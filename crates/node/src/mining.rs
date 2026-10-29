@@ -1,8 +1,3 @@
-//! Node-owned mining control facade.
-//!
-//! Header admission and proposal/submission projection over the authoritative
-//! chainstate. Candidate lifecycle lives in `bitcoin_rs_mining`.
-
 use crate::chain_effects::{ChainFollowers, ConnectMutationError};
 use alloc::sync::Arc;
 use bitcoin_rs_chain::ChainError;
@@ -57,7 +52,6 @@ use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 
-/// Production mining coordinator owned by the node process.
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
@@ -67,7 +61,6 @@ pub struct MiningCoordinator {
 }
 
 impl MiningCoordinator {
-    /// Builds a coordinator over the shared applied-chain and mempool handles.
     #[must_use]
     pub fn new(
         mempool: MempoolReader,
@@ -105,16 +98,12 @@ impl MiningCoordinator {
         }
     }
 
-    /// Test seam: long-poll calls registered on the coordinator wait; see [`MiningService`].
     #[cfg(feature = "test-seam")]
     #[must_use]
     pub fn parked_long_poll_waiters(&self) -> usize {
         self.service.parked_long_poll_waiters()
     }
 
-    /// Test seam: waits for the preparation worker's finished candidate for
-    /// `tip_hash`; see [`MiningService::wait_for_prepared_candidate`]. Used
-    /// by the storage-sync-barrier proof; never publishes or assembles.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn wait_for_prepared_candidate(
         &self,
@@ -125,7 +114,6 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
-        // Core GBT proposal looks the hash up before TestBlockValidity.
         if let Some(known) = self.known_block_result(payload.block().block_hash().into()) {
             return Ok(known);
         }
@@ -135,12 +123,6 @@ impl MiningCoordinator {
         }
     }
 
-    /// Core `LookupBlockIndex` / BIP22 proposal vocabulary.
-    ///
-    /// A node on the applied chain has had its body connected (Core
-    /// `BLOCK_VALID_SCRIPTS`). `Invalid` is `BLOCK_FAILED_VALID`. Any other
-    /// tree entry, including a header-only `Active` tip, is still
-    /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
@@ -158,8 +140,6 @@ impl MiningCoordinator {
         Some(BlockValidationResult::DuplicateInconclusive)
     }
 
-    /// Core `submitblock` fills the coinbase reserved nonce when the block
-    /// already has a BIP141 commitment but no coinbase witness. Proposal skips this.
     fn fill_uncommitted_witness(&self, block: &mut Block) -> bool {
         let tree = self.block_tree.read();
         let Some(prev_id) = tree.lookup(block.header.prev_blockhash.into()) else {
@@ -187,16 +167,10 @@ impl MiningCoordinator {
 
     fn submit(&self, payload: &BlockPayload) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = payload.block().block_hash().into();
-        // Duplicate classification and apply observe the same serialized chain state.
-        // Reserve a generation only after ruling out an already accepted body.
         let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
-        // Core v31 `submitblock` dropped the index pre-check. `ProcessNewBlock`
-        // returns `duplicate` only when the block was already accepted
-        // (`!new_block && accepted`). A header-only tree entry must still
-        // receive the body so `submitheader` then `submitblock` works.
         if matches!(
             self.known_block_result(block_hash),
             Some(BlockValidationResult::Duplicate)
@@ -229,7 +203,6 @@ impl MiningCoordinator {
     }
 }
 
-/// Serves the lifecycle the applied-tip snapshot the node publishes.
 struct AppliedTipAdapter {
     tip: TipReader,
 }
@@ -240,12 +213,9 @@ impl AppliedTipSource for AppliedTipAdapter {
     }
 }
 
-/// Serves mempool reads for candidate assembly, one read lock per call.
 struct MempoolAdapter {
     mempool: MempoolReader,
     chainstate: Arc<Chainstate>,
-    /// Read role over the same domain chainstate's mutation role uses, so a
-    /// candidate assembly cannot observe a tip and UTXO set mid-transition.
     stable: StableRead,
 }
 
@@ -265,10 +235,6 @@ impl MempoolSnapshotSource for MempoolAdapter {
         payout: &[u8],
         budget: Option<CoinbaseBudget>,
     ) -> Result<Option<SelectedBody>, MiningControlError> {
-        // One read guard covers both sequence checks and the index walk; only
-        // the selected transactions leave the pool, and the guard drops
-        // before the service builds the coinbase and Merkle roots. A budget
-        // reaches the same selector the ordinary walk uses.
         let pool = self.mempool.read();
         if expected_sequences.is_some_and(|(sequence, fee_delta_sequence)| {
             pool.sequence_number() != sequence
@@ -287,18 +253,11 @@ impl MempoolSnapshotSource for MempoolAdapter {
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
-        // One read guard covers the source sequences, the removal plan, the
-        // stable identity resolution, and the projected walk; only owned
-        // copies leave the pool, and the guard drops before the service
-        // finishes the candidate.
         let pool = self.mempool.read();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
         let plan = pool.plan_block_removals(block);
         let body = select_template_body_after(&pool, &plan, context, payout)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
-        // The plan was derived from this same state, so every id resolves; a
-        // missed identity can only shrink the expectation, which the install
-        // check then discards against the committed receipt.
         let removals = plan
             .removals
             .iter()
@@ -329,8 +288,6 @@ impl MempoolSnapshotSource for MempoolAdapter {
                 context.segwit_active,
             );
         }
-        // Keep chain inputs tied to the context tip. Match the existing
-        // transition -> mempool lock order, then release both before counting.
         let (snapshot, prevouts) = {
             let _guard = self.stable.lock();
             if self
@@ -373,7 +330,6 @@ impl MempoolSnapshotSource for MempoolAdapter {
     }
 }
 
-/// Resolves applied-tree facts for the lifecycle.
 struct ChainContextAdapter {
     block_tree: BlockTreeReader,
     network: Network,
@@ -476,10 +432,6 @@ impl MiningControl for MiningCoordinator {
         &self,
         payload: BlockPayload,
     ) -> Result<BlockValidationResult, MiningControlError> {
-        // Pre-fill binding: derive SegWit activation at the child height from the
-        // parent header, exactly as `fill_uncommitted_witness` does. A missing
-        // parent means no fill is possible. The read-only predicate runs on the
-        // borrowed block before any clone or encode.
         let segwit_active = {
             let tree = self.block_tree.read();
             tree.lookup(payload.block().header.prev_blockhash.into())
@@ -492,24 +444,16 @@ impl MiningControl for MiningCoordinator {
         };
         if segwit_active.is_some_and(|active| needs_witness_reserved_value(payload.block(), active))
         {
-            // Fill-possible: trial-clone and run the existing fill on the clone.
-            // Rebuild only when the fill changed the block; otherwise resubmit
-            // the original payload with its exact retained bytes.
             let mut trial = payload.block().clone();
             if self.fill_uncommitted_witness(&mut trial) {
                 let filled = BlockPayload::from_local(trial);
                 return self.submit(&filled);
             }
         }
-        // No-fill (or trial no-change): submit the borrowed payload directly with
-        // zero `Block` clone and zero encode; retained bytes are exact.
         self.submit(&payload)
     }
 
-    /// Admits `header` through the same Chainstate boundary inbound P2P uses.
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
-        // API-13 reports a missing parent before proof-of-work failures.
-        // Known headers stay idempotent; an empty tree also admits network genesis.
         {
             let tree = self.block_tree.read();
             let hash = header.compute_hash().into();
@@ -544,20 +488,6 @@ impl MiningControl for MiningCoordinator {
             .publish_fee_delta_generation(fee_delta_sequence);
     }
 
-    /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
-    ///
-    /// `generateblock` (`GenerateSelection::Ordered`) runs Core's
-    /// `TestBlockValidity` before the nonce search (`API-30`).
-    /// `generatetoaddress` (`Mempool`) does not. Each submitted block is
-    /// applied and dispatched to [`ChainFollowers`] under one chain transition
-    /// before the next iteration (`ARCH-07`). Failure after *N* accepted submissions
-    /// leaves those *N* blocks durable at the applied tip. `submit = false`
-    /// dry-validates through [`Chainstate::validate_block`] and does not persist.
-    /// The result vector grows one block at a time, so `count` cannot force a
-    /// large allocation up front. Callers own retry after inspecting the tip.
-    /// [`MiningControlError::InvalidRequest`] is not retriable without changing
-    /// the request. Operational failures require checking node state before retrying;
-    /// a failed durable commit requires recovery.
     fn generate(
         &self,
         request: GenerateRequest,
@@ -584,9 +514,6 @@ impl MiningControl for MiningCoordinator {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                // CONTRACT: docs/contracts/external-api.md#API-30
-                // Move into payload (no clone) for validation, then recover
-                // via `into_block` for solving; exact bytes preserved.
                 let payload = BlockPayload::from_local(block);
                 self.chainstate
                     .validate_block(&payload)
@@ -598,9 +525,6 @@ impl MiningControl for MiningCoordinator {
             })?;
             let hash = block.block_hash();
             if request.submit {
-                // Move into payload (no clone); `bytes()` is the exact
-                // serialization, no re-encode for the hex beyond the required
-                // hex string itself.
                 let payload = BlockPayload::from_local(block);
                 let hex = bitcoin_rs_primitives::encode::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
@@ -636,8 +560,6 @@ fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningCon
         ApplyError::ConcurrentChainChange => Err(MiningControlError::Unavailable(
             CompactString::from(error.to_string()),
         )),
-        // The generation counter cannot recover in-process; only a restart
-        // reserves another coordinated mutation.
         ApplyError::ChainChangeGenerationOverflow => Err(MiningControlError::Failed(
             CompactString::from(error.to_string()),
         )),
@@ -645,10 +567,6 @@ fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningCon
     }
 }
 
-/// Core `JSONRPCError(RPC_VERIFY_ERROR, "TestBlockValidity failed: %s")`.
-///
-/// Runtime failures remain operational, without a `TestBlockValidity` prefix.
-/// CONTRACT: docs/contracts/external-api.md#API-30
 fn test_block_validity_error(error: &ApplyError) -> MiningControlError {
     match bip22_reject_reason(error) {
         Ok(reason) => MiningControlError::Rejected(CompactString::from(format!(
@@ -658,7 +576,6 @@ fn test_block_validity_error(error: &ApplyError) -> MiningControlError {
     }
 }
 
-/// Core `GetRejectReason` strings used by `BIP22ValidationResult`.
 fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningControlError> {
     let reason = match error {
         ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),

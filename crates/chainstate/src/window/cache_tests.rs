@@ -1,5 +1,3 @@
-//! Window pre-proof consults the node-owned script-execution cache.
-
 use std::sync::Arc;
 
 use bitcoin_rs_chain::NodeStatus;
@@ -16,8 +14,6 @@ use bitcoin_rs_utxo::UtxoSet;
 use crate::Chainstate;
 use crate::test_fixtures::{handles, seed_genesis};
 
-/// Prevout lookup over a fixed slice for native single-transaction
-/// verification.
 struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
 
 impl UtxoView for PrevoutMap<'_> {
@@ -28,10 +24,6 @@ impl UtxoView for PrevoutMap<'_> {
             .map(|(_, txout)| txout.clone())
     }
 }
-/// Applies regtest children `1..=101` atop genesis, returning the first two
-/// coinbases both cache tests mature their spends from, plus the tip hash.
-/// Only the funding transactions are retained; every applied block is
-/// dropped after its own commit.
 fn matured_funding(
     handles: &Chainstate,
 ) -> Result<(Tx, Tx, BlockHash), Box<dyn std::error::Error>> {
@@ -59,8 +51,6 @@ fn matured_funding(
     ))
 }
 
-/// A spend of `funded`'s first output to an `OP_TRUE` output, differing only
-/// in its unlocking script: both cache tests build their spends from it.
 fn spend_tx(funded: &Tx, script_sig: Vec<u8>) -> Tx {
     Tx {
         version: 2,
@@ -78,24 +68,17 @@ fn spend_tx(funded: &Tx, script_sig: Vec<u8>) -> Tx {
     }
 }
 
-/// Window commit consumes a verified script-cache entry exactly once.
 #[test]
 fn window_commit_consumes_verified_script_cache_entry() -> Result<(), Box<dyn std::error::Error>> {
     let network = Network::Regtest;
     let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));
     seed_genesis(&handles).map_err(|error| error.to_string())?;
 
-    // Mature fixture coinbases for the spend below; this test spends only
-    // the first.
     let (funded, _, parent) = matured_funding(&handles)?;
 
-    // Install the node-owned cache after the prefix applies, so the only
-    // take in this test is the window pre-proof's.
     let cache = Arc::new(ScriptExecutionCache::new());
     handles.script_cache = Some(Arc::clone(&cache));
 
-    // `OP_TRUE` against the fixture coinbase's empty script leaves a truthy
-    // top element: a genuinely valid spend under every flag set.
     let prevout = OutPoint::new(funded.txid(), 0);
     let good = spend_tx(&funded, vec![0x51]);
     let wtxid = good.wtxid();
@@ -107,8 +90,6 @@ fn window_commit_consumes_verified_script_cache_entry() -> Result<(), Box<dyn st
         .insert_header(block.header, NodeStatus::HeaderValid)
         .map_err(|error| error.to_string())?;
 
-    // Seed exactly the flags the commit path derives: same softfork state,
-    // height, and block hash as `connect.rs` uses for this block.
     let block_hash = Hash256::from(block.block_hash());
     let applied = handles
         .applied_tip
@@ -125,10 +106,6 @@ fn window_commit_consumes_verified_script_cache_entry() -> Result<(), Box<dyn st
         block_hash,
         softfork,
     );
-    // Seed only what real native verification accepts, mirroring the
-    // gateway's second pass: finality here is cutoff-independent (zero
-    // locktime with max sequence), so the cutoff plays no role in this
-    // verdict.
     let prevouts = [(prevout, funded.outputs[0].clone())];
     bitcoin_rs_consensus::verify_tx::verify_transaction(
         &block.txs[1],
@@ -156,8 +133,6 @@ fn window_commit_consumes_verified_script_cache_entry() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// A window that fails its proof after taking entries restores them, so the
-/// retry reuses the positives instead of re-verifying scripts.
 #[test]
 fn a_failed_window_restores_the_script_cache_entries_it_took()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -165,15 +140,11 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));
     seed_genesis(&handles).map_err(|error| error.to_string())?;
 
-    // Mature two fixture coinbases: the first funds the valid spend, the
-    // second funds the invalid one.
     let (funded, funded_next, parent) = matured_funding(&handles)?;
 
     let cache = Arc::new(ScriptExecutionCache::new());
     handles.script_cache = Some(Arc::clone(&cache));
 
-    // `OP_TRUE` is a genuinely valid spend; `OP_0` leaves a falsy top
-    // element, so its scripts fail while every non-script check still passes.
     let good = spend_tx(&funded, vec![0x51]);
     let bad = spend_tx(&funded_next, vec![0x00]);
     let good_wtxid = good.wtxid();
@@ -220,7 +191,6 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     let first_payload = BlockPayload::from_local(first);
     let second_payload = BlockPayload::from_local(second);
     let payloads = [&first_payload, &second_payload];
-    // Rollback witness: bad script at 103 fails the pre-proof after the checks took the entry.
     let proven = super::prove_window(&handles, &payloads).proven;
     assert!(
         proven.is_empty(),
@@ -231,7 +201,6 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
         "failed pre-proof must restore taken entries"
     );
 
-    // Prefix commit: the valid prefix commits and reports how far it got.
     cache.insert(good_wtxid, flags);
     let err = handles
         .apply_window(&payloads)
@@ -262,9 +231,6 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     );
     Ok(())
 }
-/// A window whose pre-proof succeeds but whose second block fails admission
-/// restores only the uncommitted block's takes: the committed prefix stays
-/// consumed while the refused block's positives stay reusable.
 #[test]
 #[expect(clippy::too_many_lines)]
 fn a_window_refused_after_proof_restores_only_uncommitted_takes()

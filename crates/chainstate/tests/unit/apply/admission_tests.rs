@@ -24,10 +24,6 @@ fn shutdown_closes_admission_and_waits_for_in_flight_apply() {
     assert!(matches!(admission.enter(), Err(ApplyError::Shutdown)));
 }
 
-/// The recovery-closed read is the queryable form of the fatal-failure
-/// state: it flips exactly when `fail_closed_for_recovery` closes
-/// admission, and it is its own operational fact — never an initial-block-
-/// download answer, and independent of any chain height.
 #[test]
 fn is_closed_for_recovery_tracks_the_fatal_close() {
     let chainstate = crate::test_fixtures::handles(

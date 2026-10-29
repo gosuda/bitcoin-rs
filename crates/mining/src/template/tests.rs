@@ -1,8 +1,9 @@
-//! Coinbase-budget rule: what selection holds back, what `admits` checks, and
-//! the identity qualifier. Pools hold real transactions; the size and weight
-//! of a finished block are measured from its serialization, and a pool-shaped
-//! coinbase is parsed back by rust-bitcoin, rather than read from the
-//! candidate's own bookkeeping.
+//! Coinbase-budget rule: what selection holds back, what `admits` checks, and the
+//! identity qualifier.
+//!
+//! Pools hold real transactions; the size and weight of a finished block are measured
+//! from its serialization, and a pool-shaped coinbase is parsed back by rust-bitcoin,
+//! rather than read from the candidate's own bookkeeping.
 use super::*;
 use bitcoin_rs_mempool::{MempoolEntry, MempoolLimits};
 use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut};
@@ -48,7 +49,6 @@ fn context(segwit_active: bool, limits: Limits) -> CandidateContext {
     }
 }
 
-/// A transaction with a 200-byte witness, so its weight is not four times its size.
 fn witnessed_tx(label: u8) -> Tx {
     Tx {
         version: 2,
@@ -66,7 +66,6 @@ fn witnessed_tx(label: u8) -> Tx {
     }
 }
 
-/// A pool holding the witnessed transaction with the given admitted sigop cost.
 fn pool_with_tx(sigop_cost: u32) -> Result<Mempool, Box<dyn std::error::Error>> {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -94,8 +93,6 @@ fn assemble(
     finish_candidate(context, &body, PAYOUT)
 }
 
-/// A v2 child spending the given parent outpoint with the given version and
-/// sequence.
 fn lock_child(parent: Txid, vout: u32, version: u32, sequence: u32) -> Tx {
     Tx {
         version,
@@ -121,14 +118,6 @@ fn insert_staged(pool: &mut Mempool, tx: Tx) -> Txid {
     txid
 }
 
-/// Relative locks of staged-confirmation parents evaluate at the staged
-/// confirmation height instead of being skipped: a height lock met exactly
-/// at the staged height selects, a lock needing one more block refuses, a
-/// version-1 child stays exempt, and a time lock follows the staged
-/// predecessor MTP against the candidate cutoff. Skipping would select
-/// every child below.
-/// BIP68 time-flag bit (`1 << 22`): the consensus flag constant is
-/// crate-private, so the test names the bit it sets.
 const TIME_FLAG: u32 = 1 << 22;
 
 #[test]
@@ -166,9 +155,6 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> TestResult {
     let plan = pool.plan_block_removals(&block);
     assert_eq!(plan.removals.len(), 1, "only the parent stages");
 
-    // Candidate at height 100: the staged parent confirms at 99. The exact
-    // body set proves both directions: the met lock and the unsigned child
-    // select, the unmet height and time locks refuse.
     let base = context(true, GENEROUS);
     let selected = select_template_body_after(&pool, &plan, &base, PAYOUT)?;
     let body: Vec<Txid> = selected.transactions.iter().map(|tx| tx.txid).collect();
@@ -176,8 +162,6 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> TestResult {
     assert!(body.contains(&height_met), "the met height lock selects");
     assert!(body.contains(&unsigned), "the unsigned child selects");
 
-    // Time lock with predecessor MTP 1_000: satisfied at cutoff 1_512,
-    // refused at 1_511. The cutoff alone never stands in for the MTP.
     let met_time = CandidateContext {
         locktime_cutoff: 1_512,
         staged_parent_mtp: 1_000,
@@ -201,8 +185,6 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> TestResult {
     Ok(())
 }
 
-/// Weight, serialized size, and sigop cost of the finished block, measured from
-/// its block serialization rather than from the candidate's own bookkeeping.
 fn used(candidate: &Candidate) -> Result<(u64, u64, u64), Box<dyn std::error::Error>> {
     let block = candidate.into_unsolved_block()?;
     let sigops = u64::from(transaction_sigop_cost(
@@ -217,9 +199,6 @@ fn used(candidate: &Candidate) -> Result<(u64, u64, u64), Box<dyn std::error::Er
     Ok((block.weight(), u64::try_from(block.total_size())?, sigops))
 }
 
-/// Serialized growth a pool coinbase needs for `budget` when the owner coinbase
-/// is `candidate`'s and the pool's outputs do not widen the output count: the
-/// declared output bytes plus the scriptSig headroom to the 100-byte limit.
 fn growth_size(
     candidate: &Candidate,
     budget: CoinbaseBudget,
@@ -263,7 +242,6 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
             ),
         ];
         for (field, exact) in cases {
-            // At the exact limit the transaction stays and the budget fits.
             let fit = assemble(&context(segwit_active, exact), &pool, Some(BUDGET))?;
             assert_eq!(fit.transactions.len(), 1, "{field}");
             fit.admits(BUDGET)?;
@@ -271,8 +249,6 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
                 fit.weight, plain.weight,
                 "{field}: the block never contains the growth"
             );
-            // One unit tighter: the ordinary candidate still fits the context
-            // but refuses the budget, in exactly this dimension.
             let tight = match field {
                 "weight" => Limits {
                     weight: exact.weight - 1,
@@ -297,8 +273,6 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
                 ),
                 "{field}"
             );
-            // The budgeted selector drops the transaction that no longer fits
-            // instead of producing a candidate its consumer must refuse.
             let selected = assemble(&tight, &pool, Some(BUDGET))?;
             assert!(selected.transactions.is_empty(), "{field}");
             selected.admits(BUDGET)?;
@@ -307,7 +281,6 @@ fn growth_binds_each_dimension_exactly_and_the_selector_drops_what_no_longer_fit
     Ok(())
 }
 
-/// The owner coinbase with a pool's scriptSig and outputs, as a pool builds it.
 fn pool_coinbase(candidate: &Candidate, extra: Vec<TxOut>) -> Tx {
     let mut coinbase = candidate.coinbase.clone();
     let mut script = coinbase.inputs[0].script_sig.as_bytes().to_vec();
@@ -317,12 +290,9 @@ fn pool_coinbase(candidate: &Candidate, extra: Vec<TxOut>) -> Tx {
     coinbase
 }
 
-/// `count` outputs of exactly `serialized` bytes each; the first carries one
-/// legacy sigop (`OP_CHECKSIG`) when `sigop` is set.
 fn outputs_of(count: usize, serialized: usize, sigop: bool) -> Vec<TxOut> {
     (0..count)
         .map(|index| {
-            // 8-byte value, 1-byte script length, then the script itself.
             let mut script = vec![0x51_u8; serialized - 9];
             if sigop && index == 0 {
                 script[0] = 0xac;
@@ -337,9 +307,6 @@ fn outputs_of(count: usize, serialized: usize, sigop: bool) -> Vec<TxOut> {
 
 #[test]
 fn a_pool_shaped_coinbase_fits_the_derived_envelope_exactly() -> TestResult {
-    // (budget, pool outputs): the outputs total exactly `additional_size` bytes.
-    // 251 empty-script outputs push the output count to 253, widening its
-    // CompactSize by two bytes for a segwit owner coinbase.
     let cases = [
         (BUDGET, outputs_of(10, 100, true)),
         (
@@ -401,9 +368,6 @@ fn an_infeasible_budget_names_its_first_exhausted_dimension() -> TestResult {
         size,
         sigops,
     };
-    // `Some(0, 0)` still reserves the coinbase's own growth, so it is a
-    // different request from `None`: the empty block at its exact limits
-    // holds the ordinary template but not even the empty budget.
     let nothing = CoinbaseBudget {
         additional_size: 0,
         additional_sigops: 0,
@@ -443,9 +407,6 @@ fn an_infeasible_budget_names_its_first_exhausted_dimension() -> TestResult {
             ),
             "{field}: {refused:?}"
         );
-        // The finished-candidate rule agrees with the selection rule: the
-        // ordinary empty block at these limits refuses the same budget in the
-        // same dimension.
         let ordinary = assemble(&limited, &pool, None)?;
         assert!(ordinary.transactions.is_empty(), "{field}");
         assert!(
@@ -456,8 +417,6 @@ fn an_infeasible_budget_names_its_first_exhausted_dimension() -> TestResult {
             "{field}"
         );
     }
-    // A budget no block could ever hold is refused in weight first and does
-    // not overflow any scalar on the way.
     let huge = CoinbaseBudget {
         additional_size: u32::MAX,
         additional_sigops: u16::MAX,
@@ -490,7 +449,6 @@ fn ordinary_identity_is_unchanged_and_the_qualifier_parses_strictly() {
             CoinbaseBudget::split_qualifier(qualified.as_str()),
             Some((ordinary.as_str(), Some(BUDGET)))
         );
-        // `Some(0, 0)` reserves growth, so it differs from the ordinary id.
         let zero = CoinbaseBudget {
             additional_size: 0,
             additional_sigops: 0,

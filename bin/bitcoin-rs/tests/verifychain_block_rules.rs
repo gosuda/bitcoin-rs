@@ -1,5 +1,3 @@
-//! Independent Core oracle for the context-free body rules used by verifychain.
-//! RPC wiring and read-only daemon behavior remain in their existing owners.
 #![expect(
     clippy::expect_used,
     reason = "reference failures must identify the failed fixture step"
@@ -7,7 +5,7 @@
 
 use bitcoin_rs_consensus::verify_block::verify_block_non_contextual;
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 
 #[test]
 fn coinbase_input_sigop_growth_agrees_with_core() -> Result<(), Box<dyn std::error::Error>> {
@@ -108,7 +106,6 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
             }
             "duplicate input" => {
                 let mut spend = block.txdata[0].clone();
-                // Distinct from the coinbase, but internally repeats one input.
                 spend.input[0].previous_output.vout = 0;
                 spend.input.push(spend.input[0].clone());
                 block.txdata.push(spend);

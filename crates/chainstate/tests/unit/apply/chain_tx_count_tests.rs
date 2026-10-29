@@ -1,10 +1,3 @@
-//! Counter recovery contract: [`docs/contracts/recovery.md#rcv-06-chain-transaction-count`].
-//! Zero means unknown (including legacy datadirs), rewinds that underflow remain
-//! unknown, and additions that overflow are unknown rather than wrapping.
-//!
-//! [`ChainTxCount`] is the one implementation of that arithmetic; these cases
-//! pin it through the type's public surface.
-
 use super::*;
 
 #[test]
@@ -18,9 +11,6 @@ fn genesis_establishes_the_count_from_nothing() {
 
 #[test]
 fn an_unknown_count_stays_unknown_above_genesis() {
-    // A datadir written before the counter existed restores as unknown.
-    // Accumulating from here would produce a small number that looks like a
-    // chain total and is not one — worse than admitting we do not know.
     assert_eq!(
         ChainTxCount::UNKNOWN.advance(900_000, 2_500),
         ChainTxCount::UNKNOWN
@@ -46,8 +36,6 @@ fn rewinding_an_unknown_count_leaves_it_unknown() {
 
 #[test]
 fn a_rewind_past_zero_admits_it_does_not_know_rather_than_clamping() {
-    // Only reachable if the count and the chain have diverged. A clamp to
-    // some small number would keep reporting a confident wrong total.
     assert_eq!(
         ChainTxCount::established(4).rewind(9),
         ChainTxCount::UNKNOWN

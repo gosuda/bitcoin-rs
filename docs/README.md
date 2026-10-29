@@ -1,75 +1,12 @@
 # Documentation
-
 ## Entry points
-
 | Need | Owner |
 | --- | --- |
-| Build, configure, and run a node | [Getting started](getting-started.md) |
-| Explore Bitcoin one module at a time | [Architecture contract](contracts/architecture.md), then the per-layer crate guides below |
-| Trace validation from byte types to consensus | [primitives](../crates/primitives/README.md), [script](../crates/script/README.md), [consensus](../crates/consensus/README.md) |
-| Trace state from storage to the node runtime | [storage](../crates/storage/README.md), [utxo](../crates/utxo/README.md), [chain](../crates/chain/README.md), [node](../crates/node/README.md) |
-| Trace services from wire to API | [p2p](../crates/p2p/README.md), [mempool](../crates/mempool/README.md), [mining](../crates/mining/README.md), [index](../crates/index/README.md), [rpc](../crates/rpc/README.md) |
-| Find a normative clause and its tests | [Contract index](contracts/README.md) |
-| Discover and run validation evidence | [Validation tooling](validation-tooling.md) |
-| Understand project vocabulary | [Concepts](../CONCEPTS.md) |
-| Read repository-wide invariants | [Project invariants](../CONSTRAINTS.md) |
-| Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
-| Organize source modules, tests, and fixtures | [Source and test organization policy](policies/source-organization.md) |
-| Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
-| Evaluate the experimental keyless BIP352 codec | [Silent Payments feasibility](silent-payments.md) |
-| Assess in-process Lightning integration and qualify external Lightning interop | [In-process Lightning integration](lightning-integration.md) and [Lightning interop matrix](lightning-interop-matrix.md) |
-| Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
-| Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
-| Mine regtest blocks and inspect templates | [Solo-mining generate path](contracts/external-api.md#api-05-solo-mining-generate-path) and [template extras](contracts/external-api.md#api-11-bip22bip23-template-extras) |
-| Configure the default-off experimental native pool with an external payout signer | [Native pool operation](pool.md) and [pool contract](contracts/pool.md) |
-| Inspect a Core snapshot file without starting a node | [Snapshot inspector](../tools/snapshot/README.md) |
-| Watch a running node for stalls | [Runtime stall watchdog](operations/runtime-stall.md) |
-
-The contract index owns the clause/proof map; this page does not maintain a
-second inventory. Contracts take precedence over local source comments,
-detailed policies, and informative guides, in that order. A disagreement
-between code and contract is drift to investigate, not permission to silently
-change either side.
-
+| Run a node, mine regtest, recover, use REST, inspect snapshots, watch stalls | [Getting started](getting-started.md), [Solo-mining generate path](contracts/external-api.md#api-05-solo-mining-generate-path), [template extras](contracts/external-api.md#api-11-bip22bip23-template-extras), [Recovery contract](contracts/recovery.md), [REST guide](rest-interface.md), [Snapshot inspector](../tools/snapshot/README.md), [Runtime stall watchdog](operations/runtime-stall.md) |
+| Trace validation, state, and services module by module | [Architecture contract](contracts/architecture.md), [primitives](../crates/primitives/README.md), [script](../crates/script/README.md), [consensus](../crates/consensus/README.md), [storage](../crates/storage/README.md), [utxo](../crates/utxo/README.md), [chain](../crates/chain/README.md), [node](../crates/node/README.md), [p2p](../crates/p2p/README.md), [mempool](../crates/mempool/README.md), [mining](../crates/mining/README.md), [index](../crates/index/README.md), [rpc](../crates/rpc/README.md) |
+| Find clauses and evidence, learn vocabulary, follow invariants, change the repo | [Contract index](contracts/README.md), [Validation tooling](validation-tooling.md), [Concepts](../CONCEPTS.md), [Project invariants](../CONSTRAINTS.md), [Agent guidelines](../AGENTS.md), [contributing](../CONTRIBUTING.md), [Source and test organization policy](policies/source-organization.md), [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
+| Run the native pool, assess Lightning, evaluate silent payments, place instrumentation | [Native pool operation](pool.md), [pool contract](contracts/pool.md), [In-process Lightning integration](lightning-integration.md), [Lightning interop matrix](lightning-interop-matrix.md), [Silent Payments feasibility](silent-payments.md), [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 ## Detailed policies and generated inputs
-
-[Source compatibility](policies/source-compatibility.md) owns toolchain,
-dependency, TLS, and versioning policy. [Database migration](policies/db-migration.md)
-owns format changes. Detailed admission and peer matrices live in
-[mempool policy](policies/mempool-policy.md) and
-[P2P compatibility](policies/p2p-compatibility.md). BIP capabilities follow
-[BIP adoption](policies/bip-adoption.md); the coverage map is
-[bip-support.md](bip-support.md).
-
-`crates/rpc/core-compat.toml` is a machine-consumed *reference*
-input: it pins the Core identities the gates validate and records
-admission-profile evidence. The compatibility claim for every RPC, REST,
-and ZMQ surface lives in `crates/rpc/src/registry.rs`, the single owner.
-Treat the [hot-path ledger](benchmarks/hot-path-ledger.toml) as a
-machine-consumed input too. [RPC reference](rpc-reference.md) is generated from that
-registry; do not edit it by hand.
-
-External evidence is a separate axis: [ecosystem-compat.toml](api/ecosystem-compat.toml)
-tracks which real external consumers have exercised each compatibility
-surface, under the [ecosystem compatibility
-contract](contracts/ecosystem-compatibility.md). Core-schema status in the
-registry is not external verification; the two must not be conflated.
-
+[Source compatibility](policies/source-compatibility.md), [Database migration](policies/db-migration.md), [mempool policy](policies/mempool-policy.md), [P2P compatibility](policies/p2p-compatibility.md), [BIP adoption](policies/bip-adoption.md), [bip-support.md](bip-support.md). Contracts take precedence over local source comments, detailed policies, and informative guides, in that order; a code-vs-contract disagreement is drift to investigate, not permission to silently change either side. Compatibility for every RPC, REST, and ZMQ surface is owned by `crates/rpc/src/registry.rs` (pinned by `crates/rpc/core-compat.toml`); [RPC reference](rpc-reference.md) is generated from the registry, do not edit it by hand. Treat the [hot-path ledger](benchmarks/hot-path-ledger.toml) as a machine-consumed input too.
 ## Evidence and implementation status
-
-[Benchmarks](benchmarks/) retain methods, measurements, and decisions. The
-[hot-path contract](contracts/hot-path-attribution.md) owns ledger interpretation.
-`UNMEASURED`, `planned`, and `BLOCKED` are not successful results.
-
-[Formal models](models/) and their configurations are governed by the
-[formal verification contract](contracts/formal-verification.md). A compiled build is not proof of a
-target design, and this index does not duplicate gate verdicts.
-
-The default binary is kernel-free; library defaults are governed separately by
-[validation-default.md](contracts/validation-default.md). The optional
-`kernel` lane is not a claim that native-default promotion has passed.
-The node runs BIP324 v2 transport by default (`--v2transport=false` keeps
-every connection on v1; `P2pServiceConfig::default()` leaves it off), with
-live bidirectional Core 31.1 interop recorded
-([BIP adoption](policies/bip-adoption.md), BIP 324 row in
-[bip-support.md](bip-support.md)).
+External evidence lives in [ecosystem-compat.toml](api/ecosystem-compat.toml) under the [ecosystem compatibility contract](contracts/ecosystem-compatibility.md); registry status is not external verification, the two must not be conflated. [Benchmarks](benchmarks/) retain methods, measurements, and decisions under the [hot-path contract](contracts/hot-path-attribution.md): `UNMEASURED`, `planned`, and `BLOCKED` are not successful results. [Formal models](models/) obey the [formal verification contract](contracts/formal-verification.md); a compiled build is not proof of a target design. The default binary is kernel-free; library defaults follow [validation-default.md](contracts/validation-default.md); the optional `kernel` lane does not imply native-default promotion. The node runs BIP324 v2 transport by default (`--v2transport=false` keeps every connection on v1; `P2pServiceConfig::default()` leaves it off), with live bidirectional Core 31.1 interop recorded ([BIP adoption](policies/bip-adoption.md), BIP 324 row in [bip-support.md](bip-support.md)).

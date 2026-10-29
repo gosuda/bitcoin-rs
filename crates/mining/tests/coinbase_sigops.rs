@@ -1,9 +1,3 @@
-//! BIP141 coinbase reservation and complete-block sigop-cost boundaries.
-//!
-//! Core 31.1 `GetTransactionSigOpCost` scales legacy operations by four,
-//! then returns immediately for coinbase. rust-bitcoin supplies an independent
-//! transaction-cost oracle; admitted pool costs are already scaled.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
@@ -87,14 +81,9 @@ fn sigop_limited(segwit_active: bool, max_sigops: u64) -> CandidateContext {
 fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
     let pool = zero_fee_pool();
     let snapshot = pool.mining_snapshot();
-    // Core uses GetSigOpCount(false) for the legacy component, including
-    // coinbase outputs: OP_1 CHECKMULTISIG counts 20 operations, not one.
-    // GetTransactionSigOpCost multiplies by four and returns for coinbase.
-    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp#L112-L153
     let cases = [(vec![0x51], 0), (p2pkh(), 4), (vec![0x51, 0xae], 80)];
     for segwit_active in [false, true] {
         for (payout, expected) in &cases {
-            // Selection arm: empty live pool.
             {
                 let mut context = sigop_limited(segwit_active, *expected);
                 let candidate = assemble_candidate(&context, &pool, payout)?;
@@ -107,7 +96,6 @@ fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
                     ));
                 }
             }
-            // Ordered arm: empty snapshot.
             {
                 let mut context = sigop_limited(segwit_active, *expected);
                 let candidate = assemble_ordered_candidate(&context, &snapshot, payout)?;
@@ -170,21 +158,17 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
     }
     let snapshot = pool.mining_snapshot();
     for segwit_active in [false, true] {
-        // Selection arm: exact sigop budget admits the joined parent and child.
         {
             let candidate = assemble_candidate(&sigop_limited(segwit_active, 12), &pool, &payout)?;
             assert_eq!(candidate.transactions.len(), 2);
             assert_eq!(block_sigop_cost(&candidate)?, 12);
         }
-        // Ordered arm: the same budget admits the same snapshot entries.
         {
             let candidate =
                 assemble_ordered_candidate(&sigop_limited(segwit_active, 12), &snapshot, &payout)?;
             assert_eq!(candidate.transactions.len(), 2);
             assert_eq!(block_sigop_cost(&candidate)?, 12);
         }
-        // Whole chunk costs 12 over budget 11; parent prefix costs 8, meets
-        // the rate floor, child omitted. Ordered assembly refuses without prefix fill.
         let limited = sigop_limited(segwit_active, 11);
         let selected = assemble_candidate(&limited, &pool, &payout)?;
         assert_eq!(selected.transactions.len(), 1);

@@ -1,11 +1,3 @@
-//! Regtest fixture builders for cross-crate test harnesses.
-//!
-//! Every returned block meets its declared compact target, carries a
-//! version-4 header (regtest's BIP34 height is 500, and longer fixture chains
-//! must clear the shared contextual header gate), has a header merkle root
-//! equal to the consensus fold over its transactions, and spends the null
-//! outpoint at sequence MAX in its coinbase.
-
 use bitcoin_rs_consensus::{block_subsidy, compute_merkle_root};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
@@ -14,42 +6,32 @@ use bitcoin_rs_primitives::{
 
 use crate::compact_is_met_by;
 
-/// The regtest easy target every fixture grinds (`0x207f_ffff`).
 pub const REGTEST_BITS: u32 = 0x207f_ffff;
 
-/// Fixture failure: the nonce space is exhausted, or a block carries no
-/// transactions.
 #[derive(Debug, thiserror::Error)]
 pub enum RegtestFixtureError {
-    /// The 32-bit header nonce space was exhausted without meeting the target.
     #[error("test fixture exhausted the header nonce space")]
     NonceExhausted,
-    /// The transaction list was empty, so no merkle root exists.
     #[error("test fixture block carries no transactions")]
     EmptyMerkleRoot,
 }
 
-/// Regtest genesis header time (matches `Network::Regtest.genesis_block()`).
 #[must_use]
 pub fn genesis_time() -> u32 {
     Network::Regtest.genesis_block().header.time
 }
 
-/// Minimal sign-magnitude `CScriptNum` push.
-///
-/// Mirrors `bitcoin_rs_script::push_int`, the encoding the BIP34 checker
-/// expects, without pulling the script crate into chain.
 #[must_use]
 pub fn script_num_push(value: i64) -> Vec<u8> {
     if value == 0 {
-        return vec![0x00]; // OP_0
+        return vec![0x00];
     }
     if value == -1 {
-        return vec![0x4f]; // OP_1NEGATE
+        return vec![0x4f];
     }
     if (1..=16).contains(&value) {
         let small = u8::try_from(value).unwrap_or_default();
-        return vec![0x50 + small]; // OP_1..OP_16
+        return vec![0x50 + small];
     }
     let negative = value < 0;
     let mut magnitude = value.unsigned_abs();
@@ -71,13 +53,6 @@ pub fn script_num_push(value: i64) -> Vec<u8> {
     out
 }
 
-/// The canonical one-coinbase transaction for `height`.
-///
-/// The scriptSig is `script_num_push(height)` plus an `OP_0` extranonce byte,
-/// because consensus requires 2..=100 scriptSig bytes and the height push
-/// alone is one byte for heights 1..=16. The output pays the regtest subsidy
-/// at `height` rather than a fixed amount, so fixtures stay valid past a
-/// halving.
 #[must_use]
 pub fn coinbase(height: u32) -> Tx {
     let mut script_sig = script_num_push(i64::from(height));
@@ -101,14 +76,12 @@ pub fn coinbase(height: u32) -> Tx {
     }
 }
 
-/// Consensus merkle root over transaction ids, `None` only when `txs` is empty.
 #[must_use]
 pub fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
     let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
     compute_merkle_root(&mut leaves).map(|root| Hash256::from_le_bytes(&root))
 }
 
-/// Grinds `header.nonce` until the header hash meets `header.bits`.
 pub fn mine_header_to_declared_target(header: &mut Header) -> Result<(), RegtestFixtureError> {
     while !compact_is_met_by(header.bits, Hash256::from(header.compute_hash())) {
         header.nonce = header
@@ -119,16 +92,10 @@ pub fn mine_header_to_declared_target(header: &mut Header) -> Result<(), Regtest
     Ok(())
 }
 
-/// Grinds `block.header.nonce` until the block hash meets `header.bits`.
-///
-/// PRE: `header.bits` is a valid nonzero compact target.
-/// POST: the block hash meets the declared target; transactions are untouched.
 pub fn mine_block_to_declared_target(block: &mut Block) -> Result<(), RegtestFixtureError> {
     mine_header_to_declared_target(&mut block.header)
 }
 
-/// Mines a one-coinbase child of `prev_blockhash` at `height`, header time
-/// `genesis_time() + height`.
 pub fn mined_regtest_child_at(
     prev_blockhash: BlockHash,
     height: u32,
@@ -140,8 +107,6 @@ pub fn mined_regtest_child_at(
     )
 }
 
-/// Mines a one-coinbase child at an explicit header time (journal and
-/// state-machine fixtures that pin times near genesis).
 pub fn mined_regtest_child_at_time(
     prev_blockhash: BlockHash,
     time: u32,
@@ -150,8 +115,6 @@ pub fn mined_regtest_child_at_time(
     build_block(prev_blockhash, time, vec![coinbase(height)])
 }
 
-/// Mines a block with caller-supplied transactions (p2p multi-tx fixtures).
-/// PRE: `txs` is non-empty.
 pub fn mined_block_with_prev_hash(
     prev_blockhash: BlockHash,
     height: u32,
@@ -160,8 +123,6 @@ pub fn mined_block_with_prev_hash(
     build_block(prev_blockhash, genesis_time().saturating_add(height), txs)
 }
 
-/// Mines a header-only fixture (merkle root left zero, header `version: 4`),
-/// as the p2p header tests build before mutating bits or time.
 pub fn mined_regtest_header(
     prev_blockhash: BlockHash,
     height: u32,
@@ -178,10 +139,6 @@ pub fn mined_regtest_header(
     Ok(header)
 }
 
-/// Shared builder body for the three block fixtures: header `version: 4`,
-/// regtest bits, merkle root bound to the transaction list, nonce ground from
-/// zero. No boolean selector parameters; variant selection is by named
-/// function.
 fn build_block(
     prev_blockhash: BlockHash,
     time: u32,

@@ -1,11 +1,6 @@
+use sonic_rs::{JsonValueTrait as _, JsonValueMutTrait as _, JsonContainerTrait as _};
 use super::*;
 
-/// Hand-written canonical v1 payload offered to PR #1684, which must adopt it
-/// before its merge: three tried records (IP, non-zero Tor v3, non-zero I2P)
-/// and two anchors. Written in `Stored` field order so `serde_json::to_vec`
-/// reproduces it byte for byte; the test appends the trailing 32-byte SHA-256
-/// of the payload, the same checksum envelope `publish_book` writes. No
-/// historical schema lives in this file.
 const SHARED_FIXTURE: &str = include_str!("../../../tests/data/addrman-canonical-v1-shared.json");
 const TOR_ADDR: &str = "fivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivjcrid.onion:8334";
 const TOR_HOST: &str = "fivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivcukrkfivjcrid.onion";
@@ -30,19 +25,18 @@ fn i2p_endpoint() -> PeerEndpoint {
 
 #[test]
 fn pre_release_version_is_frozen_and_the_format_marker_is_required() {
-    // #1688: edit the canonical v1 directly until the first official release.
     assert_eq!(SCHEMA_VERSION, 1);
     assert_eq!(FORMAT, "bitcoin-rs-addrman");
-    let value = serde_json::to_value(&book().state.lock().stored).expect("schema");
+    let value = sonic_rs::to_value(&book().state.lock().stored).expect("schema");
     assert_eq!(value["format"], "bitcoin-rs-addrman");
     assert_eq!(value["version"], 1);
-    assert_eq!(value["records"], serde_json::json!([]));
-    assert_eq!(value["anchors"], serde_json::json!([]));
+    assert_eq!(value["records"], sonic_rs::json!([]));
+    assert_eq!(value["anchors"], sonic_rs::json!([]));
 }
 
 #[test]
 fn shared_fixture_round_trips_ip_tor_i2p_and_anchors() {
-    let expected: serde_json::Value = serde_json::from_str(SHARED_FIXTURE).expect("shared fixture");
+    let expected: sonic_rs::Value = sonic_rs::from_str(SHARED_FIXTURE).expect("shared fixture");
     let mut bytes = SHARED_FIXTURE.as_bytes().to_vec();
     bytes.extend_from_slice(&Sha256::digest(SHARED_FIXTURE.as_bytes()));
     let dir = tempfile::tempdir().expect("directory");
@@ -53,12 +47,11 @@ fn shared_fixture_round_trips_ip_tor_i2p_and_anchors() {
     assert!(book.state.lock().writable);
     assert_eq!(book.len(), 3);
     assert_eq!(
-        serde_json::to_value(&book.state.lock().stored).expect("state"),
+        sonic_rs::to_value(&book.state.lock().stored).expect("state"),
         expected
     );
     let tor = tor_endpoint();
     let i2p = i2p_endpoint();
-    // Guard the fixture itself: a malformed onion name would parse as neither.
     assert_eq!(tor.host().to_string(), TOR_HOST);
     assert_eq!(i2p.host().to_string(), I2P_HOST);
     {
@@ -100,42 +93,37 @@ fn shared_fixture_round_trips_ip_tor_i2p_and_anchors() {
     assert_eq!(fs::read(&path).expect("stable publication"), bytes);
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
     assert_eq!(
-        serde_json::to_value(&restored.state.lock().stored).expect("round trip"),
+        sonic_rs::to_value(&restored.state.lock().stored).expect("round trip"),
         expected
     );
     assert_indexes(&restored.state.lock());
 }
 
-fn old_v1_shape() -> serde_json::Value {
-    serde_json::json!({"version":1,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
+fn old_v1_shape() -> sonic_rs::Value {
+    sonic_rs::json!({"version":1,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
         "addr":"8.8.8.8:8333","services":9,"source_group":(1_u64<<48)|0x0101,"source_ip":"1.1.1.1",
         "last_seen":EPOCH,"last_attempt":EPOCH-1,"last_success":0,"failures":3,"tried":false
     }]})
 }
 
-fn old_v8_shape() -> serde_json::Value {
-    serde_json::json!({"version":8,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
+fn old_v8_shape() -> sonic_rs::Value {
+    sonic_rs::json!({"version":8,"magic":[1,1,1,1],"secret":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"records":[{
         "addr":"8.8.8.8:8333","services":9,"source":{"ip":"1.1.1.1"},
         "last_seen":EPOCH,"last_success":EPOCH,"failures":0,"tried":true,"new_buckets":[]
     }],"asmap_id":null,"anchors":[]})
 }
 
-fn divergent_v9_shape() -> serde_json::Value {
-    serde_json::json!({
+fn divergent_v9_shape() -> sonic_rs::Value {
+    sonic_rs::json!({
         "version": 9, "magic": [1, 1, 1, 1],
         "records": [{"obsolete_layout": "not a canonical candidate"}]
     })
 }
 
-// A genuine pre-release v9 file: every record is a real canonical `Candidate`
-// and only the format marker is absent, so this is the shape an old writer
-// could actually have produced.
 fn unmarked_v9_bytes() -> Vec<u8> {
     let source = book();
     {
         let mut manager = source.state.lock();
-        // Distinct sources spread the records over different New buckets, so
-        // the old file holds several genuine candidates rather than one.
         for n in 1..=8 {
             manager.learn(
                 target(),
@@ -159,7 +147,7 @@ fn unmarked_v9_bytes() -> Vec<u8> {
         }
     }
     source.succeeded(target(), 9, EPOCH + 1);
-    let mut value = serde_json::to_value(&source.state.lock().stored).expect("canonical schema");
+    let mut value = sonic_rs::to_value(&source.state.lock().stored).expect("canonical schema");
     assert!(
         value["records"].as_array().expect("records").len() >= 3,
         "the old writer must have produced several real records"
@@ -210,9 +198,6 @@ fn synthetic_old_shapes_are_preserved_without_decoding() {
             let base = dir.path().join("peers.dat");
             let path = network_path(&base, [1; 4]);
             let source = if scoped { &path } else { &base };
-            // Only the old envelope matters. The v1 legacy-DNS fields, the v8
-            // numeric-services records, and the divergent v9 layout never pass
-            // through a decoder or converter.
             let bytes = fixture_bytes(&match version {
                 1 => old_v1_shape(),
                 8 => old_v8_shape(),
@@ -229,18 +214,14 @@ fn synthetic_old_shapes_are_preserved_without_decoding() {
             fresh.save();
             assert_eq!(fs::read(&backup).expect("preserved after save"), bytes);
             if scoped {
-                // The old scoped file is only replaced by the fresh canonical
-                // publication; the backup keeps the exact pre-release bytes.
                 assert_ne!(fs::read(&path).expect("fresh publication"), bytes);
             } else {
-                // The unscoped base file is never overwritten; the fresh
-                // scoped publication is distinct from both base and backup.
                 assert_eq!(fs::read(&base).expect("base retained"), bytes);
                 assert_eq!(fs::read(&backup).expect("backup"), bytes);
                 let published = fs::read(&path).expect("fresh scoped publication");
                 assert_ne!(published, bytes);
-                let book: serde_json::Value =
-                    serde_json::from_slice(&published[..published.len() - 32])
+                let book: sonic_rs::Value =
+                    sonic_rs::from_slice(&published[..published.len() - 32])
                         .expect("canonical JSON");
                 assert_eq!(book["format"], "bitcoin-rs-addrman");
                 assert_eq!(book["version"], 1);
@@ -260,7 +241,7 @@ fn stripped_canonical_payload_is_an_unmarked_pre_release_file() {
     let path = network_path(&base, [1; 4]);
     let known = book();
     known.learn_dns("seed", &[target()], EPOCH);
-    let mut value = serde_json::to_value(&known.state.lock().stored).expect("schema");
+    let mut value = sonic_rs::to_value(&known.state.lock().stored).expect("schema");
     value.as_object_mut().expect("object").remove("format");
     let bytes = fixture_bytes(&value);
     fs::write(&path, &bytes).expect("unmarked v1");
@@ -275,8 +256,8 @@ fn stripped_canonical_payload_is_an_unmarked_pre_release_file() {
     );
     let published = fs::read(&path).expect("fresh canonical snapshot");
     assert_ne!(published, bytes);
-    let book: serde_json::Value =
-        serde_json::from_slice(&published[..published.len() - 32]).expect("canonical JSON");
+    let book: sonic_rs::Value =
+        sonic_rs::from_slice(&published[..published.len() - 32]).expect("canonical JSON");
     assert_eq!(book["format"], "bitcoin-rs-addrman");
     assert_eq!(book["version"], 1);
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
@@ -322,18 +303,18 @@ fn corrupt_unknown_and_wrong_network_files_fail_closed() {
     let dir = tempfile::tempdir().expect("directory");
     let base = dir.path().join("peers.dat");
     let path = network_path(&base, [1; 4]);
-    let current = serde_json::to_value(&book().state.lock().stored).expect("schema");
+    let current = sonic_rs::to_value(&book().state.lock().stored).expect("schema");
     let mut cases = vec![b"corrupt bytes".to_vec()];
     let mut bad_checksum = fixture_bytes(&current);
     bad_checksum[0] ^= 1;
     cases.push(bad_checksum);
     let mut wrong_network = current.clone();
-    wrong_network["magic"] = serde_json::json!([2, 2, 2, 2]);
+    wrong_network["magic"] = sonic_rs::json!([2, 2, 2, 2]);
     cases.push(fixture_bytes(&wrong_network));
     let mut wrong_format = current.clone();
     wrong_format["format"] = "another-format".into();
     cases.push(fixture_bytes(&wrong_format));
-    for marker in [serde_json::Value::Null, "".into()] {
+    for marker in [sonic_rs::Value::Null, "".into()] {
         let mut malformed_marker = current.clone();
         malformed_marker["format"] = marker;
         cases.push(fixture_bytes(&malformed_marker));
@@ -342,13 +323,13 @@ fn corrupt_unknown_and_wrong_network_files_fail_closed() {
     wrong_version["version"] = 2.into();
     cases.push(fixture_bytes(&wrong_version));
     let mut orphan_anchor = current.clone();
-    orphan_anchor["anchors"] = serde_json::json!([{"addr": "8.8.8.8:8333", "confirmed_at": EPOCH}]);
+    orphan_anchor["anchors"] = sonic_rs::json!([{"addr": "8.8.8.8:8333", "confirmed_at": EPOCH}]);
     cases.push(fixture_bytes(&orphan_anchor));
     let mut invalid_record = current;
-    invalid_record["records"] = serde_json::json!([{"broken": true}]);
+    invalid_record["records"] = sonic_rs::json!([{"broken": true}]);
     cases.push(fixture_bytes(&invalid_record));
     cases.push(fixture_bytes(
-        &serde_json::json!({"version": 99, "magic": [1, 1, 1, 1]}),
+        &sonic_rs::json!({"version": 99, "magic": [1, 1, 1, 1]}),
     ));
     for bytes in cases {
         fs::write(&path, &bytes).expect("rejected input");
@@ -363,14 +344,11 @@ fn corrupt_unknown_and_wrong_network_files_fail_closed() {
 
 #[test]
 fn cross_network_pre_release_is_preserved_and_superseded() {
-    // Identification runs before scope: an unmarked pre-release file from
-    // another network is preserved and replaced, never misreported as a
-    // network refusal that disables writes.
     for version in [1, 8, 9] {
         let dir = tempfile::tempdir().expect("directory");
         let base = dir.path().join("peers.dat");
         let path = network_path(&base, [1; 4]);
-        let bytes = fixture_bytes(&serde_json::json!({"version": version, "magic": [2, 2, 2, 2]}));
+        let bytes = fixture_bytes(&sonic_rs::json!({"version": version, "magic": [2, 2, 2, 2]}));
         fs::write(&path, &bytes).expect("foreign pre-release snapshot");
         let fresh = AddressBook::open(Some(base.clone()), [1; 4], false, None);
         assert!(fresh.state.lock().writable, "version {version}");
@@ -409,13 +387,13 @@ fn ipv6_and_overlay_source_round_trip_with_anchors() {
     book.succeeded(i2p, 9, EPOCH + 1);
     book.remember_anchors(&[tor, i2p], EPOCH + 1);
     book.save();
-    let expected = serde_json::to_value(&book.state.lock().stored).expect("state");
+    let expected = sonic_rs::to_value(&book.state.lock().stored).expect("state");
     assert_eq!(expected["format"], "bitcoin-rs-addrman");
     assert_eq!(expected["version"], 1);
     let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     assert!(restored.state.lock().writable);
     assert_eq!(
-        serde_json::to_value(&restored.state.lock().stored).expect("round trip"),
+        sonic_rs::to_value(&restored.state.lock().stored).expect("round trip"),
         expected
     );
     let manager = restored.state.lock();
@@ -430,14 +408,12 @@ fn ipv6_and_overlay_source_round_trip_with_anchors() {
     assert_indexes(&manager);
     drop(manager);
     let published = fs::read(&path).expect("published");
-    let decoded: serde_json::Value =
-        serde_json::from_slice(&published[..published.len() - 32]).expect("canonical JSON");
+    let decoded: sonic_rs::Value =
+        sonic_rs::from_slice(&published[..published.len() - 32]).expect("canonical JSON");
     assert_eq!(
         decoded,
-        serde_json::to_value(&restored.state.lock().stored).expect("stored")
+        sonic_rs::to_value(&restored.state.lock().stored).expect("stored")
     );
-    // Mutate, save, reopen, then a no-op save must not republish: a clean
-    // loader leaves the file untouched and its bytes byte-identical.
     restored.attempted(target(), true, EPOCH + 100);
     restored.save();
     let mutated = fs::read(&path).expect("mutated publication");

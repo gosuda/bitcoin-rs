@@ -1,6 +1,5 @@
 //! Native script parsing, classification, and building helpers.
 
-/// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
 
     macro_rules! opcodes {
@@ -14,45 +13,25 @@ pub mod opcode {
     }
 
     opcodes! {
-        /// `OP_0`: pushes an empty byte string.
         pub OP_0 = 0x00,
-        /// `OP_PUSHDATA1`: the next byte is the push length.
         pub(crate) OP_PUSHDATA1 = 0x4c,
-        /// `OP_PUSHDATA2`: the next two little-endian bytes are the push length.
         pub(crate) OP_PUSHDATA2 = 0x4d,
-        /// `OP_PUSHDATA4`: the next four little-endian bytes are the push length.
         pub(crate) OP_PUSHDATA4 = 0x4e,
-        /// `OP_1NEGATE`: pushes the number -1.
         pub OP_1NEGATE = 0x4f,
-        /// `OP_RESERVED`: reserved opcode (0x50); counts as a push under Core's `IsPushOnly`.
         pub OP_RESERVED = 0x50,
-        /// `OP_1`: pushes the number 1 (`OP_PUSHNUM_1`).
         pub OP_PUSHNUM_1 = 0x51,
-        /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
         pub OP_PUSHNUM_16 = 0x60,
-        /// `OP_IF`: begins a conditional branch (evaluator-owned semantics).
         pub OP_IF = 0x63,
-        /// `OP_ENDIF`: closes a conditional branch.
         pub OP_ENDIF = 0x68,
-        /// `OP_RETURN`: marks an unspendable provably-prunable output.
         pub OP_RETURN = 0x6a,
-        /// `OP_DROP`: drops the top stack item.
         pub OP_DROP = 0x75,
-        /// `OP_DUP`: duplicates the top stack item.
         pub OP_DUP = 0x76,
-        /// `OP_EQUAL`: pushes whether the top two stack items are equal.
         pub OP_EQUAL = 0x87,
-        /// `OP_EQUALVERIFY`: `OP_EQUAL` followed by `OP_VERIFY`.
         pub OP_EQUALVERIFY = 0x88,
-        /// `OP_HASH160`: RIPEMD160(SHA256(x)).
         pub OP_HASH160 = 0xa9,
-        /// `OP_CHECKSIG`: verifies a signature against the top public key.
         pub OP_CHECKSIG = 0xac,
-        /// `OP_CHECKSIGVERIFY`: `OP_CHECKSIG` followed by `OP_VERIFY`.
         pub(crate) OP_CHECKSIGVERIFY = 0xad,
-        /// `OP_CHECKMULTISIG`: verifies an m-of-n multisignature set.
         pub OP_CHECKMULTISIG = 0xae,
-        /// `OP_CHECKMULTISIGVERIFY`: `OP_CHECKMULTISIG` followed by `OP_VERIFY`.
         pub(crate) OP_CHECKMULTISIGVERIFY = 0xaf,
         pub(crate) OP_NOP = 0x61,
         pub(crate) OP_NOTIF = 0x64,
@@ -109,8 +88,6 @@ pub mod opcode {
         pub(crate) OP_CHECKSIGADD = 0xba,
     }
 
-    /// Returns the small-integer value an `OP_PUSHNUM_*` opcode encodes,
-    /// or `None` for every other opcode.
     #[must_use]
     pub(crate) const fn decode_pushnum(opcode: u8) -> Option<u8> {
         if opcode >= OP_PUSHNUM_1 && opcode <= OP_PUSHNUM_16 {
@@ -121,34 +98,21 @@ pub mod opcode {
     }
 }
 
-/// One parsed script instruction: an opcode or a data push.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Instruction<'a> {
-    /// Any non-push opcode byte.
     Op(u8),
-    /// The byte slice pushed by a direct push, `OP_PUSHDATA1/2/4`, or `OP_0`.
     PushBytes(&'a [u8]),
 }
 
-/// A push length or payload runs past the end of the script.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EarlyEndOfScript;
 
-/// Iterator over the instructions of a script, yielding a parse error at the
-/// first malformed push (and never again, matching Core's `GetOp` loop).
-///
-/// `0x01..=0x4b` are direct pushes, `OP_PUSHDATA1/2/4` carry an explicit
-/// little-endian length, `0x00` pushes an empty slice, and every other byte
-/// is an [`Instruction::Op`].
 #[derive(Clone, Debug)]
 pub struct Instructions<'a> {
-    /// Unconsumed tail; its length maps the current position back to an
-    /// offset in the source script.
     pub(crate) remaining: &'a [u8],
     failed: bool,
 }
 
-/// Iterates the instructions of `script`.
 #[must_use]
 pub const fn instructions(script: &[u8]) -> Instructions<'_> {
     Instructions {
@@ -157,8 +121,6 @@ pub const fn instructions(script: &[u8]) -> Instructions<'_> {
     }
 }
 
-/// Checks legacy opcode and push validity (`OP_NOP10`, 520-byte elements).
-/// Does not evaluate scripts or enforce the total script-size limit.
 #[must_use]
 pub fn has_valid_ops(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {
@@ -255,10 +217,6 @@ impl<'a> Instructions<'a> {
     }
 }
 
-/// Returns `true` when every instruction of `script` is a push.
-///
-/// Small-integer pushnum opcodes count as pushes. Mirrors Core's
-/// `IsPushOnly`: parse failure or any opcode above `OP_16` fails.
 #[must_use]
 pub fn is_push_only(script: &[u8]) -> bool {
     instructions(script).all(|instruction| match instruction {
@@ -268,13 +226,11 @@ pub fn is_push_only(script: &[u8]) -> bool {
     })
 }
 
-/// Returns `true` when the script starts with `OP_RETURN`.
 #[must_use]
 pub fn is_op_return(script: &[u8]) -> bool {
     script.first() == Some(&opcode::OP_RETURN)
 }
 
-/// Returns `true` for `OP_DUP OP_HASH160 <20 bytes> OP_EQUALVERIFY OP_CHECKSIG`.
 #[must_use]
 pub fn is_p2pkh(script: &[u8]) -> bool {
     script.len() == 25
@@ -285,7 +241,6 @@ pub fn is_p2pkh(script: &[u8]) -> bool {
         && script[24] == opcode::OP_CHECKSIG
 }
 
-/// Returns `true` for `OP_HASH160 <20 bytes> OP_EQUAL`.
 #[must_use]
 pub fn is_p2sh(script: &[u8]) -> bool {
     script.len() == 23
@@ -294,12 +249,6 @@ pub fn is_p2sh(script: &[u8]) -> bool {
         && script[22] == opcode::OP_EQUAL
 }
 
-/// Returns the public-key bytes of a bare P2PK script
-/// (`<33 or 65 bytes> OP_CHECKSIG`), or `None` for any other shape.
-///
-/// The push must decode as a `CPubKey` (`ValidSize`: 33-byte keys start
-/// `0x02`/`0x03`, 65-byte keys `0x04`/`0x06`/`0x07`), the strictness Core's
-/// `Solver` applies before classifying `pubkey`.
 #[must_use]
 fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
     let key = match script.len() {
@@ -314,31 +263,26 @@ fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// Returns `true` for a bare P2PK script.
 #[must_use]
 pub fn is_p2pk(script: &[u8]) -> bool {
     p2pk_pubkey_bytes(script).is_some()
 }
 
-/// Returns `true` for a v0 witness program: `OP_0 <20 bytes>`.
 #[must_use]
 pub fn is_p2wpkh(script: &[u8]) -> bool {
     script.len() == 22 && script[0] == opcode::OP_0 && script[1] == 0x14
 }
 
-/// Returns `true` for `OP_0 <32 bytes>`.
 #[must_use]
 pub fn is_p2wsh(script: &[u8]) -> bool {
     script.len() == 34 && script[0] == opcode::OP_0 && script[1] == 0x20
 }
 
-/// Returns `true` for a taproot output: `OP_1 <32 bytes>`.
 #[must_use]
 pub fn is_p2tr(script: &[u8]) -> bool {
     script.len() == 34 && script[0] == opcode::OP_PUSHNUM_1 && script[1] == 0x20
 }
 
-/// Returns `true` for `OP_1 OP_PUSHBYTES_2 0x4e73` (pay-to-anchor).
 #[must_use]
 pub fn is_p2a(script: &[u8]) -> bool {
     script == [opcode::OP_PUSHNUM_1, 0x02, 0x4e, 0x73]
@@ -364,16 +308,11 @@ pub fn witness_program(script: &[u8]) -> Option<(u8, &[u8])> {
     Some((version, &script[2..]))
 }
 
-/// Returns `true` when the script is a witness program of any version.
 #[must_use]
 pub fn is_witness_program(script: &[u8]) -> bool {
     witness_program(script).is_some()
 }
 
-/// Returns `true` for a bare multisig script.
-///
-/// Shape: `OP_m <n key pushes> OP_n OP_CHECKMULTISIG` with `m <= n`.
-/// Key-length checking is the caller's policy decision, not a script-shape property.
 #[must_use]
 pub fn is_multisig(script: &[u8]) -> bool {
     let mut iter = instructions(script);
@@ -411,9 +350,6 @@ pub fn is_multisig(script: &[u8]) -> bool {
 
 const MAX_BARE_MULTISIG_PUBKEYS: i64 = 20;
 
-/// Yields the next element as Core's `CScript::GetOp` does: the opcode
-/// byte and its pushed data (empty for non-push opcodes). `pos` tracks the
-/// start of the instruction the iterator just consumed.
 fn next_op<'a>(
     iter: &mut Instructions<'a>,
     script: &'a [u8],
@@ -428,9 +364,6 @@ fn next_op<'a>(
     Some((op, data))
 }
 
-/// Core `CheckMinimalPush`: the opcode must be the smallest push form
-/// that can carry `data`, and one-byte small integers must use their
-/// dedicated opcodes (`OP_0`, `OP_1NEGATE`, `OP_1..=OP_16`).
 pub(crate) fn minimal_push(data: &[u8], opcode: u8) -> bool {
     match data.len() {
         0 => opcode == opcode::OP_0,
@@ -442,8 +375,6 @@ pub(crate) fn minimal_push(data: &[u8], opcode: u8) -> bool {
     }
 }
 
-/// Core `CScriptNum` with `fRequireMinimal`: the sign-magnitude value of
-/// a little-endian byte string of at most 4 bytes.
 fn minimal_script_num(data: &[u8]) -> Option<i64> {
     if data.is_empty() {
         return Some(0);
@@ -467,8 +398,6 @@ fn minimal_script_num(data: &[u8]) -> Option<i64> {
     Some(if last & 0x80 != 0 { -value } else { value })
 }
 
-/// Core `GetScriptNumber`: a minimally encoded count in `min..=max`,
-/// whether carried by an `OP_n` opcode or a data push.
 fn script_count(opcode: u8, data: &[u8], min: i64, max: i64) -> Option<u8> {
     let count = if let Some(pushnum) = opcode::decode_pushnum(opcode) {
         i64::from(pushnum)
@@ -486,7 +415,6 @@ fn script_count(opcode: u8, data: &[u8], min: i64, max: i64) -> Option<u8> {
     u8::try_from(count).ok()
 }
 
-/// Core `CPubKey::ValidSize`.
 fn pubkey_valid_size(data: &[u8]) -> bool {
     match data.len() {
         33 => matches!(data[0], 0x02 | 0x03),
@@ -495,14 +423,6 @@ fn pubkey_valid_size(data: &[u8]) -> bool {
     }
 }
 
-/// Counts the pubkeys in a bare multisig script, or `None` unless it matches
-/// Core's `MatchMultisig` exactly.
-///
-/// `m` and `n` are small integers in `1..=MAX_PUBKEYS_PER_MULTISIG` encoded as
-/// `OP_1..=OP_16` or minimally encoded script-number pushes, every key push
-/// decodes as a `CPubKey` (33 bytes starting `0x02`/`0x03`, 65 bytes starting
-/// `0x04`/`0x06`/`0x07`), `m <= n` equals the number of key pushes, and
-/// `OP_CHECKMULTISIG` ends the script.
 #[must_use]
 pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
     if *script.last()? != opcode::OP_CHECKMULTISIG {
@@ -534,12 +454,8 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
 
 /// Returns the smallest non-dust value in satoshis for an output paying
 /// `script` under `dust_relay_fee_sat_per_kvb`.
-///
-/// Mirrors Core's `GetDustThreshold` (spend overhead copied from Core;
-/// division by 1000 at the end only).
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
-    // Scripts over the consensus execution limit are unspendable, as in Core.
     if script.len() > 10_000 {
         return 0;
     }
@@ -558,8 +474,6 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     product.saturating_add(999) / 1000
 }
 
-/// Encodes `data` as a minimal canonical push (direct push for 1..=75 bytes,
-/// `OP_PUSHDATA1/2/4` above that).
 #[must_use]
 pub fn push_data(data: &[u8]) -> Vec<u8> {
     let len = data.len();
@@ -586,11 +500,6 @@ pub fn push_data(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Encodes an integer as a minimal script push.
-///
-/// This is Core's `CScript::operator<<(CScriptNum)`: values -1..=16 use the
-/// dedicated pushnum opcodes, everything else a sign-minimal
-/// two's-complement-magnitude data push.
 #[must_use]
 pub fn push_int(value: i64) -> Vec<u8> {
     match value {
@@ -676,7 +585,7 @@ mod tests {
         assert!(is_push_only(&ok));
         assert!(is_push_only(&[opcode::OP_RESERVED]));
         assert!(!is_push_only(&[opcode::OP_DUP]));
-        assert!(!is_push_only(&[0x51, 0x20, 0x00])); // truncated 32-byte push
+        assert!(!is_push_only(&[0x51, 0x20, 0x00]));
         assert!(!is_push_only(&[0x51, 0xff]));
     }
 
@@ -748,7 +657,6 @@ mod tests {
         .concat();
         assert_eq!(multisig_key_count(&two_of_two), Some(2));
 
-        // A key push that is not a serialized pubkey fails the match.
         let bad_key: Vec<u8> = [
             vec![opcode::OP_PUSHNUM_1],
             push_data(&[0_u8; 4]),
@@ -758,7 +666,6 @@ mod tests {
         assert!(is_multisig(&bad_key));
         assert_eq!(multisig_key_count(&bad_key), None);
 
-        // Counts may be minimal script-number pushes, reaching past OP_16.
         let mut seventeen_of_seventeen = vec![0x01, 0x11];
         for _ in 0..17 {
             seventeen_of_seventeen.extend(push_data(&keys));
@@ -766,7 +673,6 @@ mod tests {
         seventeen_of_seventeen.extend([0x01, 0x11, opcode::OP_CHECKMULTISIG]);
         assert_eq!(multisig_key_count(&seventeen_of_seventeen), Some(17));
 
-        // Twenty-one keys exceeds `MAX_PUBKEYS_PER_MULTISIG`.
         let mut twenty_one = vec![opcode::OP_PUSHNUM_1];
         for _ in 0..21 {
             twenty_one.extend(push_data(&keys));
@@ -774,8 +680,6 @@ mod tests {
         twenty_one.extend([0x01, 0x15, opcode::OP_CHECKMULTISIG]);
         assert_eq!(multisig_key_count(&twenty_one), None);
 
-        // Non-minimal count encodings fail: PUSHDATA1 for one byte, and a
-        // redundant sign byte in the value.
         let padded_push: Vec<u8> = [
             vec![opcode::OP_PUSHDATA1, 0x01, 0x01],
             push_data(&keys),
@@ -794,13 +698,10 @@ mod tests {
 
     #[test]
     fn dust_threshold_matches_core_arithmetic() {
-        // P2PKH: witness false → 32+4+1+107+4+8 + 1 varint + 25 = 182; 3000 * 182 / 1000 = 546.
         let p2pkh: Vec<u8> = [vec![0x76, 0xa9, 0x14], vec![7; 20], vec![0x88, 0xac]].concat();
         assert_eq!(minimal_non_dust(&p2pkh, 3_000), 546);
-        // P2WPKH: witness true → 32+4+1+26+4+8 + 1 + 22 = 98; 3000 * 98 / 1000 = 294.
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
         assert_eq!(minimal_non_dust(&p2wpkh, 3_000), 294);
-        // OP_RETURN: always zero.
         assert_eq!(minimal_non_dust(&[opcode::OP_RETURN], 3_000), 0);
     }
 
@@ -819,27 +720,21 @@ mod tests {
 
     #[test]
     fn has_valid_ops_enforces_core_legacy_boundary() {
-        // Valid legacy opcodes up to OP_NOP10 (0xb9) are accepted.
         assert!(has_valid_ops(&[opcode::OP_NOP10]));
         assert!(has_valid_ops(&[opcode::OP_DUP, opcode::OP_NOP10]));
 
-        // OP_CHECKSIGADD (0xba) is rejected under legacy HasValidOps.
         assert!(!has_valid_ops(&[opcode::OP_CHECKSIGADD]));
         assert!(!has_valid_ops(&[0xba]));
 
-        // Opcodes above the boundary (0xbb, 0xff) are rejected.
         assert!(!has_valid_ops(&[0xbb]));
         assert!(!has_valid_ops(&[0xff]));
 
-        // Malformed pushes are rejected.
         assert!(!has_valid_ops(&[opcode::OP_PUSHDATA1]));
         assert!(!has_valid_ops(&[0x02, 0x01]));
 
-        // 520-byte pushes are accepted (MAX_SCRIPT_ELEMENT_SIZE).
         let max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE];
         assert!(has_valid_ops(&push_data(&max_element)));
 
-        // Pushes exceeding 520 bytes are rejected.
         let over_max_element = vec![0x42; crate::eval::MAX_SCRIPT_ELEMENT_SIZE + 1];
         assert!(!has_valid_ops(&push_data(&over_max_element)));
     }

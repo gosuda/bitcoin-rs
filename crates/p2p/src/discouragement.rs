@@ -9,9 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use hashbrown::{HashMap, HashSet};
 
-/// Maximum exact peer addresses retained independently of the auxiliary address book.
 pub const MAX_DISCOURAGED_IPS: usize = 4_096;
-/// A single violation temporarily avoids automatic reconnection for one hour.
 pub const DISCOURAGEMENT_LIFETIME: Duration = Duration::from_hours(1);
 
 #[derive(Debug, Default)]
@@ -33,7 +31,6 @@ impl DiscouragedPeers {
         }
     }
 
-    /// Record a reconnectable address and report whether it is retained.
     pub(crate) fn insert(&mut self, ip: impl Into<PeerAddress>, now: Instant) -> bool {
         self.expire(now);
         let ip = ip.into().to_canonical();
@@ -64,7 +61,6 @@ impl DiscouragedPeers {
     }
 }
 
-/// Immutable policy captured before an address-book selection lock is acquired.
 #[derive(Clone, Debug)]
 pub struct AutomaticPeerPolicy {
     pub(crate) banned: Vec<crate::BannedSubnet>,
@@ -75,7 +71,6 @@ pub struct AutomaticPeerPolicy {
 }
 
 impl AutomaticPeerPolicy {
-    /// Explicit operator bans take precedence over automatic protection.
     #[must_use]
     pub fn allows(&self, ip: impl Into<PeerAddress>) -> bool {
         let ip = ip.into().to_canonical();
@@ -89,10 +84,6 @@ impl AutomaticPeerPolicy {
                     .is_some_and(|ip| self.protected.iter().any(|subnet| subnet.contains(ip))))
     }
 
-    /// Whether automatic dialing may use `endpoint`. Manual bans are
-    /// IP-only; overlay hosts are discouraged by their port-free host.
-    /// This is the routing-gate-free form used at the connection boundary,
-    /// where `onlynet` was already enforced at dial time.
     #[must_use]
     pub fn allows_endpoint(&self, endpoint: PeerEndpoint) -> bool {
         match endpoint {
@@ -111,7 +102,6 @@ impl AutomaticPeerPolicy {
     }
 }
 
-/// Core `CNetAddr::IsLocal`: IPv4 0/8, 127/8 and IPv6 loopback.
 pub(crate) fn is_local(address: impl Into<PeerAddress>) -> bool {
     let Some(ip) = address.into().ip() else {
         return false;
@@ -160,7 +150,6 @@ mod tests {
             port: 8333,
         };
         entries.insert(tor.address(), now);
-        // Same key at any port shares the discouragement (port zeroed).
         assert!(entries.contains(tor.with_port(9999).address(), now));
         assert!(
             entries.contains(
@@ -183,7 +172,6 @@ mod tests {
             )
         );
         assert!(!is_local(tor.address()));
-        // Snapshot keys carry no port and no socket.
         assert!(
             entries
                 .snapshot(now)

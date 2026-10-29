@@ -1,27 +1,16 @@
 //! Strict bounded loader for the checked-in Core 31.1 fixture corpus.
-//!
-//! The corpus under `crates/rpc/tests/corpus/core-31.1/` is custody, not a
-//! second method manifest: the const [`bitcoin_rs_rpc::manifest::MANIFEST`]
-//! stays the sole method authority and [`manifest_check`] only proves every
-//! replayed method exists there. Loading enforces every ceiling from
-//! [`super::limits`], parses with `sonic-rs` into types that reject unknown
-//! fields, measures JSON depth on the raw bytes before parsing, and pins the
-//! exact Core provenance (version, binary digest, network).
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_rpc::manifest::{MANIFEST, SurfaceKind};
 use serde::Deserialize;
-use serde_json::Value;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
 use super::compare::EnvelopeCheck;
 use super::limits::{MAX_CORPUS_BYTES, MAX_FIXTURE_BYTES, MAX_FIXTURE_COUNT, MAX_JSON_DEPTH};
 use super::manifest_check;
 
-// Reuse the process gates' typed identity owner in this test binary; no
-// production crate dependency or second reference parser is introduced.
 #[expect(
     dead_code,
     reason = "the RPC fixture gate consumes only the release identity"
@@ -29,184 +18,117 @@ use super::manifest_check;
 #[path = "../../../../bin/bitcoin-rs/tests/support/reference_set.rs"]
 mod reference_set;
 
-/// Converts an in-memory byte length to `u64` for ceiling comparisons; a
-/// length that does not fit is above every ceiling and is refused by them.
 fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
-/// How the pinned Core result relates to the live bitcoin-rs result.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum Relation {
-    /// The live tuple must match the Core tuple structurally.
     Exact,
-    /// A recorded production divergence: the fixture pins both sides.
     #[serde(rename = "known_gap")]
     KnownGap,
 }
 
-/// Provenance pinned by every fixture; the loader refuses a fixture that
-/// drifts from the audited Core 31.1 binary or the regtest network.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Provenance pinned by every fixture; the loader refuses a fixture that
+/// drifts from the audited Core 31.1 binary or the regtest network.
 pub(crate) struct Provenance {
     /// Pinned Core version string; must be `31.1.0`.
     pub core_version: String,
-    /// Bitcoin Core source commit corresponding to the captured binary.
     pub core_source_commit: String,
     /// SHA-256 of the exact `bitcoind` binary the probe captured.
     pub core_binary_sha256: String,
     /// Network the capture ran on; must be `regtest`.
     pub network: String,
-    /// Tip height at capture time.
     pub tip_height: u64,
-    /// Tip hash (RPC display form) at capture time.
     pub tip_hash: String,
-    /// Probe evidence files this fixture was transcribed from.
     pub evidence: String,
 }
 
-/// Auth posture of the replayed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum RequestAuth {
-    /// Correct Basic credentials.
     Valid,
-    /// Deliberately wrong Basic credentials.
     Invalid,
-    /// No `Authorization` header at all.
     Absent,
 }
 
-/// The replayed request, verbatim bytes included.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RequestSpec {
-    /// Auth posture of the replayed request.
     pub auth: RequestAuth,
-    /// Exact JSON-RPC body bytes to send.
     pub body: String,
-    /// Method names the request carries (empty for parse errors).
     pub methods: Vec<String>,
-    /// Whether every listed method must exist in the const manifest.
     pub expect_methods_in_manifest: bool,
-    /// Byte offset at which the request write is split into two TCP
-    /// fragments; `null` sends it in one write.
     pub fragment_at: Option<usize>,
 }
 
-/// A captured HTTP response side: status, the pinned header pairs, and the
-/// body in one of three exact forms.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpTuple {
-    /// HTTP status code.
     pub status: u16,
-    /// Exact header pairs captured for this side (case preserved).
     pub headers: Vec<(String, String)>,
-    /// Wire body byte length when it is derivable: empty and text bodies
-    /// are exact; JSON bodies are `None` because the wire serialization of
-    /// an insertion-order server value cannot be reproduced offline. The
-    /// live replay always knows the wire length.
     #[serde(default)]
     pub body_len: Option<u64>,
-    /// Body form: `empty`, `text`, or `json` with the decoded value.
     pub body: BodyForm,
 }
 
-/// Body side of an [`HttpTuple`].
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "form", rename_all = "snake_case")]
 pub(crate) enum BodyForm {
     /// Zero-length body (204 notifications, 401 auth failures).
     Empty,
-    /// Non-JSON plain-text body, compared byte for byte.
     Text {
-        /// The exact body bytes as utf-8.
         text: String,
     },
-    /// JSON body carried as the decoded `sonic-rs` value.
     Json {
-        /// The decoded value (object, array, or scalar).
+        #[serde(deserialize_with = "super::compare::json_value")]
         value: Value,
     },
 }
 
-/// One checked-in fixture: provenance, request, the pinned Core tuple, the
-/// optional pinned current tuple, the relation, and the structural checks.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Fixture {
-    /// Stable fixture identifier; must equal the file stem.
     pub id: String,
-    /// Probe case ordinal this fixture was transcribed from.
     pub case_ordinal: String,
-    /// Human-readable description of what the case proves.
     pub description: String,
-    /// Pinned Core provenance.
     pub provenance: Provenance,
-    /// Request to replay.
     pub request: RequestSpec,
-    /// The captured Core response tuple.
     pub core: HttpTuple,
-    /// The pinned current bitcoin-rs tuple; required exactly when the
-    /// relation is a known gap. Absent on exact fixtures, which pin Core only.
     #[serde(default)]
     pub current: Option<HttpTuple>,
-    /// How Core relates to live.
     pub relation: Relation,
-    /// The single concrete gap identifier; required exactly for known gaps.
     #[serde(default)]
     pub gap: Option<String>,
-    /// The complete structural paths (from `structural_diff_paths`) at
-    /// which the pinned Core and pinned current tuples diverge; required
-    /// exactly for known gaps, and the comparator proves the observed diff
-    /// equals it with nothing extra. Defaults to empty, which only exact
-    /// relations may carry.
     #[serde(default)]
     pub gap_paths: Vec<String>,
-    /// Structural checks applied to the live replay.
     pub checks: Checks,
 }
 
-/// Classification class of one header name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeaderClass {
-    /// Value must be present and equal on both sides.
     Exact,
-    /// Value is wall-clock or connection dependent: presence on the live
-    /// reply only.
     Volatile,
-    /// Declared live divergence: values must be present and differ.
     Gap,
 }
 
-/// Complete header classification: every header name on the pinned side
-/// and on the live side must appear in exactly one of these lists.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HeaderCheck {
-    /// Names compared for exact structural equality.
     #[serde(default)]
     pub(crate) exact: Vec<String>,
-    /// Names whose value is wall-clock or connection dependent: classified,
-    /// required on the live reply, deliberately not value-compared, and not
-    /// required on the pinned tuple.
     #[serde(default)]
     pub(crate) volatile: Vec<String>,
-    /// Declared divergence names (known-gap fixtures only).
     #[serde(default)]
     pub(crate) gap: Vec<String>,
-    /// `Content-Length` is derived framing, not pinned data: it is absent on
-    /// 204 responses and otherwise exactly one ASCII-decimal header per tuple
-    /// whose value equals that tuple's actual raw body byte length.
     #[serde(default)]
     pub(crate) body_length: bool,
 }
 
 impl HeaderCheck {
-    /// The class of one lower-cased header name, if it is classified.
     #[must_use]
     pub(crate) fn class_of(&self, lower_name: &str) -> Option<HeaderClass> {
         let matches = |list: &[String]| {
@@ -224,55 +146,35 @@ impl HeaderCheck {
         }
     }
 
-    /// Every classified name list, in declaration order.
     #[must_use]
     pub(crate) fn classes(&self) -> [&[String]; 3] {
         [&self.exact, &self.volatile, &self.gap]
     }
 }
 
-/// Structural checks for one replayed fixture.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Checks {
-    /// Whether the live HTTP status must equal the pinned Core status.
     pub http_status: bool,
-    /// Complete header classification.
     pub headers: HeaderCheck,
-    /// Body-level check.
     pub body: BodyCheck,
 }
 
-/// Body-level structural check.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum BodyCheck {
-    /// The body must be zero bytes.
     Empty,
-    /// The body is plain text compared byte for byte against the pinned
-    /// current side (known-gap cases only).
     Text,
-    /// One JSON-RPC envelope.
-    Single {
-        /// Envelope and result checks.
-        envelope: EnvelopeCheck,
-    },
-    /// A JSON array of envelopes, compared element by element in order.
-    Batch {
-        /// Envelope and result checks per response element, in request order.
-        elements: Vec<EnvelopeCheck>,
-    },
+    Single { envelope: EnvelopeCheck },
+    Batch { elements: Vec<EnvelopeCheck> },
 }
 
-/// The one supported capture network.
 pub(crate) const PINNED_NETWORK: &str = "regtest";
 
-/// Load error: every refusal names the ceiling or rule it hit.
 #[derive(Debug)]
+/// Load error: every refusal names the ceiling or rule it hit.
 pub(crate) enum LoadError {
-    /// Corpus or fixture exceeded a ceiling, or provenance drifted.
     Violation(String),
-    /// Reading the corpus directory failed.
     Io(std::io::Error),
 }
 
@@ -285,20 +187,12 @@ impl core::fmt::Display for LoadError {
     }
 }
 
-/// Tip height Core was captured at: the regtest genesis on an empty chain.
 pub(crate) const PINNED_TIP_HEIGHT: u64 = 0;
 
-/// Tip hash, in RPC display form, Core was captured at.
 pub(crate) const PINNED_TIP_HASH: &str =
     "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
 impl std::error::Error for LoadError {}
 
-/// Loads and validates every fixture under `tests/corpus/core-31.1/`,
-/// returning them keyed by fixture id in deterministic file-name order.
-///
-/// # Errors
-/// [`LoadError::Violation`] when any ceiling, strict-parse rule or provenance
-/// pin fails; [`LoadError::Io`] when the corpus directory cannot be read.
 pub(crate) fn load_corpus() -> Result<BTreeMap<String, Fixture>, LoadError> {
     let reference =
         reference_set::reference_set().map_err(|error| LoadError::Violation(error.to_string()))?;
@@ -309,24 +203,13 @@ fn load_corpus_from(
     dir: &Path,
     release: &reference_set::ReleaseIdentity,
 ) -> Result<BTreeMap<String, Fixture>, LoadError> {
-    // Root custody: the corpus directory itself is opened once, and every
-    // entry is read from and opened relative to that one handle. A
-    // replacement of the directory name after this point cannot redirect
-    // any child open, because no child is ever resolved by full pathname.
     let corpus_dir = corpus_io::open(dir)?;
-    // Enumeration streams: the entry-count ceiling below stops the walk at
-    // the first over-limit item instead of materializing a directory of
-    // unbounded size.
     let entries = corpus_io::entries(&corpus_dir, dir)?;
     let mut fixture_count = 0_usize;
     let mut corpus_bytes = 0_u64;
     let mut fixtures = BTreeMap::new();
-    // One custody walk does both custody accounting and reading: there is no
-    // second pathname-based pass whose view could disagree with this one.
     for name in entries {
         let name = name?;
-        // Every entry counts against the ceiling BEFORE any name-shape
-        // filtering: unlimited non-JSON junk can no longer bypass the cap.
         fixture_count += 1;
         if fixture_count > MAX_FIXTURE_COUNT {
             return Err(LoadError::Violation(format!(
@@ -372,10 +255,6 @@ fn load_corpus_from(
     Ok(fixtures)
 }
 
-/// Corpus I/O under custody of one directory handle. Both arms provide the
-/// same three guarantees: the root is opened once and refused when it is not
-/// a real directory, entries are enumerated from that open handle, and every
-/// fixture read is relative to it with no path re-resolution in between.
 #[cfg(unix)]
 mod corpus_io {
     use std::io::Read as _;
@@ -383,10 +262,8 @@ mod corpus_io {
 
     use super::{LoadError, MAX_FIXTURE_BYTES, len_u64};
 
-    /// Unix custody is the raw directory descriptor `openat` works against.
     pub(super) type CorpusDir = rustix::fd::OwnedFd;
 
-    /// Opens the corpus root no-follow as a directory descriptor.
     pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
         rustix::fs::open(
             dir,
@@ -404,7 +281,6 @@ mod corpus_io {
         })
     }
 
-    /// Streams the corpus root's entry names through the open descriptor.
     pub(super) fn entries<'a>(
         dir: &'a CorpusDir,
         path: &'a Path,
@@ -427,15 +303,6 @@ mod corpus_io {
         })))
     }
 
-    /// Reads one fixture from the corpus directory descriptor with no window
-    /// between the type check and the read: `openat` refuses to follow a
-    /// final symlink, `fstat` interrogates the *same* descriptor the bytes
-    /// come from, and the read is bounded by one extra byte past the ceiling
-    /// so a lying `st_size` cannot widen it.
-    ///
-    /// # Errors
-    /// [`LoadError::Violation`] when the entry is not a regular file or
-    /// exceeds the per-fixture ceiling.
     pub(super) fn read_regular_bounded(
         dir: &CorpusDir,
         name: &str,
@@ -448,9 +315,6 @@ mod corpus_io {
                 path.display()
             ))
         };
-        // `NOFOLLOW` refuses a final symlink outright; `NONBLOCK` keeps a
-        // FIFO from blocking the open itself, so its type can be judged by
-        // `fstat`.
         let file_fd = rustix::fs::openat(
             dir,
             name,
@@ -467,8 +331,6 @@ mod corpus_io {
                 LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
             }
         })?;
-        // The type is now a property of this open description, not of a name
-        // that another process could have replaced in the meantime.
         let stat = rustix::fs::fstat(&file_fd).map_err(|error| {
             LoadError::Violation(format!("{}: fstat failed: {error}", path.display()))
         })?;
@@ -490,10 +352,6 @@ mod corpus_io {
     }
 }
 
-/// Windows custody through cap-std: the capability handle plays the role the
-/// dirfd plays on unix — entries are enumerated from it, names are opened
-/// relative to it, and `follow: No` opens a reparse point itself rather than
-/// its target.
 #[cfg(windows)]
 mod corpus_io {
     use std::io::Read as _;
@@ -504,21 +362,11 @@ mod corpus_io {
 
     use super::{LoadError, MAX_FIXTURE_BYTES, len_u64};
 
-    /// Windows custody is the capability directory handle relative opens go
-    /// through.
     pub(super) type CorpusDir = Dir;
 
-    /// Opens the corpus root as a capability directory. `OPEN_REPARSE_POINT`
-    /// makes the open deliver the reparse object itself rather than resolving
-    /// a junction or symlink, so the type judgment is a property of the
-    /// opened handle — the same open-then-verify the unix `NOFOLLOW|DIRECTORY`
-    /// arm performs, with no pre-check a swapped entry could race.
     pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
         use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-        // `BACKUP_SEMANTICS` admits a directory as a file handle;
-        // `OPEN_REPARSE_POINT` opens a junction or symlink as the reparse
-        // object instead of its target.
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
@@ -548,7 +396,6 @@ mod corpus_io {
         Ok(Dir::from_std_file(file))
     }
 
-    /// Streams the corpus root's entry names through the open handle.
     pub(super) fn entries<'a>(
         dir: &'a CorpusDir,
         path: &'a Path,
@@ -571,18 +418,6 @@ mod corpus_io {
         })))
     }
 
-    /// Reads one fixture from the corpus directory handle. The verdict
-    /// mirrors the unix arm: a symbolic link is named as such, any other
-    /// non-regular entry is refused, and the open itself does not follow a
-    /// final reparse — a symlink swapped in after the pre-check is opened as
-    /// the reparse object and judged on the opened handle's own metadata, so
-    /// the type check is never a property of a stale name. The read is
-    /// bounded by one extra byte past the ceiling so a lying size cannot
-    /// widen it.
-    ///
-    /// # Errors
-    /// [`LoadError::Violation`] when the entry is not a regular file or
-    /// exceeds the per-fixture ceiling.
     pub(super) fn read_regular_bounded(
         dir: &CorpusDir,
         name: &str,
@@ -632,15 +467,11 @@ mod corpus_io {
     }
 }
 
-/// Absolute path of the checked-in corpus.
 #[must_use]
 pub(crate) fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/core-31.1")
 }
 
-/// Measures object/array nesting on the raw fixture bytes, honoring string
-/// and escape state, before the parser runs. A fixture may not smuggle
-/// parser-exhausting nesting past the ceiling.
 fn enforce_depth(text: &str, path: &Path) -> Result<(), LoadError> {
     let mut depth = 0_usize;
     let mut in_string = false;
@@ -668,11 +499,6 @@ fn enforce_depth(text: &str, path: &Path) -> Result<(), LoadError> {
     Ok(())
 }
 
-/// Derives each pinned tuple's wire body length where the body form makes
-/// it exact: empty bodies are zero bytes and text bodies are their utf-8
-/// byte length. JSON bodies stay `None`: the server serializes an
-/// insertion-order value, so the wire length cannot be reproduced from the
-/// decoded fixture value offline.
 fn settle_body_lengths(fixture: &mut Fixture) {
     let settle = |tuple: &mut HttpTuple| match &tuple.body {
         BodyForm::Empty => tuple.body_len = Some(0),
@@ -685,10 +511,6 @@ fn settle_body_lengths(fixture: &mut Fixture) {
     }
 }
 
-/// Custody rule for one pinned tuple's `Content-Length`: a 204 must have an
-/// empty body and omit the header. Otherwise at most one header is accepted;
-/// when the wire body length is derivable its value must match. A literal on
-/// a JSON-body tuple is refused because the wire length cannot be reproduced.
 fn validate_tuple_content_length(
     tuple: &HttpTuple,
     label: &str,
@@ -708,9 +530,6 @@ fn validate_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".to_owned()));
         }
-        // Accept both capture forms: RFC 9110 §8.6 omission and the
-        // libevent-era Core `Content-Length: 0`; the negative probe pins
-        // the node's own omission.
         if let Some(value) = declared.first() {
             if *value != "0" || declared.len() != 1 {
                 return Err(fail(
@@ -765,10 +584,6 @@ fn validate_fixture(
         )));
     }
 
-    // The replayed body must itself be a valid single or batch JSON-RPC
-    // request, and the derived method names must equal `request.methods`
-    // exactly. Malformed bytes are only accepted for the parse-error case:
-    // an HTTP 500 capture with an empty derived method list.
     let derived = derive_request_methods(&fixture.request.body, fixture.core.status)
         .map_err(|why| LoadError::Violation(format!("{}: {why}", path.display())))?;
     if derived != fixture.request.methods {
@@ -866,11 +681,6 @@ fn validate_provenance(
     Ok(())
 }
 
-/// Every header name on the pinned side (current for a known gap, core for
-/// an exact relation) must be classified exactly once; exact and gap names
-/// must be present on the pinned side, volatile names need not be, and gap
-/// names are only legal on known-gap fixtures and must be declared in
-/// `gap_paths`.
 fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
     let fail = |why: String| LoadError::Violation(format!("{}: {why}", path.display()));
     let pinned = match (&fixture.relation, &fixture.current) {
@@ -883,9 +693,6 @@ fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
     if fixture.checks.headers.body_length
         && fixture.checks.headers.class_of("content-length").is_some()
     {
-        // `Content-Length` is owned by the derived body_length invariant:
-        // classifying it again as exact, volatile or gap would be stale
-        // dual ownership.
         return Err(fail(
             "header Content-Length is owned by the derived body_length class and \
              must not also be classified exact, volatile or gap"
@@ -903,10 +710,6 @@ fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                     "header {name:?} is classified both {previous:?} and {class_name:?}"
                 )));
             }
-            // A volatile name is transport or connection dependent, so the
-            // pinned tuple may omit it: a Core capture keeps only the headers
-            // its probe recorded. Exact and gap names need a pinned value to
-            // compare against.
             if class_name != "volatile"
                 && pinned
                     .headers
@@ -936,9 +739,6 @@ fn validate_header_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
     Ok(())
 }
 
-/// Every key of every pinned result must be classified exactly once across
-/// the five classes, gap keys are only legal on known-gap fixtures, and no
-/// two classes may claim the same key.
 fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
     let fail = |why: String| LoadError::Violation(format!("{}: {why}", path.display()));
     let pairs: Vec<(usize, &EnvelopeCheck, Option<&Value>)> =
@@ -988,10 +788,6 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                     )));
                 }
                 if class == "gap" {
-                    // A gap key is exactly a position where the live node
-                    // answers differently from Core (a different value, or a
-                    // member Core omits): the pinned current tuple must carry
-                    // the live shape, and the divergence must be real.
                     if fixture.relation != Relation::KnownGap {
                         return Err(fail(
                             "gap classification requires a known-gap relation".to_owned(),
@@ -1010,9 +806,7 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                              result does not carry the live shape"
                         )));
                     };
-                    let Some(core_value) = result_object.get(key.as_str()) else {
-                        // Core omits the member entirely while this node
-                        // answers: a real divergence at this path.
+                    let Some(core_value) = result_object.get(key) else {
                         continue;
                     };
                     if super::compare::value_equal(core_value, current_value) {
@@ -1023,7 +817,7 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                     }
                     continue;
                 }
-                if !result_object.contains_key(key.as_str()) {
+                if !result_object.contains_key(key) {
                     return Err(fail(format!(
                         "result key {key:?} is classified {class:?} but the pinned Core result \
                          does not carry it"
@@ -1031,8 +825,8 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
                 }
             }
         }
-        for key in result_object.keys() {
-            if !claimed.contains_key(key.as_str()) {
+        for (key, _) in result_object {
+            if !claimed.contains_key(&key) {
                 return Err(fail(format!(
                     "pinned Core result key {key:?} is not classified exactly once"
                 )));
@@ -1042,41 +836,37 @@ fn validate_result_partition(fixture: &Fixture, path: &Path) -> Result<(), LoadE
     Ok(())
 }
 
-/// Parses a replayed request body and derives the JSON-RPC method names it
-/// carries, in request order: one for a single request object, one per
-/// element for a batch array. Malformed bytes are refused unless the case is
-/// the parse-error capture (`status` 500), the only sanctioned malformed
-/// path.
 fn derive_request_methods(body: &str, status: u16) -> Result<Vec<String>, String> {
-    match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(serde_json::Value::Object(request)) => Ok(vec![request_method(&request, "request")?]),
-        Ok(serde_json::Value::Array(requests)) => {
-            let mut methods = Vec::with_capacity(requests.len());
-            for (index, request) in requests.iter().enumerate() {
-                let serde_json::Value::Object(request) = request else {
-                    return Err(format!(
-                        "batch element {index} is not a JSON-RPC request object"
-                    ));
-                };
-                methods.push(request_method(request, &format!("batch element {index}"))?);
-            }
-            Ok(methods)
+    let parsed: Value = match sonic_rs::from_str(body) {
+        Ok(parsed) => parsed,
+        Err(_) if status == 500 => return Ok(Vec::new()),
+        Err(_) => {
+            return Err(
+                "request body is not valid JSON; only the parse-error case may send malformed              bytes"
+                    .to_owned(),
+            );
         }
-        Ok(_) => Err("request body must be a JSON-RPC object or a batch array".to_owned()),
-        Err(_) if status == 500 => Ok(Vec::new()),
-        Err(_) => Err(
-            "request body is not valid JSON; only the parse-error case may send malformed              bytes"
-                .to_owned(),
-        ),
+    };
+    if let Some(request) = parsed.as_object() {
+        return Ok(vec![request_method(request, "request")?]);
     }
+    if let Some(requests) = parsed.as_array() {
+        let mut methods = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().enumerate() {
+            let Some(request) = request.as_object() else {
+                return Err(format!(
+                    "batch element {index} is not a JSON-RPC request object"
+                ));
+            };
+            methods.push(request_method(request, &format!("batch element {index}"))?);
+        }
+        return Ok(methods);
+    }
+    Err("request body must be a JSON-RPC object or a batch array".to_owned())
 }
 
-/// Extracts the `method` member of one request object.
-fn request_method(
-    request: &serde_json::Map<String, serde_json::Value>,
-    what: &str,
-) -> Result<String, String> {
-    let Some(method) = request.get("method") else {
+fn request_method(request: &sonic_rs::Object, what: &str) -> Result<String, String> {
+    let Some(method) = request.get(&"method") else {
         return Err(format!("{what} carries no method member"));
     };
     let Some(method) = method.as_str() else {
@@ -1085,9 +875,7 @@ fn request_method(
     Ok(method.to_owned())
 }
 
-/// Resolves the pinned current-tuple result value for one batch element (or
-/// the single envelope when the body is not a batch).
-fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&serde_json::Value> {
+fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&Value> {
     let current = &fixture.current.as_ref()?.body;
     let BodyForm::Json { value } = current else {
         return None;
@@ -1101,7 +889,7 @@ fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&se
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
+    use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
     use super::{load_corpus_from, reference_set};
 
@@ -1109,8 +897,8 @@ mod tests {
     const CAPTURED_FIXTURE: &str =
         include_str!("../corpus/core-31.1/01_getblockchaininfo_v2_positional.json");
 
-    fn captured_fixture() -> Result<Value, serde_json::Error> {
-        serde_json::from_str(CAPTURED_FIXTURE)
+    fn captured_fixture() -> Result<Value, sonic_rs::Error> {
+        sonic_rs::from_str(CAPTURED_FIXTURE)
     }
 
     fn assert_reference_rejected(
@@ -1118,7 +906,7 @@ mod tests {
         reason: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(fixture)?)?;
+        std::fs::write(dir.path().join(FIXTURE_NAME), sonic_rs::to_vec(fixture)?)?;
         let Err(error) = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)
         else {
             return Err("invalid Core reference was accepted".into());
@@ -1129,18 +917,16 @@ mod tests {
         Ok(())
     }
 
-    /// API-07: the control uses the same directory loader as each refusal.
     #[test]
     fn copied_fixture_preserves_core_reference() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let fixture = captured_fixture()?;
-        std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(&fixture)?)?;
+        std::fs::write(dir.path().join(FIXTURE_NAME), sonic_rs::to_vec(&fixture)?)?;
         let corpus = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)?;
         assert_eq!(corpus.len(), 1);
         Ok(())
     }
 
-    /// API-07: absent identities cannot silently acquire default values.
     #[test]
     fn corpus_rejects_missing_core_reference_fields() -> Result<(), Box<dyn std::error::Error>> {
         for field in ["core_version", "core_source_commit", "core_binary_sha256"] {
@@ -1148,13 +934,12 @@ mod tests {
             fixture["provenance"]
                 .as_object_mut()
                 .ok_or("captured provenance must be an object")?
-                .remove(field);
+                .remove(&field);
             assert_reference_rejected(&fixture, &format!("missing field `{field}`"))?;
         }
         Ok(())
     }
 
-    /// API-07: only the pinned Core version can identify this capture.
     #[test]
     fn corpus_rejects_non_pinned_core_version() -> Result<(), Box<dyn std::error::Error>> {
         for version in ["31.0.0", "31.99.0", ""] {
@@ -1165,7 +950,6 @@ mod tests {
         Ok(())
     }
 
-    /// API-07: even a well-formed, one-nibble digest change must be refused.
     #[test]
     fn corpus_rejects_mismatched_or_empty_core_digest() -> Result<(), Box<dyn std::error::Error>> {
         let original = captured_fixture()?;
@@ -1182,10 +966,6 @@ mod tests {
         Ok(())
     }
 
-    /// Step 13: the checked-in exact 401 fixture, whose pinned Core capture
-    /// omits the transport header, still passes when the live reply carries
-    /// it; the gate rejects a live reply that drops the declared volatile
-    /// header, the exact challenge, or the exact content type.
     #[test]
     fn exact_401_tuple_checks_volatile_presence_on_the_live_reply_only()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1193,7 +973,7 @@ mod tests {
         use super::{BodyForm, Fixture, HttpTuple};
 
         const AUTH_401: &str = include_str!("../corpus/core-31.1/17_auth_absent.json");
-        let fixture: Fixture = serde_json::from_str(AUTH_401)?;
+        let fixture: Fixture = sonic_rs::from_str(AUTH_401)?;
         let chain = LiveChain {
             blocks: 0,
             headers: 0,
@@ -1245,8 +1025,6 @@ mod tests {
         Ok(())
     }
 
-    /// REF-02/API-07: changing the selected release cannot relabel old captures
-    /// as evidence for a new source, binary, or version.
     #[test]
     fn corpus_rejects_stale_fixture_after_reference_changes()
     -> Result<(), Box<dyn std::error::Error>> {

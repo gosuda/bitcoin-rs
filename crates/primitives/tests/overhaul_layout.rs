@@ -1,18 +1,10 @@
 //! Scenario tests for the checked borrowed wire layout (`layout` module).
-//!
 
-//! These pin the layout owner's contract against the golden block corpus and
-//! synthetic malformations: every span a parsed structure hands out is
-//! in-bounds by construction, malformed encodings fail with a defined
-//! [`DecodeError`] before any out-of-bounds access or oversized allocation,
-//! and materialized values are byte-identical to the consensus form.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
 use bitcoin_rs_primitives::{Block, DecodeError, Network, Tx, consensus_bytes, deserialize};
 
-/// Golden fixture heights: one legacy-only block and one with segwit
-/// transactions (height 481824 is the first segwit block on mainnet).
 const HEIGHTS: &[u32] = &[170, 481_824];
 
 fn read_fixture(height: u32) -> Vec<u8> {
@@ -26,9 +18,6 @@ fn read_fixture(height: u32) -> Vec<u8> {
     }
 }
 
-/// Golden blocks: every transaction span slices to exactly the transaction's
-/// consumed region, per-transaction regions account for the whole block, and
-/// the materialized form re-encodes byte-identically.
 #[test]
 fn golden_blocks_validate_all_spans_and_consumed_counts() {
     for height in HEIGHTS {
@@ -62,7 +51,6 @@ fn golden_blocks_validate_all_spans_and_consumed_counts() {
             );
             per_tx_total += transaction.consumed_len();
         }
-        // Header (80) + count prefix width + transaction regions == block.
         let prefix = if u64::try_from(parsed.tx_count()).is_ok_and(|count| count <= 0xfc) {
             1
         } else {
@@ -83,8 +71,6 @@ fn golden_blocks_validate_all_spans_and_consumed_counts() {
     }
 }
 
-/// Every strict prefix of a golden block fails with a defined error and no
-/// panic. One representative small block keeps the sweep cheap.
 #[test]
 fn truncation_sweep_produces_defined_errors_only() {
     let bytes = read_fixture(170);
@@ -102,7 +88,6 @@ fn truncation_sweep_produces_defined_errors_only() {
     }
 }
 
-/// A trailing byte after an otherwise complete block is rejected.
 #[test]
 fn trailing_byte_is_rejected() {
     let mut bytes = read_fixture(170);
@@ -113,11 +98,8 @@ fn trailing_byte_is_rejected() {
     ));
 }
 
-/// Counts whose minimal serialized footprint exceeds the remaining bytes are
-/// rejected before any allocation sized by the count.
 #[test]
 fn impossible_counts_are_rejected_before_allocation() {
-    // version + marker/flag + u64::MAX-sized input count, nothing else.
     let mut tx_bytes = Vec::new();
     tx_bytes.extend_from_slice(&1_i32.to_le_bytes());
     tx_bytes.extend_from_slice(&[0x00, 0x01]);
@@ -128,11 +110,8 @@ fn impossible_counts_are_rejected_before_allocation() {
     ));
 }
 
-/// Non-canonical compact-size encodings are rejected with `Varint`.
 #[test]
 fn noncanonical_varints_are_rejected() {
-    // version + input count 0xFD 0x05 0x00 (little-endian 5; the canonical
-    // form of 5 is one byte), then padding so only the varint is at fault.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&1_i32.to_le_bytes());
     bytes.extend_from_slice(&[0xFD, 0x05, 0x00]);
@@ -143,10 +122,6 @@ fn noncanonical_varints_are_rejected() {
         "expected Varint, got {err:?}"
     );
 }
-/// Segwit marker handling: the golden segwit block carries witness spans, and
-/// mutating a marker/flag pair to flag 0x02 surfaces the defined flag error
-/// (or a downstream defined error when the mutation lands inside script
-/// data).
 #[test]
 fn segwit_flag_rules_hold() {
     let golden = read_fixture(481_824);
@@ -161,7 +136,7 @@ fn segwit_flag_rules_hold() {
 
     let mut corrupted = golden.clone();
     let mut replaced = false;
-    let mut cursor = 81; // past header and transaction count
+    let mut cursor = 81;
     while cursor + 1 < corrupted.len() {
         if corrupted[cursor] == 0x00 && corrupted[cursor + 1] == 0x01 {
             corrupted[cursor + 1] = 0x02;
@@ -179,9 +154,6 @@ fn segwit_flag_rules_hold() {
     ));
 }
 
-/// Metadata ranges arrive only from parsing (construction is internal), and
-/// the type is distinct from `ByteSpan`: an input's witness metadata is a
-/// `MetadataRange` over the parsed witness-span vector, never a byte offset.
 #[test]
 fn metadata_ranges_distinct_from_byte_spans() {
     let bytes = read_fixture(481_824);
@@ -206,12 +178,9 @@ fn metadata_ranges_distinct_from_byte_spans() {
             "witness item {index} span stays in bounds"
         );
     }
-    // ByteSpan and MetadataRange are distinct types with no conversion.
     let _: Option<ByteSpan> = None;
 }
 
-/// The genesis coinbase parsed through the layout hashes to the same txid as
-/// the direct consensus decode, and its span carries the exact wire bytes.
 #[test]
 fn genesis_txid_through_layout_matches_direct_decode() {
     let genesis = Network::Mainnet.genesis_block();
@@ -239,8 +208,6 @@ fn genesis_txid_through_layout_matches_direct_decode() {
     assert_eq!(slice, consensus_bytes(through_layout).as_slice());
 }
 
-/// The borrowed identity derivation must agree with the owned transaction it
-/// materializes to, on every transaction of every golden fixture.
 #[test]
 fn parsed_transaction_txid_and_base_size_match_materialized_form() {
     let mut compared = 0_usize;

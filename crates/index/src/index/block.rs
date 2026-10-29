@@ -13,24 +13,11 @@ use crate::{
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
 
-/// Source of exact scripts for coins an incoming block spends.
-///
-/// A block body carries only each input's previous outpoint; the spent coin's
-/// `script_pubkey` lives in authoritative UTXO state, and on disconnect in the
-/// block's undo record. Live deletes are anchored to that authoritative
-/// script, so preparation of a `ScriptLive` transition takes one of these
-/// instead of guessing from the parse.
 pub trait SpentCoinScripts {
-    /// The exact `script_pubkey` bytes of the coin `txid:vout`, if known.
-    ///
     /// `txid` is in little-endian byte order, as serialized in the input.
     fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]>;
 }
 
-/// The anchorless source: answers nothing.
-///
-/// Used by the legacy prepare path, which refuses `ScriptLive` outright rather
-/// than producing a Live transition with unanchored deletes.
 pub(crate) struct NoSpentScripts;
 
 impl SpentCoinScripts for NoSpentScripts {
@@ -39,23 +26,10 @@ impl SpentCoinScripts for NoSpentScripts {
     }
 }
 
-/// Upper bound on a `script_pubkey` admitted into the authoritative UTXO set.
-///
-/// Single source: `bitcoin_rs_script::MAX_SCRIPT_SIZE`, applied by
 /// `build_utxo_changes` — outputs with `is_op_return()` or a script longer
 /// than this never enter the UTXO set, so they must never enter the Live view
-/// either. The spendability predicate matches authoritative UTXO admission
-/// exactly. History rows deliberately keep oversized scripts (real on-chain
-/// activity, pinned by `live_predicate_matches_utxo_admission_not_history`);
-/// that asymmetry is bounded by consensus block size, not by this constant.
 pub use bitcoin_rs_script::MAX_SCRIPT_SIZE as MAX_LIVE_SCRIPT_SIZE;
 
-/// Derives the capability-selected rows of one serialized block body.
-///
-/// PRE: `block` holds one complete serialized block body, and `height` is the
-/// height being indexed.
-/// POST: The rows carry every funding, spending, transaction-id, and header
-/// row the capabilities select, and the returned header is the body's exact
 /// 80-byte prefix.
 /// INVARIANT: A rejected parse contributes no rows.
 pub(super) fn pending_rows_for_block_with_header(
@@ -80,10 +54,6 @@ pub(super) fn pending_rows_for_block_with_header(
 
     for tx in parsed.transactions() {
         let span = tx.span();
-        // The stored position must satisfy the same predicate every reader
-        // applies: u24-addressable and ending inside one serialized block.
-        // A body larger than the consensus cap is refused here, so a row the
-        // writer admits is never corrupt to an exporter or a restore.
         let end = u64::from(span.start()).saturating_add(u64::from(span.len()));
         let past_cap = u64::try_from(MAX_POSITION_END_BYTES).map_or(true, |cap| end > cap);
         if span.start() > U24_MAX || span.len() > U24_MAX || past_cap {
@@ -93,9 +63,6 @@ pub(super) fn pending_rows_for_block_with_header(
         }
         let position = crate::types::TxPosition::new(span.start(), span.len());
 
-        // A live output's row needs the transaction id, and that id is only
-        // computed when something needs it, so the outputs of one transaction
-        // are staged here until its id exists.
         let mut pending_live: Vec<(u32, Option<ScriptHash>)> = Vec::new();
 
         for input in tx.inputs() {
@@ -128,11 +95,6 @@ pub(super) fn pending_rows_for_block_with_header(
             let script = tx
                 .span_bytes(output.script_pubkey())
                 .unwrap_or_else(|| unreachable!("output span belongs to the parsed image"));
-            // History keeps every non-OP_RETURN output, including scripts past
-            // MAX_LIVE_SCRIPT_SIZE: it records on-chain activity, while Live
-            // mirrors UTXO admission. The asymmetry is deliberate (pinned by
-            // live_predicate_matches_utxo_admission_not_history) and bounded
-            // by consensus block size.
             if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script)
             {
                 rows.funding_rows.push(PositionedRow {
@@ -143,8 +105,6 @@ pub(super) fn pending_rows_for_block_with_header(
                     position,
                 });
             }
-            // Genesis is exempt: its coinbase output never entered the UTXO
-            // set, so it must not enter the live view either.
             if capabilities.contains(IndexCapability::ScriptLive)
                 && height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
                 && let Ok(vout) = u32::try_from(index)
@@ -180,13 +140,7 @@ pub(super) fn pending_rows_for_block_with_header(
     Ok((rows, header_row))
 }
 
-/// Turns a block's created and spent outputs into ordered live mutations.
-///
-/// Outputs created and spent within the same block cancel before the spent-coin
-/// anchor is consulted: those outputs never entered the committed UTXO set.
-/// Every surviving spend must resolve its exact script through the authoritative
 /// anchor, otherwise preparation fails closed rather than leaving a stale live
-/// row behind.
 fn push_live_ops(
     rows: &mut PendingRows,
     created: Vec<([u8; 32], u32, Option<ScriptHash>)>,
@@ -222,10 +176,6 @@ fn push_live_ops(
             continue;
         };
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
-        // At a BIP30 exception height the output outpoint can already be
-        // live. The undo record carries that replaced coin as a restore, so
-        // use the same anchor to remove its old script row before publishing
-        // the new one. The inverse operation restores the old row on rollback.
         if let Some(old_script) = spent_scripts.script_bytes(&txid, vout) {
             rows.live_ops
                 .push(LiveOp::Delete(crate::types::ScriptLiveRow::new(
@@ -243,7 +193,6 @@ fn push_live_ops(
 }
 
 /// Whether a previous outpoint is the coinbase null outpoint: a zero
-/// transaction id carried with the maximum output index.
 fn is_null_prevout(prevout_txid: &[u8], vout: u32) -> bool {
     vout == u32::MAX && prevout_txid.iter().all(|byte| *byte == 0)
 }
@@ -253,14 +202,8 @@ pub(super) fn is_op_return_script(script: &[u8]) -> bool {
     matches!(script.first(), Some(0x6a))
 }
 
-/// The scripthash a live row carries for one output, when it carries one.
-///
-/// PRE: `script` is one output's `script_pubkey` bytes.
-/// POST: `Some` exactly when authoritative UTXO admission accepts the output.
 /// INVARIANT: This predicate mirrors `build_utxo_changes`, which skips
 /// `is_op_return()` and scripts longer than `MAX_LIVE_SCRIPT_SIZE`. The
-/// spendability predicate matches authoritative UTXO admission exactly, so a
-/// live row never points at a coin no lookup can resolve.
 fn live_admission(script: &[u8]) -> Option<ScriptHash> {
     let admitted = !is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE;
     admitted.then(|| ScriptHash::from_script_bytes(script))

@@ -221,7 +221,7 @@ pub enum CheckpointError {
     Io(#[from] std::io::Error),
     /// JSON encoding or decoding failed.
     #[error("checkpoint JSON failed: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(#[from] sonic_rs::Error),
     /// A checkpoint invariant or authenticated value is invalid.
     #[error("checkpoint invariant failed: {0}")]
     Invalid(String),

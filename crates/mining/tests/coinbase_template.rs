@@ -1,12 +1,9 @@
-//! Coinbase and witness-commitment candidate tests.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
 use std::error::Error;
 use std::sync::Arc;
 
-// rust-bitcoin differential oracles: witness merkle root and sha256d commitment.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -32,10 +29,6 @@ fn context(height: u32, segwit_active: bool) -> CandidateContext {
     }
 }
 
-/// An empty pool that has seen traffic: both generation counters have moved
-/// and differ, so a dropped or transposed component changes the template
-/// identity. `clear` retires both entries and, because a stored overlay
-/// remains, advances the fee-delta sequence once more.
 fn used_empty_pool() -> Result<Mempool, Box<dyn Error>> {
     let mut pool = zero_fee_pool();
     let first = witnessed_tx(1, 1_000, None);
@@ -153,7 +146,6 @@ fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<()
         vec![WITNESS_RESERVED_VALUE.to_vec()]
     );
 
-    // rust-bitcoin differential oracle for witness merkle and sha256d commitment.
     let mut leaves = vec![OracleWtxid::all_zeros()];
     leaves.extend(
         candidate
@@ -199,8 +191,6 @@ fn fee_overflow_is_reported_instead_of_wrapping() {
     assert_eq!(err, MiningError::FeeOverflow);
 }
 
-/// POL-05 and API-28 preserve the i128 modified-fee overlay. A priority boost
-/// changes ordering; only the actual fee may increase the coinbase value.
 #[test]
 fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), Box<dyn Error>> {
     let mut pool = Mempool::new(MempoolLimits::default());
@@ -279,8 +269,6 @@ impl bitcoin_rs_mempool::AdmissionChain for ReorgCoins {
 fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), Box<dyn Error>> {
     use bitcoin::hashes::{hash160, sha256};
 
-    // Both scripts succeed without signatures. Sigops in an unexecuted branch
-    // are still counted: one legacy CHECKSIG costs 4, two-key witness multisig 2.
     let redeem = vec![0x00, 0x63, 0xac, 0x68, 0x51];
     let witness_script = vec![0x00, 0x63, 0x52, 0xae, 0x68, 0x51];
     let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x44; 32])), 0);
@@ -350,8 +338,6 @@ fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), Box<dyn
     Ok((gateway, parent, child))
 }
 
-/// The reserved reorg batch must store resolved BIP141 cost all the way
-/// through the real gateway and pool; template selection consumes it.
 #[test]
 fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
     let (gateway, parent, child) = reconsidered_sigop_fixture()?;
@@ -371,8 +357,6 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     let mut limited = context(101, true);
     limited.max_sigops = 5;
     let candidate = assemble_candidate(&limited, &gateway.read(), PAYOUT)?;
-    // Whole chunk costs 6 over budget 5; parent prefix costs 4, meets the
-    // rate floor, child omitted.
     assert_eq!(candidate.transactions.len(), 1);
     assert_eq!(candidate.transactions[0].txid, parent.txid());
     assert_eq!(candidate.transactions[0].fee, 1_000);

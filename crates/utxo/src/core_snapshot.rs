@@ -1,15 +1,4 @@
 //! Bitcoin Core portable snapshot v2 input.
-//!
-//! The header is untrusted metadata. Full loading resolves a compiled network
-//! anchor, checks the commitment of staged existing records, and only then
-//! installs them into the existing UTXO set.
-//!
-//! [`read_verified`] is the activation reader. It returns a
-//! [`VerifiedSnapshotState`]: one owned [`UtxoSet`] sealed together with the
-//! commitment and [`CoinStats`] derived from exactly the authenticated records
-//! that populated it. [`read_and_verify`] is the inspection reader that returns
-//! the bare set for offline tools; its result carries no proof.
-//! Native bitcoin-rs v4 checkpoint serialization is a separate format.
 
 use std::io::{self, Read, Write};
 
@@ -27,40 +16,22 @@ const MAGIC: [u8; 5] = *b"utxo\xff";
 const VERSION: u16 = 2;
 const HEADER_BYTES: u64 = 51;
 const MAX_SCRIPT_BYTES: u64 = 10_000;
-// Core ReadCompactSize's default range check.
 const MAX_COMPACT_SIZE: u64 = 0x0200_0000;
 
-/// Parsed header fields; parsing these fields does not authenticate the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotMetadata {
     /// Supported portable format version (2).
     pub version: u16,
-    /// Network message-start bytes as carried by the file.
     pub network_magic: [u8; 4],
-    /// Untrusted base block identity, resolved against a compiled anchor on load.
     pub base_block_hash: Hash256,
-    /// Declared number of live outputs, not transaction-level records.
     pub coins_count: u64,
 }
 
-/// Resource budgets enforced before growing decoded state.
-///
-/// Coin and aggregate script bounds constrain retained record payloads; the
-/// per-txid bound also constrains temporary output sorting. Before authentication,
-/// records live in a vector without a hash table. After authentication, payloads
-/// move into the UTXO set while the vector's allocation is still retained.
-/// These bounds are not an allocator/RSS quota: staging, hash tables and other
-/// allocation overhead remain additional. Verification materializes state in RAM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotLimits {
-    /// Maximum encoded bytes, including the header; at most one extra byte is
-    /// read to distinguish exact EOF from forbidden trailing data.
     pub max_file_bytes: u64,
-    /// Maximum declared and decoded live outputs.
     pub max_coins: u64,
-    /// Maximum sum of decompressed script lengths across all coins.
     pub max_script_bytes: u64,
-    /// Maximum live outputs in one transaction group.
     pub max_coins_per_txid: u32,
 }
 
@@ -75,40 +46,19 @@ impl Default for SnapshotLimits {
     }
 }
 
-/// Fully parsed state matching a compiled anchor, exposing the bare set for
-/// offline inspection.
-///
-/// The commitment matched at read time only: `set` is public and mutable
-/// through shared access, so this value is NOT a proof once handed out.
-/// Activation consumes [`VerifiedCoreSnapshot`] from [`read_verified`]. Neither
-/// proves genesis-to-base historical validation. There is no native-v4 trailer
-/// in a Core file.
 pub struct CoreSnapshot {
-    /// Existing UTXO representation populated from decoded coins.
     pub set: UtxoSet,
-    /// Parsed file header.
     pub metadata: SnapshotMetadata,
-    /// Compiled trust anchor selected by network and base block hash.
     pub anchor: &'static AssumeUtxoData,
-    /// Recomputed Bitcoin Core `hash_serialized_3`.
     pub hash_serialized: Hash256,
-    /// Encoded bytes consumed, excluding the EOF probe.
     pub bytes_read: u64,
 }
 
 /// One owned UTXO set sealed with the commitment and statistics that were
 /// derived from exactly its coins.
 ///
-/// Fields are private and every constructor either recomputes the proof from
-/// the owned set ([`Self::verify`]) or runs inside [`read_verified`] on records
-/// whose commitment already matched a compiled anchor. No accessor exposes the
-/// set: [`UtxoSet::replace_from`] mutates through a shared reference, so any
 /// `&UtxoSet` would let a holder invalidate the proof. The only way out is
 /// [`Self::into_parts`], which consumes the proof together with the set.
-///
-/// The proof is for the pinned identity recorded here; an activation owner must
-/// still compare [`Self::base_hash`], [`Self::height`] and
-/// [`Self::hash_serialized`] with its own compiled anchor.
 pub struct VerifiedSnapshotState {
     set: UtxoSet,
     base_hash: Hash256,
@@ -117,33 +67,16 @@ pub struct VerifiedSnapshotState {
     stats: CoinStats,
 }
 
-/// Why an owned set could not be sealed as a [`VerifiedSnapshotState`].
 #[derive(Debug, Error)]
 pub enum StateVerifyError {
-    /// Existing UTXO storage or commitment computation failed.
     #[error("snapshot UTXO state: {0}")]
     Utxo(#[from] UtxoError),
-    /// The owned coins disagree with the anchor's commitment.
     #[error("snapshot commitment {actual} does not match pinned {expected}")]
-    CommitmentMismatch {
-        /// Anchor commitment.
-        expected: Hash256,
-        /// Commitment recomputed from the owned set.
-        actual: Hash256,
-    },
+    CommitmentMismatch { expected: Hash256, actual: Hash256 },
 }
 
 impl VerifiedSnapshotState {
-    /// Recomputes the commitment and statistics of an owned set in one stable
-    /// view and seals them only if the commitment equals `anchor`'s.
-    ///
-    /// This is the single verification for a set that arrived without proof
-    /// (for example from the native v4 reader). The set is moved in, so nothing
-    /// can change it between the traversal and the returned value. Statistics
-    /// are scanned only after the commitment matched.
-    ///
     /// # Errors
-    ///
     /// Returns the storage/height error of the commitment traversal, or
     /// [`StateVerifyError::CommitmentMismatch`]; the set is dropped either way.
     pub fn verify(set: UtxoSet, anchor: &AssumeUtxoData) -> Result<Self, StateVerifyError> {
@@ -171,222 +104,122 @@ impl VerifiedSnapshotState {
         })
     }
 
-    /// Base block identity the commitment was verified for.
     #[must_use]
     pub const fn base_hash(&self) -> Hash256 {
         self.base_hash
     }
 
-    /// Base height the commitment and statistics were computed at.
     #[must_use]
     pub const fn height(&self) -> u32 {
         self.height
     }
 
-    /// Verified Core `hash_serialized_3` of the sealed coins.
     #[must_use]
     pub const fn hash_serialized(&self) -> Hash256 {
         self.hash_serialized
     }
 
-    /// Statistics of the sealed coins at [`Self::height`]; `tx_count` is zero
-    /// until the activation owner installs the pinned transaction count.
     #[must_use]
     pub const fn stats(&self) -> &CoinStats {
         &self.stats
     }
 
-    /// Ends the proof and yields the set with its statistics for installation.
     #[must_use]
     pub fn into_parts(self) -> (UtxoSet, CoinStats) {
         (self.set, self.stats)
     }
 }
 
-/// A decoded Core file whose set is sealed in a [`VerifiedSnapshotState`].
 pub struct VerifiedCoreSnapshot {
-    /// Parsed file header.
     pub metadata: SnapshotMetadata,
-    /// Compiled trust anchor selected by network and base block hash.
     pub anchor: &'static AssumeUtxoData,
-    /// Encoded bytes consumed, excluding the EOF probe.
     pub bytes_read: u64,
     state: VerifiedSnapshotState,
 }
 
 impl VerifiedCoreSnapshot {
-    /// Proof carried from the reader to activation.
     #[must_use]
     pub const fn state(&self) -> &VerifiedSnapshotState {
         &self.state
     }
 
-    /// Moves the proof out for activation.
     #[must_use]
     pub fn into_state(self) -> VerifiedSnapshotState {
         self.state
     }
 }
 
-/// Typed failures shared by offline tools and node import.
 #[derive(Debug, Error)]
 pub enum SnapshotError {
-    /// The fixed header or a coin field ended prematurely.
     #[error("snapshot truncated at byte {offset}")]
-    Truncated {
-        /// Number of bytes successfully consumed before EOF.
-        offset: u64,
-    },
-    /// An underlying input operation failed.
+    Truncated { offset: u64 },
     #[error("snapshot input failed: {0}")]
     Io(#[from] io::Error),
-    /// Magic does not identify a Core portable snapshot.
     #[error("invalid Bitcoin Core snapshot magic")]
     InvalidMagic,
-    /// Header version is not supported.
     #[error("unsupported Bitcoin Core snapshot version {version}")]
-    UnsupportedVersion {
-        /// Observed version.
-        version: u16,
-    },
-    /// File network differs from the selected network.
+    UnsupportedVersion { version: u16 },
     #[error("snapshot network magic {actual:02x?} does not match {expected:02x?}")]
-    WrongNetwork {
-        /// Selected network magic.
-        expected: [u8; 4],
-        /// File network magic.
-        actual: [u8; 4],
-    },
-    /// No compiled anchor trusts this base on the selected network.
+    WrongNetwork { expected: [u8; 4], actual: [u8; 4] },
     #[error("snapshot base {base_hash} is not pinned for {network:?}")]
     UnsupportedAnchor {
-        /// Selected consensus network.
         network: Network,
-        /// File base block identity.
         base_hash: Hash256,
     },
-    /// A configured budget would be exceeded.
     #[error("snapshot {resource} budget exceeded: {actual} > {limit}")]
     LimitExceeded {
-        /// Resource being bounded.
         resource: &'static str,
-        /// Attempted amount.
         actual: u64,
-        /// Configured maximum.
         limit: u64,
     },
-    /// A `CompactSize` uses a non-minimal spelling.
     #[error("snapshot CompactSize is noncanonical")]
     NonCanonicalCompactSize,
-    /// A `CompactSize` exceeds Core's default input limit.
     #[error("snapshot CompactSize value {value} exceeds the Core limit")]
-    CompactSizeTooLarge {
-        /// Decoded value.
-        value: u64,
-    },
-    /// Core's subtract-one base-128 integer overflowed its field.
+    CompactSizeTooLarge { value: u64 },
     #[error("snapshot Core VARINT overflows its field")]
     VarIntOverflow,
-    /// A txid group contains no outputs.
     #[error("snapshot contains an empty transaction group")]
     EmptyGroup,
-    /// A group claims more coins than remain in the header count.
     #[error("snapshot group declares {group} coins with only {remaining} remaining")]
-    CoinCountMismatch {
-        /// Group's declared output count.
-        group: u64,
-        /// Remaining declared file coins.
-        remaining: u64,
-    },
-    /// Declared coins count does not match the actual number of written coins.
+    CoinCountMismatch { group: u64, remaining: u64 },
     #[error("snapshot declared {declared} coins, wrote {actual}")]
-    DeclaredCoinCountMismatch {
-        /// Declared count.
-        declared: u64,
-        /// Actual written count.
-        actual: u64,
-    },
-    /// The snapshot write or read was interrupted.
+    DeclaredCoinCountMismatch { declared: u64, actual: u64 },
     #[error("snapshot operation interrupted")]
     Interrupted,
     /// Core emits exactly one group per txid in bytewise order.
     #[error("snapshot transaction groups are duplicated or out of Core byte order")]
     TransactionOrder,
-    /// A group repeats an output index.
     #[error("snapshot repeats output index {vout}")]
-    DuplicateOutpoint {
-        /// Repeated index in the current transaction.
-        vout: u32,
-    },
-    /// An output index cannot identify a live coin.
+    DuplicateOutpoint { vout: u32 },
     #[error("snapshot output index {vout} is invalid")]
-    InvalidOutpoint {
-        /// Invalid index.
-        vout: u64,
-    },
-    /// A coin claims creation after the trusted snapshot base.
+    InvalidOutpoint { vout: u64 },
     #[error("snapshot coin height {height} exceeds base height {base_height}")]
-    InvalidHeight {
-        /// Coin creation height.
-        height: u32,
-        /// Compiled base height.
-        base_height: u32,
-    },
-    /// Amount decompression overflowed or exceeded `MAX_MONEY`.
+    InvalidHeight { height: u32, base_height: u32 },
     #[error("snapshot compressed amount {compressed} is out of range")]
-    InvalidAmount {
-        /// Compressed amount.
-        compressed: u64,
-    },
-    /// Raw or decompressed script exceeds the Core script-size limit.
+    InvalidAmount { compressed: u64 },
     #[error("snapshot script length {length} exceeds 10000 bytes")]
-    InvalidScriptLength {
-        /// Decoded script length.
-        length: u64,
-    },
-    /// An uncompressed P2PK encoding does not reconstruct a curve point.
+    InvalidScriptLength { length: u64 },
     #[error("snapshot uncompressed P2PK encoding has an invalid curve point")]
     InvalidPublicKey,
-    /// The complete declared set is followed by more data.
     #[error("snapshot has trailing bytes")]
     TrailingBytes,
-    /// Existing UTXO storage or commitment validation failed.
     #[error("snapshot UTXO state: {0}")]
     Utxo(#[from] UtxoError),
-    /// Decoded coins disagree with the compiled trust anchor.
     #[error("snapshot commitment {actual} does not match pinned {expected}")]
-    CommitmentMismatch {
-        /// Compiled commitment.
-        expected: Hash256,
-        /// Recomputed commitment.
-        actual: Hash256,
-    },
+    CommitmentMismatch { expected: Hash256, actual: Hash256 },
 }
 
 /// Reads only the fixed 51-byte Core v2 header.
-///
-/// Network identity and anchor support are not checked here. The result must
-/// never be described as full content verification.
 pub fn read_metadata(reader: &mut impl Read) -> Result<SnapshotMetadata, SnapshotError> {
     Decoder::new(reader, HEADER_BYTES).metadata()
 }
 
-/// Decodes an entire Core v2 file and verifies its compiled state commitment.
-///
-/// No file is modified. Unknown anchors and oversized declared counts are
-/// rejected before allocating records. Core-generated groups are checked in
-/// byte order and each group's vouts are sorted for duplicate detection and the
-/// shared commitment serializer. Only a matching compiled commitment allows
-/// record payloads to move into the UTXO hash table. Input bytes and decoded
-/// resources are bounded independently of untrusted counts.
 pub fn read_and_verify(
     reader: &mut impl Read,
     network: Network,
     limits: SnapshotLimits,
 ) -> Result<CoreSnapshot, SnapshotError> {
     let authenticated = authenticate(reader, network, limits)?;
-    // The only inputs reaching the identity-hashed UTXO table now belong to
-    // the compiled state. Forged colliding txids never reach insertion.
     let set = UtxoSet::new();
     for record in authenticated.records {
         set.insert_snapshot_record(record);
@@ -400,17 +233,11 @@ pub fn read_and_verify(
     })
 }
 
-/// Decodes an entire Core v2 file like [`read_and_verify`] and seals the result
-/// for activation.
+/// Folds statistics while authenticated staged records move into the UTXO table.
 ///
-/// The statistics (including `MuHash`) are folded from the authenticated staged
-/// records while they move into the UTXO table, so activation needs neither a
-/// second commitment pass nor a statistics scan over the table. Statistics are
-/// never computed for a file whose commitment did not match.
-///
-/// # Errors
-///
-/// The same typed failures as [`read_and_verify`].
+/// Activation therefore needs neither a second commitment pass nor a statistics
+/// scan over the table. Statistics are never computed for a file whose
+/// commitment did not match.
 pub fn read_verified(
     reader: &mut impl Read,
     network: Network,
@@ -448,7 +275,6 @@ pub fn read_verified(
     })
 }
 
-/// Staged records whose commitment matched a compiled anchor; no hash table yet.
 struct Authenticated {
     records: Vec<UtxoRecord>,
     metadata: SnapshotMetadata,
@@ -493,36 +319,18 @@ fn authenticate(
     })
 }
 
-/// Report returned upon successful export of a Bitcoin Core v2 snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreV2WriteReport {
-    /// Total bytes written to the sink, including header and coin records.
     pub bytes: u64,
-    /// Total number of coins written.
     pub coins: u64,
-    /// Computed `hash_serialized_3` state commitment matching Bitcoin Core.
     pub txoutset_hash: Hash256,
 }
 
-/// Writes a complete Bitcoin Core portable snapshot v2 into `writer`.
-///
-/// Emits the fixed 51-byte header, followed by ascending internal txid-LE groups
-/// across shards 0..=255. Within each shard, entries follow the same canonical
-/// Core ordering as [`hash_serialized_3_stable_inner`]. Each group serializes:
-/// - 32-byte internal txid (LE)
-/// - `CompactSize` output count (group size)
-/// - Per output:
-///   - `CompactSize` `vout`
-///   - Core VARINT `(height << 1) | (coinbase as u32)`
-///   - Core VARINT `compress_amount(value)`
-///   - Compressed scriptPubKey (or raw length + 6 followed by raw script)
-///
-/// In the same pass, updates [`SerializedUtxoHasher`] with each coin in canonical
-/// txid/vout order, computing the exact `hash_serialized_3` commitment matching Core.
-///
 /// Polls `should_stop()` every 5,000 coins and immediately aborts with
-/// [`SnapshotError::Interrupted`]. Fails with [`SnapshotError::DeclaredCoinCountMismatch`]
-/// if the written coins count does not match `coins_count`.
+/// [`SnapshotError::Interrupted`].
+///
+/// Fails with [`SnapshotError::DeclaredCoinCountMismatch`] if the written coins count
+/// does not match `coins_count`.
 pub fn write_core_v2<W: Write + ?Sized>(
     view: &UtxoSetView<'_>,
     network: Network,
@@ -536,8 +344,6 @@ pub fn write_core_v2<W: Write + ?Sized>(
         return Err(SnapshotError::Interrupted);
     }
 
-    // 1. Fixed 51-byte Core v2 header:
-    // MAGIC (5) + VERSION (2) + network magic (4) + base block hash (32) + coins count (8)
     writer.write_all(&MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
     writer.write_all(&network.magic())?;
@@ -576,20 +382,17 @@ pub fn write_core_v2<W: Write + ?Sized>(
                         limit: u64::from(u32::MAX),
                     })?;
 
-                // Txid (32 bytes)
                 writer.write_all(&txid_bytes)?;
                 total_bytes = total_bytes
                     .checked_add(32)
                     .ok_or(SnapshotError::VarIntOverflow)?;
 
-                // CompactSize group count
                 let group_encoded = varint::encode(group_count);
                 writer.write_all(group_encoded.as_slice())?;
                 total_bytes = total_bytes
                     .checked_add(u64::try_from(group_encoded.len()).unwrap_or(0))
                     .ok_or(SnapshotError::VarIntOverflow)?;
 
-                // Per-output serialization
                 for output in outputs {
                     let entry_bytes =
                         write_output_entry(writer, &output, base_height, &mut varint_buf)?;
@@ -601,7 +404,6 @@ pub fn write_core_v2<W: Write + ?Sized>(
                         .checked_add(1)
                         .ok_or(SnapshotError::VarIntOverflow)?;
 
-                    // Check declared coins count ceiling
                     if coins_written > coins_count {
                         return Err(SnapshotError::DeclaredCoinCountMismatch {
                             declared: coins_count,
@@ -609,7 +411,6 @@ pub fn write_core_v2<W: Write + ?Sized>(
                         });
                     }
 
-                    // Poll should_stop every 5,000 coins
                     if coins_written.saturating_sub(last_polled_coins) >= 5000 {
                         last_polled_coins = coins_written;
                         if should_stop() {
@@ -657,23 +458,17 @@ fn write_output_entry<W: Write + ?Sized>(
         });
     }
 
-    // Core snapshot v2 format requires the packed height/coinbase code to be
-    // representable in a 32-bit field. If bit 31 of height is set (height >= 0x8000_0000),
-    // (height << 1) cannot fit in u32, causing high-bit loss in commitment hashing
-    // and incompatible wire encoding rejected by Core readers.
     let raw_code = (u64::from(output.height) << 1) | u64::from(output.coinbase);
     let code = u32::try_from(raw_code).map_err(|_| SnapshotError::VarIntOverflow)?;
 
     let mut written: u64 = 0;
 
-    // CompactSize vout
     let vout_encoded = varint::encode(u64::from(output.vout));
     writer.write_all(vout_encoded.as_slice())?;
     written = written
         .checked_add(u64::try_from(vout_encoded.len()).unwrap_or(0))
         .ok_or(SnapshotError::VarIntOverflow)?;
 
-    // Core VARINT height/coinbase: (height << 1) | (coinbase as u32)
     varint_buf.clear();
     crate::compress::write_core_varint(u64::from(code), varint_buf);
     writer.write_all(varint_buf)?;
@@ -681,7 +476,6 @@ fn write_output_entry<W: Write + ?Sized>(
         .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
         .ok_or(SnapshotError::VarIntOverflow)?;
 
-    // Core VARINT compressed amount
     let compressed_amount = crate::compress::compress_amount(output.value)?;
     varint_buf.clear();
     crate::compress::write_core_varint(compressed_amount, varint_buf);
@@ -690,7 +484,6 @@ fn write_output_entry<W: Write + ?Sized>(
         .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
         .ok_or(SnapshotError::VarIntOverflow)?;
 
-    // Compressed script
     if let Some((script_code, payload)) = crate::compress::compress_script(output.script_pubkey) {
         varint_buf.clear();
         crate::compress::write_core_varint(script_code, varint_buf);
@@ -776,8 +569,6 @@ impl<'a, R: Read> Decoder<'a, R> {
                     });
                 }
                 Ok(n) => {
-                    // Read returns at most the remaining slice length; its
-                    // full end position was checked against max_bytes above.
                     self.consumed += u64::try_from(n).unwrap_or(0);
                     bytes = &mut bytes[n..];
                 }
@@ -831,8 +622,6 @@ impl<'a, R: Read> Decoder<'a, R> {
 
     fn core_varint(&mut self, maximum: u64) -> Result<u64, SnapshotError> {
         let mut value = 0_u64;
-        // A u64 needs at most ten bytes. Core's continuation adds one after
-        // each seven-bit group; this is deliberately NOT record LEB128.
         for _ in 0..10 {
             let byte = self.array::<1>()?[0];
             value = value
@@ -887,7 +676,6 @@ impl<'a, R: Read> Decoder<'a, R> {
                 script.push(0x87);
             }
             2 | 3 => {
-                // Core preserves even non-curve compressed pubkey bytes here.
                 script.extend_from_slice(&[0x21, u8::try_from(code).unwrap_or(0)]);
                 script.extend_from_slice(&self.array::<32>()?);
                 script.push(0xac);
@@ -922,9 +710,6 @@ impl<'a, R: Read> Decoder<'a, R> {
             count,
             u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         )?;
-        // Temporary transaction staging holds the existing record payloads,
-        // without a hash table or a second coin representation. The vector
-        // grows only after a complete bounded group has arrived.
         let mut records = Vec::new();
         let mut commitment = SerializedUtxoHasher::new();
         let mut remaining = count;
@@ -976,10 +761,6 @@ impl<'a, R: Read> Decoder<'a, R> {
                     height,
                 ));
             }
-            // Core's commitment iterates each txid's outputs in numeric vout
-            // order (`std::map<uint32_t, Coin>`), while the file itself is
-            // written in coins-DB cursor order. Sort numerically here so the
-            // decoder's commitment and duplicate check use the hash order.
             outputs.sort_unstable_by_key(|output| output.vout);
             for pair in outputs.windows(2) {
                 if pair[0].vout == pair[1].vout {
@@ -1012,8 +793,6 @@ impl<'a, R: Read> Decoder<'a, R> {
 #[cfg(test)]
 mod tests;
 
-// Proof-carrying state: the folded statistics replace a scan of the table, so
-// they must equal one; the proofless constructor must refuse any change.
 #[cfg(test)]
 mod sealed_state_tests {
     use std::io::Cursor;
@@ -1083,7 +862,6 @@ mod sealed_state_tests {
     fn proofless_verification_refuses_a_mutated_set_or_a_foreign_anchor() -> TestResult {
         let anchor = bare()?.anchor;
         let mutated = bare()?;
-        // Shared-reference mutation is exactly what the sealed type forbids.
         mutated.set.replace_from(UtxoSet::new());
         assert!(matches!(
             VerifiedSnapshotState::verify(mutated.set, anchor),

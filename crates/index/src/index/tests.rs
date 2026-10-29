@@ -51,13 +51,10 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Proves that lexicographic key byte order matches numeric height order
-/// within one prefix, because the height suffix is big-endian (format 5).
-/// Height 1 is `[0x00, 0x00, 0x00, 0x01]`, height 256 is
-/// `[0x00, 0x00, 0x01, 0x00]`, so byte order puts 1 before 256.
+/// Proves that lexicographic key byte order matches numeric height order within one
+/// prefix, because the height suffix is big-endian (format 5).
 ///
-/// This pins the doc contract on `iter_funding_rows`: prefix-range scans
-/// arrive in chronological order without a numeric re-sort.
+/// `[0x00, 0x00, 0x01, 0x00]`, so byte order puts 1 before 256.
 #[test]
 fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
@@ -71,7 +68,6 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Store iteration order is BE byte order, so 1 precedes 256.
     assert_eq!(
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![1, 256],
@@ -80,9 +76,6 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// A persisted `ScriptLive` key with the wrong byte length fails the live
-/// scan with `InvalidPrefixRowLength`, naming the observed length. The
-/// length error belongs to prefix-row decoding, not to watermark decoding.
 #[test]
 fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -136,7 +129,6 @@ fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::E
 
 /// A block whose rows populate all four column families: a coinbase plus a
 /// spend, so funding and spending rows both exist alongside txid and header
-/// rows.
 fn rollback_fixture_block() -> Block {
     let funded = tx(OutPoint::null(), vec![0x51]);
     let spender = tx(OutPoint::new(funded.txid(), 0), vec![0x52]);
@@ -213,9 +205,6 @@ fn a_second_rollback_is_rejected_once_the_watermark_is_gone()
     Ok(())
 }
 
-/// Delegates reads to a real store but fails every write API, so the
-/// all-or-nothing claim on `commit_rollback_one` is exercised through its
-/// current conditional durable path.
 struct FailingWriteStore(RocksDbStore);
 
 impl bitcoin_rs_storage::KvStore for FailingWriteStore {
@@ -313,11 +302,6 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// A rollback of a replaced tip must not delete the replacement's rows.
-///
-/// `commit_rollback_one` checks the current watermark hash against the
-/// serialized body, so a stale body's identity cannot satisfy the tip
-/// and the replacement's prefix-colliding history stays put.
 #[test]
 fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -365,10 +349,6 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     Ok(())
 }
 
-/// `anchor_watermark` must stamp both the watermark cursor and the coverage
-/// floor: a rebuilt index knows rows below `floor` were pruned, so queries
-/// answer `Unavailable` instead of `None`. Resetting the capability clears
-/// the floor with it.
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
 -> Result<(), Box<dyn std::error::Error>> {

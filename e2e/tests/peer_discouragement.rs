@@ -5,15 +5,13 @@ use std::time::{Duration, Instant};
 use bitcoin::p2p::message::{CommandString, NetworkMessage};
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, json};
 
 fn oversized_headers() -> Result<NetworkMessage> {
-    // Core checks this count against MAX_HEADERS_RESULTS before reading any
-    // headers and calls Misbehaving. The three-byte payload is intentional.
     Ok(NetworkMessage::Unknown {
         command: CommandString::try_from("headers")
             .map_err(|error| Error::Assertion(error.to_string()))?,
-        payload: vec![0xfd, 0xd1, 0x07], // CompactSize(2001)
+        payload: vec![0xfd, 0xd1, 0x07],
     })
 }
 
@@ -57,15 +55,10 @@ fn compare(kind: Kind, protected: bool) -> Result<()> {
                 Ok((count == 0).then_some(()))
             },
         )?;
-        // Core's local exemption is disconnect-only. A fresh local connection
-        // succeeds after the violation; no subnet/address ban was created.
         let mut fresh = LivePeer::connect_with_height(&node, "local-reconnect", 0)?;
         fresh.ping_barrier(0x1388_0003, Instant::now() + Duration::from_secs(5))?;
     }
-    assert_eq!(
-        node.rpc("listbanned", &json!([]))?,
-        Value::Array(Vec::new())
-    );
+    assert_eq!(node.rpc("listbanned", &json!([]))?, json!([]));
     node.stop()
 }
 

@@ -15,7 +15,7 @@ bitcoin-rs-primitives.workspace = true
 bitcoin-rs-utxo.workspace = true
 clap.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+sonic-rs.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(unix)'.dependencies]

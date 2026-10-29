@@ -21,7 +21,6 @@ pub(super) fn plan_disconnect(
             hash: block_hash,
             tip: block_hash,
         })?;
-    // Undo and index rollback are keyed by height; only the tip may name it.
     let height = applied.height;
     if applied.hash != block_hash {
         return Err(ApplyError::DisconnectNotTip {
@@ -39,9 +38,6 @@ pub(super) fn plan_disconnect(
         }
     }
 
-    // The head must already certify this block: a disconnect advances the
-    // durable head from a known commit point, and any other tip is lineage
-    // divergence that refusing preserves untouched.
     let head = handles
         .durable_head
         .load()
@@ -53,9 +49,6 @@ pub(super) fn plan_disconnect(
         });
     }
 
-    // An altered body under a matching header would undo transactions the
-    // block never contained; txid-level merkle check also catches a duplicated
-    // final transaction that `check_merkle_root` alone misses.
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     bitcoin_rs_consensus::verify_merkle_root_with_txids(block, &txids)
         .map_err(|_| ApplyError::DisconnectBodyMismatch { hash: block_hash })?;
@@ -86,18 +79,11 @@ pub(super) fn plan_disconnect(
 
     let undo = load_block_undo(handles.undo_store.as_ref(), height, block_hash)?;
 
-    // Coinstats rewinds inside the marker fence; refuse its bad inputs here
-    // while refusal is still free.
     let tx_count_delta = tx_count_delta_for(block);
     handles
         .coin_stats
         .check_rewind(height, tx_count_delta)
         .map_err(ApplyError::CoinStatsRewind)?;
-    // The count through the parent is the applied tip's count minus exactly
-    // what the disconnected block added. The parent's own tree node cannot
-    // answer: a checkpoint restore counts only its tip and leaves ancestors
-    // unknown, and an unknown there would strand a count the next replay
-    // recomputes. An unknown applied count stays unknown either way.
     let rewound = applied.chain_tx_count.rewind(tx_count_delta);
     if applied.chain_tx_count.get().is_some() && rewound.get().is_none() {
         tracing::warn!(
@@ -120,7 +106,6 @@ pub(super) fn plan_disconnect(
     })
 }
 
-/// Caller holds admission then `chain_transition`, in that order.
 pub(super) fn disconnect_block_admitted(
     handles: &Chainstate,
     block: &Block,
@@ -146,9 +131,6 @@ pub(super) fn disconnect_block_admitted(
             source: Box::new(source),
         })
     };
-    // Fenced per disconnect, not per reorg: an interrupted switch leaves a
-    // consistent lower tip. `Refused` touched nothing; the rest may have torn
-    // state and poison admission for recovery.
     let rollback = rollback_block(
         handles.undo_store.as_ref(),
         handles.utxo.as_ref(),
@@ -167,8 +149,6 @@ pub(super) fn disconnect_block_admitted(
         RollbackError::CoinStats(source) => fatal(ApplyError::CoinStatsRewind(source)),
         RollbackError::Marker(source) => fatal(ApplyError::UndoPersistence(source)),
     })?;
-    // Journal rewinds before the head advances so a kill between the two
-    // leaves the head as high-water mark.
     let journal_rewound = handles.journal.read().clone().is_some_and(|journal| {
         let rewound = journal.lock().rewind_to(
             parent_tip.height,
@@ -188,9 +168,6 @@ pub(super) fn disconnect_block_admitted(
             })
             .is_ok()
     });
-    // Durable before published: the head batch names the parent's own
-    // cumulative count, and the tip published next carries the count that
-    // commit certified, read back from its receipt.
     let receipt = commit_disconnect_head(
         handles,
         &parent_tip,
@@ -199,9 +176,6 @@ pub(super) fn disconnect_block_admitted(
     )
     .map_err(fatal)?;
     let parent_tip = receipt.certify(parent_tip);
-    // A checkpoint restore counts only its tip; ancestors stay unknown, and a
-    // later connect derives its count from the parent's tree node. Write the
-    // certified parent count back so a reorg off a restored tip keeps it.
     handles
         .block_tree
         .write()
@@ -218,9 +192,6 @@ pub(super) fn disconnect_block_admitted(
         })?;
     }
 
-    // Without a journal rewind the marker stays set: a crash could restore a
-    // checkpoint still holding this block, and `write_clean_checkpoint`
-    // disarms it only after publishing the rolled-back set.
     Ok(DisconnectOutcome {
         hash: block_hash,
         restored_parents: rollback.restored_parents,

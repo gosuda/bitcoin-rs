@@ -1,7 +1,5 @@
 use super::*;
 
-// Generate canonical small DAGs independently of restore's traversal and
-// subset enumeration. Output slots are distinct for every outgoing edge.
 #[expect(
     clippy::expect_used,
     reason = "all generated graph indices are bounded by four"
@@ -126,9 +124,6 @@ fn generated_small_graphs_match_direct_gateway_maximal_subsets() -> TestResult {
                     let (mut snapshot, chain) = graph(parents, fees, nonfinal, state);
                     let ids: Vec<_> = snapshot.transactions.iter().map(|row| row.txid).collect();
                     for capacity in [0, snapshot.transactions[0].tx.vsize()] {
-                        // The oracle tries every bitmask on a fresh gateway.
-                        // It scores actual admitted membership, not requested rows
-                        // (confirmed members may be deduplicated by admission).
                         let mut best = vec![0_u32];
                         for mask in 1..1_u32 << parents.len() {
                             let control = gateway(

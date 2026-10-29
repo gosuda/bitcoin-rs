@@ -4,8 +4,7 @@ use super::{IndexError, SpentCoinScripts};
 use bitcoin_rs_primitives::{encode, layout::ParsedBlock};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot};
 
-// An additive namespace in the existing index metadata table. No backend table
-// is opened for this optional capability. Reset scans only this prefix.
+/// Additive namespace in the index metadata table; no backend table, reset scans only this prefix.
 pub(super) const PREFIX: &[u8] = &[1, b'F'];
 
 pub(super) fn key(hash: &[u8; 32]) -> [u8; 34] {
@@ -73,8 +72,12 @@ pub(super) fn read(
         .transpose()
 }
 
-/// Resolves inputs from earlier transactions in this block before consulting
-/// the authoritative undo source. A missing external prevout fails closed.
+/// Resolves inputs from earlier transactions in this block before consulting the
+/// authoritative undo source.
+///
+/// A missing external prevout fails closed. Empty and `OP_RETURN` outputs are excluded,
+/// but no UTXO admission rule applies: oversized scripts and genesis stay in the
+/// filter.
 pub(super) fn build(
     parsed: &ParsedBlock<'_>,
     height: u32,
@@ -92,8 +95,6 @@ pub(super) fn build(
             .unwrap_or_else(|_| unreachable!("SipHash keys are eight bytes")),
     );
     let mut filter = Vec::new();
-    // The upstream encoder owns deduplication, range mapping and bit packing;
-    // the parsed image and authoritative undo still own script selection.
     let mut writer = bitcoin::bip158::GcsFilterWriter::new(&mut filter, k0, k1, 784_931, 19);
     let mut created = hashbrown::HashMap::<([u8; 32], u32), &[u8]>::new();
     for tx in parsed.transactions() {
@@ -125,8 +126,6 @@ pub(super) fn build(
                 .unwrap_or_else(|| unreachable!("script belongs to parsed image"));
             let vout = u32::try_from(vout).map_err(|_| IndexError::MutationSizeOverflow)?;
             created.insert((txid, vout), script);
-            // BIP158 excludes empty and OP_RETURN outputs, but does not apply
-            // the UTXO admission rule for oversized scripts or genesis.
             if !script.is_empty() && script[0] != 0x6a {
                 writer.add_element(script);
             }
@@ -155,16 +154,13 @@ mod tests {
         }
     }
 
-    // Unmodified Core v31.1 vectors include genesis, witness, duplicate and
-    // empty scripts, OP_RETURN and spent prevouts. Expected bytes/headers are
-    // external fixtures, not values computed by this implementation.
     #[test]
     fn basic_filters_match_pinned_core_vectors() -> Result<(), Box<dyn std::error::Error>> {
-        let vectors: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
+        let vectors: Vec<sonic_rs::Value> =
+            sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
         for vector in vectors.into_iter().skip(1) {
             let (height, _hash, body, prevouts, previous, expected_filter, expected_header, note):
-                (u32, String, String, Vec<String>, String, String, String, String) = serde_json::from_value(vector)?;
+                (u32, String, String, Vec<String>, String, String, String, String) = sonic_rs::from_value(&vector)?;
             let bytes = Vec::from_hex(&body)?;
             let block: bitcoin::Block = deserialize(&bytes)?;
             let prevouts = prevouts
@@ -235,7 +231,6 @@ mod tests {
         block.txdata.push(child);
         let bytes = serialize(&block);
         let hash = block.block_hash().to_byte_array();
-        // An empty undo source proves that the same-block parent is authoritative.
         let filter = build(&ParsedBlock::parse_exact(&bytes)?, 1, &hash, &no_spends)?;
         let expected = bitcoin::bip158::BlockFilter::new_script_filter(&block, |outpoint| {
             assert_eq!(

@@ -38,7 +38,7 @@ curl -s http://127.0.0.1:18443/api/blocks/tip/height
 # 0
 ```
 
-Contents: [Install](#install) · [Quick start](#quick-start) · [Why an independent architecture](#why-an-independent-architecture) · [Architecture](#architecture) · [Compatibility and limitations](#compatibility-and-limitations) · [Development](#development) · [License](#license)
+Contents: [Install](#install) · [Quick start](#quick-start) · [Why bitcoin-rs](#why-bitcoin-rs) · [Experimental BIP Adoption](#experimental-bip-adoption) · [Architecture](#architecture) · [Compatibility and limitations](#compatibility-and-limitations) · [Development](#development) · [License](#license)
 
 ---
 
@@ -124,15 +124,28 @@ Consult [docs/getting-started.md](docs/getting-started.md) for layered configura
 
 ---
 
-## Why an independent architecture
+## Why bitcoin-rs
 
-[Bitcoin Core](https://github.com/bitcoin/bitcoin) is the reference implementation of Bitcoin, and its conservatism and compatibility discipline are central to network stability. Those same priorities make large internal redesigns costly to explore inside one codebase.
+Bitcoin Core's conservatism, stability, and compatibility discipline are major reasons for its success; those same safeguards make large architectural changes difficult to explore within that codebase. `bitcoin-rs` preserves Bitcoin's consensus while making architectural experimentation practical: build alternatives, verify them against reproducible evidence, and keep iterating on the implementation.
 
-`bitcoin-rs` tests what a Bitcoin full node looks like when designed from scratch in Rust around explicit ownership boundaries:
+### Why now?
 
-- **Consensus and wire compatibility at the boundary, replaceable internals.** External protocol behavior is checked against Bitcoin Core, `libbitcoinkernel`, test vectors, and external consumers, while internal data structures, concurrency, and storage engines remain free to evolve ([ecosystem compatibility contract](docs/contracts/ecosystem-compatibility.md)).
-- **Canonical coin state and integrated indexing.** Instead of requiring separate Electrum or explorer indexers to duplicate chain state for common queries, the node owns the UTXO set and optional `txindex`, `blockfilterindex`, and `scriptindex` (`utxo` or `full`) consumers with explicit readiness gating ([indexing contract](docs/contracts/indexing.md)).
-- **In-process composition without an async runtime mandate.** Core services run on a synchronous crossbeam event loop and bounded worker threads. Embedders call `bitcoin_rs_node::Node` from their own executor without the node spawning a private Tokio runtime ([embedding contract](docs/contracts/embedding.md)).
+Bitcoin behavior can be checked against Bitcoin Core, `libbitcoinkernel`, historical chain data, consensus test vectors, fuzzing, and differential tests, which makes an independent implementation practical to verify.
+
+### What can be improved
+
+- **Performance is a first-class requirement.** Synchronization, storage, memory ownership, concurrency, caching, I/O, and indexing can all be reconsidered; improvements must be demonstrated with matched whole-node benchmarks against Core.
+- **The UTXO set is the node's authoritative coin state.** The node owns the canonical UTXO set used for validation and an integrated script index exposed through Esplora-compatible APIs. Wallet-specific keys, policies, and metadata remain outside the node.
+- **Modularity keeps the core isolated and components composable.** Clear dependency and failure boundaries keep extensions from destabilizing validation or chainstate while allowing components to be reused independently.
+- **Rust-native integration is a primary path.** Applications and extensions attach to the node as typed, in-process components instead of routing through serialized RPC or separate processes.
+
+---
+
+## Experimental BIP Adoption
+
+Experiments stay small, reversible, and opt-in: active mainnet consensus is unchanged, and unactivated consensus proposals are tested only on regtest or explicitly isolated test networks. Adoption is evaluated through reference vectors, external interoperability, and measured resource costs.
+
+See the [BIP adoption policy](docs/policies/bip-adoption.md) for the research-to-shipped process, the [BIP support matrix](docs/bip-support.md) for current implementation status, and [contributing BIPs](CONTRIBUTING.md#proposing-and-implementing-bips) to propose an experiment.
 
 ---
 

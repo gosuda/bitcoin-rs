@@ -1,5 +1,3 @@
-//! `AddrMan`'s public contract: learned wire addresses survive a daemon restart
-//! and remain usable when DNS is disabled and no operator peer is configured.
 #![expect(clippy::expect_used, reason = "process fixture assertions")]
 
 use std::path::Path;
@@ -11,7 +9,7 @@ use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, json};
 
 #[test]
 fn dns_disabled_restart_reconnects_to_a_gossiped_peer() -> Result<(), Error> {
@@ -56,7 +54,6 @@ fn restart_reconnects(
     .expect("timestamp");
     let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
     let deadline = Instant::now() + Duration::from_secs(10);
-    // Exercise both decoders; duplicate gossip must preserve one candidate.
     gossip.send(
         NetworkMessage::Addr(vec![(
             timestamp,
@@ -96,7 +93,7 @@ fn restart_reconnects(
     drop(gossip);
     let datadir = learner.stop_keep_datadir()?;
     let bytes = std::fs::read(datadir.path().join("node/peers-fabfb5da.dat"))?;
-    let book: serde_json::Value = serde_json::from_slice(&bytes[..bytes.len() - 32])?;
+    let book: sonic_rs::Value = sonic_rs::from_slice(&bytes[..bytes.len() - 32])?;
     assert_eq!(book["format"], "bitcoin-rs-addrman");
     assert_eq!(book["version"], 1);
     assert_eq!(

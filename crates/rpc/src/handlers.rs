@@ -22,11 +22,6 @@ pub(crate) mod util;
 pub(crate) mod wait;
 
 /// Enumerates the live registry names in table order.
-///
-/// Projects from `crate::registry::REGISTRY`, yielding only rows with a
-/// bound dispatch arm. Exposed for the manifest coverage gate
-/// (`crates/rpc/tests/manifest_coverage.rs`), which asserts set equality
-/// with the shipped manifest rows in both directions.
 pub fn live_registry() -> impl Iterator<Item = &'static str> {
     crate::registry::REGISTRY
         .iter()
@@ -43,7 +38,6 @@ pub struct Handler {
 }
 
 impl Handler {
-    /// Builds a dispatcher over `ctx`.
     #[must_use]
     pub fn new(ctx: Arc<Context>) -> Self {
         Self {
@@ -82,25 +76,11 @@ impl Handler {
         }
     }
 
-    /// Returns the shared context used by the handlers.
     #[must_use]
     pub fn context(&self) -> &Arc<Context> {
         &self.ctx
     }
 
-    /// Dispatches one Bitcoin Core-compatible JSON-RPC method.
-    ///
-    /// One lookup in `crate::registry::REGISTRY` answers both the method
-    /// name and its dispatch arm. The registry is generated from the
-    /// compatibility manifest, so a row without a dispatch arm is a method
-    /// the manifest declares but this build does not ship; it answers
-    /// method-not-found like any unknown method.
-    ///
-    /// PRE: `method` and `params` are the decoded JSON-RPC request fields.
-    /// POST: `Ok(response)` from the row's dispatch arm, or the
-    ///   method-not-found error when no row or no arm exists for `method`.
-    /// INVARIANT: a method that answers is a manifest row, and a manifest
-    ///   row with an arm never returns method-not-found.
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
         let row = crate::registry::REGISTRY
             .iter()
@@ -114,9 +94,6 @@ impl Handler {
             .is_blocking(params)
             .then(|| {
                 self.reserve_blocking_request().map_err(|error| {
-                    // Refusal observes the existing scan owner; it never starts
-                    // a scan without the shared blocking permit. Preserve Core's
-                    // in-progress error even when the long-operation quota is full.
                     if matches!(row.execution, crate::registry::Execution::Scan)
                         && self.ctx.chain.utxo.scan_progress().is_some()
                     {
@@ -129,9 +106,6 @@ impl Handler {
                 })
             })
             .transpose()?;
-        // Registration sits after registry resolution and blocking-quota
-        // acquisition, so unknown or refused methods never appear as
-        // active; the guard removes this call's entry on every exit path.
         let _active = self.ctx.active_calls.begin(method);
         let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
         match handler {
@@ -184,10 +158,10 @@ pub(crate) fn params_array(params: &Value) -> Result<&sonic_rs::Array, RpcError>
 
 /// Binds a method's ordinary named arguments to its positional order.
 ///
-/// Core's optional `args` prefix fills only the initial unnamed positions;
-/// explicit nulls still count as named arguments. Omitted trailing arguments
-/// stay omitted, and a non-array `args` value is consumed without effect.
-/// Method owners retain arity, type, default, and value validation.
+/// Core's optional `args` prefix fills only the initial unnamed positions; explicit
+/// nulls still count as named arguments. Omitted trailing arguments stay omitted, and a
+/// non-array `args` value is consumed without effect. Method owners retain arity, type,
+/// default, and value validation.
 pub(crate) fn bind_named_params<'a>(
     params: &'a Value,
     names: &[&str],
@@ -250,7 +224,6 @@ pub(crate) fn ensure_unique_named_params(object: &sonic_rs::Object) -> Result<()
     Ok(())
 }
 
-/// Returns the type name Bitcoin Core 31.1 spells for a JSON value.
 fn json_type_name(value: &Value) -> &'static str {
     if value.is_null() {
         "null"
@@ -267,13 +240,6 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Builds Core 31.1's type error for a required positional argument.
-///
-/// PRE: `value` failed the expected-type check for argument `position`.
-/// POST: the `InvalidType` (-3) error whose message names the position, the
-///   argument label, the value's type, and the expected type, in Core 31.1's
-///   `Wrong type passed` shape.
-/// INVARIANT: the message is built only from the call's inputs; no state.
 fn wrong_type(position: usize, label: &str, value: &Value, expected: &str) -> RpcError {
     RpcError::InvalidType(format!(
         "Wrong type passed:\n{{\n    \"Position {} ({})\": \"JSON value of type {} is not of expected type {}\"\n}}",
@@ -284,12 +250,6 @@ fn wrong_type(position: usize, label: &str, value: &Value, expected: &str) -> Rp
     ))
 }
 
-/// Builds Core 31.1's type error sentence for an unnamed optional argument.
-///
-/// PRE: `value` failed the expected-type check for an optional argument the
-///   dispatcher reads without a declared label.
-/// POST: the `InvalidType` (-3) error carrying Core 31.1's bare sentence.
-/// INVARIANT: the message is built only from the call's inputs; no state.
 pub(crate) fn wrong_type_plain(value: &Value, expected: &str) -> RpcError {
     RpcError::InvalidType(format!(
         "JSON value of type {} is not of expected type {}",
@@ -298,8 +258,6 @@ pub(crate) fn wrong_type_plain(value: &Value, expected: &str) -> RpcError {
     ))
 }
 
-/// The argument label Core 31.1 uses, derived from the required-parameter
-/// message the call site passes (`"txid is required"` names the txid).
 fn label_of(name: &str) -> &str {
     name.strip_suffix(" is required")
         .or_else(|| name.strip_suffix(" must be a string"))
@@ -367,15 +325,6 @@ pub(crate) fn required_i64(
         .ok_or_else(|| RpcError::InvalidParameter(format!("{} is out of range", label_of(name))))
 }
 
-/// Parses one transaction id from its 64-character hex encoding.
-///
-/// PRE: `value` is the parameter string a caller supplied; `label` is the
-///   argument name Bitcoin Core 31.1 spells in its `-8` messages
-///   (`"parameter 1"` for `getrawtransaction`, the declared name elsewhere).
-/// POST: the decoded [`Txid`], or the `InvalidParameter` (-8) error whose
-///   message names the length of a wrong-length string or the non-hex
-///   content of a right-length one, exactly as Core 31.1 spells them.
-/// INVARIANT: a decoded txid round-trips through its lowercase hex Display.
 pub(crate) fn parse_txid(value: &str, label: &str) -> Result<Txid, RpcError> {
     if value.len() != 64 {
         return Err(RpcError::InvalidParameter(format!(
@@ -429,9 +378,6 @@ mod registry_tests {
         );
         let handler = Handler::new(Arc::new(Context::new()));
         for entry in shipped_rpc_rows() {
-            // A subsystem a bare context runs without answers `-32601`
-            // carrying its own name (Core's wallet-disabled behavior); only
-            // a foreign name is drift.
             assert!(
                 !matches!(
                     handler.dispatch(entry.name, &json!([])),
@@ -499,10 +445,6 @@ mod registry_tests {
         }
     }
 
-    // Bitcoin Core 31.1 parameter-error classification, probed against the
-    // pinned release: a wrong JSON type is -3 in Core's own words, a
-    // correctly typed but unacceptable value is -8, and only shape and
-    // arity remain on -32602.
     #[test]
     #[expect(clippy::expect_used)]
     fn wrong_json_type_answers_core_type_error_text() {
@@ -556,8 +498,6 @@ mod registry_tests {
         );
     }
 
-    /// Core 31.1 transformNamedArguments: named holes, `args`, and collision
-    /// ordering are observable through the transaction RPC, not a new route.
     #[test]
     #[expect(clippy::expect_used)]
     fn named_transaction_arguments_follow_core() {
@@ -655,8 +595,6 @@ mod registry_tests {
             .expect_err("name validation precedes missing outputs");
         assert_eq!(error.code(), -8);
         assert_eq!(error.to_string(), "Unknown named parameter extra");
-        // The prerequisite must not newly recognize parameters whose semantics
-        // are implemented in the later raw-transaction/PSBT conversion slice.
         for (method, params, name) in [
             (
                 "createrawtransaction",
@@ -703,8 +641,6 @@ mod registry_tests {
     fn await_waiter(handler: &Handler) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
-            // Observe the owner without competing for the waiter's permit.
-            // Release the mutex before checking the deadline or sleeping.
             let active = handler.blocking_requests.lock().0;
             if active != 0 {
                 return;

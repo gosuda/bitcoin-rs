@@ -1,12 +1,3 @@
-//! The node's data-dir lock: exclusive before any datadir state changes,
-//! released only when the last handle to any of the node's stores is gone,
-//! whoever retains that handle.
-//!
-//! Subprocess checks ride the harness pattern of
-//! `process_epoch_allocation_is_unique_across_processes` (`mod.rs`): re-exec
-//! this same test binary with a sentinel environment variable so the second
-//! contender is a genuine second process.
-
 use super::*;
 
 use crate::lifecycle::start_node;
@@ -18,7 +9,6 @@ const CHILD_KIND_ENV: &str = "BITCOIN_RS_TEST_DATA_DIR_LOCK_CHILD_KIND";
 const KIND_OPEN: &str = "open";
 const KIND_NODE: &str = "node";
 const CHILD_READY_DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
-/// Standard Base64 of `user:password`, the credentials `lock_config` sets.
 const BASIC_AUTH: &str = "dXNlcjpwYXNzd29yZA==";
 
 fn lock_config(data_dir: &std::path::Path) -> crate::NodeConfig {
@@ -32,7 +22,6 @@ fn lock_config(data_dir: &std::path::Path) -> crate::NodeConfig {
     config
 }
 
-/// Asserts the directory's lock is held: a fresh acquire is refused as in use.
 fn assert_directory_locked(data_dir: &std::path::Path) {
     match DataDirLock::acquire(data_dir) {
         Err(DataDirLockError::InUse { path }) => assert_eq!(path, data_dir),
@@ -93,8 +82,6 @@ fn running_node_refuses_open_until_shutdown_releases() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sends one authenticated JSON-RPC request on a keep-alive connection, reads
-/// the whole response, and leaves the connection open and idle.
 fn idle_keepalive_rpc_connection(addr: SocketAddr) -> anyhow::Result<std::net::TcpStream> {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 
@@ -148,14 +135,6 @@ fn idle_keepalive_rpc_connection(addr: SocketAddr) -> anyhow::Result<std::net::T
     Ok(stream)
 }
 
-/// Regression for the embedded-shutdown lifetime gap: an authenticated idle
-/// keep-alive connection leaves its worker thread holding the RPC handler,
-/// and through it the chainstate and its stores, after `Node::shutdown`
-/// returns. The directory must stay locked for that handle: the refusal is the
-/// typed `InUse`, never the backend's own store-lock error, and the directory
-/// reopens once the connection closes. The worker cannot leave its read before
-/// the client closes or the 30 s RPC idle timeout, so the first refusal is
-/// deterministic.
 #[test]
 fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -174,8 +153,6 @@ fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> 
     };
     assert_in_use(&error, &data_dir);
 
-    // Closing the client ends the worker's read at once; the release follows
-    // the worker's exit, so poll with a deadline instead of sleeping once.
     drop(client);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
@@ -194,8 +171,6 @@ fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> 
     }
 }
 
-/// A clone of the chainstate handle is a consumer the node cannot drain; it
-/// owns the lock until its last use, and the directory reopens after it drops.
 #[test]
 fn retained_chainstate_handle_keeps_the_directory_locked_until_dropped() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -216,8 +191,6 @@ fn retained_chainstate_handle_keeps_the_directory_locked_until_dropped() -> anyh
     Ok(())
 }
 
-/// The block-body store is a handle a consumer can keep without the chainstate
-/// or the node: it alone owns the lock until it drops.
 #[test]
 fn retained_block_body_store_keeps_the_directory_locked_until_dropped() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -238,9 +211,6 @@ fn retained_block_body_store_keeps_the_directory_locked_until_dropped() -> anyho
     Ok(())
 }
 
-/// The block files carry the lock themselves, not only through the key-value
-/// store that normally travels with them: with the node's own guard and every
-/// store handle gone, the block files alone still hold the directory.
 #[test]
 fn block_files_alone_keep_the_directory_locked_until_dropped() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -258,9 +228,6 @@ fn block_files_alone_keep_the_directory_locked_until_dropped() -> anyhow::Result
     Ok(())
 }
 
-/// A consumer that keeps only the txindex query adapter after the node is gone
-/// still holds the opened index store: the directory stays locked until the
-/// adapter drops, and then the index store reopens for a new worker.
 #[test]
 fn retained_index_query_adapter_keeps_the_directory_locked_until_dropped() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -313,9 +280,6 @@ fn retained_index_query_adapter_keeps_the_directory_locked_until_dropped() -> an
     Ok(())
 }
 
-/// The txindex store opens on the index worker thread, possibly after its
-/// node is gone. The open spec alone holds the lock before that open, and the
-/// store it opens holds the lock after the spec is gone.
 #[test]
 fn index_open_spec_and_opened_store_each_keep_the_directory_locked() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -352,8 +316,6 @@ fn symlinked_lock_file_refuses_start_without_following() -> anyhow::Result<()> {
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(&outside, data_dir.join(".lock"))?;
 
-    // `FollowSymlinks::No` refuses the entry at open (ELOOP), so the refusal
-    // carries the platform's Io variant, never a followed lock.
     let Err(error) = NodeState::open(lock_config(&data_dir), None) else {
         panic!("a symlinked lock entry must refuse startup");
     };
@@ -408,7 +370,6 @@ fn data_dir_lock_subprocess_contender() -> anyhow::Result<()> {
     std::process::exit(0);
 }
 
-/// Waits until `marker` exists, or the child dies, or the deadline passes.
 fn wait_for_child_marker(
     child: &mut std::process::Child,
     marker: &std::path::Path,
@@ -429,14 +390,9 @@ fn wait_for_child_marker(
     Ok(())
 }
 
-/// Owns the lock child. Dropping kills and reaps it, so a failed assertion, a
-/// panic, or an early `?` after the spawn cannot leave the lock-holding
-/// process running; the child's own deadline would only bound the leak.
 struct LockChild(std::process::Child);
 
 impl LockChild {
-    /// Waits for the child to exit by itself and reports its stderr when it
-    /// failed. Reads stderr first: end of file arrives with the exit.
     fn finish(&mut self) -> anyhow::Result<()> {
         use std::io::Read as _;
         let mut stderr = String::new();
@@ -456,18 +412,11 @@ impl Drop for LockChild {
     }
 }
 
-/// The cross-process half of the contract: a second live process is refused
-/// by the same open-file lock while the first holds its node, and succeeds
-/// once that process exits. `File::try_lock` is an open-file lock on every
-/// platform the node ships for; if a platform ever treats a second
-/// same-process handle as compatible, the same-process assertions above stay
-/// and this process-level proof keeps the contract.
 #[test]
 fn second_process_is_refused_while_first_holds_its_node() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // Harness test names are crate-relative; `module_path!()` is not.
     let test_name = concat!(module_path!(), "::data_dir_lock_subprocess_contender")
         .split("::")
         .skip(1)
@@ -496,7 +445,6 @@ fn second_process_is_refused_while_first_holds_its_node() -> anyhow::Result<()> 
     std::fs::write(data_dir.join("lock-parent-done"), b"")?;
     child.finish()?;
 
-    // The child has exited, so its open-file lock is gone with it.
     drop(NodeState::open(lock_config(&data_dir), None)?);
     Ok(())
 }

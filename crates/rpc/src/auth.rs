@@ -9,25 +9,19 @@ use thiserror::Error;
 /// construction, regardless of how the password was sourced.
 #[derive(Debug)]
 pub struct Auth {
-    /// Expected username.
     user: String,
-    /// SHA256 of the expected password.
     password_hash: [u8; 32],
 }
 
-/// Authentication construction errors.
 #[derive(Debug, Error)]
 pub enum AuthError {
-    /// Cookie file could not be read.
     #[error("cookie read failed: {0}")]
     Io(#[from] io::Error),
-    /// Cookie contents were not `user:password`.
     #[error("cookie file must contain user:password")]
     InvalidCookie,
 }
 
 impl Auth {
-    /// Builds Basic auth by hashing `password` once at startup.
     #[must_use]
     pub fn basic(user: impl Into<String>, password: &str) -> Self {
         Self {
@@ -36,7 +30,6 @@ impl Auth {
         }
     }
 
-    /// Builds cookie auth by reading and hashing the cookie file once.
     pub fn cookie(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         let path = path.as_ref().to_path_buf();
         let contents = fs::read_to_string(&path)?;
@@ -50,7 +43,6 @@ impl Auth {
         })
     }
 
-    /// Returns true when `Authorization` contains valid HTTP Basic credentials.
     #[must_use]
     pub(crate) fn validate_header(&self, header: Option<&str>) -> bool {
         let Some(header) = header else {
@@ -74,10 +66,8 @@ impl Auth {
     }
 }
 
-/// Compares byte strings without early exit.
 #[must_use]
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    // SPEC: constant-time eq to avoid auth-timing leaks.
     let len = left.len().max(right.len());
     let mut diff = left.len() ^ right.len();
     let mut index = 0;

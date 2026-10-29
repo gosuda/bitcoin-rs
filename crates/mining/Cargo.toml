@@ -46,7 +46,7 @@ pool-sv2 = [
 
 
 [dev-dependencies]
-serde_json.workspace = true
+sonic-rs.workspace = true
 proptest.workspace = true
 bitcoin.workspace = true
 criterion.workspace = true

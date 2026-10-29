@@ -4,7 +4,7 @@ use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute, transaction,
 };
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use bitcoin_rs_e2e::differential::mine_common_chain;
 use bitcoin_rs_e2e::helpers::sign_p2pkh_inputs;
@@ -21,9 +21,6 @@ struct Pair {
 
 impl Pair {
     fn new() -> Self {
-        // These are the repository's selected values, explicitly supplied to
-        // Core. They are not claims about Core 31.1's changed fee defaults.
-        // The two process launches are independent; start them concurrently.
         let (core, node) = std::thread::scope(|scope| {
             let core = scope.spawn(|| {
                 ProcessNode::spawn_with(
@@ -91,8 +88,6 @@ impl Pair {
     fn check(&mut self, tx: &Transaction, rejection: Option<&str>) {
         let raw = serialize_hex(tx);
         let txid = tx.compute_txid().to_string();
-        // The per-process observation sequences are independent; run the
-        // reference and candidate checks concurrently.
         let check_one = |process: &mut ProcessNode| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -167,7 +162,6 @@ impl Pair {
 
     fn preview(&mut self, txs: &[Transaction]) -> (Value, Value) {
         let raw: Vec<_> = txs.iter().map(serialize_hex).collect();
-        // The per-process preview observation is independent on each node.
         let preview_one = |process: &mut ProcessNode| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -245,12 +239,10 @@ fn signed(inputs: &[Coin], outputs: Vec<TxOut>, version: i32) -> Transaction {
     tx
 }
 
-/// Compare the scoped submitpackage wire result and committed public state.
-/// Numeric suffixes in native rejection details remain documented deviations.
 fn submit_pair(pair: &mut Pair, txs: &[Transaction], extra: &[Value]) -> Value {
     let mut args = vec![json!(txs.iter().map(serialize_hex).collect::<Vec<_>>())];
     args.extend_from_slice(extra);
-    let params = Value::Array(args);
+    let params = Value::from(args);
     let core = pair
         .core
         .rpc("submitpackage", &params)
@@ -265,10 +257,8 @@ fn submit_pair(pair: &mut Pair, txs: &[Transaction], extra: &[Value]) -> Value {
         let key = tx.compute_wtxid().to_string();
         let (reference, candidate) = (&core["tx-results"][&key], &node["tx-results"][&key]);
         if let Some(error) = reference["error"].as_str() {
-            assert!(candidate["error"].is_string(), "{reference} vs {candidate}");
+            assert!(candidate["error"].is_str(), "{reference} vs {candidate}");
             assert_eq!(reference["txid"], candidate["txid"]);
-            // Existing native consensus/script errors intentionally omit Core's
-            // verbose script diagnostics. Fee errors retain their reason prefix.
             if error.starts_with("min relay fee not met")
                 || error.starts_with("max feerate exceeded")
             {
@@ -304,10 +294,10 @@ fn submit_pair(pair: &mut Pair, txs: &[Transaction], extra: &[Value]) -> Value {
                 .node
                 .rpc("getmempoolentry", &json!([tx.compute_txid().to_string()]))
                 .expect("accepted entry");
-            if node["tx-results"][tx.compute_wtxid().to_string()]["other-wtxid"].is_null() {
+            if node["tx-results"][&tx.compute_wtxid().to_string()]["other-wtxid"].is_null() {
                 assert_eq!(
                     entry["vsize"],
-                    node["tx-results"][tx.compute_wtxid().to_string()]["vsize"]
+                    node["tx-results"][&tx.compute_wtxid().to_string()]["vsize"]
                 );
             }
         }
@@ -315,7 +305,6 @@ fn submit_pair(pair: &mut Pair, txs: &[Transaction], extra: &[Value]) -> Value {
     node
 }
 
-/// A signed P2WSH child whose unexecuted branch still incurs sigop cost.
 fn sigop_cpfp(coin: &Coin, fee: u64) -> [Transaction; 2] {
     use bitcoin::hashes::Hash as _;
     use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_ENDIF, OP_IF};
@@ -378,7 +367,6 @@ fn submitpackage_cpfp_partial_acceptance_and_guards() {
 }
 
 fn submitpackage_cpfp_and_resident_members(pair: &mut Pair) {
-    // A zero-fee signed parent is rejected by the unchanged pure preview.
     let parent = transaction(&[pair.coins[0].clone()], 1, 0, 2);
     let child = transaction(&[output(&parent, 0)], 1, 2_000, 2);
     let (core_preview, node_preview) = pair.preview(&[parent.clone(), child.clone()]);
@@ -409,28 +397,25 @@ fn submitpackage_cpfp_and_resident_members(pair: &mut Pair) {
         let named = process.rpc("submitpackage", &json!({"package": [serialize_hex(&parent), serialize_hex(&child)], "maxfeerate": "0", "maxburnamount": "0"})).expect("named parameters");
         assert_eq!(named["package_msg"], json!("success"));
         assert!(
-            named["tx-results"][child.compute_wtxid().to_string()]["fees"]["effective-feerate"]
+            named["tx-results"][&child.compute_wtxid().to_string()]["fees"]["effective-feerate"]
                 .is_null()
         );
     }
     let mut variant = child.clone();
     variant.input[0].witness = Witness::from_slice(&[vec![0]]);
-    submit_pair(pair, &[variant], &[]); // resident txid ignores another witness
-    submit_pair(pair, &[parent, child], &[]); // resident fees are not reused
+    submit_pair(pair, &[variant], &[]);
+    submit_pair(pair, &[parent, child], &[]);
 
-    // Individually admissible members use their own effective fee rates.
     let parent = transaction(&[pair.coins[1].clone()], 1, 1_000, 2);
     let child = transaction(&[output(&parent, 0)], 1, 2_000, 2);
     submit_pair(pair, &[parent, child], &[]);
 
-    // Public partial acceptance: the good parent survives a bad child.
     let parent = transaction(&[pair.coins[2].clone()], 1, 1_000, 2);
     let mut child = transaction(&[output(&parent, 0)], 1, 2_000, 2);
     child.input[0].script_sig = ScriptBuf::new();
     let partial = submit_pair(pair, &[parent, child], &[]);
     assert_eq!(partial["package_msg"], json!("transaction failed"));
 
-    // A resident parent cannot donate fees to a new zero-fee child.
     let parent = transaction(&[pair.coins[3].clone()], 1, 1_000, 2);
     submit_pair(pair, std::slice::from_ref(&parent), &[]);
     let child = transaction(&[output(&parent, 0)], 1, 0, 2);
@@ -440,11 +425,10 @@ fn submitpackage_cpfp_and_resident_members(pair: &mut Pair) {
 
     let parent = transaction(&[pair.coins[4].clone()], 1, 0, 2);
     let child = transaction(&[output(&parent, 0)], 1, 1, 2);
-    submit_pair(pair, &[parent, child], &[]); // aggregate underpayment
+    submit_pair(pair, &[parent, child], &[]);
 }
 
 fn submitpackage_fee_sigop_and_truc_guards(pair: &mut Pair) {
-    // The public maxfeerate guard uses modified fees, not just actual fees.
     let parent = transaction(&[pair.coins[5].clone()], 1, 1_000, 2);
     for process in [&mut pair.core, &mut pair.node] {
         process
@@ -456,7 +440,7 @@ fn submitpackage_fee_sigop_and_truc_guards(pair: &mut Pair) {
     }
     submit_pair(pair, &[parent], &[json!(0.00001)]);
     let low_fee = transaction(&[pair.coins[13].clone()], 1, 10, 2);
-    submit_pair(pair, &[low_fee], &[json!(0.000_000_01)]); // own floor before caller cap
+    submit_pair(pair, &[low_fee], &[json!(0.000_000_01)]);
 
     let sigop_package = sigop_cpfp(&pair.coins[14], 700);
     assert!(sigop_package.iter().map(Transaction::vsize).sum::<usize>() < 700);
@@ -468,11 +452,10 @@ fn submitpackage_fee_sigop_and_truc_guards(pair: &mut Pair) {
     let accepted = submit_pair(pair, &sigop_package, &[]);
     assert_eq!(accepted["package_msg"], json!("success"));
     assert_eq!(
-        accepted["tx-results"][sigop_package[1].compute_wtxid().to_string()]["vsize"],
-        json!(775) // 151 witness sigops plus four legacy output sigops
+        accepted["tx-results"][&sigop_package[1].compute_wtxid().to_string()]["vsize"],
+        json!(775)
     );
 
-    // TRUC ephemeral dust is admissible only with the paying dust spender.
     let coin = pair.coins[6].clone();
     let parent = signed(
         std::slice::from_ref(&coin),
@@ -514,8 +497,6 @@ fn submitpackage_fee_sigop_and_truc_guards(pair: &mut Pair) {
 
     let parent = transaction(&[pair.coins[11].clone()], 1, 0, 3);
     let child = transaction(&[output(&parent, 0)], 1, 2_000, 2);
-    // Core includes transaction-specific TRUC diagnostics; the native profile
-    // retains the typed reason. Both must reject without accepting the parent.
     let raws = json!([[serialize_hex(&parent), serialize_hex(&child)]]);
     for process in [&mut pair.core, &mut pair.node] {
         let before = process
@@ -541,7 +522,6 @@ fn submitpackage_fee_sigop_and_truc_guards(pair: &mut Pair) {
 }
 
 fn submitpackage_structure_burn_and_size_guards(pair: &mut Pair) {
-    // Reversed order, duplicates, and unrelated members fail before admission.
     let parent = transaction(&[pair.coins[7].clone()], 1, 0, 2);
     let child = transaction(&[output(&parent, 0)], 1, 2_000, 2);
     let unrelated = transaction(&[pair.coins[12].clone()], 1, 2_000, 2);
@@ -574,7 +554,6 @@ fn submitpackage_structure_burn_and_size_guards(pair: &mut Pair) {
         submit_pair(pair, &[parent.clone(), conflicting], &[])["package_msg"],
         json!("conflict-in-package")
     );
-    // Burning is checked for the entire request before the good parent commits.
     let mut burn = child;
     burn.output.push(TxOut {
         value: Amount::from_sat(1),
@@ -617,7 +596,6 @@ fn submitpackage_structure_burn_and_size_guards(pair: &mut Pair) {
         &[parent, allowed_burn],
         &[json!(0), json!("0.00000001")],
     );
-    // Large signed CPFP below the boundary, then refusal above it.
     let parent = transaction(&[pair.coins[8].clone()], 2, 0, 2);
     let child = transaction(&[output(&parent, 0)], 2_900, 300_000, 2);
     let weight = parent.weight().to_wu() + child.weight().to_wu();
@@ -634,7 +612,6 @@ fn submitpackage_structure_burn_and_size_guards(pair: &mut Pair) {
 }
 
 fn submitpackage_refuses_wider_tree(pair: &mut Pair) {
-    // The scoped API refuses a valid wider tree before any member commits.
     let first = transaction(&[pair.coins[15].clone()], 1, 0, 2);
     let second = transaction(&[pair.coins[16].clone()], 1, 0, 2);
     let child = transaction(&[output(&first, 0), output(&second, 0)], 1, 4_000, 2);
@@ -671,8 +648,6 @@ fn replacement_graph_merges_splits_and_conflict_cluster_boundary() {
     pair.check(&sibling, None);
     let merge = transaction(&[output(&parent, 0), output(&other, 0)], 1, 10_000, 2);
     pair.check(&merge, None);
-    // Replacing the parent removes its descendants; the other parent survives
-    // in a separate component. Both sides of the affected diagram matter.
     let split = transaction(&[pair.coins[0].clone()], 1, 25_000, 2);
     pair.check(&split, None);
     let crossing = transaction(&[pair.coins[0].clone()], 120, 35_000, 2);
@@ -756,8 +731,6 @@ fn package_structure_and_fail_fast_verdicts() {
     assert_eq!(core[0]["allowed"], json!(true));
     assert_eq!(core[1]["allowed"], json!(false));
     assert_eq!(node[1]["allowed"], json!(false));
-    // Detailed consensus errors are intentionally generic in the candidate.
-    // Value failures are prechecks, so other rows remain unfinished.
     let overspend_coin = pair.coins[5].clone();
     let overspend = signed(
         std::slice::from_ref(&overspend_coin),
@@ -817,7 +790,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     let parent = transaction(&[pair.coins[0].clone()], 64, 10_000, 2);
     pair.check(&parent, None);
     for index in 0..63 {
-        // Different rates exercise many chunks in one maximal cluster.
         let fee = 1_000 + u64::try_from((index * 37) % 101).expect("bounded fee") * 50;
         let child = transaction(&[output(&parent, index)], 1, fee, 2);
         pair.check(&child, None);
@@ -825,8 +797,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     let overflow = transaction(&[output(&parent, 63)], 1, 10_000, 2);
     pair.check(&overflow, Some("too-large-cluster"));
 
-    // The replacement does not grow the full cluster. DER signature lengths
-    // vary by a byte, so find the exact signed incremental-fee boundaries.
     for shortfall in [1, 0] {
         let candidate = (1_100..1_400)
             .map(|fee| (fee, transaction(&[output(&parent, 0)], 1, fee, 2)))
@@ -869,7 +839,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     );
     pair.check(&replacement, None);
 
-    // Core PreChecks uses modified fees for the relay floor as well as RBF.
     let low_base_fee = transaction(&[pair.coins[3].clone()], 1, 1, 2);
     pair.check(&low_base_fee, Some("min relay fee not met"));
     for process in [&mut pair.core, &mut pair.node] {
@@ -885,8 +854,6 @@ fn cluster_limit_fee_increment_and_prioritisation_boundaries() {
     }
     pair.check(&low_base_fee, None);
 
-    // At more than 1,000 vbytes a floor(fee*1000/vsize) comparison can hide
-    // one excess satoshi. Core applies GetFee(vsize) to the caller's limit.
     let above_max = (1_800..2_000)
         .map(|fee| (fee, transaction(&[pair.coins[2].clone()], 50, fee, 2)))
         .find(|(fee, tx)| *fee == u64::try_from(tx.vsize()).expect("vsize") + 1)

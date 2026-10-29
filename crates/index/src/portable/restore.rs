@@ -1,30 +1,4 @@
 //! Restore: one validating pass, then one fenced applying pass.
-//!
-//! The validating pass streams the artifact once and, in that single read,
-//! computes its SHA-256, checks its header against the manifest, frames and
-//! orders every record, and (when the receiver's chain identity and a fresh
-//! `TxLookup` allow it) resolves every locator to a full transaction id
-//! through the receiver's own block bodies. Every locator must equal a real
-//! top-level block transaction boundary: bytes that merely decode to a
-//! transaction elsewhere in the block (an embedded serialization inside a
-//! script or witness) never resolve a locator. The pass also compares all
-//! transactions in the covered range, so a bundle that omits a record cannot
-//! receive the complete watermark. Faults are reported in the plan's strict
-//! order regardless of where they were found: manifest fields, artifact
-//! length, SHA-256, header, record framing and order, chain identity, a fresh
-//! `TxLookup`, locator mismatch, omitted transactions. A missing or pruned
-//! body is not corruption: the capability is withheld and ordinary backfill
-//! proceeds. A bad bundle is refused before anything is written.
-//!
-//! Consistency: validation reads immutable bundle files and one captured
-//! ancestry (snapshot isolation). The applying pass is a sequence of
-//! linearizable fenced commits whose rows stay invisible, because the
-//! capability has no watermark, until one final commit stamps the watermark
-//! and floor, so readiness appears atomically or not at all. The applying
-//! pass re-hashes the file it streams and aborts before that final commit if
-//! the bytes changed since validation. A retry is idempotent: it needs a
-//! fresh `TxLookup`, clears leftovers through the capability reset, and
-//! rewrites identical rows from the same bytes.
 
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
@@ -54,7 +28,6 @@ use std::io::{self, Read};
 use std::ops::ControlFlow;
 use std::path::Path;
 
-/// Restores the `TxLookup` family from `request.dir`.
 pub(super) fn restore(
     host: &BundleHost<'_>,
     request: &IndexBundleRequest,
@@ -76,8 +49,6 @@ pub(super) fn restore(
         });
     }
 
-    // Identity and freshness are computed first but reported after the
-    // artifact's own faults; they only decide whether locators ride the pass.
     let identity = check_identity(host, request, &manifest);
     let fresh = ensure_fresh(host);
     let verify_with = match (&identity, &fresh) {
@@ -87,8 +58,6 @@ pub(super) fn restore(
     let (header, located) = validate_artifact(host, &artifact_path, &manifest, verify_with)?;
     let (chain, count_withheld) = identity?;
     fresh?;
-    // Without the receiver's count at the base the identity is unproven, so
-    // the locator outcome above is unchecked and nothing activates.
     if let Some(withheld) = count_withheld {
         return Ok(BundleOutcome::RestoreWithheld(withheld));
     }
@@ -96,9 +65,6 @@ pub(super) fn restore(
         LocatorOutcome::Verified => {}
         LocatorOutcome::Mismatch { height } => return Err(IndexBundleError::Locator { height }),
         LocatorOutcome::Withheld(withheld) => return Ok(BundleOutcome::RestoreWithheld(withheld)),
-        // Unreachable while the gates above run first: verification is only
-        // skipped when identity or freshness already refused. Fails closed so
-        // a future reorder can never activate an unchecked bundle.
         LocatorOutcome::NotChecked => {
             return Err(IndexBundleError::Identity(
                 "locator verification was skipped".to_owned(),
@@ -124,13 +90,6 @@ pub(super) fn restore(
     }))
 }
 
-/// Clears `TxConfirmed` rows that carry no `TxLookup` watermark.
-///
-/// Ordinary commits write rows and watermark atomically, so rows without a
-/// watermark exist only after an import was interrupted. The existing
-/// capability-reset path removes them before the worker derives anything, so
-/// no partial import can ever be served or mixed with derived rows. Returns
-/// whether anything was reset.
 pub(crate) fn reset_interrupted_import(
     writer: &dyn TxIndexWriter,
     reader: &dyn IndexReader,
@@ -139,10 +98,6 @@ pub(crate) fn reset_interrupted_import(
     if watermarks.tx_lookup.is_some() {
         return Ok(false);
     }
-    // One bounded row decides the probe: any `TxConfirmed` row without a
-    // watermark is leftover from an interrupted import. The old
-    // whole-family visitor materialized the family on some backends just
-    // to answer this existence check.
     let probe = reader.snapshot()?.scan_family_page(
         TxIndexFamily::TxConfirmed,
         None,
@@ -172,11 +127,6 @@ fn read_manifest(path: &Path) -> Result<IndexBundleManifestV1, IndexBundleError>
     IndexBundleManifestV1::parse(&bytes)
 }
 
-/// Compares the bundle's chain and format identity with the receiver's.
-///
-/// Also returns why the receiver's chain transaction count at the base could
-/// not be established, when a block body it needs is unavailable: that is a
-/// withheld bundle, not a refusal, and it is reported after every refusal.
 fn check_identity(
     host: &BundleHost<'_>,
     request: &IndexBundleRequest,
@@ -223,7 +173,6 @@ fn check_identity(
     Ok((chain, withheld))
 }
 
-/// Restore only fills a fresh `TxLookup`; a ready index is never reset.
 fn ensure_fresh(host: &BundleHost<'_>) -> Result<(), IndexBundleError> {
     let (_, watermarks) = host.writer.fenced_watermarks()?;
     if watermarks.tx_lookup.is_some() {
@@ -232,58 +181,24 @@ fn ensure_fresh(host: &BundleHost<'_>) -> Result<(), IndexBundleError> {
     Ok(())
 }
 
-/// How locator verification ended.
 enum LocatorOutcome {
-    /// Every locator resolved to its recorded full transaction id.
     Verified,
-    /// A locator at this height does not resolve to its recorded id.
     Mismatch { height: u32 },
-    /// A body is unavailable, so the bundle cannot be proven here.
     Withheld(Withheld),
-    /// Verification was skipped: no chain was proven, so no outcome exists.
-    /// Never trusted; the gates in [`restore`] refuse before it is read.
     NotChecked,
 }
 
-/// Locator verification that rides the validating pass. The first terminal
-/// outcome sticks; later records are not looked up.
-///
-/// Every locator must equal a real top-level block transaction boundary.
-/// Bytes that merely decode to a transaction elsewhere in the block (an
-/// embedded serialization inside a script or witness) never resolve a
-/// locator, even when the decoded id matches. Verification runs in height
-/// order after the stream: each covered body is loaded and parsed once no
-/// matter how the txid-prefix-ordered records scatter one block's
-/// transactions.
 struct LocatorCheck<'a> {
     chain: &'a ChainBase,
     tree: &'a BlockTreeReader,
     bodies: BodyReader<'a>,
-    /// Bundle positions grouped by height for the height-ordered pass.
-    /// Streaming collects; verification drains in ascending height so each
-    /// body is read and parsed once. This holds one small entry per bundle
-    /// position until its height verifies: any bundle whose records can be
-    /// validated in feasible time fits comfortably, while a per-record
-    /// re-parse (the previous shape) never finishes large bundles at all.
-    /// A bounded block cache cannot replace this grouping because records
-    /// arrive in txid-prefix order, so every block's transactions scatter
-    /// across the whole stream.
     pending: HashMap<u32, Vec<(TxPosition, [u8; 32])>>,
-    /// Positions charged against [`MAX_RESTORE_POSITIONS`].
     pending_positions: usize,
-    /// Positions the bundle carries per height, for the completeness check.
     counts: HashMap<u32, u64>,
     outcome: LocatorOutcome,
 }
 
 impl LocatorCheck<'_> {
-    /// Files every position of `record` under its height for the
-    /// height-ordered verification pass.
-    ///
-    /// Chain identity faults report at once, preserving the validating
-    /// pass's fault order; bodies stay untouched here. The later pass loads
-    /// each covered body once no matter how the txid-prefix-ordered records
-    /// scatter one block's transactions.
     fn check(&mut self, record: &TxLookupRecord<'_>) -> Result<(), IndexBundleError> {
         if !matches!(self.outcome, LocatorOutcome::Verified) {
             return Ok(());
@@ -310,15 +225,6 @@ impl LocatorCheck<'_> {
         Ok(())
     }
 
-    /// Checks one height's collected positions against its block boundaries.
-    ///
-    /// The body is loaded and parsed once for the height; the parsed spans
-    /// answer every scattered position, so a block shared by many records
-    /// costs one read and one parse instead of one per record. A position
-    /// matches only a real top-level transaction span with an equal full id:
-    /// bytes that merely decode elsewhere never resolve. Returns the block's
-    /// transaction count, or `None` when a terminal outcome was recorded
-    /// (missing body or mismatch) and verification must stop.
     fn verify_height_positions(
         &mut self,
         height: u32,
@@ -347,14 +253,6 @@ impl LocatorCheck<'_> {
             Ok(None)
         }
     }
-    ///
-    /// Strict checks run for every height before any completeness check, so
-    /// the reported fault order keeps locator mismatch ahead of omitted
-    /// transactions. Each covered body is loaded and parsed once; heights
-    /// without bundle positions reuse the metadata count when the source
-    /// keeps it. A missing body withholds instead of refusing; a count
-    /// mismatch refuses before any write, so an incomplete bundle never
-    /// receives the complete watermark.
     fn verify_locators(
         &mut self,
         floor: u32,
@@ -373,8 +271,6 @@ impl LocatorCheck<'_> {
             })?;
             let count = match self.verify_height_count(height, hash)? {
                 Some(count) => count,
-                // A terminal locator outcome is already recorded;
-                // completeness is unreachable.
                 None => return Ok(()),
             };
             block_counts.insert(height, count);
@@ -383,9 +279,6 @@ impl LocatorCheck<'_> {
             if u64::from(height) % CANCEL_POLL_RECORDS == 0 && cancelled() {
                 return Err(IndexBundleError::Cancelled);
             }
-            // The strict phase above ran every height without a terminal
-            // outcome, so a recorded count exists for each; zero fails
-            // closed toward refusal.
             let expected = block_counts.get(&height).copied().unwrap_or(0);
             if let Some(error) = incomplete_at(&self.counts, height, expected) {
                 return Err(error);
@@ -393,11 +286,6 @@ impl LocatorCheck<'_> {
         }
         Ok(())
     }
-    /// Returns one height's transaction count for the completeness check:
-    /// collected positions are verified against a single parse of the body,
-    /// while a height without positions reuses the metadata count when the
-    /// source keeps it. Returns `None` when a terminal outcome was recorded
-    /// (missing body or mismatch) and verification must stop.
     fn verify_height_count(
         &mut self,
         height: u32,
@@ -430,12 +318,12 @@ fn incomplete_at(
     })
 }
 
-/// Streams the whole artifact once: SHA-256, header, record framing, and,
-/// when `chain` is given, locator verification.
+/// Streams the whole artifact once: SHA-256, header, record framing, and, when `chain`
+/// is given, locator verification.
 ///
-/// A framing or locator fault does not stop the hash: the rest of the file is
-/// drained so a digest mismatch, which outranks every other artifact fault,
-/// is reported first. Cancellation returns at once.
+/// A framing or locator fault does not stop the hash: the rest of the file is drained
+/// so a digest mismatch, which outranks every other artifact fault, is reported first.
+/// Cancellation returns at once.
 fn validate_artifact(
     host: &BundleHost<'_>,
     path: &Path,
@@ -499,16 +387,11 @@ fn validate_artifact(
     let outcome = match (chain, locators) {
         (Some(_), Some(check)) => check.outcome,
         (Some(_), None) => LocatorOutcome::Withheld(Withheld::NoBodySource),
-        // No proven chain rode this pass, so there is no outcome to report;
-        // the caller refuses on identity, freshness, or count before reading
-        // it. Never `Verified`: correctness must not depend on that ordering.
         (None, _) => LocatorOutcome::NotChecked,
     };
     Ok((header, outcome))
 }
 
-/// Checks the header against the manifest: every one of the 73 bytes is
-/// determined by manifest fields, so equality proves the header intact.
 fn check_header(header: &ArtifactHeader, manifest: &ValidatedManifest) -> Result<(), &'static str> {
     let identity = &manifest.identity;
     if header.family != BundleFamily::TxLookup {
@@ -539,8 +422,6 @@ fn check_header(header: &ArtifactHeader, manifest: &ValidatedManifest) -> Result
     Ok(())
 }
 
-/// Polls cancellation every [`CANCEL_POLL_RECORDS`] records while `visit`
-/// consumes each framed record; `Break` stops early.
 fn read_records<R: Read>(
     records: &mut RecordReader<R>,
     host: &BundleHost<'_>,
@@ -568,20 +449,12 @@ fn read_records<R: Read>(
     Ok(())
 }
 
-/// Drains `reader` to end through its hashing layer in bounded 4,096-byte
-/// chunks, polling `cancelled` once per chunk ([`CANCEL_POLL_RECORDS`]).
-///
 /// A framing or locator fault does not stop the hash: the caller drains even
-/// after such a fault so a digest mismatch, which outranks every other
-/// artifact fault, is reported first. Cancellation returns at once with no
-/// digest comparison, preserving that precedence.
 fn drain_remaining_for_hash(
     reader: &mut super::artifact::HashedFile,
     cancelled: &dyn Fn() -> bool,
     path: &Path,
 ) -> Result<(), IndexBundleError> {
-    // Bounded: one small stack buffer, no allocation per chunk. Each chunk
-    // polls `cancelled` once, so a large invalid tail cannot block shutdown.
     const DRAIN_CHUNK: usize = 4_096;
     debug_assert!(
         matches!(u64::try_from(DRAIN_CHUNK), Ok(v) if v == CANCEL_POLL_RECORDS),
@@ -605,7 +478,6 @@ fn drain_remaining_for_hash(
     Ok(())
 }
 
-/// Everything the applying pass needs, all validated.
 struct ImportPlan<'a> {
     host: &'a BundleHost<'a>,
     path: &'a Path,
@@ -615,13 +487,6 @@ struct ImportPlan<'a> {
 }
 
 impl ImportPlan<'_> {
-    /// Imports the validated bundle through the writer's fenced stream and
-    /// returns the number of rows written.
-    ///
-    /// A failed attempt clears its un-watermarked rows before returning. A
-    /// cleanup failure is an `Index` error: the store is uncertain, so the
-    /// worker must fail instead of reconciling over partial rows toward a
-    /// readiness the bundle never earned.
     fn import(&self) -> Result<usize, IndexBundleError> {
         let base = IndexWatermark {
             height: self.manifest.identity.base_height,
@@ -662,9 +527,6 @@ impl ImportPlan<'_> {
         Err(discard_partial_rows(error, watermarks, reset))
     }
 
-    /// Emits the receiver's block identities and then every bundle row,
-    /// re-hashing the artifact so a file changed since validation is refused
-    /// before the final commit can stamp readiness.
     fn stream_import(
         &self,
         emit: &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
@@ -705,12 +567,6 @@ impl ImportPlan<'_> {
         if into_digest(hashed) != self.manifest.tx_lookup.sha256 {
             return Err(IndexBundleError::ArtifactHash { name });
         }
-        // The chain may have reorged during the long stream: refuse to stamp
-        // a watermark for a base that left the active chain. A tip advance
-        // past the base is fine — restore supports an above-base tip and
-        // backfill continues above it — so only the base identity is
-        // rechecked. Un-watermarked rows are cleared by the existing reset
-        // path, so a retry starts clean.
         let tip = self.host.applied_tip.load_full().ok_or_else(|| {
             IndexBundleError::Identity("the receiver has no applied tip".to_owned())
         })?;
@@ -730,12 +586,6 @@ impl ImportPlan<'_> {
     }
 }
 
-/// Clears a failed import's un-watermarked rows before its error is reported.
-///
-/// A cleanup failure is an `Index` error even when the import itself failed
-/// with a bundle refusal: the store may hold partial rows, so the worker
-/// must fail instead of reconciling over them toward a readiness the bundle
-/// never earned. A watermarked capability needs no reset.
 fn discard_partial_rows(
     error: IndexBundleError,
     watermarks: Result<IndexWatermarks, IndexError>,
@@ -760,8 +610,6 @@ mod tests {
     use crate::types::TxPosition;
     use std::cell::Cell;
 
-    /// The invalid-bundle drain is a bounded chunked copy that polls
-    /// cancellation once per 4,096-byte chunk: an untripped poll drains
     /// fully so the digest comparison can outrank framing faults, while a
     /// trip returns `Cancelled` at once with no digest comparison.
     #[test]
@@ -769,8 +617,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("tail.dat");
-        // Several poll intervals plus a short tail: the final chunk is
-        // partial by construction, so the drain must not assert alignment.
         let interval = usize::try_from(CANCEL_POLL_RECORDS)?;
         let bytes = vec![0xAB_u8; 3 * interval + 17];
         std::fs::write(&path, &bytes)?;
@@ -782,7 +628,6 @@ mod tests {
             digest
         };
 
-        // No cancellation drains fully and hashes every byte.
         let mut reader = open_hashed(&path)?;
         drain_remaining_for_hash(&mut reader, &|| false, &path)?;
         assert_eq!(
@@ -791,7 +636,6 @@ mod tests {
             "the bounded drain must hash the whole tail"
         );
 
-        // Immediate cancellation stops before any digest comparison.
         let mut reader = open_hashed(&path)?;
         let immediate = drain_remaining_for_hash(&mut reader, &|| true, &path);
         assert!(
@@ -799,8 +643,6 @@ mod tests {
             "entry poll must stop the drain: {immediate:?}"
         );
 
-        // A trip after the first chunk stops mid-tail, even though the
-        // undrained digest would mismatch: cancellation outranks the hash.
         let polls = Cell::new(0_u32);
         let mut reader = open_hashed(&path)?;
         let mid = drain_remaining_for_hash(
@@ -819,10 +661,6 @@ mod tests {
         Ok(())
     }
 
-    /// A locator must equal its top-level span exactly. An offset shifted
-    /// into the transaction body (an embedded serialization), a truncated
-    /// length, or an overlapping span never matches, even when the bytes at
-    /// the shifted offset decode to a transaction elsewhere.
     #[test]
     fn top_level_spans_must_match_exactly() {
         let position = TxPosition::new(100, 200);
@@ -842,8 +680,6 @@ mod tests {
     }
 
     /// Omitted records are refused at the first height whose bundle count
-    /// differs from the chain, so an incomplete bundle never receives the
-    /// complete watermark. A height with no bundle positions reports zero.
     #[test]
     fn omitted_positions_report_first_missing_height() {
         let counts = HashMap::from([(0_u32, 2_u64), (1_u32, 1_u64)]);
@@ -872,16 +708,8 @@ mod tests {
         );
     }
 
-    /// A failed import cleanup is an `Index` error even when the import
-    /// itself failed with a bundle refusal: the store may hold partial rows,
-    /// so the worker must fail instead of reconciling toward a readiness the
-    /// bundle never earned. Each branch below drives `discard_partial_rows`
-    /// — the exact tail `ImportPlan::import` returns through — with a failing
-    /// writer equivalent, not a variant check.
     #[test]
     fn cleanup_failure_preserves_index_error() {
-        // The reset fails after a bundle refusal: the `Index` error wins, so
-        // the worker fails instead of reconciling over partial rows.
         let fatal = discard_partial_rows(
             IndexBundleError::Locator { height: 9 },
             Ok(IndexWatermarks::default()),
@@ -891,8 +719,6 @@ mod tests {
             matches!(&fatal, IndexBundleError::Index(_)),
             "a failing reset must stop the worker, not report the refusal: {fatal}"
         );
-        // The reset succeeds after a bundle refusal: the refusal is reported
-        // and ordinary backfill proceeds.
         let refusal = discard_partial_rows(
             IndexBundleError::Locator { height: 9 },
             Ok(IndexWatermarks::default()),
@@ -902,8 +728,6 @@ mod tests {
             matches!(&refusal, IndexBundleError::Locator { height: 9 }),
             "a cleared import must report its refusal: {refusal}"
         );
-        // The watermark read itself fails: the store is uncertain, so the
-        // worker fails without running the reset.
         let uncertain = discard_partial_rows(
             IndexBundleError::Locator { height: 9 },
             Err(IndexError::InvalidWatermark),
@@ -913,8 +737,6 @@ mod tests {
             matches!(&uncertain, IndexBundleError::Index(_)),
             "an unreadable fence must stop the worker: {uncertain}"
         );
-        // The capability is watermarked: no partial rows exist, the reset is
-        // skipped, and the original error is reported.
         let watermarked = IndexWatermarks {
             tx_lookup: Some(IndexWatermark {
                 height: 1,

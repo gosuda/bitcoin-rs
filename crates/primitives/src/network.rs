@@ -4,65 +4,27 @@ use crate::Hash256;
 
 /// A dated observation of the chain's cumulative transaction count, plus the
 /// rate transactions have arrived since — Bitcoin Core's `ChainTxData`.
-///
-/// This is what turns "how many transactions have I verified" into "how much of
-/// the chain is that": the count alone says nothing without an estimate of the
-/// total, and the total is not knowable, so it is extrapolated from a pinned
-/// observation. Core re-measures these every release with
-/// `getchaintxstats 4096 <defaultAssumeValid>`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChainTxData {
-    /// UNIX timestamp of the block the observation was taken at.
     pub time: u64,
-    /// Cumulative transaction count of the chain at that block.
     pub tx_count: u64,
-    /// Transactions per second observed over the window ending there.
     pub tx_rate: f64,
 }
 
-/// Per-network parameters for the header presync download-twice mechanism.
-///
-/// Core generates these from its memory analysis of an attacked sync; the
-/// values here are those generated numbers, copied from
-/// `bitcoin-core/src/kernel/chainparams.cpp` (mainnet `:229-232`, testnet3
-/// `:337-340`, testnet4 `:450-453`, signet `:572-574`, regtest `:677-679`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeadersSyncParams {
-    /// Headers between two salted commitment bits (`commitment_period`).
     pub commitment_period: u32,
-    /// Headers the redownload buffer holds back before releasing them
-    /// (`redownload_buffer_size`).
     pub redownload_buffer_size: usize,
 }
 
-/// Pinned assumeutxo parameters for a specific block height.
-///
-/// Mirrors Bitcoin Core's `AssumeutxoData` structure:
-/// - `height`: Block height of the snapshot base.
-/// - `block_hash`: Block hash of the snapshot base.
-/// - `hash_serialized`: Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
-/// - `chain_tx_count`: Cumulative transaction count through `height`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssumeUtxoData {
-    /// Block height of the snapshot base.
     pub height: u32,
-    /// Block hash of the snapshot base.
     pub block_hash: Hash256,
-    /// Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
     pub hash_serialized: Hash256,
-    /// Cumulative transaction count through `height`.
     pub chain_tx_count: u64,
 }
 
-// `nMinimumChainWork` and `chainTxData`, copied from `src/kernel/chainparams.cpp`
-// in the Bitcoin Core tree this workspace already links against — the one
-// vendored by `libbitcoinkernel-sys`, client version 31.99, whose chain-tx data
-// was generated 2026-02-25.
-//
-// That is the same file `MAINNET_ASSUME_VALID_HEIGHT` above comes from: its
-// `defaultAssumeValid` comment reads `// 938343`. These constants are Core's own
-// per-release tuning, not consensus rules, and they need re-copying whenever the
-// pinned Core revision moves — the assume-valid anchor is the tell that it has.
 const MAINNET_MINIMUM_CHAIN_WORK: [u8; 32] =
     decode_compiled_hex("0000000000000000000000000000000000000001128750f82f4c366153a3a030");
 
@@ -75,58 +37,33 @@ const TESTNET4_MINIMUM_CHAIN_WORK: [u8; 32] =
 const SIGNET_MINIMUM_CHAIN_WORK: [u8; 32] =
     decode_compiled_hex("00000000000000000000000000000000000000000000000000000b463ea0a4b8");
 
-/// Bitcoin Core's mainnet `consensus.BIP16Exception` — block 170060, whose display
-/// hash is `00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22`. Stored
-/// in consensus little-endian (display hex reversed byte-wise) so it compares directly
-/// against `Hash256::from_le_bytes(block.block_hash().as_byte_array())` at the call site.
 const BIP16_EXCEPTION_MAINNET: Hash256 = Hash256::from_le_bytes(&[
     0x22, 0x9c, 0x4f, 0xac, 0x88, 0xba, 0xb1, 0x94, 0xeb, 0x08, 0xf1, 0xa5, 0x28, 0xcc, 0x30, 0x8d,
     0xed, 0x23, 0x97, 0xf4, 0xf4, 0xeb, 0x6e, 0x75, 0xdc, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
 
-/// Bitcoin Core's testnet3 `consensus.BIP16Exception` — block 394, whose display
-/// hash is `00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105`. Stored
-/// in consensus little-endian (display hex reversed byte-wise) so it compares directly
-/// against `Hash256::from_le_bytes(block.block_hash().as_byte_array())` at the call site.
 const BIP16_EXCEPTION_TESTNET3: Hash256 = Hash256::from_le_bytes(&[
     0x05, 0xb1, 0x32, 0xa4, 0xf7, 0x4a, 0x87, 0x99, 0xa5, 0x7a, 0x42, 0x02, 0xd0, 0xee, 0xb0, 0x96,
     0x12, 0xcc, 0x08, 0xd2, 0x95, 0x40, 0x1f, 0x00, 0x7c, 0x45, 0x30, 0xdd, 0x00, 0x00, 0x00, 0x00,
 ]);
 
-/// Mainnet assume-valid anchor height — the production default for skipping
-/// historical script verification, paired with [`MAINNET_ASSUME_VALID_HASH`].
 const MAINNET_ASSUME_VALID_HEIGHT: u32 = 938_343;
 
-/// Mainnet assume-valid anchor block hash — display hash
-/// `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`. Stored
-/// in consensus little-endian (display hex reversed byte-wise), following the
-/// `BIP16_EXCEPTION_*` convention above.
 const MAINNET_ASSUME_VALID_HASH: Hash256 = Hash256::from_le_bytes(&[
     0xac, 0xa5, 0x1b, 0xd5, 0xfa, 0x4b, 0x09, 0x8e, 0x47, 0x7c, 0x17, 0x1d, 0xdc, 0xdc, 0xd8, 0x94,
     0x91, 0x4d, 0xd7, 0xd6, 0xeb, 0xcc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
 
-/// A supported Bitcoin network.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Network {
-    /// Bitcoin mainnet.
     Mainnet,
-    /// Bitcoin public testnet version 3.
     Testnet3,
-    /// Bitcoin public testnet version 4.
     Testnet4,
-    /// Bitcoin default signet.
     Signet,
-    /// Local regression-test network.
     Regtest,
 }
 
 impl Network {
-    /// Stable identity spelling for logs and evidence records.
-    ///
-    /// This is distinct from Bitcoin Core's `testnet` configuration alias, which
-    /// still names [`Self::Testnet3`]. Checkpoint files keep that Core spelling
-    /// in `crates/node/src/checkpoint.rs`.
     #[must_use]
     pub const fn identity_name(self) -> &'static str {
         match self {
@@ -138,7 +75,6 @@ impl Network {
         }
     }
 
-    /// Returns the four P2P message-start bytes in wire order.
     #[must_use]
     pub const fn magic(self) -> [u8; 4] {
         match self {
@@ -150,7 +86,6 @@ impl Network {
         }
     }
 
-    /// Returns the default P2P port.
     #[must_use]
     pub const fn default_p2p_port(self) -> u16 {
         match self {
@@ -162,13 +97,6 @@ impl Network {
         }
     }
 
-    /// Returns the network's BIP34 coinbase-height activation height.
-    ///
-    /// Per Bitcoin Core's `chainparams.cpp` for fixed public networks:
-    /// - Mainnet activates at height 227,931
-    /// - Testnet3 activates at height 21,111
-    /// - Testnet4 / Signet activate at height 1
-    /// - This crate's deterministic regtest default activates at height 500.
     #[must_use]
     pub const fn bip34_activation_height(self) -> u32 {
         match self {
@@ -179,8 +107,6 @@ impl Network {
         }
     }
 
-    /// Returns the fixed BIP34 activation block hash when Core uses one to prove
-    /// that BIP34 implies BIP30 on a known chain.
     #[must_use]
     pub const fn bip34_activation_hash(self) -> Option<Hash256> {
         match self {
@@ -198,25 +124,16 @@ impl Network {
         }
     }
 
-    /// Returns `true` when BIP34 coinbase-height encoding is enforced at `height`.
     #[must_use]
     pub const fn is_bip34_active(self, height: u32) -> bool {
         height >= self.bip34_activation_height()
     }
 
-    /// Returns `true` when BIP65 (`OP_CHECKLOCKTIMEVERIFY`) is enforced at `height`.
-    ///
-    /// Per Bitcoin Core's `chainparams.cpp`:
-    /// - Mainnet activates at height 388,381
-    /// - Testnet3 activates at height 581,885
-    /// - Testnet4 / Signet activate at height 1
-    /// - Regtest activates at height 1,351
     #[must_use]
     pub const fn is_bip65_active(self, height: u32) -> bool {
         height >= self.bip65_activation_height()
     }
 
-    /// Native fixed activation height for BIP65.
     #[must_use]
     pub const fn bip65_activation_height(self) -> u32 {
         match self {
@@ -227,13 +144,11 @@ impl Network {
         }
     }
 
-    /// Returns `true` when BIP66 (strict DER signatures) is enforced at `height`.
     #[must_use]
     pub const fn is_bip66_active(self, height: u32) -> bool {
         height >= self.bip66_activation_height()
     }
 
-    /// Native fixed activation height for BIP66.
     #[must_use]
     pub const fn bip66_activation_height(self) -> u32 {
         match self {
@@ -244,13 +159,11 @@ impl Network {
         }
     }
 
-    /// Returns `true` when CSV (BIP68/112/113 relative locktime + MTP) is enforced at `height`.
     #[must_use]
     pub const fn is_csv_active(self, height: u32) -> bool {
         height >= self.csv_activation_height()
     }
 
-    /// Native fixed activation height for CSV.
     #[must_use]
     pub const fn csv_activation_height(self) -> u32 {
         match self {
@@ -261,13 +174,11 @@ impl Network {
         }
     }
 
-    /// Returns `true` when Segwit (BIP141/143/147) is enforced at `height`.
     #[must_use]
     pub const fn is_segwit_active(self, height: u32) -> bool {
         height >= self.segwit_activation_height()
     }
 
-    /// Native fixed activation height for SEGWIT.
     #[must_use]
     pub const fn segwit_activation_height(self) -> u32 {
         match self {
@@ -277,13 +188,11 @@ impl Network {
         }
     }
 
-    /// Returns `true` when Taproot (BIP341/342) is enforced at `height`.
     #[must_use]
     pub const fn is_taproot_active(self, height: u32) -> bool {
         height >= self.taproot_activation_height()
     }
 
-    /// Native fixed activation height for TAPROOT.
     #[must_use]
     pub const fn taproot_activation_height(self) -> u32 {
         match self {
@@ -293,11 +202,6 @@ impl Network {
         }
     }
 
-    /// Returns `true` when `block_hash` is a block Bitcoin Core grandfathers from P2SH
-    /// (BIP16) enforcement — its `consensus.BIP16Exception`. On mainnet this is block
-    /// 170060; on testnet3 it is block 394. Each contains a P2SH-template spend invalid
-    /// under P2SH rules but valid under the rules in force at activation. Only mainnet
-    /// and testnet3 have such a block; all other networks return `false`.
     #[must_use]
     pub fn is_bip16_p2sh_exception(self, block_hash: Hash256) -> bool {
         match self {
@@ -307,14 +211,6 @@ impl Network {
         }
     }
 
-    /// Returns the network's hash-pinned assume-valid anchor `(height, hash)`, or
-    /// `None` when the network has no production anchor.
-    ///
-    /// Mirrors Bitcoin Core's `-assumevalid` semantics: script verification for
-    /// blocks at or below the anchor height may be skipped only while the active
-    /// header chain is verified to contain the exact anchor block. Only mainnet
-    /// ships a pinned anchor; every other network returns `None` and always
-    /// verifies scripts in full.
     #[must_use]
     pub const fn assume_valid_anchor(self) -> Option<(u32, Hash256)> {
         match self {
@@ -323,7 +219,6 @@ impl Network {
         }
     }
 
-    /// Returns the pinned assumeutxo parameters for this network.
     #[must_use]
     pub const fn assume_utxo_data(self) -> &'static [AssumeUtxoData] {
         match self {
@@ -334,13 +229,11 @@ impl Network {
         }
     }
 
-    /// Finds pinned assumeutxo data matching `height`.
     #[must_use]
     pub fn assume_utxo_for_height(self, height: u32) -> Option<&'static AssumeUtxoData> {
         self.assume_utxo_data().iter().find(|d| d.height == height)
     }
 
-    /// Finds pinned assumeutxo data matching `block_hash`.
     #[must_use]
     pub fn assume_utxo_for_hash(self, block_hash: Hash256) -> Option<&'static AssumeUtxoData> {
         self.assume_utxo_data()
@@ -348,7 +241,6 @@ impl Network {
             .find(|d| d.block_hash == block_hash)
     }
 
-    /// Returns the default JSON-RPC port used by Bitcoin Core.
     #[must_use]
     pub const fn default_rpc_port(self) -> u16 {
         match self {
@@ -360,7 +252,6 @@ impl Network {
         }
     }
 
-    /// Returns DNS seeds from Bitcoin Core chain parameters.
     #[must_use]
     pub const fn dns_seeds(self) -> &'static [&'static str] {
         match self {
@@ -393,7 +284,6 @@ impl Network {
         }
     }
 
-    /// Returns the proof-of-work limit target.
     #[must_use]
     pub const fn max_target(self) -> Uint<256, 4> {
         match self {
@@ -415,7 +305,6 @@ impl Network {
         }
     }
 
-    /// Returns the main retarget interval in blocks.
     #[must_use]
     pub const fn retarget_interval(self) -> u32 {
         match self {
@@ -424,10 +313,6 @@ impl Network {
         }
     }
 
-    /// Returns the number of blocks between coinbase subsidy halvings.
-    ///
-    /// Bitcoin Core's `consensus.nSubsidyHalvingInterval`. Regtest halves every
-    /// 150 blocks so tests can reach a halving without mining 210 000 of them.
     #[must_use]
     pub const fn subsidy_halving_interval(self) -> u32 {
         match self {
@@ -436,16 +321,11 @@ impl Network {
         }
     }
 
-    /// Returns the proof-of-work target spacing in seconds.
     #[must_use]
     pub const fn target_spacing_seconds(self) -> u32 {
         10 * 60
     }
 
-    /// Returns the network's `chainTxData`.
-    ///
-    /// See [`ChainTxData`]. Regtest carries Core's deliberately non-zero rate
-    /// against a zero baseline, which is what makes progress testable there.
     #[must_use]
     pub const fn chain_tx_data(self) -> ChainTxData {
         match self {
@@ -476,15 +356,6 @@ impl Network {
             },
         }
     }
-    /// Returns the network's `nMinimumChainWork` as 32 big-endian bytes.
-    ///
-    /// A chain tip with less accumulated work than this is not treated as
-    /// synced, no matter how recent its timestamp claims to be. It is what stops
-    /// a node fed a cheap, freshly-timestamped chain from announcing that it has
-    /// left initial block download.
-    ///
-    /// Compare as byte arrays: for a fixed width, big-endian lexicographic order
-    /// is numeric order.
     #[must_use]
     pub const fn minimum_chain_work(self) -> [u8; 32] {
         match self {
@@ -492,18 +363,10 @@ impl Network {
             Self::Testnet3 => TESTNET3_MINIMUM_CHAIN_WORK,
             Self::Testnet4 => TESTNET4_MINIMUM_CHAIN_WORK,
             Self::Signet => SIGNET_MINIMUM_CHAIN_WORK,
-            // Core leaves regtest's `nMinimumChainWork` at zero: a regtest chain
-            // is meant to be one block old and still count as synced.
             Self::Regtest => [0_u8; 32],
         }
     }
 
-    /// Returns the network's header presync parameters.
-    ///
-    /// A peer whose chain has not yet shown [`Self::minimum_chain_work`] is
-    /// synchronized twice: once to build salted commitments, then once more
-    /// to store. These parameters size that mechanism; they are not
-    /// operator-selectable.
     #[must_use]
     pub const fn headers_sync_params(self) -> HeadersSyncParams {
         match self {
@@ -530,14 +393,12 @@ impl Network {
         }
     }
 
-    /// Returns the proof-of-work retarget timespan in seconds.
     #[must_use]
     pub const fn target_timespan_seconds(self) -> u32 {
         self.retarget_interval()
             .saturating_mul(self.target_spacing_seconds())
     }
 
-    /// Returns whether non-retarget blocks may use the test-network minimum-difficulty rule.
     #[must_use]
     pub const fn allow_min_difficulty_blocks(self) -> bool {
         match self {
@@ -546,7 +407,6 @@ impl Network {
         }
     }
 
-    /// Returns whether retarget heights keep the previous difficulty unchanged.
     #[must_use]
     pub const fn pow_no_retargeting(self) -> bool {
         match self {
@@ -555,7 +415,6 @@ impl Network {
         }
     }
 
-    /// Returns whether retargeting uses the first block of the period as the base difficulty.
     #[must_use]
     pub const fn enforce_bip94(self) -> bool {
         match self {
@@ -564,7 +423,6 @@ impl Network {
         }
     }
 
-    /// Returns the genesis block hash.
     #[must_use]
     pub fn genesis_block_hash(self) -> Hash256 {
         let hex = match self {
@@ -580,12 +438,6 @@ impl Network {
         }
     }
 
-    /// Returns the BIP325 signet challenge script, or `None` off signet.
-    ///
-    /// This is Core's default signet challenge, the 1-of-2 multisig that
-    /// `-signetchallenge` replaces; custom challenges are unsupported. It is
-    /// the one owner of the challenge: block validation and the mining
-    /// projections both read it here.
     #[must_use]
     pub const fn signet_challenge(self) -> Option<&'static [u8]> {
         match self {
@@ -594,12 +446,6 @@ impl Network {
         }
     }
 
-    /// Returns the network's genesis block.
-    ///
-    /// Decoded from the fixed consensus serialization copied from Bitcoin Core's
-    /// `chainparams.cpp` genesis (the same bytes `CreateGenesisBlock` produces);
-    /// [`Self::genesis_block_hash`] is asserted in debug builds and pinned by the
-    /// crate's differential tests.
     #[must_use]
     pub fn genesis_block(self) -> crate::Block {
         let bytes: &[u8] = match self {
@@ -621,7 +467,7 @@ impl Network {
 }
 
 /// Core's default signet challenge (`OP_1 <pubkey> <pubkey> OP_2 OP_CHECKMULTISIG`,
-/// `src/kernel/signet.h`).
+/// `src/signet.h`).
 const SIGNET_DEFAULT_CHALLENGE: &[u8] = &[
     0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3, 0xd4,
     0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d, 0x1e, 0x08,
@@ -630,18 +476,13 @@ const SIGNET_DEFAULT_CHALLENGE: &[u8] = &[
     0x51, 0x89, 0xf2, 0xe6, 0xc4, 0x52, 0xae,
 ];
 
-/// Bitcoin Core testnet3 genesis serialization.
 const TESTNET3_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae180101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
-/// Bitcoin Core mainnet genesis serialization.
 const MAINNET_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
-/// Bitcoin Core 27.0+ testnet4 genesis serialization.
 const TESTNET4_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000004e7b2b9128fe0291db0693af2ae418b767e657cd407e80cb1434221eaea7a07a046f3566ffff001dbb0c78170101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff5504ffff001d01044c4c30332f4d61792f323032342030303030303030303030303030303030303030303165626435386332343439373062336161396437383362623030313031316662653865613865393865303065ffffffff0100f2052a010000002321000000000000000000000000000000000000000000000000000000000000000000ac00000000";
 
-/// Bitcoin Core default-signet genesis serialization.
 const SIGNET_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a008f4d5fae77031e8ad222030101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
-/// Bitcoin Core regtest genesis serialization.
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
 const fn hex_nibble(byte: u8) -> u8 {
@@ -688,9 +529,6 @@ const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
     Hash256::from_le_bytes(&out)
 }
 
-// Bitcoin Core src/kernel/chainparams.cpp:
-// v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
-// v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
 const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 5] = [
     AssumeUtxoData {
         height: 840_000,
@@ -953,8 +791,6 @@ mod tests {
             } = network.chain_tx_data();
             assert!(tx_rate > 0.0, "{network:?} needs a non-zero rate");
             if matches!(network, Network::Regtest) {
-                // Core pins regtest at a zero baseline with a non-zero rate on
-                // purpose, so progress there is a function of time alone.
                 assert_eq!((time, tx_count), (0, 0));
             } else {
                 assert!(time > 0 && tx_count > 0, "{network:?}");
@@ -964,9 +800,6 @@ mod tests {
 
     #[test]
     fn mainnet_assume_utxo_data_matches_pinned_core() -> Result<(), crate::HashError> {
-        // Independent literals from Bitcoin Core src/kernel/chainparams.cpp:
-        // v31.1 (840k..935k): 9be056a8a72b624dae9623b2f7bded92c2a21c91
-        // v32.0rc1 (965k): d0231bb01d83178224bf7b198ba04f78cc2c89ef
         let expected_mainnet = [
             (
                 840_000,
@@ -1140,9 +973,6 @@ mod chain_params_tests {
         assert!(parsed[1..31].iter().all(|byte| *byte == 0));
     }
 
-    /// The literals are what Bitcoin Core writes in `chainparams.cpp`. Round-trip
-    /// them so a mistake in the parser, or a byte order mixed up on the way in,
-    /// shows up as a string that no longer matches the source it was copied from.
     #[test]
     fn minimum_chain_work_round_trips_to_the_hex_bitcoin_core_ships() {
         let expected = [
@@ -1174,8 +1004,6 @@ mod chain_params_tests {
 
     #[test]
     fn minimum_chain_work_compares_as_a_number_when_compared_as_bytes() {
-        // Big-endian, fixed width: array order is numeric order. The whole
-        // chain-work check rests on this, so state it rather than assume it.
         let smaller: [u8; 32] =
             decode_compiled_hex("00000000000000000000000000000000000000000000000000000000000000ff");
         let larger: [u8; 32] =

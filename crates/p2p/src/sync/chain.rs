@@ -6,8 +6,6 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 
-// Header admission is decided by the authoritative tree writer, so its
-// outcome vocabulary belongs to the chain crate; the seam shares it.
 pub use bitcoin_rs_chain::HeaderAdmission;
 pub use bitcoin_rs_chainstate::WindowApplyDisposition;
 pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;
@@ -20,22 +18,12 @@ use bitcoin_rs_primitives::Network;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
-/// Boxed source for seam failures: the executor forwards them to logs and
-/// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
 
-/// A window commit that stopped partway: `applied` committed, the block at
-/// index `applied` failed, and `invalidated` carries the subtree the
-/// implementation marked while the transition was held.
 pub struct WindowCommitError {
-    /// Blocks that committed before the failure.
     pub applied: usize,
-    /// How the executor must treat this failure.
     pub disposition: WindowApplyDisposition,
-    /// Hashes marked invalid while the transition was held; empty unless
-    /// `disposition` is [`WindowApplyDisposition::Permanent`].
     pub invalidated: Box<[Hash256]>,
-    /// The implementation's underlying failure.
     pub source: SyncChainError,
 }
 
@@ -60,59 +48,30 @@ impl core::fmt::Debug for WindowCommitError {
     }
 }
 
-/// Applied-chain seam driven by the block-download executor.
-///
-/// The implementation owns applied-tip mutation (node, ARCH-07) — header
-/// admission under the chain-transition lock, window commit, branch switch,
-/// and genesis bootstrap. The executor owns everything else.
 pub trait SyncChain: Send + Sync {
-    /// Pinned snapshot ancestor whose bodies historical validation requires.
-    /// This is independent of the moving foreground header tip.
     fn historical_base(&self) -> Option<Hash256> {
         None
     }
 
-    /// Replays bounded retained snapshot history, distinguishing local work
-    /// from genuinely missing pinned-ancestry bodies.
     fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         Ok(HistoricalAdvance::Complete)
     }
 
-    /// Validates a requested historical body through the chainstate owner.
     fn connect_historical(&self, _payload: &BlockPayload) -> Result<(), SyncChainError> {
         Err("historical validation is not configured".into())
     }
-    /// Network the applied chain validates against.
     fn network(&self) -> Network;
 
-    /// Read-only block tree (headers + applied chain topology).
     fn block_tree(&self) -> RwLockReadGuard<'_, BlockTree>;
 
-    /// Header (chain) tip published by header admission.
     fn chain_tip(&self) -> Option<Arc<TipSnapshot>>;
 
-    /// Applied tip published by commits and branch switches.
     fn applied_tip(&self) -> Option<Arc<TipSnapshot>>;
 
-    /// Applies genesis when nothing is applied yet.
     fn bootstrap_genesis(&self);
 
-    /// Admits a headers batch (header tip move + assume-valid re-evaluation
-    /// happen inside, under the implementation's transition lock).
-    ///
-    /// POST: `HeaderAdmission::Accepted::demoted_tip` is the chain-owned
-    ///   fact, forwarded unchanged: the valid header tip this batch moved onto
-    ///   another branch. It is `None` for a linear advance and when no tip was
-    ///   displaced; the seam never derives or defaults it.
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
-    /// Cumulative chain work a peer's header chain must demonstrate before
-    /// this node stores its headers (`Network::minimum_chain_work`).
-    ///
-    /// PRE: none.
-    /// POST: return the network's anti-DoS work threshold, the value that
-    ///   decides whether an inbound batch enters the download-twice presync
-    ///   or the direct admission path.
     /// INVARIANT: the threshold has exactly one source — the configured
     ///   network's parameter table; implementations override only to
     ///   substitute a fixture threshold.
@@ -120,31 +79,12 @@ pub trait SyncChain: Send + Sync {
         bitcoin_rs_chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
     }
 
-    /// Whether `block`'s body binds to its admitted header — txid merkle
-    /// root plus witness commitment under the tree's segwit-active rule for
-    /// the block's parent. `Ok(())` when bound or when the header is not in
-    /// the tree; `Err` rejects the delivery. The consensus rule and the
-    /// segwit-active derivation stay with the implementation; the executor
-    /// only owns the staging policy that calls it.
     fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError>;
 
-    /// Number of leading drained blocks that commit as one window
-    /// (apply-side batch policy).
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
-    /// Commits borrowed `payloads` in order as one chain transition without
-    /// cloning. `Ok(n)` = all `n` committed and settled. Borrowing preserves
-    /// the exact-serialization invariant; no payload bytes are copied.
     fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError>;
 
-    /// Moves the applied chain onto `target`'s branch. `staged_body`
-    /// resolves connect-side bodies from bounded staging; `connected_body`
-    /// runs once per committed connect so the executor can retire download
-    /// accounting.
-    ///
-    /// A failed connect reports the valid header tip its invalidation
-    /// displaced, if any, in `ReorgError::ConnectFailed::demoted_tip`; the
-    /// implementation forwards it unchanged.
     fn switch_to_branch(
         &self,
         target: NodeId,

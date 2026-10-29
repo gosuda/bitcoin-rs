@@ -10,17 +10,12 @@ use std::thread;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// Real block tree and pool behind every capability source, shared with the
-/// coinbase-budget proofs.
 pub(super) struct Sources {
     tree: BlockTree,
     pub(super) tip: TipSnapshot,
     pub(super) pool: Mutex<Mempool>,
-    // Signals a particular live-key read while the service holds its state lock.
     wait_probe: Mutex<Option<(usize, Sender<()>)>>,
-    /// Selections that walked the pool for the ordinary template.
     pub(super) ordinary_walks: AtomicUsize,
-    /// Selections that walked the pool under a coinbase budget.
     pub(super) budgeted_walks: AtomicUsize,
 }
 
@@ -66,9 +61,6 @@ impl MempoolSnapshotSource for Sources {
         payout: &[u8],
         budget: Option<CoinbaseBudget>,
     ) -> Result<Option<SelectedBody>, MiningControlError> {
-        // One read guard covers both sequence checks and the index walk; only
-        // the selected transactions leave the pool, and the guard drops
-        // before the service finishes the coinbase and Merkle roots.
         let pool = self.pool.lock();
         if expected_sequences.is_some_and(|(sequence, fee_revision)| {
             pool.sequence_number() != sequence || pool.fee_delta_sequence_number() != fee_revision
@@ -91,10 +83,6 @@ impl MempoolSnapshotSource for Sources {
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError> {
-        // One read guard covers the source sequences, the removal plan, the
-        // stable identity resolution, and the projected walk; only owned
-        // copies leave the pool, and the guard drops before the service
-        // finishes the candidate.
         let pool = self.pool.lock();
         let source_sequences = (pool.sequence_number(), pool.fee_delta_sequence_number());
         let plan = pool.plan_block_removals(block);
@@ -131,8 +119,6 @@ impl MempoolSnapshotSource for Sources {
     }
 }
 
-/// A service over `pool` with a real genesis block tree: the applied tip is
-/// genesis, so the candidate under assembly is block 1 on regtest.
 pub(super) fn service_over(pool: Mempool) -> TestResult<(Arc<Sources>, Arc<MiningService>)> {
     let mut tree = BlockTree::new();
     let genesis = Network::Regtest.genesis_block();
@@ -185,7 +171,6 @@ fn fixture() -> TestResult<(Arc<Sources>, Arc<MiningService>, Txid)> {
         if label == 1 {
             low = tx.txid();
         }
-        // Entries supply admitted mining facts; this is not a consensus-spend test.
         pool.insert_entry(MempoolEntry::new(tx, 100, fee, 1, 0, 0))?;
     }
     let (source, service) = service_over(pool)?;
@@ -206,7 +191,6 @@ fn prioritisation_rebuilds_cached_order_and_wakes_a_waiting_long_poll() -> TestR
     assert_eq!(first.template_id, legacy_id);
 
     let (entered_tx, entered_rx) = channel();
-    // First read: get_block_template's initial predicate. Second: the wait loop.
     *source.wait_probe.lock() = Some((2, entered_tx));
     let (done_tx, done_rx) = channel();
     let waiting = Arc::clone(&service);
@@ -214,13 +198,11 @@ fn prioritisation_rebuilds_cached_order_and_wakes_a_waiting_long_poll() -> TestR
         let _ = done_tx.send(waiting.get_block_template(Some(legacy_id.as_str()), None));
     });
     entered_rx.recv_timeout(Duration::from_secs(2))?;
-    // The signalled predicate holds this mutex. Acquiring it proves that the
-    // unchanged-key worker has released it into Condvar::wait_for.
     drop(service.state.lock());
     assert!(done_rx.try_recv().is_err());
     source.pool.lock().prioritise(low, 100_000)?;
     assert_eq!(source.current_revisions(), (original.0, original.1 + 1));
-    service.publish_generation(); // Existing prioritisetransaction RPC wake.
+    service.publish_generation();
     let next = done_rx.recv_timeout(Duration::from_millis(500))??.candidate;
     poll.join().map_err(|_| "long-poll worker panicked")?;
     assert_eq!(next.transactions[0].txid, low);

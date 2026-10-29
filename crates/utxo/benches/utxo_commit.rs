@@ -1,10 +1,3 @@
-//! Production-shaped UTXO commit benchmarks.
-//!
-//! The retained cases exercise the public `contract::commit_block_changes` path with a
-//! normal mixed-shard block, a concentrated worst-case block, and a spend-heavy
-//! block. Correctness edge cases belong in the UTXO test suite rather than in
-//! long-lived benchmark arms.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 
 #[global_allocator]
@@ -203,15 +196,9 @@ fn spend_fanout_case(seed: u64) -> (UtxoSet, BlockChanges) {
     (set, changes)
 }
 
-/// One deterministic workload seed shared by the timed arms and the
-/// measurement mode, so both paths measure identical inputs.
 const SYNTHETIC_SEED: u64 = 0x00ab_cdef;
-/// Deterministic workload seed for the spend-fanout arm, shared by both
-/// paths.
 const FANOUT_SEED: u64 = 0x0405_0607;
-/// Commit txid for the synthetic arms, shared by both paths.
 const SYNTHETIC_COMMIT_TXID: u64 = 0x0012_3456;
-/// Commit txid for the spend-fanout arm, shared by both paths.
 const FANOUT_COMMIT_TXID: u64 = 0x0412_1314;
 
 fn bench_synthetic(c: &mut Criterion, name: &str, shape: ShardShape) {
@@ -256,9 +243,6 @@ fn utxo_commit(c: &mut Criterion) {
     bench_spend_fanout(c);
 }
 
-/// Settles one workload's commit outside Criterion timing and prints the
-/// retained [`UtxoMemoryReport`] as one JSON line, so an external run can
-/// capture process peak RSS (for example `/usr/bin/time -v`) around it.
 fn measure_memory(arm: &str) -> Result<(), String> {
     let ((set, changes), commit_txid) = match arm {
         "existing" => (

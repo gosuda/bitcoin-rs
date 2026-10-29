@@ -1,26 +1,14 @@
-//! Mutation records for the mempool's mutation API.
-//!
-//! Every mutating [`Mempool`](crate::Mempool) method returns a
-//! [`MutationResult`] describing exactly what it committed, in commit order.
-//! The pool advances its [`Mempool::sequence_number`] counter exactly once
-//! per emitted change while the write lock is held, so each change in a
-//! batch carries a distinct, contiguous sequence value that observers can
-//! publish verbatim.
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_primitives::{Hash256, PeerEndpoint, Txid};
 
-/// Canonical modulo-2^64 arithmetic for mutation sequence values.
 pub(crate) struct MutationSequence;
 
 impl MutationSequence {
-    /// Advances the sequence for one committed change.
     pub(crate) const fn advance(current: u64) -> u64 {
         current.wrapping_add(1)
     }
 
-    /// Derives the first sequence value of a batch ending at `current`.
     pub(crate) fn base(current: u64, len: usize) -> u64 {
         let len = u64::try_from(len).unwrap_or(u64::MAX);
         if len == 0 {
@@ -30,55 +18,37 @@ impl MutationSequence {
         }
     }
 
-    /// Returns the sequence value at an index in a batch.
     pub(crate) fn at(base: u64, index: usize) -> Option<u64> {
         let offset = u64::try_from(index).ok()?;
         Some(base.wrapping_add(offset))
     }
 }
 
-/// Why an entry left the pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemovalReason {
-    /// The entry confirmed in a connected block.
     BlockInclusion,
-    /// A connected block's transaction took the entry's inputs.
     Conflict,
-    /// A BIP125 replacement evicted the entry.
     Replaced,
-    /// The entry descended from an evicted or replaced entry.
     Descendant,
-    /// Size or fee-rate policy evicted the entry.
     PolicyEviction,
-    /// The entry or an ancestor outlived `MEMPOOL_EXPIRY_SECS`.
     Expiry,
-    /// A wholesale clear emptied the pool.
     Clear,
-    /// A reorg disconnected the entry's containing state.
     Reorg,
 }
 
-/// What happened to one transaction in a committed mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationOutcome {
-    /// The transaction was admitted to the pool.
     Accepted,
-    /// The transaction left the pool for the recorded reason.
     Removed(RemovalReason),
 }
 
-/// One transaction's committed outcome, in commit order within a
-/// [`MutationResult`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MutationChange {
     /// Transaction id in native consensus byte order.
     pub txid: Hash256,
-    /// What happened to the transaction.
     pub outcome: MutationOutcome,
 }
 
-/// Builds a change for `txid`, converting the pool's internal `Txid` once at
-/// this seam.
 pub(crate) fn change(txid: &Txid, outcome: MutationOutcome) -> MutationChange {
     MutationChange {
         txid: Hash256::from(*txid),
@@ -86,10 +56,8 @@ pub(crate) fn change(txid: &Txid, outcome: MutationOutcome) -> MutationChange {
     }
 }
 
-/// The ordered record of one committed mempool mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MutationResult {
-    /// Committed changes in commit order.
     pub changes: Vec<MutationChange>,
     /// Mempool sequence assigned to `changes[0]`; each later change took the
     /// next value. `0` when `changes` is empty.
@@ -97,7 +65,6 @@ pub struct MutationResult {
 }
 
 impl MutationResult {
-    /// An empty result: nothing was committed and no sequence moved.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -106,19 +73,16 @@ impl MutationResult {
         }
     }
 
-    /// Number of committed changes.
     #[must_use]
     pub fn len(&self) -> usize {
         self.changes.len()
     }
 
-    /// Returns `true` when nothing was committed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.changes.is_empty()
     }
 
-    /// The sequence assigned to `changes[index]`, when in bounds.
     #[must_use]
     pub fn sequence_of(&self, index: usize) -> Option<u64> {
         if index >= self.changes.len() {
@@ -127,7 +91,6 @@ impl MutationResult {
         MutationSequence::at(self.sequence_base, index)
     }
 
-    /// The txid of every change that left the pool, in commit order.
     #[must_use]
     pub fn removed_txids(&self) -> Vec<Txid> {
         self.changes
@@ -138,47 +101,27 @@ impl MutationResult {
     }
 }
 
-/// Identifies the network peer a transaction arrived from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
-    /// The peer's logical endpoint; `None` for unidentified sessions.
     pub endpoint: Option<PeerEndpoint>,
-    /// The peer's destination, absent for anonymous inbound connections.
     pub addr: Option<bitcoin_rs_primitives::PeerEndpoint>,
-    /// The node-local id of the connection the peer arrived on.
     pub connection_id: u64,
 }
 
-/// How the transaction behind a committed mutation entered the node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
-    /// Submitted through RPC `sendrawtransaction` or the embedded
-    /// `Node::broadcast`.
     Rpc,
-    /// Submitted through an Esplora raw-transaction broadcast route.
     Esplora,
-    /// Revalidated from the optional restart snapshot before services start.
     Snapshot,
-    /// Relayed in from a network peer.
     Peer(PeerToken),
-    /// Re-admitted by a reorg's disconnect walk.
     Reorg,
-    /// Confirmed in by block application.
     Block,
 }
 
-/// The [`AdmissionOrigin`]s a local submission may carry.
-///
-/// [`MempoolGateway::submit_local_transaction`](crate::MempoolGateway::submit_local_transaction)
-/// takes this type, so a peer, reorg, or block origin cannot reach the local
-/// path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalOrigin {
-    /// Recorded as [`AdmissionOrigin::Rpc`].
     Rpc,
-    /// Recorded as [`AdmissionOrigin::Esplora`].
     Esplora,
-    /// Recorded as [`AdmissionOrigin::Snapshot`].
     Snapshot,
 }
 
@@ -192,18 +135,9 @@ impl From<LocalOrigin> for AdmissionOrigin {
     }
 }
 
-/// What the gateway hands its observers: the committed result plus how the
-/// mutating transaction entered the node.
-///
-/// [`MempoolGateway`](crate::MempoolGateway) clones one [`MutationResult`] into the envelope for
-/// each committed non-empty batch that has an observer attached, enqueues
-/// that envelope, then returns the original result to the caller. Observers
-/// receive `&MutationEnvelope` after the publish mutex is released.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MutationEnvelope {
-    /// How the transaction entered the node.
     pub origin: AdmissionOrigin,
-    /// The committed mutation, in commit order.
     pub result: MutationResult,
     /// Accepted bodies retained under the commit writer, keyed by change index.
     /// Empty when no observer requests transaction payloads.
@@ -214,8 +148,6 @@ pub struct MutationEnvelope {
 mod tests {
     use super::*;
 
-    // MPL-02 (docs/contracts/mempool-mutations.md): each emitted change owns
-    // one sequence; a position beyond that batch owns none.
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
         let result = MutationResult {
@@ -245,8 +177,6 @@ mod tests {
         assert_eq!(result.sequence_of(2), None);
     }
 
-    // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
-    // no sequence, including at index zero.
     #[test]
     fn empty_mutation_has_no_sequence_at_any_index() {
         let result = MutationResult::empty();

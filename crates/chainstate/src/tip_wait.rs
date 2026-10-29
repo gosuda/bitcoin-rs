@@ -9,7 +9,6 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::Chainstate;
 
-/// Coordination only: the published `ArcSwap` remains the sole tip value.
 #[derive(Default)]
 pub(crate) struct TipNotification {
     pub(crate) gate: Mutex<()>,
@@ -40,8 +39,6 @@ impl ActiveTipWait for Chainstate {
                 return Some(guard);
             }
         };
-        // An omitted current_tip captures the settled starting tip, just as
-        // Core's initial GetTip does. Do not start from a transient prefix.
         let starting_transition = if matches!(condition, TipWaitCondition::Changed(None)) {
             let Some(guard) = settled_transition() else {
                 return self.applied_tip.load_full();
@@ -61,10 +58,6 @@ impl ActiveTipWait for Chainstate {
                 return Some(tip);
             }
             if condition.matches(&tip) {
-                // Publication occurs inside a transition. Release the wait
-                // gate BEFORE acquiring transition exclusion; a publisher
-                // uses the opposite order. Only lock acquisition is timed:
-                // unsatisfied tip predicates park on the Condvar, not a poll.
                 drop(gate);
                 let Some(transition) = settled_transition() else {
                     return self.applied_tip.load_full();
@@ -74,9 +67,6 @@ impl ActiveTipWait for Chainstate {
                 if condition.matches(&settled) || stopped() {
                     return Some(settled);
                 }
-                // A transient reorg prefix does not satisfy a settled wait.
-                // Keep the gate until parking so the next publish cannot be
-                // lost after dropping the transition exclusion.
                 drop(transition);
             }
             if let Some(end) = deadline {
@@ -266,8 +256,6 @@ mod tests {
             TipWaitCondition::Changed(Some(genesis.hash)),
             Arc::new(AtomicBool::new(false)),
         );
-        // This is the private registration proof that the black-box header
-        // response comparison cannot observe through the public RPC surface.
         let deadline = Instant::now() + Duration::from_secs(2);
         while owner.tip_notification.changed.notify_all() == 0 {
             assert!(Instant::now() < deadline, "waiter must park before headers");
@@ -442,7 +430,6 @@ mod tests {
         let second_payload = BlockPayload::from_local(second);
         transition.connect(&second_payload).expect("second");
         drop(transition);
-        // Notify is only a test observation of parking, not publication.
         let deadline = Instant::now() + Duration::from_secs(1);
         while owner.tip_notification.changed.notify_all() == 0 {
             assert!(Instant::now() < deadline, "waiter must capture then park");

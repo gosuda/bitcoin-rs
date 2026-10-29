@@ -1,9 +1,3 @@
-//! Shared canned mining fixtures for the rpc integration tests.
-//!
-//! `compat_template`/`smoke_template` and `compat_info`/`smoke_info` were
-//! byte-identical literals duplicated across test binaries; both now read the
-//! same fixture, parameterized on the only differing fields.
-
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -15,8 +9,6 @@ use bitcoin_rs_primitives::{
     CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Witness,
 };
 
-/// Canned template; callers pin `capabilities` and `mutable` to the contract
-/// their test exercises.
 pub(crate) fn canned_template(
     capabilities: Vec<MiningCapability>,
     mutable: Vec<TemplateMutation>,
@@ -63,7 +55,6 @@ pub(crate) fn canned_template(
     }
 }
 
-/// Canned mining info for the typed mining-response schema.
 pub(crate) fn canned_info() -> MiningInfo {
     MiningInfo {
         blocks: 0,

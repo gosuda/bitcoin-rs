@@ -1,23 +1,4 @@
 //! Outbound block announcement owner: headers-first, high-bandwidth compact block,
-//! and `inv` fallback.
-//!
-//! # Architecture
-//!
-//! [`BlockAnnounceQueue`] is the non-blocking producer: a one-slot wake channel
-//! that coalesces notifications under backpressure. Chainstate remains the
-//! authoritative owner of the committed tip.
-//!
-//! [`BlockAnnouncer`] is the P2P-owned decision engine:
-//! - Tracks peer known-header/block state.
-//! - Tracks peer `sendheaders` preference (BIP130).
-//! - Maintains a bounded set of up to 3 peers promoted to BIP152 high-bandwidth mode.
-//! - Selects the best announcement mechanism for each peer:
-//!   1. BIP152 high-bandwidth compact block (`cmpctblock`) if selected, previous block is known, and not blocksonly.
-//!   2. BIP130 `headers` sequence (up to 8 headers) if `sendheaders` was negotiated and anchored to active chain.
-//!   3. Compatibility fallback `inv` (`MSG_BLOCK`) announcing the current active tip.
-//! - Discards stale announcements across reorgs.
-//! - Coalesces wakeups under queue saturation and rereads the committed tip from chainstate.
-//! - Disconnect cleanly removes peer announcement state.
 
 #[cfg(test)]
 use std::net::SocketAddr;
@@ -42,17 +23,12 @@ use crate::peer::COMPACT_BLOCK_VERSION;
 use crate::peer_info::PeerInfo;
 use crate::wire::Message;
 
-/// Core's `MAX_BLOCKS_TO_ANNOUNCE` (`net_processing.cpp:111`).
 pub const MAX_BLOCKS_TO_ANNOUNCE: usize = 8;
 
-/// Core's `MAX_PEERS_FOR_HIGH_BANDWIDTH_CMPCT` (`net_processing.cpp:142`).
 pub const MAX_HIGH_BANDWIDTH_PEERS: usize = 3;
 
-/// Drain poll interval when the block announce queue is empty.
 const ANNOUNCE_POLL: Duration = Duration::from_millis(100);
 
-/// Shared initial-block-download predicate behind the proactive P2P paths:
-/// true while the node's latch reports active for its network.
 pub(crate) fn ibd_active(
     ibd: Option<&(
         Arc<bitcoin_rs_chain::InitialBlockDownload>,
@@ -64,28 +40,21 @@ pub(crate) fn ibd_active(
     })
 }
 
-/// Configuration for block announcements.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlockAnnounceConfig {
-    /// Whether the node operates in blocksonly/no-tx mode.
-    /// In blocksonly mode, high-bandwidth compact block relay is disabled.
     pub blocksonly: bool,
 }
 
-/// Thread-safe non-blocking wake queue for committed-tip announcements.
 #[derive(Clone)]
 pub struct BlockAnnounceQueue {
     sender: Sender<()>,
 }
 
-/// Receiving end of the committed-tip wake queue.
 pub struct BlockAnnounceReceiver {
     receiver: Receiver<()>,
 }
 
 impl BlockAnnounceQueue {
-    /// Creates a one-slot wake queue. One pending token represents any number
-    /// of committed-tip changes because the consumer rereads chainstate.
     #[must_use]
     pub fn new() -> (Self, BlockAnnounceReceiver) {
         let (sender, receiver) = crossbeam_channel::bounded(1);
@@ -94,16 +63,12 @@ impl BlockAnnounceQueue {
         (queue, rx)
     }
 
-    /// Wakes the P2P consumer after a committed chain change. Never blocks
-    /// chainstate; a full slot already guarantees a future reread.
     pub fn wake(&self) -> bool {
         self.sender.try_send(()).is_ok()
     }
 }
 
 impl BlockAnnounceReceiver {
-    /// Receives one wake, or waits up to `timeout`, then drains redundant
-    /// tokens so the caller performs one chainstate reread.
     pub fn recv_timeout(
         &self,
         timeout: Duration,
@@ -113,7 +78,6 @@ impl BlockAnnounceReceiver {
         Ok(())
     }
 
-    /// Drains all available wake tokens.
     pub fn try_recv(&self) -> bool {
         let mut woke = false;
         while self.receiver.try_recv().is_ok() {
@@ -125,22 +89,11 @@ impl BlockAnnounceReceiver {
 
 #[derive(Default)]
 struct AnnounceState {
-    /// Up to 3 peers we have requested high-bandwidth compact blocks from via `sendcmpct(true, 2)`.
     /// BIP152: "Nodes MUST NOT send `sendcmpct(high_bandwidth=true)` to more than 3 peers."
     high_bandwidth_requested_peers: Vec<PeerSource>,
-    /// Observation cursor only; chainstate remains the authoritative tip owner.
     last_processed_tip: Option<Hash256>,
-    /// Greatest height announced early. Monotonic: a second block at the
-    /// same height (reorg race, duplicate connect) or a stale side branch
-    /// never re-announces.
     highest_fast_announce: u32,
-    /// Set when no ready peer could receive a post-commit announcement, or
-    /// the node's aggregate outbound budget refused a live peer. The worker
-    /// replans the committed tip on a later poll ([`BlockAnnouncer::process_tip_retry`]).
     announcement_retry: bool,
-    /// Bumped by the disconnect hook under the state lock. `process_tip`
-    /// compares epochs across its send window, so a disconnect between
-    /// planning and the final write re-arms instead of being erased.
     announcement_epoch: u64,
 }
 
@@ -151,7 +104,6 @@ struct PlannedAnnouncement {
     confirms_tip: bool,
 }
 
-/// Owner of block announcement selection, peer state, and high-bandwidth relay.
 pub struct BlockAnnouncer {
     peers: Arc<PeerTable>,
     chain_query: Arc<dyn ChainQuery>,
@@ -167,7 +119,6 @@ pub struct BlockAnnouncer {
 }
 
 impl BlockAnnouncer {
-    /// Constructs a new block announcer over the peer table and chain query.
     #[must_use]
     pub fn new(
         peers: Arc<PeerTable>,
@@ -186,7 +137,6 @@ impl BlockAnnouncer {
         }
     }
 
-    /// Attaches the stale-tip retainer and block tree reader so the announcer
     /// can relay recent stale tips to peers that negotiated BIP332.
     #[must_use]
     pub fn with_stale_tips(
@@ -199,16 +149,12 @@ impl BlockAnnouncer {
         self
     }
 
-    /// Attaches the early-announce body rendezvous shared with the chain
-    /// query, so compact `getdata` and `getblocktxn` for the most recently
-    /// announced hash answer from the held body before the store carries it.
     #[must_use]
     pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
         self.recent = recent;
         self
     }
 
-    /// Configures the IBD gate to suppress proactive block announcements during initial block download.
     #[must_use]
     pub fn with_ibd(
         mut self,
@@ -219,13 +165,11 @@ impl BlockAnnouncer {
         self
     }
 
-    /// Whether the node is currently in initial block download.
     #[must_use]
     pub fn in_ibd(&self) -> bool {
         ibd_active(self.ibd.as_ref())
     }
 
-    /// Returns the current list of peers we requested high-bandwidth compact blocks from.
     #[cfg(test)]
     pub fn high_bandwidth_requested_peers(&self) -> Vec<crate::PeerEndpoint> {
         let state = self.state.lock();
@@ -236,7 +180,6 @@ impl BlockAnnouncer {
             .collect()
     }
 
-    /// Returns the best block known for `addr`.
     #[cfg(test)]
     pub fn peer_known_block(&self, addr: crate::PeerEndpoint) -> Option<Hash256> {
         let source = self.peers.lease(addr)?.source(Some(addr));
@@ -245,12 +188,10 @@ impl BlockAnnouncer {
             .and_then(|state| state.last_announced_block)
     }
 
-    /// Called when a peer handshake completes.
     pub fn on_peer_ready(&self) {
         self.reconcile_high_bandwidth_peers();
     }
 
-    /// Called when a peer disconnects: cleans up its announcement state.
     pub fn on_peer_disconnected(&self, source: PeerSource) {
         if let Some(stale_tips) = &self.stale_tips {
             stale_tips.forget_peer(source);
@@ -259,35 +200,17 @@ impl BlockAnnouncer {
         state
             .high_bandwidth_requested_peers
             .retain(|candidate| *candidate != source);
-        // An enqueued announcement dies with the session that carried it; a
-        // same-address replacement starts with no announced-tip state. Arm
-        // the retry so the next poll replans the committed tip onto whatever
-        // sessions are live then, and bump the epoch: `process_tip` compares
-        // epochs around its send window so a disconnect between planning and
-        // discharge re-arms instead of being erased.
         state.announcement_retry = true;
         state.announcement_epoch += 1;
-        // Keep the table's `bip152_hb_to` snapshot consistent for the window
-        // where the entry outlives the worker's set membership.
         self.peers.note_high_bandwidth_selected(source, false);
     }
 
-    /// Initial fill: offer unused high-bandwidth slots to eligible peers,
-    /// proven deliverers first. Pushes the fresh promotions into `sent`.
     fn fill_high_bandwidth_slots(
         &self,
         state: &mut AnnounceState,
         eligible: &[(PeerSource, u64)],
         sent: &mut Vec<(Option<crate::PeerEndpoint>, Message)>,
     ) {
-        // BIP152 asks for high-bandwidth slots to go to peers that recently
-        // delivered blocks quickly. Filling strictly in session order
-        // freezes the initial fill on whoever connected first — measured
-        // live on testnet4, where a fresh v2/`hb=true` peer never won a
-        // slot from the earliest-connected Core relayers — so prefer proven
-        // deliverers here. Ties (all-zero sequences on quiet networks) keep
-        // session order because the sort is stable; the rotation pass in
-        // the caller still owns later upgrades.
         let mut fill_order = eligible.to_vec();
         fill_order.sort_by_key(|&(_, sequence)| std::cmp::Reverse(sequence));
         for &(source, _) in &fill_order {
@@ -309,8 +232,6 @@ impl BlockAnnouncer {
         }
     }
 
-    /// Reconciles the selected high-bandwidth compact-relay peers against
-    /// current ready sessions and IBD state.
     pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         let eligible: Vec<_> = self
             .peers
@@ -341,9 +262,6 @@ impl BlockAnnouncer {
             });
             let send_succeeded = match self.peers.send(source, message.clone()) {
                 Ok(()) => true,
-                // The node's aggregate budget is full while the peer is live:
-                // leave the selection untouched so the next reconcile retries
-                // the demotion instead of forgetting it.
                 Err(refusal) if refusal.is_saturated() => continue,
                 Err(_) => false,
             };
@@ -392,9 +310,6 @@ impl BlockAnnouncer {
                 });
                 match self.peers.send(demoted, demote.clone()) {
                     Ok(()) => sent.push((demoted.endpoint, demote)),
-                    // Aggregate budget full: the demotion did not happen, so
-                    // the selection is restored as it was and the next
-                    // reconcile retries the whole rotation.
                     Err(refusal) if refusal.is_saturated() => {
                         state
                             .high_bandwidth_requested_peers
@@ -429,8 +344,6 @@ impl BlockAnnouncer {
             .collect()
     }
 
-    /// Why the planner fell back to a plain `inv` for one peer. Kept out of
-    /// `planned_announcements` so the decision skeleton stays readable.
     fn inv_fallback_reason(
         send_headers: bool,
         known_position: Option<(Hash256, u32)>,
@@ -449,10 +362,6 @@ impl BlockAnnouncer {
         }
     }
 
-    /// One ready session's announcement anchor: its source, its recorded
-    /// compact preference, and its best demonstrated-or-announced position on
-    /// the active chain. Shared by post-commit planning and the pre-commit
-    /// early send so both read the same eligibility.
     fn peer_anchor(
         &self,
         session: &crate::PeerSession,
@@ -476,14 +385,7 @@ impl BlockAnnouncer {
         (source, peer_state, known_position)
     }
 
-    /// High-bandwidth compact-push candidacy for one ready session: the peer
-    /// asked for high-bandwidth compact blocks, is not blocksonly-gated,
     /// knows the tip's parent, and was not already sent this header. BIP152
-    /// needs no transaction-relay permission, so the peer's relay role is
-    /// not consulted: negotiation plus the node blocksonly gate decide. The
-    /// compact body builds lazily through `build`, so ineligible peers cost
-    /// no store load and the pre-commit path builds its hand-held body once
-    /// for all peers. One rule, two callers.
     fn plan_compact_push(
         &self,
         session: &crate::PeerSession,
@@ -495,8 +397,6 @@ impl BlockAnnouncer {
         if known_position.is_some_and(|(_, height)| height >= tip_height) {
             return None;
         }
-        // Peer must have explicitly requested high-bandwidth compact blocks
-        // from us.
         if peer_state.compact_high_bandwidth != Some(true)
             || peer_state.compact_version != Some(COMPACT_BLOCK_VERSION)
             || self.config.blocksonly
@@ -515,15 +415,6 @@ impl BlockAnnouncer {
         })
     }
 
-    /// Early compact-block announce for a PoW-valid tip child: relays the
-    /// block to eligible high-bandwidth peers before connect finishes, and
-    /// holds the body so compact `getdata` and `getblocktxn` answer before
-    /// the store carries it. Never publishes a tip and never advances the
-    /// mining generation; miners switch on the post-commit path. Skipped in
-    /// initial block download and for a height at or below the greatest
-    /// already announced early, so reorg races and duplicate connects send
-    /// nothing more. A later connect failure is not retracted — the send
-    /// stands, and the failure sends nothing further.
     pub fn announce_pow_valid(
         &self,
         block: &Block,
@@ -542,8 +433,6 @@ impl BlockAnnouncer {
                 return Vec::new();
             }
             state.highest_fast_announce = height;
-            // The one held body: `block` is borrowed from the connect call,
-            // so retaining it past this call needs exactly one copy.
             self.recent.store(hash, Arc::new(block.clone()));
         }
         let mut sent = Vec::new();
@@ -563,9 +452,6 @@ impl BlockAnnouncer {
             {
                 continue;
             }
-            // Record the per-peer announcement: the post-commit `process_tip`
-            // reads it as the peer's known position and sends no second
-            // `cmpctblock` for this hash.
             self.peers.note_announced_block(announcement.source, hash);
             sent.push((announcement.source.endpoint, announcement.message));
         }
@@ -586,10 +472,6 @@ impl BlockAnnouncer {
             let (source, peer_state, known_position) = self.peer_anchor(session);
 
             if known_position.is_some_and(|(_, height)| height >= tip.height) {
-                // If this peer already knows a block at or above our active tip,
-                // normal announcement is suppressed. For stale-tip relay peers,
-                // however, BIP332 requires always announcing the active tip so peers
-                // track our tip for fork point selection. We fall back to an `inv`.
                 let stale_relay = self
                     .peers
                     .announcement_state(source)
@@ -608,7 +490,6 @@ impl BlockAnnouncer {
                 continue;
             }
 
-            // Option A: High-Bandwidth BIP152 Compact Block
             if let Some(announcement) =
                 self.plan_compact_push(session, peer_state, known_position, tip.height, || {
                     self.chain_query
@@ -626,17 +507,6 @@ impl BlockAnnouncer {
                 continue;
             }
 
-            // Option B: Headers-First Announcement (BIP130)
-            //
-            // Anchoring requires a demonstrated position: a tip this
-            // connection delivered and the node accepted (`demonstrated_tips`
-            // from a headers-download round, or its last announced block). A
-            // sendheaders peer that only listens for announcements has no
-            // anchor, so it stays on the `inv` fallback — measured live on
-            // testnet4 and pinned by
-            // `test_sendheaders_peer_without_demonstrated_tip_gets_inv`.
-            // Core additionally anchors on the peer's own announcements;
-            // closing that gap is a sync-credit change, not a planner one.
             let send_headers = session.info.as_ref().is_some_and(|i| i.send_headers);
             if send_headers {
                 if let Some((known_hash, known_height)) = known_position
@@ -671,7 +541,6 @@ impl BlockAnnouncer {
                 }
             }
 
-            // Option C: `inv` Compatibility Fallback
             let reason = Self::inv_fallback_reason(send_headers, known_position, tip.height);
             let block_inv =
                 Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
@@ -692,7 +561,6 @@ impl BlockAnnouncer {
         planned
     }
 
-    /// Rereads and processes the current committed tip.
     pub fn process_tip(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         self.reconcile_high_bandwidth_peers();
         if self.in_ibd() {
@@ -704,9 +572,6 @@ impl BlockAnnouncer {
         let tip_hash = Hash256::from(tip.hash);
         let send_epoch = {
             let mut state = self.state.lock();
-            // Claim the observation only on the processing path. Planning is
-            // side-effect free, while this claim prevents concurrent workers
-            // from sending the same committed tip twice.
             if state.last_processed_tip == Some(tip_hash) {
                 return Vec::new();
             }
@@ -727,9 +592,6 @@ impl BlockAnnouncer {
             {
                 Ok(()) => {}
                 Err(refusal) => {
-                    // A live peer refused only because the node's aggregate
-                    // budget is full still needs its announcement: the tip is
-                    // replanned on a later poll.
                     refused_by_node_budget |= refusal.is_saturated();
                     continue;
                 }
@@ -740,14 +602,6 @@ impl BlockAnnouncer {
             }
             sent.push((announcement.source.endpoint, announcement.message));
         }
-        // Keep one retry intent across a disconnected interval. Each poll
-        // rereads chainstate, so reconnecting peers receive the current tip
-        // rather than a stored announcement from a superseded branch. A
-        // poll that delivered into a stable session set discharges a stale
-        // flag; refusal, an all-failed send, no ready peers, a delivered
-        // source that already lost its session, or a disconnect inside the
-        // send window keeps it armed. A disconnect after this write leaves
-        // the hook-armed flag standing.
         let lost_delivery = planned_sources
             .iter()
             .any(|source| !self.peers.is_current(*source));
@@ -761,19 +615,7 @@ impl BlockAnnouncer {
         sent
     }
 
-    /// Replans the committed tip after aggregate-budget refusal, all sends
-    /// failing, or processing with no ready peers.
-    ///
-    /// PRE: none.
-    /// POST: with a retry pending, the pending flag clears and the tip is
-    /// processed again as if it had not been seen. Continued refusal or no
-    /// ready peers rearms the retry. Peers that already know it are skipped
-    /// by the planner, and an `inv` fallback may repeat. Without a pending
-    /// retry, nothing happens.
     pub fn process_tip_retry(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
-        // IBD suppresses announcements entirely; consuming the intent here
-        // would drop a disconnect-armed retry before the first poll that can
-        // act on it. Keep it armed until `process_tip` can run.
         if self.in_ibd() {
             return Vec::new();
         }
@@ -787,14 +629,7 @@ impl BlockAnnouncer {
         self.process_tip()
     }
 
-    /// Synchronously drains the queue, coalesces to the latest tip, and processes it.
     /// Relays recent stale tips to ready peers that negotiated BIP332.
-    ///
-    /// PRE: none.
-    /// POST: sends at most [`crate::staletip::MAX_ADVERTISED_STALETIPS`] stale-tip announcements
-    ///   per peer, respecting peer `prefers_blocks`, rate bounds, and repeat/echo
-    ///   suppression. Sent tips are marked known via [`crate::sync::StaleTipRetainer::mark_known`]
-    ///   only after `peers.send` returns `Ok`.
     pub fn process_stale_tips(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         if self.in_ibd() {
             return Vec::new();
@@ -875,7 +710,6 @@ impl BlockAnnouncer {
     }
 }
 
-/// Dedicated background worker thread that drains `BlockAnnounceQueue` and announces new blocks.
 pub fn spawn_block_announce_worker(
     announcer: Arc<BlockAnnouncer>,
     rx: BlockAnnounceReceiver,
@@ -1162,9 +996,6 @@ mod tests {
         }
     }
 
-    /// An announcement the node aggregate refused was not delivered: the peer
-    /// stays connected and its known tip stays behind, the tip is not
-    /// reprocessed by plain repeats, and one retry announces it.
     #[test]
     fn announcement_saturated_retried() {
         let chain = Arc::new(MockAnnounceChain::new(2));
@@ -1210,8 +1041,6 @@ mod tests {
         );
     }
 
-    /// A demotion the node aggregate refused did not happen: the peer stays
-    /// selected, nothing is cancelled, and the next reconcile retries it.
     #[test]
     fn demotion_saturated_keeps_the_selection_and_retries() {
         let chain = Arc::new(MockAnnounceChain::new(2));
@@ -1232,7 +1061,6 @@ mod tests {
         assert_eq!(announcer.high_bandwidth_requested_peers(), vec![addr]);
         assert!(matches!(rx.try_recv(), Ok(Message::SendCmpct(_))));
 
-        // The peer stops offering compact relay while the aggregate is full.
         let mut info = test_peer_info(addr, true);
         info.compact_block_relay = false;
         table.publish_info(addr, &lease, info);
@@ -1517,11 +1345,6 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // Four eligible compact peers connected in order; a4 delivered three
-        // blocks and a1 one, the middle two none. BIP152 wants the slots on
-        // the proven deliverers, deepest sequence first. All peers are set
-        // up before any compact preference is recorded so the explicit
-        // reconcile below is the only one that sees eligible peers.
         let addrs = [
             test_addr(1201),
             test_addr(1202),
@@ -1547,7 +1370,6 @@ mod tests {
             vec![addrs[3], addrs[0], addrs[1]]
         );
 
-        // The selection is written through to the snapshot rpc reads.
         for (addr, expected) in addrs.iter().zip([true, true, false, true]) {
             let state = table
                 .announcement_state(source(&table, *addr))
@@ -1561,9 +1383,6 @@ mod tests {
 
     #[test]
     fn test_high_bandwidth_fill_keeps_session_order_without_evidence() {
-        // All sequences zero (quiet network): the stable sort keeps session
-        // order, so the fill behaves exactly like the old connection-order
-        // rule whenever no peer has delivered blocks yet.
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -1596,11 +1415,6 @@ mod tests {
 
     #[test]
     fn test_sendheaders_peer_without_demonstrated_tip_gets_inv() {
-        // Live-measured on testnet4: a sendheaders peer that never
-        // participates in a headers-download round has no demonstrated
-        // anchor, so the planner conservatively falls back to `inv` instead
-        // of BIP130 `headers`. See the Option B comment in
-        // `planned_announcements`.
         let chain = Arc::new(MockAnnounceChain::new(2));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -1611,7 +1425,6 @@ mod tests {
 
         let addr = test_addr(1221);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, true);
-        // No mark_known: the peer demonstrated nothing.
 
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
@@ -1717,7 +1530,6 @@ mod tests {
         assert_eq!(sent1.len(), 1);
         assert!(rx.try_recv().is_ok());
 
-        // Repeated tip event
         let sent2 = announcer.process_tip();
         assert!(sent2.is_empty(), "repeated tip event must be a no-op");
         assert!(rx.try_recv().is_err());
@@ -1770,7 +1582,6 @@ mod tests {
         let drained = announcer.drain_queue_and_process(&rx);
         assert_eq!(drained, 1);
 
-        // The wake carries no stale payload: the consumer rereads height 3.
         assert_eq!(announcer.peer_known_block(addr), Some(chain.hash_at(3)));
         let msg = peer_rx.try_recv().expect("peer received preserved tip");
         match msg {
@@ -1836,8 +1647,6 @@ mod tests {
             Some(chain.hash_at(0))
         );
 
-        // #1560: losing every send must retain the committed tip across a
-        // disconnected interval, without requiring another chain wake.
         assert!(lease.is_cancelled());
         assert_eq!(announcer.process_tip_retry(), Vec::new());
         assert_eq!(announcer.process_tip_retry(), Vec::new());
@@ -1881,14 +1690,10 @@ mod tests {
         let (_replacement, replacement_rx) = setup_peer(&table, &announcer, addr, true);
         mark_known(&table, &announcer, addr, chain.hash_at(0));
         chain.set_committed_height(2);
-        // A fresh committed tip arrives on a direct poll, not the retry path
-        // (which would consume the flag itself).
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
         assert!(replacement_rx.try_recv().is_ok());
 
-        // The successful delivery must not leave a stale flag that replays
-        // the tip to fallback peers on the next timeout.
         assert!(
             !announcer.state.lock().announcement_retry,
             "a delivered tip discharges the retry intent"
@@ -1910,10 +1715,6 @@ mod tests {
         let (old_lease, _rx) = setup_peer(&table, &announcer, addr, true);
         mark_known(&table, &announcer, addr, chain.hash_at(0));
 
-        // The tip enqueues to the session, then the session dies and a
-        // same-address replacement registers before the flag write. The
-        // enqueue is lost with the old session; the replacement has no
-        // announced-tip state.
         let sent = announcer.process_tip();
         assert_eq!(sent.len(), 1);
         let old_source = old_lease.source(Some(addr));
@@ -1956,7 +1757,6 @@ mod tests {
             queue: Some(queue),
             handle: Some(worker),
         };
-        // No chain wake: the worker must discover the new connection on a poll.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let message = loop {
             if let Ok(message) = rx.try_recv() {
@@ -2021,8 +1821,6 @@ mod tests {
         let _v1_peer = setup_peer(&table, &announcer, v1_addr, true);
         note_compact_preference(&table, v1_addr, false, 1);
 
-        // A block-relay-only peer with negotiated v2 compact relay is a
-        // promotion candidate: BIP152 needs no transaction-relay permission.
         let block_only_addr = test_addr(1007);
         let (block_only_tx, block_only_rx) = crate::test_support::message_channel();
         let block_only = PeerLease::new_block_relay(block_only_tx);
@@ -2246,19 +2044,16 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // addr1: peer wants high-bandwidth compact blocks AND knows prev_hash
         let addr1 = test_addr(1031);
         let (_lease1, _rx1) = setup_peer(&table, &announcer, addr1, true);
         note_compact_preference(&table, addr1, true, 2);
         mark_known(&table, &announcer, addr1, chain.hash_at(1));
 
-        // addr2: peer wants high-bandwidth compact blocks, but does NOT know prev_hash
         let addr2 = test_addr(1032);
         let (_lease2, _rx2) = setup_peer(&table, &announcer, addr2, true);
         note_compact_preference(&table, addr2, true, 2);
         mark_known(&table, &announcer, addr2, chain.hash_at(0));
 
-        // addr3: peer sent sendcmpct(false), knows prev_hash -> must NOT receive CmpctBlock
         let addr3 = test_addr(1033);
         let (_lease3, _rx3) = setup_peer(&table, &announcer, addr3, true);
         note_compact_preference(&table, addr3, false, 2);
@@ -2382,7 +2177,6 @@ mod tests {
             "the IBD poll must not consume the armed retry"
         );
 
-        // A fresh header younger than the IBD window ends initial download.
         let genesis = Network::Regtest.genesis_block();
         let recent = Header {
             prev_blockhash: genesis.block_hash(),
@@ -2469,7 +2263,6 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // Case A: distance = 5 <= MAX_BLOCKS_TO_ANNOUNCE (8) -> Headers
         let addr_a = test_addr(1051);
         let (_lease_a, rx_a) = setup_peer(&table, &announcer, addr_a, true);
         mark_known(&table, &announcer, addr_a, chain.hash_at(1));
@@ -2488,7 +2281,6 @@ mod tests {
         }
         assert!(rx_a.try_recv().is_ok());
 
-        // Case B: distance = 10 > MAX_BLOCKS_TO_ANNOUNCE (8) -> Inv fallback
         let chain = Arc::new(MockAnnounceChain::new(12));
         let table = Arc::new(PeerTable::new());
         let announcer = BlockAnnouncer::new(
@@ -2518,9 +2310,6 @@ mod tests {
         assert!(rx_b.try_recv().is_ok());
     }
 
-    /// One-coinbase native tip child for early-send tests. The encoder never
-    /// validates, so the merkle root stays default; only the header linkage
-    /// matters for anchor resolution.
     fn tip_child_block(prev: BlockHash, time: u32) -> Block {
         Block {
             header: Header {
@@ -2558,17 +2347,12 @@ mod tests {
             BlockAnnounceConfig::default(),
         );
 
-        // A high-bandwidth peer that demonstrated the tip (the parent).
         let addr = test_addr(1301);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
         note_compact_preference(&table, addr, true, 2);
         mark_known(&table, &announcer, addr, chain.hash_at(1));
-        // A second peer without compact relay must stay silent.
         let quiet = test_addr(1302);
         let (_quiet_lease, quiet_rx) = setup_peer(&table, &announcer, quiet, false);
-        // The second setup reconciles high-bandwidth slots and may promote
-        // the first peer (`SendCmpct`); drain it so the assertions below see
-        // only the early send.
         while rx.try_recv().is_ok() {}
 
         let block = tip_child_block(chain.block_hash_at(1), 1200);
@@ -2610,7 +2394,6 @@ mod tests {
         assert_eq!(announcer.announce_pow_valid(&block, hash, 2).len(), 1);
         while rx.try_recv().is_ok() {}
 
-        // Same height again — duplicate or reorg sibling — sends nothing.
         assert_eq!(announcer.announce_pow_valid(&block, hash, 2), []);
         assert!(rx.try_recv().is_err());
     }
@@ -2624,8 +2407,6 @@ mod tests {
             Arc::clone(&chain) as Arc<dyn ChainQuery>,
             BlockAnnounceConfig::default(),
         );
-        // High-bandwidth preference recorded, but the parent never
-        // demonstrated: the peer cannot anchor the tip child.
         let addr = test_addr(1321);
         let (_lease, rx) = setup_peer(&table, &announcer, addr, false);
         note_compact_preference(&table, addr, true, 2);
@@ -2669,8 +2450,6 @@ mod tests {
                     && matches!(message, Message::CmpctBlock(_))),
             "post-commit must not resend cmpctblock to the early peer: {sent:?}"
         );
-        // Reconciliation inside `process_tip` may promote the peer with
-        // `SendCmpct`; the wire must carry no second `cmpctblock`.
         while let Ok(message) = rx.try_recv() {
             assert!(
                 !matches!(message, Message::CmpctBlock(_)),
@@ -2827,9 +2606,6 @@ mod tests {
         table.note_stale_tip_relay(src, true);
         table.note_announced_tip(src, fork_hash, Some(1));
 
-        // The peer demonstrated and opened relay before the target was
-        // retained (campaign o2 demonstrates the main tip while the retainer
-        // is still empty, so its opening floor predates the later tip).
         let opened = announcer.process_stale_tips();
         assert!(opened.is_empty(), "empty retainer opens relay with no send");
 
@@ -2838,7 +2614,6 @@ mod tests {
             "demoted tip must be learned"
         );
 
-        // Same peer, same retained hash, body absent: prefers-blocks gets nothing.
         *chain.stale_announcement.lock() = Some(StaleTipAnnouncement {
             fork_point: fork_hash,
             headers: vec![CompressedHeader {
@@ -2861,7 +2636,6 @@ mod tests {
             "refused tip must stay unoffered, not marked known"
         );
 
-        // Same peer, same retained hash, body now available: sent exactly once.
         *chain.stale_announcement.lock() = Some(StaleTipAnnouncement {
             fork_point: fork_hash,
             headers: vec![CompressedHeader {

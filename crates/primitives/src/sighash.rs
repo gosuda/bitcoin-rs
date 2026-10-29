@@ -1,9 +1,4 @@
 //! Native signature-hash computation: legacy, BIP143 (segwit v0), and BIP341/342 (taproot).
-//!
-//! `SighashCache` holds a transaction reference plus lazily computed midstates. The
-//! algorithms are bug-for-bug compatible with Bitcoin Core's `interpreter.cpp`
-//! (`SignatureHash`, `SignatureHashSchnorr`). Durable tests pin Core's `sighash.json`
-//! vectors and published hash values.
 
 use std::sync::OnceLock;
 
@@ -19,100 +14,54 @@ use crate::{
     varint,
 };
 
-/// Position marker used when no `OP_CODESEPARATOR` executed before the opcodes being signed.
-///
-/// BIP341/BIP342 sentinel only: taproot commits the *position* of the last
-/// executed code separator into the sighash (`0xFFFF_FFFF` when none ran).
-/// The legacy path never uses this constant — it signs the *subscript from*
-/// the last executed separator to the script end instead, and the caller
-/// strips already-executed separator opcodes out of that subscript
-/// (deletion semantics, `remove_codeseparators` at the checker layer).
-/// `SegWit` v0 omits legacy `FindAndDelete`. The caller supplies the
-/// `BIP143` script-code suffix after the last executed `OP_CODESEPARATOR`;
-/// this method hashes that selected suffix verbatim.
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.
 #[cfg(test)]
 const TAPSCRIPT_LEAF_VERSION: u8 = 0xc0;
 
-/// Standard Bitcoin signature hash modes used by legacy, segwit, and taproot signing.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Sighash {
-    /// `SIGHASH_ALL`.
     All,
-    /// `SIGHASH_NONE`.
     None,
-    /// `SIGHASH_SINGLE`.
     Single,
-    /// `SIGHASH_ALL | SIGHASH_ANYONECANPAY`.
     AllAnyoneCanPay,
-    /// `SIGHASH_NONE | SIGHASH_ANYONECANPAY`.
     NoneAnyoneCanPay,
-    /// `SIGHASH_SINGLE | SIGHASH_ANYONECANPAY`.
     SingleAnyoneCanPay,
-    /// `SIGHASH_DEFAULT`, valid for taproot only.
     Default,
 }
 
-/// Errors returned while computing signature hashes.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SighashError {
-    /// The requested transaction input does not exist.
     #[error("input index {index} out of range for {total} inputs")]
-    InputOutOfRange {
-        /// Requested input index.
-        index: usize,
-        /// Number of transaction inputs.
-        total: usize,
-    },
-    /// `SIGHASH_DEFAULT` is valid for taproot only.
+    InputOutOfRange { index: usize, total: usize },
     #[error("SIGHASH_DEFAULT is valid only for taproot")]
     DefaultOnlyTaproot,
-    /// Taproot annex bytes failed BIP341 validation.
     #[error("invalid taproot annex: {0}")]
     InvalidAnnex(#[source] AnnexError),
-    /// Taproot `SIGHASH_SINGLE` requires an output at the same index as the input.
     #[error(
         "sighash single requires output at input index {input_index}; outputs length {outputs_length}"
     )]
     SingleMissingOutput {
-        /// Input index being signed.
         input_index: usize,
-        /// Number of transaction outputs.
         outputs_length: usize,
     },
-    /// Taproot prevout count must match the transaction input count.
     #[error("taproot prevouts length {provided} does not match input count {expected}")]
-    PrevoutsLength {
-        /// Supplied prevout count.
-        provided: usize,
-        /// Transaction input count.
-        expected: usize,
-    },
-    /// Taproot prevout lookup failed for the requested index.
+    PrevoutsLength { provided: usize, expected: usize },
     #[error("taproot prevout at index {index} unavailable")]
-    PrevoutsIndex {
-        /// Supplied prevout index.
-        index: usize,
-    },
-    /// The one-byte consensus form does not name a known sighash type.
+    PrevoutsIndex { index: usize },
     #[error("unknown sighash type byte {0:#04x}")]
     UnknownType(u8),
 }
 
-/// BIP341 annex validation failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AnnexError {
-    /// The annex is empty.
     #[error("annex is empty")]
     Empty,
-    /// The annex does not start with the mandatory 0x50 prefix byte.
     #[error("annex must start with the 0x50 prefix byte")]
     InvalidFirstByte,
 }
 
-/// The masked base type of a legacy sighash flag (Core's `nHashType & 0x1f | 0x80` mask).
 #[derive(Copy, Clone)]
 enum EcdsaType {
     All,
@@ -124,9 +73,6 @@ enum EcdsaType {
 }
 
 impl EcdsaType {
-    /// Masks a raw 32-bit sighash flag down to the representable base type, mirroring
-    /// Core's `SignatureHash`: stray middle bits are ignored, the ANYONECANPAY bit and
-    /// the `0x1f` base bits decide.
     const fn from_consensus(n: u32) -> Self {
         let masked = (n & 0x1f) | (n & 0x80);
         match masked {
@@ -168,13 +114,6 @@ impl EcdsaType {
     }
 }
 
-/// Lazily cached signature hashes for one transaction.
-///
-/// The taproot amount/scriptPubKey midstates assume the same prevout set is supplied to
-/// every call on this cache, including concurrent calls; construct a fresh cache when
-/// the prevout set changes. Aggregate hashes initialize once and can be shared across
-/// parallel input checks. Script code, input index, hash type, annex and code-separator
-/// position remain arguments of each digest.
 pub struct SighashCache<'t> {
     tx: &'t Tx,
     segwit_prevouts: OnceLock<Hash256>,
@@ -188,7 +127,6 @@ pub struct SighashCache<'t> {
 }
 
 impl<'t> SighashCache<'t> {
-    /// Constructs a cache over `tx` with all midstates uninitialized.
     #[must_use]
     pub fn new(tx: &'t Tx) -> Self {
         Self {
@@ -204,21 +142,6 @@ impl<'t> SighashCache<'t> {
         }
     }
 
-    /// Computes the pre-segwit legacy signature hash for `sighash_type` as a raw 32-bit
-    /// flag. Stray middle bits are ignored when classifying (Core's `& 0x1f | 0x80` mask)
-    /// but the raw value is appended to the hash. The `SIGHASH_SINGLE` bug is reproduced:
-    /// when the masked type is SINGLE and `input_index` has no matching output, the
-    /// uint256 value 1 is returned.
-    ///
-    /// Legacy-only semantics, deliberately isolated from the other two families:
-    /// `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
-    /// ANYONECANPAY single-input substitution, the zeroed sibling sequences and
-    /// blanked sibling outputs of NONE/SINGLE, and the code-separator subscript
-    /// deletion performed by the caller before this function, all live here and
-    /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
-    /// verbatim and zeroes whole fields instead, and
-    /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
-    /// no script-code concept at all.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
@@ -270,7 +193,6 @@ impl<'t> SighashCache<'t> {
                     if n == input_index {
                         output.consensus_encode(writer);
                     } else {
-                        // Core blanks non-matching outputs to value -1 with an empty script.
                         writer.write_all(&u64::MAX.to_le_bytes());
                         write_compact(writer, 0);
                     }
@@ -284,12 +206,6 @@ impl<'t> SighashCache<'t> {
         Ok(finalize_double_sha256(engine))
     }
 
-    /// Computes the BIP143 segwit-v0 signature hash (p2wpkh and p2wsh alike: the caller
-    /// supplies the witness script / p2wpkh template as `script_code`).
-    ///
-    /// `script_code` is hashed verbatim: BIP143 has no code-separator deletion, no
-    /// SINGLE blanking of individual outputs, and no uint256-one bug — those are
-    /// legacy-only (see [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
         &self,
         input_index: usize,
@@ -301,14 +217,6 @@ impl<'t> SighashCache<'t> {
         self.segwit_v0_signature_hash_raw(input_index, script_code, value, raw)
     }
 
-    /// Computes the BIP143 digest for a raw ECDSA hash type.
-    ///
-    /// Field selection uses the low five bits and `SIGHASH_ANYONECANPAY`, while all
-    /// 32 bits are serialized into the digest. Undefined ECDSA hash types remain
-    /// valid without `STRICTENC`; enforcing that policy belongs to the script
-    /// checker, not the digest engine. Raw zero is valid here, unlike the typed
-    /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
-    /// script-code suffix verbatim.
     pub fn segwit_v0_signature_hash_raw(
         &self,
         input_index: usize,
@@ -355,9 +263,6 @@ impl<'t> SighashCache<'t> {
                     output.consensus_encode(single_writer);
                     finalize_double_sha256(single)
                 }
-                // BIP143 uses zero hashOutputs when SINGLE has no matching output. The
-                // complete preimage is still hashed and a signature over that digest can
-                // verify; this is not the legacy SINGLE bug.
                 None => zero,
             }
         } else {
@@ -380,9 +285,11 @@ impl<'t> SighashCache<'t> {
         Ok(finalize_double_sha256(engine))
     }
 
-    /// Computes the BIP341 taproot signature hash. `leaf_hash_code_separator` is `None`
-    /// for key-path spends and `Some((leaf_hash, code_separator_position))` for script
-    /// path spends (BIP342). The tagged hash includes Core's zero epoch byte.
+    /// Computes the BIP341 taproot signature hash.
+    ///
+    /// `leaf_hash_code_separator` is `None` for key-path spends and `Some((leaf_hash,
+    /// code_separator_position))` for script path spends (BIP342). The tagged hash
+    /// includes Core's zero epoch byte.
     pub fn taproot_signature_hash(
         &self,
         input_index: usize,
@@ -419,7 +326,7 @@ impl<'t> SighashCache<'t> {
         let is_anyone_can_pay = ty_byte & 0x80 != 0;
 
         let mut msg = Vec::with_capacity(64 + total * 40 + self.tx.outputs.len() * 16);
-        msg.push(0x00); // epoch (Core: SignatureHashSchnorr epoch 0)
+        msg.push(0x00);
         msg.push(ty_byte);
         msg.extend_from_slice(&self.tx.version.to_le_bytes());
         msg.extend_from_slice(&self.tx.lock_time.to_le_bytes());
@@ -463,7 +370,7 @@ impl<'t> SighashCache<'t> {
         }
         if let Some((leaf_hash, code_separator_position)) = leaf_hash_code_separator {
             msg.extend_from_slice(leaf_hash.as_byte_array());
-            msg.push(0x00); // key version 0
+            msg.push(0x00);
             msg.extend_from_slice(&code_separator_position.to_le_bytes());
         }
 
@@ -525,7 +432,6 @@ impl<'t> SighashCache<'t> {
 }
 
 impl Sighash {
-    /// Returns the consensus byte for the sighash mode.
     #[must_use]
     pub const fn to_u8(self) -> u8 {
         match self {
@@ -539,7 +445,6 @@ impl Sighash {
         }
     }
 
-    /// Parses the one-byte consensus form of a sighash mode (BIP341).
     pub const fn from_consensus_u8(byte: u8) -> Result<Self, SighashError> {
         match byte {
             0x00 => Ok(Self::Default),
@@ -566,8 +471,6 @@ impl Sighash {
     }
 }
 
-/// Computes the BIP341 tapleaf hash for a leaf script at `leaf_version`
-/// (`0xc0` for BIP342 tapscript).
 #[must_use]
 pub fn tapleaf_hash(leaf_version: u8, script: &[u8]) -> Hash256 {
     let len = varint::encode(compact_len(script.len()));
@@ -643,7 +546,6 @@ mod tests {
         let input = crate::TxIn {
             previous_output: OutPoint::new(Txid(Hash256::default()), 0xffff_ffff),
             script_sig: crate::Script::new(),
-            // BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
             sequence: crate::Sequence::ENABLE_RBF_NO_LOCKTIME,
             witness: crate::Witness::new(),
         };
@@ -702,10 +604,6 @@ mod tests {
         }
     }
 
-    // Independent compatibility pin. The digest was generated with Bitcoin Core
-    // v27.0's `SignatureHash`/`SignatureHashWitnessV0` implementation (the
-    // corresponding tx, script, value, and flag are the inputs below), then
-    // recorded here so this test does not compare two native implementations.
     #[test]
     fn bip143_sighash_pins_single() {
         let tx = synthetic_tx(2);
@@ -723,9 +621,6 @@ mod tests {
         );
     }
 
-    // Independent compatibility pins generated by Bitcoin Core v27.0's
-    // `SignatureHashSchnorr`/Tapscript sighash implementation. The expected
-    // digests are checked in rather than obtained from another native wrapper.
     #[test]
     fn bip341_key_path_and_bip342_script_path_pins() {
         let tx = synthetic_tx(2);
@@ -833,8 +728,6 @@ mod tests {
 
     #[test]
     fn legacy_masked_sighash_flags_pin_raw_wire_patterns() {
-        // Stray middle bits are masked away for classification but the raw value is
-        // appended to the hash; Core's sighash.json exercises exactly these shapes.
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x52, 0x53];
         #[expect(

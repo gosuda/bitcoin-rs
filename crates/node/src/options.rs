@@ -1,21 +1,3 @@
-//! The node option table: every operator option declared once.
-//!
-//! [`option_rows!`] holds one row per operator-settable node option. Each row
-//! names its configuration slot, its text value grammar, and its spelling on
-//! every process-input surface: the command line, the environment, the TOML
-//! configuration file, and Bitcoin Core's `bitcoin.conf`. Consumer macros
-//! derive each surface from the same rows, so an option is written once and
-//! appears everywhere with one grammar.
-//!
-//! PRE: each row names a [`UserConfig`] slot that is `None` until a surface
-//! sets it.
-//! POST: every surface a row lists parses its own spelling of that option
-//! into the slot with the row's grammar.
-//! INVARIANT: a surface column absent from a row means the option does not
-//! exist on that surface. The chainstate-journal bounds are environment-only
-//! (their TOML spellings live inside the `chainstate_journal` table group),
-//! and the notification adapters are a TOML-only whole-value option.
-
 use std::convert::Infallible;
 use std::ffi::OsStr;
 use std::fmt;
@@ -33,37 +15,23 @@ use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
 
-/// Canonical subnet type shared by every process-input surface.
 pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
-/// Network label for `--onlynet`.
 pub use bitcoin_rs_primitives::NetworkLabel;
 
-/// Parses a network selection spelling.
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
     NetworkSelection::from_str(value)
 }
 
-/// Parses a storage backend name.
 pub fn parse_storage_backend(value: &str) -> std::result::Result<StorageBackend, String> {
     StorageBackend::from_str(value)
 }
 
-/// Parses a script-index mode, keeping the historical boolean spellings.
 pub fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, String> {
     ScriptIndexMode::parse(value).ok_or_else(|| {
         format!("invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean")
     })
 }
 
-/// Verifies that a portable index bundle path is non-empty, not merely
-/// whitespace, and contains no NUL byte.
-///
-/// PRE: none; operates only on the path's encoded bytes, without filesystem I/O.
-/// POST: returns `Ok(())` when `path` is usable; returns the specific reason
-///   when it is not.
-/// INVARIANT: this is the single authority for index bundle path validity,
-///   shared by process-input parsers and the post-resolution configuration
-///   validator.
 pub fn check_index_bundle_path(
     path: &std::path::Path,
 ) -> std::result::Result<(), IndexBundleDirError> {
@@ -77,33 +45,20 @@ pub fn check_index_bundle_path(
     Ok(())
 }
 
-/// Parses a portable index bundle directory: any nonblank path without a NUL.
-///
-/// PRE: `value` is the operator's text for `index_bundle_import` or
-/// `index_bundle_export`.
-/// POST: the path is returned verbatim; no filesystem access happens here, so
-/// existence and writability are checked only when the bundle directive runs.
-/// INVARIANT: an empty or blank value is an error on every surface rather than
-/// a quiet "unset", because an operator who wrote the key meant to run a
-/// bundle operation.
 pub fn parse_index_bundle_dir(value: &str) -> std::result::Result<PathBuf, IndexBundleDirError> {
     let path = PathBuf::from(value);
     check_index_bundle_path(&path)?;
     Ok(path)
 }
 
-/// Why an index bundle directory value was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum IndexBundleDirError {
-    /// The value was empty or only whitespace.
     #[error("index bundle directory must not be empty")]
     Empty,
-    /// The value contained a NUL byte, which no path can hold.
     #[error("index bundle directory must not contain a NUL byte")]
     Nul,
 }
 
-/// Parses a validation mode.
 pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, String> {
     ValidationMode::parse(value).ok_or_else(|| {
         format!(
@@ -112,14 +67,12 @@ pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode,
     })
 }
 
-/// Parses a validation engine name.
 pub fn parse_validation_engine(value: &str) -> std::result::Result<ValidationEngine, String> {
     ValidationEngine::parse(value).ok_or_else(|| {
         format!("invalid validation-engine value `{value}`: expected `native` or `kernel`")
     })
 }
 
-/// Parses an environment or file boolean.
 fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -128,15 +81,12 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
-/// Parses P2P message-start bytes as eight hexadecimal characters.
 pub fn parse_p2p_magic(value: &str) -> Result<[u8; 4]> {
     let value = value.trim();
     <[u8; 4]>::from_hex(value)
         .map_err(|_| anyhow::anyhow!("p2p magic must be exactly eight hexadecimal characters"))
 }
 
-/// Parses one fixed outbound peer endpoint: a socket address or a
-/// `host:port` pair whose hostname is resolved later.
 pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String> {
     let value = value.trim();
     if value.parse::<SocketAddr>().is_ok() {
@@ -153,7 +103,6 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String
     Ok(value.to_owned())
 }
 
-/// Parse one allowed remote network without DNS resolution.
 pub fn parse_peer_network(value: &str) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, String> {
     value.parse().map_err(str::to_owned)
 }
@@ -167,7 +116,6 @@ fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> 
         .collect()
 }
 
-/// Parses a comma-separated listener bind list.
 fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
     value
         .split(',')
@@ -176,12 +124,6 @@ fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
         .collect()
 }
 
-/// Parses a comma-separated fixed-peer list.
-///
-/// Every segment must be one valid endpoint — the same per-segment rule the
-/// CLI applies after its delimiter split and TOML applies per array element,
-/// so no surface quietly accepts a trailing or doubled comma that another
-/// rejects. An all-empty value still means "unset".
 fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     let value = value.trim();
     if value.is_empty() {
@@ -193,7 +135,6 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Parses one `--onlynet` network label.
 pub fn parse_network_label(
     value: &str,
 ) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, String> {
@@ -206,7 +147,6 @@ pub fn parse_network_label(
     }
 }
 
-/// Parses an operator discouragement-exemption subnet.
 pub fn parse_noban_subnet(
     value: &str,
 ) -> std::result::Result<bitcoin_rs_p2p::IpSubnet, bitcoin_rs_p2p::SubnetParseError> {
@@ -223,23 +163,16 @@ fn parse_noban_list(value: &str) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>> {
         .collect()
 }
 
-/// Accepts any text as a free-form string.
-///
-/// The wrap is deliberate: a row's grammar is one function shape, so an option
-/// that cannot fail still reports through `Result`.
 #[expect(clippy::unnecessary_wraps)]
 fn parse_text(value: &str) -> std::result::Result<String, Infallible> {
     Ok(value.to_owned())
 }
 
-/// Accepts any text as a filesystem path, for the same reason as
-/// [`parse_text`].
 #[expect(clippy::unnecessary_wraps)]
 fn parse_path(value: &str) -> std::result::Result<PathBuf, Infallible> {
     Ok(PathBuf::from(value))
 }
 
-/// Applies a row grammar to one text value.
 fn parsed<T, E: fmt::Display>(
     value: &str,
     grammar: fn(&str) -> std::result::Result<T, E>,
@@ -247,14 +180,12 @@ fn parsed<T, E: fmt::Display>(
     grammar(value).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// Reads an environment value, naming the variable when it is not UTF-8.
 fn environment_text<'a>(key: &str, value: &'a OsStr) -> Result<&'a str> {
     value
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("environment variable {key} is not valid UTF-8"))
 }
 
-/// One TOML key arm of the `UserConfig` deserializer.
 macro_rules! toml_row {
     ($key:ident, $($slot:ident).*, $map:ident, $matched:ident, native($want:literal)) => {
         if $key == $want {
@@ -295,13 +226,10 @@ macro_rules! toml_row {
     };
 }
 
-/// Re-raises a value-grammar error as a deserializer error.
 fn toml_error<E: fmt::Display, F: serde::de::Error>(error: E) -> F {
     F::custom(error)
 }
 
-/// Generates the source-layer types, the environment surface, and the flat
-/// TOML surface from the option table.
 macro_rules! emit_user_config {
     (
         fields {
@@ -345,8 +273,6 @@ macro_rules! emit_user_config {
             }
         )*
 
-        /// One parser-independent configuration layer: every option is a slot
-        /// that is `None` until a surface sets it.
         #[derive(Clone, Debug, Default)]
         pub struct UserConfig {
             $(
@@ -360,16 +286,6 @@ macro_rules! emit_user_config {
         }
 
         impl UserConfig {
-            /// Overlays `upper` onto `self` field by field: a field `upper`
-            /// sets wins, a field `upper` leaves unset keeps this layer's
-            /// value.
-            ///
-            /// INVARIANT: the RPC credentials are one auth group rather than
-            /// three independent fields. The highest auth-bearing layer owns
-            /// the mode: a layer that sets a cookie drops the basic
-            /// credentials it accumulated, and a layer that sets either basic
-            /// credential drops an accumulated cookie. Within one layer the
-            /// two halves of Basic authentication merge field-wise.
             pub fn overlay(&mut self, upper: &Self) {
                 $(
                     if upper.$fid.is_some() {
@@ -391,11 +307,6 @@ macro_rules! emit_user_config {
                 }
             }
 
-            /// Parses one environment entry into this layer.
-            ///
-            /// PRE: `key` is an environment variable name.
-            /// POST: when `key` names a table option, that slot holds the
-            /// parsed value; any other name leaves this layer untouched.
             pub fn apply_env(&mut self, key: &str, value: &OsStr) -> Result<()> {
                 match key {
                     $(
@@ -429,8 +340,6 @@ macro_rules! emit_user_config {
             where
                 D: serde::Deserializer<'de>,
             {
-                /// The TOML spellings this layer accepts, for the
-                /// unknown-field error.
                 const TOML_KEYS: &[&str] = &[
                     $(
                         $( $tkey, )?
@@ -501,94 +410,53 @@ macro_rules! emit_user_config {
 }
 
 #[macro_export]
-/// Forwards the canonical option table to a consumer macro.
-///
-/// The table grammar is one `fields` block of top-level rows and one `groups`
-/// block of grouped rows. Each row carries its documentation, its type, and
-/// any of four surface columns:
-///
-/// ```text
-/// fields {
-///     /// help text
-///     id: Type {
-///         cli[#[arg(long = "flag", …)]]  env["BITCOIN_RS_ID", grammar]
-///         toml native("key")             conf["core-key"]
-///     }
-/// }
-/// groups {
-///     /// group help text
-///     group id: GroupType table("nested-key") extra-attrs {
-///         /// help text
-///         field as id: Type { …same columns… }
-///     }
-/// }
-/// ```
-///
-/// `toml` modes are `native` (the value's own deserializer), `text` (one
-/// string through the row grammar), and `each` (a list, element by element).
-/// A `table` group deserializes as one nested TOML table and its rows carry
-/// no TOML column.
-///
-/// Invoke it with a consumer macro name; the consumer receives the canonical
-/// table and expands the surface it owns.
 macro_rules! option_rows {
     ($m:ident) => {
         $m! {
             fields {
-                /// Network profile.
                 network: Option<NetworkSelection> {
                     cli[#[arg(long = "network", value_parser = parse_network)]]
                     env["BITCOIN_RS_NETWORK", parse_network]
                     toml text("network", parse_network)
                 }
-                /// Node data directory.
                 data_dir: Option<PathBuf> {
                     cli[#[arg(long = "data-dir")]]
                     env["BITCOIN_RS_DATA_DIR", parse_path]
                     toml native("data_dir")
                 }
-                /// Save eligible mempool transactions on clean shutdown and revalidate them on startup.
                 persist_mempool: Option<bool> {
                     cli[#[arg(long = "persist-mempool")]]
                     env["BITCOIN_RS_PERSIST_MEMPOOL", parse_bool]
                     toml native("persist_mempool")
                 }
-                /// Restart snapshot byte budget in MiB; raise to retain a larger pool.
                 mempool_snapshot_max_mb: Option<u64> {
                     cli[#[arg(long = "mempool-snapshot-max-mb")]]
                     env["BITCOIN_RS_MEMPOOL_SNAPSHOT_MAX_MB", str::parse]
                     toml native("mempool_snapshot_max_mb")
                 }
-                /// Restart snapshot restore timeout in seconds; raise for large or complex mempools.
                 mempool_snapshot_restore_timeout_secs: Option<u64> {
                     cli[#[arg(long = "mempool-snapshot-restore-timeout-secs")]]
                     env["BITCOIN_RS_MEMPOOL_SNAPSHOT_RESTORE_TIMEOUT_SECS", str::parse]
                     toml native("mempool_snapshot_restore_timeout_secs")
                 }
-                /// External notification adapters. `None` means this layer does not
-                /// speak to them.
                 notifications: Option<NotificationConfig> {
                     cli[#[arg(skip)]]
                     toml native("notifications")
                 }
             }
             groups {
-                /// User-supplied storage overrides.
                 group storage: StorageOverrides {
-                    /// Selected storage backend.
                     backend as storage_backend: Option<StorageBackend> {
                         cli[#[arg(long = "storage-backend", value_parser = parse_storage_backend)]]
                         env["BITCOIN_RS_STORAGE_BACKEND", parse_storage_backend]
                         toml text("storage_backend", parse_storage_backend)
                     }
-                    /// Database cache budget in MiB.
                     dbcache_mb as dbcache_mb: Option<u64> {
                         cli[#[arg(long = "dbcache-mb")]]
                         env["BITCOIN_RS_DBCACHE_MB", str::parse]
                         toml native("dbcache_mb")
                         conf["dbcache"]
                     }
-                    /// Pruning target in MiB.
                     prune_target_mb as prune_target_mb: Option<u64> {
                         cli[#[arg(long = "prune-target-mb")]]
                         env["BITCOIN_RS_PRUNE_TARGET_MB", str::parse]
@@ -596,202 +464,166 @@ macro_rules! option_rows {
                         conf["prune"]
                     }
                 }
-                /// User-supplied P2P overrides.
                 group p2p: P2pOverrides {
-                    /// P2P message-start bytes.
                     magic as p2p_magic: Option<[u8; 4]> {
                         cli[#[arg(long = "p2p-magic", value_parser = parse_p2p_magic)]]
                         env["BITCOIN_RS_P2P_MAGIC", parse_p2p_magic]
                         toml text("p2p_magic", parse_p2p_magic)
                     }
-                    /// P2P listener bind addresses.
                     listen as p2p_listen: Option<Vec<SocketAddr>> {
                         cli[#[arg(long = "p2p-listen", value_delimiter = ',')]]
                         env["BITCOIN_RS_P2P_LISTEN", parse_socket_list]
                         toml native("p2p_listen")
                     }
-                    /// Whether DNS seeds are enabled.
                     dns_seeds as dns_seeds_enabled: Option<bool> {
                         cli[#[arg(long = "dns-seeds-enabled")]]
                         env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
                         toml native("dns_seeds_enabled")
                         conf["dnsseed"]
                     }
-                    /// Optional Bitcoin Core `ASMap` file for network diversity.
                     asmap as asmap: Option<PathBuf> {
                         cli[#[arg(long = "asmap")]]
                         env["BITCOIN_RS_ASMAP", parse_path]
                         toml native("asmap")
                     }
-                    /// Subnets exempt from automatic discouragement; explicit bans still apply.
                     noban_subnets as p2p_noban: Option<Vec<$crate::options::IpSubnet>> {
                         cli[#[arg(long = "p2p-noban", value_delimiter = ',', value_parser = $crate::options::parse_noban_subnet)]]
                         env["BITCOIN_RS_P2P_NOBAN", parse_noban_list]
                         toml each("p2p_noban", parse_noban_subnet)
                     }
-                    /// Fixed outbound peer endpoints.
                     connect as connect: Option<Vec<String>> {
                         cli[#[arg(long = "connect", value_delimiter = ',', value_parser = parse_connect_endpoint)]]
                         env["BITCOIN_RS_CONNECT", parse_connect_list]
                         toml each("connect", parse_connect_endpoint)
                     }
-                    /// SOCKS5 route for IP destinations; onion routing is configured separately.
                     proxy as proxy: Option<SocketAddr> {
                         cli[#[arg(long = "proxy")]]
                         env["BITCOIN_RS_PROXY", str::parse]
                         toml native("proxy")
                         conf["proxy"]
                     }
-                    /// SOCKS5 route for Tor v3 destinations, passed to the proxy without local DNS.
                     onion_proxy as onion_proxy: Option<SocketAddr> {
                         cli[#[arg(long = "onion-proxy")]]
                         env["BITCOIN_RS_ONION_PROXY", str::parse]
                         toml native("onion_proxy")
                         conf["onion"]
                     }
-                    /// Loopback SAM bridge of an operator-managed IVNP router.
                     i2p_sam as i2p_sam: Option<SocketAddr> {
                         cli[#[arg(long = "i2p-sam")]]
                         env["BITCOIN_RS_I2P_SAM", str::parse]
                         toml native("i2p_sam")
                         conf["i2psam"]
                     }
-                    /// Loopback Tor control endpoint enabling a persistent inbound onion service.
                     tor_control as tor_control: Option<SocketAddr> {
                         cli[#[arg(long = "tor-control")]]
                         env["BITCOIN_RS_TOR_CONTROL", str::parse]
                         toml native("tor_control")
                         conf["torcontrol"]
                     }
-                    /// Tor SAFECOOKIE file; otherwise use NULL authentication.
                     tor_cookie as tor_cookie: Option<PathBuf> {
                         cli[#[arg(long = "tor-cookie")]]
                         env["BITCOIN_RS_TOR_COOKIE", parse_path]
                         toml native("tor_cookie")
                     }
-                    /// Accept inbound I2P streams using a persistent application destination.
                     i2p_accept as i2p_accept: Option<bool> {
                         cli[#[arg(long = "i2p-accept", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_I2P_ACCEPT", parse_bool]
                         toml native("i2p_accept")
                         conf["i2pacceptincoming"]
                     }
-                    /// Require SOCKS username/password authentication with fresh credentials per connection.
                     proxy_randomize_credentials as proxy_randomize_credentials: Option<bool> {
                         cli[#[arg(long = "proxy-randomize-credentials", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_PROXY_RANDOMIZE_CREDENTIALS", parse_bool]
                         toml native("proxy_randomize_credentials")
                         conf["proxyrandomize"]
                     }
-                    /// Public Bitcoin service port for inbound overlay services.
                     overlay_port as overlay_port: Option<u16> {
                         cli[#[arg(long = "overlay-port")]]
                         env["BITCOIN_RS_OVERLAY_PORT", str::parse]
                         toml native("overlay_port")
                     }
-                    /// Restrict every peer connection to these remote networks.
                     onlynet as onlynet: Option<Vec<$crate::options::PeerNetwork>> {
                         cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_peer_network)]]
                         env["BITCOIN_RS_ONLYNET", parse_peer_networks]
                         toml each("onlynet", parse_peer_network)
                         conf["onlynet"]
                     }
-                    /// Whether fast sync (shallow, early fan-out over a larger
-                    /// outbound set) is enabled.
                     fast_sync as fast_sync: Option<bool> {
                         cli[#[arg(long = "fast-sync", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_FAST_SYNC", parse_bool]
                         toml native("fast_sync")
                     }
-                    /// Whether to attempt and accept BIP324 v2 encrypted
-                    /// connections and advertise `NODE_P2P_V2`.
                     v2_transport as v2_transport: Option<bool> {
                         cli[#[arg(long = "v2transport", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_V2_TRANSPORT", parse_bool]
                         toml native("v2_transport")
                         conf["v2transport"]
                     }
-                    /// Offer BIP331 ancestor package relay to peers. Off by default.
                     package_relay as p2p_package_relay: Option<bool> {
                         cli[#[arg(long = "p2p-package-relay", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_P2P_PACKAGE_RELAY", parse_bool]
                         toml native("p2p_package_relay")
                     }
-                    /// Announce and accept BIP332 stale-tip headers. Off by default; setting
-                    /// it on a test network is the explicit test override.
                     stale_tip_relay as p2p_stale_tip_relay: Option<bool> {
                         cli[#[arg(long = "p2p-stale-tip-relay", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_P2P_STALE_TIP_RELAY", parse_bool]
                         toml native("p2p_stale_tip_relay")
                     }
-                    /// Tell BIP332 peers this node prefers stale-tip blocks over headers.
-                    /// Requires `p2p_stale_tip_relay`.
                     stale_tip_prefers_blocks as p2p_stale_tip_prefers_blocks: Option<bool> {
                         cli[#[arg(long = "p2p-stale-tip-prefers-blocks", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_P2P_STALE_TIP_PREFERS_BLOCKS", parse_bool]
                         toml native("p2p_stale_tip_prefers_blocks")
                     }
                 }
-                /// User-supplied RPC overrides.
                 group rpc: RpcOverrides {
-                    /// Enable the experimental keyless getblocktweaks RPC (requires the silent-payments build feature).
                     silent_payments as silent_payments: Option<bool> {
                         cli[#[arg(long = "silent-payments", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_SILENT_PAYMENTS", parse_bool]
                         toml native("silent_payments")
                     }
-                    /// Enable the optional BIP337 compressrawtransaction and decompressrawtransaction RPCs.
                     compressed_transactions as compressed_transactions: Option<bool> {
                         cli[#[arg(long = "compressed-transactions", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_COMPRESSED_TRANSACTIONS", parse_bool]
                         toml native("compressed_transactions")
                     }
-                    /// JSON-RPC bind address.
                     bind as rpc_bind: Option<SocketAddr> {
                         cli[#[arg(long = "rpc-bind")]]
                         env["BITCOIN_RS_RPC_BIND", str::parse]
                         toml native("rpc_bind")
                     }
-                    /// Separate public HTTP bind; when set, rpc-bind serves JSON-RPC only.
                     public_bind as public_bind: Option<SocketAddr> {
                         cli[#[arg(long = "public-bind")]]
                         env["BITCOIN_RS_PUBLIC_BIND", str::parse]
                         toml native("public_bind")
                     }
-                    /// Maximum live connections on the RPC listener (default 128).
                     max_connections as rpc_max_connections: Option<usize> {
                         cli[#[arg(long = "rpc-max-connections")]]
                         env["BITCOIN_RS_RPC_MAX_CONNECTIONS", str::parse]
                         toml native("rpc_max_connections")
                     }
-                    /// Maximum live connections on the optional public listener (default 128).
                     public_max_connections as public_max_connections: Option<usize> {
                         cli[#[arg(long = "public-max-connections")]]
                         env["BITCOIN_RS_PUBLIC_MAX_CONNECTIONS", str::parse]
                         toml native("public_max_connections")
                     }
-                    /// Whether the REST gateway is enabled.
                     rest as rest: Option<bool> {
                         cli[#[arg(long = "rest")]]
                         env["BITCOIN_RS_REST", parse_bool]
                         toml native("rest")
                         conf["rest"]
                     }
-                    /// Basic-auth username.
                     user as rpc_user: Option<String> {
                         cli[#[arg(long = "rpc-user")]]
                         env["BITCOIN_RS_RPC_USER", parse_text]
                         toml native("rpc_user")
                         conf["rpcuser"]
                     }
-                    /// Basic-auth password.
                     password as rpc_password: Option<String> {
                         cli[#[arg(long = "rpc-password")]]
                         env["BITCOIN_RS_RPC_PASSWORD", parse_text]
                         toml native("rpc_password")
                         conf["rpcpassword"]
                     }
-                    /// Cookie-auth path.
                     cookie as rpc_cookie: Option<PathBuf> {
                         cli[#[arg(long = "rpc-cookie")]]
                         env["BITCOIN_RS_RPC_COOKIE", parse_path]
@@ -799,235 +631,187 @@ macro_rules! option_rows {
                         conf["rpccookiefile"]
                     }
                 }
-                /// User-supplied index overrides.
                 group indexes: IndexOverrides {
-                    /// Whether the transaction index is enabled.
                     txindex as txindex: Option<bool> {
                         cli[#[arg(long = "txindex")]]
                         env["BITCOIN_RS_TXINDEX", parse_bool]
                         toml native("txindex")
                         conf["txindex"]
                     }
-                    /// Enable the optional BIP158 basic-filter index and BIP157 serving.
                     blockfilterindex as blockfilterindex: Option<bool> {
                         cli[#[arg(long = "blockfilterindex", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_BLOCKFILTERINDEX", parse_bool]
                         toml native("blockfilterindex")
                         conf["blockfilterindex"]
                     }
-                    /// Script index mode.
                     script_index as script_index: Option<ScriptIndexMode> {
                         cli[#[arg(long = "scriptindex", visible_alias = "script-index", num_args = 0..=1, default_missing_value = "true", value_parser = parse_script_index)]]
                         env["BITCOIN_RS_SCRIPTINDEX", parse_script_index]
                         toml text("script_index", parse_script_index)
                     }
-                    /// One-shot startup restore of a portable index bundle from this
-                    /// directory. Requires `txindex` and excludes `index_bundle_export`;
-                    /// remove it after the run.
                     bundle_import as index_bundle_import: Option<PathBuf> {
                         cli[#[arg(long = "index-bundle-import", value_parser = $crate::options::parse_index_bundle_dir)]]
                         env["BITCOIN_RS_INDEX_BUNDLE_IMPORT", parse_index_bundle_dir]
                         toml text("index_bundle_import", parse_index_bundle_dir)
                     }
-                    /// One-shot startup export of a portable index bundle into this
-                    /// directory. Requires `txindex` and excludes `index_bundle_import`;
-                    /// remove it after the run.
                     bundle_export as index_bundle_export: Option<PathBuf> {
                         cli[#[arg(long = "index-bundle-export", value_parser = $crate::options::parse_index_bundle_dir)]]
                         env["BITCOIN_RS_INDEX_BUNDLE_EXPORT", parse_index_bundle_dir]
                         toml text("index_bundle_export", parse_index_bundle_dir)
                     }
                 }
-                /// User-supplied observability overrides.
                 group observability: ObservabilityOverrides {
-                    /// Tracing filter level.
                     log_level as log_level: Option<String> {
                         cli[#[arg(long = "log-level")]]
                         env["BITCOIN_RS_LOG_LEVEL", parse_text]
                         toml native("log_level")
                     }
-                    /// Optional Prometheus metrics bind address.
                     metrics_bind as metrics_bind: Option<SocketAddr> {
                         cli[#[arg(long = "metrics-bind")]]
                         env["BITCOIN_RS_METRICS_BIND", str::parse]
                         toml native("metrics_bind")
                     }
                 }
-                /// User-supplied validation overrides.
                 group validation: ValidationOverrides {
-                    /// Height through which script verification may be skipped.
                     assume_valid_height as assume_valid_height: Option<u32> {
                         cli[#[arg(long = "assume-valid-height")]]
                         env["BITCOIN_RS_ASSUME_VALID_HEIGHT", str::parse]
                         toml native("assume_valid_height")
                     }
-                    /// Which script verification the apply path may skip.
                     mode as validation_mode: Option<ValidationMode> {
                         cli[#[arg(long = "validation-mode", value_parser = parse_validation_mode)]]
                         env["BITCOIN_RS_VALIDATION_MODE", parse_validation_mode]
                         toml text("validation_mode", parse_validation_mode)
                     }
-                    /// Which script-verification engine runs: `native` (default)
-                    /// or `kernel`. `kernel` requires a build with the `kernel`
-                    /// feature.
                     engine as validation_engine: Option<ValidationEngine> {
                         cli[#[arg(long = "validation-engine", value_parser = parse_validation_engine)]]
                         env["BITCOIN_RS_VALIDATION_ENGINE", parse_validation_engine]
                         toml text("validation_engine", parse_validation_engine)
                     }
                 }
-                /// User-supplied mining overrides.
                 group mining: MiningOverrides {
-                    /// Watch-only coinbase payout address. Decoded after every config
-                    /// layer has been applied, against the resolved consensus network.
                     payout_address as mining_payout_address: Option<String> {
                         cli[#[arg(long = "mining-payout-address")]]
                         env["BITCOIN_RS_MINING_PAYOUT_ADDRESS", parse_text]
                         toml native("mining_payout_address")
                     }
                 }
-                /// Native pool overrides. Listener addresses, data and difficulty are explicit.
                 group pool: PoolOverrides {
-                    /// Enable the noncustodial native pool service with external payout signing.
                     enabled as pool: Option<bool> {
                         cli[#[arg(long = "pool", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_POOL", parse_bool]
                         toml native("pool")
                     }
-                    /// Dedicated pool ledger directory.
                     datadir as pool_datadir: Option<PathBuf> {
                         cli[#[arg(long = "pool-datadir")]]
                         env["BITCOIN_RS_POOL_DATADIR", parse_path]
                         toml native("pool_datadir")
                     }
-                    /// Explicit SV1 listener address.
                     v1_bind as pool_v1_bind: Option<SocketAddr> {
                         cli[#[arg(long = "pool-v1-bind")]]
                         env["BITCOIN_RS_POOL_V1_BIND", str::parse]
                         toml native("pool_v1_bind")
                     }
-                    /// Explicit SV2 listener address.
                     sv2_bind as pool_sv2_bind: Option<SocketAddr> {
                         cli[#[arg(long = "pool-sv2-bind")]]
                         env["BITCOIN_RS_POOL_SV2_BIND", str::parse]
                         toml native("pool_sv2_bind")
                     }
-                    /// Authority key file; the service validates permissions and contents.
                     sv2_authority_key as pool_sv2_authority_key: Option<PathBuf> {
                         cli[#[arg(long = "pool-sv2-authority-key")]]
                         env["BITCOIN_RS_POOL_SV2_AUTHORITY_KEY", parse_path]
                         toml native("pool_sv2_authority_key")
                     }
-                    /// Explicitly permit non-loopback mining listeners.
                     allow_non_loopback as pool_allow_non_loopback: Option<bool> {
                         cli[#[arg(long = "pool-allow-non-loopback", num_args = 0..=1, default_missing_value = "true")]]
                         env["BITCOIN_RS_POOL_ALLOW_NON_LOOPBACK", parse_bool]
                         toml native("pool_allow_non_loopback")
                     }
-                    /// Total pool connection limit.
                     max_connections as pool_max_connections: Option<u32> {
                         cli[#[arg(long = "pool-max-connections")]]
                         env["BITCOIN_RS_POOL_MAX_CONNECTIONS", str::parse]
                         toml native("pool_max_connections")
                     }
-                    /// Per-IP pool connection limit.
                     max_connections_per_ip as pool_max_connections_per_ip: Option<u32> {
                         cli[#[arg(long = "pool-max-connections-per-ip")]]
                         env["BITCOIN_RS_POOL_MAX_CONNECTIONS_PER_IP", str::parse]
                         toml native("pool_max_connections_per_ip")
                     }
-                    /// Fixed share difficulty as an exact plain decimal.
                     share_difficulty as pool_share_difficulty: Option<String> {
                         cli[#[arg(long = "pool-share-difficulty")]]
                         env["BITCOIN_RS_POOL_SHARE_DIFFICULTY", parse_text]
                         toml native("pool_share_difficulty")
                     }
-                    /// Immutable PPLNS window in exact work units.
                     window_work as pool_window_work: Option<u64> {
                         cli[#[arg(long = "pool-window-work")]]
                         env["BITCOIN_RS_POOL_WINDOW_WORK", str::parse]
                         toml native("pool_window_work")
                     }
-                    /// Immutable pool fee in basis points (0..=10000).
                     fee_bps as pool_fee_bps: Option<u16> {
                         cli[#[arg(long = "pool-fee-bps")]]
                         env["BITCOIN_RS_POOL_FEE_BPS", str::parse]
                         toml native("pool_fee_bps")
                     }
-                    /// Hex scriptPubKey paying the externally controlled pool reward.
                     reward_script as pool_reward_script: Option<String> {
                         cli[#[arg(long = "pool-reward-script")]]
                         env["BITCOIN_RS_POOL_REWARD_SCRIPT", parse_text]
                         toml native("pool_reward_script")
                     }
-                    /// Coinbase maturity, at least the consensus minimum of 100.
                     maturity as pool_maturity: Option<u32> {
                         cli[#[arg(long = "pool-maturity")]]
                         env["BITCOIN_RS_POOL_MATURITY", str::parse]
                         toml native("pool_maturity")
                     }
-                    /// Required payout transaction confirmation depth.
                     payout_confirmations as pool_payout_confirmations: Option<u32> {
                         cli[#[arg(long = "pool-payout-confirmations")]]
                         env["BITCOIN_RS_POOL_PAYOUT_CONFIRMATIONS", str::parse]
                         toml native("pool_payout_confirmations")
                     }
-                    /// Reorg monitoring depth, covering all confirmation depths.
                     reorg_watch_depth as pool_reorg_watch_depth: Option<u32> {
                         cli[#[arg(long = "pool-reorg-watch-depth")]]
                         env["BITCOIN_RS_POOL_REORG_WATCH_DEPTH", str::parse]
                         toml native("pool_reorg_watch_depth")
                     }
-                    /// Minimum external payout amount in satoshis.
                     min_payout_sat as pool_min_payout_sat: Option<u64> {
                         cli[#[arg(long = "pool-min-payout-sat")]]
                         env["BITCOIN_RS_POOL_MIN_PAYOUT_SAT", str::parse]
                         toml native("pool_min_payout_sat")
                     }
-                    /// Maximum external payout outputs (1..=2500).
                     max_payout_outputs as pool_max_payout_outputs: Option<u32> {
                         cli[#[arg(long = "pool-max-payout-outputs")]]
                         env["BITCOIN_RS_POOL_MAX_PAYOUT_OUTPUTS", str::parse]
                         toml native("pool_max_payout_outputs")
                     }
                 }
-                /// User-supplied chainstate journal overrides.
                 group chainstate_journal: ChainstateJournalOverrides
                 table("chainstate_journal")
                 #[derive(serde::Deserialize)]
                 #[serde(default, deny_unknown_fields)]
                 {
-                    /// Whether the journal is active.
                     enabled as enabled: Option<bool> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL", parse_bool]
                     }
-                    /// Durability batch size, in blocks.
                     blocks as blocks: Option<u32> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", str::parse]
                     }
-                    /// Durability batch period, in seconds.
                     seconds as seconds: Option<u64> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS", str::parse]
                     }
-                    /// Active-segment rotation threshold, in MiB.
                     rotate_mib as rotate_mib: Option<u64> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB", str::parse]
                     }
-                    /// Total-journal retention bound, in MiB.
                     max_journal_mib as max_journal_mib: Option<u64> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB", str::parse]
                     }
-                    /// Backpressure threshold, in blocks.
                     max_lag_blocks as max_lag_blocks: Option<u32> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS", str::parse]
                     }
-                    /// Backpressure threshold, in seconds.
                     max_lag_seconds as max_lag_seconds: Option<u64> {
                         cli[#[arg(skip)]]
                         env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS", str::parse]

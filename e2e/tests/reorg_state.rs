@@ -1,9 +1,4 @@
 //! Process-level chain transition regressions against pinned Bitcoin Core.
-//!
-//! The two candidate nodes begin with identical Core-mined blocks. One
-//! connects a losing branch before receiving Core's winning branch; the
-//! other receives only the winning branch. Their public chainstate and
-//! mempool observations must converge.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -21,7 +16,7 @@ use bitcoin_rs_e2e::helpers::{
 };
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 fn core_block(core: &mut ProcessNode, hash: &str) -> Result<Block> {
     let hex = core.rpc("getblock", &json!([hash, 0]))?;
@@ -58,7 +53,7 @@ fn submit_competing_headers(node: &mut ProcessNode, blocks: &[Block]) -> Result<
     for block in blocks {
         assert_eq!(
             node.rpc("submitheader", &json!([serialize_hex(&block.header)]))?,
-            Value::Null
+            Value::new()
         );
     }
     Ok(())
@@ -67,14 +62,11 @@ fn submit_competing_headers(node: &mut ProcessNode, blocks: &[Block]) -> Result<
 fn dial_core(core: &ProcessNode, node: &mut ProcessNode) -> Result<()> {
     assert_eq!(
         node.rpc("addnode", &json!([core.p2p_addr.to_string(), "onetry"]))?,
-        Value::Null
+        Value::new()
     );
     Ok(())
 }
 
-/// Stable, implementation-independent fields of the public chain/UTXO view.
-/// Disk-size estimates are intentionally absent; Core and fjall store the
-/// same coins using different physical layouts.
 fn chain_view(node: &mut ProcessNode) -> Result<Value> {
     let chain = node.rpc("getblockchaininfo", &json!([]))?;
     let coins = node.rpc("gettxoutsetinfo", &json!(["muhash", null, false]))?;
@@ -120,7 +112,7 @@ fn sorted_mempool(node: &mut ProcessNode) -> Result<Vec<String>> {
 fn coin(node: &mut ProcessNode, txid: &str, include_mempool: bool) -> Result<Value> {
     let reply = node.rpc("gettxout", &json!([txid, 0, include_mempool]))?;
     if reply.is_null() {
-        return Ok(Value::Null);
+        return Ok(Value::new());
     }
     Ok(json!({
         "bestblock": reply.str_field("bestblock")?,
@@ -306,10 +298,6 @@ fn deliver_invalid_branch(
     })
 }
 
-/// Three disconnected blocks contain a transaction that conflicts with the
-/// new branch and an independent transaction that must return to the pool.
-/// The clean path starts with the same two mempool transactions, so the
-/// final mempool comparison tests both eviction and resurrection.
 #[test]
 fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
@@ -356,8 +344,6 @@ fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
     );
     assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
 
-    // Core mines only the specified conflicting transaction. Its independent
-    // spend stays out of the winning branch and remains eligible for mempool.
     let mut rival = vec![mine_core_block(&mut core, &[tx_hex(&new_tx)])?];
     rival.push(mine_core_block(&mut core, &[])?);
     rival.push(mine_core_block(&mut core, &[])?);
@@ -406,10 +392,6 @@ fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
     core.stop()
 }
 
-/// A scripted peer offers a higher-work branch with valid `PoW` and Merkle
-/// commitments, but its first coinbase overclaims the subsidy. This is a
-/// permanent consensus failure rather than a mutated-body transport error.
-/// The old coins and the ability to extend the valid branch must survive.
 #[test]
 fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -438,9 +420,6 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
         Some(rival[0].header.merkle_root)
     );
 
-    // Run the exact overclaim body through the pinned independent validator
-    // from genesis. This distinguishes the intended consensus failure from
-    // an accidentally malformed header or Merkle commitment.
     let mut oracle = ProcessNode::spawn(Kind::Core)?;
     assert_eq!(
         oracle.rpc("submitblock", &json!([serialize_hex(&rival[0])]))?,
@@ -459,9 +438,6 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
     assert_eq!(sorted_mempool(&mut node)?, Vec::<String>::new());
     assert_eq!(node.rpc("getblockhash", &json!([1]))?, json!(old_tip));
 
-    // Invalid-branch recovery reconnects the old branch through durable
-    // commits. Kill immediately after the public state has returned to that
-    // branch, then check the same tip and coins before allowing new work.
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);

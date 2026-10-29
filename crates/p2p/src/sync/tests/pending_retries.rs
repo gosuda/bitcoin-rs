@@ -220,7 +220,6 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx,
     } = SyncHarness::new(tree);
-    // Staging byte budget that exactly one staged block exhausts.
     install_budget(
         &sync,
         super::super::SyncBudget {
@@ -247,8 +246,6 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
     );
     let _headers = rx.try_recv()?;
 
-    // Deliver only the successor: it stages (waiting on block1) and
-    // exactly exhausts the staging byte budget.
     inbound_blocks_tx.send(crate::InboundBlock::from_local(block2.clone()))?;
     sync.drain_inbound_blocks();
     assert_eq!(
@@ -256,16 +253,10 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult 
         consensus_bytes(&block2).len()
     );
 
-    // Exhausted staging degrades to backpressure: the next tick requests
-    // nothing further (block3 stays unrequested) and the staged block is
-    // not dropped for re-download.
     sync.tick();
     assert!(rx.try_recv().is_err());
     assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
-    // The window-front block arrives: the stager admits it past the
-    // exhausted budget (expected-block exemption), apply drains both, and
-    // request capacity returns for block3.
     inbound_blocks_tx.send(crate::InboundBlock::from_local(block1))?;
     sync.tick();
 

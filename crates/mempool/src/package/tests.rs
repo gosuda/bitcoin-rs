@@ -1,6 +1,3 @@
-//! Boundary vectors from pinned Core `policy/packages.cpp`, `truc_policy.cpp`,
-//! and `ephemeral_policy.cpp`. Policy-only shape vectors do not claim script validity.
-
 use super::*;
 use crate::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, MempoolGateway, MempoolLimits,
@@ -15,7 +12,6 @@ use bitcoin_rs_primitives::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// Records every published envelope in order.
 #[derive(Default)]
 struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);
 
@@ -281,7 +277,6 @@ fn native_package_failure_keeps_membership_sequence_overlay_and_estimator() -> T
             )
             .is_err()
     );
-    // Aggregate fee refusal precedes scripts, like the owner's single path.
     child.outputs[0].value = Amount::from_sat(100_000);
     assert!(matches!(
         gateway.submit_local_package(
@@ -580,8 +575,6 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
         else {
             unreachable!()
         };
-        // Every member committed by the atomic plan reports the package's
-        // aggregate rate over the same full set.
         assert_eq!(*effective_fee_rate, Some(2_000_000 / u64::from(total_size)));
     }
     let batches = seen.0.lock();
@@ -720,13 +713,11 @@ fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing()
 #[test]
 fn rpc_package_fee_cap_compares_signed_fees_without_rounding() -> TestResult {
     use crate::PackageTxResult;
-    // A >1,000-vB member can exceed the cap by one satoshi while its
-    // displayed integer sat/kvB quote still equals the cap.
     for (outputs, fee, rate, delta, rejected) in [
         (30, 100, 1_000, -1, false),
         (30, 100, 1_000, 0, false),
         (30, 100, 1_000, 1, true),
-        (1, 1, 1, 0, true), // No one-satoshi minimum for a ratio comparison.
+        (1, 1, 1, 0, true),
     ] {
         let seen = Arc::new(Seen::default());
         let gateway = gateway_observed(Some(seen.clone()));
@@ -760,7 +751,6 @@ fn rpc_package_fee_cap_compares_signed_fees_without_rounding() -> TestResult {
             assert!(gateway.read().is_empty());
             assert_eq!(gateway.read().sequence_number(), 0);
             assert!(seen.0.lock().is_empty());
-            // Explicit zero continues to disable the caller cap.
             let uncapped = gateway.submit_rpc_package(&[tx], Some(0), unix_time_secs(), &chain)?;
             assert!(matches!(
                 uncapped.tx_results[0],
@@ -814,7 +804,6 @@ fn rpc_package_fee_failure_precedence_preserves_other_planner_errors() -> TestRe
         assert_eq!(
             result.package_error,
             Some(if full {
-                // Capacity refusal retains its old position after dust checks.
                 AcceptanceRejectReason::MissingEphemeralSpends
             } else {
                 AcceptanceRejectReason::MinRelayFeeNotMet
@@ -933,8 +922,6 @@ fn gateway_observed(observer: Option<Arc<dyn crate::MempoolObserver>>) -> Mempoo
     )
 }
 
-/// A resident stamped with time zero: older than the mempool lifetime
-/// against any wall clock, so the tests below never sleep.
 fn stale_entry(tx: &Tx) -> Result<crate::MempoolEntry, std::num::TryFromIntError> {
     Ok(crate::MempoolEntry::new(
         Arc::new(tx.clone()),
@@ -1149,7 +1136,6 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
     ));
     assert!(facts.results.iter().all(|fact| fact.allowed.is_none()));
     let mut txs = [parent, child, sibling];
-    // Changing the parent's version changes its txid; relink both children.
     txs[0].version = 2;
     txs[1].version = 2;
     txs[1].inputs[0].previous_output.txid = txs[0].txid();
@@ -1166,8 +1152,6 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
     Ok(())
 }
 
-// Core expires stale entries after each accepted transaction: a committed
-// package does too, inside the same atomic envelope as its acceptance.
 #[test]
 fn native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope() -> TestResult {
     let seen = Arc::new(Seen::default());
@@ -1212,8 +1196,6 @@ fn native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope() 
     Ok(())
 }
 
-// A package member that expires with its stale resident parent was admitted
-// and published, then removed: the caller sees the ordinary full refusal.
 #[test]
 fn native_package_member_expires_with_its_stale_parent_and_is_refused_as_full() -> TestResult {
     let seen = Arc::new(Seen::default());
@@ -1258,10 +1240,6 @@ fn native_package_member_expires_with_its_stale_parent_and_is_refused_as_full() 
     Ok(())
 }
 
-// A stale child carried in the package was never admitted here: only its
-// two independent parents are. The expiry pass removes stale roots with
-// their descendants but never ancestors, so the parents survive and the
-// package still succeeds. Only a removed admitted member refuses as full.
 #[test]
 fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
     let seen = Arc::new(Seen::default());
@@ -1327,18 +1305,12 @@ fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
     Ok(())
 }
 
-/// Single-transaction `maxfeerate` gates on the actual base fee, never the
-/// modified fee: a policy discount must not smuggle an over-cap fee in,
-/// and a surcharge must not refuse an under-cap fee.
 #[test]
 fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
     use crate::standardness::AcceptanceRejectReason;
-    // Gauge the fixture shape once: one anyone-can-spend input and output.
     let gauge = gateway();
     gauge.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
     let tx = spend(&[coin(840)], &[98_000], true);
-    // The spent output is a witness program so the native single path
-    // verifies the pushed witness instead of refusing a bare key.
     let chain = Coins(vec![(coin(840), output(100_000))]);
     gauge.submit_local_transaction(
         Arc::new(tx.clone()),
@@ -1353,18 +1325,11 @@ fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
         .ok_or("fixture missing")?
         .vsize;
     let base_rate = 2_000_000 / u64::from(vsize);
-    // Wide margins around both rates so integer rounding cannot matter:
-    // the discount drops the modified fee to 100 sats, the surcharge lifts
-    // it to 100_000 sats, while the base fee stays 2_000 sats.
     let below_base = base_rate / 2;
     let above_base = base_rate * 2 + 1_000;
-    // Real margins, immune to integer-division equality: the discounted fee
-    // (100 sats) sits below the cap's required fee, the surcharge-implied
-    // fee (100_000 sats) sits above the higher cap's.
     assert!(crate::rbf::required_fee(below_base, vsize).is_ok_and(|limit| limit > 100));
     assert!(above_base < 100_000_000 / u64::from(vsize));
 
-    // Discount: modified rate is under the cap, base rate is over it.
     let discounted = gateway();
     discounted.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
     discounted.prioritise(tx.txid(), -1_900)?;
@@ -1389,7 +1354,6 @@ fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
     );
     assert!(discounted.read().is_empty());
 
-    // Surcharge: modified rate is over the cap, base rate is under it.
     let surcharged = gateway();
     surcharged.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
     surcharged.prioritise(tx.txid(), 98_000)?;

@@ -1,37 +1,4 @@
 //! Stratum V2 mining-protocol server state machine.
-//!
-//! [`ProtocolSession`] is one pool connection above the Noise transport: it
-//! consumes plaintext [`Frame`]s and produces plaintext [`Frame`]s, so the
-//! state machine is testable without a socket and the transport can be
-//! swapped without touching it.
-//!
-//! The session is a *wire* adapter. It owns channel identity, the message
-//! layouts, and the per-channel share target. Everything else is delegated to
-//! the one owner, [`crate::pool::JobBook`]:
-//!
-//! - job projection (coinbase split, merkle branch, header facts) comes from
-//!   [`crate::pool::Job`];
-//! - extranonce uniqueness and session identity come from
-//!   [`JobBook::open_session`] / [`JobBook::close_session`];
-//! - every share verdict (stale, duplicate, version mask, time window, target,
-//!   network target) comes from [`JobBook::validate`], whose rejection is only
-//!   *mapped* here to an official SV2 error code;
-//! - a block candidate is handed to the host as the owner's
-//!   [`crate::pool::FoundBlock`]; the node's authoritative submit path is
-//!   called by the host through [`FoundBlock::submit`], never from here.
-//!
-//! One wire rule is checked here before delegating, because it is a rule about
-//! the SV2 messages this session itself sent: §5.3.11 requires a share's
-//! `ntime` to be at least the `ntime_start` the job announced, and the
-//! announced value is `Job::ntime()`.
-//!
-//! Financial effects are not decided here. An accepted share becomes an
-//! [`Event::ShareAccepted`] carrying the owner's accepted-share identity (its
-//! header hash is the ledger's idempotency key). A network-target result is
-//! instead emitted as [`Event::BlockFound`] and remains pending until the host
-//! submits it through [`MiningControl`], records the receipt, and calls
-//! [`ProtocolSession::confirm_block`]. `SubmitShares.Success` is held until
-//! those host-owned durable steps complete.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -102,67 +69,41 @@ use super::{ConfigError, Frame, MAX_EXTRANONCE_WIRE_LEN, PROTOCOL_VERSION, U24_M
 
 /// `SetupConnection.flags` bit 0: the client can only process standard jobs.
 pub const FLAG_REQUIRES_STANDARD_JOBS: u32 = 1 << 0;
-/// `SetupConnection.flags` bit 1: the client will send `SetCustomMiningJob`.
 pub const FLAG_REQUIRES_WORK_SELECTION: u32 = 1 << 1;
 /// `SetupConnection.flags` bit 2: the client requires version rolling.
 pub const FLAG_REQUIRES_VERSION_ROLLING: u32 = 1 << 2;
-/// `SetupConnection.Success.flags` bit 0: the server accepts no version changes.
 pub const SUCCESS_FLAG_REQUIRES_FIXED_VERSION: u32 = 1 << 0;
-/// `SetupConnection.Success.flags` bit 1: the server accepts no standard channel.
 pub const SUCCESS_FLAG_REQUIRES_EXTENDED_CHANNELS: u32 = 1 << 1;
 
 /// Local error code: `sequence_number` did not increase on its channel.
 pub const ERROR_CODE_INVALID_SEQUENCE_NUMBER: &str = "invalid-sequence-number";
-/// Local error code: too many accepted shares await ledger confirmation.
 pub const ERROR_CODE_POOL_BUSY: &str = "pool-busy";
-/// Local error code: the job holds its maximum number of accepted shares.
 pub const ERROR_CODE_JOB_SHARE_CAPACITY: &str = "job-share-capacity";
-/// Local error code: the pool asked this connection to reconnect elsewhere.
 pub const ERROR_CODE_RECONNECT_REQUESTED: &str = "reconnect-requested";
-/// Local error code: the host closed the channel because the share was not recorded.
 pub const ERROR_CODE_SHARE_NOT_RECORDED: &str = "share-not-recorded";
 
-/// Why the host admission hook refused a `user_identity`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmitError {
-    /// The identity is malformed for this pool (`invalid-user-identity`).
     InvalidIdentity,
-    /// The identity is well formed but not registered (`unknown-user`).
     UnknownUser,
 }
 
-/// Host hook that admits or refuses a channel's `user_identity`.
-///
-/// The adapter never interprets the identity: payout mapping and registration
-/// belong to the accounting layer, which supplies this closure.
 pub type AdmitUser = Arc<dyn Fn(&[u8]) -> Result<(), AdmitError> + Send + Sync>;
 
 /// Hard bounds on everything a peer can make this session hold.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// Largest accepted plaintext frame payload, at most the U24 wire maximum.
     pub max_frame_payload: usize,
-    /// Open channels per connection.
     pub max_channels: usize,
-    /// Wire job records kept per channel (older ones answer `invalid-job-id`).
     pub max_jobs_per_channel: usize,
-    /// Accepted shares awaiting [`ProtocolSession::confirm_share`].
     pub max_pending_acks: usize,
-    /// How long an unacknowledged share ticket lives before
-    /// [`ProtocolSession::expire_tickets`] drops it and releases its burned
-    /// duplicate key. Zero expires at the next poll. Monotonic: wall-clock
-    /// jumps never fast-forward or stall expiry.
     pub pending_ack_timeout: Duration,
-    /// Plaintext frames queued for the transport.
     pub max_outbound_frames: usize,
-    /// Events queued for the host.
     pub max_pending_events: usize,
-    /// Encrypted bytes queued for the socket.
     pub max_outbound_bytes: usize,
 }
 
 impl Limits {
-    /// Conservative defaults for a pool-facing listener.
     pub const DEFAULT: Self = Self {
         max_frame_payload: 8 * 1024,
         max_channels: 64,
@@ -174,7 +115,6 @@ impl Limits {
         max_outbound_bytes: 4 * 1024 * 1024,
     };
 
-    /// Rejects limits that are zero or exceed the wire format.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_frame_payload < 64 || self.max_frame_payload > U24_MAX {
             return Err(ConfigError::Limits(
@@ -200,20 +140,14 @@ impl Default for Limits {
     }
 }
 
-/// Per-connection configuration.
 #[derive(Clone)]
 pub struct ServerConfig {
-    /// Resource bounds.
     pub limits: Limits,
-    /// Starting share target of every channel; a channel never starts easier
-    /// than the miner's own `max_target`.
     pub initial_target: ShareTarget,
-    /// Identity admission hook.
     pub admit_user: AdmitUser,
 }
 
 impl ServerConfig {
-    /// Default limits, and an admission hook that refuses only an empty identity.
     #[must_use]
     pub fn new(initial_target: ShareTarget) -> Self {
         Self {
@@ -242,40 +176,23 @@ impl fmt::Debug for ServerConfig {
 /// Mining channel flavour.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelKind {
-    /// Header-only mining: the pool fixes the whole extranonce.
     Standard,
-    /// The miner rolls `extranonce_size` bytes of the coinbase.
     Extended,
 }
 
-/// Ledger handle for one accepted share awaiting confirmation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShareTicket(pub u64);
 
 /// One accepted share, handed to the host to record before the miner is told.
-///
-/// This event is emitted only for shares that do not meet the network target.
-/// A block candidate is surfaced as [`Event::BlockFound`] instead, so the host
-/// cannot accidentally acknowledge it without first submitting the block.
 #[derive(Debug)]
 pub struct ShareEvent {
-    /// Pass back to [`ProtocolSession::confirm_share`] or [`ProtocolSession::reject_share`].
     pub ticket: ShareTicket,
-    /// Channel the share arrived on.
     pub channel_id: u32,
-    /// The miner's `sequence_number`.
     pub sequence_number: u32,
-    /// The owner's accepted share. Block outcomes use [`PendingBlock`].
     pub outcome: AcceptedShare,
 }
 
 /// A block candidate awaiting the host's authoritative [`MiningControl`] submission.
-///
-/// The ticket remains pending until the host submits this block, records the
-/// resulting [`BlockReceipt`] in its durable ledger, and calls
-/// [`Connection::confirm_block`] with the [`BlockSubmission`] returned by
-/// [`PendingBlock::submit`]. There is no conversion from a raw share ticket to
-/// a block submission token.
 #[derive(Debug)]
 pub struct PendingBlock {
     ticket: ShareTicket,
@@ -285,36 +202,26 @@ pub struct PendingBlock {
 }
 
 impl PendingBlock {
-    /// Ticket to use after the ledger has recorded this block.
     #[must_use]
     pub fn ticket(&self) -> ShareTicket {
         self.ticket
     }
 
-    /// Channel carrying the pending block share.
     #[must_use]
     pub fn channel_id(&self) -> u32 {
         self.channel_id
     }
 
-    /// Miner sequence number for the pending share.
     #[must_use]
     pub fn sequence_number(&self) -> u32 {
         self.sequence_number
     }
 
-    /// The complete block candidate and its accepted-share identity.
     #[must_use]
     pub fn found_block(&self) -> &FoundBlock {
         &self.found
     }
 
-    /// Submit this candidate through the node's authoritative [`MiningControl`].
-    ///
-    /// The returned token is required by [`Connection::confirm_block`]. The
-    /// host records its receipt in the durable ledger before passing the token
-    /// to `confirm_block`. A submission error leaves this pending candidate
-    /// available for retry.
     pub fn submit(
         &self,
         mining_control: &dyn MiningControl,
@@ -330,11 +237,6 @@ impl PendingBlock {
     }
 }
 
-/// Proof that a pending block was submitted to [`MiningControl`].
-///
-/// This type is intentionally constructible only through
-/// [`PendingBlock::submit`]. The host records [`Self::receipt`] in its ledger
-/// before passing this token to [`Connection::confirm_block`].
 #[derive(Debug)]
 pub struct BlockSubmission {
     ticket: ShareTicket,
@@ -345,137 +247,81 @@ pub struct BlockSubmission {
 }
 
 impl BlockSubmission {
-    /// Share ticket associated with the submitted block.
     #[must_use]
     pub fn ticket(&self) -> ShareTicket {
         self.ticket
     }
 
-    /// [`MiningControl`]'s receipt, to pass to the ledger's block-record operation.
     #[must_use]
     pub fn receipt(&self) -> &BlockReceipt {
         &self.receipt
     }
 }
 
-/// Why a channel went away.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseReason {
-    /// The miner sent `CloseChannel`.
     Peer,
-    /// The host closed it.
     Host,
 }
 
-/// Something the host must act on.
 #[derive(Debug)]
 pub enum Event {
-    /// `SetupConnection` was accepted.
     SetupCompleted {
-        /// Flags the client declared.
         flags: u32,
     },
-    /// `SetupConnection` was refused; the connection is closing.
     SetupRejected {
-        /// Official error code that was sent.
         code: &'static str,
     },
-    /// A channel is open and holds an extranonce session.
     ChannelOpened {
-        /// New channel id.
         channel_id: u32,
-        /// Group channel the channel belongs to.
         group_channel_id: u32,
-        /// Standard or extended.
         kind: ChannelKind,
-        /// The owner's session identity (unique extranonce prefix).
         session: SessionId,
-        /// Opaque identity the miner declared.
         user_identity: Vec<u8>,
-        /// Declared hashrate, h/s.
         nominal_hash_rate: f32,
-        /// Initial share target.
         target: ShareTarget,
     },
-    /// An open request was refused.
     ChannelOpenRejected {
-        /// The request's `request_id`.
         request_id: u32,
-        /// Error code that was sent.
         code: &'static str,
     },
-    /// A channel closed and its session was released.
     ChannelClosed {
-        /// Closed channel id.
         channel_id: u32,
-        /// Who closed it.
         reason: CloseReason,
     },
     /// A share passed the owner's predicate; record it, then confirm.
     ShareAccepted(ShareEvent),
-    /// A block passed the network target and awaits host submission.
     BlockFound(PendingBlock),
-    /// A share was refused and the miner was told why.
     ShareRejected {
-        /// Channel the share arrived on.
         channel_id: u32,
-        /// The miner's `sequence_number`.
         sequence_number: u32,
-        /// Error code that was sent.
         code: &'static str,
-        /// The owner's verdict, absent for rules that live on the wire only.
         cause: Option<ShareError>,
     },
 }
 
-/// Read-only view of one open channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChannelInfo {
-    /// Channel id.
     pub channel_id: u32,
-    /// Standard or extended.
     pub kind: ChannelKind,
-    /// The owner's session.
     pub session: SessionId,
-    /// Opaque identity the miner declared.
     pub user_identity: Vec<u8>,
-    /// Current share target.
     pub target: ShareTarget,
-    /// Largest target the miner accepts.
     pub max_target: ShareTarget,
-    /// Bytes the miner was told as `extranonce_prefix`.
     pub extranonce_prefix: Vec<u8>,
 }
 
 /// Fatal protocol violations; the connection must be dropped.
 #[derive(Debug, Error)]
 pub enum SessionError {
-    /// A message other than `SetupConnection` opened the connection.
     #[error("message type {msg_type:#04x} before SetupConnection")]
-    SetupRequired {
-        /// Offending message type.
-        msg_type: u8,
-    },
-    /// `SetupConnection` arrived on an established connection.
+    SetupRequired { msg_type: u8 },
     #[error("SetupConnection sent twice")]
     DuplicateSetup,
-    /// The payload does not decode to exactly one message.
     #[error("malformed message {msg_type:#04x}: {detail}")]
-    Malformed {
-        /// Offending message type.
-        msg_type: u8,
-        /// What failed.
-        detail: String,
-    },
-    /// The `channel_msg` bit does not match the message definition.
+    Malformed { msg_type: u8, detail: String },
     #[error("message type {msg_type:#04x} requires channel_msg bit = {expected}")]
-    ChannelBit {
-        /// Offending message type.
-        msg_type: u8,
-        /// Bit value the definition requires.
-        expected: bool,
-    },
-    /// A message type this server never accepts from a client.
+    ChannelBit { msg_type: u8, expected: bool },
     #[error("unexpected message type {msg_type:#04x}")]
     UnexpectedMessage {
         /// Offending message type.
@@ -483,45 +329,24 @@ pub enum SessionError {
     },
     /// The peer is not draining output.
     #[error("{queue} backlog exceeds {limit}")]
-    Backlog {
-        /// Which queue overflowed.
-        queue: &'static str,
-        /// Its bound.
-        limit: usize,
-    },
-    /// A message this server built does not fit its wire type.
+    Backlog { queue: &'static str, limit: usize },
     #[error("cannot encode message {msg_type:#04x}: {detail}")]
-    Encode {
-        /// Message type.
-        msg_type: u8,
-        /// What failed.
-        detail: String,
-    },
-    /// The job owner refused a request that cannot be a miner's fault.
+    Encode { msg_type: u8, detail: String },
     #[error("job owner: {0}")]
     Job(JobError),
-    /// The job owner could not project a job for a channel.
     #[error("job projection: {0}")]
     Projection(ShareError),
-    /// A host call named a channel that is not open.
     #[error("channel {0} is not open")]
     UnknownChannel(u32),
-    /// A block ticket cannot be acknowledged as an ordinary share.
     #[error("block ticket requires `MiningControl` submission before confirmation")]
     BlockRequiresSubmission,
-    /// A host-requested target is above the miner's own maximum.
     #[error("target exceeds the maximum target of channel {channel_id}")]
-    TargetAboveMaximum {
-        /// The channel whose bound would be violated.
-        channel_id: u32,
-    },
-    /// An error code with bytes outside printable ASCII.
+    TargetAboveMaximum { channel_id: u32 },
     #[error("error code is not printable ASCII")]
     BadErrorCode,
 }
 
 impl SessionError {
-    /// False for host-call mistakes that leave the connection untouched.
     #[must_use]
     pub fn is_fatal(&self) -> bool {
         !matches!(
@@ -543,24 +368,18 @@ enum Phase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Delivery {
-    /// `ntime_start` unset; activated by the `SetNewPrevHash` that follows.
     Future,
-    /// `ntime_start` set; mined immediately on the last announced prev hash.
     Active,
 }
 
 struct ChannelJob {
-    /// Share target fixed when the job became active on the channel.
-    /// `None` until a future job is activated.
     target: Option<ShareTarget>,
 }
 
 struct Channel {
     kind: ChannelKind,
     session: SessionId,
-    /// The owner's session extranonce prefix.
     session_prefix: Vec<u8>,
-    /// Standard channels: the pool-fixed rolled bytes. Extended: empty.
     rolled: Vec<u8>,
     user_identity: Vec<u8>,
     nominal_hash_rate: f32,
@@ -568,11 +387,6 @@ struct Channel {
     target: ShareTarget,
     last_sequence: Option<u32>,
     jobs: BTreeMap<u32, ChannelJob>,
-    /// Parent hash of the last `SetNewPrevHash` that landed on this channel.
-    /// `None` until the first parent arrives. A new job whose parent differs
-    /// forces `Delivery::Future` plus `SetNewPrevHash` for this channel, even
-    /// when the connection-wide delivery is `Active` (for example a channel
-    /// that missed the parent announce).
     last_prev_hash: Option<BlockHash>,
 }
 
@@ -587,26 +401,16 @@ struct Pending {
     sequence_number: u32,
     difficulty: u64,
     block_hash: Option<[u8; 32]>,
-    /// Header hash burned in [`JobBook`] by validation. Released via
-    /// [`JobBook::unburn`] when the ticket is dropped without a durable
-    /// record (channel close, connection teardown, expiry, or host refusal).
     hash: [u8; 32],
-    /// Monotonic arrival time; [`ProtocolSession::expire_tickets`] drops the
-    /// ticket past `limits.pending_ack_timeout`.
     submitted_at: Instant,
     kind: PendingKind,
 }
 
-/// One Stratum V2 pool connection, above the transport.
 pub struct ProtocolSession {
     config: ServerConfig,
     phase: Phase,
     requires_standard_jobs: bool,
     reconnecting: bool,
-    /// Whether this connection has ever been given parent context (a
-    /// `SetNewPrevHash`). Until set, `announce` upgrades an `Active`
-    /// delivery to `Future` so a job never reaches a miner that never got a
-    /// parent.
     parent_delivered: bool,
     channels: BTreeMap<u32, Channel>,
     group_id: Option<u32>,
@@ -654,8 +458,6 @@ fn frame_of<T: Encodable + GetSize>(
     })
 }
 
-/// Decodes exactly one message; trailing bytes are a violation (no extension
-/// TLV was negotiated, so none may follow).
 fn decode<'a, T: Decodable<'a> + GetSize>(
     msg_type: u8,
     payload: &'a mut [u8],
@@ -691,12 +493,6 @@ fn code_str(code: &str) -> Result<Str0255<'_>, SessionError> {
 }
 
 /// The integer pool difficulty (diff-1 basis, `0xffff << 208`) of `target`.
-///
-/// Spec §5.3.13: `SubmitShares.Success.new_shares_sum` is the sum of the
-/// *difficulty* of the jobs the shares were submitted against, NOT the raw
-/// hash count ([`crate::pool::ShareWork`]), which is scaled by 2^32.
-/// Targets easier than difficulty 1 clamp to 1 so that acknowledged shares
-/// always contribute at least 1 unit to the acknowledged shares sum.
 pub fn target_difficulty(target: ShareTarget) -> u64 {
     let target_u256 = Uint::<256, 4>::from_le_bytes(target.to_le_bytes());
     if target_u256.is_zero() {
@@ -761,8 +557,6 @@ fn standard_job_frame(
     frame_of(MESSAGE_TYPE_NEW_MINING_JOB, CHANNEL_BIT_NEW_MINING_JOB, msg)
 }
 
-/// `NewExtendedMiningJob` for an extended channel or, with the group id, for
-/// the whole group: the coinbase halves and merkle path are the owner's.
 fn extended_job_frame(
     channel_id: u32,
     job: &Job,
@@ -926,8 +720,6 @@ fn open_success_frame(context: &OpenSuccess<'_>) -> Result<Frame, SessionError> 
 }
 
 impl ProtocolSession {
-    /// A session awaiting `SetupConnection`. `book` is checked for an
-    /// extranonce layout the SV2 wire can carry.
     pub fn new(config: ServerConfig, book: &JobBook) -> Result<Self, ConfigError> {
         config.limits.validate()?;
         let layout = book.config().extranonce;
@@ -954,45 +746,31 @@ impl ProtocolSession {
         })
     }
 
-    /// True once the connection must be flushed and closed.
     #[must_use]
     pub fn is_closing(&self) -> bool {
         self.phase == Phase::Closing
     }
 
-    /// True once `SetupConnection` succeeded and the connection accepts channels.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.phase == Phase::Open
     }
 
-    /// Frames with a non-zero `extension_type` discarded so far (§3.4.1: no
-    /// extension is negotiated, so they are ignored).
     #[must_use]
     pub fn ignored_extension_frames(&self) -> u64 {
         self.ignored_extension_frames
     }
 
-    /// Number of open channels.
     #[must_use]
     pub fn channel_count(&self) -> usize {
         self.channels.len()
     }
 
-    /// Accepted shares awaiting [`Self::confirm_share`].
     #[must_use]
     pub fn pending_acks(&self) -> usize {
         self.pending.len()
     }
 
-    /// Drops unacknowledged tickets older than `limits.pending_ack_timeout`
-    /// and releases their burned duplicate keys, so a stuck host or a silent
-    /// miner cannot pin the bounded [`Limits::max_pending_acks`] budget and
-    /// head-of-line-block every later share. Returns the dropped tickets for
-    /// host observability. Confirmed and buffered shares are unaffected: only
-    /// tickets still awaiting host acknowledgement can expire, and the
-    /// idempotent ledger stays the convergence point for any retry.
-    /// Monotonic: age is measured with [`Instant`], never wall clock.
     pub fn expire_tickets(&mut self, book: &mut JobBook, now: Instant) -> Vec<ShareTicket> {
         let timeout = self.config.limits.pending_ack_timeout;
         let mut expired = Vec::new();
@@ -1011,19 +789,16 @@ impl ProtocolSession {
         expired
     }
 
-    /// The group channel id, once a channel was opened.
     #[must_use]
     pub fn group_channel_id(&self) -> Option<u32> {
         self.group_id
     }
 
-    /// Ids of the open channels, ascending.
     #[must_use]
     pub fn channel_ids(&self) -> Vec<u32> {
         self.channels.keys().copied().collect()
     }
 
-    /// View of one open channel.
     #[must_use]
     pub fn channel(&self, channel_id: u32) -> Option<ChannelInfo> {
         let channel = self.channels.get(&channel_id)?;
@@ -1040,12 +815,10 @@ impl ProtocolSession {
         })
     }
 
-    /// Drains the outbound plaintext frames, in send order.
     pub fn take_frames(&mut self) -> Vec<Frame> {
         self.out.drain(..).collect()
     }
 
-    /// Next host event, if any.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.events.pop_front()
     }
@@ -1088,11 +861,6 @@ impl ProtocolSession {
         Some(id)
     }
 
-    /// Consumes one plaintext frame from the peer.
-    ///
-    /// `Err` is a fatal violation: drop the connection and call
-    /// [`Self::release`]. Refusals that the protocol answers with an error
-    /// message (bad channel, stale share, ...) are `Ok` and visible as events.
     pub fn handle(&mut self, book: &mut JobBook, frame: Frame) -> Result<(), SessionError> {
         if self.phase == Phase::Closing {
             return Ok(());
@@ -1139,9 +907,6 @@ impl ProtocolSession {
             let msg: SetupConnection<'_> = decode(MESSAGE_TYPE_SETUP_CONNECTION, &mut payload)?;
             (msg.protocol, msg.min_version, msg.max_version, msg.flags)
         };
-        // The set of flags this server cannot honor. Work selection needs
-        // custom jobs, which the job owner cannot install; version rolling
-        // needs a non-empty version mask on the job owner.
         let rolling_available = book.config().version_mask != 0;
         let mut unsupported = FLAG_REQUIRES_WORK_SELECTION;
         if !rolling_available {
@@ -1232,8 +997,6 @@ impl ProtocolSession {
             _ => Err(SessionError::UnexpectedMessage { msg_type }),
         }
     }
-
-    // ---- channel open ------------------------------------------------------
 
     fn reject_open(&mut self, request_id: u32, code: &'static str) -> Result<(), SessionError> {
         let msg = OpenMiningChannelError {
@@ -1377,40 +1140,16 @@ impl ProtocolSession {
             target,
         })?;
 
-        // §5.3.15/5.3.16: the first message after a channel opens is a future
-        // job, followed by the `SetNewPrevHash` that activates it.
         if let Some(current) = book.current().cloned() {
             self.send_to_channel(channel_id, &current, Delivery::Future)?;
         }
         Ok(())
     }
 
-    // ---- job distribution --------------------------------------------------
-
-    /// Announces a job the owner just installed to every channel.
-    ///
-    /// Delivery is driven by per-connection channel state, not the owner's
-    /// `fresh` flag: channels missing the job (or holding it inactive for
-    /// want of its `SetNewPrevHash`) still converge on it. `clean_jobs`
-    /// sends a future job and the `SetNewPrevHash` that activates it
-    /// (earlier jobs are stale in the owner and invalid on the miner);
-    /// otherwise the job is active immediately on the last announced
-    /// previous hash. Connections that did not set
-    /// `REQUIRES_STANDARD_JOBS` receive one group-addressed
-    /// `NewExtendedMiningJob`; the others, one job per channel.
     pub fn announce(&mut self, installed: &crate::pool::Installed) -> Result<(), SessionError> {
-        // Delivery is driven by per-connection channel state, not the
-        // owner's `fresh` flag: a channel opened after the install (or one
-        // whose `SetNewPrevHash` never landed) still needs the current job
-        // and its parent context. `distribute` is idempotent for channels
-        // that already hold the active job.
         if self.phase != Phase::Open {
             return Ok(());
         }
-        // Until this connection knows a parent, every announcement carries
-        // one: an `Active` job would otherwise reach a miner that never got
-        // `SetNewPrevHash` (for example a channel opened while the book was
-        // empty, then an `Active` refresh on the same parent).
         let delivery = if installed.clean_jobs || !self.parent_delivered {
             Delivery::Future
         } else {
@@ -1422,21 +1161,12 @@ impl ProtocolSession {
     fn distribute(&mut self, job: &Job, delivery: Delivery) -> Result<(), SessionError> {
         let job_id = job.id().get();
         let parent = job.previous_block_hash();
-        // Per-channel parent enforcement lives in `send_to_channel`: a channel
-        // whose last parent differs (including `None` for a channel that never
-        // got `SetNewPrevHash`) gets `Future` plus the parent even when the
-        // connection-wide delivery is `Active`. This covers a channel that
-        // missed the parent announce on an otherwise unchanged parent.
         let missing: Vec<u32> = self
             .channels
             .iter()
             .filter(|(_, channel)| !channel.jobs.contains_key(&job_id))
             .map(|(id, _)| *id)
             .collect();
-        // Channels that recorded the job but never received the
-        // `SetNewPrevHash` that activates it (the job frame landed while the
-        // prev-hash frame hit a full outbound queue). They need only the
-        // parent announcement, not a second job.
         let needs_parent: Vec<u32> = self
             .channels
             .iter()
@@ -1451,11 +1181,6 @@ impl ProtocolSession {
         if missing.is_empty() && needs_parent.is_empty() {
             return Ok(());
         }
-        // Group-addressed delivery shares one `Delivery` for every channel, so
-        // it is only safe when every channel agrees on the parent. An `Active`
-        // group job would otherwise activate a channel that never got the
-        // parent; fall back to per-channel delivery (which upgrades stale
-        // channels to `Future` in `send_to_channel`) when parents disagree.
         let group = match self.group_id {
             Some(group)
                 if !self.requires_standard_jobs
@@ -1495,12 +1220,7 @@ impl ProtocolSession {
         for channel_id in missing {
             self.send_to_channel(channel_id, job, delivery)?;
         }
-        // Retry parent-only delivery for jobs that stayed inactive. This also
-        // covers channels opened mid-install: `announce` no longer depends on
-        // the owner's `fresh` flag, so a late channel that recorded the job
-        // via `open_channel` still converges on the active parent here.
         for channel_id in needs_parent {
-            // A channel served above already carries the active job.
             if self
                 .channels
                 .get(&channel_id)
@@ -1514,8 +1234,6 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Parent-only delivery: the `SetNewPrevHash` that activates an already
-    /// recorded future job.
     fn send_prev_hash(&mut self, channel_id: u32, job: &Job) -> Result<(), SessionError> {
         if !self.channels.contains_key(&channel_id) {
             return Err(SessionError::UnknownChannel(channel_id));
@@ -1531,17 +1249,12 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Channel-addressed delivery: the job, then (for a future job) the
-    /// `SetNewPrevHash` that activates it.
     fn send_to_channel(
         &mut self,
         channel_id: u32,
         job: &Job,
         delivery: Delivery,
     ) -> Result<(), SessionError> {
-        // Enforce the per-channel parent invariant at the lowest level: a
-        // channel whose last parent differs gets `Future` plus
-        // `SetNewPrevHash`, even if the caller asked for `Active`.
         let mut delivery = delivery;
         if delivery == Delivery::Active
             && self
@@ -1592,8 +1305,6 @@ impl ProtocolSession {
         Ok(())
     }
 
-    // ---- targets -----------------------------------------------------------
-
     fn queue_set_target(&mut self, id: u32, target: ShareTarget) -> Result<(), SessionError> {
         let le = target.to_le_bytes();
         self.queue(
@@ -1606,11 +1317,6 @@ impl ProtocolSession {
         )
     }
 
-    /// Host-driven retarget (vardiff policy lives in the host).
-    ///
-    /// `id` is a channel or the group channel. The target must not exceed the
-    /// miner's `max_target` (§5.3.21). Jobs already active keep the target they
-    /// were issued under; future jobs take it when they activate.
     pub fn set_target(&mut self, id: u32, target: ShareTarget) -> Result<(), SessionError> {
         let members: Vec<u32> = if self.group_id == Some(id) {
             self.channels.keys().copied().collect()
@@ -1677,14 +1383,11 @@ impl ProtocolSession {
                 lowered = Some(max_target);
             }
         }
-        // §5.3.7: a smaller max_target must be reflected by a SetTarget.
         match lowered {
             Some(target) => self.queue_set_target(channel_id, target),
             None => Ok(()),
         }
     }
-
-    // ---- shares ------------------------------------------------------------
 
     fn submit_standard(
         &mut self,
@@ -1839,9 +1542,6 @@ impl ProtocolSession {
             nonce,
             version,
         };
-        // Reserve the event slot before validation: `book.validate` records
-        // dedup state and the valid path inserts a pending ticket, so a full
-        // event queue must fail here rather than leave an unserviceable ticket.
         if self.events.len() >= self.config.limits.max_pending_events {
             return Err(SessionError::Backlog {
                 queue: "event",
@@ -1904,10 +1604,6 @@ impl ProtocolSession {
         }
     }
 
-    /// The host recorded the share durably: tell the miner it counted.
-    ///
-    /// Returns `false` when the ticket is unknown or its channel closed
-    /// meanwhile (nothing is sent).
     pub fn confirm_share(&mut self, ticket: ShareTicket) -> Result<bool, SessionError> {
         let Some(pending) = self.pending.get(&ticket.0) else {
             return Ok(false);
@@ -1915,9 +1611,6 @@ impl ProtocolSession {
         if matches!(pending.kind, PendingKind::Block) {
             return Err(SessionError::BlockRequiresSubmission);
         }
-        // Queue before removing the ticket: a full outbound queue must leave
-        // the pending acknowledgement in place for a later retry instead of
-        // dropping a share the ledger already recorded.
         let (channel_id, sequence_number, difficulty) = (
             pending.channel_id,
             pending.sequence_number,
@@ -1941,11 +1634,6 @@ impl ProtocolSession {
         Ok(true)
     }
 
-    /// Records a submitted block and acknowledges its share.
-    ///
-    /// The caller must record [`BlockSubmission::receipt`] in the ledger
-    /// before invoking this method. Only the opaque token produced by
-    /// [`PendingBlock::submit`] can pass the ticket and channel checks.
     pub fn confirm_block(&mut self, submission: &BlockSubmission) -> Result<bool, SessionError> {
         let Some(pending) = self.pending.get(&submission.ticket.0) else {
             return Ok(false);
@@ -1957,9 +1645,6 @@ impl ProtocolSession {
         {
             return Ok(false);
         }
-        // Queue before removing the ticket: a full outbound queue must leave
-        // the pending acknowledgement in place for a later retry instead of
-        // dropping a block the ledger already recorded.
         let (channel_id, sequence_number, difficulty) = (
             pending.channel_id,
             pending.sequence_number,
@@ -1983,19 +1668,11 @@ impl ProtocolSession {
         Ok(true)
     }
 
-    /// The node rejected a found block as a stale sibling: tell the miner it
-    /// did not count without closing the connection.
-    ///
-    /// Only the token produced by [`PendingBlock::submit`] passes the ticket
-    /// and channel checks. Returns `false` when the ticket is unknown or its
-    /// channel closed meanwhile (nothing is sent).
     pub fn reject_block(
         &mut self,
         submission: &BlockSubmission,
         code: &'static str,
     ) -> Result<bool, SessionError> {
-        // Validate the host-supplied code before touching ticket state: an
-        // unknown code must not silently drop the acknowledgement.
         let error_code = code_str(code)?;
         let Some(pending) = self.pending.get(&submission.ticket.0) else {
             return Ok(false);
@@ -2012,9 +1689,6 @@ impl ProtocolSession {
         if pending.block_hash != Some(submission.block_hash) {
             return Ok(false);
         }
-        // Queue before removing the ticket: a full outbound queue must leave
-        // the pending acknowledgement in place for a later retry instead of
-        // dropping it unsent.
         let (channel_id, sequence_number) = (pending.channel_id, pending.sequence_number);
         if !self.channels.contains_key(&channel_id) {
             self.pending.remove(&submission.ticket.0);
@@ -2034,16 +1708,11 @@ impl ProtocolSession {
         Ok(true)
     }
 
-    /// The host could not record the share: tell the miner it did not count.
-    ///
-    /// `code` must be printable ASCII (for example [`ERROR_CODE_SHARE_NOT_RECORDED`]).
     pub fn reject_share(
         &mut self,
         ticket: ShareTicket,
         code: &'static str,
     ) -> Result<bool, SessionError> {
-        // Validate before mutating: a malformed host code returns
-        // `BadErrorCode` without dropping the pending ticket.
         let error_code = code_str(code)?;
         let Some(pending) = self.pending.get(&ticket.0) else {
             return Ok(false);
@@ -2051,9 +1720,6 @@ impl ProtocolSession {
         if matches!(pending.kind, PendingKind::Block) {
             return Err(SessionError::BlockRequiresSubmission);
         }
-        // Queue before removing the ticket: a full outbound queue must leave
-        // the pending refusal in place for a later retry instead of dropping
-        // a share the host already judged.
         let (channel_id, sequence_number) = (pending.channel_id, pending.sequence_number);
         if !self.channels.contains_key(&channel_id) {
             self.pending.remove(&ticket.0);
@@ -2073,17 +1739,12 @@ impl ProtocolSession {
         Ok(true)
     }
 
-    // ---- close, cancel, reconnect ----------------------------------------
-
     fn refuse_custom_job(&mut self, mut payload: Vec<u8>) -> Result<(), SessionError> {
         let (channel_id, request_id) = {
             let msg: SetCustomMiningJob<'_> =
                 decode(MESSAGE_TYPE_SET_CUSTOM_MINING_JOB, &mut payload)?;
             (msg.channel_id, msg.request_id)
         };
-        // Work selection is not advertised (SetupConnection refuses
-        // REQUIRES_WORK_SELECTION), so a custom job is a client error that the
-        // protocol answers with the official code rather than a disconnect.
         let msg = SetCustomMiningJobError {
             channel_id,
             request_id,
@@ -2096,7 +1757,6 @@ impl ProtocolSession {
         )
     }
 
-    /// Channels a close of `id` covers: the channel, or every member for the group.
     fn close_scope(&self, id: u32) -> Vec<u32> {
         if self.group_id == Some(id) {
             self.channels.keys().copied().collect()
@@ -2117,10 +1777,6 @@ impl ProtocolSession {
             return Ok(());
         };
         book.close_session(channel.session);
-        // Cancel: shares of a closed channel are not acknowledged. Their
-        // burned duplicate keys are released so identical retries validate
-        // fresh instead of sticking at `Duplicate` while nothing can ever
-        // credit them.
         for hash in self
             .pending
             .values()
@@ -2146,7 +1802,6 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Host-initiated close of a channel (or of the whole group).
     pub fn close_channel(
         &mut self,
         book: &mut JobBook,
@@ -2168,10 +1823,6 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Asks the miner to reconnect (`Reconnect`, §3.6.5). An empty host and
-    /// port 0 mean "same endpoint". Afterwards new channels are refused with
-    /// [`ERROR_CODE_RECONNECT_REQUESTED`]; the host closes the connection when
-    /// the miner leaves or after its own grace period.
     pub fn request_reconnect(&mut self, new_host: &str, new_port: u16) -> Result<(), SessionError> {
         let msg = Reconnect {
             new_host: code_str(new_host)?,
@@ -2182,16 +1833,14 @@ impl ProtocolSession {
         Ok(())
     }
 
-    /// Releases every owner session this connection holds. The host MUST call
-    /// this when the connection ends, whatever the reason: the owner's session
-    /// table is bounded and a leaked session shrinks it. Idempotent.
+    /// Releases every owner session this connection holds.
+    ///
+    /// The host MUST call this when the connection ends, whatever the reason: the
+    /// owner's session table is bounded and a leaked session shrinks it. Idempotent.
     pub fn release(&mut self, book: &mut JobBook) {
         for (_, channel) in std::mem::take(&mut self.channels) {
             book.close_session(channel.session);
         }
-        // Dropped tickets will never be confirmed: release their burned
-        // duplicate keys so retries on a fresh connection validate anew
-        // rather than inherit `Duplicate` from uncredited work.
         for pending in std::mem::take(&mut self.pending).into_values() {
             unburn_hash(book, &pending.hash);
         }
@@ -2206,7 +1855,6 @@ struct PreparedShare {
     target: ShareTarget,
 }
 
-/// Releases one header hash burned by [`JobBook::validate`].
 fn unburn_hash(book: &mut JobBook, hash: &[u8; 32]) {
     let _ = book.unburn(&BlockHash::from(Hash256::from_le_bytes(hash)));
 }

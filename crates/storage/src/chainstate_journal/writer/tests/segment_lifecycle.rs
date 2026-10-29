@@ -229,7 +229,6 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-MARK-2.
 #[test]
 fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -247,7 +246,6 @@ fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResu
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -270,9 +268,6 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
         Err(JournalWriterError::AppendGap { height: 1 })
     ));
 
-    // Compaction itself also owns the guard. Even if an internal caller
-    // poisons an already-frozen writer, it cannot commit a new base that a
-    // restart would reopen without the in-memory append-gap latch.
     let store = Arc::new(CountingStore::new());
     let mut frozen = open_fresh("frozen-progress-append-gap", store)?;
     frozen.freeze()?;
@@ -284,10 +279,6 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1, JW-MARK-2.
-// A fork below the checkpoint base invalidates the generation; the disconnect
-// debt settles through the same freeze-compact-resume publication instead of
-// leaving the writer frozen until restart.
 #[test]
 fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -315,8 +306,6 @@ fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResul
         writer.append(&sample_record(11)),
         Err(JournalWriterError::NotOpen { .. })
     ));
-    // Publication must not resume before compaction installs the new base:
-    // the only head still in memory is the destroyed generation's stale cursor.
     assert!(matches!(
         writer.resume(),
         Err(JournalWriterError::NotOpen {
@@ -341,7 +330,6 @@ fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResul
     Ok(())
 }
 
-// Contract: docs/contracts/recovery.md, RCV-02; chainstate-journal-v1.md, JW-MARK-2.
 #[test]
 fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -354,8 +342,6 @@ fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -
     writer.dir.write("segment-invalid.log", b"not a segment")?;
     let head_before = writer.dir.read("head.json")?;
 
-    // Span directory iterator buffers and sparse generation numbers. Cleanup
-    // must enumerate the existing names, not walk up to the largest generation.
     for generation in (1..=2048).chain(std::iter::once(u64::MAX)) {
         writer.dir.write(segment_name(generation), [0; 512])?;
     }
@@ -381,8 +367,6 @@ fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -
     assert_eq!(writer.dir.read("segment-invalid.log")?, b"not a segment");
     assert!(!writer.requires_compaction()?);
 
-    // Relief leaves the active append cursor usable and its next durable
-    // record recoverable, without retiring the cold-revalidation marker.
     writer.append(&sample_record(1))?;
     writer.flush_to(1)?;
     let dir = writer.dir.try_clone()?;

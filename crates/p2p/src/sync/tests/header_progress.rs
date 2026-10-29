@@ -58,15 +58,6 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
 
 #[test]
 fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
-    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
-    // Regression test: once a node has caught up, no
-    // connected peer has a handshake-time start_height above its applied
-    // height — every peer connected while the node was at or below the
-    // tip. When a new header then extends the tip (a sendheaders
-    // announcement), the announcing peer demonstrably has the block, so
-    // its demonstrated best-known height must keep it request-eligible
-    // and tick must fetch the missing body instead of skipping every
-    // peer for a stale handshake snapshot.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -101,16 +92,12 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
         ..
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
-    // The peer's handshake height equals the applied height: it connected
-    // while the node was at the tip, before the new block existed.
     let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
     ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 2));
 
-    // The peer announces the new tip header; drain accepts it and must
-    // record the demonstrated height on the peer.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![announced_header],
         source: Some(current_source(&peers, addr)),
@@ -145,12 +132,6 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
 
 #[test]
 fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
-    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
-    // edge of the branch-aware credit. A winning fork announced at tip
-    // re-selects the tree's best chain during acceptance, and the
-    // announcing peer must earn credit against that POST-reselection
-    // chain. A filter that credited only headers on the pre-insert tip
-    // would leave the peer ineligible and no fork body would be fetched.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -191,9 +172,6 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
         ..
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
-    // The peer's handshake height equals the applied height: it
-    // connected at the losing tip, and only the fork announcement it
-    // delivers demonstrates anything beyond that.
     let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         8333,
@@ -236,10 +214,6 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
 
 #[test]
 fn losing_fork_credit_survives_winner_disconnect() -> TestResult {
-    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md). Peer A's
-    // accepted fork is initially losing, peer B later extends it so the
-    // fork wins, and B then disconnects. A must retain the accepted tip
-    // evidence and remain eligible for the bodies it demonstrated.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

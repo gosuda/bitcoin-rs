@@ -1,77 +1,4 @@
 //! Native Stratum V2 mining-pool adapter.
-//!
-//! A pool-side Stratum V2 server for `bitcoin-rs`, built from three layers:
-//!
-//! 1. **Authenticated transport** ([`Connection`]): the `Noise_NX_Secp256k1+
-//!    EllSwift_ChaChaPoly_SHA256` responder of the Stratum V2 specification,
-//!    run by the Stratum Reference Implementation's own `noise_sv2` and
-//!    `codec_sv2` (never home-grown crypto). The pool authority key crosses
-//!    this crate as 32 raw bytes ([`AuthorityKeypair`]), so no `secp256k1`
-//!    type is shared with the repository's `secp256k1 0.29` graph:
-//!    `noise_sv2 2.0.0` resolves its own `secp256k1 0.28.2` and the two meet
-//!    only at the byte boundary.
-//! 2. **Protocol session** ([`ProtocolSession`]): `SetupConnection`, standard,
-//!    extended and group channels, `NewMiningJob` / `NewExtendedMiningJob` /
-//!    `SetNewPrevHash` / `SetTarget` / `SubmitShares*`, `UpdateChannel`,
-//!    `CloseChannel`, `Reconnect`, and the error and cancel semantics around
-//!    them, using the official message layouts from `mining_sv2 12.0.0` and
-//!    `common_messages_sv2 9.0.0`.
-//! 3. **The one job and share owner**, [`crate::pool::JobBook`]. This
-//!    crate never assembles a template, never builds a coinbase, and never
-//!    validates a share or a block: it passes the owner's `Job` to the wire
-//!    and maps the owner's `ShareError` to an official error code.
-//!
-//! # What is real, and what is not
-//!
-//! Implemented and exercised by `tests/protocol.rs` with real Noise
-//! handshakes, real encrypted frames and real regtest candidates: the Mining
-//! Protocol server role. [`ROLES`] states every other role explicitly; none of
-//! them is advertised in `SetupConnection`:
-//!
-//! - Job Declaration server and work selection (`SetCustomMiningJob`,
-//!   `REQUIRES_WORK_SELECTION`) are not implemented: the owner exposes no way
-//!   to install a miner-declared job (`JobBook::install` takes a pool-built
-//!   `Candidate`), and adding one here would be a second template and
-//!   validation path. `SetupConnection` for the Job Declaration protocol is
-//!   refused with `unsupported-protocol`; the work-selection flag with
-//!   `unsupported-feature-flags`; a stray `SetCustomMiningJob` with
-//!   `jd-not-supported`.
-//! - Template Distribution (serving or consuming) is not needed by a native
-//!   pool, whose templates come from `MiningControl`, and is not implemented.
-//! - Extension negotiation is not implemented; frames with a non-zero
-//!   `extension_type` are discarded as §3.4.1 requires.
-//!
-//! Not run: a network daemon, a real key, a real funds path. Nothing in this
-//! crate opens a socket: [`Connection`] is sans-IO (`feed` bytes in,
-//! `take_transmit` bytes out).
-//!
-//! # Host loop
-//!
-//! ```text
-//! let mut conn = Connection::accept(&authority, validity, config, &book)?;
-//! loop {
-//!     // read up to conn.read_hint().max(4096) bytes from the socket, then
-//!     conn.feed(&bytes, &mut book)?;
-//!     socket.write_all(&conn.take_transmit());
-//!     while let Some(event) = conn.poll_event() {
-//!         match event {
-//!             Event::ShareAccepted(e) => {
-//!                 ledger.record(&e.outcome);
-//!                 conn.confirm_share(e.ticket)?;
-//!             }
-//!             Event::BlockFound(pending) => {
-//!                 let submitted = pending.submit(&*mining_control)?;
-//!                 // The pool service maps pending.found_block() plus
-//!                 // submitted.receipt() into its ledger BlockFound record here.
-//!                 conn.confirm_block(&submitted)?;
-//!             }
-//!             ...
-//!         }
-//!     }
-//!     // when the node installs a job: conn.announce(&installed)?;
-//! }
-//! conn.release(&mut book); // always, on every exit path
-//! ```
 
 #![forbid(unsafe_code)]
 
@@ -101,61 +28,38 @@ use noise_sv2::{AEAD_MAC_LEN, ELLSWIFT_ENCODING_SIZE, Responder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-/// Stratum V2 specification revision this crate implements: the
-/// `stratum-mining/sv2-spec` commit of 2026-10-15.
 pub const SPEC_REVISION: &str = "025e2f76802d5942a10f6f3fea07941522b108ca";
-/// Stratum Reference Implementation release whose crates.io line is used
-/// (`stratum-core 0.6.0`, 2026-09-17).
 pub const SRI_RELEASE: &str = "v1.12.0";
-/// The only protocol version Stratum V2 defines (`SetupConnection` §3.6.1).
 pub const PROTOCOL_VERSION: u16 = 2;
-/// Largest value of the U24 `msg_length` frame field.
 pub const U24_MAX: usize = 0x00ff_ffff;
 /// Largest `B0_32` field: a standard channel's full extranonce must fit it.
 pub const MAX_EXTRANONCE_WIRE_LEN: usize = 32;
-/// Largest single `feed` the transport accepts; the pending input buffer is
-/// therefore bounded by one decoder chunk plus this.
 pub const MAX_FEED_LEN: usize = 1 << 17;
 
 /// One plaintext SV2 frame, decrypted (or about to be encrypted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
-    /// `extension_type` without the channel bit; 0 for every core message.
     pub extension_type: u16,
-    /// Message type.
     pub msg_type: u8,
-    /// The `channel_msg` bit.
     pub channel_msg: bool,
-    /// Message payload, without the 6-byte header.
     pub payload: Vec<u8>,
 }
 
-/// Whether one protocol role is implemented by this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoleStatus {
-    /// Implemented and covered by `tests/protocol.rs`.
     Implemented,
-    /// Not implemented; never advertised.
     NotImplemented,
-    /// Not needed by a native pool.
     NotApplicable,
 }
 
-/// One row of the role matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct Role {
-    /// Role or capability.
     pub name: &'static str,
-    /// Where the specification defines it.
     pub spec: &'static str,
-    /// Whether this crate implements it.
     pub status: RoleStatus,
-    /// Behaviour or the exact missing fact.
     pub detail: &'static str,
 }
 
-/// The full role matrix of this adapter. Anything not `Implemented` is a fact
-/// about what is missing, not a claim of support.
 pub const ROLES: &[Role] = &[
     Role {
         name: "Noise_NX authenticated transport, responder",
@@ -246,65 +150,36 @@ pub const ROLES: &[Role] = &[
 /// Configuration refused before any connection state exists.
 #[derive(Debug, Eq, Error, PartialEq)]
 pub enum ConfigError {
-    /// A resource limit is out of range.
     #[error("invalid limits: {0}")]
     Limits(&'static str),
-    /// The pool authority key pair is not a valid matching pair.
     #[error("authority key pair rejected: {0}")]
     Authority(String),
-    /// Certificate validity is zero or does not fit a U32 of seconds.
     #[error("certificate validity must be between 1 second and u32::MAX seconds")]
     CertValidity,
-    /// The owner's extranonce layout cannot be carried by a `B0_32` field.
     #[error("extranonce layout of {total} bytes exceeds the {max}-byte wire field")]
-    ExtranonceTooLong {
-        /// `session_len + rolled_len`.
-        total: usize,
-        /// Wire maximum.
-        max: usize,
-    },
+    ExtranonceTooLong { total: usize, max: usize },
 }
 
 /// Transport failures. All of them are fatal for the connection: after a
 /// failed decryption the cipher nonce no longer matches the peer's.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    /// The Noise handshake failed.
     #[error("noise handshake failed: {0}")]
     Handshake(String),
-    /// A frame failed authentication (bad MAC) or decoding.
     #[error("frame failed authentication or decoding: {0}")]
     Decrypt(String),
-    /// A frame declares more payload than the configured limit.
     #[error("frame needs more than {limit} payload bytes")]
-    FrameTooLarge {
-        /// Configured payload limit.
-        limit: usize,
-    },
-    /// A single `feed` call exceeded the bound.
+    FrameTooLarge { limit: usize },
     #[error("read of {len} bytes exceeds the {max}-byte feed bound")]
-    FeedTooLarge {
-        /// Offered length.
-        len: usize,
-        /// Bound.
-        max: usize,
-    },
-    /// The decoder asked for no input and produced no frame.
+    FeedTooLarge { len: usize, max: usize },
     #[error("decoder made no progress")]
     Stalled,
-    /// An outbound frame could not be encoded.
     #[error("cannot encode outbound frame: {0}")]
     Encode(String),
-    /// The peer is not draining output.
     #[error("outbound byte queue would exceed {limit}")]
-    OutboxFull {
-        /// Bound.
-        limit: usize,
-    },
-    /// An application frame before the handshake completed.
+    OutboxFull { limit: usize },
     #[error("transport is not open")]
     NotOpen,
-    /// The transport failed earlier.
     #[error("transport failed earlier")]
     Failed,
 }
@@ -312,24 +187,15 @@ pub enum TransportError {
 /// Any failure of a [`Connection`] call.
 #[derive(Debug, Error)]
 pub enum Error {
-    /// The encrypted transport failed.
     #[error(transparent)]
     Transport(#[from] TransportError),
-    /// The peer violated the protocol, or a host call was invalid.
     #[error(transparent)]
     Session(#[from] SessionError),
-    /// The connection already failed; release it and drop the socket.
     #[error("connection is closed")]
     Closed,
 }
 
 impl Error {
-    /// Whether the connection is unusable after this error.
-    ///
-    /// Transport failures and protocol violations are fatal. A host call that
-    /// named an unknown channel, asked for a target above the miner's maximum,
-    /// or passed a malformed error code is refused without touching the
-    /// connection.
     #[must_use]
     pub fn is_fatal(&self) -> bool {
         match self {
@@ -340,28 +206,17 @@ impl Error {
 }
 
 /// The pool authority key pair, as raw 32-byte x-only keys.
-///
-/// Raw bytes are the whole interface to `noise_sv2` on purpose: the secret
-/// never becomes a `secp256k1` type of a version this crate does not control,
-/// and it is wiped when dropped.
 pub struct AuthorityKeypair {
     public: [u8; 32],
     secret: Zeroizing<[u8; 32]>,
 }
 
 impl AuthorityKeypair {
-    /// Wraps the BIP340 x-only public key and an already-zeroizing 32-byte
-    /// secret. [`Connection::accept`] verifies that the pair matches.
-    ///
-    /// Requiring [`Zeroizing`] at this boundary ensures the caller's secret
-    /// buffer is wiped on drop rather than merely copying it into the
-    /// authority object.
     #[must_use]
     pub fn from_bytes(public: [u8; 32], secret: Zeroizing<[u8; 32]>) -> Self {
         Self { public, secret }
     }
 
-    /// The public key miners pin.
     #[must_use]
     pub fn public(&self) -> &[u8; 32] {
         &self.public
@@ -412,12 +267,6 @@ fn frame_bytes(frame: &Frame) -> Result<Vec<u8>, TransportError> {
     Ok(bytes)
 }
 
-/// `Noise_NX` responder plus bounded `SV2` framing.
-///
-/// The decoder is fed exactly the byte count it asks for, and the number of
-/// encrypted bytes fed for the current frame is checked against the ceiling
-/// the configured payload limit implies *before* each read, so an oversized
-/// declaration is refused after the encrypted header, never buffered.
 struct Transport {
     decoder: NoiseDecoder,
     encoder: NoiseEncoder,
@@ -593,15 +442,12 @@ impl Transport {
                 }
                 Ok(())
             }
-            // The state is consumed with the error: the connection is over.
             Err(e) => Err(TransportError::Decrypt(e.to_string())),
         }
     }
 
     fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
         let bytes = frame_bytes(frame)?;
-        // Refuse before encrypting: an encrypted frame that is then dropped
-        // would leave the peer's nonce behind ours.
         let estimate = encrypted_frame_len(frame.payload.len());
         if self.outbox.len().saturating_add(estimate) > self.max_outbox {
             return Err(TransportError::OutboxFull {
@@ -628,11 +474,6 @@ impl Transport {
 }
 
 /// One authenticated pool connection: Noise transport plus protocol session.
-///
-/// Sans-IO. Every method that can queue output leaves it in
-/// [`Connection::take_transmit`]. After any `Err` the connection is dead:
-/// drain `take_transmit` if you want a last message out, call
-/// [`Connection::release`], and drop the socket.
 pub struct Connection {
     transport: Transport,
     session: ProtocolSession,
@@ -649,11 +490,6 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    /// A server-side connection awaiting the miner's first handshake bytes.
-    ///
-    /// `book` is only read, to check that its extranonce layout fits the wire.
-    /// `cert_validity` is how long the certificate this connection presents
-    /// stays valid.
     pub fn accept(
         authority: &AuthorityKeypair,
         cert_validity: Duration,
@@ -670,26 +506,20 @@ impl Connection {
         })
     }
 
-    /// How many more bytes would let the decoder make progress; read at least
-    /// this much (reading more is always safe).
     #[must_use]
     pub fn read_hint(&self) -> usize {
         self.transport.read_hint()
     }
 
-    /// The protocol session, for inspection.
     #[must_use]
     pub fn session(&self) -> &ProtocolSession {
         &self.session
     }
 
-    /// The protocol session, for host-owned acknowledgement and expiry.
     pub fn session_mut(&mut self) -> &mut ProtocolSession {
         &mut self.session
     }
 
-    /// True once the connection must be flushed and closed (a refused
-    /// `SetupConnection`, a failure, or [`Connection::release`]).
     #[must_use]
     pub fn is_closing(&self) -> bool {
         self.dead || self.session.is_closing()
@@ -715,10 +545,6 @@ impl Connection {
         result
     }
 
-    /// Feeds bytes read from the socket (any length up to [`MAX_FEED_LEN`]).
-    ///
-    /// Decrypts and decodes every complete frame, runs the protocol session on
-    /// it against `book`, and queues the replies.
     pub fn feed(&mut self, data: &[u8], book: &mut JobBook) -> Result<(), Error> {
         self.guard(|conn| {
             let frames = conn.transport.feed(data)?;
@@ -729,17 +555,14 @@ impl Connection {
         })
     }
 
-    /// Drains the encrypted bytes to write to the socket.
     pub fn take_transmit(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.transport.outbox)
     }
 
-    /// Next host event, if any.
     pub fn poll_event(&mut self) -> Option<Event> {
         self.session.poll_event()
     }
 
-    /// Announces a job the owner just installed; see [`ProtocolSession::announce`].
     pub fn announce(&mut self, installed: &Installed) -> Result<(), Error> {
         self.guard(|conn| {
             conn.session.announce(installed)?;
@@ -747,7 +570,6 @@ impl Connection {
         })
     }
 
-    /// The host recorded the share: send `SubmitShares.Success`.
     pub fn confirm_share(&mut self, ticket: ShareTicket) -> Result<bool, Error> {
         self.guard(|conn| {
             let sent = conn.session.confirm_share(ticket)?;
@@ -756,11 +578,6 @@ impl Connection {
         })
     }
 
-    /// The host submitted and recorded a found block: send `SubmitShares.Success`.
-    ///
-    /// The token must come from [`PendingBlock::submit`] after the host
-    /// called its authoritative [`MiningControl`] and recorded the receipt in the
-    /// ledger.
     pub fn confirm_block(&mut self, submission: &BlockSubmission) -> Result<bool, Error> {
         self.guard(|conn| {
             let sent = conn.session.confirm_block(submission)?;
@@ -769,7 +586,6 @@ impl Connection {
         })
     }
 
-    /// The host could not record the share: send `SubmitShares.Error`.
     pub fn reject_share(&mut self, ticket: ShareTicket, code: &'static str) -> Result<bool, Error> {
         self.guard(|conn| {
             let sent = conn.session.reject_share(ticket, code)?;
@@ -778,10 +594,6 @@ impl Connection {
         })
     }
 
-    /// The node rejected a found block as stale: send `SubmitShares.Error`.
-    ///
-    /// The token must come from [`PendingBlock::submit`]. Retires the block
-    /// ticket without closing the connection.
     pub fn reject_block(
         &mut self,
         submission: &BlockSubmission,
@@ -794,7 +606,6 @@ impl Connection {
         })
     }
 
-    /// Retargets a channel or the group channel; see [`ProtocolSession::set_target`].
     pub fn set_target(&mut self, id: u32, target: ShareTarget) -> Result<(), Error> {
         self.guard(|conn| {
             conn.session.set_target(id, target)?;
@@ -802,7 +613,6 @@ impl Connection {
         })
     }
 
-    /// Closes a channel (or the whole group) and releases its owner sessions.
     pub fn close_channel(
         &mut self,
         book: &mut JobBook,
@@ -815,7 +625,6 @@ impl Connection {
         })
     }
 
-    /// Sends `Reconnect`; see [`ProtocolSession::request_reconnect`].
     pub fn request_reconnect(&mut self, new_host: &str, new_port: u16) -> Result<(), Error> {
         self.guard(|conn| {
             conn.session.request_reconnect(new_host, new_port)?;
@@ -823,7 +632,6 @@ impl Connection {
         })
     }
 
-    /// Releases every owner session. Call on every exit path; idempotent.
     pub fn release(&mut self, book: &mut JobBook) {
         self.session.release(book);
         self.dead = true;

@@ -1,18 +1,8 @@
-//! REF-02/REF-07 — the differential lane runs two public processes, never handlers.
-//!
-//! The pinned Core 31.1 `bitcoind` and the `bitcoin-rs` binary each start in
-//! an isolated regtest datadir, share identical block bytes, answer only
-//! through their public RPC surface, and leave no child behind. A missing or
-//! substituted reference binary is a typed failure that names the pinned
-//! digest; it is never a skipped test.
-
 #![expect(
     clippy::expect_used,
     reason = "process custody failures must name the offending identity"
 )]
 
-// The harness consumes only the release identity's binary digest; the rest
-// of the reference record stays dead in this binary.
 #[expect(dead_code, reason = "only the release bitcoind digest is read")]
 #[path = "support/reference_set.rs"]
 mod reference_set;
@@ -47,9 +37,8 @@ use bitcoin_rs_e2e::process_peer::connect_loopback;
 use bitcoin_rs_e2e::rpc::exchange;
 use bitcoin_rs_e2e::{ClockControl, Error, Kind, ProcessNode, SpawnOptions};
 use reference_set::reference_set;
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
-// A height-1 coinbase is mature for admission after 101 common blocks.
 const COMMON_BLOCKS: u32 = 101;
 
 /// Whether the OS still reports a live process under `pid`. On unix the
@@ -69,7 +58,6 @@ fn pid_is_alive(pid: u32) -> bool {
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     // SAFETY: the returned handle is checked for null and closed on every
-    // path; `code` is a plain out-param the call fully overwrites.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
@@ -83,7 +71,6 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
-/// Waits for the kernel to drop the child after it is reaped.
 fn assert_reaped(pid: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while pid_is_alive(pid) {
@@ -92,8 +79,6 @@ fn assert_reaped(pid: u32) {
     }
 }
 
-/// The exact binary this test package is compiled against — not the
-/// newest-file heuristic the e2e crate uses for cross-package callers.
 fn self_binary() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
 }
@@ -109,7 +94,6 @@ fn start(binary: Kind) -> ProcessNode {
     .expect("public process must start")
 }
 
-/// API-02: verification must inspect its requested bodies without repairing them.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -212,8 +196,6 @@ fn verifychain_reads_the_requested_window_and_preserves_state() {
             .write(true)
             .open(&path)
             .expect("test fault injection");
-        // Core's level-one CheckBlock excludes contextual witness checks. A
-        // nonce mutation leaves txids unchanged and must still pass that level.
         for (offset, level, verdict) in [
             (value_offset, 2, false),
             (0, 0, false),
@@ -269,7 +251,6 @@ fn verifychain_reads_the_requested_window_and_preserves_state() {
     }
 }
 
-/// API-02: native framing damage is corruption, not unavailable history.
 #[test]
 fn verifychain_reports_damaged_native_frames_without_repairing_them() {
     let mut core = start(Kind::Core);
@@ -284,7 +265,6 @@ fn verifychain_reports_damaged_native_frames_without_repairing_them() {
         .windows(original_body.len())
         .position(|bytes| bytes == original_body)
         .expect("tip body in file");
-    // Native frame: magic, length, height (four bytes each), then 32-byte hash.
     let frame_start = body_start
         .checked_sub(4 + 4 + 4 + 32)
         .expect("frame header");
@@ -336,8 +316,6 @@ fn verifychain_reports_damaged_native_frames_without_repairing_them() {
     drop(datadir);
 }
 
-/// API-01/API-02: Core 31.1 omits inapplicable pruning and signet fields.
-/// The optional compact-filter RPC must remain unavailable until enabled.
 #[test]
 fn chaininfo_optional_fields_follow_core_with_blockfilters_disabled() {
     for (kind, rest_flag) in [(Kind::Core, "-rest=1"), (Kind::BitcoinRs, "--rest=true")] {
@@ -362,8 +340,6 @@ fn chaininfo_optional_fields_follow_core_with_blockfilters_disabled() {
         for response in [&rpc, &rest] {
             assert_eq!(response.get("chain"), Some(&json!("regtest")));
             assert_eq!(response.get("pruned"), Some(&json!(false)));
-            // Core src/rpc/blockchain.cpp inserts these keys only for the
-            // relevant pruning mode or signet, never as JSON null.
             for field in [
                 "automatic_pruning",
                 "prune_target_size",
@@ -387,7 +363,7 @@ fn chaininfo_optional_fields_follow_core_with_blockfilters_disabled() {
     }
 }
 
-fn named_rpc_cases() -> Vec<(&'static str, serde_json::Value)> {
+fn named_rpc_cases() -> Vec<(&'static str, sonic_rs::Value)> {
     vec![
         (
             "createrawtransaction",
@@ -467,7 +443,6 @@ fn named_rpc_cases() -> Vec<(&'static str, serde_json::Value)> {
     ]
 }
 
-/// API-02: ordinary named arguments share Core's positional binding rules.
 #[test]
 fn named_rpc_arguments_follow_core() {
     let mut core = start(Kind::Core);
@@ -479,8 +454,6 @@ fn named_rpc_arguments_follow_core() {
         compare_reply(&request.to_string(), &reference, &candidate)
             .expect("named binding and method errors match Core");
     }
-    // Arity is method-owned only after name/collision binding succeeds.
-    // The existing local compact parameter error is explicitly a deviation.
     for params in [json!([[], {}, false]), json!({"args": [[], {}, false]})] {
         let request = json!({"jsonrpc": "2.0", "id": "arity", "method": "gettxspendingprevout", "params": params});
         let reference = core.rpc_raw(&request).expect("Core arity control");
@@ -488,8 +461,6 @@ fn named_rpc_arguments_follow_core() {
         assert_eq!(reference["error"]["code"], json!(-1));
         assert_eq!(candidate["error"]["code"], json!(-32602));
     }
-    // Preserve repeated JSON keys until the binder rejects them. Building
-    // these requests through serde_json::Value would discard that evidence.
     for body in [
         r#"{"jsonrpc":"2.0","id":"duplicate","method":"createrawtransaction","params":{"inputs":[],"inputs":[],"outputs":{}}}"#,
         r#"{"jsonrpc":"2.0","id":"duplicate","method":"gettxspendingprevout","params":{"outputs":[],"mempool_only":true,"mempool_only":false}}"#,
@@ -511,7 +482,6 @@ fn named_rpc_arguments_follow_core() {
     node.stop().expect("node stop");
 }
 
-/// API-02/API-32: unsupported creation and missing-output deviations are explicit.
 #[test]
 fn named_rpc_review_boundaries_are_explicit() {
     let mut core = start(Kind::Core);
@@ -523,8 +493,6 @@ fn named_rpc_review_boundaries_are_explicit() {
     compare_reply(&request.to_string(), &reference, &candidate)
         .expect("supported four-argument creation matches Core");
 
-    // Until the constructor implements version, every supplied form refuses;
-    // Core must actually serialize non-default version 1 for this discriminator.
     for (params, code, message) in [
         (
             json!([[], {}, 0, false, 1]),
@@ -589,10 +557,8 @@ fn named_rpc_review_boundaries_are_explicit() {
     node.stop().expect("native stop");
 }
 
-/// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
 #[test]
 fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
-    // Each binary's startup, listener probe, and shutdown are independent.
     std::thread::scope(|scope| {
         for binary in [Kind::BitcoinRs, Kind::Core] {
             scope.spawn(move || {
@@ -609,11 +575,8 @@ fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
     });
 }
 
-/// POL-05/REF-07: signaling never decides replacement eligibility. Both
-/// nodes still reject an underpaying replacement without changing the pool.
 #[test]
 fn replacement_signaling_matches_pinned_core() {
-    // The signaled and unsignaled scenarios are independent node pairs.
     std::thread::scope(|scope| {
         for signals in [false, true] {
             scope.spawn(move || replacement_signaling_case(signals));
@@ -656,8 +619,6 @@ fn replacement_signaling_case(signals: bool) {
             .expect("replacement below the original's fee");
         let underpaying_raw = serialize_hex(&underpaying);
 
-        // The replacement is independently valid before there is a conflict.
-        // A script or funding failure must not masquerade as an RBF difference.
         let raws = [&replacement_raw, &underpaying_raw];
         std::thread::scope(|scope| {
             for process in [&mut core, &mut node] {
@@ -687,8 +648,6 @@ fn replacement_signaling_case(signals: bool) {
             json!(original_txid),
         );
 
-        // Independent public response expectations for the pinned fee-policy case.
-        // The per-process observation sequences are independent.
         let rejection_case = |process: &mut ProcessNode, rejection: &str| {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))
@@ -777,7 +736,6 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         )
     });
     let (core_pid, node_pid) = (core.pid(), node.pid());
-    // Only Core exposes a mock clock today; the gap stays visible here.
     assert!(matches!(core.clock, ClockControl::Mock(_)));
     assert_eq!(node.clock, ClockControl::None);
 
@@ -806,26 +764,24 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
     let input = invalid.input.first_mut().expect("signature input");
     let mut script = input.script_sig.as_bytes().to_vec();
     let signature_length = usize::from(*script.first().expect("signature push length"));
-    // Change the last S scalar byte, preserving DER structure and sighash type.
     *script
         .get_mut(signature_length.checked_sub(1).expect("signature length"))
         .expect("signature scalar") ^= 1;
     input.script_sig = bitcoin::ScriptBuf::from_bytes(script);
     let invalid_raw = bitcoin::consensus::encode::serialize_hex(&invalid);
-    // The per-process preview and rejection observations are independent.
     let signature_case = |process: &mut ProcessNode| {
         let valid = process
             .rpc("testmempoolaccept", &json!([[raw]]))
             .expect("valid signed preview reaches the public admission owner");
         let valid_allowed = valid
-            .pointer("/0/allowed")
+            .pointer(&sonic_rs::pointer![0usize, "allowed"])
             .expect("valid preview allowed field")
             .clone();
         let invalid = process
             .rpc("testmempoolaccept", &json!([[invalid_raw]]))
             .expect("invalid signature is a semantic preview reply");
         let invalid_allowed = invalid
-            .pointer("/0/allowed")
+            .pointer(&sonic_rs::pointer![0usize, "allowed"])
             .expect("invalid preview allowed field")
             .clone();
         let rejection = process
@@ -857,8 +813,6 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         compare_reply("invalid signature preview allowed", &json!(false), allowed)
             .expect("invalid signature preview");
     }
-    // Rejection text is implementation-specific; the semantic allow verdict and
-    // JSON-RPC error code are this scenario's named compatibility observations.
     for code in &rejection_codes {
         compare_reply("invalid signature send error code", &json!(-26), code)
             .expect("invalid signature rejection code");
@@ -951,14 +905,13 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
 
     let transcript = std::fs::read_to_string(node.evidence.join("transcript.jsonl"))
         .expect("transcript custody");
-    // All setup and scenario requests retain their ordered raw replies.
     assert!(transcript.lines().count() >= expected + 12);
     for line in transcript.lines() {
-        let entry: serde_json::Value = serde_json::from_str(line).expect("JSONL event");
+        let entry: sonic_rs::Value = sonic_rs::from_str(line).expect("JSONL event");
         assert!(entry.get("request").is_some() && entry.get("reply").is_some());
     }
     for process in [&core, &node] {
-        let launch: serde_json::Value = serde_json::from_slice(
+        let launch: sonic_rs::Value = sonic_rs::from_slice(
             &std::fs::read(process.evidence.join("launch.json")).expect("launch evidence"),
         )
         .expect("launch JSON");
@@ -1017,7 +970,6 @@ fn missing_reference_binary_names_the_pinned_digest() {
     assert!(text.contains(&pinned) && text.contains("/nonexistent/reference/bitcoind"));
 }
 
-/// REF-07a: a value difference is behavioral evidence, never transport success.
 #[test]
 fn deliberately_different_reply_is_a_behavior_failure() {
     let reference = json!({"txids": ["expected"], "mempool_sequence": 2});
@@ -1029,7 +981,6 @@ fn deliberately_different_reply_is_a_behavior_failure() {
     ));
 }
 
-/// REF-07b: rejected startup must report and reap the exact child process.
 #[test]
 fn rejected_startup_options_leave_no_child() {
     let error = match ProcessNode::spawn_with(
@@ -1061,7 +1012,6 @@ fn rejected_startup_options_leave_no_child() {
     assert_reaped(pid);
 }
 
-/// REF-07b: an early successful exit is not readiness and leaves no child.
 #[test]
 fn successful_child_exit_before_readiness_is_not_startup_success() {
     let error = match ProcessNode::spawn_with(
@@ -1083,7 +1033,6 @@ fn successful_child_exit_before_readiness_is_not_startup_success() {
     assert_reaped(pid);
 }
 
-/// REF-07c: readiness is deadline-bounded and expiration reaps the child.
 #[test]
 fn readiness_deadline_reaps_the_child() {
     let error = match ProcessNode::spawn_with(
@@ -1104,8 +1053,6 @@ fn readiness_deadline_reaps_the_child() {
     assert_reaped(pid);
 }
 
-// A local transport peer exercises the same HTTP owner; it never stands in
-// for either node in the compatibility scenario above.
 fn serve_once(
     respond: impl FnOnce(TcpStream, Instant) + Send + 'static,
 ) -> (SocketAddr, JoinHandle<()>) {
@@ -1137,17 +1084,12 @@ fn serve_once(
 
 fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle<()>) {
     serve_once(move |mut stream, deadline| {
-        // Drain the entire bounded request before closing, so unread request
-        // bytes cannot turn a malformed reply into a TCP reset instead.
         let mut request = Vec::new();
         loop {
             assert!(request.len() < 4096, "unexpected oversized fixture request");
             let mut chunk = [0_u8; 512];
             let count = match stream.read(&mut chunk) {
                 Ok(count) => count,
-                // RCVTIMEO expiry arrives as WouldBlock; a loaded scheduler
-                // can stall the client past one read bound, so retry against
-                // the responder's total deadline.
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -1176,12 +1118,10 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
             }
         }
         std::thread::sleep(delay);
-        // A timed-out client may have already closed its socket.
         let _write_result = stream.write_all(reply);
     })
 }
 
-/// REF-07d: malformed HTTP and JSON are transport failures, not comparisons.
 #[test]
 fn malformed_http_and_json_replies_are_transport_failures() {
     for reply in [
@@ -1201,7 +1141,6 @@ fn malformed_http_and_json_replies_are_transport_failures() {
     }
 }
 
-/// REF-07c: a readable socket must not renew the total response deadline.
 #[test]
 fn dribbled_http_response_cannot_renew_the_request_deadline() {
     let (addr, server) = serve_once(|mut stream, deadline| {
@@ -1246,7 +1185,6 @@ fn dribbled_http_response_cannot_renew_the_request_deadline() {
     );
 }
 
-/// REF-07c: a slow request reader cannot renew the upload deadline.
 #[test]
 fn slow_http_request_reader_obeys_one_total_deadline() {
     let (addr, server) = serve_once(|mut stream, deadline| {
@@ -1278,7 +1216,6 @@ fn slow_http_request_reader_obeys_one_total_deadline() {
     );
 }
 
-/// REF-07c: each reference request obeys its fixed deadline.
 #[test]
 fn stalled_response_respects_the_request_deadline() {
     let (addr, server) = serve_reply(b"", Duration::from_millis(250));
@@ -1297,20 +1234,8 @@ fn stalled_response_respects_the_request_deadline() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Readiness scenarios: the txindex capability's readiness facts must be
-// one fact everywhere they render — the `getcapabilities` row, the
-// `getindexinfo` report Core parity checks, the Esplora tip, and the
-// Prometheus readiness gauge all read the same node-owned status snapshot.
-// ---------------------------------------------------------------------------
-
-/// Regtest payout for single-node block production. No readiness scenario
-/// spends from these coinbases.
 const MINING_ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
-/// The readiness outcomes documented for the txindex capability. The gauge
-/// label and the `getcapabilities` row spell them identically; a state
-/// outside this vocabulary is a behavior failure, never a poll artifact.
 const READINESS_OUTCOMES: [&str; 8] = [
     "Ready",
     "CatchingUp",
@@ -1326,7 +1251,6 @@ fn readiness_deadline() -> Instant {
     Instant::now() + Duration::from_mins(2)
 }
 
-/// Starts the node with its derived index enabled.
 fn start_txindex_node() -> ProcessNode {
     ProcessNode::spawn_with(
         Kind::BitcoinRs,
@@ -1340,20 +1264,16 @@ fn start_txindex_node() -> ProcessNode {
     .expect("txindex node must start")
 }
 
-/// Extracts the txindex readiness outcome from a `getcapabilities` row.
-///
-/// Unit outcomes render as strings; payload outcomes render as one-key
-/// objects. Either way the token must be documented vocabulary.
 fn readiness_outcome(row: &Value) -> String {
     let state = row
-        .pointer("/capabilities/0/state")
+        .pointer(&sonic_rs::pointer!["capabilities", 0usize, "state"])
         .unwrap_or_else(|| panic!("getcapabilities has no txindex row: {row}"));
     let tag = if let Some(spelled) = state.as_str() {
         spelled.to_owned()
     } else {
         state
             .as_object()
-            .and_then(|object| object.keys().next())
+            .and_then(|object| object.iter().next().map(|(key, _)| key))
             .unwrap_or_else(|| panic!("untagged readiness state: {state}"))
             .to_owned()
     };
@@ -1364,8 +1284,6 @@ fn readiness_outcome(row: &Value) -> String {
     tag
 }
 
-/// Polls until the txindex row reports Ready, returning the distinct
-/// outcomes observed on the way.
 fn wait_until_ready(node: &mut ProcessNode, deadline: Instant) -> Result<Vec<String>, Error> {
     let mut observed = Vec::new();
     loop {
@@ -1375,8 +1293,8 @@ fn wait_until_ready(node: &mut ProcessNode, deadline: Instant) -> Result<Vec<Str
             observed.push(outcome.clone());
         }
         let enabled = row
-            .pointer("/capabilities/0/enabled")
-            .and_then(Value::as_bool)
+            .pointer(&sonic_rs::pointer!["capabilities", 0usize, "enabled"])
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
             .unwrap_or(false);
         if outcome == "Ready" && enabled {
             return Ok(observed);
@@ -1393,11 +1311,10 @@ fn wait_until_ready(node: &mut ProcessNode, deadline: Instant) -> Result<Vec<Str
     }
 }
 
-/// Polls until `getindexinfo` reports the txindex watermark synced.
 fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), Error> {
     loop {
         let info = node.rpc("getindexinfo", &json!(["txindex"]))?;
-        if info.pointer("/txindex/synced") == Some(&json!(true)) {
+        if info.pointer(&sonic_rs::pointer!["txindex", "synced"]) == Some(&json!(true)) {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1412,16 +1329,9 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
     }
 }
 
-/// Mines `blocks` on a lone node through its public mining RPC.
-///
-/// Startup anchors the tip at genesis but applies that block on the first
-/// one-second sync tick, so an immediate mine races the applied tip. The
-/// retry is bounded and only tolerates that one startup message.
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        // The transport shares the readiness deadline: a bulk mine
-        // legitimately exceeds the per-request budget on slow hosts.
         match node.rpc_until(
             "generatetoaddress",
             &json!([blocks, MINING_ADDRESS]),
@@ -1451,13 +1361,11 @@ fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Erro
         .collect()
 }
 
-/// Reserves an ephemeral loopback address for `--metrics-bind`.
 fn reserved_metrics_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve metrics port");
     listener.local_addr().expect("reserved metrics address")
 }
 
-/// Scrapes the readiness gauge series from a node's metrics listener.
 fn scrape_readiness(addr: SocketAddr) -> Vec<(String, f64)> {
     let prefix = "node_capability_txindex_readiness{";
     let mut last = None;
@@ -1494,8 +1402,6 @@ fn scrape_readiness(addr: SocketAddr) -> Vec<(String, f64)> {
     panic!("metrics scrape failed after retries: {last:?}");
 }
 
-/// Exact one/zero gauge values: outcomes are set from `bool`, so exact bit
-/// comparison is the honest check.
 fn is_one(value: f64) -> bool {
     value.to_bits() == 1.0f64.to_bits()
 }
@@ -1504,8 +1410,6 @@ fn is_zero(value: f64) -> bool {
     value.to_bits() == 0.0f64.to_bits()
 }
 
-/// The scraped series must show exactly one active outcome and it must be
-/// the one the RPC row reported: metrics and RPC are one fact.
 fn assert_one_active(samples: &[(String, f64)], expected: &str) {
     assert_eq!(
         samples.len(),
@@ -1531,21 +1435,18 @@ fn assert_one_active(samples: &[(String, f64)], expected: &str) {
     );
 }
 
-/// First confirmed transaction of a block, through the public surface.
 fn first_block_txid(process: &mut ProcessNode, height: u32) -> String {
     let hash = process
         .rpc("getblockhash", &json!([height]))
         .expect("block hash");
     let block = process.rpc("getblock", &json!([hash, 2])).expect("block");
     block
-        .pointer("/tx/0/txid")
-        .and_then(Value::as_str)
+        .pointer(&sonic_rs::pointer!["tx", 0usize, "txid"])
+        .and_then(|value| value.as_str())
         .expect("coinbase txid")
         .to_owned()
 }
 
-/// Polls the scrape until exactly one outcome is active and it is
-/// `expected`: the sampled gauge converging on the RPC row.
 fn wait_gauge_active(addr: SocketAddr, expected: &str, deadline: Instant) -> Vec<(String, f64)> {
     loop {
         let samples = scrape_readiness(addr);
@@ -1561,8 +1462,6 @@ fn wait_gauge_active(addr: SocketAddr, expected: &str, deadline: Instant) -> Vec
     }
 }
 
-/// Startup readiness: at one captured tip, the capability row, the Core-parity
-/// index report, the Esplora tip, and the Prometheus gauge all agree.
 #[test]
 fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     let metrics_addr = reserved_metrics_addr();
@@ -1594,34 +1493,37 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     wait_txindex_synced(&mut core, deadline).expect("core txindex synced");
     wait_txindex_synced(&mut node, deadline).expect("node txindex synced");
 
-    // The capability row: enabled and Ready at the captured tip.
     let row = node
         .rpc("getcapabilities", &json!([]))
         .expect("capabilities");
-    assert_eq!(row.pointer("/capabilities/0/id"), Some(&json!("txindex")));
-    assert_eq!(row.pointer("/capabilities/0/compiled"), Some(&json!(true)));
-    assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(true)));
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "id"]),
+        Some(&json!("txindex"))
+    );
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "compiled"]),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "enabled"]),
+        Some(&json!(true))
+    );
     assert_eq!(readiness_outcome(&row), "Ready");
 
-    // Core parity: both binaries render the same synced index report.
     let synced = compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
         .expect("index report parity");
     assert_eq!(
-        synced.pointer("/txindex/synced"),
+        synced.pointer(&sonic_rs::pointer!["txindex", "synced"]),
         Some(&json!(true)),
         "parity reply: {synced}"
     );
 
-    // Esplora renders the same tip the RPC reports.
     let tip = node.rpc("getblockcount", &json!([])).expect("tip height");
     let esplora = node
         .http_get_json("/api/blocks/tip/height")
         .expect("esplora tip height");
     assert_eq!(tip, esplora, "RPC and Esplora must agree on the tip");
 
-    // The readiness gauge is that same fact in Prometheus form. The gauge
-    // is a sampled view, so require convergence with the RPC outcome within
-    // the deadline, then assert the full one-active rendering.
     let samples = wait_gauge_active(metrics_addr, "Ready", deadline);
     assert_one_active(&samples, "Ready");
 
@@ -1631,8 +1533,6 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     assert_reaped(node_pid);
 }
 
-/// Disabled index: the disabled capability has its own documented row,
-/// not silence, and the absence is identical to Core's.
 #[test]
 fn disabled_index_reports_its_documented_disabled_row() {
     let mut core = start(Kind::Core);
@@ -1644,19 +1544,26 @@ fn disabled_index_reports_its_documented_disabled_row() {
     let row = node
         .rpc("getcapabilities", &json!([]))
         .expect("capabilities");
-    assert_eq!(row.pointer("/capabilities/0/id"), Some(&json!("txindex")));
-    assert_eq!(row.pointer("/capabilities/0/compiled"), Some(&json!(true)));
-    assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(false)));
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "id"]),
+        Some(&json!("txindex"))
+    );
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "compiled"]),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        row.pointer(&sonic_rs::pointer!["capabilities", 0usize, "enabled"]),
+        Some(&json!(false))
+    );
     assert_eq!(readiness_outcome(&row), "Disabled");
 
-    // Both binaries report the absent index identically.
     assert_eq!(
         compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
             .expect("disabled parity"),
         json!({}),
     );
 
-    // Chain data still serves without an index; verbose history does not.
     let esplora = node
         .http_get_json("/api/blocks/tip/height")
         .expect("esplora tip height");
@@ -1678,8 +1585,6 @@ fn disabled_index_reports_its_documented_disabled_row() {
     assert_reaped(node_pid);
 }
 
-/// Catch-up: blocks applied ahead of the derived worker must surface
-/// only documented intermediate outcomes, and the poll ends Ready.
 #[test]
 fn catch_up_poll_stays_inside_the_documented_outcomes() {
     let mut node = start_txindex_node();
@@ -1707,8 +1612,6 @@ fn catch_up_poll_stays_inside_the_documented_outcomes() {
     assert_reaped(pid);
 }
 
-/// Index failure: a destroyed derived store recovers by rebuilding from
-/// retained canonical chainstate, and the historical row comes back.
 #[test]
 fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     let mut node = start_txindex_node();
@@ -1718,7 +1621,6 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     wait_until_ready(&mut node, deadline).expect("initial readiness");
     wait_txindex_synced(&mut node, deadline).expect("initial sync");
 
-    // A confirmed historical row the index owns, captured before the loss.
     let txid = first_block_txid(&mut node, 5);
     let raw = node
         .rpc("getrawtransaction", &json!([txid]))
@@ -1726,9 +1628,6 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
 
     let datadir = node.take_datadir().expect("datadir custody");
     node.stop().expect("stop before recovery");
-    // The resolved data dir is `<datadir>/node`; the derived store lives
-    // beside the chainstate inside it. Destroy it only when it is really
-    // there: a silent no-op would make the rebuild vacuous.
     let derived_store = datadir.path().join("node").join("txindex");
     assert!(
         derived_store.is_dir(),
@@ -1762,8 +1661,6 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
         );
     }
     wait_txindex_synced(&mut rebuilt, deadline).expect("rebuilt sync");
-    // Backfill may trail the watermark report; poll the row, and on failure
-    // keep the chain-side evidence in the panic.
     let mut restored = None;
     let row_deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < row_deadline {
@@ -1845,7 +1742,6 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
     wait_until_ready(&mut node, deadline).expect("initial readiness");
     wait_txindex_synced(&mut node, deadline).expect("initial sync");
 
-    // Abandon the last two blocks and re-mine from height 99 on a fork.
     let fork_base = node
         .rpc("getblockhash", &json!([COMMON_BLOCKS - 2]))
         .expect("fork base hash");
@@ -1877,8 +1773,6 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
 /// ancestry after disconnect and replacement, while its raw bytes stay readable.
 #[test]
 fn retained_transaction_confirmations_match_core_after_reorg() {
-    // Compare this contract's chain fields and byte identity. Script asm and
-    // descriptor rendering have their own compatibility evidence.
     let compare_transaction = |core: &mut ProcessNode, node: &mut ProcessNode, params: &Value| {
         let reference = core
             .rpc("getrawtransaction", params)
@@ -1922,9 +1816,6 @@ fn retained_transaction_confirmations_match_core_after_reorg() {
         .expect("disconnect the containing block");
     for replaced in [false, true] {
         if replaced {
-            // The reference starts with fixed mocktime. Move it forward so
-            // mining with the same payout cannot recreate the invalidated
-            // block byte for byte.
             let replacement_time = active["time"]
                 .as_u64()
                 .expect("original block time")

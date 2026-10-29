@@ -1,6 +1,3 @@
-//! BIP141 base serialization parity over borrowed transaction ranges.
-//! References: BIP141 Transaction ID / Block size; rust-bitcoin is the
-//! independent decoder and hash/weight oracle, not the candidate serializer.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 #[path = "support/block_facts_fixture.rs"]
@@ -109,7 +106,6 @@ fn legacy_and_mixed_lazy_witness_ids_match_oracle_and_reuse_cache() {
         for (actual, expected) in ids.iter().zip(&oracle.txdata) {
             assert_eq!(actual.to_string(), expected.compute_wtxid().to_string());
         }
-        // Contents alone cannot prove cache reuse.
         let first = view.witness_ids();
         let cached = first.as_ptr();
         assert_eq!(cached, view.witness_ids().as_ptr());

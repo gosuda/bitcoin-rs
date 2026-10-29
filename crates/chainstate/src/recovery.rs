@@ -12,7 +12,6 @@ use std::path::Path;
 pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Source selected for the initial authoritative chainstate.
 pub enum ResumeSource {
     /// A pinned snapshot selected by the authoritative durable head.
     Snapshot,
@@ -24,10 +23,8 @@ pub enum ResumeSource {
     Journal,
 }
 
-/// Directory name containing the chainstate journal.
 pub const CHAINSTATE_JOURNAL_DIR: &str = bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
 
-/// Returns whether startup must ignore incremental recovery and fully revalidate.
 pub fn requires_full_revalidation(data_dir: &Path) -> bool {
     data_dir
         .join(CHAINSTATE_JOURNAL_DIR)
@@ -35,22 +32,13 @@ pub fn requires_full_revalidation(data_dir: &Path) -> bool {
         .is_file()
 }
 
-/// Fully recovered state ready for runtime composition.
 pub struct InitialChainstate {
-    /// Recovered UTXO set.
     pub utxo: UtxoSet,
-    /// Recovered coin statistics.
     pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,
-    /// Recovered block tree.
     pub tree: bitcoin_rs_chain::BlockTree,
-    /// Recovered applied tip, absent on a cold start.
     pub applied_tip: Option<TipSnapshot>,
-    /// Recovery source selected at startup.
     pub resume_source: ResumeSource,
-    /// Journal writer bootstrap, when journaling is enabled.
     pub journal_bootstrap: Option<JournalBootstrap>,
-    /// Same-descriptor checkpoint seed minted by the witnessed recovery read.
-    /// `None` on cold starts; the journal path carries the checkpoint token.
     pub script_live_seed: Option<VerifiedSnapshotArtifact>,
 }
 
@@ -64,7 +52,6 @@ fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
     open_journal_dir(data_dir)
 }
 
-/// Opens or creates the chainstate journal directory.
 pub fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
     let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
     std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
@@ -101,13 +88,10 @@ fn restored_initial(
         applied_tip: Some(restored.applied_tip),
         resume_source: ResumeSource::Checkpoint,
         journal_bootstrap,
-        // C2: the journal replays H to T on the same chain; no new mint.
         script_live_seed: restored.seed,
     })
 }
 
-/// A compatible checkpoint accelerates the root-selected snapshot without
-/// becoming a second commit authority. This permits pruning after finalization.
 pub(crate) fn restore_snapshot(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
@@ -178,7 +162,6 @@ fn cold_initial_chainstate(
 }
 
 #[expect(clippy::too_many_lines)]
-/// Recovers the initial authoritative state from checkpoint and journal evidence.
 pub fn prepare_initial_chainstate(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
@@ -197,9 +180,6 @@ pub fn prepare_initial_chainstate(
         network,
         genesis: network.genesis_block_hash(),
     };
-    // Check the full-revalidation marker BEFORE opening the checkpoint: the
-    // marker contract says incremental recovery must be ignored, so the
-    // checkpoint must not be part of the decision once the marker is present.
     if requires_full_revalidation(data_dir) {
         metrics::counter!(
             "node.chainstate_journal.fallback_total",
@@ -302,8 +282,6 @@ pub fn prepare_initial_chainstate(
                 applied_tip: Some(replayed.applied_tip),
                 resume_source,
                 journal_bootstrap: Some(bootstrap),
-                // C2: the journal replays H to T on the same chain; the
-                // checkpoint token at H is carried through, never reminted.
                 script_live_seed: seed,
             })
         }

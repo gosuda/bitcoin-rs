@@ -1,5 +1,3 @@
-//! Focused behavioral tests for the node-owned mining coordinator.
-
 #[path = "mining/support.rs"]
 mod support;
 

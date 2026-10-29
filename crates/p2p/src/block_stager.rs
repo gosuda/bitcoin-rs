@@ -1,11 +1,4 @@
 //! Out-of-order block staging bounded by the download window budget.
-//!
-//! [`BlockStager`] holds decoded inbound bodies until their predecessor is
-//! applied. Slot-count eviction and byte-budget backpressure live here;
-//! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
-//! coordinator stages arrivals and drains a contiguous apply prefix; it does
-//! not own this policy. The ownership boundary is defined by the
-//! [architecture contract](../../../docs/contracts/architecture.md).
 
 use std::{
     collections::VecDeque,
@@ -18,114 +11,60 @@ use hashbrown::{HashMap, hash_map::Entry};
 use crate::PeerSource;
 use crate::download_window::SyncBudget;
 
-/// Bounded in-memory staging set for inbound block bodies.
 #[derive(Debug)]
 pub(crate) struct BlockStager {
     budget: SyncBudget,
     received: HashMap<Hash256, ReceivedBlock>,
     received_order: VecDeque<Hash256>,
-    /// Serialized bytes of staged bodies. This is the admission fact: the byte
-    /// budget and `staged_byte_headroom` read it and never the attribution
-    /// totals below.
     received_bytes: usize,
-    /// Sum of `ReceivedBlock::decoded_bytes` over staged bodies. Attribution
-    /// only: nothing admits or evicts on it.
     decoded_bytes: usize,
     next_received_deadline: Option<Instant>,
-    /// Highest staged-block population observed; feeds the high-water gauge.
     received_blocks_high_water: usize,
-    /// Highest staged-byte total observed; feeds the high-water gauge.
     received_bytes_high_water: usize,
-    /// Highest `decoded_bytes + received_bytes` observed; feeds the
-    /// retained-bytes high-water gauge.
     retained_bytes_high_water: usize,
-    /// Live count of staged bodies still awaiting the admission clauses
-    /// because the tree could not resolve their hash at arrival. The shared
-    /// quota on this count bounds orphan floods (`MAX_UNRESOLVED_STAGED_BODIES`).
     gate_pending_count: usize,
 }
 
 #[derive(Debug)]
 struct ReceivedBlock {
-    // One exact payload: decoded block plus the exact bytes it carries,
-    // reused by the unified `apply_block` to skip reserialization. The
-    // received-block budget (max_received_blocks / max_received_bytes) counts
-    // only `bytes`; `decoded_bytes` attributes the decoded side and admits
-    // nothing.
     payload: BlockPayload,
     received_at: Instant,
     bytes: usize,
-    /// `block.retained_heap_bytes()` measured once when the stager took
-    /// ownership of this `Block` allocation (`insert`, or `restore_many` for
-    /// the allocation it receives). The staged block is never mutated, so the
-    /// measurement stays exact until the entry leaves. It excludes the inline
-    /// `Block` value, allocator rounding, and the `serialized` buffer, which
-    /// `bytes` already counts.
     decoded_bytes: usize,
-    /// Delivering connection, retained so a header-admission fault on the
-    /// staged body can blame the right peer.
     source: Option<PeerSource>,
-    /// The body staged while the tree could not resolve its hash, so the
-    /// arrival gate's missing-header arm passed it without evaluating the
-    /// unrequested-admission clauses. Cleared once the clauses run against
-    /// the resolved node, or by request evidence (a resolved owned fetch).
     gate_pending: bool,
 }
 
-/// A contiguous apply-prefix body drained from staging.
 #[derive(Clone, Debug)]
 pub(crate) struct DrainedBlock {
-    /// Identity of the drained body.
     pub hash: Hash256,
-    /// One exact payload: decoded block plus the exact bytes it carries,
-    /// drained for apply-without-reserialize.
     payload: BlockPayload,
     received_at: Instant,
     bytes: usize,
     source: Option<PeerSource>,
-    /// Carried through a partial-apply restore so an ungated body still owes
-    /// the admission clauses afterward.
     gate_pending: bool,
 }
 
 impl DrainedBlock {
-    /// The connection that delivered this body, or `None` for a locally
-    /// injected one.
     #[must_use]
     pub(crate) const fn source(&self) -> Option<PeerSource> {
         self.source
     }
 
-    /// Borrows the drained payload.
     #[must_use]
     pub(crate) const fn payload(&self) -> &BlockPayload {
         &self.payload
     }
 }
 
-/// Result of attempting to stage one inbound body.
 #[derive(Clone, Debug)]
 pub(crate) enum StagedBlock {
-    /// The hash is already in the staging set.
     AlreadyStaged,
-    /// The body is retained. `dropped` are count-budget evictions caused by
-    /// this insert.
-    Memory {
-        /// Serialized size of the newly staged body.
-        bytes: usize,
-        /// Bodies evicted so this insert could fit the slot budget.
-        dropped: Vec<Hash256>,
-    },
-    /// The body was refused (byte budget or oversize) and should be
-    /// re-requested.
-    DroppedForRetry {
-        /// The refused body.
-        hash: Hash256,
-    },
+    Memory { bytes: usize, dropped: Vec<Hash256> },
+    DroppedForRetry { hash: Hash256 },
 }
 
 impl BlockStager {
-    /// Empty stager sized to `budget`.
     #[must_use]
     pub(crate) fn new(budget: SyncBudget) -> Self {
         Self {
@@ -142,54 +81,41 @@ impl BlockStager {
         }
     }
 
-    /// Number of currently staged bodies.
     #[must_use]
     pub(crate) fn received_len(&self) -> usize {
         self.received.len()
     }
 
-    /// Total serialized bytes of currently staged bodies.
     #[must_use]
     pub(crate) fn received_bytes(&self) -> usize {
         self.received_bytes
     }
 
-    /// Decoded heap bytes owned by currently staged blocks (capacity-based,
-    /// excluding allocator rounding and the preserved serialized buffers).
     #[must_use]
     pub(crate) const fn decoded_bytes(&self) -> usize {
         self.decoded_bytes
     }
 
-    /// Attributed retained bytes of currently staged bodies: decoded heap
-    /// bytes plus the preserved serialized buffers. Excludes allocator
-    /// rounding and says nothing about process RSS.
     #[must_use]
     pub(crate) const fn retained_attributed_bytes(&self) -> usize {
         self.decoded_bytes.saturating_add(self.received_bytes)
     }
 
-    /// Highest attributed retained total ever observed this run; feeds the
-    /// retained-bytes high-water gauge.
     #[must_use]
     pub(crate) const fn retained_attributed_bytes_high_water(&self) -> usize {
         self.retained_bytes_high_water
     }
 
-    /// Highest staged-block population ever observed this run.
     #[must_use]
     pub(crate) const fn received_high_water(&self) -> usize {
         self.received_blocks_high_water
     }
 
-    /// Highest staged-byte total ever observed this run; feeds the high-water gauge.
     #[must_use]
     pub(crate) const fn received_bytes_high_water(&self) -> usize {
         self.received_bytes_high_water
     }
 
-    /// Staged count when the apply frontier is present, or `None` if empty or
-    /// the next expected hash is not staged.
     #[must_use]
     pub(crate) fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
         let received_len = self.received.len();
@@ -204,16 +130,10 @@ impl BlockStager {
         Some(received_len)
     }
 
-    /// PRE: none.
-    /// POST: yields the identity of every currently staged body, in map
-    ///       order.
-    /// INVARIANT: yields no heights; the block tree is the only height
-    ///       source.
     pub(crate) fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
         self.received.keys().copied()
     }
 
-    /// Stages `payload` or refuses it for retry under the byte budget.
     pub(crate) fn insert(
         &mut self,
         hash: Hash256,
@@ -230,12 +150,6 @@ impl BlockStager {
         if bytes > self.budget.max_received_bytes {
             return StagedBlock::DroppedForRetry { hash };
         }
-        // Byte-budget exhaustion is backpressure, not eviction: refuse the
-        // incoming block (it stays re-requestable through the window's
-        // drop-for-retry path) instead of evicting already-downloaded staged
-        // progress into re-download churn. The next expected block is exempt —
-        // it unblocks the apply frontier immediately, and refusing it while
-        // staged successors hold the budget would deadlock the window.
         if Some(hash) != next_expected_hash
             && self.received_bytes.saturating_add(bytes) > self.budget.max_received_bytes
         {
@@ -270,30 +184,19 @@ impl BlockStager {
         StagedBlock::Memory { bytes, dropped }
     }
 
-    /// Whether `hash` is currently staged. Feeds the stall detector's
-    /// no-blame guard: a staged next-expected block means the apply side owns
-    /// the frontier.
     #[must_use]
     pub(crate) fn contains(&self, hash: &Hash256) -> bool {
         self.received.contains_key(hash)
     }
 
-    /// The connection that delivered the staged body, or `None` for a
-    /// locally injected one; `None` also when `hash` is not staged.
     pub(crate) fn staged_source(&self, hash: &Hash256) -> Option<PeerSource> {
         self.received.get(hash).and_then(|entry| entry.source)
     }
 
-    /// How many staged bodies still owe the admission clauses because their
-    /// hash was unresolvable at arrival.
     pub(crate) fn gate_pending_count(&self) -> usize {
         self.gate_pending_count
     }
 
-    /// `(hash, embedded header, delivering connection)` for every staged
-    /// body. The sync executor retries header admission for bodies whose
-    /// headers are still absent from the tree: a staged body can never
-    /// become expected until its header lands.
     pub(crate) fn staged_headers(
         &self,
     ) -> impl Iterator<Item = (Hash256, Header, Option<PeerSource>)> + '_ {
@@ -302,13 +205,11 @@ impl BlockStager {
             .map(|(hash, entry)| (*hash, entry.payload.block().header, entry.source))
     }
 
-    /// Clones one exact staged payload without removing it from the bounded set.
     #[must_use]
     pub(crate) fn staged_body(&self, hash: Hash256) -> Option<BlockPayload> {
         self.received.get(&hash).map(|entry| entry.payload.clone())
     }
 
-    /// Releases one body after that exact block commits during a branch switch.
     pub(crate) fn retire_applied(&mut self, hash: &Hash256) -> bool {
         let removed = self.take_entry(hash).is_some();
         if self.received.is_empty() {
@@ -318,8 +219,6 @@ impl BlockStager {
         removed
     }
 
-    /// Removes the contiguous prefix of `expected_hashes` that is currently
-    /// staged. Stops at the first missing hash.
     pub(crate) fn drain_expected_prefix(
         &mut self,
         expected_hashes: &[Hash256],
@@ -338,14 +237,9 @@ impl BlockStager {
         drained
     }
 
-    /// Restores previously drained bodies after a partial apply.
     pub(crate) fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
             let gate_pending = drained.gate_pending;
-            // Measured here instead of carried from the drain: the committer
-            // restores clones, and a cloned block's vectors are exactly
-            // sized, so the original's measurement would misattribute the
-            // allocation this entry now owns.
             let decoded_bytes = drained.payload.block().retained_heap_bytes();
             let previous = self.received.insert(
                 drained.hash,
@@ -385,7 +279,6 @@ impl BlockStager {
         })
     }
 
-    /// Drops staged bodies whose received deadline has passed.
     pub(crate) fn prune_expired(&mut self, now: Instant) -> Vec<Hash256> {
         if self.received.is_empty() {
             self.next_received_deadline = None;
@@ -460,10 +353,6 @@ impl BlockStager {
         self.received_order.remove(candidate_index)
     }
 
-    /// Only the slot-count budget evicts staged blocks. The byte budget is
-    /// enforced as admission backpressure in [`Self::insert`] (with a bounded
-    /// overshoot for the next expected block), so byte exhaustion can never
-    /// trigger evict/re-download churn.
     fn is_over_count_budget(&self) -> bool {
         self.received.len() > self.budget.max_received_blocks
     }
@@ -474,16 +363,10 @@ impl BlockStager {
         Some(*hash)
     }
 
-    /// Drops the staged body for `hash`, releasing its staging-budget bytes.
-    /// Used for bodies whose embedded header is permanently inadmissible —
-    /// they can never become expected, so they are dead inventory.
     pub(crate) fn discard(&mut self, hash: &Hash256) -> bool {
         self.remove(hash).is_some()
     }
 
-    /// Flags a freshly staged body as still owing the unrequested-admission
-    /// clauses: it staged while the tree could not resolve its hash, so the
-    /// arrival gate's missing-header arm passed it without evaluating them.
     pub(crate) fn set_gate_pending(&mut self, hash: &Hash256) {
         if let Some(entry) = self.received.get_mut(hash)
             && !entry.gate_pending
@@ -493,9 +376,6 @@ impl BlockStager {
         }
     }
 
-    /// Staged bodies that arrived before their headers were tree-known and
-    /// have neither faced the admission clauses nor earned request evidence
-    /// since.
     pub(crate) fn gate_pending_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
         self.received
             .iter()
@@ -503,8 +383,6 @@ impl BlockStager {
             .map(|(hash, _)| *hash)
     }
 
-    /// Settles the owed gate: the clauses held against the resolved node, or
-    /// request evidence (a resolved owned fetch) exempted the body.
     pub(crate) fn clear_gate_pending(&mut self, hash: &Hash256) {
         if let Some(entry) = self.received.get_mut(hash)
             && entry.gate_pending
@@ -514,9 +392,6 @@ impl BlockStager {
         }
     }
 
-    /// Free slots before the count budget forces an eviction; an insert that
-    /// finds none must not displace already-staged work for a delivery
-    /// nobody asked for.
     #[must_use]
     pub(crate) fn count_headroom(&self) -> usize {
         self.budget
@@ -556,10 +431,6 @@ impl BlockStager {
             .retain(|hash| received.contains_key(hash));
     }
 
-    /// Counts one entry that just entered `received`: adds its serialized and
-    /// decoded bytes, then advances the retained high-water mark, so a
-    /// restore that refills the set past an earlier peak is observed like an
-    /// insert. The serialized high-water marks stay insert-only, as shipped.
     fn count_staged(&mut self, bytes: usize, decoded_bytes: usize) {
         self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
@@ -568,9 +439,6 @@ impl BlockStager {
             .max(self.retained_attributed_bytes());
     }
 
-    /// Reverses [`Self::count_staged`] and the gate-pending count for an
-    /// entry that just left `received`. `prune_expired` batches the same
-    /// subtraction over its retained set.
     fn release(&mut self, entry: &ReceivedBlock) {
         if entry.gate_pending {
             self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
@@ -1309,8 +1177,6 @@ mod tests {
         assert!(stager.contains(&expected_hash));
     }
 
-    /// Two bodies with identical consensus bytes and different decoded heap
-    /// ownership: `fat` keeps spare `txs` capacity, `lean` is exactly sized.
     fn lean_and_fat_blocks() -> (Block, Block, bytes::Bytes) {
         let genesis = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&genesis));
@@ -1352,9 +1218,6 @@ mod tests {
         assert_eq!(stager.retained_attributed_bytes(), 0);
         assert_eq!(stager.retained_attributed_bytes_high_water(), peak);
 
-        // The committer restores clones, whose vectors are exactly sized: the
-        // stager must attribute the allocation it now owns, not the drained
-        // original's.
         let fat_tail = drained.split_off(1);
         let clone = fat_tail[0].clone();
         let clone_bytes = clone.payload().block().retained_heap_bytes();
@@ -1414,7 +1277,6 @@ mod tests {
         let combined = lean_bytes + fat_bytes + 2 * wire;
         assert_eq!(stager.retained_attributed_bytes(), combined);
         assert_eq!(stager.retained_attributed_bytes_high_water(), combined);
-        // The serialized marks are insert-only: restore never moved them.
         assert_eq!(stager.received_bytes(), 2 * wire);
         assert_eq!(stager.received_bytes_high_water(), wire);
         assert_eq!(stager.received_high_water(), 1);
@@ -1511,7 +1373,6 @@ mod tests {
             panic!("incoming block should stage after evicting the older one");
         };
         assert_eq!(dropped, [evicted]);
-        // Both bodies were resident until the count-budget eviction ran.
         assert_eq!(
             stager.retained_attributed_bytes_high_water(),
             fat_bytes + lean_bytes + 2 * wire

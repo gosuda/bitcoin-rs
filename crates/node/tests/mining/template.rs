@@ -11,7 +11,6 @@ use super::support::{
     regtest_mining, template_request,
 };
 
-// CONTRACT: API-11
 #[test]
 fn template_does_not_echo_client_capabilities() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -27,8 +26,6 @@ fn template_does_not_echo_client_capabilities() -> Result<()> {
         long_poll_id: None,
         coinbase_budget: None,
     })?);
-    // API-11 advertises only implemented server capabilities,
-    // and omits Signet metadata on networks that are not Signet.
     assert_eq!(
         template
             .capabilities
@@ -42,21 +39,17 @@ fn template_does_not_echo_client_capabilities() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-11
 #[test]
 fn signet_template_includes_challenge_and_signet_rule() -> Result<()> {
     let state = open_at_genesis(Network::Signet)?;
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    // Bitcoin Core's Signet getblocktemplate contract requires the signet rule
-    // and challenge metadata for Signet templates.
     assert!(template.rules.iter().any(|rule| rule.as_str() == "signet"));
     assert!(template.signet.is_some());
     Ok(())
 }
 
-// CONTRACT: crates/mining/README.md, coinbase-budgeted templates
 #[test]
 fn budgeted_request_reaches_the_selector_and_yields_a_valid_block() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -65,12 +58,9 @@ fn budgeted_request_reaches_the_selector_and_yields_a_valid_block() -> Result<()
         additional_size: 4_000,
         additional_sigops: 100,
     };
-    // No ordinary candidate exists yet, so the owner selects under the budget.
     let budgeted = expect_template(mining.get_block_template(budgeted_template_request(budget))?);
     budgeted.candidate.admits(budget)?;
 
-    // The ordinary template keeps its generation identity and is a different
-    // candidate from the budgeted one.
     let ordinary = expect_template(mining.get_block_template(template_request(None))?);
     let genesis_hash = Hash256::from(Network::Regtest.genesis_block().block_hash());
     let sequence = state.mempool().read().sequence_number();
@@ -90,7 +80,6 @@ fn budgeted_request_reaches_the_selector_and_yields_a_valid_block() -> Result<()
             .starts_with(ordinary.candidate.template_id.as_str())
     );
 
-    // The budgeted candidate is a block the node's own validation accepts.
     let mut block = budgeted.candidate.into_unsolved_block()?;
     solve_block(&mut block, 1_000_000)?;
     assert_eq!(
@@ -100,7 +89,6 @@ fn budgeted_request_reaches_the_selector_and_yields_a_valid_block() -> Result<()
     Ok(())
 }
 
-// CONTRACT: crates/mining/README.md, coinbase-budgeted templates
 #[test]
 fn unsatisfiable_budget_is_the_existing_failed_error_and_ordinary_templates_keep_working()
 -> Result<()> {

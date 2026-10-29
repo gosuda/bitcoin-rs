@@ -2,24 +2,20 @@
 
 use core::ops::{Deref, DerefMut};
 
-/// A Bitcoin script (`scriptSig` or `scriptPubKey`) as owned consensus bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Script(Vec<u8>);
 
 impl Script {
-    /// An empty script.
     #[must_use]
     pub const fn new() -> Self {
         Self(Vec::new())
     }
 
-    /// Wraps already-decoded consensus script bytes.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
-    /// Returns the consensus script bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
@@ -27,9 +23,6 @@ impl Script {
 
     /// Returns the heap bytes allocated for this script's byte buffer,
     /// including spare capacity.
-    ///
-    /// Excludes inline `Script` struct overhead (which is counted in the enclosing
-    /// vector capacity or on the stack) and allocator metadata/rounding.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         self.0.capacity()
@@ -67,25 +60,21 @@ impl PartialEq<Vec<u8>> for Script {
 pub struct Witness(Vec<Vec<u8>>);
 
 impl Witness {
-    /// An empty witness stack.
     #[must_use]
     pub const fn new() -> Self {
         Self(Vec::new())
     }
 
-    /// Wraps already-decoded witness stack items.
     #[must_use]
     pub fn from_stack(stack: Vec<Vec<u8>>) -> Self {
         Self(stack)
     }
 
-    /// Returns true when the stack is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Returns the number of witness items.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
@@ -93,9 +82,6 @@ impl Witness {
 
     /// Returns the heap bytes allocated for this witness stack, including
     /// the outer stack allocation and all out-of-line item buffers with spare capacity.
-    ///
-    /// Excludes inline `Witness` struct overhead (counted in `inputs.capacity() * size_of::<TxIn>()`
-    /// or on the stack) and allocator metadata/rounding.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self

@@ -1,11 +1,8 @@
-//! Candidate scalar, dependency-index, and shape tests.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
 use std::error::Error;
 
-// rust-bitcoin differential oracles: witness merkle root and sha256d commitment.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_mining::{
@@ -19,7 +16,6 @@ fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> 
     transactions.iter().map(|tx| tx.txid).collect()
 }
 
-/// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
 #[expect(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
@@ -113,7 +109,6 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
             + fees
     );
 
-    // rust-bitcoin differential oracle for witness merkle and sha256d commitment.
     let mut leaves = vec![OracleWtxid::all_zeros()];
     leaves.extend(
         candidate
@@ -217,7 +212,6 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// API-05: solving searches nonces until the compact target is met.
 #[test]
 fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
     let context = CandidateContext {
@@ -242,7 +236,6 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// API-05: generateblock keeps listed order and does not add those fees to the coinbase.
 #[test]
 fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
     let mut mempool = zero_fee_pool();

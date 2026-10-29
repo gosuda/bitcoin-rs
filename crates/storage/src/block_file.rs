@@ -78,13 +78,11 @@ pub fn block_file_max_height_key(file_no: u32) -> [u8; 11] {
     key
 }
 
-/// Encodes a per-file maximum height value.
 #[must_use]
 pub fn encode_block_file_max_height(height: u32) -> [u8; 4] {
     height.to_le_bytes()
 }
 
-/// Decodes an exact per-file maximum height value.
 #[must_use]
 pub fn decode_block_file_max_height(bytes: &[u8]) -> Option<u32> {
     if bytes.len() != 4 {
@@ -98,25 +96,8 @@ pub struct FlatFileBlockStore {
     blocks_dir: PathBuf,
     max_file_bytes: u64,
     writer: Mutex<WriterState>,
-    /// Bytes currently occupied by this store's block files.
-    ///
-    /// Seeded by walking the directory once at open, then maintained by the two
-    /// operations that change it: `append` adds a framed record, and
-    /// `delete_file_if_not_current` subtracts a whole file. Every deletion in
-    /// the workspace goes through that one method, so there is no second path
-    /// to forget.
-    ///
-    /// Maintained rather than measured because the caller is
-    /// `getblockchaininfo`. Walking the directory costs one `stat` per file —
-    /// thousands at a mainnet-sized chain — and that call has just been made
-    /// independent of chain length; putting a directory walk back into it would
-    /// undo that. `disk_usage` checks the running figure against a real walk
-    /// under `debug_assert`.
     usage: AtomicU64,
     /// Set only when a failed append could not restore the old file length.
-    ///
-    /// Normal reads remain lock-free. Recovery reads take `writer` once and
-    /// replace `usage` with a directory measurement.
     usage_dirty: AtomicBool,
     /// Last field: drops after the writer's file handle above has closed.
     guard: Option<crate::StoreGuard>,
@@ -129,7 +110,6 @@ struct WriterState {
     directory_dirty: bool,
     rollback_offset: Option<u64>,
 }
-/// Reusable reader for framed block bodies.
 pub(crate) struct FlatFileBlockReader {
     blocks_dir: PathBuf,
     state: Option<ReaderState>,
@@ -145,8 +125,8 @@ struct ReaderState {
 impl FlatFileBlockStore {
     /// Keeps `guard` alive until this store's block-file handle is closed.
     ///
-    /// Panics when a guard is already installed: replacing it would release
-    /// the first guard while the block-file handle it protects is still open.
+    /// Panics when a guard is already installed: replacing it would release the first
+    /// guard while the block-file handle it protects is still open.
     #[must_use]
     pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
         assert!(
@@ -160,19 +140,14 @@ impl FlatFileBlockStore {
     }
 
     /// Opens a store with no committed body extent, recovering an incomplete tail.
-    ///
-    /// A caller with a durable head must use [`Self::open_with_committed_extent`]
-    /// so recovery cannot discard bytes that head already committed.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES, None)
     }
 
     /// Opens a store after admitting the durable head's committed body extent.
     ///
-    /// The extent file must contain complete frames through the committed
-    /// offset. Corruption in that prefix refuses open without changing any
-    /// block file. Only an incomplete tail beyond the extent may be removed.
-    /// Earlier files may have been pruned; this is not a full archive scrub.
+    /// The extent file must contain complete frames through the committed offset.
+    /// Corruption in that prefix refuses open without changing any
     pub fn open_with_committed_extent(
         data_dir: impl AsRef<Path>,
         committed: BodyExtent,
@@ -180,13 +155,13 @@ impl FlatFileBlockStore {
         Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES, Some(committed))
     }
 
-    /// Persists a block body unless `existing` already names its complete matching record.
+    /// Persists a block body unless `existing` already names its complete matching
+    /// record.
     ///
-    /// `hash` is the 32-byte consensus little-endian hash representation.
-    ///
-    /// Callers normally obtain `existing` from their key-value index before calling this method.
-    /// Supplying it makes replay after an interrupted index update idempotent without making this
-    /// store depend on a particular key-value backend.
+    /// `hash` is the 32-byte consensus little-endian hash representation. Callers
+    /// normally obtain `existing` from their key-value index before calling this
+    /// method. Supplying it makes replay after an interrupted index update idempotent
+    /// without making this store depend on a particular key-value backend.
     pub fn persist(
         &self,
         existing: Option<BlockFilePosition>,
@@ -205,8 +180,6 @@ impl FlatFileBlockStore {
     }
 
     /// Appends one framed block body and flushes it to the operating system.
-    ///
-    /// `hash` is the 32-byte consensus little-endian hash representation.
     pub fn append(
         &self,
         height: u32,
@@ -231,9 +204,6 @@ impl FlatFileBlockStore {
                 .checked_add(1)
                 .ok_or(StorageError::InvalidOperation("block file number overflow"))?;
             let file = open_new_block_file(&self.blocks_dir, file_no)?;
-            // Install a self-consistent new writer before syncing its directory
-            // entry. A sync error therefore leaves a retryable dirty state, not
-            // a new file paired with the old append offset.
             writer.file = file;
             writer.file_no = file_no;
             writer.append_offset = 0;
@@ -257,10 +227,6 @@ impl FlatFileBlockStore {
             .offset
             .checked_add(record_len)
             .ok_or(StorageError::InvalidOperation("block file offset overflow"))?;
-        // The writer cursor is established at `append_offset` when the store
-        // opens or recovers, starts at zero on rollover, and advances by the
-        // exact record length after every successful write. Keep that invariant
-        // instead of issuing an unconditional seek for every block.
         let append_result =
             write_record(&mut writer.file, &header, body).and_then(|()| writer.file.flush());
         if let Err(append_error) = append_result {
@@ -290,16 +256,6 @@ impl FlatFileBlockStore {
     }
 
     /// Bytes this store's block files currently occupy on disk.
-    ///
-    /// This is what `getblockchaininfo` reports as `size_on_disk`: bytes that
-    /// are actually there, so pruning a file makes it fall. It is not the sum of
-    /// the block sizes the node has seen — that figure keeps counting blocks
-    /// whose bytes have been deleted, which is the opposite of what the field
-    /// is read for.
-    ///
-    /// Undo data is not included. It lives in the key-value store rather than in
-    /// files here, so this store cannot see it; Bitcoin Core counts its undo
-    /// files in the same number and this does not.
     #[must_use]
     pub(crate) fn disk_usage(&self) -> u64 {
         if self.usage_dirty.load(Ordering::Acquire) {
@@ -344,7 +300,6 @@ impl FlatFileBlockStore {
         Ok(())
     }
 
-    /// Creates a reusable block-body reader.
     #[must_use]
     pub(crate) fn reader(&self) -> FlatFileBlockReader {
         FlatFileBlockReader {
@@ -354,9 +309,6 @@ impl FlatFileBlockStore {
     }
 
     /// Loads a body only when its frame completely matches the requested height and hash.
-    ///
-    /// `hash` is the 32-byte consensus little-endian hash representation.
-    ///
     /// Missing files, malformed frames, mismatched targets, and short reads return `Ok(None)`.
     pub fn load(
         &self,
@@ -379,7 +331,6 @@ impl FlatFileBlockStore {
     }
 
     /// Loads at most `limit` body bytes after validating the complete frame header.
-    ///
     /// The returned prefix is bound to `height` and `hash`; malformed, missing,
     /// mismatched, or short records return `Ok(None)`.
     pub(crate) fn load_prefix(
@@ -394,18 +345,10 @@ impl FlatFileBlockStore {
 
     /// Loads `len` body bytes starting `offset` bytes into the body.
     ///
-    /// `offset` is relative to the **body**, not to the record header, so a
-    /// caller holding a transaction's offset within the serialized block passes
-    /// it unchanged.
-    ///
-    /// The complete frame is validated first, exactly as [`Self::load`] does, so
-    /// a range is never served out of a record that does not belong to `height`
-    /// and `hash`. A range extending past the body's end returns `Ok(None)`
-    /// rather than a short read: a truncated transaction would decode into
-    /// something other than the transaction the caller asked for.
-    ///
-    /// Missing files, malformed frames, mismatched targets, out-of-bounds ranges
-    /// and short reads all return `Ok(None)`.
+    /// `offset` is relative to the **body**, not to the record header, so a caller
+    /// holding a transaction's offset within the serialized block passes it unchanged.
+    /// Missing files, malformed frames, mismatched targets, out-of-bounds ranges and
+    /// short reads all return `Ok(None)`.
     pub fn load_range(
         &self,
         position: BlockFilePosition,
@@ -418,42 +361,27 @@ impl FlatFileBlockStore {
             .load_range(position, height, hash, offset, len)
     }
 
-    /// Returns the file currently receiving appends.
     #[must_use]
     pub(crate) fn current_file_number(&self) -> u32 {
         self.writer.lock().file_no
     }
 
-    /// Returns the first byte offset in the current file that the next
-    /// append will write to.
-    ///
-    /// Together with [`Self::current_file_number`] this is the append cursor
-    /// a durable head names: every frame at or below the cursor was written
-    /// through this store, and [`Self::sync`] makes all of it durable.
     #[must_use]
     pub(crate) fn append_offset(&self) -> u64 {
         self.writer.lock().append_offset
     }
 
-    /// Returns the path of a numbered flat file.
     #[must_use]
     pub fn file_path(&self, file_no: u32) -> PathBuf {
         block_file_path(&self.blocks_dir, file_no)
     }
 
-    /// Deletes a numbered file unless it is the current append target.
-    ///
-    /// Returns `true` only when a file was removed; a missing or current file returns `false`.
     pub(crate) fn delete_file_if_not_current(&self, file_no: u32) -> Result<bool, StorageError> {
         let writer = self.writer.lock();
         if writer.file_no == file_no {
             return Ok(false);
         }
         let path = block_file_path(&self.blocks_dir, file_no);
-        // Sized before the unlink, because afterwards there is nothing to size.
-        // A file that cannot be sized is removed without adjusting the running
-        // figure rather than guessed at; `disk_usage`'s `debug_assert` is what
-        // notices if that ever happens.
         let reclaimed = fs::metadata(&path).map(|metadata| metadata.len()).ok();
         match fs::remove_file(path) {
             Ok(()) => {
@@ -493,15 +421,10 @@ impl FlatFileBlockStore {
             ));
         }
         let blocks_dir = data_dir.join(BLOCK_FILE_DIRECTORY);
-        // Admit authority before opening any file with create/write permissions.
-        // Even when a checkpoint already matches the head, these bytes must
-        // survive: an apparent torn tail can instead be a damaged committed frame.
         if let Some(extent) = committed {
             validate_committed_extent(&blocks_dir, extent)?;
         }
         fs::create_dir_all(&blocks_dir)?;
-        // Persist the blocks-directory entry in its parent. This runs once per
-        // store open, not on the append path.
         sync_blocks_dir(data_dir)?;
         let file_no = highest_block_file_number(&blocks_dir)?.unwrap_or(0);
         let path = block_file_path(&blocks_dir, file_no);
@@ -511,11 +434,8 @@ impl FlatFileBlockStore {
             .read(true)
             .write(true)
             .open(path)?;
-        // The file may have been created above; persist its directory entry.
         sync_blocks_dir(&blocks_dir)?;
         let file_len = file.metadata()?.len();
-        // The admitted prefix has already been scanned. A newer append file
-        // lies wholly after the durable extent; its scan starts at zero.
         let scan_start = committed
             .filter(|extent| extent.file_no == file_no)
             .map_or(0, |extent| extent.offset);
@@ -538,9 +458,6 @@ impl FlatFileBlockStore {
         }
         file.seek(SeekFrom::Start(recovered_offset))?;
 
-        // Seeded from the files themselves, once. A store reopened over an
-        // existing directory has to start from what is there, and an incomplete
-        // tail was just truncated above, so this runs after that.
         let usage = AtomicU64::new(measure_blocks_dir(&blocks_dir)?);
 
         Ok(Self {
@@ -561,7 +478,6 @@ impl FlatFileBlockStore {
 }
 
 impl FlatFileBlockReader {
-    /// Loads a body only when its frame completely matches the requested height and hash.
     pub(crate) fn load(
         &mut self,
         position: BlockFilePosition,
@@ -571,7 +487,6 @@ impl FlatFileBlockReader {
         self.load_bytes(position, height, hash, 0, None)
     }
 
-    /// Loads at most `limit` body bytes after validating the complete frame header.
     pub(crate) fn load_prefix(
         &mut self,
         position: BlockFilePosition,
@@ -584,19 +499,6 @@ impl FlatFileBlockReader {
         self.load_bytes(position, height, hash, 0, Some(take))
     }
 
-    /// Loads `len` body bytes starting `offset` bytes into the body.
-    ///
-    /// `offset` is relative to the **body**, not to the record header, so a
-    /// caller holding a transaction's offset within the serialized block passes
-    /// it unchanged.
-    ///
-    /// The complete frame is validated first, exactly as [`Self::load`] does, so
-    /// a range is never served out of a record that does not belong to `height`
-    /// and `hash`. A range extending past the body's end returns `Ok(None)`
-    /// rather than a short read.
-    ///
-    /// Missing files, malformed frames, mismatched targets, out-of-bounds ranges
-    /// and short reads all return `Ok(None)`.
     pub(crate) fn load_range(
         &mut self,
         position: BlockFilePosition,
@@ -628,8 +530,6 @@ impl FlatFileBlockReader {
         skip: u64,
         take: Option<u64>,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        // Preserve the availability-only contract of full, prefix and ranged
-        // reads. Verification uses the same parser without discarding corruption.
         match self.load_frame_bytes(position, height, hash, skip, take) {
             Err(StorageError::CorruptBlockFrame(_)) => Ok(None),
             result => result,
@@ -778,8 +678,6 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
 
 #[cfg(windows)]
 fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
-    // FlushFileBuffers needs GENERIC_WRITE on the directory handle, and
-    // FILE_FLAG_BACKUP_SEMANTICS is what lets a directory be opened at all.
     use std::os::windows::fs::OpenOptionsExt as _;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     std::fs::OpenOptions::new()
@@ -794,8 +692,6 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
 #[cfg(not(any(unix, windows)))]
 #[expect(clippy::unnecessary_wraps)]
 fn sync_blocks_dir(_blocks_dir: &Path) -> Result<(), StorageError> {
-    // std has no portable primitive for opening and syncing a directory.
-    // Keep the durability boundary explicit where the platform supports it.
     Ok(())
 }
 
@@ -902,11 +798,6 @@ fn read_exact_or_none(reader: &mut impl io::Read, bytes: &mut [u8]) -> Result<bo
     }
 }
 
-/// Sums the sizes of every block file in `blocks_dir`.
-///
-/// The truth `disk_usage`'s running figure is kept honest against, and how that
-/// figure is seeded at open. Costs one `stat` per file, which is why it is not
-/// what `getblockchaininfo` calls.
 fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
     let mut total = 0_u64;
     for entry in fs::read_dir(blocks_dir)? {
@@ -918,8 +809,6 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        // `DirEntry::metadata` reuses the stale size cached by the directory
-        // enumeration on Windows; a fresh stat sees the kernel's live length.
         total = total.saturating_add(fs::metadata(entry.path())?.len());
     }
     Ok(total)
@@ -1043,17 +932,6 @@ mod tests {
         Ok(())
     }
 
-    /// `disk_usage` reports bytes that are there, and stops reporting them when
-    /// they are deleted.
-    ///
-    /// This is what `getblockchaininfo` calls `size_on_disk`. The figure it
-    /// replaces was the sum of every block's serialized length, which pruning
-    /// could not move: records are kept when their bodies are dropped, so a
-    /// pruned node went on reporting bytes it no longer had — under a field name
-    /// that is read precisely to check whether pruning is working.
-    ///
-    /// Compared against a fresh walk of the directory at every step, so it pins
-    /// the number against the files rather than against itself.
     #[test]
     fn disk_usage_follows_the_files_through_appends_and_deletion() -> Result<(), crate::StorageError>
     {
@@ -1067,7 +945,6 @@ mod tests {
         assert_eq!(after_first, super::measure_blocks_dir(&blocks_dir)?);
         assert!(after_first > 0, "an appended body occupies bytes");
 
-        // Past the 120-byte cap, so this rolls into a second file.
         let third = store.persist(None, 2, hash(2), b"a longer second body")?;
         let third = store.persist(None, 3, hash(3), b"third").map(|_| third)?;
         assert_eq!(third.file_no, 0, "the fixture must roll over");
@@ -1075,7 +952,6 @@ mod tests {
         assert_eq!(after_rollover, super::measure_blocks_dir(&blocks_dir)?);
         assert!(after_rollover > after_first, "appends add bytes");
 
-        // File 0 is complete, so it is prunable; file 1 is the current one.
         assert!(
             store.delete_file_if_not_current(0)?,
             "the fixture must have a prunable file"
@@ -1094,7 +970,6 @@ mod tests {
         Ok(())
     }
 
-    /// A failed rollback must not leave a later append behind a torn frame.
     #[test]
     fn retry_recovers_an_append_whose_rollback_failed() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
@@ -1145,14 +1020,6 @@ mod tests {
         Ok(())
     }
 
-    /// Only block files count, and a stray file must not be mistaken for one.
-    ///
-    /// The seeding walk and the running figure have to agree about what a block
-    /// file is: `append` counts framed records and nothing else, so a walk that
-    /// counted every directory entry would seed a number the maintained one can
-    /// never match — and `disk_usage`'s guard would fire on a node that had
-    /// nothing wrong with it. Backup copies, editor scratch files and the
-    /// operating system's own directory droppings all land here.
     #[test]
     fn disk_usage_counts_only_block_files() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
@@ -1232,8 +1099,6 @@ mod tests {
         let body: Vec<u8> = (0..=255_u8).cycle().take(1_000).collect();
         let position = store.persist(None, 9, hash(9), &body)?;
 
-        // Exhaustive over a coarse grid rather than a handful of cases: an
-        // off-by-one in the header skip shows up only at specific offsets.
         for offset in (0_u32..1_000).step_by(37) {
             for len in [0_u32, 1, 2, 33, 256, 999] {
                 let Some(end) = offset.checked_add(len) else {
@@ -1266,9 +1131,6 @@ mod tests {
         let store = FlatFileBlockStore::open(data_dir.path())?;
         let position = store.persist(None, 11, hash(11), b"the original body")?;
 
-        // Same frame, wrong identity: a range must be as strongly bound to
-        // (height, hash) as a whole-body load is, or a reorged-away block could
-        // serve bytes for a height it no longer owns.
         assert_eq!(store.load_range(position, 12, hash(11), 0, 4)?, None);
         assert_eq!(store.load_range(position, 11, hash(12), 0, 4)?, None);
         assert_eq!(
@@ -1289,7 +1151,6 @@ mod tests {
         assert_eq!(store.load_range(position, 5, hash(5), 11, 0)?, None);
         assert_eq!(store.load_range(position, 5, hash(5), 0, 11)?, None);
         assert_eq!(store.load_range(position, 5, hash(5), u32::MAX, 1)?, None);
-        // The exact end of the body is in bounds.
         assert_eq!(
             store.load_range(position, 5, hash(5), 10, 0)?,
             Some(Vec::new())

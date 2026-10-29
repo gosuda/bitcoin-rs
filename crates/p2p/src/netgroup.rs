@@ -9,8 +9,6 @@ pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-// Match CNetAddr::IsRoutable for grouping. Transport admission has its own
-// explicit local/multicast/port restrictions; it must not change hash vectors.
 fn routable(ip: IpAddr) -> bool {
     match canonical_ip(ip) {
         IpAddr::V4(ip) => {
@@ -62,8 +60,6 @@ pub(crate) fn linked_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(bytes))
 }
 
-/// Core's `GetNetClass` for the ordinary IP transports supported here. This
-/// intentionally ignores remote prefixes and `ASMap`; those are netgroups.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum NetworkClass {
     Unroutable,
@@ -170,8 +166,6 @@ impl NetGroups {
             PeerAddress::Onion(key) => return vec![4, key[0] | 15],
             PeerAddress::I2p(key) => return vec![5, key[0] | 15],
         };
-        // Core applies ASMap only to IPv4/IPv6 network classes; local and
-        // unroutable IPs keep the prefix owner's unclassified group.
         let asn = if self.bytes.is_empty() || !routable(ip) {
             0
         } else {
@@ -180,7 +174,7 @@ impl NetGroups {
         if asn == 0 {
             prefix_group(ip)
         } else {
-            let mut group = vec![2]; // Core NET_IPV6 groups both IP families by ASN.
+            let mut group = vec![2];
             group.extend_from_slice(&asn.to_le_bytes());
             group
         }
@@ -220,8 +214,6 @@ fn valid(bytes: &[u8]) -> bool {
     validate(bytes).is_some()
 }
 
-// Walk every branch in serialization order; forward-only jumps and at most
-// 128 input bits bound work and stack depth independently of hostile bytecode.
 fn validate(bytes: &[u8]) -> Option<()> {
     let mut bits = Bits { bytes, pos: 0 };
     let end = bytes.len().checked_mul(8)?;
@@ -363,8 +355,6 @@ mod tests {
         }
     }
 
-    // The bytes and expected addresses/ASNs are copied unchanged from Bitcoin
-    // Core v31.1 src/test/netbase_tests.cpp::asmap_test_vectors (MIT).
     #[test]
     fn independent_core_vectors_cover_the_bytecode_interpreter() {
         assert!(valid(CORE_ASMAP));
@@ -432,8 +422,6 @@ mod tests {
 
     #[test]
     fn core_linked_ipv4_forms_share_the_mapped_asn_and_prefix_group() {
-        // Core netbase_tests.cpp::netbase_getgroup independently supplies these
-        // four equivalent encodings of IPv4 1.2.3.4.
         for encoded in [
             "::FFFF:0:102:304",
             "64:FF9B::102:304",
@@ -443,8 +431,6 @@ mod tests {
             let ip = encoded.parse::<IpAddr>().expect("Core vector");
             assert_eq!(NetGroups::default().group(ip), vec![1, 1, 2]);
         }
-        // A Core-generated map maps native IPv6 to 64500, while linked IPv4
-        // 8.8.8.8 maps to 64501; passing raw transition bytes cannot pass.
         assert!(valid(LINKED_ASMAP));
         for encoded in [
             "8.8.8.8",
@@ -481,10 +467,6 @@ mod tests {
 
     #[test]
     fn supported_ip_network_classes_follow_core_getnetclass() {
-        // Independent classification cases from Core v31.1
-        // 9be056a8a72b624dae9623b2f7bded92c2a21c91 netaddress.cpp:
-        // IsRoutable, HasLinkedIPv4 and GetNetClass. These are grouping-only
-        // fixtures, not permission to dial otherwise unsupported addresses.
         for (address, expected) in [
             ("127.0.0.1", NetworkClass::Unroutable),
             ("::1", NetworkClass::Unroutable),
@@ -500,11 +482,9 @@ mod tests {
             ("64:ff9b::808:808", NetworkClass::Ipv4),
             ("2002:0808:0808::1", NetworkClass::Ipv4),
             ("2001:0:0:0:0:0:f7f7:f7f7", NetworkClass::Ipv4),
-            // Linked IPv4 inherits outer routability, unlike mapped IPv4.
             ("64:ff9b::7f00:1", NetworkClass::Ipv4),
             ("2001:4860:4860::8888", NetworkClass::Ipv6),
             ("64:ff9b:1::808:808", NetworkClass::Ipv6),
-            // Core excludes FE80::/64, not the whole FE80::/10 range.
             ("fe80:1::1", NetworkClass::Ipv6),
         ] {
             assert_eq!(

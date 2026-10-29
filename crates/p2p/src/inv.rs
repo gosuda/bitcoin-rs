@@ -5,26 +5,18 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Txid};
 #[cfg(test)]
 use crate::wire::Message;
 
-/// Converts a peer-wire block identity without reversing its consensus bytes.
 pub(crate) fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
     use bitcoin::hashes::Hash as _;
     BlockHash::from(Hash256::from_le_bytes(hash.as_byte_array()))
 }
 
-/// Converts a native block identity into the peer-wire representation.
 pub(crate) fn wire_block_hash(hash: BlockHash) -> bitcoin::BlockHash {
     use bitcoin::hashes::Hash as _;
     bitcoin::BlockHash::from_byte_array(*hash.as_bytes())
 }
 
-/// Maximum inventory vectors accepted in one message.
 pub const MAX_INV_PER_MSG: usize = 50_000;
 
-/// Requests missing parents from the connection that supplied the child.
-///
-/// Inventory identity, witness serialization, deduplication, and saturation
-/// behavior follow `docs/policies/p2p-compatibility.md` §5; this function
-/// adapts admission's parent txids to the authoritative peer-table enqueue.
 pub fn request_missing_parents(
     peers: &crate::PeerTable,
     source: PeerToken,
@@ -32,10 +24,6 @@ pub fn request_missing_parents(
 ) -> bool {
     use bitcoin::hashes::Hash as _;
 
-    // Unidentified-aware resolution: an anonymous inbound session has no
-    // endpoint, so it is found by connection id among live sessions rather
-    // than by the endpoint-keyed lookup. The token comparison still rejects
-    // stale tokens.
     let Some(session) = peers.sessions().into_iter().find(|session| {
         session.endpoint == source.endpoint
             && session.lease.connection_id().get() == source.connection_id
@@ -63,19 +51,10 @@ pub fn request_missing_parents(
         return false;
     }
     request_witness(&mut items, witness);
-    // The request owner retains alternate sources and shares the same cap as
-    // ordinary inv downloads. A retiring connection cannot target its successor.
     let retained = peers.request_parent_transactions(connection, &items);
     retained && !lease.is_cancelled()
 }
 
-/// Requests ancestor package information from the exact live connection
-/// represented by `source`.
-///
-/// The caller gates this path on the published `PKG_RELAY_ANC` bit. This
-/// adapter only resolves the token and applies existing bounds and ownership
-/// rules. `parents` ride the solicitation so its terminal outcomes can fall
-/// back to them instead of stranding them.
 pub fn request_package_info(
     peers: &crate::PeerTable,
     source: PeerToken,
@@ -86,10 +65,6 @@ pub fn request_package_info(
 }
 
 /// Applies BIP144's witness request flag to transaction vectors without
-/// changing hashes. Only getdata requests use this flag; announcements
-/// retain their own types. Block bodies are never requested through this
-/// path: block inventory is routed to header sync, and the download window
-/// builds its own `MSG_WITNESS_BLOCK` or compact requests.
 pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
     if !witness {
         return;
@@ -101,13 +76,6 @@ pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
     }
 }
 
-/// Returns the block hash carried by a block-typed inventory vector, or
-/// `None` for every other vector.
-///
-/// PRE: `item` is one vector of an inbound `inv` message.
-/// POST: `Some` exactly for `MSG_BLOCK` and `MSG_WITNESS_BLOCK`.
-/// INVARIANT: the hash is returned unchanged; the caller routes it to
-/// header sync and never requests the body from the announcement.
 pub(crate) fn inventory_block_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {
@@ -118,12 +86,7 @@ pub(crate) fn inventory_block_hash(item: &Inventory) -> Option<Hash256> {
     }
 }
 
-/// Returns the 32-byte hash carried by a transaction-typed inventory vector,
-/// or `None` for non-transaction vectors.
-///
-/// For `Transaction` and `WitnessTransaction` the hash is the txid; for
 /// `WTx` (BIP339) it is the wtxid. The caller interprets the hash according
-/// to this inventory type, independently of either relay direction's preference.
 pub(crate) fn inventory_tx_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {
@@ -135,7 +98,6 @@ pub(crate) fn inventory_tx_hash(item: &Inventory) -> Option<Hash256> {
     }
 }
 
-/// Return true when the inventory list is within the protocol bound.
 pub(crate) const fn is_within_inventory_bound(items: &[Inventory]) -> bool {
     items.len() <= MAX_INV_PER_MSG
 }
@@ -352,7 +314,6 @@ mod tests {
         let source: PeerToken = lease.source(None).into();
         assert!(source.addr.is_none());
         table.register_unidentified(lease.clone());
-        // A second live anonymous session must not receive this lease's request.
         let (other_sender, other_receiver) = crate::test_support::message_channel_bounded(2);
         let other = PeerLease::new_inbound(other_sender);
         let other_source: PeerToken = other.source(None).into();

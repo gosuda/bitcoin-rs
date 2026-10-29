@@ -11,7 +11,6 @@ use bitcoin_rs_primitives::{
 
 use super::support::{open_at_genesis, regtest_mining, solved_template_block};
 
-/// API-05: a 64-character generateblock entry must already be in the mempool.
 #[test]
 fn generateblock_rejects_unknown_mempool_txid() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -30,10 +29,7 @@ fn generateblock_rejects_unknown_mempool_txid() -> Result<()> {
     Ok(())
 }
 
-/// API-05: decoded generateblock hex is included without mempool lookup.
-/// Invalid spends fail Core `TestBlockValidity` before the nonce search.
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-27
 fn generateblock_raw_tx_does_not_require_mempool_admission() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
@@ -77,7 +73,6 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> Result<()> {
     Ok(())
 }
 
-/// API-05: submit=false dry-validates through the apply gates and does not persist.
 #[test]
 fn generate_without_submit_does_not_advance_the_tip() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -104,13 +99,9 @@ fn generate_without_submit_does_not_advance_the_tip() -> Result<()> {
     Ok(())
 }
 
-/// Raw generateblock inputs must include the confirmed P2SH redeem costs before
-/// solving, and a refusal retains Core's API-30 rejection class and reason.
 #[test]
 fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
-    // The unreachable branch is valid to spend but counts 199 * 20 sigops.
-    // IF + 199 CHECKMULTISIG + ENDIF also fits the 201-op execution limit.
     let redeem = [vec![0x00, 0x63], vec![0xae; 199], vec![0x68, 0x51]].concat();
     let payout = bitcoin::ScriptBuf::from_bytes(redeem.clone())
         .to_p2sh()
@@ -151,7 +142,6 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: inputs[..5].to_vec(),
-        // 5 * (199 * 20 * 4) + 100 * 4 = exactly 80,000 cost units.
         outputs: vec![TxOut {
             value: Amount::from_sat(1_000),
             script_pubkey: vec![0xac; 100].into(),

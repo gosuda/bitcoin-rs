@@ -1,8 +1,3 @@
-//! The node's aggregate outbound budget never ends a session. A request whose
-//! reply cannot be reserved is deferred and answered once, a parked tail and
-//! the parked misses are paid for before they are built, the refused time is
-//! not silence, and the bulk margin keeps control traffic flowing.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,13 +21,9 @@ use crate::connection::{OutboundBudget, Refusal, SharedOutboundBudget};
 use crate::test_support::hog;
 use crate::{Message, PeerLease};
 
-/// `headroom` reserves once and reuses what it holds, so a run of misses
-/// charges the aggregate once; sending spends the credit and shrinks it to
-/// the frame it travels with.
 #[test]
 fn headroom_retains_one_credit() -> TestResult {
     let reserve = 1_000;
-    // The aggregate's bulk limit is exactly one reservation.
     let aggregate = Arc::new(SharedOutboundBudget::with_limits(reserve + 64, 64));
     let (queue, receiver) = crate::test_support::message_channel();
     let lease = PeerLease::new_with_budget(
@@ -83,9 +74,6 @@ fn headroom_retains_one_credit() -> TestResult {
     Ok(())
 }
 
-/// The misses are reserved before the `notfound` is built: a refusal leaves
-/// the list as it was, charges nothing, reports a stall instead of an error,
-/// and the list goes out intact once the aggregate has room.
 #[test]
 fn parked_misses_reserved_before_build() -> TestResult {
     let miss = Inventory::Transaction(bitcoin::Txid::from_byte_array([3; 32]));
@@ -138,17 +126,13 @@ fn parked_misses_reserved_before_build() -> TestResult {
     Ok(())
 }
 
-/// The reservation taken before a reply is built covers the largest `pong`,
-/// `headers` or `addr`/`addrv2` reply the loop can build.
 #[test]
 fn reply_bound_covers_actual_replies() -> TestResult {
-    // `ping` answers with a `pong` of the same size.
     assert_eq!(
         reply_bound(&Message::Ping(1), false),
         Some(wire_len_of(&Message::Pong(u64::MAX))?)
     );
 
-    // `getheaders` answers with at most the maximum number of headers.
     let get_headers = Message::GetHeaders(GetHeadersMessage::new(
         Vec::new(),
         bitcoin::BlockHash::all_zeros(),
@@ -162,8 +146,6 @@ fn reply_bound_covers_actual_replies() -> TestResult {
         Some(wire_len_of(&full_headers)?)
     );
 
-    // `getaddr` is reserved for only while it is answered from the book, in
-    // either encoding, at its worst-case row size.
     assert_eq!(reply_bound(&Message::GetAddr, false), None);
     let socket = bitcoin_rs_primitives::PeerEndpoint::from(([1, 2, 3, 4], 8333));
     let addr_v1 = Message::Addr(vec![
@@ -193,9 +175,6 @@ fn reply_bound_covers_actual_replies() -> TestResult {
     Ok(())
 }
 
-/// A compact-block message is answered with a follow-up request the loop
-/// reserves for before dispatch: a `getblocktxn` naming every slot at worst,
-/// or a one-item `getdata` fallback.
 #[test]
 fn reply_bound_covers_compact_follow_ups() -> TestResult {
     let slots = 3_000_u64;
@@ -224,7 +203,6 @@ fn reply_bound_covers_compact_follow_ups() -> TestResult {
     assert!(cmpct_bound >= wire_len_of(&worst_getblocktxn)?);
     assert!(cmpct_bound >= wire_len_of(&fallback)?);
 
-    // `blocktxn` can only fall back to a one-item `getdata`.
     let blocktxn = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
         transactions: bitcoin::bip152::BlockTransactions {
             block_hash,
@@ -236,8 +214,6 @@ fn reply_bound_covers_compact_follow_ups() -> TestResult {
     Ok(())
 }
 
-/// The parked misses are reserved at the exact length of the `notfound` that
-/// will carry them, across the compact-size boundary.
 #[test]
 fn notfound_wire_bound_is_exact() -> TestResult {
     for items in [1, 2, 252, 253, 1_000] {
@@ -251,9 +227,6 @@ fn notfound_wire_bound_is_exact() -> TestResult {
     Ok(())
 }
 
-/// Only the aggregate's refusal is a stall. Silence inside it is not counted,
-/// silence after it is, and a refusal of the connection's own queue never
-/// opens one.
 #[test]
 fn stall_exclusion_removes_only_shared_refusals() {
     let t0 = Instant::now();
@@ -313,11 +286,6 @@ fn stall_exclusion_removes_only_shared_refusals() {
     assert_eq!(local.next_action(long_after), KeepaliveAction::Expired);
 }
 
-/// The deferred-retry harness: the parked peer, the lease under test, and
-/// the stall clock its retries charge against. The aggregate-starved lease,
-/// the full local queue, the dead writer, and the stall markers rotate
-/// through the same fields phase by phase, so every transition below runs
-/// against the exact state the previous one left behind.
 struct DeferredHarness {
     lease: PeerLease,
     peer: crate::Peer<std::io::Cursor<Vec<u8>>>,
@@ -326,8 +294,6 @@ struct DeferredHarness {
 }
 
 impl DeferredHarness {
-    /// Parks `message` as the deferred inbound and retries it under the
-    /// current lease and stall clock; `getaddr` is never answerable here.
     fn retry(&mut self, message: Option<Message>, now: Instant) -> DeferredStep {
         self.peer.deferred_inbound = message;
         retry_deferred_request(
@@ -340,8 +306,6 @@ impl DeferredHarness {
         )
     }
 
-    /// Retries whatever the previous step left deferred, without parking
-    /// anything new.
     fn retry_held(&mut self, now: Instant) -> DeferredStep {
         retry_deferred_request(
             &mut self.peer,
@@ -354,9 +318,6 @@ impl DeferredHarness {
     }
 }
 
-/// A request whose reply the aggregate refuses is kept and retried; the
-/// connection's own full queue, a dead writer and an old pause outside a
-/// stall each keep their existing rule.
 #[test]
 fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
     let bound = reply_bound(&Message::Ping(1), false).ok_or("a reserved ping")?;
@@ -395,7 +356,6 @@ fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
     assert_eq!(harness.peer.deferred_inbound, None);
     drop(credit);
 
-    // The connection's own full queue closes it, as before.
     let (queue, _receiver) = crate::test_support::message_channel();
     harness.lease = PeerLease::new_with_budget(
         queue,
@@ -412,7 +372,6 @@ fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
     ));
     assert!(harness.lease.is_cancelled());
 
-    // A dead writer ends it without waiting.
     let (queue, _receiver) = crate::test_support::message_channel();
     harness.lease = PeerLease::new(queue);
     harness.lease.budget_handle().mark_writer_dead();
@@ -421,8 +380,6 @@ fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
         DeferredStep::Ended
     ));
 
-    // An old pause outside a stall expires; inside the stall that began with
-    // it, it does not.
     let later = t0 + TIMEOUT_INTERVAL + Duration::from_secs(5);
     let hold = hog(&aggregate, 3 * bound + 1);
     let (queue, _receiver) = crate::test_support::message_channel();
@@ -444,13 +401,9 @@ fn deferred_request_retries_and_keeps_the_existing_local_rules() -> TestResult {
     Ok(())
 }
 
-/// Runs `request` against a session whose aggregate refuses its reply and
-/// checks that nothing is queued meanwhile, the session lives, and the single
-/// reply arrives once the aggregate drains.
 fn answered_once_after_the_aggregate_drains(request: &Message, expected: Message) -> TestResult {
     let bound = reply_bound(request, true).ok_or("a request-scoped reply")?;
     let aggregate = Arc::new(SharedOutboundBudget::with_limits(4 * bound, 0));
-    // Other connections' queued bytes leave one byte too few for the reply.
     let hold = hog(&aggregate, 3 * bound + 1);
     let mut shared = shared_with(ScriptedChain { blocks: Vec::new() });
     shared.address_book = Some(crate::addrman::AddressBook::open(
@@ -466,8 +419,6 @@ fn answered_once_after_the_aggregate_drains(request: &Message, expected: Message
         &WriterKind::Gated,
     )?;
 
-    // The writer's gate stays shut while the aggregate is full, so a reply
-    // queued too early would stay charged and show in `pending`.
     served.client.send(request)?;
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -509,16 +460,11 @@ fn request_deferred_not_reply() -> TestResult {
     answered_once_after_the_aggregate_drains(&Message::GetAddr, Message::Addr(Vec::new()))
 }
 
-/// A bulk tail the aggregate cannot take parks without touching the lease,
-/// control sends still fit in the bulk margin, and the tail is served once
-/// the aggregate drains.
 #[test]
 fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestResult {
     let block_a = block(11);
     let entry = scripted(&block_a);
     let block_len = wire_len_of(&Message::BlockPayload(entry.1.clone()))?;
-    // Bulk limit nine blocks, margin one: eight blocks and a byte of other
-    // connections' bytes leave no bulk room for one more reservation.
     let aggregate = Arc::new(SharedOutboundBudget::with_limits(10 * block_len, block_len));
     let hold = hog(&aggregate, 8 * block_len + 1);
     let mut served = Served::start_on(
@@ -530,9 +476,6 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
         &WriterKind::Gated,
     )?;
 
-    // The writer's gate stays shut, so everything charged stays visible: the
-    // parked tail holds no reservation and queues no body, while the control
-    // message still fits in the margin.
     served
         .client
         .send(&Message::GetData(vec![inventory_of(&block_a)]))?;
@@ -569,28 +512,8 @@ fn a_bulk_tail_parked_on_the_aggregate_leaves_the_margin_for_control() -> TestRe
     Ok(())
 }
 
-/// A conditional compact reply defers on a locally full queue with a live writer.
-///
-/// A stray `blocktxn` has no pending reconstruction, so the real
-/// `process_compact_message` returns `Idle` and `handle_compact_outcome`
-/// sends nothing, yet `reply_bound` still reserves for it. One `Idle` probe
-/// covers the conditional class: `CmpctBlock` shares the same bound and the
-/// same fresh/retry gate. The fresh gate and the deferred retry must both
-/// defer it instead of closing, while `Ping` keeps its unconditional
-/// high-water close
-/// (pinned by `deferred_request_retries_and_keeps_the_existing_local_rules`)
-/// and a dead writer still ends the session. The local wait counts toward
-/// the timeout; only a shared refusal opens a stall.
-///
-/// This is a bounded real-socket smoke: it parks one conditional against a
-/// full local queue, observes that nothing is cancelled or queued, then
-/// drains and proves the session still serves. The sleep only bounds the
-/// live-session poll window and proves no causal barrier. The deterministic
-/// witness that the retry defers and then readies with no reply is
-/// `conditional_local_retry_defers_then_readies_with_no_reply`.
 #[test]
 fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
-    // One-slot local queue, no aggregate: the next reservation fails Local.
     let mut served = Served::start(
         shared_with(ScriptedChain { blocks: Vec::new() }),
         OutboundBudget::with_block_reserve(1, 1 << 20, 1),
@@ -608,19 +531,12 @@ fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
     );
     assert!(!served.lease.is_cancelled());
 
-    // Stray `blocktxn`: no pending entry, so the real reconstruction returns
-    // `Idle` and sends nothing.
     let stray = Message::BlockTxn(bitcoin::p2p::message_compact_blocks::BlockTxn {
         transactions: bitcoin::bip152::BlockTransactions {
             block_hash: bitcoin::BlockHash::all_zeros(),
             transactions: Vec::new(),
         },
     });
-    // The single conditional arrives while the local queue is full. The
-    // session must park instead of closing: the fresh gate defers, and the
-    // deferred retry keeps waiting with a live writer. The sleep only bounds
-    // the live-session poll window; it is not a barrier, so this test claims
-    // only the parked state, not that the retry fired.
     served.client.send(&stray)?;
     std::thread::sleep(Duration::from_millis(1200));
     assert!(
@@ -633,8 +549,6 @@ fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
         "an Idle compact outcome reserves and queues nothing while parked"
     );
 
-    // Draining the filler proves nothing spurious was queued: only the filler
-    // reaches the peer, then the session still serves.
     served.open_gate();
     assert_eq!(
         read_messages(&mut served.client, 1)?,
@@ -653,9 +567,6 @@ fn conditional_compact_defers_on_locally_full_queue() -> TestResult {
     Ok(())
 }
 
-/// Deterministic witness for the conditional local retry with a live writer:
-/// a locally full queue defers (`Waiting`) without cancelling, then readies
-/// once the queue drains and the stray `blocktxn` answers nothing (`Idle`).
 #[test]
 fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     let t0 = Instant::now();
@@ -734,7 +645,6 @@ fn conditional_local_retry_defers_then_readies_with_no_reply() -> TestResult {
     Ok(())
 }
 
-/// An unconditional `Ping` on a locally full queue still ends and cancels.
 #[test]
 fn unconditional_ping_on_locally_full_queue_ends() -> TestResult {
     let t0 = Instant::now();
@@ -766,7 +676,6 @@ fn unconditional_ping_on_locally_full_queue_ends() -> TestResult {
     Ok(())
 }
 
-/// A conditional compact request with a dead writer ends instead of waiting.
 #[test]
 fn conditional_local_retry_with_dead_writer_ends() {
     let t0 = Instant::now();
@@ -796,7 +705,6 @@ fn conditional_local_retry_with_dead_writer_ends() {
     ));
 }
 
-/// A fresh local wait expires once parked past `TIMEOUT_INTERVAL` plus a second.
 #[test]
 fn conditional_local_wait_expires_after_timeout_interval() -> TestResult {
     let t0 = Instant::now();

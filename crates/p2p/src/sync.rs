@@ -1,18 +1,4 @@
 //! Block download orchestrator.
-//!
-//! Reads the applied-chain seam ([`crate::sync::chain::SyncChain`]), the peer table, and the
-//! inbound channels and, when a peer reports a longer chain, sends
-//! `getheaders` toward that peer. Inbound `headers` batches are admitted
-//! through [`crate::sync::chain::SyncChain::admit_headers`]; inbound full blocks are staged in
-//! the `BlockStager` and committed through [`crate::sync::chain::SyncChain::commit_window`].
-//! The download executor, window, staging, and peer policy are owned by this
-//! crate; applied-tip mutation behind `crate::sync::chain::SyncChain` remains a node-provided
-//! ARCH-07 seam.
-//!
-//! Each tick runs one canonical frontier reconciliation:
-//! observe the chain frontier and the identity-bearing usable-peer set,
-//! convict or release what no longer holds work, then either schedule
-//! concrete recovery or name the reason progress is impossible.
 
 mod branches;
 pub mod chain;
@@ -80,48 +66,21 @@ pub use crate::download_window::default_sync_budget;
 #[cfg(test)]
 pub(crate) use crate::download_window::MIN_PEERS_FOR_FANOUT;
 
-/// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
 
-/// Time after which an unanswered frontier `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the node asks whether its own tip has gone stale: Core's
-/// `STALE_CHECK_INTERVAL` is 10 * 60 seconds (`net_processing.cpp:111`).
 const STALE_CHECK_INTERVAL: Duration = Duration::from_mins(10);
 
-/// The node's judgement of its own tip's progress, and the one extra
-/// full-relay connection that judgement can buy.
-///
-/// A tip that stops moving while nothing is being downloaded means the
-/// connections the node holds are not telling it about the network. Core
-/// answers that with one more full-relay dial rather than with a different
-/// download strategy, and takes the extra connection back as soon as the
-/// chain moves again (`net_processing.cpp:5604-5668`).
 #[derive(Clone, Debug, Default)]
 struct StaleTipState {
-    /// The header tip identity last observed: height and hash together, so a
-    /// same-height replacement or a reorg to a lower tip is a change.
     last_seen_tip: Option<(u32, Hash256)>,
-    /// When the tip last advanced, `None` before the first observation.
     last_update: Option<Instant>,
-    /// When the staleness question is next asked.
     next_check: Option<Instant>,
-    /// Whether one extra full-relay dial is currently allowed.
     extra_dial_allowed: bool,
 }
 
 impl StaleTipState {
-    /// Records what the tip did this tick and updates the extra-dial
-    /// allowance.
-    ///
-    /// PRE: `tip_height` and `tip_hash` are this tick's header tip identity,
-    ///   `blocks_in_flight` the bodies the window still expects, and
-    ///   `block_spacing` the network's target spacing.
-    /// POST: a tip whose height or hash changed withdraws the allowance at
-    ///   once and restarts the staleness clock on the new tip; a tip that
-    ///   has not moved is re-judged no more often than
-    ///   `STALE_CHECK_INTERVAL`.
     /// INVARIANT: the allowance is this record's only output, so the
     ///   connection manager never reads a staleness clock of its own.
     fn follow(
@@ -147,12 +106,6 @@ impl StaleTipState {
     }
 }
 
-/// Whether the node's tip looks stale rather than merely quiet.
-///
-/// PRE: `block_spacing` is the network's target spacing.
-/// POST: return false while any body is in flight, because the node is
-///   downloading rather than stuck; otherwise return true once the tip has
-///   stood still for three target spacings.
 /// INVARIANT: this is Core's `TipMayBeStale` (`net_processing.cpp:1434-1448`),
 ///   which weighs the last tip update against `3 * nPowTargetSpacing` with
 ///   nothing in flight.
@@ -171,70 +124,26 @@ fn tip_may_be_stale(
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
-/// Block download orchestrator.
-///
-/// Drives the P2P-owned `DownloadWindow` and `BlockStager` against the
-/// applied-chain seam. See `docs/contracts/architecture.md` for the
-/// download-window ownership contract.
 pub struct BlockSync {
-    /// Bounded historical downloads, independent of the foreground
-    /// download window. This short-held lock is also read by peer ingress.
     historical: Mutex<historical::HistoricalDownload>,
-    /// Serializes historical replay and delivery without holding the ingress lock.
     historical_work: Mutex<()>,
-    /// Applied-chain seam: header admission, window commit, branch switch,
-    /// and genesis bootstrap live behind it (node owns them, ARCH-07).
     pub(crate) chain: Arc<dyn SyncChain>,
     peer_table: Arc<PeerTable>,
-    /// The node's one chain-owned initial-block-download latch, shared with
-    /// RPC and the listener. Block-body peer choice reads it through
-    /// [`crate::download_window::BlockDownloadPolicy`]; nothing else decides
-    /// whether this node is still syncing.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<crate::InboundBlock>,
-    /// One lock owns the coupled download, staged-body, header-request, and
-    /// session-reconciliation state. Consensus and chain I/O stay outside
-    /// this lock.
     scheduler: Mutex<SchedulerState>,
-    /// Last time a `Refused` admission replayed a `getheaders` re-request;
-    /// paces retries to the request timeout so a paused admission cannot
-    /// re-issue the same locator at round-trip pace.
     refused_rerequest_at: Mutex<Option<Instant>>,
-    /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained by
-    /// the next tick's header drain.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
-    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
-    /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
-    /// no chain transition: the failed settlement left the implementation's
-    /// admission closed, so every further attempt would churn staged state.
-    /// Only recreating the sync object (restart path) clears it; there is no
-    /// in-place recovery that reopens admission.
     apply_halted: std::sync::atomic::AtomicBool,
     /// Recent stale tips for BIP332 relay, kept across [`BlockSync::install_budget`]
-    /// so a budget swap cannot erase them. Shared with the announcer and the
-    /// chain query; see [`StaleTipRetainer`].
     stale_tips: Arc<StaleTipRetainer>,
 }
 
-/// Cap on deferred owned-fetch marks waiting on unattached tip headers:
-/// bounded so a peer cannot grow the scheduler by announcing tips that
-/// never admit. The oldest mark is evicted first.
 const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
 
-/// Blocks above the applied tip within which an unrequested compact block
-/// earns the mempool scan, as in Core (`net_processing.cpp:4664`). A block
-/// further ahead, which the mempool is unlikely to help reconstruct, routes
-/// only its header to admission and downloads through the window.
 const COMPACT_RECONSTRUCTION_MAX_AHEAD: u32 = 2;
 
-/// Appends one deferred owned-fetch mark, keeping the queue deduplicated and
-/// bounded at every insertion point — the initial record, the header-drain
-/// deferral, and the post-resolve requeue all share this tail.
-///
-/// Dedup keys on `(source, hash)`: two live connections that each issued a
-/// compact fetch for the same hash both hold ownership, because inbound
-/// admission checks the exact source. The oldest mark is evicted first.
 fn defer_owned_body_fetch(scheduler: &mut SchedulerState, source: PeerSource, hash: Hash256) {
     if scheduler
         .owned_body_fetches
@@ -252,26 +161,13 @@ fn defer_owned_body_fetch(scheduler: &mut SchedulerState, source: PeerSource, ha
 struct SchedulerState {
     window: DownloadWindow,
     stager: BlockStager,
-    /// Selects the exact lifecycle entry whose request paces frontier
-    /// discovery; request data lives only in `headers_sync`.
     header_request_owner: Option<PeerSource>,
-    /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
-    /// `getdata` was issued for a tip hash whose header has not attached yet.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
-    /// Exact connections that answered an outstanding body request with
-    /// `notfound`, so the released body is replanned elsewhere instead of
-    /// being asked of the same connection again. Retention-bounded by
     /// [`requests::BODY_UNAVAILABLE_RETRY`] with a safety ceiling, and
     /// independent of the window's pending budget.
     body_unavailable: requests::UnavailableBodies,
-    /// Chain-sync eviction state for every connection that has not yet shown
-    /// it can bring us to the tip. Keyed by exact connection identity, so a
-    /// replacement at the same address is judged on its own record.
     chain_sync: hashbrown::HashMap<PeerSource, peers::ChainSyncState>,
-    /// The sole header lifecycle owner for each exact connection: its wire
-    /// request and download-twice validation cursor share one entry.
     headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
-    /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
     expected_apply_cache: Option<ExpectedApplyCache>,
 }
@@ -289,11 +185,6 @@ impl SchedulerState {
             .and_then(|source| self.headers_sync.get(&source)?.request)
     }
 
-    /// Releases every scheduling fact owned by a connection not in `live`.
-    ///
-    /// PRE: `live` is the peer table's live-session snapshot.
-    /// POST: the window, header lifecycles, and deferred body fetches hold
-    ///   only facts owned by a connection in `live`.
     /// INVARIANT: ownership is compared by connection identity, never by
     ///   address alone.
     fn release_unowned(&mut self, live: &[PeerSource]) {
@@ -311,14 +202,6 @@ impl SchedulerState {
         self.headers_sync.retain(|source, _| owns(source));
     }
 
-    /// Puts one connection's chain-sync record back after a probe that never
-    /// left the node.
-    ///
-    /// PRE: `prior` is the record the connection held before the probe was
-    ///   attempted.
-    /// POST: the connection's record is exactly `prior`, so the rule retries
-    ///   on a later tick instead of starting the response window for a request
-    ///   the connection never received.
     /// INVARIANT: only the chain-sync sweep writes this map outside its own
     ///   decision, and it writes it back the way it found it.
     fn restore_chain_sync(&mut self, source: PeerSource, prior: Option<peers::ChainSyncState>) {
@@ -341,7 +224,6 @@ struct PeerHeadersSync {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct HeaderRequest {
-    /// The exact connection the request was sent to.
     source: PeerSource,
     kind: HeaderRequestKind,
     locator_tip_hash: Hash256,
@@ -373,19 +255,11 @@ pub(super) enum HeaderRequestState {
     Answered,
 }
 
-/// Whether `send_getheaders` reached the wire this tick.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GetheadersOutcome {
-    /// The request was sent and registered.
     Sent,
-    /// Existing request pacing or a live presync cursor owns this connection.
     Suppressed,
-    /// Nothing was sent because the frontier body is already owned: the
-    /// capability question the probe exists to answer is resolved, and no
-    /// request is outstanding on this connection.
     FrontierOwned,
-    /// The connection's outbound channel is gone (the send failed or the
-    /// lease no longer exists).
     Failed,
 }
 
@@ -405,11 +279,6 @@ struct GetdataRequestOutcome {
 }
 
 impl BlockSync {
-    /// Constructs a new orchestrator over the supplied shared handles.
-    ///
-    /// PRE: `ibd` is the node's chain-owned latch that RPC and the listener
-    ///   also hold.
-    /// POST: the orchestrator starts no download until a tick runs.
     /// INVARIANT: the latch is never replaced and never copied into a cached
     ///   boolean.
     #[must_use]
@@ -448,9 +317,6 @@ impl BlockSync {
         }
     }
 
-    /// Replaces the whole scheduler state with one configured by `budget`:
-    /// the fast-sync opt-in at node open, and tests and benchmarks that
-    /// exercise non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
         *self.historical.lock() = historical::HistoricalDownload::new(budget);
         *self.scheduler.lock() = SchedulerState {
@@ -466,13 +332,6 @@ impl BlockSync {
         };
     }
 
-    /// Records one block-typed inventory vector from `source` for the next
-    /// header drain.
-    ///
-    /// PRE: `source` identifies the current connection and `hash` is a
-    /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
-    /// POST: the announcement is queued; the caller wakes the sync loop. No
-    /// block body request is emitted here.
     /// INVARIANT: one entry per connection — the first unprocessed
     /// announcement wins, so a later vector cannot replace an unknown tip
     /// before header sync drains it — and a flooding peer cannot grow the
@@ -484,27 +343,6 @@ impl BlockSync {
             .or_insert(hash);
     }
 
-    /// Linearizably enqueues one deferred owned body fetch and publishes its
-    /// ownership only after the follow-up left on the same connection.
-    ///
-    /// The exact-source peer-table guard (`PeerTable::with_current`, holding
-    /// the `parking_lot::RwLockReadGuard<TableView>` entries read guard) is
-    /// held across the scheduler lock, the nonblocking reserved-credit
-    /// `enqueue`, and the ownership publication, so a same-address
-    /// replacement cannot register between validation and publication. The
-    /// tree guard is released before this call; only the
-    /// `peer_table -> scheduler` order is taken here. `enqueue` spends the
-    /// held `ProductionSink` reservation through `send_with` and nonblocking
-    /// `outbound.try_send`, so no blocking send or credit-free write occurs
-    /// under the lock.
-    ///
-    /// PRE: `enqueue` sends the `GetBlockTxn`/`GetData` follow-up for `hash`
-    /// on `source`'s connection under its reply reservation and answers
-    /// whether it left the wire.
-    /// POST: on `false` nothing is published and the answer is `false`; on
-    /// `true` `(source, hash)` is deduplicated under
-    /// `MAX_DEFERRED_OWNED_FETCHES` and the answer is `true`. A stale source
-    /// publishes nothing and answers `false`.
     /// INVARIANT: `send_then` is not used here because it would charge a new
     /// budget credit instead of spending the held reply reservation; the
     /// `with_current` guard plus the reserved-credit `enqueue` is the
@@ -527,12 +365,6 @@ impl BlockSync {
         admitted && published
     }
 
-    /// Whether `source` already owns the download of `hash`.
-    ///
-    /// PRE: `source` identifies a live connection and `hash` is a block hash.
-    /// POST: `true` when the download window holds a pending request for
-    ///   `hash` owned by this exact connection, or the compact path marked
-    ///   the body as fetched by it.
     /// INVARIANT: ownership is compared by connection identity, never by
     ///   address alone, so a same-address replacement cannot claim its
     ///   predecessor's request.
@@ -549,30 +381,9 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
-    /// Whether a compact block with `header` from `source` earns a
-    /// mempool-wide reconstruction scan.
-    ///
-    /// PRE: `header` is the `cmpctblock`'s embedded header.
-    /// POST: `true` only when the header has valid proof of work, the block
-    ///   is not marked invalid, its parent is a known block not marked
-    ///   invalid, the header passes the contextual rules header admission
-    ///   applies against that parent (required nBits, median time past,
-    ///   timewarp, future time, version), and it either carries more work
-    ///   than the applied chain and sits at most
-    ///   [`COMPACT_RECONSTRUCTION_MAX_AHEAD`] blocks above the applied tip,
-    ///   or answers a body fetch `source` owns.
-    ///   This matches Core, which runs its contextual header checks before
-    ///   reconstruction and scans only blocks that close to its active tip.
-    ///   With the required nBits enforced, forging such a header costs a
-    ///   block at the chain's difficulty, replaying an old one fails the work
-    ///   test, and a header already held far above the applied tip earns no
-    ///   scan.
     /// INVARIANT: the tree read is released before the scheduler lock is
     ///   taken, keeping the `tree -> scheduler` order without nesting.
     ///
-    /// This is the pre-scan gate on the compact header alone. A
-    /// reconstructed body still faces the staging gate
-    /// (`unrequested_body_admissible`) like any other delivered block.
     #[must_use]
     pub(crate) fn compact_reconstruction_admissible(
         &self,
@@ -600,11 +411,6 @@ impl BlockSync {
             else {
                 return false;
             };
-            // A header that admission would refuse never earns the scan. In
-            // particular its own valid proof of work must meet the target
-            // the chain requires after this parent. As in admission, a header
-            // already in the tree is not rechecked, so a clock that has since
-            // moved backwards cannot refuse it.
             if known.is_none()
                 && bitcoin_rs_chain::validate_contextual_header(
                     &tree,
@@ -633,34 +439,22 @@ impl BlockSync {
         extends_applied || self.owns_body_fetch(source, hash)
     }
 
-    /// Runs one orchestrator tick as a single canonical frontier
-    /// reconciliation: observe, recover what is unowned, then schedule or
-    /// name why progress is impossible.
     pub fn tick(&self) {
         self.retire_timed_out_header_syncs(Instant::now());
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
-        // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
         self.advance_historical();
         self.drain_inbound_blocks();
         self.advance_historical();
 
         let now = Instant::now();
-        // One frontier observation feeds recovery, selection, and planning;
-        // the observation reads tips once and resolves the canonical
-        // next-required body exactly once per tick.
         let chain = self.observe_chain_frontier();
         self.reconcile_window_recovery(&chain, now);
-        // Convicted connections must release their work before selection so
-        // the same tick can re-request it.
         self.reconcile_peer_sessions();
         let mut frontier = self.observe_frontier(chain.clone(), now);
         let peers_changed = self.sweep_chain_sync(&frontier, now);
         self.follow_tip_progress(&frontier, now);
-        // Both explicit eviction and a failed probe send can remove a peer.
-        // Release its work before refreshing the frontier, so a full pending
-        // budget cannot prevent same-tick reassignment to a live connection.
         if peers_changed {
             self.reconcile_peer_sessions();
             frontier = self.observe_frontier(chain, now);
@@ -711,10 +505,6 @@ impl BlockSync {
         }
     }
 
-    /// Lets the node's own tip govern the extra full-relay connection.
-    ///
-    /// PRE: `frontier` is the observation made at `now`.
-    /// POST: the extra-dial allowance reflects this tick's tip.
     /// INVARIANT: the staleness question is asked at most once per
     ///   `STALE_CHECK_INTERVAL`, so a stalled tip costs one dial rather than
     ///   one decision per tick.
@@ -731,11 +521,6 @@ impl BlockSync {
             .follow(tip.height, tip.hash, blocks_in_flight, block_spacing, now);
     }
 
-    /// Whether the stale tip still justifies one extra full-relay dial.
-    ///
-    /// PRE: none.
-    /// POST: the answer is the scheduler's current judgement, and it changes
-    ///   only when the tip moves or the staleness question is next asked.
     /// INVARIANT: the connection manager is the only reader, because it is the
     ///   only part of the node that can dial.
     #[must_use]
@@ -743,11 +528,6 @@ impl BlockSync {
         self.scheduler.lock().stale_tip.extra_dial_allowed
     }
 
-    /// Whether `source` holds a per-connection block-download slot right now.
-    ///
-    /// PRE: `source` names a connection of this node's epoch.
-    /// POST: true exactly while the window counts that connection among the
-    ///   peers it is fetching from.
     /// INVARIANT: the answer comes from the same window the fetch budget
     ///   reads, so a peer never both downloads and is retired as idle.
     #[must_use]
@@ -755,7 +535,6 @@ impl BlockSync {
         self.scheduler.lock().window.is_downloading(source)
     }
 
-    /// Returns whether `ancestor` is the node at `height` on `descendant`'s branch.
     fn is_ancestor_at_height(
         tree: &BlockTree,
         ancestor: NodeId,
@@ -765,8 +544,6 @@ impl BlockSync {
         tree.node_at_height_from(descendant, height) == Some(ancestor)
     }
 
-    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.
-    /// Keep fallible ancestry navigation separate from request publication.
     fn first_connect_height(
         tree: &BlockTree,
         applied_hash: Hash256,
@@ -794,9 +571,6 @@ impl BlockSync {
         }
     }
 
-    /// The canonical next-required body on the active branch: the applied tip's
-    /// successor during an extension, or the first connect node above the
-    /// common ancestor during a reorg.
     pub(super) fn next_required_body(&self) -> Option<RequiredBody> {
         let chain_tip = self.chain.chain_tip()?;
         let applied_tip = self.chain.applied_tip()?;
@@ -804,8 +578,6 @@ impl BlockSync {
         Self::required_body_from_tips(&tree, applied_tip.hash, chain_tip.tip_id)
     }
 
-    /// Resolve ancestry against the caller's captured tips without sampling
-    /// either published tip again.
     fn required_body_from_tips(
         tree: &BlockTree,
         applied_hash: Hash256,
@@ -820,8 +592,6 @@ impl BlockSync {
         })
     }
 
-    /// The chain-side frontier: both tips and the canonical next-required
-    /// body, resolved in one consistent tree read.
     pub(super) fn observe_chain_frontier(&self) -> ChainFrontier {
         let applied_tip = self.chain.applied_tip();
         let chain_tip = self.chain.chain_tip();
@@ -840,13 +610,6 @@ impl BlockSync {
         }
     }
 
-    /// The full scheduler observation: the chain frontier joined to the
-    /// body's scheduling state and the identity-bearing usable-peer set,
-    /// all consistent for one tick.
-    ///
-    /// Lock order: the peer-table snapshot is taken first, then the chain
-    /// tree read for capability resolution, then the scheduler lock — the
-    /// established `peer_table -> tree -> scheduler` order.
     pub(super) fn observe_frontier(&self, chain: ChainFrontier, now: Instant) -> SyncFrontier {
         let sessions = self.peer_table.usable_peers();
         let mut usable_peers = Vec::with_capacity(sessions.len());
@@ -859,8 +622,6 @@ impl BlockSync {
                     Some(info) => info,
                     None => continue,
                 };
-                // The peer's demonstrated height on the active branch: only a
-                // tip that intersects our chain is usable for bodies.
                 let active_height = if demonstrated_tips.is_empty() {
                     u32::try_from(info.best_known_height).ok()
                 } else {
@@ -900,7 +661,6 @@ impl BlockSync {
         }
     }
 
-    /// Records why the frontier cannot advance this tick.
     fn note_no_progress(frontier: &SyncFrontier, reason: NoProgressReason) {
         if reason == NoProgressReason::AtTip {
             return;
@@ -918,7 +678,6 @@ impl BlockSync {
 }
 
 impl NoProgressReason {
-    /// Metric label for the reason.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AtTip => "at_tip",
@@ -940,12 +699,6 @@ impl std::fmt::Display for NoProgressReason {
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// A latch that stays in initial block download: nothing is ever applied
-/// behind it, so [`bitcoin_rs_chain::InitialBlockDownload::is_active`] answers
-/// active for every time.
-///
-/// PRE: none.
-/// POST: the returned latch is shared and never leaves initial block download.
 /// INVARIANT: test-only. Production wires the node's chain-owned latch; a test
 ///   that exercises the block-service clause builds its own fixture.
 #[cfg(test)]

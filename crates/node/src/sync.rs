@@ -1,12 +1,3 @@
-//! Applied-chain seam for the block-download executor.
-//!
-//! The executor — download scheduling, staging, peer policy — lives in
-//! [`bitcoin_rs_p2p::sync`]. This module is the [`bitcoin_rs_p2p::sync::SyncChain`] implementation
-//! it drives: the applied-tip-mutating operations that stay in `node` under
-//! ARCH-07 (header admission under the chain-transition lock, window commit
-//! through `ChainTransition` + `ChainFollowers`, branch switch via
-//! [`crate::reorg::switch_to_branch`], genesis bootstrap).
-
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -20,18 +11,13 @@ use crossbeam_channel::Receiver;
 
 pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 
-/// The [`SyncChain`] implementation over [`bitcoin_rs_chainstate::Chainstate`]:
-/// applied-tip mutation behind the chain-transition lock plus the derived
-/// consumers that must fire inside it.
 struct NodeSyncChain {
     assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
-    /// The chainstate's read-only block-tree capability.
     block_tree: bitcoin_rs_chain::BlockTreeReader,
     followers: crate::chain_effects::ChainFollowers,
 }
 
-/// Constructs the download executor over the applied-chain seam.
 #[must_use]
 pub fn block_sync(
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
@@ -82,13 +68,6 @@ fn settle_window_failure(
     error
 }
 
-/// Settles a successful window: finishes the transition, or classifies a
-/// finish failure as [`WindowApplyDisposition::Fatal`] when the reserved
-/// even generation could not be published.
-///
-/// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
-/// and surface a `Fatal` disposition when the CAS fails, so the caller
-/// stops retrying instead of wedging on an odd generation.
 #[expect(clippy::result_large_err)]
 fn settle_window_success(
     transition: bitcoin_rs_chainstate::ChainTransition<'_>,
@@ -120,13 +99,6 @@ fn settle_window_success(
     }
 }
 
-/// Test fixture: the one owner of header-tree writes node tests must
-/// synthesize directly — mid-chain forks that must not become the best tip,
-/// and subtrees admission would reject — which [`Chainstate::admit_headers`]
-/// cannot produce because admission validates and republishes the best-work
-/// tip. Production never calls this.
-///
-/// [`Chainstate::admit_headers`]: bitcoin_rs_chainstate::Chainstate::admit_headers
 #[cfg(test)]
 pub(crate) fn fixture_insert_header_node(
     handles: &bitcoin_rs_chainstate::Chainstate,
@@ -239,7 +211,6 @@ impl SyncChain for NodeSyncChain {
         let transition = self
             .handles
             .begin_transition()
-            // A closed or already-active generation refuses a new window.
             .map_err(|source| WindowCommitError {
                 applied: 0,
                 disposition: WindowApplyDisposition::Operational,
@@ -267,7 +238,6 @@ impl SyncChain for NodeSyncChain {
                 for (payload, outcome) in payloads.iter().zip(&error.committed) {
                     self.followers.on_connect(payload.block(), outcome);
                 }
-                // A connect failure settles according to its disposition.
                 Err(settle_window_failure(transition, mempool_change, error))
             }
         };

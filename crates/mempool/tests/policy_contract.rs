@@ -1,14 +1,3 @@
-//! Mempool policy compatibility contract: every policy row in
-//! `docs/policies/mempool-policy.md` cites one fixture here (or in
-//! `crates/rpc/tests/policy_contract.rs`).
-//!
-//! Fixtures in this file assert the mutating pool-side verdict. The preview-side
-//! verdicts retired with the removed `evaluate_package_acceptance` helper are now
-//! exercised through the real `MempoolGateway` preview path in
-//! `crates/rpc/tests/policy_contract.rs`; the missing-inputs row keeps a direct
-//! mempool-surface preview fixture below.
-//!
-//! Contract clause: `docs/contracts/mempool-policy.md` `POL-01`.
 #![deny(clippy::expect_used)]
 
 extern crate alloc;
@@ -31,7 +20,6 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::opcode;
 use parking_lot::RwLock;
 
-/// Bitcoin Core default dust relay rate, sat/kvB.
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
 
 fn policy() -> StandardnessPolicy {
@@ -41,8 +29,6 @@ fn policy() -> StandardnessPolicy {
     }
 }
 
-/// Stub chain that provides no confirmed prevouts, exercising missing-input
-/// classification through the real `MempoolGateway` preview path.
 struct EmptyChain;
 
 impl AdmissionChain for EmptyChain {
@@ -51,14 +37,12 @@ impl AdmissionChain for EmptyChain {
     }
 }
 
-/// `OP_0 <20 bytes>` — a P2WPKH witness program shape.
 fn p2wpkh_script() -> Vec<u8> {
     let mut script = vec![opcode::OP_0, 0x14];
     script.extend([0x11_u8; 20]);
     script
 }
 
-/// `OP_TRUE` — no recognized standard output type.
 fn op_true_script() -> Vec<u8> {
     vec![0x51]
 }
@@ -67,8 +51,6 @@ fn outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid::from(Hash256::from_le_bytes(&[label; 32])), vout)
 }
 
-/// One-input, one-P2WPKH-output transaction. Distinct `output_value` values
-/// keep txids distinct across fixtures.
 fn tx(prevout: OutPoint, output_value: u64, sequence: u32) -> Tx {
     tx_multi(&[(prevout, sequence)], output_value, p2wpkh_script())
 }
@@ -148,11 +130,6 @@ fn configured_min_relay_floor_overrides_the_default() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// BIP125 replacement policy
-// ---------------------------------------------------------------------------
-
-/// Original (signaling or not) plus a descendant, both at 2000 sat/kvB.
 struct ConflictFixture {
     pool: Mempool,
     original: Tx,
@@ -160,7 +137,6 @@ struct ConflictFixture {
 }
 
 fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
-    // `ENABLE_RBF_NO_LOCKTIME` (BIP125 signal) is 0xFFFFFFFD.
     let sequence = if signaling {
         0xFF_FF_FF_FD
     } else {
@@ -272,8 +248,6 @@ fn replacement_may_add_an_unconfirmed_input() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Builds a root with `output_count` outputs so siblings can share a cluster
-/// without being in each other's ancestor or descendant packages.
 fn fanout_root(label: u8, output_count: usize) -> Tx {
     Tx {
         version: 2,
@@ -414,13 +388,6 @@ fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// BIP68 sequence locks and coinbase maturity at admission (policy §3, §5)
-// ---------------------------------------------------------------------------
-
-/// Confirmed chain facts for finality fixtures: one snapshot height, tip
-/// median-time-past, CSV activation, and per-prevout metadata rows, mirroring
-/// what the RPC producer derives from the live UTXO set and the block tree.
 struct MetaChain {
     height: u32,
     locktime_cutoff: u32,
@@ -443,7 +410,6 @@ impl AdmissionChain for MetaChain {
     }
 }
 
-/// Builds a chain whose only confirmed coin is `(outpoint, output, meta)`.
 fn meta_chain(
     height: u32,
     locktime_cutoff: u32,
@@ -562,11 +528,6 @@ fn relative_lock_cases() -> [Case; 7] {
     ]
 }
 
-/// Relative locks and coinbase maturity are reported from the confirmed
-/// prevout metadata: a height lock clears once enough blocks passed, a time
-/// lock is measured against the confirmed median-time-past, the BIP68 check is
-/// inert before CSV activation, and a coinbase is spendable at 100
-/// confirmations.
 #[test]
 fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
@@ -690,35 +651,20 @@ fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Rolling minimum fee (policy: Core `GetMinFee`)
-// ---------------------------------------------------------------------------
-
-/// Clock reading for the floor fixtures. Unless a block has connected, the
-/// rolling floor does not decay, so the value only names the reading.
 const T0: u64 = 1_700_000_000;
 
-/// Core's rolling-fee half-life: twelve hours.
 const HALF_LIFE_SECS: u64 = 12 * 60 * 60;
 
-/// The outcome of a package evicted to fit the pool's byte limit.
 const CAPACITY_EVICTION: MutationOutcome = MutationOutcome::Removed(RemovalReason::PolicyEviction);
 
-/// Output value of the spend fixtures previewed below. Each is funded by one
-/// confirmed coin holding this value plus the fee under test.
 const SPEND_OUTPUT_SATS: u64 = 10_000;
 
-/// Virtual size of the one-input, one-P2WPKH-output spend fixtures.
 const SPEND_VSIZE: u64 = 82;
 
-/// The fee that pays `rate` sat/kvB over one spend fixture, truncated the way
-/// Core's `CFeeRate::GetFee` truncates.
 const fn spend_fee_at(rate: u64) -> u64 {
     rate * SPEND_VSIZE / 1_000
 }
 
-/// Preview verdict for one spend fixture paying exactly `fee`, funded by a
-/// confirmed coin. `tag` keeps the funding outpoints of one test distinct.
 fn preview_spend(
     gateway: &MempoolGateway,
     tag: u8,
@@ -758,12 +704,6 @@ fn gateway_over(pool: Mempool) -> MempoolGateway {
     )
 }
 
-/// A 4 000 vB pool that has just evicted its cheapest package.
-///
-/// Two 1 000 vB packages pay three and two times `evicted_rate`, and a 2 000 vB
-/// package pays `evicted_rate`: the pool is exactly full. A fourth 1 000 vB
-/// package at six times `evicted_rate` overflows it, so the capacity
-/// eviction removes the `evicted_rate` package whole and leaves 1 000 vB free.
 fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Error>> {
     let limits = MempoolLimits {
         max_total_bytes: 4_000,
@@ -810,8 +750,6 @@ fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted()
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
-    // Three quarters full, well past the point where the retired heuristic
-    // raised the floor, with the cheapest package at the relay floor itself.
     for (label, fee) in [(1, 1_000), (2, 2_000), (3, 3_000)] {
         pool.insert_entry(entry(
             tx(outpoint(label, 0), 1_000, 0xFF_FF_FF_FF),
@@ -839,10 +777,6 @@ fn mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it()
     let pool = pool_after_capacity_eviction(EVICTED_RATE)?;
     let relay_floor = pool.min_relay_fee_sat_per_kvb();
 
-    // Core's rolling floor: the evicted package's rate plus the incremental
-    // relay fee. The retired heuristic read the cheapest *remaining* package
-    // (2 000 sat/kvB here), so it forgot the eviction and quoted a higher
-    // number that depended on what happened to stay.
     let floor = pool.min_fee_sat_per_kvb(T0);
     assert_eq!(
         floor,
@@ -876,14 +810,9 @@ fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life()
     let mut pool = pool_after_capacity_eviction(EVICTED_RATE)?;
     let floor = EVICTED_RATE + pool.policy_snapshot().incremental_relay_fee_sat_per_kvb;
 
-    // With no block since the eviction the floor does not decay, however
-    // long the clock runs.
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + 30 * 24 * 60 * 60), floor);
 
-    // A block, even one that confirms nothing, starts the decay at its own
-    // time. The pool is above half full, so the half-life is the full twelve
-    // hours; reads move forward in time.
     pool.remove_for_block(&[], &[], 2, T0);
     assert_eq!(pool.min_fee_sat_per_kvb(T0), floor);
     assert_eq!(pool.min_fee_sat_per_kvb(T0 + HALF_LIFE_SECS), floor / 2);

@@ -1,12 +1,3 @@
-//! Witness activation must agree across accounting and both script backends.
-//!
-//! Contract: BIP141, "Witness program" and "Sigops":
-//! <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki>
-//! Core v31.1 counts witness sigops only with WITNESS enabled:
-//! <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L2139-L2166>
-//! `VerifyFlags::filled` owns this library's CLEANSTACK -> WITNESS -> P2SH
-//! implications. The kernel must apply them before masking out policy bits.
-
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::kernel::{BlockParse, BlockScriptSource};
 use bitcoin_rs_consensus::verify_tx::{
@@ -31,10 +22,6 @@ struct WitnessFixture {
 }
 
 impl WitnessFixture {
-    /// `CHECKSIG` operations in an unexecuted branch still count under BIP141.
-    /// Each script stays within 201 non-push opcodes (199 checks + IF + ENDIF)
-    /// and succeeds without signatures, so a script failure cannot mask the
-    /// sigop-limit verdict. Expected costs come from the BIP, not the counter.
     fn new(sigops: u32) -> Self {
         let mut inputs = Vec::new();
         let mut prevouts = Vec::new();
@@ -127,9 +114,6 @@ fn engines() -> Vec<ValidationEngine> {
 fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), ConsensusError> {
     for engine in engines() {
         let mut fixture = WitnessFixture::new(1);
-        // Keep the sigop count but invalidate the witness-program hash. Before
-        // normalization at the kernel boundary, CLEANSTACK alone became NONE and
-        // this spend incorrectly passed that backend's script checks.
         fixture.tx.inputs[0].witness[0].push(opcode::OP_PUSHNUM_1);
         let block = fixture.block(engine)?;
         for (flags, witness_active) in [
@@ -158,7 +142,6 @@ fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), C
                     assert_eq!(verdict, Ok(()));
                 }
             }
-            // Assume-valid skips witness execution, not flag-aware accounting.
             assert_eq!(
                 verify_transaction_non_script(&fixture.tx, &fixture, 0, 0, flags),
                 Ok(()),

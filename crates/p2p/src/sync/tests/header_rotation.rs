@@ -40,12 +40,6 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         "a pending getheaders must name the invalid peer before its batch arrives"
     );
 
-    // Deliver the attributed invalid batch while the gate is still armed
-    // against the invalid peer. No other selectable peer remains, so this
-    // tick cannot re-arm the gate against a different address — and the
-    // batch is marked a non-response so the wire-response consume cannot
-    // clear it either: the only way the header request ends up clear is
-    // the peer-fault cleanup.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![nbits_mismatch_header(genesis.compute_hash(), 1)],
         source: Some(current_source(&peers, invalid_peer)),
@@ -67,7 +61,6 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         "invalid header source must lose its outbound lease"
     );
 
-    // Re-introduce a healthy peer; the next getheaders must rotate to it.
     let other_lease = crate::PeerLease::new(other_tx);
     peers.register(other_peer, other_lease.clone());
     peers.publish_info(other_peer, &other_lease, synthetic_peer(other_peer, 8));

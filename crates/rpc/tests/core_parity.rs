@@ -1,20 +1,9 @@
-//! Core-parity vertical gate: the real authenticated loopback
-//! server over a real regtest node, replaying the checked-in Core 31.1
-//! corpus under structural comparison.
-//!
-//! This gate never starts Bitcoin Core, never compares raw JSON text, never
-//! substitutes a fake context, and never changes production behavior. The
-//! eight probe-derived fixtures (cases 01, 04, 05, 06, 07, 17, 18, 20) carry
-//! exact provenance — pinned Core 31.1.0, the exact binary SHA-256, regtest,
-//! tip identity — and exactly one relation each: `exact`, or `known_gap`
-//! with one concrete gap identifier pinning both sides of the divergence.
-
 mod support;
 
 use std::collections::BTreeSet;
 
 use bitcoin_rs_rpc::manifest::MANIFEST;
-use serde_json::Value;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
 use support::compare::{self, LiveChain};
 use support::fixture::{
@@ -25,11 +14,8 @@ use support::http::{Connection, HttpError, RawRequest, RawResponse};
 use support::limits::{MAX_CORPUS_BYTES, SEED_CHAIN_BLOCKS};
 use support::manifest_check::is_shipped_rpc_method;
 
-/// The probe ordinals this vertical slice covers.
 const EXPECTED_ORDINALS: [&str; 8] = ["01", "04", "05", "06", "07", "17", "18", "20"];
 
-/// Stands up the real replay surface: strict corpus load, a real regtest
-/// node with the deterministic seed chain, and the authenticated server.
 fn stand_up() -> Result<(NodeHarness, ServerHarness), support::Failure> {
     fixture::load_corpus()?;
     let node = NodeHarness::open()?;
@@ -43,12 +29,10 @@ fn stand_up() -> Result<(NodeHarness, ServerHarness), support::Failure> {
     Ok((node, server))
 }
 
-/// Converts a decoded response into the fixture-side tuple shape, keeping
-/// empty, text, and JSON bodies distinct.
 fn as_tuple(response: RawResponse) -> HttpTuple {
     let body = if response.body.is_empty() {
         BodyForm::Empty
-    } else if let Ok(value) = serde_json::from_slice::<Value>(&response.body) {
+    } else if let Ok(value) = sonic_rs::from_slice::<Value>(&response.body) {
         BodyForm::Json { value }
     } else {
         BodyForm::Text {
@@ -63,22 +47,19 @@ fn as_tuple(response: RawResponse) -> HttpTuple {
     }
 }
 
-/// Decodes every result the fixture demands as typed corepc v31
-/// `getblockchaininfo`; a payload that does not fit the versioned wire
-/// struct fails the gate here, at the decode boundary.
 fn assert_typed_chaininfo(
     fixture: &Fixture,
     response: &RawResponse,
 ) -> Result<(), support::Failure> {
     match &fixture.checks.body {
         BodyCheck::Single { envelope } => {
-            let value: Value = serde_json::from_slice(&response.body)?;
+            let value: Value = sonic_rs::from_slice(&response.body)?;
             if envelope.result.typed_chaininfo {
                 decode_result_as_chaininfo(&value)?;
             }
         }
         BodyCheck::Batch { elements } => {
-            let value: Value = serde_json::from_slice(&response.body)?;
+            let value: Value = sonic_rs::from_slice(&response.body)?;
             let rows = value
                 .as_array()
                 .ok_or_else(|| support::fail("batch replay must answer an array"))?;
@@ -92,13 +73,11 @@ fn assert_typed_chaininfo(
     }
     Ok(())
 }
-/// Re-serializes one envelope's result and decodes it into the typed corepc
-/// v31 struct, then proves the network identity inside the typed value.
 fn decode_result_as_chaininfo(envelope: &Value) -> Result<(), support::Failure> {
     let result = envelope
         .get("result")
         .ok_or_else(|| support::fail("typed chaininfo envelope carries no result"))?;
-    let typed = compare::typed_getblockchain_info(serde_json::to_string(result)?.as_bytes())?;
+    let typed = compare::typed_getblockchain_info(sonic_rs::to_string(result)?.as_bytes())?;
     if typed.chain != PINNED_NETWORK {
         return Err(support::fail(format!(
             "typed chaininfo decoded for chain {:?}, not {PINNED_NETWORK}",
@@ -108,16 +87,12 @@ fn decode_result_as_chaininfo(envelope: &Value) -> Result<(), support::Failure> 
     Ok(())
 }
 
-/// The vertical gate: a real regtest chain, the real authenticated loopback
-/// server, and every corpus fixture replayed under structural comparison.
 #[test]
 fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error::Error>> {
     let corpus = fixture::load_corpus()?;
     let (node, server) = stand_up()?;
     let live: LiveChain = node.live_chain()?;
 
-    // Authenticated getblockchaininfo must answer HTTP 200 and decode as the
-    // typed corepc v31 wire struct, before any fixture comparison runs.
     let authenticated = server.replay(
         RequestAuth::Valid,
         r#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#,
@@ -130,10 +105,9 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         ))
         .into());
     }
-    let envelope: Value = serde_json::from_slice(&authenticated.body)?;
+    let envelope: Value = sonic_rs::from_slice(&authenticated.body)?;
     decode_result_as_chaininfo(&envelope)?;
 
-    // Replay every fixture under its declared relation.
     for fixture in corpus.values() {
         let response = server.replay(
             fixture.request.auth,
@@ -144,9 +118,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         assert_typed_chaininfo(fixture, &response)?;
     }
 
-    // Wrong credentials must be rejected outright by the live server; the
-    // exact-relation 401 fixtures above pin that both nodes answer with
-    // Core's challenge, content type, and empty body.
     let rejected = server.replay(
         RequestAuth::Invalid,
         r#"{"jsonrpc":"2.0","id":18,"method":"getblockchaininfo","params":[]}"#,
@@ -160,16 +131,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
         .into());
     }
 
-    // Classification discipline: every fixture carries exactly one relation
-    // and each known gap names one concrete identifier. The two auth cases
-    // are exact: both nodes answer an unauthenticated JSON-RPC request with
-    // Core's challenge, content type, and empty body. The remaining rows are
-    // known gaps by construction: the probe evidence recorded Core response
-    // bodies but not the transport headers of the JSON probes, and the live
-    // error wording genuinely diverges from Core's. A future capture that
-    // records Core's full header tuple and equal messages may reclassify
-    // those rows as `exact`; the comparator already enforces full equality
-    // on that relation.
     let mut gaps = Vec::new();
     for fixture in corpus.values() {
         match fixture.relation {
@@ -192,10 +153,6 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// One keep-alive connection accepts two fully framed requests — the first
-/// answered with 204 and an empty body, the second written in two TCP
-/// fragments and answered with 200 — with framing decoded from the 204 status
-/// or a declared `Content-Length`, never from end of stream.
 #[test]
 fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error::Error>> {
     let (_node, server) = stand_up()?;
@@ -235,21 +192,11 @@ fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error
         ))
         .into());
     }
-    let envelope: Value = serde_json::from_slice(&second.body)?;
+    let envelope: Value = sonic_rs::from_slice(&second.body)?;
     decode_result_as_chaininfo(&envelope)?;
     Ok(())
 }
 
-/// Replays one authenticated request from a worker thread while the caller
-/// holds the node's chain-transition barrier, and returns the complete framed
-/// response.
-///
-/// PRE: `server` wires the node's real transition barrier into its context,
-///   and no other lock is held by the caller.
-/// POST: the response was received before the barrier was released, or the
-///   call failed with the bound it hit.
-/// INVARIANT: the barrier is released on every outcome before the worker is
-///   joined, so a blocked handler cannot deadlock the gate.
 fn replay_during_chain_transition(
     server: &ServerHarness,
     body: &str,
@@ -258,11 +205,8 @@ fn replay_during_chain_transition(
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// A status read that waits on the barrier stays blocked for the whole
-    /// window; this bounds the wait, it does not assert a latency.
     const DEADLOCK_WATCHDOG: Duration = Duration::from_secs(30);
 
-    /// One bounded exchange on a fresh connection, off the main thread.
     fn request(
         address: SocketAddr,
         authorization: String,
@@ -304,9 +248,6 @@ fn replay_during_chain_transition(
     }
 }
 
-/// Reads the applied tip's published transaction count from the node state,
-/// never from an RPC answer, so the status response has an independent
-/// expectation to meet.
 fn seeded_chain_tx_count(node: &NodeHarness) -> Result<u64, Box<dyn std::error::Error>> {
     let applied = node
         .state
@@ -334,11 +275,14 @@ fn decoded_success(
         ))
         .into());
     }
-    let envelope: Value = serde_json::from_slice(&response.body)?;
+    let envelope: Value = sonic_rs::from_slice(&response.body)?;
     if envelope.get("id").and_then(Value::as_i64) != Some(id) {
         return Err(support::fail(format!("{method} answered a different id: {envelope}")).into());
     }
-    if !matches!(envelope.get("error"), None | Some(Value::Null)) {
+    if !envelope
+        .get("error")
+        .is_none_or(sonic_rs::JsonValueTrait::is_null)
+    {
         return Err(support::fail(format!("{method} returned an error: {envelope}")).into());
     }
     envelope
@@ -347,10 +291,6 @@ fn decoded_success(
         .ok_or_else(|| support::fail(format!("{method} answered no result")).into())
 }
 
-/// Regression test: an explorer's status read waited on the
-/// whole-chain transition, so requests hung while a block was applying.
-/// `getblockchaininfo` must answer from the last complete applied publication
-/// with the barrier held.
 #[test]
 fn getblockchaininfo_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
     let (node, server) = stand_up()?;
@@ -375,9 +315,6 @@ fn getblockchaininfo_returns_during_chain_transition() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// `getchaintxstats` must answer from the same published pair with the barrier
-/// held, reporting the applied tip's count rather than waiting for the
-/// transition to finish.
 #[test]
 fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
     let (node, server) = stand_up()?;
@@ -398,7 +335,6 @@ fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::
         ))
         .into());
     }
-    // A zero-block window keeps its documented shape: no window fields.
     if result.get("window_tx_count").is_some() || result.get("window_interval").is_some() {
         return Err(support::fail(format!(
             "a zero-block window must omit its fields: {result}"
@@ -408,10 +344,6 @@ fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Corpus custody: the checked-in directory obeys every ceiling, every
-/// fixture pins the audited Core provenance, the probe ordinals are covered
-/// exactly once, and every replayed method is accounted for in the const
-/// `MANIFEST`.
 #[test]
 fn corpus_bounds_and_provenance_hold() -> Result<(), Box<dyn std::error::Error>> {
     let corpus = fixture::load_corpus()?;

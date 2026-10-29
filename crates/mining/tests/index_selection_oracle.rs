@@ -2,19 +2,6 @@
     clippy::expect_used,
     reason = "integration fixtures fail loudly on a broken precondition"
 )]
-//! Indexed template selection against an independent oracle.
-//!
-//! `assemble_candidate` walks the pool's maintained chunk index under one
-//! guard and checks only direct parents. The oracle below re-derives the same
-//! selection from copied facts: the whole-pool snapshot's transitive ancestor
-//! positions, its own finality and BIP68 rules, its own limit arithmetic, its
-//! own sum-then-round block-minimum-fee test, and its own tail pass over the
-//! chunks the walk skipped for resources. It shares only the chunk partition
-//! (owned and checked by the mempool's own from-scratch oracle) and the pool's
-//! public per-entry charged weight, and it asserts that every chunk's indexed
-//! aggregates equal the sums of its members. A divergence therefore names the
-//! selection: parent skips, per-chunk finality, weight/size/sigop skips,
-//! signed-fee order, the aggregate fee floor, or the prefix tail.
 
 #[path = "support/fixtures.rs"]
 mod common;
@@ -31,9 +18,7 @@ use common::{
 };
 use proptest::prelude::*;
 
-/// Locktime above the height threshold: compared with the timestamp cutoff.
 const NON_FINAL_LOCKTIME: u32 = 500_000_100;
-/// Timestamp cutoff below [`NON_FINAL_LOCKTIME`].
 const LOCKTIME_CUTOFF: u32 = 500_000_000;
 
 fn context() -> CandidateContext {
@@ -48,7 +33,6 @@ fn selected(candidate: &Candidate) -> Vec<Txid> {
     candidate.transactions.iter().map(|tx| tx.txid).collect()
 }
 
-/// Header-plus-coinbase numbers an empty template already uses.
 #[derive(Clone, Copy, Debug)]
 struct Reservation {
     weight: u64,
@@ -68,7 +52,6 @@ impl Reservation {
     }
 }
 
-/// Bytes of the block transaction count for `body` non-coinbase transactions.
 fn count_bytes(body: usize) -> u64 {
     match body + 1 {
         0..=252 => 1,
@@ -77,9 +60,6 @@ fn count_bytes(body: usize) -> u64 {
     }
 }
 
-/// Oracle finality: absolute locktime against the cutoff, and a positive
-/// relative lock on an input whose parent is pooled (the parent confirms in
-/// the same next block, so any nonzero lock is unmet).
 fn final_in_next_block(context: &CandidateContext, pooled: &HashSet<Txid>, tx: &Tx) -> bool {
     let lock_time = tx.lock_time.to_consensus();
     let absolute = lock_time == 0 || {
@@ -104,19 +84,13 @@ fn final_in_next_block(context: &CandidateContext, pooled: &HashSet<Txid>, tx: &
     absolute && relative
 }
 
-/// Core `DEFAULT_BLOCK_MIN_TX_FEE`: the lowest rate a chunk or chunk prefix
-/// may pay, in satoshis per kvB of virtual size.
 const BLOCK_MIN_TX_FEE_SAT_PER_KVB: i128 = 1;
 
-/// A run of snapshot positions: one chunk, or a prefix of one.
 type Run = Range<usize>;
 
-/// The oracle's body under construction, over the whole-pool snapshot.
 struct Oracle<'a> {
     context: &'a CandidateContext,
     entries: &'a [SnapshotEntry],
-    /// Policy-charged weight of each snapshot entry (the pool's public
-    /// accessor); summed exactly before any rounding.
     charged: Vec<u64>,
     pooled: HashSet<Txid>,
     taken: Vec<bool>,
@@ -128,7 +102,6 @@ struct Oracle<'a> {
 }
 
 impl Oracle<'_> {
-    /// Actual fee plus signed overlay, summed over `run`.
     fn modified_fee(&self, run: &Run) -> i128 {
         self.entries[run.start..run.end]
             .iter()
@@ -136,21 +109,15 @@ impl Oracle<'_> {
             .sum()
     }
 
-    /// Charged weight summed over `run`.
     fn charged_weight(&self, run: &Run) -> u64 {
         self.charged[run.start..run.end].iter().sum()
     }
 
-    /// Whether `floor(modified_fee * 1000 / vsize) >= BLOCK_MIN_TX_FEE_SAT_PER_KVB`
-    /// for the run's summed fee and `vsize = ceil(summed charged weight / 4)`.
-    /// For a positive `vsize` and an integer minimum that is
-    /// `modified_fee * 1000 >= minimum * vsize`, for negative fees too.
     fn pays_block_min_fee(&self, run: &Run) -> bool {
         let vsize = i128::from(self.charged_weight(run).div_ceil(4));
         self.modified_fee(run) * 1_000 >= BLOCK_MIN_TX_FEE_SAT_PER_KVB * vsize
     }
 
-    /// Whether a transitive ancestor outside `run` is not selected yet.
     fn blocked(&self, run: &Run) -> bool {
         self.entries[run.start..run.end]
             .iter()
@@ -167,7 +134,6 @@ impl Oracle<'_> {
             .all(|entry| final_in_next_block(self.context, &self.pooled, &entry.tx))
     }
 
-    /// Totals after appending `run`, or `None` when a limit would be passed.
     fn grown_by(&self, run: &Run) -> Option<(u64, u64, u64)> {
         let members = &self.entries[run.start..run.end];
         let growth = count_bytes(self.order.len() + members.len()) - count_bytes(self.order.len());
@@ -190,7 +156,6 @@ impl Oracle<'_> {
             .then_some((weight, size, sigops))
     }
 
-    /// Appends `run`, which must have passed [`Self::grown_by`].
     fn take(&mut self, run: &Run) {
         let (weight, size, sigops) = self.grown_by(run).expect("the run fits");
         self.weight = weight;
@@ -204,14 +169,6 @@ impl Oracle<'_> {
     }
 }
 
-/// Oracle selection: ordered txids and their actual-fee sum.
-///
-/// Main walk: chunks in index order; stop at the first chunk whose summed
-/// rate is below the block minimum; skip a chunk with an unselected outside
-/// ancestor or a non-final member; take a chunk that fits; remember one that
-/// does not. Tail pass: for each remembered chunk in index order, take its
-/// longest prefix that fits, is final, has its outside ancestors selected, and
-/// pays the block minimum as a prefix.
 fn oracle(
     context: &CandidateContext,
     pool: &Mempool,
@@ -276,10 +233,6 @@ fn oracle(
         }
         oracle.take(&run);
     }
-    // `skipped` holds only chunks recorded solely because they did not fit:
-    // a blocked or non-final chunk never enters, so the tail rechecks neither.
-    // A production bug that recorded such a chunk would surface here as an
-    // order/fees divergence rather than being masked by a recheck.
     for run in skipped {
         let longest = (1..=run.len())
             .rev()
@@ -296,23 +249,15 @@ fn oracle(
     (oracle.order, oracle.fees)
 }
 
-/// One generated pool entry: tree shape, resources, locks, and overlay.
 #[derive(Clone, Copy, Debug)]
 struct Spec {
-    /// Parent among earlier entries (modulo their count), when any.
     parent: Option<usize>,
-    /// Zero reaches the aggregate fee floor; a child's fee can still lift a
-    /// zero-fee parent's chunk over it.
     fee: u64,
     weight: u64,
-    /// `true`: `vsize = ceil(weight / 4)`, so the charged weight is the exact
-    /// (often odd) weight and aggregate rounding differs from per-member
-    /// rounding. `false`: the common 100 vB basis.
     exact_vsize: bool,
     size: u32,
     sigops: u32,
     non_final_locktime: bool,
-    /// 0/3: final sequence; 1: one-block relative lock; 2: lock disabled.
     lock_kind: u8,
     delta: i64,
 }
@@ -344,7 +289,6 @@ fn spec() -> impl Strategy<Value = Spec> {
         )
 }
 
-/// Each child spends its own vout of the parent, so no two entries conflict.
 fn spec_tx(label: u8, parent: Option<Txid>, spec: &Spec) -> Tx {
     let mut transaction = tx(label, 1_000, parent);
     if let Some(parent) = parent {
@@ -371,7 +315,6 @@ fn spec_tx(label: u8, parent: Option<Txid>, spec: &Spec) -> Tx {
     transaction
 }
 
-/// Builds a pool of parent-tree transactions, then applies the overlays.
 fn build_pool(specs: &[Spec]) -> Mempool {
     let mut pool = zero_fee_pool();
     let mut txids: Vec<Txid> = Vec::new();
@@ -403,12 +346,6 @@ fn build_pool(specs: &[Spec]) -> Mempool {
 }
 
 proptest! {
-    /// The indexed selection equals the oracle's, in order and in fees, for
-    /// pools with chains, forks, non-final locktimes, unmet unconfirmed BIP68
-    /// locks, forced weight/size/sigop skips (which feed the prefix tail),
-    /// zero-fee members, odd weights whose aggregate rounding differs from
-    /// per-member rounding, and negative and positive overlays that put whole
-    /// chunks and chunk prefixes below the block minimum fee.
     #[test]
     fn indexed_selection_matches_the_independent_oracle(
         specs in prop::collection::vec(spec(), 1..24),
@@ -434,9 +371,6 @@ proptest! {
     }
 }
 
-/// A skipped chunk blocks its descendants in later chunks: A fits; the
-/// B+C chunk is too heavy for the limit and is skipped; D (child of C) would
-/// fit by itself but its parent chunk is unselected, so D is skipped too.
 #[test]
 fn skipped_ancestor_chunk_blocks_a_later_descendant_chunk() {
     let mut pool = zero_fee_pool();
@@ -461,9 +395,6 @@ fn skipped_ancestor_chunk_blocks_a_later_descendant_chunk() {
     assert_eq!(oracle(&limited, &pool, reservation).0, vec![a_txid]);
 }
 
-/// Overlays rank by modified fee while actual fees fund the coinbase: a
-/// positive overlay lifts a cheap transaction over a dearer one, and a
-/// negative overlay that leaves the modified fee positive drops one below it.
 #[test]
 fn overlays_rank_by_modified_fee_and_pay_actual_fees() {
     let mut pool = zero_fee_pool();
@@ -482,7 +413,6 @@ fn overlays_rank_by_modified_fee_and_pay_actual_fees() {
     let base = context();
     let reservation = Reservation::of(&base);
     let candidate = assemble_candidate(&base, &pool, PAYOUT).expect("template");
-    // Modified fees: cheap 21_000, mid 5_000, dear 3_000.
     assert_eq!(selected(&candidate), vec![cheap_txid, mid_txid, dear_txid]);
     assert_eq!(selected_fees(&candidate), 15_000);
     let (order, fees) = oracle(&base, &pool, reservation);
@@ -490,16 +420,11 @@ fn overlays_rank_by_modified_fee_and_pay_actual_fees() {
     assert_eq!(fees, 15_000);
 }
 
-/// Forged facts whose charged weight is exactly `weight`: `vsize` is the
-/// weight rounded up to whole vbytes, as for a real transaction.
 fn exact(fee: u64, weight: u64) -> Forged {
     let vsize = u32::try_from(weight.div_ceil(4)).expect("test weight fits vsize");
     Forged::new(fee, weight, vsize).with_vsize(vsize)
 }
 
-/// The block minimum fee applies to a chunk's summed fee, never to one member:
-/// a zero-fee parent rides in on its child's fee, while a zero-fee standalone
-/// chunk ends the walk.
 #[test]
 fn aggregate_floor_rescues_a_zero_fee_parent_and_ends_the_walk() {
     let mut pool = zero_fee_pool();
@@ -521,12 +446,6 @@ fn aggregate_floor_rescues_a_zero_fee_parent_and_ends_the_walk() {
     assert_eq!(fees, 5_000);
 }
 
-/// Prefix rates sum exact charged weights once, then round. A 1,997 WU parent
-/// and a 2,001 WU child charge 3,998 WU together, exactly 1,000 vB, so a
-/// 1 sat aggregate meets the 1 sat/kvB minimum; the members' own vsizes
-/// (500 + 501) would sum to 1,001 vB and miss it. The whole three-member
-/// chunk (8,998 WU) overflows the 5,000 WU budget, so the tail takes the
-/// two-member prefix.
 #[test]
 fn tail_prefix_meets_the_minimum_on_exactly_rounded_aggregate_weight() {
     let mut pool = zero_fee_pool();
@@ -557,9 +476,6 @@ fn tail_prefix_meets_the_minimum_on_exactly_rounded_aggregate_weight() {
     assert_eq!(fees, 1);
 }
 
-/// A tail prefix must itself pay the block minimum. The zero-fee parent's
-/// prefix fits the 900 WU left, but the chunk's rate comes from the child's
-/// fee, which that prefix does not carry.
 #[test]
 fn tail_prefix_that_misses_the_minimum_is_not_selected() {
     let mut pool = zero_fee_pool();

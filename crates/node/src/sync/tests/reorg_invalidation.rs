@@ -36,10 +36,6 @@ type MaturedBodyStore = (
     Arc<Bodies>,
 );
 
-/// Matures the shared 101-block fixture on store-backed handles so a reorg
-/// test can route one body through the durable path: staged payloads are
-/// always well-formed by construction, and only the store maps a
-/// constructor failure to `BodyDecode`.
 fn matured_chain_with_body_store() -> Result<MaturedBodyStore, Box<dyn std::error::Error>> {
     let (_, main, _) = matured_chain(101)?;
     let genesis = Network::Regtest.genesis_block();
@@ -63,9 +59,6 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, Box<dyn std::erro
             block_body_store: Some(bodies_store.clone()),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            // This fixture drives chainstate alone: nothing reads through the
-            // other role, so the domain it mints loses nothing when only the
-            // mutation role is taken from it.
             chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
@@ -273,9 +266,6 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
             "the valid main branch must win after subtree invalidation"
         );
     }
-    // Rejecting the first rival body restores the old applied branch within
-    // the same transition, including its exact UTXO entries. A later sync
-    // tick or manual apply must not be needed to recover this valid tip.
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.hash),
         Some(main_tip_hash)
@@ -315,9 +305,6 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
         BlockPayload::from_local(invalid),
     );
 
-    // The old body passes preflight and the disconnect-side reload, then
-    // disappears before restoration. The transition must fail closed rather
-    // than settle the fork ancestor as a normal stable result.
     let mut old_body_reads = 0;
     let outcome = adapter.switch_to_branch(
         invalid_id,
@@ -383,8 +370,6 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    // The staged payload decodes to another header's block: the plan must
-    // refuse with BodyHashMismatch before touching chainstate.
     bodies.insert(target_hash, BlockPayload::from_local(wrong));
 
     let outcome = crate::reorg::switch_to_branch(
@@ -442,10 +427,6 @@ fn branch_switch_rejects_malformed_body_before_mutation() -> Result<(), Box<dyn 
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    // Truncate the target's canonical bytes and persist them in the durable
-    // store: the staged callback answers None for the planned hash, so the
-    // reorg loader falls through to the store, decodes only the bytes, and
-    // maps the constructor failure to BodyDecode before touching chainstate.
     let mut malformed = BlockPayload::from_local(target).bytes().clone();
     malformed.truncate(malformed.len() - 1);
     bodies_store

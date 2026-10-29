@@ -14,35 +14,21 @@ use crate::{
 mod active_index;
 use active_index::ActiveHeightIndex;
 
-/// Cached BIP9 deployment-state lookup.
-///
-/// Wraps an interior `RwLock<HashMap>` so the cache is `Send + Sync` and the
-/// reader/writer paths are non-blocking under contention. State is stored as
-/// a stable `u8` tag supplied by the deployment-state encoder in consensus;
-/// the chain crate does not interpret it.
-///
-/// PRE: a tag is the deployment state's encoded discriminant.
-/// POST: cache readers obtain the same tag for a live `(node_id, deployment_id)`.
-/// INVARIANT: Branch invalidation discards entries by node, not by height.
 #[derive(Default)]
 struct Bip9Cache {
     entries: RwLock<HashMap<(NodeId, u32), u8>>,
 }
 
 impl Bip9Cache {
-    /// Inserts or updates the cached state for `(node_id, deployment_id)`.
     fn insert(&self, node_id: NodeId, deployment_id: u32, tag: u8) {
         self.entries.write().insert((node_id, deployment_id), tag);
     }
 
-    /// Returns the cached state tag for `(node_id, deployment_id)`, if any.
     #[must_use]
     fn get(&self, node_id: NodeId, deployment_id: u32) -> Option<u8> {
         self.entries.read().get(&(node_id, deployment_id)).copied()
     }
 
-    /// Removes all deployment states selected by the tree's node-indexed
-    /// invalidation bitmap in one cache scan.
     fn invalidate_nodes(&self, invalid: &[bool]) {
         self.entries.write().retain(|(id, _), _| {
             id.index()
@@ -51,29 +37,18 @@ impl Bip9Cache {
     }
 }
 
-/// Facts of one [`BlockTree::invalidate_subtree`] call.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InvalidationOutcome {
-    /// The complete invalid subtree in deterministic slab order. Callers use
-    /// it to purge bounded body and download state after releasing their
-    /// chain-transition witness.
     pub invalid: Vec<Hash256>,
-    /// The previous active tip, when invalidation left it valid yet selected a
-    /// different branch. A tip displaced because it sits inside the invalid
-    /// subtree is `Invalid`, never stale, and is not reported here.
     pub demoted_tip: Option<Hash256>,
 }
 
-/// A header inserted by header admission and the tip it displaced.
 #[derive(Clone, Copy)]
 pub(crate) struct Inserted {
     pub(crate) id: NodeId,
-    /// The previous active tip when this insertion moved the tip onto another
-    /// branch; see `BlockTree::publish_tip_if_best`.
     pub(crate) demoted_tip: Option<Hash256>,
 }
 
-/// In-memory block tree keyed by compact slab ids and header hashes.
 pub struct BlockTree {
     nodes: Slab<BlockTreeNode>,
     by_hash: HashTable<NodeId>,
@@ -111,8 +86,6 @@ impl BlockTree {
         self.nodes.get(index).ok_or(ChainError::UnknownNode { id })
     }
 
-    /// Test-only mutation invalidates the active-height index before yielding
-    /// a node, because callers can change its parent or height.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn node_mut(&mut self, id: NodeId) -> Result<&mut BlockTreeNode, ChainError> {
         let is_indexed_active_node = {
@@ -120,7 +93,7 @@ impl BlockTree {
             self.active_by_height.contains_at_height(node.height, id)
         };
         if is_indexed_active_node {
-            self.active_by_height.taint(); // BEFORE yielding mut
+            self.active_by_height.taint();
         }
         self.node_mut_without_index_invalidation(id)
     }
@@ -137,12 +110,6 @@ impl BlockTree {
             .ok_or(ChainError::UnknownNode { id })
     }
 
-    /// Records the cumulative transaction count after applying `id`'s block.
-    ///
-    /// Genesis establishes the count from its own block. Every other node
-    /// derives from its actual parent, so side branches remain independent. A
-    /// parent with an unknown count keeps the child unknown rather than
-    /// manufacturing a partial total.
     pub fn record_applied_tx_count(
         &mut self,
         id: NodeId,
@@ -162,7 +129,6 @@ impl BlockTree {
         Ok(())
     }
 
-    /// Restores an authenticated cumulative transaction count for `id`.
     pub fn restore_chain_tx_count(
         &mut self,
         id: NodeId,
@@ -173,7 +139,6 @@ impl BlockTree {
         Ok(())
     }
 
-    /// Refreshes an immutable tip snapshot after its count changes, without reselecting it.
     fn refresh_published_tip(&self, id: NodeId) {
         if self.tip.load_full().is_none_or(|tip| tip.tip_id != id) {
             return;
@@ -183,7 +148,6 @@ impl BlockTree {
         }
     }
 
-    /// The published snapshot of `id`: the node's own chain facts.
     fn tip_snapshot(&self, id: NodeId) -> Result<TipSnapshot, ChainError> {
         let node = self.node(id)?;
         Ok(TipSnapshot {
@@ -195,12 +159,6 @@ impl BlockTree {
         })
     }
 
-    /// Returns the highest shared ancestor of `a` and `b`, walking parent pointers.
-    ///
-    /// Returns `None` when either node is unknown or the chains share no common
-    /// ancestor (e.g. disconnected roots). Trusted active-index entries answer
-    /// active-prefix queries; otherwise ancestry follows bounded parent walks
-    /// without relying on heights.
     #[must_use]
     pub fn find_common_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
         if self.active_by_height.is_trusted() {
@@ -248,7 +206,6 @@ impl BlockTree {
         Some(a)
     }
 
-    /// Looks up a node id by header hash.
     #[must_use]
     pub fn lookup(&self, hash: Hash256) -> Option<NodeId> {
         self.by_hash
@@ -260,21 +217,16 @@ impl BlockTree {
             .copied()
     }
 
-    /// Returns a reference to the node whose header hash matches `hash`, or
-    /// `None` if no such node exists.
     #[must_use]
     pub fn node_by_hash(&self, hash: Hash256) -> Option<&BlockTreeNode> {
         self.node(self.lookup(hash)?).ok()
     }
 
-    /// Returns the height of the block at `hash`, or `None` if no node with
-    /// that hash exists in the tree.
     #[must_use]
     pub fn height_of_hash(&self, hash: Hash256) -> Option<u32> {
         self.node_by_hash(hash).map(|node| node.height)
     }
 
-    /// Returns active and fork leaves in slab iteration order.
     #[must_use]
     pub fn leaf_node_ids(&self) -> Vec<NodeId> {
         let mut parents: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
@@ -310,8 +262,6 @@ impl BlockTree {
         self.tip().map(|tip| tip.height)
     }
 
-    /// Shares the writable tip cell for lock-free publication. Requires mutation authority;
-    /// read-only callers use [`Self::tip`] and cannot extract the cell.
     #[must_use]
     pub fn tip_handle(&mut self) -> Arc<ArcSwapOption<TipSnapshot>> {
         Arc::clone(&self.tip)
@@ -326,11 +276,6 @@ impl BlockTree {
         self.bip9_cache.insert(node_id, deployment_id, tag);
     }
 
-    /// Builds a block locator starting from `tip_id`. For active tips, returns
-    /// header hashes at offsets 0, 1, 2, ..., 9, 10, 12, 16, 24, 40, ... by
-    /// sampling the height index. Side-chain, malformed, and disconnected tips
-    /// walk back through parents with exponential backoff. Stops at the genesis
-    /// (no parent) or after `max_entries` hashes.
     #[must_use]
     pub fn block_locator(&self, tip_id: NodeId, max_entries: usize) -> Vec<Hash256> {
         let mut locator = Vec::with_capacity(max_entries.min(32));
@@ -358,9 +303,6 @@ impl BlockTree {
                     break;
                 }
 
-                // O(1) local active-vector adjacency: parent must match the
-                // entry at h-1 (or be absent at h=0), and if h+1 exists its
-                // parent must be this node. Rejects same-height fork swaps.
                 let parent_matches = if target_height == 0 {
                     node.parent.is_none()
                 } else {
@@ -435,13 +377,6 @@ impl BlockTree {
         }
         locator
     }
-    /// Walks backward from `start_id` via parent pointers to the node at
-    /// `target_height`. Returns the `NodeId` at that height, or None if
-    /// `target_height > start_id.height` or the chain is broken.
-    ///
-    /// Parent heights must strictly decrease on the fallback walk. A cycle or
-    /// other public height/parent mutation that violates that bound returns
-    /// `None` instead of hanging.
     #[must_use]
     pub fn node_at_height_from(&self, start_id: NodeId, target_height: u32) -> Option<NodeId> {
         let mut remaining = usize::MAX;
@@ -450,10 +385,6 @@ impl BlockTree {
             .flatten()
     }
 
-    /// Uses the existing height index and bounds fallback parent hops.
-    ///
-    /// The caller owns `remaining`; several ancestry checks can share one
-    /// request budget. Rejoining a trusted indexed prefix ends the walk.
     pub fn node_at_height_from_bounded(
         &self,
         start_id: NodeId,
@@ -496,7 +427,6 @@ impl BlockTree {
             cursor = parent;
         }
     }
-    /// Returns the active node at `height`, or `None` if no such published ancestor exists.
     #[must_use]
     pub fn active_node_at_height(&self, height: u32) -> Option<&BlockTreeNode> {
         let tip = self.tip()?;
@@ -504,8 +434,6 @@ impl BlockTree {
         self.node(node_id).ok()
     }
 
-    /// Height of `hash` on the ancestry of `tip_id`, or `None` if the hash is
-    /// unknown or not on that chain.
     #[must_use]
     pub fn active_height_of(&self, tip_id: crate::NodeId, hash: Hash256) -> Option<u32> {
         let candidate = self.node_by_hash(hash)?;
@@ -514,7 +442,6 @@ impl BlockTree {
         (active.hash == hash).then_some(active.height)
     }
 
-    /// Median-time-past of the block *before* `height` on the chain ending at `tip`; `None` when that ancestor is missing.
     #[must_use]
     pub fn median_time_past_before_height(&self, tip: NodeId, height: u32) -> Option<u32> {
         if height == 0 {
@@ -524,13 +451,6 @@ impl BlockTree {
         self.median_time_past_at(node)
     }
 
-    /// Returns the BIP113 median time of the most recent
-    /// [`bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW`] blocks, inclusive of
-    /// `start_id`, walking backward via parent pointers.
-    ///
-    /// When the chain has fewer blocks than the window, the median is
-    /// computed over however many exist. Returns `None` only when `start_id`
-    /// is not in the tree.
     #[must_use]
     pub fn median_time_past_at(&self, start_id: NodeId) -> Option<u32> {
         const WINDOW: usize = bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
@@ -557,7 +477,6 @@ impl BlockTree {
         Some(times[len / 2])
     }
 
-    /// Inserts a header whose parent is inferred from `prev_blockhash`.
     pub fn insert_header(
         &mut self,
         header: BlockHeader,
@@ -586,7 +505,6 @@ impl BlockTree {
         self.insert_node_with_hash(parent, header, hash, status)
     }
 
-    /// Inserts a header under an explicit parent.
     pub fn insert_node(
         &mut self,
         parent: Option<NodeId>,
@@ -662,20 +580,9 @@ impl BlockTree {
         })
     }
 
-    /// Marks `root` and every descendant invalid, then republishes the best valid tip.
-    ///
-    /// [`InvalidationOutcome::invalid`] is the complete invalid subtree in deterministic
-    /// slab order; callers use it to purge bounded body and download state after
-    /// releasing their chain-transition witness. Equal-work valid tips retain insertion
-    /// order, matching normal tip publication. [`InvalidationOutcome::demoted_tip`] is
-    /// the previous active tip only when it stays valid and the new best tip is not one of
-    /// its descendants; a tip inside the invalid subtree is `Invalid`, not stale.
     pub fn invalidate_subtree(&mut self, root: NodeId) -> Result<InvalidationOutcome, ChainError> {
         let (invalid, best) = self.invalidation_plan(root)?;
 
-        // Demote the previous active tip to Stale if it is not the new best and is not
-        // about to be marked invalid. The tip store is cleared below, so this is the one
-        // place that sees the displaced tip: report it here, not from publication.
         let mut demoted_tip = None;
         if let Some(old_tip) = self.tip()
             && let Some(best) = best
@@ -697,9 +604,6 @@ impl BlockTree {
         self.tip.store(None);
         self.active_by_height.clear_tainted();
 
-        // Mark the subtree invalid and collect the hashes in deterministic slab order.
-        // Permanently invalid blocks can never anchor a deployment-state lookup
-        // again, so their memoized states go with them.
         let mut hashes = Vec::with_capacity(invalid.iter().filter(|&&b| b).count());
         for (index, node) in &mut self.nodes {
             if invalid[index] {
@@ -710,7 +614,6 @@ impl BlockTree {
         self.bip9_cache.invalidate_nodes(&invalid);
 
         if let Some(best) = best {
-            // The tip store was cleared above, so publication displaces nothing.
             self.publish_tip_if_best(best)?;
         }
 
@@ -720,8 +623,6 @@ impl BlockTree {
         })
     }
 
-    /// Returns the tip that would become active after invalidating `root` and
-    /// its descendants, without changing the tree.
     pub fn tip_after_invalidation(&self, root: NodeId) -> Result<Option<NodeId>, ChainError> {
         self.invalidation_plan(root).map(|(_, best)| best)
     }
@@ -758,9 +659,6 @@ impl BlockTree {
             }
         }
 
-        // Select the best remaining valid tip before mutating statuses, using the same
-        // deterministic ordering `publish_tip_if_best` applies: greater chainwork wins,
-        // and for equal work the earlier insertion (lower slab index) wins.
         let best = self
             .nodes
             .iter()
@@ -780,7 +678,6 @@ impl BlockTree {
 
         Ok((invalid, best))
     }
-    /// Returns all ancestors from `start` down to the root, including `start`.
     pub fn ancestor_chain(&self, start: NodeId) -> Result<Vec<NodeId>, ChainError> {
         let mut out = Vec::new();
         let mut cursor = Some(start);
@@ -792,17 +689,6 @@ impl BlockTree {
         Ok(out)
     }
 
-    /// Returns the valid nodes off the ancestry of `tip` that replay after
-    /// that ancestry without displacing `tip` as the best tip.
-    ///
-    /// A node qualifies when it is not `Invalid`, its chainwork does not exceed
-    /// `tip`'s, and its parent is on the ancestry or itself qualifies. Invalid
-    /// subtrees and branches heavier than `tip` are therefore excluded whole.
-    /// Nodes are never removed, so slab order is insertion order: the result
-    /// lists every parent before its children, and replaying the ancestry then
-    /// this list keeps every retained leaf's relative learn order. Equal-work
-    /// nodes replay after `tip` and cannot displace it, because publication
-    /// requires strictly more work.
     pub fn replayable_side_nodes(&self, tip: NodeId) -> Result<Vec<NodeId>, ChainError> {
         let tip_work = self.node(tip)?.chainwork;
         let mut kept = vec![false; self.nodes.capacity()];
@@ -837,21 +723,10 @@ impl BlockTree {
         Ok(side)
     }
 
-    /// Returns the parent id for a node.
     pub fn parent_id(&self, id: NodeId) -> Result<Option<NodeId>, ChainError> {
         Ok(self.node(id)?.parent)
     }
 
-    /// Publishes `node_id` as the active tip when it carries strictly more work.
-    ///
-    /// Returns the hash of the previous active tip exactly when this moved the tip onto
-    /// another branch. Direct-parent extension returns `None` without any ancestry
-    /// walk. Otherwise the new tip's common ancestor with the old tip decides: the old
-    /// tip only counts as displaced when it is not itself that ancestor, which also
-    /// covers a descendant reached through intermediate nodes that were never published.
-    /// The ancestry query runs before the active-height index moves, so the trusted
-    /// index answers it in fork-depth steps. `NodeStatus::Stale` marking is unchanged:
-    /// every previous tip becomes stale; only the returned fact is gated.
     fn publish_tip_if_best(&mut self, node_id: NodeId) -> Result<Option<Hash256>, ChainError> {
         let node = self.node(node_id)?;
         if node.status == NodeStatus::Invalid {
@@ -901,7 +776,6 @@ impl BlockTree {
             return;
         }
 
-        // Full rebuild into temporary Vec (do not mutate live index mid-validation)
         let mut rebuilt = Vec::new();
         let mut cursor = Some(tip_id);
         let mut seen: hashbrown::HashSet<NodeId> = hashbrown::HashSet::new();
@@ -961,13 +835,11 @@ mod tests {
         node::{BlockHeader, NodeId, NodeStatus},
     };
 
-    // Distinct nonces distinguish same-height siblings.
     fn extend(tree: &mut BlockTree, parent: NodeId, nonce: u32) -> Result<NodeId, ChainError> {
         let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);
         tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)
     }
 
-    // Inserts like `extend`, also returning the tip that insertion displaced.
     fn extend_with_fact(
         tree: &mut BlockTree,
         parent: NodeId,
@@ -1013,7 +885,6 @@ mod tests {
         Ok(ids)
     }
 
-    /// Genesis plus `count` children, so `ids[h]` is the node at height `h`.
     fn linear_chain(count: u32) -> Result<(BlockTree, Vec<NodeId>), ChainError> {
         let mut tree = BlockTree::new();
         let genesis = tree.insert_node(
@@ -1052,8 +923,6 @@ mod tests {
         let (mut tree, ids) = linear_chain(2)?;
         let (a, c) = (ids[0], ids[2]);
 
-        // Mutating an indexed active node's parent invalidates the height
-        // index, forcing block_locator onto the parent-walk fallback.
         tree.node_mut(c)?.parent = Some(a);
 
         let expected = vec![tree.node(c)?.hash, tree.node(a)?.hash];
@@ -1067,16 +936,12 @@ mod tests {
         let (mut tree, ids) = linear_chain(2)?;
         let (genesis_id, main_child_id, main_tip_id) = (ids[0], ids[1], ids[2]);
 
-        // Same-height side fork (shares genesis parent with main_child).
         let fork_child_id = extend(&mut tree, genesis_id, 11)?;
         let fork_hash = tree.node(fork_child_id)?.hash;
 
         assert_eq!(tree.active_by_height.last(), Some(main_tip_id));
         assert_eq!(tree.active_by_height.get(1), Some(main_child_id));
 
-        // Corrupt the height-1 index slot to the same-height fork node while
-        // leaving the tip slot intact so the indexed path is still attempted.
-        // Seam taints first; trust gate then forces parent-walk for both locators.
         assert!(
             tree.active_by_height
                 .replace_slot_for_test(1, fork_child_id)
@@ -1104,7 +969,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut tree, main_ids) = linear_chain(40)?;
 
-        // Side branch from main[18] at heights 19..=26; must not become tip.
         let side_ids = extend_branch(&mut tree, main_ids[18], 1019..=1026)?;
         let side_hashes = side_ids
             .iter()
@@ -1123,7 +987,6 @@ mod tests {
         }
         assert!(tree.active_by_height.is_tainted_for_test());
 
-        // Local neighborhood coherence at h=24 would pass the old adjacency guard.
         let i24 = tree.active_by_height.get(24).ok_or("corrupted slot 24")?;
         let i23 = tree.active_by_height.get(23).ok_or("corrupted slot 23")?;
         let i25 = tree.active_by_height.get(25).ok_or("corrupted slot 25")?;
@@ -1141,9 +1004,6 @@ mod tests {
             }
         }
 
-        // The height index is tainted above, so this walk is the parent-walk
-        // fallback. Its schedule is the Core one, asserted by height rather
-        // than by a second copy of the production loop.
         let expected = locator_hashes_at_heights(&tree, &main_ids, &CORE_LOCATOR_HEIGHTS_40)?;
         assert_eq!(tree.block_locator(main_ids[40], 32), expected);
         for side_hash in &side_hashes {
@@ -1157,7 +1017,6 @@ mod tests {
         let (mut tree, main_ids) = linear_chain(40)?;
         let side_id = extend(&mut tree, main_ids[18], 1019)?;
 
-        // Height 19 is not in the tip-40 locator sample set (40..30,28,24,16,0).
         assert!(tree.active_by_height.replace_slot_for_test(19, side_id));
         assert!(tree.active_by_height.is_tainted_for_test());
 
@@ -1275,8 +1134,6 @@ mod tests {
             NodeStatus::Active,
         )?;
 
-        // The published snapshot is coherent with the active insertion:
-        // genesis's height and hash, not hand-stored values.
         assert_eq!(tree.tip_id(), Some(genesis_id));
         assert_eq!(tree.tip_height(), Some(0));
         assert_eq!(
@@ -1396,8 +1253,6 @@ mod tests {
         let (mut tree, ids) = linear_chain(1)?;
         let (a, b) = (ids[0], ids[1]);
 
-        // Two-node parent cycle with a non-decreasing height so the fallback
-        // walk cannot reach the target by ordinary height descent.
         tree.node_mut(a)?.parent = Some(b);
         tree.node_mut(a)?.height = 2;
 
@@ -1441,7 +1296,6 @@ mod tests {
         Ok(())
     }
 
-    // Core GetLocator (src/chain.cpp): double only after have.size() > 10.
     const CORE_LOCATOR_HEIGHTS_40: [u32; 16] = [
         40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 27, 23, 15, 0,
     ];
@@ -1484,17 +1338,12 @@ mod tests {
 
         let expected = locator_hashes_at_heights(&tree, &main_ids, &CORE_LOCATOR_HEIGHTS_40)?;
 
-        // Indexed walk: the height index is trusted, so the fast path runs.
         assert!(tree.active_by_height.is_trusted());
         assert_eq!(tree.block_locator(tip_id, 32), expected);
 
-        // Parent-walk fallback: taint forces the second path, which must
-        // produce the same schedule.
         tree.active_by_height.taint();
         assert_eq!(tree.block_locator(tip_id, 32), expected);
 
-        // A node that is not the active tip still yields a locator rooted at
-        // itself, through the same fallback walk.
         let side = *main_ids.get(10).ok_or("node exists at height 10")?;
         let side_locator = tree.block_locator(side, 32);
         assert_eq!(side_locator.first(), Some(&tree.node(side)?.hash));
@@ -1520,11 +1369,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use bitcoin_rs_consensus::{CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID};
 
-        // Main chain: genesis -> a1 -> a2.
         let (mut tree, main_ids) = linear_chain(2)?;
         let (genesis_id, a2_id) = (main_ids[0], main_ids[2]);
 
-        // Side chain: genesis -> b1 -> b2 -> b3 (longer, active).
         let side_ids = extend_branch(&mut tree, genesis_id, 101..=103)?;
         let side_hashes = side_ids
             .iter()
@@ -1537,16 +1384,13 @@ mod tests {
             }
         }
 
-        // The side chain is the active tip because it is longer.
         assert_eq!(tree.tip_id(), Some(side_ids[2]));
         assert_eq!(tree.active_by_height.get(1), Some(side_ids[0]));
 
-        // Previewing the invalidation selects a2 without mutating status or tip.
         assert_eq!(tree.tip_after_invalidation(side_ids[0])?, Some(a2_id));
         assert_eq!(tree.tip_id(), Some(side_ids[2]));
         assert_eq!(tree.node(side_ids[0])?.status, NodeStatus::HeaderValid);
 
-        // Invalidate the side root (b1). This must mark b1..b3 invalid and reselect a2.
         let outcome = tree.invalidate_subtree(side_ids[0])?;
         let invalid_hashes = outcome.invalid;
         assert_eq!(
@@ -1585,23 +1429,19 @@ mod tests {
             NodeStatus::HeaderValid,
         )?;
 
-        // Three equal-length forks, inserted in order.
         let mut fork_tips = Vec::new();
         for fork in 0..3 {
             let branch = extend_branch(&mut tree, genesis_id, [10 + fork, 20 + fork])?;
             fork_tips.push(branch[1]);
         }
 
-        // a is active because it was inserted first and all forks have equal chainwork.
         assert_eq!(tree.tip_id(), Some(fork_tips[0]));
 
-        // Invalidate the active a fork. The next earliest equal-work fork (b) wins.
         tree.invalidate_subtree(fork_tips[0])?;
         assert_eq!(tree.node(fork_tips[0])?.status, NodeStatus::Invalid);
         assert_eq!(tree.tip_id(), Some(fork_tips[1]));
         assert_eq!(tree.node(fork_tips[1])?.status, NodeStatus::Active);
 
-        // c is still valid but not active.
         assert_eq!(tree.node(fork_tips[2])?.status, NodeStatus::HeaderValid);
         Ok(())
     }
@@ -1620,13 +1460,11 @@ mod tests {
         let a2 = test_header(BlockHash(a1_hash), 2);
         let a2_id = tree.insert_node(Some(a1_id), a2, NodeStatus::HeaderValid)?;
 
-        // Invalidate the active chain root a1, leaving only genesis valid.
         tree.invalidate_subtree(a1_id)?;
         assert_eq!(tree.node(a1_id)?.status, NodeStatus::Invalid);
         assert_eq!(tree.node(a2_id)?.status, NodeStatus::Invalid);
         assert_eq!(tree.tip_id(), Some(genesis_id));
 
-        // Inserting a child under the invalid a1 must itself be invalid and cannot become tip.
         let a3 = test_header(BlockHash(a1_hash), 3);
         let a3_id = tree.insert_node(Some(a1_id), a3, NodeStatus::HeaderValid)?;
         assert_eq!(tree.node(a3_id)?.status, NodeStatus::Invalid);
@@ -1646,8 +1484,6 @@ mod tests {
 
         assert_eq!(demoted_facts(&steps), vec![None; 4]);
         assert_eq!(tree.tip_id(), Some(steps[3].0));
-        // Status marking is unchanged: every previous tip is stale, yet none
-        // is a displaced side-branch tip.
         assert_eq!(tree.node(steps[2].0)?.status, NodeStatus::Stale);
         assert_eq!(tree.node(genesis)?.status, NodeStatus::Stale);
         Ok(())
@@ -1659,7 +1495,6 @@ mod tests {
         let (mut tree, main) = linear_chain(2)?;
         let side = extend_branch_with_facts(&mut tree, main[0], 101..=102)?;
 
-        // Shorter, then equal work: neither strictly exceeds the active tip.
         assert_eq!(demoted_facts(&side), vec![None, None]);
         assert_eq!(tree.tip_id(), Some(main[2]));
         assert_eq!(tree.node(main[2])?.status, NodeStatus::Active);
@@ -1686,10 +1521,8 @@ mod tests {
         let first_old = tree.node(main[2])?.hash;
         let second = extend_branch_with_facts(&mut tree, main[0], 101..=103)?;
         let second_tip = tree.node(second[2].0)?.hash;
-        // Forks from the middle of the branch that just became active.
         let third = extend_branch_with_facts(&mut tree, second[1].0, 201..=202)?;
         let third_tip = tree.node(third[1].0)?.hash;
-        // Forks from the root, so the fork walk runs on the rebuilt index.
         let fourth = extend_branch_with_facts(&mut tree, main[0], 301..=305)?;
 
         assert_eq!(demoted_facts(&second), vec![None, None, Some(first_old)]);
@@ -1713,7 +1546,6 @@ mod tests {
             ..test_header(BlockHash(tip_hash), 50)
         };
         let zero_id = tree.insert_node(Some(main[2]), zero_work, NodeStatus::HeaderValid)?;
-        // Equal chainwork does not publish, so the next insert is not a direct child.
         assert_eq!(tree.tip_id(), Some(main[2]));
 
         let (descendant, demoted) = extend_with_fact(&mut tree, zero_id, 51)?;
@@ -1729,7 +1561,6 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut tree, main) = linear_chain(2)?;
         let displaced = tree.node(main[2])?.hash;
-        // A heavier branch held invalid, then reconsidered without republication.
         let mut heavy = Vec::new();
         let mut parent = main[0];
         for nonce in 101..=103 {
@@ -1837,8 +1668,6 @@ mod tests {
         let mut tree = BlockTree::new();
         let genesis = test_header(BlockHash::default(), 0);
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        // The persisted encoding has no known zero: `from_wire(0)` is unknown,
-        // and an unknown count encodes back as zero.
         tree.restore_chain_tx_count(genesis_id, ChainTxCount::from_wire(0))?;
         assert_eq!(tree.node(genesis_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
         assert_eq!(tree.node(genesis_id)?.chain_tx_count.to_wire(), 0);
@@ -1855,8 +1684,6 @@ mod tests {
 
         let main_header = test_header(BlockHash(genesis_hash), 1);
         let main_id = tree.insert_node(Some(genesis_id), main_header, NodeStatus::HeaderValid)?;
-        // Equal work means insertion order keeps `main` the published tip;
-        // `side` never is.
         let side_header = test_header(BlockHash(genesis_hash), 101);
         let side_id = tree.insert_node(Some(genesis_id), side_header, NodeStatus::HeaderValid)?;
         assert_eq!(tree.tip_id(), Some(main_id));
@@ -1865,8 +1692,6 @@ mod tests {
             Some(ChainTxCount::UNKNOWN)
         );
 
-        // Recording on a non-tip ancestor first: the publication must stay
-        // pinned to the published tip's node, unknown count and all.
         tree.record_applied_tx_count(genesis_id, 1)?;
         assert_eq!(
             tree.tip().map(|tip| (tip.tip_id, tip.chain_tx_count)),
@@ -1879,15 +1704,12 @@ mod tests {
             Some((main_id, ChainTxCount::established(3)))
         );
 
-        // A count recorded on a non-tip node must not touch the published
-        // snapshot.
         tree.restore_chain_tx_count(side_id, ChainTxCount::established(9))?;
         assert_eq!(
             tree.tip().map(|tip| (tip.tip_id, tip.chain_tx_count)),
             Some((main_id, ChainTxCount::established(3)))
         );
 
-        // And an authenticated restore on the tip itself refreshes it.
         tree.restore_chain_tx_count(main_id, ChainTxCount::established(5))?;
         assert_eq!(
             tree.tip().map(|tip| tip.chain_tx_count),

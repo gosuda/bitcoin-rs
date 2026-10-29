@@ -1,7 +1,5 @@
-//! Synthetic Cargo metadata coverage for production feature isolation.
-
 use super::WorkspaceGraph;
-use serde_json::{Value, json};
+use sonic_rs::{JsonValueMutTrait as _, Value, json};
 
 fn dependency(name: &str, kind: Option<&str>, features: &[&str]) -> Value {
     json!({

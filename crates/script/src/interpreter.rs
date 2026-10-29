@@ -1,10 +1,4 @@
 //! Script verification entry points over the native transaction type.
-//!
-//! The driver mirrors Core's `VerifyScript`/`VerifyWitnessProgram` flow: run
-//! scriptSig then scriptPubKey through the opcode evaluator, apply P2SH
-//! redeem-script evaluation, dispatch `SegWit` v0 spends through their witness
-//! programs, and hand taproot key-path and script-path spends to the local
-//! BIP341/BIP342 verifier.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -22,56 +16,32 @@ use crate::signature_cache::SignatureCache;
 use crate::stack::{ScriptItem, Stack};
 use crate::taproot;
 
-/// Verification flags passed to the delegated consensus script engine.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct VerifyFlags(u32);
 
 impl VerifyFlags {
-    /// No verification flags.
     pub const NONE: Self = Self(0);
-    /// Evaluate P2SH subscripts (BIP16).
     pub const P2SH: Self = Self(1 << 0);
-    /// Require strict signature and public-key encodings.
     pub const STRICTENC: Self = Self(1 << 1);
-    /// Require strict DER signatures (BIP66).
     pub const DERSIG: Self = Self(1 << 2);
-    /// Require low-S ECDSA signatures.
     pub const LOW_S: Self = Self(1 << 3);
-    /// Require empty CHECKMULTISIG dummy element (BIP147).
     pub const NULLDUMMY: Self = Self(1 << 4);
-    /// Require scriptSig push-only form.
     pub const SIGPUSHONLY: Self = Self(1 << 5);
-    /// Require minimal push and numeric encodings.
     pub const MINIMALDATA: Self = Self(1 << 6);
-    /// Discourage NOPs reserved for future soft forks.
     pub const DISCOURAGE_UPGRADABLE_NOPS: Self = Self(1 << 7);
-    /// Require a single true stack item after evaluation.
     pub const CLEANSTACK: Self = Self(1 << 8);
-    /// Enable `OP_CHECKLOCKTIMEVERIFY` (BIP65).
     pub const CHECKLOCKTIMEVERIFY: Self = Self(1 << 9);
-    /// Enable `OP_CHECKSEQUENCEVERIFY` (BIP112).
     pub const CHECKSEQUENCEVERIFY: Self = Self(1 << 10);
-    /// Enable segregated witness validation (BIP141/BIP143).
     pub const WITNESS: Self = Self(1 << 11);
-    /// Discourage unknown witness program versions.
     pub const DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM: Self = Self(1 << 12);
-    /// Require minimal IF/NOTIF arguments in segwit scripts.
     pub const MINIMALIF: Self = Self(1 << 13);
-    /// Require failed signature checks to consume empty signatures.
     pub const NULLFAIL: Self = Self(1 << 14);
-    /// Require compressed public keys in segwit scripts.
     pub const WITNESS_PUBKEYTYPE: Self = Self(1 << 15);
-    /// Make `CODESEPARATOR` and `FindAndDelete` fail non-segwit scripts.
     pub const CONST_SCRIPTCODE: Self = Self(1 << 16);
-    /// Enable taproot and tapscript validation (BIP341/BIP342).
     pub const TAPROOT: Self = Self(1 << 17);
-    /// Discourage unknown taproot leaf versions.
     pub const DISCOURAGE_UPGRADABLE_TAPROOT_VERSION: Self = Self(1 << 18);
-    /// Discourage unknown `OP_SUCCESS` opcodes.
     pub const DISCOURAGE_OP_SUCCESS: Self = Self(1 << 19);
-    /// Discourage unknown public-key versions in tapscript.
     pub const DISCOURAGE_UPGRADABLE_PUBKEYTYPE: Self = Self(1 << 20);
-    /// Mandatory consensus flags used for block validation after taproot activation.
     pub const MANDATORY: Self = Self(
         Self::P2SH.0
             | Self::DERSIG.0
@@ -81,7 +51,6 @@ impl VerifyFlags {
             | Self::WITNESS.0
             | Self::TAPROOT.0,
     );
-    /// Standard relay flags; useful for vector tests that request policy checks.
     pub const STANDARD: Self = Self(
         Self::MANDATORY.0
             | Self::STRICTENC.0
@@ -99,35 +68,21 @@ impl VerifyFlags {
             | Self::DISCOURAGE_UPGRADABLE_PUBKEYTYPE.0,
     );
 
-    /// Returns raw Core-compatible flag bits.
     #[must_use]
     pub const fn bits(self) -> u32 {
         self.0
     }
 
-    /// Rebuilds flags from raw bits previously returned by [`Self::bits`].
-    /// Bits that match no defined flag are carried through unchanged; they
-    /// select no check this crate runs. Named after `bitflags`'
-    /// `from_bits_retain`: infallible, retaining unknown bits.
     #[must_use]
     pub const fn from_bits_retain(bits: u32) -> Self {
         Self(bits)
     }
 
-    /// Returns the full consensus-authority bit set, including taproot for bitcoinkernel.
     #[must_use]
     pub const fn kernel_bits(self) -> u32 {
         self.0 & Self::MANDATORY.0
     }
 
-    /// Applies Core's flag implications: `CLEANSTACK` implies `WITNESS`, and
-    /// `WITNESS` implies `P2SH`.
-    ///
-    /// Core asserts these combinations in `VerifyScript` because relaxing them
-    /// would turn a soft fork into a hard one - a chain could go from
-    /// `CLEANSTACK` alone to `P2SH + CLEANSTACK` and change what validates.
-    /// A library cannot assert on its caller, so the driver normalizes instead,
-    /// which is what Core's own vector harness does through `FillFlags`.
     #[must_use]
     pub const fn filled(self) -> Self {
         let mut bits = self.0;
@@ -140,19 +95,16 @@ impl VerifyFlags {
         Self(bits)
     }
 
-    /// Returns true when all `other` bits are present.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
-    /// Adds another flag set.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
-    /// Parses a comma-separated Core test-vector flag string.
     pub fn from_core_names(names: &str) -> Result<Self, ScriptError> {
         let mut flags = Self::NONE;
         for name in names
@@ -200,7 +152,6 @@ impl VerifyFlags {
 
 macro_rules! script_errors {
     ($($variant:ident = $name:literal,)*) => {
-        /// Core-named failures; display uses the exact `ScriptErrorString` names.
         #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
         pub enum ScriptErrCode {
             $(
@@ -275,51 +226,25 @@ script_errors! {
     ScriptNum = "SCRIPTNUM",
 }
 
-/// Script execution errors surfaced by the script crate.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ScriptError {
-    /// The requested input index was not present in the transaction.
     #[error("input index {index} out of range for {inputs} inputs")]
     InputIndexOutOfRange { index: usize, inputs: usize },
-    /// A Core vector flag name was not known by this crate.
     #[error("unknown script verify flag {name}")]
     UnknownFlag { name: String },
-    /// The delegated consensus verifier rejected the script.
     #[error("script verification failed: {0}")]
     Verification(String),
-    /// The supplied prevout set does not match the transaction input count.
     #[error("prevout count does not match transaction input count")]
     TaprootPrevoutsUnavailable,
-    /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
     Invalid { code: ScriptErrCode },
 }
 
-/// Public script verifier for the portable posture.
-///
-/// Executes legacy, `P2SH`, and segwit v0 spends through the native opcode
-/// evaluator, and taproot key-path and script-path spends via the local
-/// BIP341/BIP342 verifier.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Interpreter;
 
 impl Interpreter {
-    /// Executes a script spend with the complete ordered prevout set.
-    ///
-    /// When `script_sig` and `witness` already match the bytes stored on
-    /// `tx.inputs[input_idx]` — true for every block/mempool validation caller,
-    /// which reads them straight off the transaction — `tx` is used as-is with
-    /// no clone. Only callers that pass substitute bytes (e.g. vector tests
-    /// grafting a foreign witness) pay for a clone to splice them in.
-    ///
     /// `prevouts` must contain one spent output for each input, in input order.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ScriptError::TaprootPrevoutsUnavailable`] if the prevout count
-    /// differs from the transaction input count. Returns
-    /// [`ScriptError::InputIndexOutOfRange`] if `input_idx` is invalid after
-    /// the count matches. The count check runs before script evaluation.
     pub fn execute_with_prevouts(
         &self,
         script_pubkey: &[u8],
@@ -352,7 +277,6 @@ impl Interpreter {
             Cow::Borrowed(tx)
         } else {
             let mut grafted = tx.clone();
-            // `grafted` is a clone of `tx`; input_idx was proven in-bounds.
             let grafted_input = &mut grafted.inputs[input_idx];
             grafted_input.script_sig = Script::from_bytes(script_sig.to_vec());
             grafted_input.witness = Witness::from_stack(witness.to_vec());
@@ -372,25 +296,17 @@ impl Interpreter {
     }
 }
 
-/// Invalid resolved-input wiring, rejected before script evaluation.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PrevoutError {
-    /// The supplied rows do not cover every input exactly once.
     #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
     Count {
         input_count: usize,
         prevout_count: usize,
     },
-    /// A row identifies a different outpoint than the corresponding input.
     #[error("prevout does not match transaction input {input_index}")]
     Mismatch { input_index: usize },
 }
 
-/// Checks that resolved prevouts cover the transaction in input order.
-///
-/// # Errors
-/// Returns a count error before checking identities, or the first mismatched
-/// outpoint. This validates caller wiring, not the contents of a UTXO record.
 pub fn validate_prevouts(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<(), PrevoutError> {
     if prevouts.len() != tx.inputs.len() {
         return Err(PrevoutError::Count {
@@ -406,11 +322,6 @@ pub fn validate_prevouts(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<(), 
     Ok(())
 }
 
-/// One native transaction and its ordered spent outputs for parallel input checks.
-///
-/// This owner binds the sighash cache to its transaction and prevouts for its
-/// lifetime. Each input retains its own script, hash mode, annex and separator
-/// context; only transaction-wide aggregate hashes are shared.
 pub struct PreparedTransaction<'tx> {
     tx: &'tx Tx,
     prevouts: Vec<TxOut>,
@@ -418,11 +329,6 @@ pub struct PreparedTransaction<'tx> {
 }
 
 impl<'tx> PreparedTransaction<'tx> {
-    /// Validates and retains resolved prevouts, then initializes an empty cache.
-    /// The borrowed transaction and owned outputs cannot change after validation.
-    ///
-    /// # Errors
-    /// Returns [`PrevoutError`] if the count or ordered outpoint identities differ.
     pub fn new(tx: &'tx Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<Self, PrevoutError> {
         validate_prevouts(tx, prevouts)?;
         Ok(Self {
@@ -432,16 +338,9 @@ impl<'tx> PreparedTransaction<'tx> {
         })
     }
 
-    /// Validates and takes ownership of resolved prevouts for parallel checks.
-    /// Script buffers move into the retained outputs without being cloned.
-    ///
-    /// # Errors
-    /// Returns [`PrevoutError`] if the count or ordered outpoint identities differ.
     pub fn from_owned(tx: &'tx Tx, prevouts: Vec<(OutPoint, TxOut)>) -> Result<Self, PrevoutError> {
         validate_prevouts(tx, &prevouts)?;
         let mut prevouts: Vec<TxOut> = prevouts.into_iter().map(|(_, output)| output).collect();
-        // In-place collection may reuse the larger tuple allocation. Do not
-        // retain that spare outpoint capacity for the parallel-check lifetime.
         prevouts.shrink_to_fit();
         Ok(Self {
             tx,
@@ -450,16 +349,6 @@ impl<'tx> PreparedTransaction<'tx> {
         })
     }
 
-    /// Verifies an input using this transaction's bytes and resolved prevout.
-    ///
-    /// `cache` is the admission-local positive signature-result cache.
-    /// Existing block and uncached callers pass `None`; admission passes
-    /// `Some` to share successful group results across its passes. This
-    /// method keeps no reference to the cache; every encoding and script
-    /// check still runs.
-    ///
-    /// # Errors
-    /// Returns input-index or script errors. Prevout wiring was checked at construction.
     pub fn verify_input(
         &self,
         input_idx: usize,
@@ -485,11 +374,6 @@ impl<'tx> PreparedTransaction<'tx> {
     }
 }
 
-/// Callers have checked the input/prevout bounds and bound the cache to these
-/// immutable transaction bytes and ordered prevouts. Only `script_pubkey`
-/// stays an explicit override; scriptSig and witness are read from
-/// `spending.inputs[input_idx]` because `execute_with_prevouts` grafts
-/// substitutes into its spend copy before calling, so they always match here.
 fn execute_spend(
     spending: &Tx,
     input_idx: usize,
@@ -522,8 +406,6 @@ fn invalid(code: ScriptErrCode) -> ScriptError {
     ScriptError::Invalid { code }
 }
 
-/// Mirrors Core's `VerifyScript`: scriptSig, then scriptPubKey, then the P2SH
-/// and witness redirections the flags admit, then `CLEANSTACK`.
 fn verify_script(
     script_sig: &[u8],
     script_pubkey: &[u8],
@@ -534,8 +416,6 @@ fn verify_script(
     if flags.contains(VerifyFlags::SIGPUSHONLY) && !is_push_only(script_sig) {
         return Err(invalid(ScriptErrCode::SigPushonly));
     }
-    // Witness data is only ever legitimate for a program this function
-    // reaches below; anything left unconsumed is malleation.
     let mut witness_used = false;
 
     let mut stack = Stack::new();
@@ -549,8 +429,6 @@ fn verify_script(
         &mut weight,
         None,
     )?;
-    // P2SH needs the scriptSig's own result, because scriptPubKey execution
-    // consumes the redeem script off the top.
     let redeem_stack = stack.clone();
     eval::eval_script(
         &mut stack,
@@ -569,11 +447,6 @@ fn verify_script(
                 return Err(invalid(ScriptErrCode::WitnessMalleated));
             }
             if version == 1 && program.len() == 32 {
-                // Bare Taproot follows the same scriptSig evaluation and
-                // witness-malleation checks as every native witness program.
-                // Wrapped v1 programs below retain their upgradeable meaning.
-                // Core recognizes native v1/32 before its activation check;
-                // DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM does not apply here.
                 if flags.contains(VerifyFlags::TAPROOT) {
                     verify_taproot(program, witness, flags, checker)?;
                 }
@@ -611,8 +484,6 @@ fn verify_script(
 
         if flags.contains(VerifyFlags::WITNESS) {
             if let Some((version, program)) = witness_program(&redeem) {
-                // The scriptSig may push exactly the redeem script and nothing
-                // else; any other shape lets a third party rewrite it.
                 if script_sig != crate::script::push_data(&redeem).as_slice() {
                     return Err(invalid(ScriptErrCode::WitnessMalleatedP2sh));
                 }
@@ -626,10 +497,6 @@ fn verify_script(
         return Err(invalid(ScriptErrCode::WitnessUnexpected));
     }
 
-    // Core's CLEANSTACK assertion is meaningful only when P2SH or WITNESS
-    // activates the corresponding stack-discipline path. Policy vectors may
-    // request CLEANSTACK alone; those legacy spends retain the normal
-    // final-top-item check.
     if flags.contains(VerifyFlags::CLEANSTACK)
         && (flags.contains(VerifyFlags::P2SH) || flags.contains(VerifyFlags::WITNESS))
     {
@@ -641,7 +508,6 @@ fn verify_script(
     Ok(())
 }
 
-/// Mirrors Core's `VerifyWitnessProgram` for the versions this driver serves.
 fn verify_witness_program(
     witness: &[Vec<u8>],
     version: u8,
@@ -651,8 +517,6 @@ fn verify_witness_program(
     stack: &mut Stack,
 ) -> Result<(), ScriptError> {
     if version != 0 {
-        // Wrapped v1 and unknown versions stay spendable by consensus so
-        // future soft forks can define them; policy discourages relaying them.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableWitnessProgram));
         }
@@ -703,8 +567,6 @@ fn verify_witness_program(
         None,
     )?;
 
-    // Witness execution is its own stack discipline: exactly one true item,
-    // regardless of whether CLEANSTACK is set.
     if witness_stack.len() != 1 {
         return Err(invalid(ScriptErrCode::CleanStack));
     }
@@ -713,7 +575,6 @@ fn verify_witness_program(
     Ok(())
 }
 
-/// The implicit P2WPKH witness script: `DUP HASH160 <program> EQUALVERIFY CHECKSIG`.
 fn p2wpkh_script_code(program: &[u8]) -> Vec<u8> {
     let mut script = Vec::with_capacity(5 + program.len());
     script.push(crate::script::opcode::OP_DUP);
@@ -743,12 +604,6 @@ fn require_true_top(stack: &Stack) -> Result<(), ScriptError> {
     }
 }
 
-/// Unified taproot verification: key-path and script-path (BIP341/BIP342).
-///
-/// Mirrors Core's `VerifyWitnessProgram` taproot branch. Strips an optional
-/// annex, dispatches to key-path (single remaining element) or script-path
-/// (control block + leaf script), and executes tapscript through the native
-/// evaluator with `SigVersion::Tapscript`.
 fn verify_taproot(
     program: &[u8],
     witness: &[Vec<u8>],
@@ -759,17 +614,12 @@ fn verify_taproot(
         return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
     }
 
-    // Work on an owned copy so we can pop the annex / control / script.
     let mut stack: Vec<Vec<u8>> = witness.to_vec();
 
-    // Strip annex: if the last element is non-empty and starts with 0x50.
-    // Core: "if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG)"
     let annex_bytes = strip_annex(&mut stack);
 
     if stack.len() == 1 {
         let signature = &stack[0];
-        // Tapscript uses an empty signature as false; a key-path witness
-        // must instead contain a 64/65-byte signature (BIP341).
         if signature.is_empty() {
             return Err(invalid(ScriptErrCode::SchnorrSigSize));
         }
@@ -784,10 +634,6 @@ fn verify_taproot(
     }
 }
 
-/// Strips the annex from the witness stack when present (BIP341).
-///
-/// Mirrors Core's annex-stripping condition: when the stack has at least two
-/// elements and the last is non-empty with a leading `ANNEX_TAG` byte.
 fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
     if stack.len() < 2 {
         return None;
@@ -798,7 +644,6 @@ fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
     if is_annex { stack.pop() } else { None }
 }
 
-/// Verifies a taproot script-path spend (BIP341/BIP342).
 fn verify_taproot_scriptpath(
     checker: &mut TxSignatureChecker<'_>,
     program: &[u8],
@@ -807,7 +652,6 @@ fn verify_taproot_scriptpath(
     annex_bytes: Option<Vec<u8>>,
     flags: VerifyFlags,
 ) -> Result<(), ScriptError> {
-    // Core: "const valtype& control = SpanPopBack(stack); const valtype& script = SpanPopBack(stack);"
     let control = stack
         .pop()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
@@ -815,7 +659,6 @@ fn verify_taproot_scriptpath(
         .pop()
         .ok_or_else(|| invalid(ScriptErrCode::WitnessProgramWitnessEmpty))?;
 
-    // Core: control size validation.
     if control.len() < taproot::TAPROOT_CONTROL_BASE_SIZE
         || control.len() > taproot::TAPROOT_CONTROL_MAX_SIZE
         || !(control.len() - taproot::TAPROOT_CONTROL_BASE_SIZE)
@@ -824,34 +667,24 @@ fn verify_taproot_scriptpath(
         return Err(invalid(ScriptErrCode::TaprootWrongControlSize));
     }
 
-    // Core: execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, script)
     let leaf_version = control[0] & taproot::TAPROOT_LEAF_MASK;
     let tapleaf = bitcoin_rs_primitives::tapleaf_hash(leaf_version, &script);
 
-    // Core: VerifyTaprootCommitment(control, program, tapleaf_hash)
     if !taproot::verify_taproot_commitment(&control, program, &tapleaf) {
         return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
     }
 
-    // Core: if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT)
     if leaf_version != taproot::TAPROOT_LEAF_TAPSCRIPT {
-        // Unknown leaf version: success by consensus, discouraged by policy.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableTaprootVersion));
         }
         return Ok(());
     }
 
-    // Core's ExecuteWitnessScript checks OP_SUCCESS before initial stack
-    // limits, and success bypasses evaluation and the final stack checks.
     if eval::tapscript_op_success(&script, flags)? {
         return Ok(());
     }
 
-    // Build the witness stack for the evaluator: the remaining elements
-    // (after annex, control, and script were popped) are the input stack.
-    // Core: ExecuteWitnessScript checks stack.size() > MAX_STACK_SIZE
-    // for tapscript before running EvalScript.
     if stack.len() > eval::MAX_STACK_SIZE {
         return Err(invalid(ScriptErrCode::StackSize));
     }
@@ -865,11 +698,6 @@ fn verify_taproot_scriptpath(
             .map_err(|_| invalid(ScriptErrCode::StackSize))?;
     }
 
-    // Core: execdata.m_validation_weight_left =
-    //   GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET
-    // `witness.stack` is the *original* full witness (including annex,
-    // control, and script). The serialization is a CompactSize count
-    // prefix followed by each element as CompactSize(len) + bytes.
     let witness_serialized_size: usize =
         encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
             + witness
@@ -929,7 +757,6 @@ mod tests {
             Ok(true)
         );
 
-        // OP_0 leaves one empty element, which CastToBool reads as false.
         assert!(matches!(
             interpreter.execute_with_prevouts(
                 &[0x00],

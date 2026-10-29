@@ -1,5 +1,4 @@
 //! Mempool and transaction E2E: broadcast, entry/ancestor/descendant views,
-//! preview, raw-transaction codecs, prioritisation, and fee estimation.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -12,13 +11,8 @@ use bitcoin_rs_e2e::helpers::{
     op_true_script, raw_spend_to, signed_spend, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
-/// One mempool lifecycle on one node: a broadcast enters the pool with a
-/// complete entry view, re-submitting is idempotent (Core's `-27
-/// txn-already-in-mempool` divergence is intentional), a fee delta overlays
-/// and is reported, and `generateblock` confirms the transaction and drains
-/// the pool.
 #[test]
 fn mempool_lifecycle_from_broadcast_to_confirmation() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -41,7 +35,6 @@ fn mempool_lifecycle_from_broadcast_to_confirmation() -> Result<()> {
     assert_eq!(info.u64_field("bytes")?, 82);
 
     let entry = node.rpc("getmempoolentry", &json!([txid]))?;
-    // Like Core, the entry omits txid (it is the lookup key) and carries wtxid.
     assert_eq!(entry.str_field("wtxid")?, txid);
     assert_eq!(entry.u64_field("vsize")?, 82);
     assert_eq!(entry.u64_field("ancestorcount")?, 1);
@@ -73,14 +66,12 @@ fn mempool_lifecycle_from_broadcast_to_confirmation() -> Result<()> {
     assert_eq!(txids.len(), 2);
     assert_eq!(txids[1], txid, "listed tx is tx[1] after the coinbase");
 
-    // Without txindex a confirmed tx needs its block hash to be served.
     let confirmed = node.rpc("getrawtransaction", &json!([txid, true, hash]))?;
     assert_eq!(confirmed.u64_field("confirmations")?, 1);
     assert_eq!(confirmed.str_field("blockhash")?, hash);
     node.stop()
 }
 
-/// `testmempoolaccept` previews admission without mutating the pool.
 #[test]
 fn mempool_accept_preview() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -98,7 +89,6 @@ fn mempool_accept_preview() -> Result<()> {
         "preview must not pool"
     );
 
-    // A spend of an unknown outpoint reports a frozen reject reason.
     let phantom = bitcoin::TxOut {
         value: bitcoin::Amount::from_sat(1_000),
         script_pubkey: op_true_script(),
@@ -114,15 +104,11 @@ fn mempool_accept_preview() -> Result<()> {
     node.stop()
 }
 
-/// Parent/child submissions populate `depends`/`spentby` and the
-/// ancestors/descendants views.
 #[test]
 fn ancestors_and_descendants_views() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
 
-    // OP_TRUE outputs are non-standard for mempool admission, so the
-    // parent pays the P2PKH funding address and the child signs for it.
     let parent = raw_spend_to(
         outpoint,
         &prevout,
@@ -159,14 +145,11 @@ fn ancestors_and_descendants_views() -> Result<()> {
     node.stop()
 }
 
-/// `getrawtransaction` serves mempool entries and (with a block hash)
-/// confirmed transactions; without a block hash and no txindex it is -5.
 #[test]
 fn raw_transaction_lookup_rules() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
 
-    // A confirmed coinbase is only reachable via its block hash.
     let coinbase_txid = outpoint.txid.to_string();
 
     let block_hash = node
@@ -186,7 +169,6 @@ fn raw_transaction_lookup_rules() -> Result<()> {
     .map_err(|e| Error::Assertion(format!("block-served tx decode: {e}")))?;
     assert_eq!(decoded.compute_txid().to_string(), coinbase_txid);
 
-    // A mempool transaction resolves without a block hash.
     let spend = spend_anyone(outpoint, &prevout, 1_000);
     let txid = spend.compute_txid().to_string();
     node.rpc("sendrawtransaction", &json!([tx_hex(&spend)]))?;
@@ -199,17 +181,17 @@ fn raw_transaction_lookup_rules() -> Result<()> {
     node.stop()
 }
 
-/// `createrawtransaction` + `decoderawtransaction` round-trip.
 #[test]
 fn create_and_decode_raw_transaction() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
 
+    let address = funding_address()?.to_string();
     let created = node.rpc(
         "createrawtransaction",
         &json!([
             [{"txid": outpoint.txid.to_string(), "vout": outpoint.vout}],
-            {funding_address()?.to_string(): 1.0}
+            {address: 1.0}
         ]),
     )?;
     let hex = created
@@ -234,8 +216,6 @@ fn create_and_decode_raw_transaction() -> Result<()> {
     node.stop()
 }
 
-/// A signed P2PKH spend is admitted — the signature-checking path is
-/// exercised, not just the anyone-can-spend one.
 #[test]
 fn signed_p2pkh_spend_accepted() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -246,7 +226,6 @@ fn signed_p2pkh_spend_accepted() -> Result<()> {
         &json!([COINBASE_MATURITY + 1, address]),
     )?;
 
-    // Find the funding UTXO paid to our address at height 1.
     let coinbase = coinbase_at(&mut node, 1)?;
     let (outpoint, prevout) = funding_output(&coinbase)?;
     assert_eq!(
@@ -264,8 +243,6 @@ fn signed_p2pkh_spend_accepted() -> Result<()> {
     node.stop()
 }
 
-/// With no confirmation history `estimatesmartfee` reports an `errors`
-/// array and `estimaterawfee` an empty object; invalid targets are -8/-32602.
 #[test]
 fn fee_estimates_on_empty_history() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -283,8 +260,6 @@ fn fee_estimates_on_empty_history() -> Result<()> {
     node.stop()
 }
 
-/// Malformed, unknown-input, unknown-txid, and out-of-range requests each
-/// carry Core's distinct error code rather than a generic failure.
 #[test]
 fn rejects_carry_core_error_codes() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -309,9 +284,7 @@ fn rejects_carry_core_error_codes() -> Result<()> {
         ("testmempoolaccept", json!([["deadbeef"]]), -22),
         ("decoderawtransaction", json!(["00ff"]), -22),
         ("getmempoolentry", json!([format!("{:064x}", 0)]), -5),
-        // No txindex: a confirmed transaction is unreachable without its block.
         ("getrawtransaction", json!([confirmed_txid]), -5),
-        // A non-zero dummy argument is Core's -8.
         ("prioritisetransaction", json!([pooled_txid, 1, 5000]), -8),
         ("estimatesmartfee", json!([0]), -8),
     ];

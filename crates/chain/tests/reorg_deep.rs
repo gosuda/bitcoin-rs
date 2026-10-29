@@ -1,4 +1,3 @@
-//! Deep reorganization planner integration tests.
 use bitcoin_rs_chain::{BlockHeader, BlockTree, NodeId, NodeStatus, plan_reorg};
 
 #[path = "support/pow_oracle.rs"]
@@ -33,7 +32,6 @@ fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(plan.connect.len(), 50);
     assert_eq!(plan.disconnect.first().copied(), Some(trunk[100]));
     assert_eq!(plan.disconnect.last().copied(), Some(trunk[51]));
-    // Both sides of the plan terminate at the common fork ancestor.
     assert_eq!(
         tree.node(*plan.disconnect.last().ok_or("empty disconnect")?)?
             .parent,

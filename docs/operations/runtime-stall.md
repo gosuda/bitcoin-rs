@@ -1,69 +1,10 @@
 # Capture a runtime stall
-
-Run the watchdog outside the node. It watches a dedicated INFO-level log for
-`sync progress`, with a monotonic deadline. After one missed deadline it
-collects evidence, detaches the debugger, and exits. It does not use RPC,
-metrics, the node logger, or any node mutex. Log rotation and truncation are
-supported. The default 180 seconds allows three 60-second intervals.
-
+Run the watchdog outside the node. It watches a dedicated INFO-level log for `sync progress` against a monotonic deadline; after one missed deadline it collects evidence, detaches the debugger, and exits. It does not use RPC, metrics, the node logger, or any node mutex. Log rotation and truncation are supported. The default 180 seconds allows three 60-second intervals.
 ## Requirements and cost
-
-Use Linux, Python 3.11 or newer, GDB, and the matching executable and debug
-symbols. GDB must have permission to attach; before watching, the watchdog
-verifies it with one dry attach that momentarily pauses the target. Configure
-that permission through the deployment's normal debugging policy; this tool
-never changes ptrace settings, privileges, or node configuration. Keep the log
-exclusive to this node and enable INFO telemetry. An unrelated log or disabled
-INFO output cannot prove this node's liveness.
-
-**GDB pauses the target twice.** A watch takes two short pauses — the
-preflight dry attach plus the capture attach — diagnostic capture, not passive
-monitoring. The watchdog limits GDB to 30 seconds plus five
-seconds for termination, 32 frames per thread, and 16 MiB of output. Kernel
-snapshots cover at most 256 threads and 4 KiB per field; the retained log tail
-is at most 1 MiB. These are work/output bounds, not hard real-time guarantees
-for filesystem I/O.
-
-Prepare an existing private evidence directory, then run:
-
+Use Linux, Python 3.11 or newer, GDB, and the matching executable and debug symbols. GDB must have permission to attach; before watching, the watchdog verifies it with one dry attach that momentarily pauses the target. Configure that permission through the deployment's normal debugging policy; this tool never changes ptrace settings, privileges, or node configuration. Keep the log exclusive to this node and enable INFO telemetry. An unrelated log or disabled INFO output cannot prove this node's liveness. **GDB pauses the target twice**: the preflight dry attach plus the capture attach (diagnostic capture, not passive monitoring). The watchdog limits GDB to 30 seconds plus five seconds for termination, 32 frames per thread, and 16 MiB of output. Kernel snapshots cover at most 256 threads and 4 KiB per field; the retained log tail is at most 1 MiB. These are work/output bounds, not hard real-time guarantees for filesystem I/O. Prepare an existing private evidence directory, then run (substituting the node's PID and paths):
 ```sh
-python3 scripts/watch_runtime_stall.py \
-  --pid 12345 \
-  --log /path/to/this-node.log \
-  --output /path/to/private/evidence \
-  --timeout 180
+python3 scripts/watch_runtime_stall.py --pid 12345 --log /path/to/this-node.log --output /path/to/private/evidence --timeout 180
 ```
-
-Replace the PID and paths with the running node's values. Each capture creates
-a fresh mode-0700 subdirectory and never overwrites old evidence. Debugger
-output can reveal addresses and application state; retain it privately.
-
+Each capture creates a fresh mode-0700 subdirectory and never overwrites old evidence. Debugger output can reveal addresses and application state; retain it privately.
 ## Reading the result
-
-`result.json` records the PID/start identity, reason, debugger command, native
-outcome and completeness. `threads.txt` has userspace backtraces with thread
-names and IDs. `kernel-waits.txt` records kernel wait information.
-`telemetry-tail.log` retains recent output. The watch ends when the original
-process exits rather than following a restart. Identity is rechecked
-immediately before attachment.
-
-A timeout, denied attach, missing symbols or partial dump is not successful
-diagnosis. Incomplete capture preserves available output and exits with failure.
-After a debugger timeout, confirm the node's process state before intervening;
-the tool never sends the node an unconditional continue or termination signal.
-
-A missed cadence is **not a deadlock verdict**. Inspect all thread stacks for
-blocked call sites and potential holders, then reconcile lock order with
-source. Kernel `wchan` and `stack` fields are not userspace mutex-owner records.
-Even a complete dump cannot automatically assign every `parking_lot` mutex an
-owner. The historical stage-2 holder in #1094 remains unconfirmed until an
-actual stalled-node capture is analyzed.
-
-The event loop emits summaries by elapsed time after either periodic or
-inbound wake work. Wake volume can no longer consume the tick-count multiples
-that previously controlled reporting. A genuinely blocked loop still misses
-the deadline and is visible to the independent watchdog.
-
-References: [GDB attach/detach](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Attach.html),
-[GDB thread inspection](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Threads.html),
-[Linux proc stack](https://man7.org/linux/man-pages/man5/proc_pid_stack.5.html).
+`result.json` records the PID/start identity, reason, debugger command, native outcome, and completeness. `threads.txt` has userspace backtraces with thread names and IDs. `kernel-waits.txt` records kernel wait information. `telemetry-tail.log` retains recent output. The watch ends when the original process exits rather than following a restart. Identity is rechecked immediately before attachment. A timeout, denied attach, missing symbols, or partial dump is not successful diagnosis: incomplete capture preserves available output and exits with failure. After a debugger timeout, confirm the node's process state before intervening; the tool never sends the node an unconditional continue or termination signal. A missed cadence is **not a deadlock verdict**: inspect all thread stacks for blocked call sites and potential holders, then reconcile lock order with source. Kernel `wchan` and `stack` fields are not userspace mutex-owner records. Even a complete dump cannot automatically assign every `parking_lot` mutex an owner; the historical stage-2 holder in #1094 remains unconfirmed until an actual stalled-node capture is analyzed. The event loop emits summaries by elapsed time after either periodic or inbound wake work; wake volume no longer consumes the tick-count multiples that previously controlled reporting. A genuinely blocked loop still misses the deadline and is visible to the independent watchdog. References: [GDB attach/detach](https://sourceware.org/gdb/current/onlinedocs/gdb/html/Attach.html), [GDB thread inspection](https://sourceware.org/gdb/current/onlinedocs/gdb/html/Threads.html), [Linux proc stack](https://man7.org/linux/man-pages/man5/proc_pid_stack.5.html).

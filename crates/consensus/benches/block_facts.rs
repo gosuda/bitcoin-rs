@@ -1,7 +1,3 @@
-//! Parse-once fact derivation and decoded lazy witness-ID benchmarks.
-//! Run the identical harness at its introduction commit and the optimized
-//! descendant in separate target directories. No historical-chain fixture is
-//! needed. This microbenchmark is not an apply-path or full-replay verdict.
 #![allow(missing_docs)]
 
 #[path = "../tests/support/block_facts_fixture.rs"]
@@ -17,8 +13,6 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 
 fn block_facts(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_facts");
-    // name, tx count, inputs, outputs, script bytes, witness modulus.
-    // Each fixture isolates a relevant source of copying or metadata work.
     for (name, txs, inputs, outputs, script, witness) in [
         ("legacy_small", 1, 1, 2, 25, 0),
         ("legacy_1024", 1024, 1, 2, 25, 0),
@@ -29,9 +23,6 @@ fn block_facts(c: &mut Criterion) {
         ("segwit_253_inputs", 8, 253, 2, 0, 1),
         ("segwit_253_outputs", 8, 1, 253, 0, 1),
     ] {
-        // Locally assembled fixture: one encode retains the exact bytes. The
-        // timed spans below never re-encode and never run a second decode
-        // alongside the payload construction.
         let block = fixtures::fixture(txs, inputs, outputs, script, witness);
         let payload = BlockPayload::from_local(block);
         let parsed = ParsedBlock::parse_exact(payload.bytes())
@@ -77,8 +68,6 @@ fn lazy_witness_ids(c: &mut Criterion) {
         }
         group.throughput(Throughput::Elements(1024));
         group.bench_function(name, |b| {
-            // Reset the lazy cache outside timing. Each iteration measures a
-            // genuine first fill, not the already-populated fast return.
             b.iter_batched_ref(
                 || BlockView::from_facts(&payload.block().txs, baseline.clone()),
                 |view| {

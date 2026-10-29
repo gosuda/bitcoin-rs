@@ -1,5 +1,3 @@
-//! Signal-independent replacement and retained historical BIP125 policy vectors.
-//! Core process evidence lives in `replacement_signaling_matches_pinned_core`.
 #![allow(clippy::expect_used)]
 
 extern crate alloc;
@@ -204,8 +202,6 @@ fn retained_replacement_rules_are_enforced() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// POL-05: mixing signaling and nonsignaling conflicts cannot reintroduce
-/// a signal requirement. The replacement itself does not signal either.
 #[test]
 fn replacements_accept_mixed_signaling_conflicts() -> Result<(), Box<dyn Error>> {
     const RBF_SEQUENCE: u32 = 0xffff_fffd;
@@ -248,10 +244,6 @@ fn pool_with_conflict(
         MempoolLimits::default()
     } else {
         MempoolLimits {
-            // A chain this long is one cluster this long, so the cluster caps
-            // have to be lifted alongside the ancestor caps or admission
-            // refuses the fixture before the replacement rules are reached.
-            // This test is about BIP125, not about cluster limits.
             cluster_count: 400,
             cluster_size_vbytes: 1_000_000,
             ..MempoolLimits::default()
@@ -383,12 +375,9 @@ fn pool_fingerprint(pool: &Mempool) -> PoolFingerprint {
 
 #[test]
 fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Error>> {
-    // BIP125 rules pass, but the pool min-relay floor rejects before mutation.
     {
         let mut pool = Mempool::new(MempoolLimits::default());
         let original = tx_from_inputs(20, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
-        // Admit under the default floor, then raise it so only the replacement
-        // hits BelowMinRelayFee after BIP125 validation succeeds.
         pool.insert_entry(MempoolEntry::new(Arc::new(original), 300, 1_000, 2, 1, 0))?;
         pool.limits.min_relay_fee_sat_per_kvb = 5_000;
         let replacement = tx_from_inputs(40, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);

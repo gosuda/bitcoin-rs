@@ -1,5 +1,3 @@
-//! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -42,17 +40,14 @@ use hashbrown::HashMap;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
-/// Convert native `BlockHash` to bitcoin `BlockHash` for envelope types.
 fn btc_bh(hash: NativeBlockHash) -> BlockHash {
     BlockHash::from_byte_array(*hash.as_bytes())
 }
 
-/// Convert bitcoin `BlockHash` to native `BlockHash` for payload lookups.
 fn native_bh(hash: &BlockHash) -> NativeBlockHash {
     NativeBlockHash(Hash256::from_le_bytes(hash.as_byte_array()))
 }
 
-/// `(network, Core magic, Core default P2P port)` for every supported network.
 const NETWORK_TABLE: [(Network, Magic, u16); 5] = [
     (Network::Mainnet, Magic::BITCOIN, 8333),
     (Network::Testnet3, Magic::TESTNET3, 18333),
@@ -66,7 +61,6 @@ fn genesis_block() -> Result<Block, Box<dyn Error>> {
     Ok(deserialize::<Block>(&bytes)?)
 }
 
-/// Chains `count` synthetic headers onto `parent`, deterministically.
 fn child_headers(parent: &Header, count: usize) -> Vec<Header> {
     let mut headers = Vec::with_capacity(count);
     let mut current = *parent;
@@ -100,7 +94,6 @@ fn headers_into_blocks(headers: &[Header]) -> HashMap<NativeBlockHash, Block> {
         .collect()
 }
 
-/// Model of the node's active-chain view at the [`ChainQuery`] seam.
 struct FakeChain {
     active: Vec<Header>,
     bodies: HashMap<NativeBlockHash, Block>,
@@ -197,8 +190,6 @@ impl ChainQuery for FakeChain {
                 .bodies
                 .get(&native)
                 .is_some_and(|block| block.block_hash() == native);
-            // This fixture supplies only validated, recent bodies. Production
-            // stale eligibility is exercised by ActiveChainQuery tests.
             if known {
                 if !headroom() {
                     outcome.halted = true;
@@ -231,8 +222,6 @@ fn inventory_hash(item: &Inventory) -> Option<BlockHash> {
     }
 }
 
-/// Collecting-sink wrapper around the streamed dispatch: responses arrive in
-/// the exact order the streaming send emits them.
 fn dispatch_collect(
     peer: &mut Peer<Cursor<Vec<u8>>>,
     message: &Message,
@@ -256,7 +245,6 @@ fn dispatch_collect(
     Ok(collected.into_inner())
 }
 
-/// Collecting form of the streaming serve for expected/actual comparisons.
 fn serve_collect(
     chain: &FakeChain,
     items: &[Inventory],
@@ -272,7 +260,6 @@ fn serve_collect(
     Ok((blocks.into_inner(), outcome.not_found))
 }
 
-/// Drives an outbound handshake as if the remote peer sent `version`.
 fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
     let mut peer = Peer::new(Cursor::new(Vec::new()), magic);
     let responses = dispatch_inbound(&mut peer, &version_for_handshake())?;
@@ -311,7 +298,6 @@ fn locator_hashes(headers: &[Header]) -> Vec<NativeBlockHash> {
     headers.iter().map(Header::compute_hash).collect()
 }
 
-/// Builds one raw v1 frame (magic, command, length, checksum, payload).
 fn raw_frame(magic: Magic, command: &[u8; 12], payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(24 + payload.len());
     frame.extend_from_slice(&magic.to_bytes());
@@ -344,7 +330,6 @@ fn command_field(name: &str) -> Result<[u8; 12], Box<dyn Error>> {
     Ok(field)
 }
 
-/// Asserts an outcome is the typed protocol error, returning it for inspection.
 fn expect_protocol_error<T: std::fmt::Debug>(
     outcome: Result<T, PeerError>,
     why: &'static str,
@@ -365,14 +350,8 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(buffer)
 }
 
-/// The protocol version Bitcoin Core 31.1 advertises. This node advertises
-/// [`PROTOCOL_VERSION`] instead, the one protocol-version deviation recorded in
-/// `docs/policies/p2p-compatibility.md` §4.
 const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
 
-/// The 36 commands of the Core-compatibility inventory: Core 31.1's wire set
-/// this node types, plus the legacy `reject` and `alert` that Core 31.1 no
-/// longer processes. Each decodes with a Core-style outcome.
 const CORE_COMPAT_COMMANDS: [&str; 36] = [
     "version",
     "verack",
@@ -412,9 +391,6 @@ const CORE_COMPAT_COMMANDS: [&str; 36] = [
     "sendaddrv2",
 ];
 
-/// The commands this node types beyond Core 31.1's set: BIP434 `feature`,
-/// BIP331 package relay, and BIP332 `staletip`. Core 31.1 treats each as an
-/// unknown command.
 const EXTENSION_COMMANDS: [&str; 6] = [
     "feature",
     "sendpackages",
@@ -424,9 +400,6 @@ const EXTENSION_COMMANDS: [&str; 6] = [
     "staletip",
 ];
 
-/// Whether `outcome` is the typed result an extension command gives an empty
-/// payload: its own codec error, or for `pkgtxns` the raw payload surfaced for
-/// the listener to charge before any transaction is parsed.
 fn is_own_typed_empty_payload_outcome(
     command: &str,
     outcome: &Result<(Message, bytes::Bytes), PeerError>,
@@ -1118,11 +1091,8 @@ fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Shared prefix plus its two competing extensions.
 type ForkBranches = (Vec<Header>, Vec<Header>, Vec<Header>);
 
-/// Builds a shared prefix plus two competing extensions, like a node that has
-/// stored headers from both fork attempts.
 fn fork_fixture() -> Result<ForkBranches, Box<dyn Error>> {
     let genesis = genesis_block()?;
     let shared = child_headers(&genesis.header, 2);
@@ -1329,8 +1299,6 @@ fn connect_with_retry(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn Error>> {
     }
 }
 
-/// Acts as a Core 31.1 client: sends `version`, consumes the negotiated
-/// feature set + `verack`, completes the handshake, then pings.
 fn drive_handshake_as_core(
     mut client: TcpStream,
     magic: Magic,
@@ -1412,7 +1380,6 @@ fn drive_handshake_as_core(
     Ok(())
 }
 
-/// A dial wiring with a shared table, an active network, and no chain view.
 fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
@@ -1433,7 +1400,6 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
     )
 }
 
-/// One remote `version` advertising exactly `services`.
 fn remote_version(services: ServiceFlags) -> Message {
     let mut version = version_message(
         1,

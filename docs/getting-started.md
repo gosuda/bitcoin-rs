@@ -34,7 +34,7 @@ Precedence, low to high:
 4. `BITCOIN_RS_*` environment variables
 5. CLI flags
 
-A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. Runtime test controls are not public configuration.
+ A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. Runtime test controls are not public configuration.
 
 Common network names are `mainnet`, `signet`, `testnet4`, and `regtest`; retained aliases are documented by the compatibility contracts.
 
@@ -78,8 +78,7 @@ bitcoin-rs --onion-proxy 127.0.0.1:9050 --onlynet onion \
   --connect VALID_V3_SERVICE.onion:8333
 ```
 
-Use a real v3 service address in place of the placeholder. To add an inbound
-onion service, enable external Tor's cookie-authenticated control port and
+ To add an inbound onion service, enable external Tor's cookie-authenticated control port and
 add `--tor-control 127.0.0.1:9051 --tor-cookie /path/to/control_auth_cookie`.
 Tor forwards to a dedicated, unprivileged local listener. Accepted circuits
 have opaque `tor-inbound-N:0` connection handles because Tor does not reveal
@@ -124,8 +123,6 @@ from deterministic local protocol fixtures.
 ./target/release/bitcoin-rs --storage-backend redb
 ```
 
-or:
-
 ```sh
 export BITCOIN_RS_STORAGE_BACKEND=fjall
 ```
@@ -163,8 +160,7 @@ timeout, defaulting to at least 60 seconds and scaling dynamically with the conf
 grandparent, parent, child) are restored atomically in topological order within package
 standardness limits. Candidate records persist precomputed BIP16/BIP141 SigOp costs
 (version 2 format), validated upfront against standardness limits before script execution.
-Note that mempool persistence is an operational optimization for clean shutdowns;
-abrupt termination (power loss, crash, kill) does not record a snapshot.
+ Abrupt termination (power loss, crash, kill) does not record a snapshot.
 Locally submitted transactions awaiting initial broadcast retain that status
 across restart if re-admitted. The existing P2P relay worker retries them in
 bounded batches, including after absent peers or queue saturation. A successful

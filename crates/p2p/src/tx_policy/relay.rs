@@ -23,11 +23,12 @@ const MAX_KNOWN: usize = 5_000;
 const MAX_BATCH: usize = 1_000;
 const INVENTORY_TARGET: usize = 70;
 
-/// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus
-/// bound address bytes and port. Socket scope/flow and the remote address/port
-/// are not part of this identity.
-/// Accepted I2P SAM streams use their ephemeral local bind endpoint, so their
-/// clocks are per stream; they do not share a destination-wide inbound clock.
+/// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus bound
+/// address bytes and port.
+///
+/// Socket scope/flow and the remote address/port are not part of this identity.
+/// Accepted I2P SAM streams use their ephemeral local bind endpoint, so their clocks
+/// are per stream; they do not share a destination-wide inbound clock.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct InboundClockKey {
     network: NetworkClass,
@@ -70,9 +71,10 @@ fn exponential(mean_secs: u32, rng: &mut impl RngCore) -> Duration {
     Duration::from_secs_f64(-unit.ln() * f64::from(mean_secs)).max(Duration::from_millis(1))
 }
 
-/// Core v31.1 `FeeFilterRounder`: 1.1-spaced buckets, two-thirds rounded
-/// downward, followed by the configured min-relay floor. Fractional buckets
-/// are intentionally truncated to integer sat/kvB, as in Core.
+/// Core v31.1 `FeeFilterRounder`: 1.1-spaced buckets, two-thirds rounded downward,
+/// followed by the configured min-relay floor.
+///
+/// Fractional buckets are intentionally truncated to integer sat/kvB, as in Core.
 #[expect(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
@@ -84,8 +86,6 @@ fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
         return minimum;
     }
     let mut lower = 0.0;
-    // Core v31.1 initializes its quantizer from DEFAULT_MIN_RELAY_TX_FEE
-    // (100 sat/kvB), halved. This grid is independent of our configured floor.
     let mut upper = 50.0;
     while upper <= 10_000_000.0
         && upper < f64::from(u32::try_from(floor.min(10_000_001)).unwrap_or(10_000_001))
@@ -109,10 +109,6 @@ impl RelayPeer {
         clocks: &mut HashMap<InboundClockKey, Instant>,
         rng: &mut impl RngCore,
     ) -> Self {
-        // Joining an existing key adopts its clock, even if already due.
-        // Admission must not postpone a cycle that existing peers can send.
-        // An inbound peer without an IP key keeps its inbound cadence; only
-        // the shared clock needs a key.
         let next_inv = match key {
             Some(key) => *clocks
                 .entry(key)
@@ -279,7 +275,6 @@ impl PeerTable {
                 return;
             }
         }
-        // Entropy is needed only for a new peer, and stays outside the policy lock.
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
         let mut policy = self.tx_policy.lock();
         let TxPolicy {
@@ -346,7 +341,6 @@ impl PeerTable {
         let (floor, minimum) = {
             let pool = gateway.read();
             let minimum = pool.min_relay_fee_sat_per_kvb();
-            // Core rolling floor measured against total virtual size.
             let floor = pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs());
             (
                 if ibd {
@@ -387,19 +381,11 @@ impl PeerTable {
                     .entry(source)
                     .or_insert_with(|| RelayPeer::new(now, is_inbound, inbound, inbound_inv, rng));
                 if info.version >= 70_013 && minimum <= Amount::MAX_MONEY.to_sat() {
-                    // `filter_due` advances the schedule and the sent state
-                    // before the send is known to have queued anything, so
-                    // snapshot what a refused send must give back.
                     let before = (peer.last_filter, peer.sent_ibd_filter);
                     if let Some(rate) = peer.filter_due(now, floor, minimum, ibd, rng) {
                         let message = Message::FeeFilter(i64::try_from(rate).unwrap_or(i64::MAX));
                         match self.send(source, message) {
                             Ok(()) => {}
-                            // The node's aggregate budget is full while the
-                            // connection is healthy: the filter was not sent,
-                            // so the state returns to what it was and the
-                            // next poll offers it again. This peer's
-                            // inventory step still runs.
                             Err(crate::OutboundRefusal::Saturated(_)) => {
                                 (peer.last_filter, peer.sent_ibd_filter) = before;
                                 peer.next_filter = now;
@@ -417,8 +403,6 @@ impl PeerTable {
                         if *shared <= now {
                             *shared = next_inv(now, true, rng);
                         }
-                        // Each due peer remains eligible this cycle, even if
-                        // an earlier sibling already advanced the shared clock.
                         *shared
                     }
                     None => next_inv(now, is_inbound, rng),
@@ -482,8 +466,6 @@ impl PeerTable {
         };
         let mut items = Vec::new();
         let mut identities = Vec::new();
-        // The requests behind `items`, kept so a refused send can queue them
-        // again.
         let mut offered = Vec::new();
         for candidate in candidates {
             let request = candidate.request;
@@ -524,11 +506,6 @@ impl PeerTable {
                     peer.note_known(identity);
                 }
             }
-            // The node's aggregate budget is full while the connection is
-            // healthy: nothing was announced, so nothing is known to the
-            // peer. The requests go back to the pending queue under the same
-            // caps and dedup as the over-target tail above, and the next
-            // cycle offers them again.
             Err(crate::OutboundRefusal::Saturated(_)) => {
                 for request in offered {
                     if peer.pending.len() < MAX_PENDING_PER_PEER
@@ -555,8 +532,6 @@ struct Candidate {
     parents: Vec<Txid>,
 }
 
-/// Among candidates whose queued parents have been selected, prefer higher
-/// feerates. No transaction bodies survive the mempool read.
 fn dependency_order(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let indices: HashMap<_, _> = candidates
         .iter()
@@ -786,8 +761,6 @@ mod tests {
         let mut info = table
             .info_of(endpoint)
             .ok_or_else(|| std::io::Error::other("clock fixture info"))?;
-        // A pre-BIP133 peer isolates inventory clock draws from fee-filter
-        // refreshes without substituting the scheduler under test.
         info.version = 70_012;
         table.publish_info(endpoint, &lease, info);
         Ok(connected)
@@ -817,8 +790,6 @@ mod tests {
 
     #[test]
     fn inbound_clock_key_uses_network_class_and_canonical_bind_endpoint() {
-        // Core v31.1 net.cpp's inbound key uses GetNetClass, GetAddrBytes and
-        // GetPort. IPv4 mapped bind bytes are identical; scope/flow are absent.
         let key = |remote: &str, bind: &str| {
             InboundClockKey::new(
                 remote.parse::<crate::PeerAddress>().map_or_else(
@@ -862,7 +833,6 @@ mod tests {
         assert_eq!(due, clock(&table, b));
         table.poll_transaction_relay(&gateway, now, false, &mut rng);
         assert!(inventory(&a_rx).is_empty() && inventory(&b_rx).is_empty());
-        // Joining an already-due key must not postpone existing siblings.
         let (c, c_rx) = clock_peer(&table, "1.1.1.1:3000", "10.0.0.1:8333", true)?;
         let draws = rng.draws;
         table.queue_transaction_relay(request, due, &mut rng);
@@ -1068,7 +1038,6 @@ mod tests {
         );
     }
 
-    /// A ready full-relay peer whose queue also charges `aggregate`.
     fn connect_on(
         table: &PeerTable,
         port: u16,
@@ -1109,9 +1078,6 @@ mod tests {
             .collect()
     }
 
-    /// A fee filter the node aggregate refused was never sent: the schedule
-    /// and the sent-while-syncing state return to what they were, so the next
-    /// poll offers it again instead of waiting out a fresh interval.
     #[test]
     fn feefilter_saturated_restores() {
         let table = PeerTable::new();
@@ -1126,15 +1092,12 @@ mod tests {
             (peer.last_filter, peer.sent_ibd_filter, peer.next_filter)
         };
 
-        // A syncing node's filter goes out while the aggregate has room.
         table.poll_transaction_relay(&gateway, now, true, &mut rng);
         let syncing = fee_filters(&rx);
         assert_eq!(syncing.len(), 1);
         let (sent_rate, sent_while_syncing, _) = state(&table);
         assert!(sent_while_syncing && sent_rate.is_some());
 
-        // Other connections fill the aggregate; the synced node's filter is
-        // refused and every part of the state it advanced is given back.
         let hold = crate::test_support::hog(&aggregate, 256);
         let refused_at = now + Duration::from_secs(1);
         table.poll_transaction_relay(&gateway, refused_at, false, &mut rng);
@@ -1152,9 +1115,6 @@ mod tests {
         assert!(!state(&table).1);
     }
 
-    /// An `inv` the node aggregate refused announced nothing: the peer knows
-    /// nothing of it, the requests go back to the pending queue, and the next
-    /// cycle offers them.
     #[test]
     fn relay_inv_saturated_requeues() {
         let table = PeerTable::new();
@@ -1477,8 +1437,6 @@ mod tests {
     fn inbound_without_ip_key_keeps_inbound_cadence() {
         let now = Instant::now();
         let mut clocks = HashMap::new();
-        // Same deterministic draw for both: inbound mean (5s) must exceed
-        // outbound mean (2s) for the same uniform sample.
         let mut rng_in = StdRng::seed_from_u64(42);
         let mut rng_out = StdRng::seed_from_u64(42);
         let inbound = RelayPeer::new(now, true, None, &mut clocks, &mut rng_in);

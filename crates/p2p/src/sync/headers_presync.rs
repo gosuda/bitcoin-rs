@@ -1,23 +1,5 @@
 //! Core's download-twice header presync state: the anti-memory-DoS gate that
 //! keeps an unverified, low-work header chain out of the block tree.
-//!
-//! A peer that has not demonstrated at least the network's minimum chain work
-//! must be synchronized twice. The first pass (PRESYNC) validates each header
-//! minimally — continuity, proof of work, permitted difficulty transition, and
-//! cumulative work — and retains only one salted commitment bit per
-//! [`HeadersSyncParams::commitment_period`] headers. Once the cumulative work
-//! crosses the minimum, the second pass (REDOWNLOAD) replays the same chain
-//! from the fork point, checks every commitment at its salted offset, and
-//! releases headers to the caller only from behind the bounded redownload
-//! buffer. Only that released output may reach
-//! [`SyncChain::admit_headers`](super::chain::SyncChain::admit_headers).
-//!
-//! Core authority: `bitcoin-core/src/headerssync.h:57-100` (the design),
-//! `:103-149` (state and constructor), and
-//! `bitcoin-core/src/headerssync.cpp:72-149` (phase processing),
-//! `:150-218` (presync validation and the work transition),
-//! `:219-305` (redownload commitment checks and buffering), and
-//! `:306-326` (the locator switch).
 
 use std::collections::VecDeque;
 
@@ -27,129 +9,63 @@ use bitcoin_rs_chain::{
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Header, HeadersSyncParams, Network};
 use sha2::{Digest as _, Sha256};
 
-/// Cumulative proof of work, ordered like Core's `arith_uint256` chainwork.
 type Work = ChainWork;
 
-/// Core's `MAX_FUTURE_BLOCK_TIME` (`bitcoin-core/src/consensus/params.h`), the
-/// drift the honest-chain length estimate allows on top of the median-time-past
-/// bound (`bitcoin-core/src/headerssync.cpp:33-49`).
 const MAX_FUTURE_BLOCK_TIME_SECONDS: u64 = 2 * 60 * 60;
 
-/// The phase of one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeadersSyncPhase {
-    /// Collecting salted commitments; nothing is releasable.
     Presync,
-    /// Replaying the chain and verifying commitments; releases buffered
-    /// headers once enough commitments stand behind them.
     Redownload,
-    /// Finished: temporary storage is released and the state is spent.
     Final,
 }
 
-/// The fork point a peer's header chain builds from, resolved against the
-/// block tree by the caller before any state exists.
-///
-/// PRE: the anchor names a header this node already holds in its tree.
-/// POST: (no mutation — this is an input record).
-/// INVARIANT: `locator` is the tree locator for the anchor as observed at
-///   resolution time, so the state can issue continuation requests without
-///   ever reading the tree.
 #[derive(Clone, Debug)]
 pub struct HeaderAnchor {
-    /// The network whose difficulty rules the chain is validated against.
     pub network: Network,
-    /// Height of the anchor.
     pub height: u32,
-    /// Hash of the anchor.
     pub hash: Hash256,
-    /// The anchor header itself: redownload reads its bits as the previous
-    /// difficulty when its buffer is empty.
     pub header: Header,
-    /// Cumulative chain work through the anchor.
     pub chain_work: Work,
-    /// Median time past at the anchor, bounding the honest-chain length
-    /// estimate behind `max_commitments`.
     pub median_time_past: u32,
-    /// Tree locator for the anchor, appended after the sync cursor in every
-    /// continuation request.
     pub locator: Vec<Hash256>,
 }
 
-/// One batch's outcome from [`HeadersSyncState::process`].
 #[derive(Clone, Debug)]
 pub struct HeaderSyncResult {
-    /// Headers the caller may admit now: empty during PRESYNC, and during
-    /// REDOWNLOAD only headers whose commitments are verified and whose
-    /// buffer depth has been retired.
     pub ready_headers: Vec<Header>,
-    /// Whether the caller should request the next batch from this peer with
-    /// `HeadersSyncState::next_locator`.
     pub request_more: bool,
-    /// The phase after this batch.
     pub phase: HeadersSyncPhase,
 }
 
-/// A typed failure that ends one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderSyncError {
-    /// The batch did not connect to the sync cursor.
     NonContinuous {
-        /// Phase that observed the break.
         phase: HeadersSyncPhase,
-        /// Height where continuity broke.
         height: u32,
     },
-    /// A difficulty transition the network does not permit at this height
-    /// (`bitcoin-core/src/headerssync.cpp:186-195`).
     DifficultyTransition {
-        /// Phase that observed the transition.
         phase: HeadersSyncPhase,
-        /// Height of the offending header.
         height: u32,
     },
-    /// A header whose hash does not meet its own declared target.
     InvalidPow {
-        /// Phase that observed the header.
         phase: HeadersSyncPhase,
-        /// Height of the offending header.
         height: u32,
-        /// Hash of the offending header.
         hash: Hash256,
     },
-    /// Redownload produced a header whose commitment bit differs from the one
-    /// PRESYNC stored — the peer served a different chain the second time
-    /// (`bitcoin-core/src/headerssync.cpp:281-293`).
     CommitmentMismatch {
-        /// Height where the bits diverged.
         height: u32,
     },
-    /// Redownload reached a commitment height with no stored commitment left
-    /// to check (`bitcoin-core/src/headerssync.cpp:275-280`).
     CommitmentOverrun {
-        /// Height that overran the commitment deque.
         height: u32,
     },
-    /// PRESYNC exceeded the honest-chain length bound on stored commitments,
-    /// so continuing would spend the memory the mechanism exists to bound
-    /// (`bitcoin-core/src/headerssync.cpp:197-206`).
     MaxCommitments {
-        /// Height that exceeded the bound.
         height: u32,
     },
-    /// `process` was called on a spent state; a caller bookkeeping bug.
     Finalized,
 }
 
 impl HeaderSyncError {
-    /// Whether this failure is the peer's, not the network's.
-    ///
-    /// PRE: none.
-    /// POST: return true for every failure except a lost continuity, which
-    ///   Core documents as possibly benign (`headerssync.cpp:155-163`).
-    /// INVARIANT: a commitment divergence is always the peer's: PRESYNC and
-    ///   REDOWNLOAD saw the same salted hasher, so only the sender can make
-    ///   the two passes disagree.
     pub(crate) const fn is_peer_fault(&self) -> bool {
         !matches!(self, Self::NonContinuous { .. })
     }
@@ -199,9 +115,6 @@ impl core::fmt::Display for HeaderSyncError {
 
 impl std::error::Error for HeaderSyncError {}
 
-/// A compressed header: every field but `prev_blockhash`, which the redownload
-/// buffer reconstructs from its predecessor
-/// (`bitcoin-core/src/headerssync.h:29-52`).
 #[derive(Clone, Copy, Debug)]
 struct CompressedHeader {
     version: i32,
@@ -234,25 +147,20 @@ impl CompressedHeader {
     }
 }
 
-/// A FIFO of the one-bit commitments a PRESYNC pass leaves for the
-/// REDOWNLOAD check (`headerssync.h:198-201` keeps the same bits), packed
-/// 64 per word. A mainnet pass can retain millions of commitments — see the
-/// honest-chain estimate in [`HeadersSyncState::new`] — so one byte apiece
-/// would make every open sync state a memory-amplification surface per
-/// connection.
+/// A FIFO of the one-bit commitments a PRESYNC pass leaves for the REDOWNLOAD check
+/// (`headerssync.h:198-201` keeps the same bits), packed 64 per word.
+///
+/// A mainnet pass can retain millions of commitments — see the honest-chain estimate in
+/// [`HeadersSyncState::new`] — so one byte apiece would make every open sync state a
+/// memory-amplification surface per connection.
 #[derive(Default)]
 struct CommitmentBits {
-    /// Packed bit words; only `live` leading bits (from `head`) are live.
     words: VecDeque<u64>,
-    /// Number of live bits in the queue.
     live: u64,
-    /// Index of the oldest live bit inside `words[0]` (0..64).
     head: u8,
 }
 
 impl CommitmentBits {
-    /// Appends one bit; allocates a new word when the tail crosses a
-    /// 64-bit boundary.
     fn push_back(&mut self, bit: bool) {
         let tail = u64::from(self.head).saturating_add(self.live);
         let word = usize::try_from(tail / 64).unwrap_or(usize::MAX);
@@ -265,8 +173,6 @@ impl CommitmentBits {
         self.live += 1;
     }
 
-    /// Removes the oldest bit, dropping the front word once its last live
-    /// bit is consumed.
     fn pop_front(&mut self) -> Option<bool> {
         if self.live == 0 {
             return None;
@@ -281,12 +187,10 @@ impl CommitmentBits {
         Some(bit)
     }
 
-    /// Live bits currently held.
     fn live_bits(&self) -> u64 {
         self.live
     }
 
-    /// Releases every retained bit (used at sync teardown).
     fn clear(&mut self) {
         self.words.clear();
         self.live = 0;
@@ -294,8 +198,6 @@ impl CommitmentBits {
     }
 }
 
-/// One peer's download-twice header sync (`headerssync.h:103-149`).
-///
 /// INVARIANT: no method on this type inserts into the block tree. Headers
 /// leave only through [`HeaderSyncResult::ready_headers`], and only the
 /// caller's committed-phase branch may admit them.
@@ -304,51 +206,25 @@ pub struct HeadersSyncState {
     chain_start: HeaderAnchor,
     params: HeadersSyncParams,
     minimum_work: Work,
-    /// The secret offset on heights for commitment bits
-    /// (`headerssync.cpp:24`, `headerssync.h:186-190`).
     commit_offset: u32,
-    /// Salted key material for the commitment hash; generated once per state
-    /// and never reused after `FINAL` (`headerssync.h:211-212`).
     salt: [u8; 16],
-    /// Cumulative work over the PRESYNC pass, starting at the anchor's.
     current_work: Work,
-    /// Height of the last PRESYNC header (starts at the anchor's).
     current_height: u32,
-    /// Hash of the last PRESYNC header (starts at the anchor's).
     last_header_hash: Hash256,
-    /// Bits of the last PRESYNC header (starts at the anchor's).
     last_header_bits: u32,
-    /// One-bit commitments created during PRESYNC, consumed during REDOWNLOAD.
     commitments: CommitmentBits,
-    /// Bound on [`Self::commitments`] from the honest-chain length estimate
-    /// (`headerssync.cpp:33-49`).
     max_commitments: u64,
-    /// The bounded second-pass buffer (`headerssync.h:231-233`).
     redownloaded: VecDeque<CompressedHeader>,
     redownload_last_height: u32,
     redownload_last_hash: Hash256,
-    /// Bits of the last stored redownload header.
     redownload_last_bits: CompactTarget,
     redownload_first_prev_hash: Hash256,
     redownload_work: Work,
-    /// Set once the redownloaded chain itself crosses the minimum work: the
-    /// target is reached and the whole buffer may drain
-    /// (`headerssync.h:244-249`).
     process_all_remaining_headers: bool,
-    /// The header height the peer demonstrated before `finalize` reset the
-    /// cursors — the horizon it verifiably serves.
     final_height: u32,
 }
 
 impl HeadersSyncState {
-    /// Starts one peer's download-twice sync from a known fork point.
-    ///
-    /// PRE: `chain_start` names a header this node already holds, and
-    ///   `params.commitment_period > 0`.
-    /// POST: returns a fresh PRESYNC state whose permanent storage is empty;
-    ///   `salt` keys the commitment hash and `params` size the commitment
-    ///   period and the redownload buffer.
-    /// INVARIANT: no method on this type inserts into the block tree.
     pub fn new(
         chain_start: HeaderAnchor,
         minimum_work: Work,
@@ -360,16 +236,7 @@ impl HeadersSyncState {
             "commitment period must be nonzero"
         );
         let period = u64::from(params.commitment_period);
-        // Core draws the commitment offset from a fast RNG
-        // (`headerssync.cpp:24`); deriving it from the state's own salt keeps
-        // one random input per sync and stays reproducible under test.
         let commit_offset = u64::from_le_bytes(salt[..8].try_into().unwrap_or([0; 8])) % period;
-        // Estimate how long an honest chain could be right now: the fastest
-        // rate the median-time-past rule allows (6 blocks per second) times
-        // the seconds from the anchor's MTP to now plus the future-block
-        // bound (`headerssync.cpp:33-49`). A clock behind the anchor clamps
-        // the estimate to the bound alone, which is the safe direction: the
-        // sync aborts rather than the memory bound growing unbounded.
         let seconds_since_start =
             u64::from(current_unix_seconds().saturating_sub(chain_start.median_time_past))
                 .saturating_add(MAX_FUTURE_BLOCK_TIME_SECONDS);
@@ -399,26 +266,12 @@ impl HeadersSyncState {
         }
     }
 
-    /// Processes one received batch (`headerssync.cpp:72-149`).
-    ///
-    /// PRE: `headers` is non-empty; continuity is enforced here per
-    ///   header, not assumed from the sender; `full_message` says whether
-    ///   the batch filled the wire's maximum headers page.
-    /// POST: PRESYNC releases nothing; REDOWNLOAD releases only ordered,
-    ///   commitment-verified headers whose buffer depth has been retired. A
-    ///   returned `request_more` means the caller should continue this sync
-    ///   with `Self::next_locator`; a `Final` phase means the sync is over
-    ///   and the state is spent.
-    /// INVARIANT: returned headers are continuous, commitment-checked, and
-    ///   may be admitted only by the caller's committed-phase branch.
     pub fn process(
         &mut self,
         headers: &[Header],
         full_message: bool,
     ) -> Result<HeaderSyncResult, HeaderSyncError> {
         if headers.is_empty() {
-            // The route admits empty batches itself; a defensive no-op keeps
-            // the sync alive rather than spending it.
             return Ok(HeaderSyncResult {
                 ready_headers: Vec::new(),
                 request_more: true,
@@ -433,9 +286,6 @@ impl HeadersSyncState {
         } else {
             self.process_redownload(headers, full_message)
         };
-        // Core finalizes whenever a run will not continue
-        // (`headerssync.cpp:146`): a failure or a stopped download frees the
-        // temporary state in the same step that reports it.
         let result = match outcome {
             Ok(result) => result,
             Err(error) => {
@@ -452,16 +302,6 @@ impl HeadersSyncState {
         })
     }
 
-    /// The PRESYNC pass: minimal validation and salted commitments
-    /// (`headerssync.cpp:150-218`).
-    ///
-    /// PRE: `headers` is non-empty (the caller guards the empty batch).
-    /// POST: every header passed [`Self::validate_presync_header`] —
-    ///   which enforces continuity for each header, not just the first —
-    ///   or the first failing header's error.
-    /// INVARIANT: the crossing check runs only after the whole batch
-    ///   validated, so a batch that breaks continuity mid-way never sums
-    ///   its disconnected branch work into the REDOWNLOAD decision.
     fn process_presync(
         &mut self,
         headers: &[Header],
@@ -481,19 +321,6 @@ impl HeadersSyncState {
         })
     }
 
-    /// Validates and commits one PRESYNC header (`headerssync.cpp:172-218`).
-    ///
-    /// PRE: `header` chains onto the running cursor — its
-    ///   `prev_blockhash` equals the hash the cursor holds. Whole-batch
-    ///   continuity lives here, as Core's `CheckHeadersAreContinuous`
-    ///   keeps it out of the caller's loop
-    ///   (`net_processing.cpp:2915-2924`).
-    /// POST: the header passed continuity, the permitted difficulty
-    ///   transition, proof of work, and the commitment bound, and the
-    ///   cursor advanced onto it; or the failing check's error with the
-    ///   cursor untouched.
-    /// INVARIANT: a rejected header leaves no trace: work, bits, height,
-    ///   and the cursor are exactly their pre-call values.
     fn validate_presync_header(&mut self, header: &Header) -> Result<(), HeaderSyncError> {
         let height = self.current_height.saturating_add(1);
         if Hash256::from(header.prev_blockhash) != self.last_header_hash {
@@ -535,9 +362,6 @@ impl HeadersSyncState {
         Ok(())
     }
 
-    /// Transitions to REDOWNLOAD at the anchor: replay the same chain from
-    /// the fork point with the commitments PRESYNC collected
-    /// (`headerssync.cpp:207-216`).
     fn begin_redownload(&mut self) {
         self.redownloaded.clear();
         self.redownload_last_height = self.chain_start.height;
@@ -548,8 +372,6 @@ impl HeadersSyncState {
         self.phase = HeadersSyncPhase::Redownload;
     }
 
-    /// The REDOWNLOAD pass: commitment verification and the bounded buffer
-    /// (`headerssync.cpp:219-305`).
     fn process_redownload(
         &mut self,
         headers: &[Header],
@@ -568,9 +390,6 @@ impl HeadersSyncState {
             });
         }
         if !full_message {
-            // The peer declined to serve the full chain a second time:
-            // release whatever the buffer retired and end the sync
-            // (`headerssync.cpp:130-138`).
             return Ok(HeaderSyncResult {
                 ready_headers,
                 request_more: false,
@@ -584,8 +403,6 @@ impl HeadersSyncState {
         })
     }
 
-    /// Validates one redownloaded header and buffers it
-    /// (`headerssync.cpp:220-299`).
     fn store_redownloaded_header(&mut self, header: &Header) -> Result<(), HeaderSyncError> {
         let height = self.redownload_last_height.saturating_add(1);
         let hash = Hash256::from(header.compute_hash());
@@ -636,10 +453,6 @@ impl HeadersSyncState {
         Ok(())
     }
 
-    /// Releases headers the verified commitments cover
-    /// (`headerssync.cpp:231-249`): everything past the buffer bound, and
-    /// once the redownloaded chain itself crosses the minimum work,
-    /// everything left.
     fn pop_ready_headers(&mut self) -> Vec<Header> {
         let mut ready = Vec::new();
         let release_all = self.process_all_remaining_headers;
@@ -654,14 +467,6 @@ impl HeadersSyncState {
         ready
     }
 
-    /// The locator to continue this sync with (`headerssync.cpp:306-326`).
-    ///
-    /// PRE: the state is not `Final`.
-    /// POST: returns the sync cursor for the current phase — the last
-    ///   PRESYNC header or the last buffered REDOWNLOAD header — followed by
-    ///   the anchor's known fork locator.
-    /// INVARIANT: locator progress is monotonic within a phase: the cursor is
-    ///   the deepest header this sync has accepted.
     #[must_use]
     pub(crate) fn next_locator(&self) -> Vec<Hash256> {
         if self.phase == HeadersSyncPhase::Final {
@@ -678,11 +483,6 @@ impl HeadersSyncState {
         locator
     }
 
-    /// The height this sync has reached, for request bookkeeping and logs.
-    ///
-    /// PRE: none.
-    /// POST: returns the cursor height of the live phase, or the height the
-    ///   peer demonstrated once spent.
     #[must_use]
     pub(crate) const fn sync_height(&self) -> u32 {
         match self.phase {
@@ -692,20 +492,12 @@ impl HeadersSyncState {
         }
     }
 
-    /// The live phase, for tests and logs.
     #[must_use]
     #[cfg(test)]
     pub(crate) const fn phase(&self) -> HeadersSyncPhase {
         self.phase
     }
 
-    /// Releases all temporary state and spends the sync (`headerssync.cpp:52-66`).
-    ///
-    /// PRE: none (idempotent).
-    /// POST: the state is `Final`, every commitment and buffered header is
-    ///   dropped, and the salt is never reused: the caller must discard this
-    ///   state and construct a fresh one for any later sync.
-    /// INVARIANT: no temporary header remains retained after finalization.
     pub fn finalize(&mut self) {
         if self.phase == HeadersSyncPhase::Final {
             return;
@@ -720,8 +512,6 @@ impl HeadersSyncState {
         self.phase = HeadersSyncPhase::Final;
     }
 
-    /// The salted one-bit commitment for one header hash
-    /// (`headerssync.h:211-216`: a salted hasher reduced to its low bit).
     pub(super) fn commitment_bit(&self, hash: Hash256) -> bool {
         let mut digest = Sha256::new();
         digest.update(self.salt);
@@ -729,8 +519,6 @@ impl HeadersSyncState {
         digest.finalize()[0] & 1 == 1
     }
 
-    /// The first height at or above `from` whose header carries a salted
-    /// commitment, for tests that must substitute exactly one of those.
     #[must_use]
     #[cfg(test)]
     pub(crate) const fn first_commitment_height(&self, from: u32) -> u32 {

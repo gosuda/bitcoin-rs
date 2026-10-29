@@ -224,8 +224,6 @@ fn pruning_reservations_and_expired_leases_keep_typed_failures() -> Result {
             below: 300
         }))
     ));
-    // A retained body can still be returned without inputs after undo history
-    // was pruned. The two consumers retain the explicit unavailability reason.
     assert!(matches!(
         f.chain.block_spends(queried, tip(&f.chain)?)?.spent,
         Err(HistoryUnavailable::Pruned { below: 300 })
@@ -287,8 +285,6 @@ fn certification_budget_stops_a_deep_side_anchor_before_body_io() -> Result {
         for height in 1..=4101 {
             let mut header = mined_regtest_header(previous, height)?;
             header.version = 5;
-            // Synthetic header admission is enough to choose a distinct best
-            // header branch; this test does not claim PoW/consensus evidence.
             let id = tree.insert_header(header, NodeStatus::HeaderValid)?;
             previous = tree.node(id)?.hash.into();
         }
@@ -308,7 +304,6 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Re
     let first = &f.blocks[1].txs[0];
     let input = |tx: &Tx, vout| TxIn {
         previous_output: OutPoint::new(tx.txid(), vout),
-        // The fixture outputs have empty scripts, so the input supplies true.
         script_sig: Script::from_bytes(vec![0x51]),
         sequence: Sequence::MAX,
         witness: Witness::new(),
@@ -316,7 +311,6 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Re
     let parent = Tx {
         version: 2,
         lock_time: LockTime::ZERO,
-        // Reverse historical height order to catch sorting by undo/height.
         inputs: vec![input(second, 0), input(first, 0)],
         outputs: vec![
             TxOut {
@@ -332,7 +326,6 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Re
     let child = Tx {
         version: 2,
         lock_time: LockTime::ZERO,
-        // Same-block inputs are absent from net undo; preserve vout order too.
         inputs: vec![input(&parent, 1), input(&parent, 0)],
         outputs: vec![TxOut {
             value: Amount::from_sat(9_999_998_000),
@@ -394,8 +387,6 @@ fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Res
     f.bodies
         .persist_block_body(1, hash(original), &consensus_bytes(original))?;
 
-    // BIP141: a coinbase-only witness root is zero. This independent vector is
-    // SHA256d(00*32 || 00*32), with a zero reserved witness value.
     let commitment = [
         0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69, 0x53,
         0x75, 0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e,
@@ -450,9 +441,6 @@ fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalik
             ),
         });
         let block = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![cb])?;
-        // This is a synthetic retained-body query; header insertion does not
-        // claim mainnet PoW or block admission. Activation comes from the real
-        // network's deployment owner at the queried header's height.
         chain
             .block_tree
             .write()
@@ -482,18 +470,12 @@ fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -
     let id = {
         let mut tree = chain.block_tree.write();
         let id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
-        // Keep a distinct, longer header branch indexed so the queried node
-        // is truly off-header-chain, even after its synthetic height changes.
         let mut competing = block.header;
         competing.nonce = competing.nonce.wrapping_add(1);
         let sibling = tree.insert_header(competing, NodeStatus::HeaderValid)?;
         competing.prev_blockhash = tree.node(sibling)?.hash.into();
         let competing_tip = tree.insert_header(competing, NodeStatus::HeaderValid)?;
         assert_eq!(tree.tip_id(), Some(competing_tip));
-        // The query owner refuses over two million off-header-chain ancestor
-        // IDs before traversal/allocation. A synthetic height isolates this
-        // refusal without constructing millions of headers or claiming a
-        // consensus-valid chain.
         tree.node_mut(id)?.height = 2_000_000;
         id
     };
@@ -501,8 +483,6 @@ fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -
         bitcoin_rs_chain::deployment_statuses(&chain.block_tree.read(), Network::Mainnet, Some(id)),
         Err(bitcoin_rs_chain::DeploymentQueryError::Budget { .. })
     ));
-    // Certification has no ancestor at the requested height. Missing bodies
-    // must keep their typed failure without attempting deployment history.
     assert!(matches!(
         chain.block_spends(hash(&block), tip(&chain)?),
         Err(BlockSpendsError::History(HistoryUnavailable::Missing))
@@ -512,8 +492,6 @@ fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -
         chain.block_spends(hash(&block), tip(&chain)?),
         Err(BlockSpendsError::ResourceLimit)
     ));
-    // Within the work budget, malformed ancestry is an integrity failure,
-    // not resource exhaustion or ordinary unavailable history.
     chain.block_tree.write().node_mut(id)?.height = 2;
     bodies.persist_block_body(2, hash(&block), &consensus_bytes(&block))?;
     assert!(matches!(

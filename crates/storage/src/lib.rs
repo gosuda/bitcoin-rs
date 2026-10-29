@@ -30,11 +30,12 @@ pub use pruning::{MandatoryRetention, RetentionError, RetentionLease, RetentionR
 
 /// Opaque ownership token a store keeps until its engine handle is closed.
 ///
-/// Each file-owning store carries it as its last field, so it drops only after
-/// the engine (or file) handle has closed. The node hands every store its
-/// data-directory lock this way: the lock then lives exactly as long as the
-/// last handle that can still write the directory, whoever retains that
-/// handle. Storage never inspects the token.
+/// Each file-owning store carries it as its last field, so it drops only after the
+/// engine (or file) handle has closed.
+///
+/// The node hands every store its data-directory lock this way: the lock then lives
+/// exactly as long as the last handle that can still write the directory, whoever
+/// retains that handle. Storage never inspects the token.
 pub type StoreGuard = std::sync::Arc<dyn core::any::Any + Send + Sync>;
 
 pub use durable_head::{
@@ -54,14 +55,10 @@ pub use redb_impl::{
 #[cfg(feature = "rocksdb")]
 pub use rocksdb_impl::{ROCKSDB_DEFAULT_CACHE_BYTES, RocksDbStore};
 
-/// Selectable storage backend.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StorageBackend {
-    /// `RocksDB`.
     RocksDb,
-    /// `Fjall`.
     Fjall,
-    /// `redb`.
     Redb,
 }
 
@@ -107,27 +104,16 @@ impl fmt::Display for StorageBackend {
 }
 
 pub mod assumeutxo;
-/// Ordered atomic write batches shared by every backend.
 mod batch;
-/// Indexed authoritative block bodies and read sessions.
 pub mod block_body;
-/// Append-only flat files for immutable block bodies.
 mod block_file;
-/// Process cache-budget division shared by the storage backends.
 pub mod cache_budget;
-/// Logical column-family names shared by all storage backends.
 mod column_families;
-/// Durable chain head record and its atomic commit boundary.
 pub mod durable_head;
-/// Storage error type.
 mod error;
-/// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
-/// Durable rollback-evidence sidecars and the warning snapshot.
 pub mod recovery_evidence;
-/// Backend-neutral key-value store traits.
 mod trait_;
-/// Per-block UTXO undo records and the in-flight disconnect marker.
 pub mod undo;
 
 #[cfg(feature = "fjall")]

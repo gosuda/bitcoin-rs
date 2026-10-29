@@ -1,5 +1,3 @@
-//! Process-level crash and upgrade compatibility tests for chainstate recovery.
-
 use anyhow::{Context as _, Result, bail};
 
 use bitcoin_rs_chain::regtest_fixture;
@@ -31,10 +29,6 @@ fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
     }
     Ok(())
 }
-/// A rolled-back disconnect marker that survives the kill no longer
-/// refuses startup: reopening reconciles the durable head — the disconnect
-/// parent — onto the restored state, publishes a clean checkpoint, and
-/// retires the marker only after that publication.
 #[test]
 fn torn_disconnect_replays_parent_tip() -> Result<()> {
     let (_temp, _config, state) = run_marker_scenario("disconnect-rolledback")?;
@@ -54,9 +48,6 @@ fn torn_disconnect_replays_parent_tip() -> Result<()> {
     Ok(())
 }
 
-/// A durable head that still names the disconnected block — the kill beat
-/// the rollback — is certified by the head: recovery replays the restored
-/// (possibly stale) state up to it and retires the marker.
 #[test]
 fn torn_disconnect_cold_replays_head() -> Result<()> {
     let (_temp, _config, state) = run_marker_scenario("inflight-cold")?;
@@ -77,12 +68,6 @@ fn torn_disconnect_cold_replays_head() -> Result<()> {
     Ok(())
 }
 
-/// A checkpoint published above the block the disconnect rewinds past
-/// restores at or above the rewound durable head. That is a stale
-/// checkpoint, not divergence: recovery rolls the restored coins back to
-/// the head the batch certified — the Core `ReplayBlocks`
-/// roll-back-to-fork-point shape — then warns with the recovery mode,
-/// publishes a clean checkpoint, and retires the marker.
 #[test]
 fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
     let log = SharedLog::default();
@@ -121,9 +106,6 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
         .load()?
         .context("the durable head must survive recovery")?;
     drop(state);
-    // The refusal this defect produced repeated on every restart. A second
-    // restart must come up on the repaired checkpoint, with no marker and no
-    // new recovery work.
     let reopened =
         NodeState::open(config, None).context("reopening after completed recovery must succeed")?;
     assert_eq!(
@@ -149,14 +131,8 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
     Ok(())
 }
 
-/// A checkpoint far below the durable head is a replay base, not a
-/// refusal: reopening replays a whole authenticated gap one block wider
-/// than a commit group, lands on the durable head, and leaves the head
-/// untouched.
 #[test]
 fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
-    // The durable head commits one group of 64 blocks; this gap exceeds
-    // one group by one.
     const GAP_BLOCKS: u32 = 65;
     let temp = tempfile::tempdir()?;
     let mut config = test_config(temp.path().join("node"));
@@ -197,9 +173,6 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     Ok(())
 }
 
-/// The executed prune frontier is a durable fact, not process state: after a
-/// SIGKILL the restarted node still observes the exact boundary committed by
-/// the killed process: deleted rows stay gone and retained rows remain.
 #[test]
 fn pruned_frontier_survives_sigkill_and_preserves_boundary() -> Result<()> {
     const FRONTIER: u32 = 12;
@@ -331,16 +304,12 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
                 block1.clone(),
             ))?;
-            // The rollback completes; the kill arrives before any
-            // publication clears the marker.
             state.chainstate().disconnect_block(&block1)?;
         }
         "inflight-cold" => {
             state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
                 block1.clone(),
             ))?;
-            // The durable head still names this block: recovery replays
-            // the certified chain onto the restored state and retires it.
             state
                 .undo_store()
                 .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
@@ -349,18 +318,10 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
                 block1.clone(),
             ))?;
-            // The checkpoint lands above the block the disconnect then
-            // rewinds past: the restored tip sits at or above the durable
-            // head.
             state.publish_checkpoint()?;
-            // The rollback completes; the journal is disabled, so nothing
-            // clears the marker on the way down.
             state.chainstate().disconnect_block(&block1)?;
         }
         "prune" => {
-            // A chain long enough that the durable checkpoint leaves a real
-            // deletion range below the Core reorg margin, then one manual
-            // prune whose frontier must outlive the process.
             state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
                 genesis.clone(),
             ))?;
@@ -417,8 +378,6 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     assert_eq!(tip.hash, expected_hash, "scenario {scenario}");
     Ok(())
 }
-/// Spawns the parked crash worker for `scenario` against `data_dir`, waits
-/// for its ready marker, SIGKILLs it, and asserts it did not exit cleanly.
 fn spawn_and_kill_worker(scenario: &str, data_dir: &Path, ready_after: Duration) -> Result<()> {
     let executable = std::env::current_exe()?;
     let mut child = Command::new(executable)
@@ -464,9 +423,6 @@ fn spawn_and_kill_worker(scenario: &str, data_dir: &Path, ready_after: Duration)
     Ok(())
 }
 
-/// The scenario's node config. A marker that survives the kill must not be
-/// disarmed by journal rewind on the way down, so the marker scenarios run
-/// without the journal.
 fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
     let mut config = test_config(data_dir);
     if matches!(
@@ -478,8 +434,6 @@ fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
     config
 }
 
-/// Build the checkpointed base, let a parked child drive the node to the
-/// marker state and die to `SIGKILL`, then reopen in this process.
 fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig, NodeState)> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join(format!("{scenario}-node"));
@@ -517,10 +471,6 @@ impl std::io::Write for SharedLog {
     }
 }
 
-/// Captures `tracing` events for one assertion. Each nextest test runs in
-/// its own process, so the global subscriber set here sees only this
-/// test's events; under plain `cargo test` an already-set subscriber wins
-/// and is ignored.
 fn install_log_capture(log: SharedLog) {
     let _already_set = tracing::subscriber::set_global_default(
         tracing_subscriber::fmt()
@@ -536,8 +486,6 @@ fn read_stderr(mut stderr: std::process::ChildStderr) -> std::io::Result<String>
     stderr.read_to_string(&mut output)?;
     Ok(output)
 }
-/// Spawns the ignored child worker for `scenario`, waits until it reports
-/// readiness, then kills it and proves it died by signal rather than exiting.
 fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> {
     let executable = std::env::current_exe()?;
     let mut child = Command::new(executable)
@@ -606,7 +554,6 @@ fn test_config(data_dir: PathBuf) -> NodeConfig {
     config
 }
 
-/// The same configuration with the manual prune service enabled.
 fn prune_test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = test_config(data_dir);
     config.storage.prune_target_mb = 1;
@@ -655,9 +602,6 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
     Ok(block)
 }
 
-/// The coinbase push that names `height` in the script-number encoding BIP34
-/// requires: little-endian magnitude, minimal length, with a leading `0x00`
-/// byte whenever the top magnitude bit is set so the value stays positive.
 fn coinbase_height_push(height: u32) -> Result<Vec<u8>> {
     let mut bytes = height.to_le_bytes().to_vec();
     while bytes.len() > 1 && bytes.last() == Some(&0) {

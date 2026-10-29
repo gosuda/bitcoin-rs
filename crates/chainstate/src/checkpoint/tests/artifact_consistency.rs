@@ -1,5 +1,6 @@
 use super::*;
 
+/// The applied tip carries the count the checkpoint writes.
 #[test]
 fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn std::error::Error>> {
     for chain_tx_count in [0, 1] {
@@ -7,7 +8,6 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
         let (tree, _, applied) = chain_with_applied_height(0, 0)?;
         let applied_tip = tip_snapshot(&tree, applied)?;
         let tree = RwLock::new(tree);
-        // The applied tip carries the count the checkpoint writes.
         let applied_tip = bitcoin_rs_chain::TipSnapshot {
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::from_wire(chain_tx_count),
             ..applied_tip
@@ -71,15 +71,15 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts()
     Ok(())
 }
 
+/// The ordering claim needs a count disagreement to actually exist: an
+/// UNKNOWN tip count is skipped by validation, which would report the
+/// height error even if count validation ran first.
 #[test]
 fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
-    // The ordering claim needs a count disagreement to actually exist: an
-    // UNKNOWN tip count is skipped by validation, which would report the
-    // height error even if count validation ran first.
     let applied_tip = bitcoin_rs_chain::TipSnapshot {
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(2),
         ..applied_tip
@@ -131,12 +131,13 @@ fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// The offsets below are the checkpoint envelope (16 bytes) followed by the
-/// stable `CoinStats::to_bytes` layout defined in
-/// `crates/utxo/src/stats/coin_stats.rs`: `MuHash` numerator/denominator, then
-/// height, total amount, bogo size, transaction count, and UTXO count.
-/// The `full resync` assertion is the checkpoint recovery contract documented
-/// in `docs/policies/db-migration.md` and exercised by the loader.
+/// The offsets below are the checkpoint envelope (16 bytes) followed by the stable
+/// `CoinStats::to_bytes` layout defined in `crates/utxo/src/stats/coin_stats.rs`:
+/// `MuHash` numerator/denominator, then height, total amount, bogo size, transaction
+/// count, and UTXO count.
+///
+/// The `full resync` assertion is the checkpoint recovery contract documented in
+/// `docs/policies/db-migration.md` and exercised by the loader.
 #[test]
 fn authenticated_coinstats_semantics_require_resync() -> Result<(), Box<dyn std::error::Error>> {
     const COINSTATS_ENVELOPE_BYTES: usize = 16;
@@ -204,14 +205,14 @@ fn authenticated_utxo_value_mutation_requires_resync() -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// Fused traversal over live coins disagrees with a stale listener:
+/// publication proceeds exactly as before, but no witness is minted.
 #[test]
 fn publish_gate_withholds_token_on_fused_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(2, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
     let data_dir = super::super::open_data_dir(dir.path())?;
-    // Fused traversal over live coins disagrees with a stale listener:
-    // publication proceeds exactly as before, but no witness is minted.
     let (write, witness) = super::super::write_checkpoint_from_dir(
         &data_dir,
         config(),
@@ -225,7 +226,6 @@ fn publish_gate_withholds_token_on_fused_mismatch() -> Result<(), Box<dyn std::e
         witness.is_none(),
         "fused mismatch must withhold the seed witness"
     );
-    // Control: an empty set with a matching empty listener passes the gate.
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -269,24 +269,18 @@ fn publish_swap_between_commit_and_open_yields_integrity() -> Result<(), Box<dyn
     let Some(witness) = witness else {
         return Err("full gate unexpectedly withheld the seed witness".into());
     };
-    // Swap the committed bytes between commit and the post-commit open,
-    // keeping the length so the byte_len pre-check still passes. The manifest
-    // is re-authenticated over the swapped bytes, mirroring a substitution
-    // the pre-pass hash cannot see.
     mutate_authenticated_artifact(dir.path(), UTXO_FILE, |bytes| {
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
     })?;
     let root = dir.path().join(CHECKPOINT_ROOT);
-    let current: CurrentV1 = serde_json::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     let artifact_path = root.join(&current.directory).join(UTXO_FILE);
     assert_eq!(fs::metadata(&artifact_path)?.len(), witness.byte_len());
-    // The load falls back exactly as it does for any post-commit corruption.
     let Err(error) = load_checkpoint(dir.path(), config()) else {
         return Err("swapped checkpoint bytes unexpectedly loaded".into());
     };
     assert!(error.to_string().contains("full resync"));
-    // The sealed descriptor over the swapped bytes gives Integrity, never coins.
     let file = fs::File::open(&artifact_path)?;
     let mut seed =
         VerifiedSnapshotArtifact::seal(file, witness, SeedProvenance::Checkpoint(reference));

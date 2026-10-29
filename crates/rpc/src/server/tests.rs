@@ -138,7 +138,6 @@ fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
 
 #[test]
 fn connection_admission_reserves_slots_for_other_peers() {
-    // Loopback gets no special treatment: it is one source like any other.
     let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
     let mut active = ActiveConnections::default();
@@ -163,8 +162,6 @@ fn connection_admission_reserves_slots_for_other_peers() {
     assert!(!small_pool.admit(source, 4));
     assert!(small_pool.admit(other, 4));
 
-    // Below four workers no share is kept: one client can hold a blocking
-    // call and still reach the ordinary slot the quota leaves it.
     let mut two_slots = ActiveConnections::default();
     assert!(two_slots.admit(source, 2));
     assert!(two_slots.admit(source, 2));
@@ -197,8 +194,6 @@ fn getutxos_post_preserves_http_security_and_limits() -> std::io::Result<()> {
         assert!(rest_wire_request(request.as_bytes(), true)?.starts_with(b"HTTP/1.1 400 "));
     }
     for (enabled, expected) in [(true, 400), (false, 404)] {
-        // Deliberately send no body: receiving an answer proves the cap
-        // was enforced before the body read.
         let response = rest_wire_request(b"POST /rest/getutxos.hex?cache=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2049\r\nConnection: keep-alive\r\n\r\n", enabled)?;
         assert!(response.starts_with(format!("HTTP/1.1 {expected} ").as_bytes()));
         let text = String::from_utf8_lossy(&response);
@@ -223,22 +218,54 @@ fn prepare_http_socket_disables_nagle() {
 #[test]
 #[expect(clippy::expect_used)]
 fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
-    let auth = Arc::new(Auth::basic("alice", "secret"));
-    let handler = Arc::new(Handler::new(Arc::new(Context::new())));
-    let server = RpcServer::bind(
-        "127.0.0.1:0",
-        auth,
-        handler,
-        4,
-        core::time::Duration::from_millis(500),
-        false,
-    )?;
+    let server = accept_test_server()?;
+    let handler = Arc::clone(&server.handler);
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
-    let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
-    std::thread::sleep(core::time::Duration::from_millis(150));
+    let (parked, ready) = crossbeam_channel::bounded(1);
+    let handle = thread::spawn(move || {
+        server.serve_accept_loop(&shutdown_clone.into(), RpcSurface::Shared, |listener| {
+            let result = listener.accept();
+            if result
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+            {
+                let _ = parked.try_send(());
+            }
+            result
+        })
+    });
+    ready
+        .recv_timeout(Duration::from_secs(3))
+        .expect("idle accept");
+    thread::sleep(Duration::from_millis(45));
+    let start = Instant::now();
     shutdown.store(true, Ordering::Release);
-    handle.join().expect("join serve thread")
+    handle.join().expect("join serve thread")?;
+    let elapsed = start.elapsed();
+    eprintln!("idle RPC listener shutdown: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(80),
+        "idle shutdown took {elapsed:?}"
+    );
+    assert!(handler.is_stopping());
+    Ok(())
+}
+
+#[test]
+fn shutdown_before_serving_does_not_admit_a_queued_connection() -> io::Result<()> {
+    let server = accept_test_server()?;
+    let handler = Arc::clone(&server.handler);
+    let _queued = TcpStream::connect(server.local_addr()?)?;
+    let shutdown = Arc::new(AtomicBool::new(true));
+    let mut attempts = 0;
+    server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |listener| {
+        attempts += 1;
+        listener.accept()
+    })?;
+    assert_eq!(attempts, 0);
+    assert!(handler.is_stopping());
+    Ok(())
 }
 
 #[test]
@@ -376,8 +403,6 @@ fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
         .nth(1)
         .and_then(|token| token.parse().ok())
         .expect("HTTP status");
-    // The connection-level framing error surfaces as a bad-request-class
-    // response before any JSON-RPC authentication or parsing runs.
     assert!(
         (400..500).contains(&code) && code != 401,
         "expected a framing error status, got {code}"
@@ -405,9 +430,6 @@ fn read_fed_request(
     });
     let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(3)));
     let result = read_whole_request(&mut reader, Duration::from_secs(3), Duration::from_secs(3));
-    // Close the server end first: after a failed read, a writer blocked on
-    // a full socket buffer would otherwise never return. The writer's
-    // resulting error must not hide the read's.
     drop(reader);
     let written = writer.join().expect("writer thread");
     if result.is_ok() {
@@ -646,9 +668,6 @@ fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
     Ok(())
 }
 
-// CONTRACT: docs/contracts/external-api.md#API-02 — the envelope rules
-// follow the pinned Core 31.1 parser (`src/rpc/request.cpp:206-260`) and
-// its legacy HTTP mapping (`src/httprpc.cpp:41-56`).
 #[test]
 fn non_string_jsonrpc_version_is_an_invalid_request() {
     let handler = Handler::new(Arc::new(Context::new()));
@@ -713,8 +732,6 @@ fn unsupported_jsonrpc_version_is_an_invalid_request() {
 
 #[test]
 fn json_rpc_1_0_remains_accepted_as_legacy() {
-    // Core keeps the historical `{"jsonrpc":"1.0"}` form as legacy
-    // (`request.cpp:216-224`); it must not become an invalid request.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -755,10 +772,6 @@ fn non_array_or_object_params_are_an_invalid_request() {
 
 #[test]
 fn a_rejected_envelope_never_dispatches_the_method() {
-    // Dispatch probe: `setnetworkactive` mutates a Context-owned flag,
-    // so execution is observable outside the reply. A malformed envelope
-    // must produce -32600 and leave the flag untouched — a discarded
-    // dispatch would still show up here even if the -32600 replaced it.
     let handler = Handler::new(Arc::new(Context::new()));
     let executed = handle_json(
         &handler,
@@ -798,8 +811,6 @@ fn a_rejected_envelope_never_dispatches_the_method() {
 
 #[test]
 fn an_empty_batch_answers_an_empty_ok_batch() {
-    // Core's batch reply path produces an empty array for an empty
-    // batch (`httprpc.cpp`): HTTP 200 with `[]`.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(&handler, b"[]");
     let body = response.body.expect("empty batch replies");
@@ -810,8 +821,6 @@ fn an_empty_batch_answers_an_empty_ok_batch() {
 
 #[test]
 fn a_top_level_scalar_is_a_parse_error() {
-    // Core's final `else` in `HTTPReq_JSONRPC` answers `RPC_PARSE_ERROR`
-    // (-32700) "Top-level object parse error" at HTTP 500 with a null id.
     let handler = Handler::new(Arc::new(Context::new()));
     for request in [br"5".as_slice(), br#""x""#.as_slice()] {
         let response = handle_json(&handler, request);
@@ -841,10 +850,6 @@ fn a_top_level_scalar_is_a_parse_error() {
 
 #[test]
 fn json_rpc_2_method_and_params_envelope_errors_answer_400() {
-    // parse() has already accepted `"2.0"` when method/params validation
-    // throws, so the body keeps the v2 envelope while the status is the
-    // 400 every envelope refusal takes (`httprpc.cpp`). `"method":null`
-    // is "Missing method": Core checks `isNull()` before `isStr()`.
     let handler = Handler::new(Arc::new(Context::new()));
     for (request, message) in [
         (
@@ -892,8 +897,6 @@ fn json_rpc_2_method_and_params_envelope_errors_answer_400() {
 
 #[test]
 fn an_all_notification_batch_answers_204() {
-    // A non-empty batch whose members are all valid v2 notifications has
-    // no reply rows, so Core answers HTTP 204 (`httprpc.cpp:219-227`).
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -909,8 +912,6 @@ fn an_all_notification_batch_answers_204() {
 
 #[test]
 fn legacy_invalid_request_maps_to_http_400() {
-    // A legacy request whose method is not a string is a -32600, which
-    // Core answers with HTTP 400 (`httprpc.cpp:47-53`).
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(&handler, br#"{"id":1,"method":7,"params":[]}"#);
     assert_eq!(response.status, 400, "legacy -32600 maps to HTTP 400");
@@ -918,8 +919,6 @@ fn legacy_invalid_request_maps_to_http_400() {
 
 #[test]
 fn legacy_method_not_found_maps_to_http_404() {
-    // Core maps RPC_METHOD_NOT_FOUND to HTTP 404 for legacy requests
-    // (`httprpc.cpp:51-53`); this previously answered 500.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(&handler, br#"{"id":1,"method":"missing","params":[]}"#);
     assert_eq!(response.status, 404, "legacy -32601 maps to HTTP 404");
@@ -927,7 +926,6 @@ fn legacy_method_not_found_maps_to_http_404() {
 
 #[test]
 fn legacy_other_errors_keep_http_500() {
-    // Everything except -32600 and -32601 stays 500 for legacy requests.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(&handler, br#"{"id":1,"method":"getblock","params":[]}"#);
     assert_eq!(response.status, 500, "legacy -32602 keeps HTTP 500");
@@ -935,9 +933,6 @@ fn legacy_other_errors_keep_http_500() {
 
 #[test]
 fn json_rpc_2_dispatch_errors_still_answer_http_200() {
-    // Core keeps *dispatch* errors inside HTTP 200 for a v2 request
-    // (`httprpc.cpp:118-124`); only envelope failures, which happen
-    // before the version is trusted, take the legacy HTTP status.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -957,9 +952,6 @@ fn json_rpc_2_dispatch_errors_still_answer_http_200() {
 
 #[test]
 fn json_rpc_2_envelope_error_uses_the_legacy_status() {
-    // A malformed envelope is refused while classifying `jsonrpc`, before
-    // the claimed version is trusted, so it takes the legacy HTTP mapping
-    // and envelope shape (`request.cpp:206-224`, `httprpc.cpp:41-56`).
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -973,10 +965,6 @@ fn json_rpc_2_envelope_error_uses_the_legacy_status() {
 
 #[test]
 fn json_rpc_2_post_classification_error_keeps_the_v2_envelope() {
-    // Core's parser assigns the version before checking method/params
-    // (`request.cpp:211-231`), so a v2 request rejected later still
-    // replies in the v2 envelope — but the outer error path answers
-    // HTTP 400, not the dialect's 200 (`httprpc.cpp:189-194`).
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -1001,9 +989,6 @@ fn json_rpc_2_post_classification_error_keeps_the_v2_envelope() {
 
 #[test]
 fn an_explicit_null_method_is_missing() {
-    // Core checks `valMethod.isNull()` before its string check
-    // (`request.cpp:226-229`), so `"method":null` is "Missing method",
-    // not "Method must be a string".
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -1022,9 +1007,6 @@ fn an_explicit_null_method_is_missing() {
 
 #[test]
 fn absent_and_null_params_dispatch_as_an_empty_array() {
-    // Core canonicalizes absent and explicit-null params to `[]` before
-    // dispatch (`request.cpp:243-248`), so no-argument methods apply
-    // their defaults instead of failing on the null.
     let handler = Handler::new(Arc::new(Context::new()));
     for request in [
         br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount"}"#.as_slice(),
@@ -1042,9 +1024,6 @@ fn absent_and_null_params_dispatch_as_an_empty_array() {
 
 #[test]
 fn batch_members_keep_per_member_envelope_dialect() {
-    // Batch members are parsed independently by Core
-    // (`httprpc.cpp:200-215`), so a v2 member and a legacy member in one
-    // batch keep their own envelopes even when a sibling is malformed.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -1070,9 +1049,6 @@ fn batch_members_keep_per_member_envelope_dialect() {
 
 #[test]
 fn notification_with_a_malformed_envelope_is_not_executed() {
-    // A rejected envelope must not run, so a notification cannot silently
-    // cause work: the response is an error, not the 204 a notification
-    // would produce.
     let handler = Handler::new(Arc::new(Context::new()));
     let response = handle_json(
         &handler,
@@ -1186,9 +1162,11 @@ struct Exchange {
     served: io::Result<()>,
 }
 
-/// Serves one loopback connection with `serve_connection`, writes `request`
-/// and nothing more, and reports what the client saw. The client keeps its
-/// side open until the response ends, as a client still uploading would.
+/// Serves one loopback connection with `serve_connection`, writes `request` and nothing
+/// more, and reports what the client saw.
+///
+/// The client keeps its side open until the response ends, as a client still uploading
+/// would.
 fn exchange(request: &[u8]) -> io::Result<Exchange> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut client = TcpStream::connect(listener.local_addr()?)?;
@@ -1252,9 +1230,10 @@ fn json_rpc_head(token: Option<&str>, content_length: usize) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A JSON-RPC request without valid credentials is answered from its head:
-/// the client withholds all 16 MiB it declared and still gets Core's exact
-/// 401 and a FIN. A wrong password waits out Core's brute-force delay first.
+/// A JSON-RPC request without valid credentials is answered from its head: the client
+/// withholds all 16 MiB it declared and still gets Core's exact 401 and a FIN.
+///
+/// A wrong password waits out Core's brute-force delay first.
 #[test]
 fn unauthorized_json_rpc_is_answered_from_the_head_with_core_s_tuple() -> io::Result<()> {
     for (token, delayed) in [(None, false), (Some(BAD_TOKEN), true)] {
@@ -1333,11 +1312,12 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
     Ok(())
 }
 
-/// Runs the unauthorized path on the server side of one loopback pair and
-/// returns the client's view of the response plus the next `take` bytes
-/// the server reads once the handler returns. The server thread starts
-/// first and reads while the client writes, so neither side waits on a
-/// buffer the other has not drained.
+/// Runs the unauthorized path on the server side of one loopback pair and returns the
+/// client's view of the response plus the next `take` bytes the server reads once the
+/// handler returns.
+///
+/// The server thread starts first and reads while the client writes, so neither side
+/// waits on a buffer the other has not drained.
 fn serve_unauthorized(request: &[u8], take: usize) -> io::Result<(String, Vec<u8>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -1472,8 +1452,61 @@ fn accept_test_server() -> io::Result<RpcServer> {
     )
 }
 
-// Inject at the syscall boundary, without exhausting the test process's
-// descriptors. The listener and subsequent HTTP worker remain real.
+/// Arrival phases start after a real `WouldBlock`, so the former 100-ms sleep
+/// cannot hide behind a connection queued before the accept thread started.
+#[test]
+fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
+    let server = accept_test_server()?;
+    let addr = server.local_addr()?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&shutdown);
+    let (idle_tx, idle_rx) = crossbeam_channel::bounded(1);
+    let (accepted_tx, accepted_rx) = crossbeam_channel::unbounded();
+    let handle = thread::spawn(move || {
+        server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
+            let result = listener.accept();
+            match &result {
+                Ok(_) => {
+                    let _ = accepted_tx.send(Instant::now());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    let _ = idle_tx.try_send(());
+                }
+                Err(_) => {}
+            }
+            result
+        })
+    });
+    let result = (|| -> io::Result<Vec<Duration>> {
+        let mut latencies = Vec::new();
+        for phase in [0, 13, 37, 61, 89] {
+            idle_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("idle listener");
+            thread::sleep(Duration::from_millis(phase));
+            let start = Instant::now();
+            let client = TcpStream::connect(addr)?;
+            let accepted = accepted_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("accepted connection");
+            latencies.push(accepted.duration_since(start));
+            drop(client);
+        }
+        Ok(latencies)
+    })();
+    shutdown.store(true, Ordering::Release);
+    handle.join().expect("accept thread")?;
+    let latencies = result?;
+    eprintln!("new-connection accept delays at phases 0/13/37/61/89 ms: {latencies:?}");
+    assert!(
+        latencies
+            .iter()
+            .all(|latency| *latency < Duration::from_millis(80)),
+        "new connections waited on an idle accept cadence: {latencies:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
     let server = accept_test_server()?;
@@ -1501,14 +1534,14 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
             errors.push(error);
         }
         #[cfg(windows)]
-        errors.push(io::Error::from_raw_os_error(10024)); // WSAEMFILE
+        errors.push(io::Error::from_raw_os_error(10024));
         let mut errors = errors.into_iter();
         let start = Instant::now();
         server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
             if let Some(error) = errors.next() {
                 return Err(error);
             }
-            assert!(start.elapsed() >= POLL_INTERVAL * 3);
+            assert!(start.elapsed() >= ACCEPT_ERROR_BACKOFF * 3);
             listener.accept()
         })
     });
@@ -1543,7 +1576,7 @@ fn repeated_accept_errors_back_off_and_observe_shutdown() -> io::Result<()> {
         Err(io::Error::other("resource temporarily exhausted"))
     })?;
     assert_eq!(attempts, 3);
-    assert!(start.elapsed() >= POLL_INTERVAL * 3);
+    assert!(start.elapsed() >= ACCEPT_ERROR_BACKOFF * 3);
     Ok(())
 }
 

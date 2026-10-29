@@ -1,8 +1,7 @@
-//! Mined regtest fixtures shared by manual process-boundary reproductions.
 use bitcoin::hashes::Hash;
 use bitcoin::{Block, BlockHash, OutPoint, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::ProcessNode;
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 use std::error::Error;
 use std::time::{Duration, Instant};
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -44,9 +43,6 @@ pub(super) fn block(prev: BlockHash, time: u32, txdata: Vec<Transaction>) -> Res
 }
 
 pub(super) fn submit(node: &ProcessNode, block: &Block) -> Result {
-    // Bulk fixture bodies would exceed the process journal's 64 MiB bound.
-    // Keep process custody and the common RPC transport; journal compact
-    // block identities here instead of copying 140 MiB of generated hex.
     let result = bitcoin_rs_e2e::rpc::Connection::new(node.rpc_addr).rpc(
         &json!({"jsonrpc":"2.0","id":1,"method":"submitblock","params":[bitcoin::consensus::encode::serialize_hex(block)]}),
         ("parity", "parity"), Instant::now() + Duration::from_secs(60),

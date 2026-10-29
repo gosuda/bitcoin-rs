@@ -1,19 +1,6 @@
 //! Job projection, extranonce allocation, and the single share predicate.
-//!
-//! One [`JobBook`] owns every fact a Stratum V1 or V2 adapter needs about
-//! work it handed to miners: the coinbase split around the extranonce, the
-//! merkle branch, the header template, bounded job retention, bounded session
-//! identity, stale state, and duplicate state. The template itself is built by
-//! `MiningControl`; a block is validated by `MiningControl`. Money, keys, and
-//! difficulty policy are inputs, never state, here.
-//!
-//! Invariants:
 //! - `coinbase_prefix || session || rolled || coinbase_suffix` is the exact
 //!   non-witness (txid) serialization of the coinbase the block will carry.
-//! - A job never grows its candidate's coinbase beyond the declared
-//!   [`CoinbaseBudget`]: scriptSig growth stays under the 100-byte consensus
-//!   limit, extra outputs stay inside the budget's size and sigop allowance,
-//!   and `Candidate::admits` (the owner's rule) passes for the budget.
 //! - A stale job is never revived.
 
 use std::collections::{HashMap, VecDeque};
@@ -37,51 +24,36 @@ use compact_str::CompactString;
 use ruint::Uint;
 use thiserror::Error;
 
-/// Consensus limit on a coinbase scriptSig length (`bad-cb-length`).
-///
-/// Canonical value is [`CoinbaseBudget::MAX_SCRIPT_SIG_LEN`]; this alias keeps
-/// the existing `stratum::` path working.
 pub const MAX_COINBASE_SCRIPT_SIG_LEN: usize = CoinbaseBudget::MAX_SCRIPT_SIG_LEN;
-/// BIP320 general-purpose version-rolling bits.
 pub const BIP320_VERSION_MASK: u32 = 0x1fff_e000;
-/// Core's `MAX_FUTURE_BLOCK_TIME`: the largest forward `ntime` window a job may grant.
 pub const MAX_NTIME_FORWARD_SECS: u32 = 7_200;
-/// Offset of the scriptSig length byte in a one-input coinbase's txid serialization:
-/// version (4) + input count (1) + outpoint (36).
 const SCRIPT_SIG_LEN_OFFSET: usize = 41;
-/// Offset of the first scriptSig byte in the same serialization.
 const SCRIPT_SIG_OFFSET: usize = 42;
 
-/// Wire-neutral job identity, unique and increasing within one [`JobBook`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct JobId(u32);
 
 impl JobId {
-    /// Wraps a raw wire value.
     #[must_use]
     pub const fn new(raw: u32) -> Self {
         Self(raw)
     }
 
-    /// Returns the raw wire value.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
     }
 }
 
-/// Session identity, unique within one [`JobBook`] lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SessionId(u32);
 
 impl SessionId {
-    /// Wraps a raw wire value.
     #[must_use]
     pub const fn new(raw: u32) -> Self {
         Self(raw)
     }
 
-    /// Returns the raw wire value.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
@@ -90,9 +62,9 @@ impl SessionId {
 
 /// Split of the coinbase extranonce between the pool and the miner.
 ///
-/// `session_len` bytes are assigned by the pool and unique per open session
-/// (SV1 `extranonce1`, SV2 extended-channel prefix). `rolled_len` bytes are
-/// chosen by the miner (SV1 `extranonce2`, SV2 remaining extranonce).
+/// `session_len` bytes are assigned by the pool and unique per open session (SV1
+/// `extranonce1`, SV2 extended-channel prefix). `rolled_len` bytes are chosen by the
+/// miner (SV1 `extranonce2`, SV2 remaining extranonce).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExtranonceLayout {
     session_len: u8,
@@ -100,7 +72,6 @@ pub struct ExtranonceLayout {
 }
 
 impl ExtranonceLayout {
-    /// Builds a layout of `session_len` pool bytes and `rolled_len` miner bytes.
     #[must_use]
     pub const fn new(session_len: u8, rolled_len: u8) -> Self {
         Self {
@@ -109,25 +80,21 @@ impl ExtranonceLayout {
         }
     }
 
-    /// Pool-assigned bytes.
     #[must_use]
     pub fn session_len(self) -> usize {
         usize::from(self.session_len)
     }
 
-    /// Miner-chosen bytes.
     #[must_use]
     pub fn rolled_len(self) -> usize {
         usize::from(self.rolled_len)
     }
 
-    /// Total extranonce bytes inside the coinbase scriptSig.
     #[must_use]
     pub fn total_len(self) -> usize {
         self.session_len() + self.rolled_len()
     }
 
-    /// Number of distinct pool prefixes this layout can name.
     fn session_capacity(self) -> u64 {
         match self.session_len {
             0 => 1,
@@ -137,16 +104,12 @@ impl ExtranonceLayout {
     }
 }
 
-/// Extranonce bytes of one share: pool prefix plus miner-chosen bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Extranonce<'a> {
-    /// Pool-assigned prefix; length `ExtranonceLayout::session_len`.
     pub session: &'a [u8],
-    /// Miner-chosen bytes; length `ExtranonceLayout::rolled_len`.
     pub rolled: &'a [u8],
 }
 
-/// One open miner session and its unique extranonce prefix.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Session {
     id: SessionId,
@@ -155,20 +118,17 @@ pub struct Session {
 }
 
 impl Session {
-    /// Session identity.
     #[must_use]
     pub const fn id(&self) -> SessionId {
         self.id
     }
 
-    /// Pool-assigned extranonce prefix, `ExtranonceLayout::session_len` bytes.
     #[must_use]
     pub fn extranonce_prefix(&self) -> &[u8] {
         &self.prefix
     }
 }
 
-/// Bounded session table: unique prefixes, oldest-freed prefix reused first.
 #[derive(Debug)]
 struct SessionTable {
     layout: ExtranonceLayout,
@@ -233,7 +193,6 @@ impl SessionTable {
     }
 }
 
-/// Encodes `slot` little-endian into exactly `len` bytes, zero padded.
 fn slot_prefix(slot: u64, len: usize) -> Vec<u8> {
     let le = slot.to_le_bytes();
     let mut prefix = vec![0_u8; len];
@@ -242,183 +201,84 @@ fn slot_prefix(slot: u64, len: usize) -> Vec<u8> {
     prefix
 }
 
-/// Setup and projection failures. Nothing here is a share verdict.
 #[derive(Debug, Eq, Error, PartialEq)]
 pub enum JobError {
-    /// A configuration field is unusable.
     #[error("invalid job book configuration: {0}")]
     InvalidConfig(&'static str),
-    /// The owner's rule: the candidate cannot admit the declared coinbase budget.
     #[error("candidate cannot admit the declared coinbase budget: {0}")]
     Budget(MiningError),
-    /// The candidate coinbase is not a single-input coinbase with an output.
     #[error("candidate coinbase is not a one-input coinbase with at least one output")]
     CoinbaseShape,
-    /// Tag plus extranonce do not fit under the scriptSig consensus limit.
     #[error(
         "coinbase tag and extranonce need {needed} scriptSig bytes but only {room} remain under the consensus limit"
     )]
-    ExtranonceExceedsScriptSig {
-        /// Bytes available after the node's height prefix.
-        room: usize,
-        /// Bytes the tag and extranonce need.
-        needed: usize,
-    },
-    /// Extra outputs serialize to more bytes than the budget declares.
+    ExtranonceExceedsScriptSig { room: usize, needed: usize },
     #[error("extra coinbase outputs serialize to {used} bytes, budget allows {budget}")]
-    ExtraOutputsSize {
-        /// Serialized bytes of the extra outputs.
-        used: u64,
-        /// Declared `additional_size`.
-        budget: u32,
-    },
-    /// Extra outputs cost more sigops than the budget declares.
+    ExtraOutputsSize { used: u64, budget: u32 },
     #[error("extra coinbase outputs cost {used} sigops, budget allows {budget}")]
-    ExtraOutputsSigops {
-        /// BIP141 sigop cost of the extra outputs.
-        used: u32,
-        /// Declared `additional_sigops`.
-        budget: u16,
-    },
-    /// Extra outputs pay more than the node's coinbase output holds.
+    ExtraOutputsSigops { used: u32, budget: u16 },
     #[error(
         "extra coinbase outputs pay {extra} sat but the node payout output holds {available} sat"
     )]
-    ExtraOutputsValue {
-        /// Sum of the extra output values.
-        extra: u64,
-        /// Value of the node payout output.
-        available: u64,
-    },
-    /// The coinbase split failed its txid round-trip.
+    ExtraOutputsValue { extra: u64, available: u64 },
     #[error("coinbase split does not reproduce the coinbase txid serialization")]
     CoinbaseSplit,
-    /// Every job id has been issued.
     #[error("job ids are exhausted")]
     JobIdExhausted,
-    /// Every session id has been issued.
     #[error("session ids are exhausted")]
     SessionIdExhausted,
-    /// All session slots are in use.
     #[error("all {capacity} session slots are in use")]
-    SessionCapacity {
-        /// Configured session capacity.
-        capacity: usize,
-    },
-    /// A share target or difficulty of zero names no work.
+    SessionCapacity { capacity: usize },
     #[error("share target and pool difficulty must be nonzero")]
     ZeroTarget,
-    /// Pool difficulty text is not a bounded plain decimal.
     #[error("pool difficulty is not a plain decimal of at most 19 digits")]
     InvalidDifficulty,
 }
 
-/// Why a job no longer accepts shares.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum StaleReason {
-    /// A job on a different parent was installed after it.
     PreviousBlockChanged,
-    /// [`JobBook::invalidate_active`] retired it.
     Invalidated,
-    /// Evicted by job retention; only the id is remembered.
     Retired,
 }
 
-/// Share verdicts that reject the share.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ShareError {
-    /// The session is not open.
     #[error("unknown session {0:?}")]
     UnknownSession(SessionId),
-    /// The job id was never issued.
     #[error("unknown job {0:?}")]
     UnknownJob(JobId),
-    /// The job exists or existed but accepts no more shares.
     #[error("stale share for job {job:?}: {reason:?}")]
-    Stale {
-        /// Job the share named.
-        job: JobId,
-        /// Why it is stale.
-        reason: StaleReason,
-    },
-    /// The session prefix does not match the layout.
+    Stale { job: JobId, reason: StaleReason },
     #[error("session extranonce prefix is {actual} bytes, layout needs {expected}")]
-    SessionPrefixLength {
-        /// Layout `session_len`.
-        expected: usize,
-        /// Supplied length.
-        actual: usize,
-    },
-    /// The miner-chosen extranonce length does not match the layout.
+    SessionPrefixLength { expected: usize, actual: usize },
     #[error("rolled extranonce is {actual} bytes, layout needs {expected}")]
-    ExtranonceLength {
-        /// Layout `rolled_len`.
-        expected: usize,
-        /// Supplied length.
-        actual: usize,
-    },
-    /// The version changes bits outside the job's rolling mask.
+    ExtranonceLength { expected: usize, actual: usize },
     #[error(
         "version {version:#010x} differs from job version {job_version:#010x} outside mask {mask:#010x}"
     )]
     VersionOutsideMask {
-        /// Submitted full version.
         version: u32,
-        /// Job version.
         job_version: u32,
-        /// Job rolling mask.
         mask: u32,
     },
-    /// `ntime` is below the job's minimum legal timestamp.
     #[error("ntime {ntime} is before the job minimum {min_ntime}")]
-    TimeTooEarly {
-        /// Submitted time.
-        ntime: u32,
-        /// Job minimum.
-        min_ntime: u32,
-    },
-    /// `ntime` is beyond the job's forward window.
+    TimeTooEarly { ntime: u32, min_ntime: u32 },
     #[error("ntime {ntime} is after the job maximum {max_ntime}")]
-    TimeTooLate {
-        /// Submitted time.
-        ntime: u32,
-        /// Job maximum.
-        max_ntime: u32,
-    },
-    /// The same header was already accepted.
+    TimeTooLate { ntime: u32, max_ntime: u32 },
     #[error("duplicate share {hash}, first accepted under job {first_job:?}")]
-    Duplicate {
-        /// Header hash.
-        hash: BlockHash,
-        /// Job it was first accepted under.
-        first_job: JobId,
-    },
-    /// The hash meets neither the network target nor the share target.
+    Duplicate { hash: BlockHash, first_job: JobId },
     #[error("share hash {hash} does not meet the share target")]
-    BelowTarget {
-        /// Header hash.
-        hash: BlockHash,
-    },
-    /// The job holds its maximum number of accepted shares.
+    BelowTarget { hash: BlockHash },
     #[error("job {job:?} already holds {capacity} accepted shares")]
-    JobShareCapacity {
-        /// Job the share named.
-        job: JobId,
-        /// Configured per-job capacity.
-        capacity: usize,
-    },
+    JobShareCapacity { job: JobId, capacity: usize },
 }
 
 /// A nonzero 256-bit share target. A hash meets it when it is less than or equal.
-///
-/// The value is the numeric hash order Bitcoin uses: `to_le_bytes` is the
-/// internal byte order of [`Hash256`], `to_be_bytes` the display order and
-/// the SV1 / SV2 `U256` target byte order after the adapter's own swap.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShareTarget(ChainWork);
 
 impl ShareTarget {
-    /// Builds a target from little-endian bytes; zero is rejected.
     pub fn from_le_bytes(bytes: [u8; 32]) -> Result<Self, JobError> {
         let value = ChainWork::from_le_bytes(bytes);
         if value == ChainWork::ZERO {
@@ -427,34 +287,20 @@ impl ShareTarget {
         Ok(Self(value))
     }
 
-    /// Builds a target from big-endian bytes; zero is rejected.
     pub fn from_be_bytes(mut bytes: [u8; 32]) -> Result<Self, JobError> {
         bytes.reverse();
         Self::from_le_bytes(bytes)
     }
 
-    /// Builds the network target of compact `bits`; zero and negative
-    /// encodings are rejected.
     pub fn from_compact(bits: CompactTarget) -> Result<Self, JobError> {
-        // Single consensus decode lives in the chain crate; reuse it so the
-        // pool can never diverge from header validation.
         let value = bitcoin_rs_chain::compact_to_target(bits);
         Self::from_le_bytes(value.to_le_bytes())
     }
 
-    /// Builds the target of integer pool difficulty `difficulty`; see
-    /// [`Self::from_pool_difficulty_ratio`].
     pub fn from_pool_difficulty(difficulty: u64) -> Result<Self, JobError> {
         Self::from_pool_difficulty_ratio(difficulty, 1)
     }
 
-    /// Builds the target of pool difficulty `numerator / denominator` exactly:
-    /// `floor(0xffff * 2^208 * denominator / numerator)`. Difficulty 1 is
-    /// compact `0x1d00ffff`. A difficulty so small that the target exceeds
-    /// `2^256 - 1` saturates at `2^256 - 1`, which every hash meets.
-    ///
-    /// This is the one owner of difficulty-to-target arithmetic. Which
-    /// difficulty a session gets (vardiff) stays the adapter's policy.
     pub fn from_pool_difficulty_ratio(numerator: u64, denominator: u64) -> Result<Self, JobError> {
         if numerator == 0 || denominator == 0 {
             return Err(JobError::ZeroTarget);
@@ -471,13 +317,6 @@ impl ShareTarget {
         Self::from_le_bytes(bytes)
     }
 
-    /// Builds the target of a pool difficulty written as a plain decimal such
-    /// as `"16384"` or `"0.001"` (SV1 `mining.set_difficulty`), without floats.
-    ///
-    /// Accepted: ASCII digits, an optional `.` followed by digits, at most 19
-    /// digits in total. Exponents, signs, and a missing integer part are
-    /// rejected with [`JobError::InvalidDifficulty`]; zero with
-    /// [`JobError::ZeroTarget`].
     pub fn from_pool_difficulty_decimal(text: &str) -> Result<Self, JobError> {
         let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
         let well_formed = !whole.is_empty()
@@ -500,13 +339,11 @@ impl ShareTarget {
         Self::from_pool_difficulty_ratio(numerator, denominator)
     }
 
-    /// Little-endian bytes (internal [`Hash256`] order).
     #[must_use]
     pub fn to_le_bytes(self) -> [u8; 32] {
         self.0.to_le_bytes()
     }
 
-    /// Big-endian bytes (display order).
     #[must_use]
     pub fn to_be_bytes(self) -> [u8; 32] {
         let mut bytes = self.to_le_bytes();
@@ -514,18 +351,15 @@ impl ShareTarget {
         bytes
     }
 
-    /// Whether `hash`, read as a little-endian 256-bit integer, is at most the target.
     #[must_use]
     pub fn meets(self, hash: Hash256) -> bool {
         ChainWork::from_le_bytes(hash.to_le_bytes()) <= self.0
     }
 
-    /// Expected hashes behind one share at this target: `floor(2^256 / (target + 1))`.
     #[must_use]
     pub fn work(self) -> ShareWork {
         let one = ChainWork::from(1_u32);
         match self.0.checked_add(one) {
-            // target = 2^256 - 1: every hash meets it, one hash per share.
             None => ShareWork(one),
             Some(denominator) => ShareWork((!self.0) / denominator + one),
         }
@@ -537,13 +371,11 @@ impl ShareTarget {
 pub struct ShareWork(ChainWork);
 
 impl ShareWork {
-    /// Little-endian bytes of the 256-bit work value.
     #[must_use]
     pub fn to_le_bytes(self) -> [u8; 32] {
         self.0.to_le_bytes()
     }
 
-    /// Big-endian bytes of the 256-bit work value.
     #[must_use]
     pub fn to_be_bytes(self) -> [u8; 32] {
         let mut bytes = self.to_le_bytes();
@@ -551,100 +383,58 @@ impl ShareWork {
         bytes
     }
 
-    /// The work as `u128`, or `None` when it needs more than 128 bits.
     #[must_use]
     pub fn as_u128(self) -> Option<u128> {
         u128::try_from(&self.0).ok()
     }
 
-    /// Sum of two work values, or `None` on 256-bit overflow.
     #[must_use]
     pub fn checked_add(self, other: Self) -> Option<Self> {
         self.0.checked_add(other.0).map(Self)
     }
 }
 
-/// One share as submitted, with every field explicit.
 #[derive(Clone, Copy, Debug)]
 pub struct ShareSubmission<'a> {
-    /// Submitting session.
     pub session: SessionId,
-    /// Job the miner worked on.
     pub job: JobId,
-    /// Miner-chosen extranonce bytes.
     pub rolled_extranonce: &'a [u8],
-    /// Header time.
     pub ntime: u32,
-    /// Header nonce.
     pub nonce: u32,
-    /// Complete header version as hashed (rolled bits applied).
     pub version: u32,
 }
 
-/// What an accepted share is worth to the pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShareClass {
-    /// Meets the share target only.
     Share,
-    /// Meets the network target: a block candidate.
     Block,
 }
 
-/// An accepted share: identity and work, with no financial meaning attached.
 #[derive(Clone, Debug)]
 pub struct AcceptedShare {
-    /// Submitting session.
     pub session: SessionId,
-    /// Job the share belongs to.
     pub job: JobId,
-    /// Header hash. Unique per accepted share: the idempotency key a durable
-    /// ledger must index uniquely.
     pub hash: BlockHash,
-    /// The exact header hashed.
     pub header: Header,
-    /// Candidate block height.
     pub height: u32,
-    /// Parent block hash of the job.
     pub previous_block_hash: BlockHash,
-    /// Session prefix followed by the miner-chosen bytes.
     pub extranonce: Vec<u8>,
-    /// Share target the share was judged against.
     pub target: ShareTarget,
-    /// Work of `target`, not of the hash found.
     pub work: ShareWork,
-    /// Share or block candidate.
     pub class: ShareClass,
 }
 
-/// A share that meets the network target, with the full block to submit.
 #[derive(Clone, Debug)]
 pub struct FoundBlock {
-    /// The accepted share that found it; `share.class` is [`ShareClass::Block`].
     pub share: AcceptedShare,
-    /// The complete block: reassembled coinbase, then the candidate's transactions.
     pub block: Block,
-    /// Exact consensus serialization of `block`.
     pub raw: Vec<u8>,
-    /// Txid of the block's coinbase.
     pub coinbase_txid: Txid,
-    /// Total coinbase output value (subsidy plus fees).
     pub coinbase_value: u64,
 }
 
 impl FoundBlock {
-    /// Hands the block to the node's authoritative submit path.
-    ///
-    /// `&self` so an `Err` leaves the block available for a retry. An `Err`
-    /// or an [`BlockStatus::Undetermined`] receipt means the chain outcome is
-    /// unknown: the caller must not infer acceptance or rejection.
     pub fn submit(&self, control: &dyn MiningControl) -> Result<BlockReceipt, MiningControlError> {
-        // The job retains the exact wire bytes built at share time: decode
-        // them once through the shared payload path instead of re-encoding
-        // the block, so the node receives one exact payload with no second
-        // owner and no second decode. A decode failure means our own encoder
-        // just produced bytes the decoder rejects, so it surfaces as an
-        // operational submit failure, never as a share verdict: validation
-        // outcomes are unchanged, and `&self` keeps the block retryable.
         let payload = BlockPayload::from_raw(self.raw.clone().into())
             .map_err(|err| MiningControlError::Failed(CompactString::from(err.to_string())))?;
         let result = control.submit_block(payload)?;
@@ -661,42 +451,26 @@ impl FoundBlock {
     }
 }
 
-/// Chain outcome class of a submitted block, from the node's verdict alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockStatus {
-    /// Accepted, or its body was already connected.
     Applied,
-    /// Rejected, or a duplicate of a known-invalid block.
     Rejected,
-    /// The node could not conclude; reconcile from chain observation.
     Undetermined,
 }
 
-/// The node's answer to one block submission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockReceipt {
-    /// Block hash.
     pub hash: BlockHash,
-    /// Block height.
     pub height: u32,
-    /// Parent block hash.
     pub previous_block_hash: BlockHash,
-    /// Coinbase txid.
     pub coinbase_txid: Txid,
-    /// Total coinbase output value.
     pub coinbase_value: u64,
-    /// Session that found the block.
     pub session: SessionId,
-    /// Job the block was built from.
     pub job: JobId,
-    /// The node's BIP22 verdict.
     pub result: BlockValidationResult,
 }
 
 impl BlockReceipt {
-    /// Whether the node refused the block only because its parent is no longer
-    /// the applied tip: a stale sibling, not a defective block. This is the one
-    /// reading of [`STALE_PARENT_REASON`] every pool adapter shares.
     #[must_use]
     pub fn is_stale_parent(&self) -> bool {
         matches!(
@@ -705,7 +479,6 @@ impl BlockReceipt {
         )
     }
 
-    /// Maps the node verdict onto the three outcomes a ledger can act on.
     #[must_use]
     pub fn status(&self) -> BlockStatus {
         match &self.result {
@@ -722,17 +495,13 @@ impl BlockReceipt {
     }
 }
 
-/// Result of a share that passed every check.
 #[derive(Clone, Debug)]
 pub enum ShareOutcome {
-    /// Meets the share target only.
     Share(Box<AcceptedShare>),
-    /// Meets the network target.
     Block(Box<FoundBlock>),
 }
 
 impl ShareOutcome {
-    /// The accepted share, whichever class it is.
     #[must_use]
     pub fn share(&self) -> &AcceptedShare {
         match self {
@@ -742,7 +511,6 @@ impl ShareOutcome {
     }
 }
 
-/// One immutable job: a candidate projected onto the Stratum work shape.
 #[derive(Debug)]
 pub struct Job {
     id: JobId,
@@ -895,79 +663,66 @@ impl Job {
         })
     }
 
-    /// Job identity.
     #[must_use]
     pub const fn id(&self) -> JobId {
         self.id
     }
 
-    /// The immutable candidate this job projects.
     #[must_use]
     pub fn candidate(&self) -> &Arc<Candidate> {
         &self.candidate
     }
 
-    /// Candidate block height.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.candidate.height
     }
 
-    /// Parent block hash (internal byte order).
     #[must_use]
     pub fn previous_block_hash(&self) -> BlockHash {
         BlockHash::from(self.candidate.previous_block_hash)
     }
 
-    /// Header version as the unsigned wire value.
     #[must_use]
     pub const fn version(&self) -> u32 {
         self.version
     }
 
-    /// Network compact target bits.
     #[must_use]
     pub fn bits(&self) -> CompactTarget {
         self.candidate.bits
     }
 
-    /// Header time the job was issued with.
     #[must_use]
     pub const fn ntime(&self) -> u32 {
         self.ntime
     }
 
-    /// Smallest legal `ntime` (`Candidate::min_time`).
     #[must_use]
     pub fn min_ntime(&self) -> u32 {
         self.candidate.min_time
     }
 
-    /// Largest `ntime` the job accepts.
     #[must_use]
     pub const fn max_ntime(&self) -> u32 {
         self.max_ntime
     }
 
-    /// Version bits a miner may roll.
     #[must_use]
     pub const fn version_mask(&self) -> u32 {
         self.version_mask
     }
 
-    /// Extranonce split of this job.
     #[must_use]
     pub const fn extranonce_layout(&self) -> ExtranonceLayout {
         self.extranonce
     }
 
-    /// Coinbase txid serialization up to the extranonce (SV1 `coinb1`).
     #[must_use]
     pub fn coinbase_prefix(&self) -> &[u8] {
         &self.coinbase_prefix
     }
 
-    /// Coinbase txid serialization after the extranonce (SV1 `coinb2`).
     #[must_use]
     pub fn coinbase_suffix(&self) -> &[u8] {
         &self.coinbase_suffix
@@ -979,13 +734,11 @@ impl Job {
         &self.merkle_branch
     }
 
-    /// Total coinbase output value (subsidy plus fees).
     #[must_use]
     pub fn coinbase_value(&self) -> u64 {
         self.candidate.coinbase_value
     }
 
-    /// Pool outputs this job inserted into the coinbase.
     #[must_use]
     pub fn extra_outputs(&self) -> &[TxOut] {
         &self.extra_outputs
@@ -1005,21 +758,17 @@ impl Job {
         Ok(version)
     }
 
-    /// Txid of the coinbase carrying `extranonce`.
     pub fn coinbase_txid(&self, extranonce: Extranonce<'_>) -> Result<Txid, ShareError> {
         let mut scratch = Vec::new();
         self.coinbase_hash_with(extranonce, &mut scratch)
             .map(Txid::from)
     }
 
-    /// Header merkle root for the coinbase carrying `extranonce`.
     pub fn merkle_root(&self, extranonce: Extranonce<'_>) -> Result<Hash256, ShareError> {
         let mut scratch = Vec::new();
         self.merkle_root_with(extranonce, &mut scratch)
     }
 
-    /// The header a miner hashes for these fields. No window checks: this is a
-    /// projection, [`JobBook::validate`] is the predicate.
     pub fn header(
         &self,
         extranonce: Extranonce<'_>,
@@ -1058,10 +807,6 @@ impl Job {
         Ok(())
     }
 
-    /// The header `share` hashes to under `extranonce`, after the field rules
-    /// every share obeys: extranonce lengths, version mask and `ntime` window.
-    /// The one home of those rules, shared by live validation and the
-    /// stale-job replay probe so the two cannot disagree.
     fn checked_header(
         &self,
         extranonce: Extranonce<'_>,
@@ -1122,7 +867,6 @@ impl Job {
         Ok(node)
     }
 
-    /// Builds the complete block for a share that met the network target.
     fn found_block(&self, share: AcceptedShare, extranonce: Extranonce<'_>) -> FoundBlock {
         let mut coinbase = self.coinbase_template.clone();
         let mut script =
@@ -1157,8 +901,6 @@ impl Job {
     }
 }
 
-/// Merkle branch of the coinbase path: the sibling hash at every tree level,
-/// leaf level first. `txids` are the non-coinbase transactions in block order.
 fn coinbase_merkle_branch(txids: &[Txid]) -> Vec<Hash256> {
     let mut rest: Vec<Hash256> = txids.iter().map(|txid| Hash256::from(*txid)).collect();
     let mut branch = Vec::new();
@@ -1185,25 +927,15 @@ fn coinbase_merkle_branch(txids: &[Txid]) -> Vec<Hash256> {
     branch
 }
 
-/// Bounds and rules shared by every job and session of one [`JobBook`].
 #[derive(Clone, Debug)]
 pub struct JobBookConfig {
-    /// Coinbase growth the pool declares to the template owner. Pass the same
-    /// value to [`fetch_template`].
     pub budget: CoinbaseBudget,
-    /// Extranonce split.
     pub extranonce: ExtranonceLayout,
-    /// Static pool bytes placed after the node's height prefix, before the extranonce.
     pub coinbase_tag: Vec<u8>,
-    /// Version bits miners may roll; a subset of [`BIP320_VERSION_MASK`], zero for none.
     pub version_mask: u32,
-    /// Seconds past the job time a share's `ntime` may roll; at most [`MAX_NTIME_FORWARD_SECS`].
     pub ntime_forward_secs: u32,
-    /// Jobs retained, active or stale.
     pub max_jobs: usize,
-    /// Sessions open at once.
     pub max_sessions: usize,
-    /// Accepted shares remembered per job for duplicate detection.
     pub max_shares_per_job: usize,
 }
 
@@ -1251,21 +983,13 @@ impl JobBookConfig {
     }
 }
 
-/// Outcome of [`JobBook::install`].
 #[derive(Clone, Debug)]
 pub struct Installed {
-    /// The job to announce (or the unchanged newest job).
     pub job: Arc<Job>,
-    /// A new job was created. False: same template, time, and outputs as the
-    /// newest active job; nothing needs sending.
     pub fresh: bool,
     /// Miners must drop all earlier work (SV1 `clean_jobs`, SV2 `SetNewPrevHash`).
     pub clean_jobs: bool,
-    /// A job was already retained and its parent differs from the new job's.
-    /// A fact about job parents only: it says nothing about whether the chain
-    /// extended or reorganized. Chain reorganization is a chain observation.
     pub parent_changed: bool,
-    /// Jobs that were active and are stale after this call.
     pub invalidated: Vec<JobId>,
 }
 
@@ -1282,10 +1006,6 @@ struct JobEntry {
     hashes: Vec<Hash256>,
 }
 
-/// The job and share state of one pool endpoint.
-///
-/// Single owner, `&mut` methods: the adapter serializes access. Memory is
-/// bounded by `max_jobs`, `max_sessions`, and `max_shares_per_job`.
 #[derive(Debug)]
 pub struct JobBook {
     config: JobBookConfig,
@@ -1299,7 +1019,6 @@ pub struct JobBook {
 }
 
 impl JobBook {
-    /// Builds an empty book; rejects an unusable configuration.
     pub fn new(config: JobBookConfig) -> Result<Self, JobError> {
         config.validate()?;
         let sessions = SessionTable::new(config.extranonce, config.max_sessions);
@@ -1315,35 +1034,29 @@ impl JobBook {
         })
     }
 
-    /// The configuration this book was built with.
     #[must_use]
     pub fn config(&self) -> &JobBookConfig {
         &self.config
     }
 
-    /// Opens a session with a unique extranonce prefix.
     pub fn open_session(&mut self) -> Result<Session, JobError> {
         self.sessions.open()
     }
 
-    /// Closes a session and frees its prefix for reuse (oldest-freed first).
     pub fn close_session(&mut self, id: SessionId) -> bool {
         self.sessions.close(id)
     }
 
-    /// Looks up an open session.
     #[must_use]
     pub fn session(&self, id: SessionId) -> Option<&Session> {
         self.sessions.get(id)
     }
 
-    /// Open sessions.
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.sessions.live.len()
     }
 
-    /// The newest job, if it is still active.
     #[must_use]
     pub fn current(&self) -> Option<&Arc<Job>> {
         self.jobs
@@ -1351,13 +1064,11 @@ impl JobBook {
             .filter(|entry| entry.state == JobState::Active)
             .map(|entry| &entry.job)
     }
-    /// The latest installation metadata, if an active job exists.
     #[must_use]
     pub fn current_installed(&self) -> Option<&Installed> {
         self.last_installed.as_ref()
     }
 
-    /// A retained job, active or stale.
     #[must_use]
     pub fn job(&self, id: JobId) -> Option<&Arc<Job>> {
         self.locate(id)
@@ -1366,7 +1077,6 @@ impl JobBook {
             .map(|entry| &entry.job)
     }
 
-    /// Marks every active job stale ([`StaleReason::Invalidated`]) and returns them.
     pub fn invalidate_active(&mut self) -> Vec<JobId> {
         let mut invalidated = Vec::new();
         for entry in &mut self.jobs {
@@ -1379,10 +1089,6 @@ impl JobBook {
         invalidated
     }
 
-    /// Projects `candidate` onto a new job, or returns the unchanged newest job.
-    ///
-    /// `extra_outputs` are pool coinbase outputs; see the crate interface note
-    /// for their placement, budget, and value rules.
     pub fn install(
         &mut self,
         candidate: Arc<Candidate>,
@@ -1480,16 +1186,6 @@ impl JobBook {
         usize::try_from(id.0 - front).map_err(|_| ShareError::UnknownJob(id))
     }
 
-    /// Releases a burned duplicate key so a later identical submission
-    /// validates fresh. Removes the hash from the duplicate set and from the
-    /// owning job's remembered hashes; a missing or retired job still clears
-    /// the shared set. Returns whether the key was present.
-    ///
-    /// Call only when the validated share will never be durably recorded from
-    /// its ticket (rejected and dropped by the adapter, or expired while
-    /// unacknowledged): confirmed or buffered shares must keep their burn so
-    /// replays converge to [`ShareError::Duplicate`] instead of
-    /// double-crediting. Linearizable under the single `&mut` borrow.
     #[must_use]
     pub fn unburn(&mut self, hash: &BlockHash) -> bool {
         let raw = Hash256::from(*hash);
@@ -1506,16 +1202,6 @@ impl JobBook {
     }
 
     /// The single share predicate.
-    ///
-    /// Checks, in order: session, job existence, job staleness, extranonce
-    /// lengths, version mask, `ntime` window, duplicate, network target, share
-    /// target, per-job capacity. A stale job refuses with
-    /// [`ShareError::Duplicate`] when the share is an exact replay of one
-    /// already accepted (same header under the same field rules) and with
-    /// [`ShareError::Stale`] otherwise. A header that meets the network target
-    /// is a block candidate even when it misses `target`, and is never refused
-    /// for capacity. Only accepted shares are remembered, so rejected input
-    /// cannot consume duplicate-set capacity.
     pub fn validate(
         &mut self,
         share: &ShareSubmission<'_>,
@@ -1536,9 +1222,6 @@ impl JobBook {
             rolled: share.rolled_extranonce,
         };
         if let JobState::Stale(reason) = entry.state {
-            // An exact retransmit keeps its duplicate identity: the identical
-            // header was already judged, so the miner learns `Duplicate`
-            // rather than `Stale`. Any other share on a retired job is stale.
             let replayed = job
                 .checked_header(extranonce, share, &mut self.scratch)
                 .ok()
@@ -1576,14 +1259,6 @@ impl JobBook {
             Vec::with_capacity(extranonce.session.len() + extranonce.rolled.len());
         full_extranonce.extend_from_slice(extranonce.session);
         full_extranonce.extend_from_slice(extranonce.rolled);
-        // A network-valid block from a harder channel target must not be
-        // credited at the channel target: cap fallback-block work at the
-        // network target when the channel target was not met. The judging
-        // target stays the channel target; only accounting work is capped.
-        // Linearizability: validation is under the single `JobBook` borrow.
-        // Snapshot isolation: the ledger credits `AcceptedShare.work`
-        // idempotently by header hash. Causally, a block never credits more
-        // than the network work that made it valid.
         let credited_work = if is_block && !target.meets(raw_hash) {
             match ShareTarget::from_compact(job.candidate.bits) {
                 Ok(network) => network.work(),
@@ -1614,11 +1289,6 @@ impl JobBook {
             ShareOutcome::Share(Box::new(accepted))
         };
 
-        // Block candidates bypass the per-job capacity check above, and they
-        // must still join the duplicate set: linearizable under the single
-        // `JobBook` borrow, so a replayed block reports `Duplicate` instead
-        // of validating as a second block, and crash recovery cannot credit
-        // it twice. Non-block shares that reach here always have room.
         self.seen.insert(raw_hash, share.job);
         if let Some(entry) = self.jobs.get_mut(index) {
             entry.hashes.push(raw_hash);
@@ -1627,13 +1297,6 @@ impl JobBook {
     }
 }
 
-/// Requests a template that leaves `budget` of coinbase room, through the
-/// node's one authoritative template path.
-///
-/// `long_poll_id` is the previous candidate's `template_id.as_str()`: the call
-/// then waits for a newer generation. The returned template's `candidate`
-/// feeds [`JobBook::install`]; `submit_old == Some(false)` means the previous
-/// work's parent is no longer the applied tip.
 pub fn fetch_template(
     control: &dyn MiningControl,
     budget: CoinbaseBudget,

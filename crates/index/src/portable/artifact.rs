@@ -16,11 +16,12 @@
 //! | 65..73 | payload bytes (everything after the header) |
 //!
 //! A `TxLookup` record is `txid (32, LE) || height (4, BE) || count (1) ||
-//! TxPosition[count] (6 each)`. Records carry full transaction ids, never raw
-//! key-value rows, and appear in strictly ascending
-//! `(txid[..8], height, txid[8..])` order: the stored-key order of the
-//! `TxConfirmed` family refined by the full id, so prefix collisions have a
-//! total order.
+//! TxPosition[count] (6 each)`.
+//!
+//! Records carry full transaction ids, never raw key-value rows, and appear in strictly
+//! ascending `(txid[..8], height, txid[8..])` order: the stored-key order of the
+//! `TxConfirmed` family refined by the full id, so prefix collisions have a total
+//! order.
 
 use super::manifest::BundleFamily;
 use crate::IndexError;
@@ -31,22 +32,15 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use zerocopy::{FromBytes, IntoBytes};
 
-/// Serialized header length.
 pub(super) const HEADER_LEN: usize = 73;
-/// Artifact layout version this code reads and writes.
 pub(super) const ARTIFACT_VERSION: u32 = 1;
-/// Buffer size of every streamed artifact read and write.
 pub(super) const IO_BUFFER_BYTES: usize = 64 << 10;
-/// Records between cancellation polls.
 pub(super) const CANCEL_POLL_RECORDS: u64 = 4_096;
 
 const MAGIC: [u8; 8] = *b"BRSIXART";
-/// `txid || height || count` precede the positions.
 const RECORD_FIXED_LEN: usize = 32 + HEIGHT_SIZE + 1;
-/// Ordering key: `txid[..8] || height_be || txid[8..]`.
 const RECORD_KEY_LEN: usize = 32 + HEIGHT_SIZE;
 
-/// Decoded artifact header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ArtifactHeader {
     pub(super) family: BundleFamily,
@@ -116,7 +110,6 @@ impl ArtifactHeader {
     }
 }
 
-/// Writes one `TxLookup` record and returns its encoded length.
 pub(super) fn write_record(
     out: &mut impl Write,
     txid: &[u8; 32],
@@ -137,16 +130,16 @@ pub(super) fn write_record(
     Ok(u64::try_from(len).unwrap_or(u64::MAX))
 }
 
-/// Why a streamed read stopped.
 #[derive(Debug)]
 pub(super) enum ReadFault {
-    /// The file could not be read.
     Io(io::Error),
     /// A record violated the framing contract.
-    Framing { record: u64, reason: &'static str },
+    Framing {
+        record: u64,
+        reason: &'static str,
+    },
 }
 
-/// One framed record, borrowed from the reader's scratch buffer.
 pub(super) struct TxLookupRecord<'a> {
     /// Full transaction id, little-endian bytes.
     pub(super) txid: [u8; 32],
@@ -154,9 +147,6 @@ pub(super) struct TxLookupRecord<'a> {
     pub(super) positions: &'a [TxPosition],
 }
 
-/// Streams and validates `TxLookup` records: exact count, exact payload
-/// length, strictly ascending keys, heights inside `[floor, base_height]`,
-/// valid position lists, and no trailing bytes.
 pub(super) struct RecordReader<R> {
     inner: R,
     scratch: Vec<u8>,
@@ -169,7 +159,6 @@ pub(super) struct RecordReader<R> {
 }
 
 impl<R: Read> RecordReader<R> {
-    /// Positions `inner` just past the header.
     pub(super) fn new(inner: R, header: &ArtifactHeader, floor: u32) -> Self {
         Self {
             inner,
@@ -183,8 +172,6 @@ impl<R: Read> RecordReader<R> {
         }
     }
 
-    /// Returns the next record, or `None` after the declared last record has
-    /// been followed by exactly the declared end of the file.
     pub(super) fn next_record(&mut self) -> Result<Option<TxLookupRecord<'_>>, ReadFault> {
         let record = self.next_index;
         if self.records_left == 0 {
@@ -212,7 +199,6 @@ impl<R: Read> RecordReader<R> {
         }))
     }
 
-    /// After the last record: no payload may remain and the file must end.
     fn expect_end(&mut self, record: u64) -> Result<(), ReadFault> {
         let framing = |reason: &'static str| ReadFault::Framing { record, reason };
         if self.payload_left != 0 {
@@ -225,7 +211,6 @@ impl<R: Read> RecordReader<R> {
         }
     }
 
-    /// Reads one whole record into `scratch` and returns its encoded length.
     fn read_frame(&mut self, record: u64) -> Result<usize, ReadFault> {
         let framing = |reason: &'static str| ReadFault::Framing { record, reason };
         self.scratch.clear();
@@ -257,8 +242,6 @@ impl<R: Read> RecordReader<R> {
         (txid, height_be)
     }
 
-    /// Height bounds, position validity, and strict key order; returns the
-    /// record's ordering key.
     fn check_frame(
         &self,
         record: u64,
@@ -308,7 +291,6 @@ fn read_record_bytes(
     })
 }
 
-/// Reports whether `reader` is at end of stream.
 fn probe_end(reader: &mut impl Read) -> io::Result<bool> {
     let mut byte = [0_u8; 1];
     loop {
@@ -320,23 +302,12 @@ fn probe_end(reader: &mut impl Read) -> io::Result<bool> {
     }
 }
 
-/// Sink of one folded row: the stored key and its packed position value.
 type RowEmit<'a, E> = dyn FnMut(HashPrefixRow, &[u8]) -> Result<(), E> + 'a;
 
-/// Cap on the positions folded into one stored row.
-///
-/// One serialized block holds at most ~66k transactions even at a 60-byte
-/// minimum encoding, so twice that can never trigger on an honest bundle
 /// while bounding importer RSS under one megabyte (131,072 x 6 bytes). Past
 /// the cap the import fails closed: rows sharing one key must commit as one
-/// value, so there is no sound way to split them.
 const MAX_FOLDED_POSITIONS: usize = 131_072;
 
-/// Folds consecutive records that share one stored key into one row value.
-///
-/// Distinct transactions whose ids collide on the 8-byte prefix inside one
-/// block share a key; the stored value lists every position in block order,
-/// exactly as ordinary derivation writes it.
 #[derive(Default)]
 pub(super) struct RowAssembler {
     row: Option<HashPrefixRow>,
@@ -344,11 +315,6 @@ pub(super) struct RowAssembler {
 }
 
 impl RowAssembler {
-    /// Adds `record`; a completed previous row is handed to `emit` first.
-    ///
-    /// Refuses with [`IndexError::MutationSizeOverflow`] past
-    /// [`MAX_FOLDED_POSITIONS`]: a malicious bundle must not grow importer
-    /// RSS without bound before any row is written.
     pub(super) fn push(
         &mut self,
         record: &TxLookupRecord<'_>,
@@ -368,7 +334,6 @@ impl RowAssembler {
         Ok(())
     }
 
-    /// Emits the row being accumulated, if any.
     pub(super) fn flush<E>(&mut self, emit: &mut RowEmit<'_, E>) -> Result<(), E> {
         let Some(row) = self.row.take() else {
             return Ok(());
@@ -380,7 +345,6 @@ impl RowAssembler {
     }
 }
 
-/// Hashes everything read through it.
 pub(super) struct HashingReader<R> {
     inner: R,
     hasher: Sha256,
@@ -407,10 +371,8 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
-/// A file read through one 64 KiB buffer whose reads are all hashed.
 pub(super) type HashedFile = BufReader<HashingReader<File>>;
 
-/// Opens `path` for a hashed, buffered read from byte zero.
 pub(super) fn open_hashed(path: &Path) -> io::Result<HashedFile> {
     Ok(BufReader::with_capacity(
         IO_BUFFER_BYTES,
@@ -418,13 +380,10 @@ pub(super) fn open_hashed(path: &Path) -> io::Result<HashedFile> {
     ))
 }
 
-/// Digest of everything `reader` has consumed. Callers drain it to end of
-/// file first, so no buffered byte is left unhashed.
 pub(super) fn into_digest(reader: HashedFile) -> [u8; 32] {
     reader.into_inner().finish()
 }
 
-/// SHA-256 and length of `path`, streamed through one hashed buffer.
 pub(super) fn hash_file(path: &Path) -> io::Result<([u8; 32], u64)> {
     let mut reader = open_hashed(path)?;
     let bytes = io::copy(&mut reader, &mut io::sink())?;
@@ -458,7 +417,6 @@ mod tests {
 
     type Record = ([u8; 32], u32, Vec<TxPosition>);
 
-    /// Encodes `(txid, height, positions)` records and the matching header.
     fn stream(
         records: &[([u8; 32], u32, Vec<TxPosition>)],
         base_height: u32,
@@ -643,8 +601,6 @@ mod tests {
 
     #[test]
     fn folder_refuses_a_row_past_the_position_quota() {
-        // Every record shares one stored key but carries a distinct full id,
-        // so all of their valid positions fold into a single row value.
         const PER_RECORD: usize = 255;
         let records = MAX_FOLDED_POSITIONS / PER_RECORD + 2;
         let mut payload = Vec::new();

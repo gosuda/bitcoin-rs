@@ -3,46 +3,26 @@
 
 extern crate alloc;
 
-/// Shared resolved-input accounting.
 mod accounting;
-/// Shared transaction preparation, retries, and gateway lifecycle queries.
 mod admission;
-/// Maintained per-cluster chunk order and the one global chunk index.
 mod chunk_index;
-/// Mempool entry metadata.
 mod entry;
-/// Package eviction policy.
 pub mod eviction;
-/// Checked fee diagrams over immutable projections of the admitted graph.
 mod fee_diagram;
-/// Fee-rate history-based fee-rate estimator.
 mod fee_estimator;
-/// Fee-estimator history datadir persistence.
 pub mod fee_history;
-/// Single mutation gateway and observer seam in front of the pool.
 mod gateway;
-/// Mutation records returned by every mutating pool method.
 mod mutation;
-/// Orphan transaction pool for transactions with missing parents.
 mod orphan;
-/// Package shape and ephemeral-spend policy.
 mod package;
-/// Mempool policy limits.
 mod policy;
-/// Mempool indexes and mutation API.
 mod pool;
-/// Replacement fee and graph policy (BIP125 / Core rules).
 mod rbf;
-/// Cloneable read-only capability over the mempool.
 mod reader;
-/// Core rolling minimum fee state machine.
 mod rolling_min_fee;
-/// Optional, bounded transaction snapshots; membership is always revalidated.
 pub mod snapshot;
-/// Transaction relay standardness policy.
 pub mod standardness;
 mod submit_package;
-/// BIP431 topology policy.
 mod truc;
 
 pub use admission::{

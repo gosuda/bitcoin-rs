@@ -24,13 +24,10 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const MAGIC: Magic = Magic::REGTEST;
 
-/// Bytes in flight toward one side. An empty inbox reads as a poll timeout,
-/// a closed and empty one as end of stream.
 #[derive(Default)]
 struct Inbox {
     bytes: VecDeque<u8>,
     closed: bool,
-    /// Largest read served; zero serves whatever is asked.
     max_read: usize,
 }
 
@@ -59,7 +56,6 @@ impl Read for Inbox {
     }
 }
 
-/// A connected initiator and responder, with the bytes each still has to read.
 struct Connected {
     initiator: Established,
     responder: Established,
@@ -67,9 +63,6 @@ struct Connected {
     to_responder: Inbox,
 }
 
-/// Runs both handshakes to completion, carrying every send to the other side.
-/// `first_message` is sealed by the initiator the moment it is established,
-/// before the responder has read the initiator's version packet.
 fn connect(
     seed: u64,
     max_read: usize,
@@ -138,8 +131,6 @@ fn handshakes_agree_on_a_session_and_carry_packets_both_ways() -> TestResult {
         connected.responder.session_id
     );
 
-    // The initiator's first packet followed its version packet without a
-    // pause; the handshake left it unread for the established reader.
     let first = connected
         .responder
         .recv
@@ -181,7 +172,6 @@ fn established_reader_refuses_an_oversized_length_before_its_body() -> TestResul
         .initiator
         .send
         .seal(&vec![0; MAX_RECV_CONTENTS_LEN + 1], &[], false)?;
-    // Only the length field is delivered: the refusal must not wait for the body.
     connected.to_responder.bytes.extend(&packet[..3]);
     let result = connected
         .responder
@@ -262,7 +252,6 @@ fn responder_refuses_a_v1_version_from_another_network() {
 
 #[test]
 fn an_initiator_knows_whether_its_peer_answered() -> TestResult {
-    // A peer that closes without a byte: the initiator may retry as v1.
     let mut rng = StdRng::seed_from_u64(16);
     let mut silent = Handshake::initiator(MAGIC, &mut rng);
     let mut inbox = Inbox::default();
@@ -278,7 +267,6 @@ fn an_initiator_knows_whether_its_peer_answered() -> TestResult {
     );
     assert!(!silent.received_any());
 
-    // One byte is an answer, so a later failure must not fall back.
     let mut answered = Handshake::initiator(MAGIC, &mut rng);
     drop(answered.take_outbound());
     let mut inbox = Inbox {
@@ -291,9 +279,6 @@ fn an_initiator_knows_whether_its_peer_answered() -> TestResult {
     Ok(())
 }
 
-/// A hand-driven initiator whose garbage, terminator, AAD, decoys, and version
-/// contents each test chooses: the misbehaviours of Bitcoin Core's
-/// `p2p_v2_misbehaving.py`.
 struct ScriptedInitiator {
     secret_key: SecretKey,
     ellswift: ElligatorSwift,
@@ -314,8 +299,6 @@ impl ScriptedInitiator {
         }
     }
 
-    /// Opens `responder` with this initiator's key and garbage, and returns
-    /// the initiator's session once the responder waits for its terminator.
     fn open(
         &self,
         responder: &mut Handshake,
@@ -348,8 +331,6 @@ impl ScriptedInitiator {
     }
 }
 
-/// Feeds `bytes` after the initiator's garbage and reports where the
-/// responder's handshake ends.
 fn finish(
     responder: &mut Handshake,
     inbox: &mut Inbox,
@@ -466,20 +447,13 @@ fn decoys_before_the_version_packet_are_skipped() -> TestResult {
     Ok(())
 }
 
-/// Each decoy packet before the version returns one [`Step::Yield`], leaving
-/// the handshake resumable; the version packet after them still establishes.
 #[test]
 fn each_decoy_before_the_version_yields_once() -> TestResult {
     let (initiator, mut responder, mut inbox, mut session) = scripted(17, 5)?;
-    // Seal in wire order: the cipher advances per packet, so the first decoy
-    // carries the garbage AAD, the second an empty AAD, and the version an
-    // empty AAD after them.
     let mut wire = session.send_garbage_terminator.to_vec();
     wire.extend(session.send.seal(&[0; 100], &initiator.garbage, true)?);
     wire.extend(session.send.seal(&[0; 7], &[], true)?);
     let version = session.send.seal(&[], &[], false)?;
-    // Feed only the terminator and the two decoys first: each decoy yields
-    // once, and decoys alone never establish.
     inbox.bytes.extend(&wire);
     let mut yielded = 0;
     loop {
@@ -493,8 +467,6 @@ fn each_decoy_before_the_version_yields_once() -> TestResult {
         }
     }
     assert_eq!(yielded, 2, "one yield per decoy packet");
-    // The version packet after the decoys still establishes, without another
-    // yield: it carries a message, not a decoy.
     inbox.bytes.extend(version);
     inbox.closed = true;
     loop {
@@ -512,11 +484,6 @@ fn each_decoy_before_the_version_yields_once() -> TestResult {
     Ok(())
 }
 
-/// A pre-version byte stream that releases one sealed decoy per `interval`,
-/// like a socket fed decoys faster than its poll; the version packet is never
-/// released. Outbound bytes are collected and ignored. `consumed` counts the
-/// bytes its reader actually took: staging a decoy proves nothing about the
-/// receiver, consuming it does.
 struct DecoyDribble {
     blobs: Vec<Vec<u8>>,
     released: usize,
@@ -538,8 +505,6 @@ impl DecoyDribble {
             pending: VecDeque::new(),
             written: Vec::new(),
         };
-        // The terminator is due at once so the handshake reaches the version
-        // wait; each further decoy per interval.
         dribble.release_one();
         dribble
     }
@@ -587,24 +552,14 @@ impl std::io::Write for DecoyDribble {
     }
 }
 
-/// Decoys alone must not hold the handshake past its deadline: the scripted
-/// responder, whose session matches the sealed stream, is fed its terminator
-/// and then one decoy per 10 ms, but never the version packet, so `establish`
-/// fails on a 500 ms deadline within 2 s.
 #[test]
 fn decoys_never_hold_the_handshake_past_the_deadline() -> TestResult {
-    // Reuse the matched pair: a fresh responder would derive another secret,
-    // its terminator scan would fail fast, and the deadline would prove
-    // nothing. The scripted responder already consumed the key and garbage.
     let (initiator, mut responder, _, mut session) = scripted(18, 5)?;
-    // The first packet carries the garbage as AAD; later decoys an empty AAD.
     let mut blobs = vec![session.send_garbage_terminator.to_vec()];
     blobs.push(session.send.seal(&[0; 16], &initiator.garbage, true)?);
     for _ in 0..120 {
         blobs.push(session.send.seal(&[0; 16], &[], true)?);
     }
-    // Terminator plus the first (garbage-AAD) decoy packet, measured before
-    // the dribble takes the blobs.
     let through_first_decoy = blobs[0].len() + blobs[1].len();
     let mut stream = DecoyDribble::new(blobs, Duration::from_millis(10));
     let lease = PeerLease::new(crossbeam_channel::unbounded().0);
@@ -630,9 +585,6 @@ fn decoys_never_hold_the_handshake_past_the_deadline() -> TestResult {
         "decoys must not hold the handshake past its deadline"
     );
     assert!(responder.received_any(), "the decoys did arrive");
-    // The garbage scan never reads past the terminator and each packet is
-    // read exactly, so a byte beyond the first decoy means the responder
-    // consumed that whole packet, yielded, and started the next one.
     assert!(
         stream.consumed > through_first_decoy,
         "the responder must have consumed a complete decoy past the terminator and yielded for the next: consumed {} of the first {through_first_decoy}",
@@ -666,7 +618,6 @@ fn a_stream_cut_anywhere_never_establishes() -> TestResult {
     stream.extend(session.send_garbage_terminator);
     stream.extend(session.send.seal(&[], &initiator.garbage, false)?);
     for cut in 0..stream.len() {
-        // The same seed rebuilds the responder whose key the stream answers.
         let mut rng = StdRng::seed_from_u64(14);
         let _initiator = ScriptedInitiator::new(&mut rng, 9);
         let mut responder = Handshake::responder(MAGIC, &mut rng);
@@ -690,8 +641,6 @@ fn a_stream_cut_anywhere_never_establishes() -> TestResult {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Arbitrary bytes from an unauthenticated peer end the handshake as v1 or
-    /// as an error, never as a session, and never panic.
     #[test]
     fn hostile_bytes_never_establish(bytes in prop::collection::vec(any::<u8>(), 0..6_000)) {
         let mut rng = StdRng::seed_from_u64(15);

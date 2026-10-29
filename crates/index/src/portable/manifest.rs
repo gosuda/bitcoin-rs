@@ -1,38 +1,21 @@
 //! Versioned bundle manifest: schema, canonical encoding, and field validation.
-//!
-//! The manifest is the last file an export publishes and the first file a
-//! restore reads. Parsing denies unknown fields; validation refuses anything
-//! the compiled code cannot restore exactly. Block and genesis hashes are
-//! conventional big-endian hex; `chainwork` and `sha256` are 64 lowercase hex
-//! digits.
 
 use super::{IndexBundleError, artifact::HEADER_LEN};
 use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_primitives::Network;
 use serde::{Deserialize, Serialize};
 
-/// Manifest `format` value naming this bundle layout.
 pub(super) const BUNDLE_FORMAT: &str = "bitcoin-rs-index-bundle";
-/// Manifest `version` this code reads and writes.
 pub(super) const BUNDLE_VERSION: u32 = 1;
-/// Manifest file name; published last, so its presence marks a complete bundle.
 pub(super) const MANIFEST_FILE: &str = "manifest.json";
-/// `TxLookup` artifact file name.
 pub(super) const TXLOOKUP_FILE: &str = "txlookup-v1.dat";
-/// `ScriptHistory` artifact file name, reserved until that family is qualified.
 pub(super) const SCRIPTHISTORY_FILE: &str = "scripthistory-v1.dat";
-/// Manifests are small JSON documents; larger files are refused unread.
 pub(super) const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
-/// An index family a bundle may carry. `ScriptLive` is never a bundle
-/// capability: it is always reseeded from the UTXO set.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum BundleFamily {
-    /// Core-compatible transaction lookup rows.
     TxLookup,
-    /// Script funding and spending history. Declared by the schema; refused
-    /// by export and restore until its record layout is qualified.
     ScriptHistory,
 }
 
@@ -52,17 +35,13 @@ impl BundleFamily {
     }
 }
 
-/// Script-index mode of the exporting node.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum IndexMode {
-    /// `scriptindex=utxo`: `ScriptLive` only.
     Utxo,
-    /// `scriptindex=full`: history plus live outputs.
     Full,
 }
 
-/// The chain point every artifact in the bundle is anchored to.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManifestBase {
@@ -73,8 +52,6 @@ pub(super) struct ManifestBase {
     pub(super) validated: bool,
 }
 
-/// One capability's exact coverage: first covered height, and the watermark
-/// its rows reach.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManifestCoverage {
@@ -84,7 +61,6 @@ pub(super) struct ManifestCoverage {
     pub(super) hash: String,
 }
 
-/// Index-format facts a receiver must match exactly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManifestIndex {
@@ -104,7 +80,6 @@ pub(super) struct ManifestArtifact {
     pub(super) records: u64,
 }
 
-/// Bundle manifest, version 1.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct IndexBundleManifestV1 {
@@ -117,7 +92,6 @@ pub(super) struct IndexBundleManifestV1 {
     pub(super) artifacts: Vec<ManifestArtifact>,
 }
 
-/// Chain and format identity carried by a bundle, as typed values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BundleIdentity {
     pub(super) network: Network,
@@ -131,18 +105,14 @@ pub(super) struct BundleIdentity {
     pub(super) chain_tx_count: u64,
 }
 
-/// The `TxLookup` artifact a manifest declares.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TxLookupArtifact {
     pub(super) sha256: [u8; 32],
-    /// Exact file length, header included.
     pub(super) bytes: u64,
     pub(super) records: u64,
-    /// First covered height.
     pub(super) floor: u32,
 }
 
-/// A manifest whose every field the compiled code can act on.
 #[derive(Clone, Debug)]
 pub(super) struct ValidatedManifest {
     pub(super) identity: BundleIdentity,
@@ -150,17 +120,14 @@ pub(super) struct ValidatedManifest {
 }
 
 impl IndexBundleManifestV1 {
-    /// Parses a manifest, denying unknown fields.
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, IndexBundleError> {
         sonic_rs::from_slice(bytes).map_err(|error| IndexBundleError::Manifest(error.to_string()))
     }
 
-    /// Encodes the manifest as indented JSON.
     pub(super) fn to_json(&self) -> Result<Vec<u8>, IndexBundleError> {
         sonic_rs::to_vec_pretty(self).map_err(|error| IndexBundleError::Manifest(error.to_string()))
     }
 
-    /// Builds the manifest an export publishes for one `TxLookup` artifact.
     pub(super) fn for_tx_lookup(
         identity: &BundleIdentity,
         mode: IndexMode,
@@ -200,8 +167,6 @@ impl IndexBundleManifestV1 {
         }
     }
 
-    /// Checks format, version, structure, and every encoded value, without
-    /// consulting the receiving chain.
     pub(super) fn validate(&self) -> Result<ValidatedManifest, IndexBundleError> {
         let refuse = |reason: String| IndexBundleError::Manifest(reason);
         if self.format != BUNDLE_FORMAT {
@@ -301,7 +266,6 @@ impl IndexBundleManifestV1 {
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-/// Lowercase hex encoding.
 pub(super) fn encode_hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -387,7 +351,6 @@ mod tests {
     fn manifest_round_trips_through_json_and_validates() {
         let text = json();
         assert!(text.contains("bitcoin-rs-index-bundle"));
-        // Hashes use the conventional big-endian spelling.
         assert!(text.contains("ab00000000000000000000000000000000000000000000000000000000000000"));
         let parsed = IndexBundleManifestV1::parse(text.as_bytes()).expect("parses");
         let validated = parsed.validate().expect("validates");

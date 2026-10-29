@@ -1,19 +1,4 @@
 //! Compatibility-manifest coverage gate.
-//!
-//! Proves four invariants:
-//! 1. the dispatcher's live dispatch registry and the shipped manifest rows
-//!    are set-equal in both directions (REST and ZMQ likewise against their
-//!    live registrations), and every `Unimplemented` row really answers
-//!    `method not found`;
-//! 2. the manifest carries no duplicate rows;
-//! 3. `docs/rpc-reference.md` is byte-identical to a regeneration of the
-//!    manifest; drift names the delta and the regen command. Regeneration
-//!    is a separate ignored test, so a coverage run never writes and a
-//!    regen run never passes silently;
-//! 4. the declared claims stay honest: every `Deviation` row names its
-//!    difference, no row claims `Supported` while the pinned reference
-//!    carries no differential harness, and the reference identity still
-//!    matches `Cargo.lock`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -27,7 +12,6 @@ use sonic_rs::json;
 /// ZMQ PUB topics Bitcoin Core 31.x registers (src/zmq/zmqpublishnotifier.cpp).
 const CORE_ZMQ_TOPICS: [&str; 5] = ["hashblock", "hashtx", "rawblock", "rawtx", "sequence"];
 
-/// `Cargo.lock`, so the pinned reference cannot quietly stop being pinned.
 const CARGO_LOCK: &str = include_str!("../../../Cargo.lock");
 
 fn handler() -> Handler {
@@ -54,11 +38,6 @@ fn not_dispatchable(handler: &Handler, name: &str) -> bool {
     )
 }
 
-/// Invariant 1 (RPC, bidirectional): the live dispatch registry and the
-/// shipped manifest rows are set-equal in both directions. Both sides come
-/// from one static table (`registry::REGISTRY`) that binds each name to its
-/// handler arm and that `Handler::dispatch` itself consumes, so a method can
-/// neither dispatch without a shipped row nor ship a row without an arm.
 #[test]
 fn rpc_rows_and_the_live_registry_agree_both_ways() {
     let live: BTreeSet<&str> = bitcoin_rs_rpc::handlers::live_registry().collect();
@@ -79,9 +58,6 @@ fn rpc_rows_and_the_live_registry_agree_both_ways() {
     );
 }
 
-/// Invariant 1 (RPC, reverse): every `Unimplemented` row is genuinely absent
-/// from the dispatcher, and a manifest row is never both shipped and
-/// unimplemented.
 #[test]
 fn every_unimplemented_rpc_row_answers_method_not_found() {
     let handler = handler();
@@ -105,8 +81,6 @@ fn every_unimplemented_rpc_row_answers_method_not_found() {
     );
 }
 
-/// Invariant 1 (REST): shipped route prefixes are exactly the prefixes the
-/// REST router registers; every registered prefix has a manifest row.
 #[test]
 fn rest_rows_and_router_registrations_agree_both_ways() {
     let registered: BTreeSet<&str> = bitcoin_rs_rpc::rest::REGISTRATIONS
@@ -129,10 +103,6 @@ fn rest_rows_and_router_registrations_agree_both_ways() {
     );
 }
 
-/// Invariant 1 (ZMQ): the declared topic rows are exactly the five topics
-/// Bitcoin Core registers. The row set is checked feature-independently,
-/// because a topic declared only when `zmq` is compiled would let the table
-/// and the publisher disagree in a build nobody tests.
 #[test]
 fn zmq_rows_are_valid_core_topics() {
     let declared: BTreeSet<&str> = manifest::entries_of_kind(SurfaceKind::Zmq)
@@ -145,11 +115,6 @@ fn zmq_rows_are_valid_core_topics() {
     );
 }
 
-/// Invariant 4: a row that claims `Deviation` names the difference.
-///
-/// The status alone tells a client that this node differs and not how, and
-/// the regenerated reference renders the empty note without complaint, so
-/// nothing else would notice.
 #[test]
 fn deviation_rows_name_their_difference() {
     let silent: Vec<&str> = manifest::MANIFEST
@@ -163,14 +128,6 @@ fn deviation_rows_name_their_difference() {
     );
 }
 
-/// Invariant 4: nothing may claim `Supported` until something can verify it.
-///
-/// `Supported` means differentially verified against the pinned reference,
-/// and no harness compares result values or shapes against Core's own
-/// declarations yet. The reference record carries a flag for whether it
-/// does, and this refuses the claim while the flag is false. Without it,
-/// `Supported` becomes a synonym for "implemented" one row at a time, which
-/// is the failure mode the whole vocabulary exists to prevent.
 #[test]
 fn supported_is_not_claimable_without_the_harness() {
     let table: toml::Table = toml::from_str(manifest::MANIFEST_TOML)
@@ -196,14 +153,6 @@ fn supported_is_not_claimable_without_the_harness() {
     );
 }
 
-/// Invariant 4: the pinned reference is pinned to something the build
-/// actually links.
-///
-/// The Core revision in the reference record comes from the kernel crate's
-/// vendored tree, so the claim is only as good as that version staying put.
-/// Checked against `Cargo.lock` rather than against a comment: a dependency
-/// bump that moves the Core source has to come back through this file, which
-/// is exactly when the compatibility claims need re-reading.
 #[test]
 fn the_pinned_core_reference_matches_the_locked_kernel() {
     let table: toml::Table = toml::from_str(manifest::MANIFEST_TOML)
@@ -224,9 +173,6 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
             .get(version_key)
             .and_then(toml::Value::as_str)
             .unwrap_or_else(|| panic!("`{version_key}` must be a string"));
-        // Every `[[package]]` block naming the crate contributes its version;
-        // a crate locked at two versions must agree at both, not just at the
-        // first substring hit.
         let lock: toml::Table = toml::from_str(CARGO_LOCK)
             .unwrap_or_else(|err| panic!("Cargo.lock must parse as TOML: {err}"));
         let locked: Vec<&str> = lock
@@ -253,7 +199,6 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
     }
 }
 
-/// The `esplora` extension row resolves against the live Esplora router.
 #[test]
 fn esplora_extension_row_resolves_to_the_router() {
     let row = manifest::MANIFEST
@@ -302,10 +247,6 @@ fn notes_are_markdown_table_safe() {
     }
 }
 
-/// Invariant 3: the checked-in reference is byte-identical to a
-/// regeneration of the manifest. This test never writes; it fails when
-/// `REGEN_RPC_REFERENCE` is set so a regeneration run can never double as
-/// a passing coverage run.
 #[test]
 fn generated_reference_matches_checked_in() {
     const REGEN: &str = "REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc \
@@ -341,8 +282,6 @@ fn generated_reference_matches_checked_in() {
     }
 }
 
-/// Explicit regeneration of `docs/rpc-reference.md` from the manifest.
-/// Ignored by default; run it with `REGEN_RPC_REFERENCE=1` set.
 #[ignore = "writes docs/rpc-reference.md; run explicitly with REGEN_RPC_REFERENCE=1"]
 #[test]
 fn regenerate_reference() {

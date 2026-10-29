@@ -1,7 +1,3 @@
-// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns evidence identity/codec,
-// atomic marker publication, warning-before-marker ordering, and marker
-// refusal semantics; `RCV-04` owns crash behavior. These tests are proof,
-// not policy.
 use super::*;
 
 const G: &str = "aaaa";
@@ -19,9 +15,11 @@ fn marker_file(dir: &Path) -> PathBuf {
     dir.join(MARKER_FILE)
 }
 
-/// Reads back the most recent valid marker event. The runtime never reads
-/// the marker (it is write-only audit evidence at runtime); these tests pin
-/// the write protocol, so the test reader lives here instead of production.
+/// Reads back the most recent valid marker event.
+///
+/// The runtime never reads the marker (it is write-only audit evidence at runtime);
+/// these tests pin the write protocol, so the test reader lives here instead of
+/// production.
 fn read_marker(dir: &Path, genesis_hash: &str) -> Option<ChainRollbackEvent> {
     read_sidecar(dir, MARKER_FILE, |data| {
         ChainRollbackEvent::decode(data, genesis_hash)
@@ -112,8 +110,6 @@ fn foreign_genesis_or_future_epoch_witness_is_ignored() {
     );
 }
 
-// `write` step 8 and RCV-03 require staged, non-authoritative tails not to
-// survive a returned failure.
 #[test]
 fn witness_rotation_failure_removes_staged_temp() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -156,7 +152,6 @@ fn witness_stage_failure_preserves_bounded_current_prev() {
 
     write_witness(dir.path(), &w2).expect("restore w2");
 
-    // An invalid current must not rotate over a valid .prev.
     std::fs::write(witness_file(dir.path()), b"corrupt-garbage").expect("corrupt current");
     let w3 = AppliedTipWitness::new(G, 3, 300, "ccc", 3000);
     write_witness(dir.path(), &w3).expect("write w3 over corrupt current");
@@ -296,8 +291,6 @@ fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
     assert!(read_marker(dir.path(), G).is_some());
 }
 
-// RCV-12: marker failure returns an error while the warning already set
-// stays process-visible, and a prior checkpoint warning is preserved.
 #[test]
 fn index_marker_failure_preserves_checkpoint_warning() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -404,8 +397,6 @@ fn foreign_format_write_is_rejected_without_rotating() {
     );
 }
 
-// Semantic rotation: a parseable but foreign-genesis or wrong-format current
-// cannot displace a valid .prev.
 #[test]
 fn foreign_genesis_current_cannot_displace_valid_prev() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -417,11 +408,11 @@ fn foreign_genesis_current_cannot_displace_valid_prev() {
     assert_eq!(read_witness(dir.path(), G), Some(w2.clone()));
 
     let foreign = AppliedTipWitness::new("bbbb", 3, 300, "ccc", 3000);
-    let foreign_bytes = format!("{}\n", serde_json::to_string(&foreign).unwrap());
+    let foreign_bytes = format!("{}\n", sonic_rs::to_string(&foreign).unwrap());
     std::fs::write(witness_file(dir.path()), foreign_bytes.as_bytes())
         .expect("plant foreign current");
     assert!(
-        serde_json::from_slice::<AppliedTipWitness>(
+        sonic_rs::from_slice::<AppliedTipWitness>(
             &std::fs::read(witness_file(dir.path())).unwrap()
         )
         .is_ok(),
@@ -445,7 +436,6 @@ fn foreign_genesis_current_cannot_displace_valid_prev() {
         ".prev is the valid record, never the foreign one"
     );
 
-    // Same contract for a wrong-format current.
     let dir2 = tempfile::tempdir().expect("tempdir");
     write_witness(dir2.path(), &w1).expect("write w1");
     write_witness(dir2.path(), &w2).expect("write w2 -> w1 to .prev");
@@ -453,7 +443,7 @@ fn foreign_genesis_current_cannot_displace_valid_prev() {
     wrong_format.format = "999".to_owned();
     std::fs::write(
         witness_file(dir2.path()),
-        format!("{}\n", serde_json::to_string(&wrong_format).unwrap()).as_bytes(),
+        format!("{}\n", sonic_rs::to_string(&wrong_format).unwrap()).as_bytes(),
     )
     .expect("plant wrong-format current");
     write_witness(dir2.path(), &w3).expect("write w3 over wrong-format current");

@@ -11,31 +11,21 @@ use bitcoin_rs_storage::{
 };
 use tracing::debug;
 
-// Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
-// TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
+/// Reserved `UtxoMeta` metadata keys: the `0x00` prefix is reserved for `TxIndex` metadata;
+/// data row keys begin with ASCII letters and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
 /// On-disk format 5: big-endian height suffixes, 43-byte live rows with u24
 /// `vout`, and 6-byte `TxPosition` values. Any older marker refuses start
-/// (`UnsupportedTxIndexFormatVersion`) so the store fully resets and rebuilds
 /// from chainstate; no in-place upgrade path exists.
 pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
 
-/// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
-/// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
-/// before the first reset; afterwards the key always exists, either as
-/// `Idle = [0xFF, version(u64 LE)]` (9 bytes) or as a claim
 /// `[mask, process_epoch(u64 LE), base_version(u64 LE)]` (17 bytes).
-/// The process epoch records provenance only; any process can complete the
-/// exact claim. Any other shape is a typed error. Completion
-/// never deletes the key: it CASes the exact claim to
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
-/// across repeated resets.
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
 
-/// Consumer cursor slot (`0x00, b'C'`). Opaque bytes owned by the node-side
 /// reconciliation consumer; data row keys begin with ASCII letters only and
 /// can never collide with the reserved `0x00` prefix.
 pub(super) const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
@@ -51,13 +41,12 @@ const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
 
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
-/// Decoded durable capability-reset state.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ResetState {
-    /// No reset is owed; `version` advances once per completed reset.
-    Idle { version: u64 },
+    Idle {
+        version: u64,
+    },
     /// A reset obligation derived on top of `base_version`. `process_epoch`
-    /// records where the claim originated; it does not grant exclusive rights.
     Claim {
         mask: u8,
         process_epoch: u64,
@@ -65,14 +54,6 @@ enum ResetState {
     },
 }
 
-/// Exact reset-state observation fencing one derived index write.
-///
-/// Captured before any store-dependent derivation, carried by value into the
-/// matching commit, and re-checked as a conditional write on the exact bytes:
-/// an ordinary commit only lands while the reset state is byte-identical to
-/// the observation, so a reset that completed in between (idle version
-/// advanced, or state moved Absent -> Idle) rejects the stale write instead
-/// of silently re-adopting it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexWriteFence {
     state: IndexWriteFenceState,
@@ -82,21 +63,14 @@ pub struct IndexWriteFence {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexWriteFenceState {
-    /// No reset state existed; the commit requires the key to stay absent.
     Absent,
-    /// Exact `Idle` bytes observed; the commit requires the same bytes.
     Idle([u8; RESET_IDLE_LEN]),
 }
 
-/// Atomic disposition of the reconciliation consumer cursor inside one
-/// committed index transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsumerCursorUpdate<'a> {
-    /// Preserve the currently stored cursor.
     Keep,
-    /// Replace the cursor with these opaque consumer bytes.
     Set(&'a [u8]),
-    /// Delete the cursor atomically with the row mutation.
     Clear,
 }
 
@@ -120,7 +94,6 @@ fn valid_reset_mask(mask: u8) -> bool {
 }
 
 /// Decodes exactly `size_of::<u64>()` bytes as little-endian; any other
-/// length is a malformed reset marker.
 fn decode_le_u64(bytes: &[u8]) -> Result<u64, IndexError> {
     let raw: [u8; size_of::<u64>()] = bytes
         .try_into()
@@ -155,9 +128,6 @@ fn parse_reset_state(bytes: &[u8]) -> Result<ResetState, IndexError> {
     }
 }
 
-/// Captures the reset state, ordinary revision, and all capability watermarks from one
-/// point-in-time snapshot. Pending reset claims are cooperatively completed
-/// only after the snapshot has been released.
 pub(super) fn capture_write_fence<S: KvStore>(
     store: &S,
     generation: u64,
@@ -312,8 +282,6 @@ impl ExactResetClaim {
     }
 }
 
-/// A cooperative reset obligation. The process epoch is provenance only; any
-/// process can complete the exact raw claim. Same-mask adoption preserves its bytes.
 struct ResetWork {
     mask: u8,
     claim: ExactResetClaim,
@@ -378,11 +346,6 @@ fn watermark_condition<'a>(
     }
 }
 
-/// Applies one ordinary batch under the coherent fence. Six exact conditions
-/// fence the batch: reset state, ordinary revision, and all watermark rows.
-/// The commit also inserts the next revision. A lost race with an unchanged
-/// reset returns [`IndexError::StaleIndexState`]. A moved reset cooperatively
-/// completes the pending exact claim and returns [`IndexError::ResetInProgress`].
 pub(super) fn commit_ordinary<S: KvStore>(
     store: &S,
     generation: u64,
@@ -428,9 +391,6 @@ pub(super) fn commit_ordinary<S: KvStore>(
     Err(IndexError::StaleIndexState)
 }
 
-/// Rechecks the exact reset state and ordinary revision captured by `fence`.
-/// A moved reset adopts or completes the pending claim first; an unchanged
-/// reset with a moved revision reports the derived state as stale.
 pub(super) fn ensure_fence_live<S: KvStore>(
     store: &S,
     generation: u64,
@@ -458,8 +418,6 @@ pub(super) fn ensure_fence_live<S: KvStore>(
     Err(IndexError::StaleIndexState)
 }
 
-/// Publishes or adopts a reset claim. Same-mask adoption writes nothing; mask
-/// growth changes only byte zero of the exact observed claim.
 fn acquire_capability_reset<S: KvStore>(
     store: &S,
     requested_mask: u8,
@@ -558,8 +516,6 @@ fn acquire_capability_reset<S: KvStore>(
     }
 }
 
-/// Drives an exact reset claim to completion in bounded, revision-fenced
-/// batches, or cooperatively adopts any pending claim when the request is empty.
 pub(super) fn resume_capability_reset<S: KvStore>(
     store: &S,
     generation: u64,

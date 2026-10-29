@@ -9,30 +9,23 @@ use crate::template::CoinbaseBudget;
 /// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
-/// Consensus witness reserved value used when constructing a BIP141 commitment.
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
 /// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum MiningError {
-    /// Coinbase subsidy plus fees exceeded the satoshi range.
     #[error("coinbase value overflows satoshi range")]
     CoinbaseValueOverflow,
-    /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
     FeeOverflow,
-    /// Candidate scalar arithmetic exceeded its supported width.
     #[error("candidate {field} overflows its supported width")]
     CandidateScalarOverflow { field: &'static str },
-    /// Coinbase reservation already exhausts a configured block limit.
     #[error("coinbase reservation exhausts the {field} limit")]
     CapacityExhausted { field: &'static str },
-    /// Exhausted `max_tries` without meeting the compact target.
     #[error("failed to meet compact target in {tries} nonce attempts")]
     Unsolved { tries: u64 },
 }
 
-/// Builds the coinbase paying `payout`, optionally committing to `SegWit`.
 pub(crate) fn build_coinbase(
     height: u32,
     subsidy_halving_interval: u32,
@@ -71,7 +64,6 @@ pub(crate) fn build_coinbase(
     })
 }
 
-/// Builds the BIP141 `OP_RETURN` witness-commitment script (`6a24aa21a9ed || commitment`).
 pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     let mut script = Vec::with_capacity(38);
     script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
@@ -79,18 +71,6 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     script
 }
 
-/// Read-only predicate for Core `UpdateUncommittedBlockStructures`.
-///
-/// Returns `true` exactly when [`update_uncommitted_block_structures`] would
-/// push [`WITNESS_RESERVED_VALUE`]: `segwit_active` holds, the block carries a
-/// coinbase whose outputs contain a BIP141 witness commitment, and the
-/// coinbase's first input has an empty witness stack.
-///
-/// Preconditions (owner-kept, not derived here): `segwit_active` is the
-/// caller-owned `SegWit` activation at the child height (`prev.height + 1`);
-/// parent-header lookup stays with the Node caller. Proposal mode skips both
-/// this predicate and the mutation, matching Core. Borrows only; performs no
-/// allocation, clone, or encode.
 #[must_use]
 pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool {
     if !segwit_active {
@@ -108,19 +88,10 @@ pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool 
     input.witness.is_empty()
 }
 
-/// Core `UpdateUncommittedBlockStructures`: if the block already carries a
-/// BIP141 commitment but the coinbase has no witness, insert the reserved nonce.
-///
-/// `submitblock` calls this before admission. Proposal mode does not.
-/// The fill condition is owned by [`needs_witness_reserved_value`]; this
-/// mutation reuses that predicate and performs only the push.
 pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
     if !needs_witness_reserved_value(block, segwit_active) {
         return;
     }
-    // Predicate proved a coinbase with a first input exists, and the same
-    // exclusive borrow is held with no intervening mutation, so indexing is
-    // validated. Empty shapes stay a no-op through the false predicate above.
     block.txs[0].inputs[0]
         .witness
         .push(WITNESS_RESERVED_VALUE.to_vec());
@@ -134,13 +105,7 @@ fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
 }
 
 fn coinbase_script_sig(height: u32) -> Vec<u8> {
-    // BIP34 requires the minimal `CScriptNum` encoding. Heights 1..=16 therefore
-    // use OP_1..OP_16 rather than a data push — `push_int` matches consensus
-    // `check_bip34`.
     let mut script = push_int(i64::from(height));
-    // Consensus rejects coinbase scriptSigs shorter than two bytes
-    // (`bad-cb-length`). Heights whose BIP34 prefix is a single opcode need a
-    // trailing OP_0, matching Bitcoin Core's `CreateNewBlock`.
     if script.len() < CoinbaseBudget::MIN_SCRIPT_SIG_LEN {
         script.push(0x00);
     }
@@ -193,12 +158,8 @@ mod uncommitted_witness_tests {
         }
     }
 
-    /// Predicate agrees with the fill branch, including shapes the matrix
-    /// below never builds: a block without a coinbase and a coinbase without
-    /// inputs are both panic-free no-ops with a false predicate.
     #[test]
     fn predicate_matches_fill_branch_including_empty_shapes() {
-        // Positive: the one shape the mutation fills.
         let mut fillable = commitment_block(Vec::new(), true);
         assert!(needs_witness_reserved_value(&fillable, true));
         update_uncommitted_block_structures(&mut fillable, true);
@@ -207,14 +168,12 @@ mod uncommitted_witness_tests {
             Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
         );
 
-        // Uncovered: no coinbase at all.
         let mut no_txs = commitment_block(Vec::new(), true);
         no_txs.txs.clear();
         assert!(!needs_witness_reserved_value(&no_txs, true));
         update_uncommitted_block_structures(&mut no_txs, true);
         assert_eq!(no_txs.txs, Vec::<bitcoin_rs_primitives::Tx>::new());
 
-        // Uncovered: coinbase without inputs has no witness slot.
         let mut no_inputs = commitment_block(Vec::new(), true);
         no_inputs.txs[0].inputs.clear();
         assert!(!needs_witness_reserved_value(&no_inputs, true));
@@ -225,9 +184,6 @@ mod uncommitted_witness_tests {
         );
     }
 
-    /// The reserved nonce is inserted only for an active-segwit block that
-    /// already commits and carries no coinbase witness; every other shape is
-    /// left byte-for-byte alone.
     #[test]
     fn reserved_nonce_fills_only_an_empty_witness_under_a_commitment() {
         let custom = vec![vec![0x11; 32]];

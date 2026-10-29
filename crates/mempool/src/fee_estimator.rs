@@ -1,36 +1,16 @@
-//! History-based fee-rate estimator modelled on Bitcoin Core's
-//! `CBlockPolicyEstimator` but simplified.
-//!
-//! Maintains exponentially-spaced fee-rate buckets and records, per bucket,
-//! how many blocks transactions waited before confirmation.
-//! [`FeeEstimator::estimate`] returns the lowest fee rate whose historical
-//! confirmation success rate clears a threshold, or [`None`] when there is
-//! insufficient data.
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_primitives::Txid;
 use hashbrown::HashMap;
 
-/// Bucket fee-rate growth numerator: each bucket's lower bound is 5% above
-/// the previous (`lower * 105 / 100`).
 const BUCKET_GROWTH_NUM: u64 = 105;
-/// Bucket fee-rate growth denominator.
 const BUCKET_GROWTH_DEN: u64 = 100;
-/// Minimum tracked fee rate: 1 sat/vB = 1 000 sat/kvB.
 const MIN_FEE_RATE_SAT_PER_KVB: u64 = 1_000;
-/// Maximum tracked fee rate: 1 000 sat/vB = 1 000 000 sat/kvB.
 const MAX_FEE_RATE_SAT_PER_KVB: u64 = 1_000_000;
-/// Maximum confirmation-target horizon in blocks.
 const MAX_CONF_TARGET: usize = 25;
-/// A bucket is suggested when >= 85% of historical transactions at or above
-/// its fee rate confirmed within the target.
 const SUCCESS_THRESHOLD: f64 = 0.85;
-/// Per-block decay factor applied to all bucket counts.
 const DECAY_FACTOR: f64 = 0.998;
-/// Minimum decayed observation count required before producing an estimate.
 const MIN_OBSERVATIONS: f64 = 1.0;
-/// Maximum number of pending (unconfirmed) transaction entries tracked.
 const MAX_PENDING_ENTRIES: usize = 10_000;
 
 /// Fee rate in satoshis per kilo-virtual-byte (sat/kvB).
@@ -38,41 +18,27 @@ const MAX_PENDING_ENTRIES: usize = 10_000;
 pub struct FeeRate(u64);
 
 impl FeeRate {
-    /// Returns the fee rate in sat/kvB.
     #[must_use]
     pub const fn as_sat_per_kvb(self) -> u64 {
         self.0
     }
 }
 
-/// Rejection reason when a persisted fee estimator history payload is rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryReject {
-    /// Leading magic bytes are not the estimator's.
     BadMagic,
-    /// The format version is not one this build reads.
     UnknownVersion(u32),
-    /// Truncated, carries trailing bytes, or disagrees with the layout this
-    /// build computes: drifted bucket bounds, non-finite or negative
-    /// counts, out-of-range indexes, or impossible entry counts.
     Corrupt,
 }
 
-/// Per-bucket confirmation statistics.
 #[derive(Debug)]
 struct Bucket {
-    /// Lower-bound fee rate for this bucket (sat/kvB).
     fee_rate_sat_per_kvb: u64,
-    /// Decayed count of transactions confirmed within N blocks
-    /// (index 0 = 1 block, index 24 = 25 blocks).
     confirmed_within: [f64; MAX_CONF_TARGET],
-    /// Decayed count of transactions RESOLVED for each target: confirmed
-    /// within it, or still unconfirmed once it expired.
     resolved_within: [f64; MAX_CONF_TARGET],
 }
 
 impl Bucket {
-    /// Creates a zeroed bucket at the given fee-rate lower bound.
     const fn new(fee_rate_sat_per_kvb: u64) -> Self {
         Self {
             fee_rate_sat_per_kvb,
@@ -82,31 +48,22 @@ impl Bucket {
     }
 }
 
-/// Metadata for a pending (unconfirmed) transaction.
 #[derive(Debug)]
 struct PendingEntry {
-    /// Index into `buckets`.
     bucket_index: usize,
-    /// Block height at which the transaction entered the mempool.
     entry_height: u32,
-    /// Highest target already sampled for this transaction, 0 for none.
     resolved_through: usize,
 }
 
-/// History-based fee estimator with exponential buckets and per-block decay.
 #[derive(Debug)]
 pub struct FeeEstimator {
     buckets: Vec<Bucket>,
-    /// Height whose decay has already been applied, so a repeated
-    /// notification for it does not age the history a second time.
     last_decayed_height: Option<u32>,
     pending: HashMap<Txid, PendingEntry>,
-    /// Heights at which tracked txids were recorded as confirmed.
     confirmed_at: HashMap<Txid, u32>,
 }
 
 impl FeeEstimator {
-    /// Creates a new estimator with precomputed fee-rate buckets and no data.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -117,7 +74,6 @@ impl FeeEstimator {
         }
     }
 
-    /// Records that a transaction entered the mempool.
     pub fn tx_entered(&mut self, txid: Txid, fee_rate_sat_per_kvb: u64, height: u32) {
         if self.pending.contains_key(&txid) {
             return;
@@ -136,12 +92,10 @@ impl FeeEstimator {
         );
     }
 
-    /// Records that a transaction left the mempool without confirming.
     pub fn tx_left(&mut self, txid: &Txid) {
         self.pending.remove(txid);
     }
 
-    /// Records confirmations from a connected block and applies decay.
     pub fn block_connected(&mut self, confirmed_txids: &[Txid], block_height: u32) {
         let advances_height = match self.last_decayed_height {
             Some(last_height) => block_height > last_height,
@@ -172,7 +126,6 @@ impl FeeEstimator {
         }
     }
 
-    /// Expires targets and decays observations for one newly reached height.
     fn advance_height(&mut self, block_height: u32) {
         self.expire_targets(block_height);
         self.last_decayed_height = Some(block_height);
@@ -183,7 +136,6 @@ impl FeeEstimator {
         });
     }
 
-    /// Samples a failure for every target that expired on this block.
     fn expire_targets(&mut self, block_height: u32) {
         let mut outlived = Vec::new();
         for (txid, entry) in &mut self.pending {
@@ -203,8 +155,6 @@ impl FeeEstimator {
         }
     }
 
-    /// Estimates the minimum fee rate for confirmation within
-    /// `conf_target_blocks`.
     #[must_use]
     pub fn estimate(&self, conf_target_blocks: u32) -> Option<FeeRate> {
         let target = usize::try_from(conf_target_blocks)
@@ -230,19 +180,12 @@ impl FeeEstimator {
         result
     }
 
-    /// Returns the last height whose decay was applied, or `None` before the
-    /// first `block_connected` call. A connected block ages the estimator even
-    /// when it confirms nothing the pool tracked, so this is the observable
-    /// proof that `block_connected` fired.
     #[must_use]
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) fn last_decayed_height(&self) -> Option<u32> {
         self.last_decayed_height
     }
 
-    /// Returns the bucket index for a fee rate: the highest bucket whose
-    /// lower bound is <= the given rate. Rates below the first bucket clamp
-    /// to index 0.
     fn bucket_index_for_rate(&self, fee_rate_sat_per_kvb: u64) -> usize {
         let idx = self
             .buckets
@@ -250,7 +193,6 @@ impl FeeEstimator {
         idx.saturating_sub(1)
     }
 
-    /// Records a confirmation, incrementing all targets >= `blocks_waited`.
     fn record_confirmation(&mut self, entry: &PendingEntry, blocks_waited: u32) {
         let bucket_index = entry.bucket_index;
         let waited = usize::try_from(blocks_waited).unwrap_or(0);
@@ -275,7 +217,6 @@ impl FeeEstimator {
         }
     }
 
-    /// Applies the per-block decay factor to all bucket counts.
     fn apply_decay(&mut self) {
         for bucket in &mut self.buckets {
             for count in &mut bucket.confirmed_within {
@@ -287,14 +228,11 @@ impl FeeEstimator {
         }
     }
 
-    /// Encodes the estimator's recoverable state for the owner-local
-    /// history file. Deterministic: the same state produces the same bytes.
     #[must_use]
     pub fn to_history_bytes(&self) -> Vec<u8> {
         history_codec::encode(self)
     }
 
-    /// Decodes a history payload written by [`Self::to_history_bytes`].
     pub(crate) fn from_history_bytes(bytes: &[u8]) -> Result<Self, HistoryReject> {
         history_codec::decode(bytes)
     }
@@ -305,7 +243,6 @@ impl Default for FeeEstimator {
     }
 }
 
-/// Owner-local persistence of the estimator's recoverable state.
 mod history_codec {
     use super::{
         Bucket, FeeEstimator, HistoryReject, MAX_CONF_TARGET, MAX_PENDING_ENTRIES, PendingEntry,
@@ -315,16 +252,10 @@ mod history_codec {
     use bitcoin_rs_primitives::Txid;
     use hashbrown::HashMap;
 
-    /// Magic prefix of every version-1 history payload.
     pub(super) const HISTORY_MAGIC: [u8; 8] = *b"BRSEFEES";
-    /// Estimator-owned format version; bumped only for a format change.
     pub(super) const HISTORY_VERSION: u32 = 1;
-    /// Decode-side bound on confirmation records. Runtime state is bounded
-    /// by the prune window; this gate only stops a hostile payload from
-    /// naming billions of entries before any work is believed.
     const MAX_CONFIRMED_RECORDS: usize = 1_000_000;
 
-    /// Sequential little-endian reader over a trusted-length byte slice.
     struct Reader<'a> {
         bytes: &'a [u8],
     }
@@ -403,8 +334,6 @@ mod history_codec {
         }
     }
 
-    /// Encodes the estimator state with txids in sorted order, so the same
-    /// state always produces the same bytes.
     pub(super) fn encode(est: &FeeEstimator) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&HISTORY_MAGIC);
@@ -450,8 +379,6 @@ mod history_codec {
         out
     }
 
-    /// Decodes a version-1 payload, rejecting anything this build cannot
-    /// interpret exactly.
     pub(super) fn decode(bytes: &[u8]) -> Result<FeeEstimator, HistoryReject> {
         let mut reader = Reader { bytes };
         if reader.take(HISTORY_MAGIC.len())? != HISTORY_MAGIC {
@@ -531,7 +458,6 @@ mod history_codec {
     }
 }
 
-/// Builds the exponentially-spaced fee-rate buckets.
 fn build_buckets() -> Vec<Bucket> {
     let mut buckets = Vec::new();
     let mut lower = MIN_FEE_RATE_SAT_PER_KVB;
@@ -558,7 +484,6 @@ mod tests {
         Txid(Hash256::from_le_bytes(&bytes))
     }
 
-    /// A txid spread over more than 256 values, for the capacity test.
     fn wide_txid(n: u32) -> Txid {
         let mut bytes = [0_u8; 32];
         bytes[..4].copy_from_slice(&n.to_le_bytes());
@@ -646,7 +571,6 @@ mod tests {
         );
     }
 
-    /// Fresh arrivals must not be counted as failures.
     #[test]
     fn a_burst_of_fresh_arrivals_does_not_erase_a_good_estimate() {
         let mut est = FeeEstimator::new();
@@ -671,7 +595,6 @@ mod tests {
         );
     }
 
-    /// Re-announcing a transaction must not restart its clock.
     #[test]
     fn a_repeated_admission_keeps_the_original_entry_height() {
         let mut est = FeeEstimator::new();
@@ -688,7 +611,6 @@ mod tests {
         );
     }
 
-    /// Departures must free capacity, or the estimator wedges.
     #[test]
     fn a_departure_frees_capacity_for_new_transactions() {
         let mut est = FeeEstimator::new();
@@ -716,7 +638,6 @@ mod tests {
         );
     }
 
-    /// A confirmation after skipped heights must still record its misses.
     #[test]
     fn a_confirmation_after_skipped_heights_records_the_targets_it_missed() {
         let mut est = FeeEstimator::new();
@@ -743,7 +664,6 @@ mod tests {
         );
     }
 
-    /// Decay models elapsed blocks, so one height decays once.
     #[test]
     fn a_repeated_height_notification_decays_the_history_once() {
         let mut once = FeeEstimator::new();
@@ -771,7 +691,6 @@ mod tests {
         );
     }
 
-    /// A target resolves once, even if the same height is processed twice.
     #[test]
     fn a_target_resolves_once_when_a_height_is_processed_twice() {
         let bucket_index = {
@@ -859,7 +778,6 @@ mod tests {
         );
     }
 
-    /// Sums every recorded success across all buckets and targets.
     fn total_confirmations(est: &FeeEstimator) -> f64 {
         est.buckets
             .iter()
@@ -918,8 +836,6 @@ mod tests {
         );
     }
 
-    /// A confirmation at or below the high-water height records the
-    /// observation without advancing or re-decaying the estimator.
     #[test]
     fn non_advancing_height_confirmation_records_without_decay() {
         for (case, tag, height) in [
@@ -980,8 +896,6 @@ mod tests {
         assert_eq!(est.to_history_bytes(), est.to_history_bytes());
     }
 
-    /// Every payload shape the version-1 decoder must refuse. Offsets follow
-    /// the layout magic(8) version(4) height-flag(1) bucket-count(4) buckets.
     #[test]
     fn history_rejects_every_corrupt_payload_shape() {
         let base = FeeEstimator::new().to_history_bytes();

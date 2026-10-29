@@ -1,4 +1,3 @@
-//! Authentication coverage for the synchronous RPC server.
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -68,8 +67,6 @@ fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::er
     let payload = response.split_once("\r\n\r\n").ok_or("missing body")?.1;
     let value: sonic_rs::Value = sonic_rs::from_str(payload)?;
 
-    // CONTRACT: API-02. Core maps legacy RPC_METHOD_NOT_FOUND to HTTP 404
-    // (`src/httprpc.cpp:51-53`); other legacy codes keep 500.
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     assert!(value.get("jsonrpc").is_none());
     assert!(value.get("error").is_some());
@@ -305,11 +302,6 @@ fn constant_time_compare_checks_length_and_content() {
     assert!(!constant_time_eq(b"same-but-longer", b"same"));
 }
 
-/// Declares a 16 MiB body on a fresh connection, sends only the head, and
-/// reads to the server's close. Returns the response and the time it took.
-/// The client never sends a body byte and never closes: a response that
-/// arrives proves the server answered from the head, and a read that times
-/// out (5 s) means it neither answered nor closed.
 fn withheld_body_request(
     address: std::net::SocketAddr,
     credentials: Option<&str>,
@@ -343,8 +335,6 @@ fn unauthorized_request_is_answered_before_its_body_is_read()
             elapsed < Duration::from_secs(2),
             "{credentials:?} took {elapsed:?}"
         );
-        // Exact equality covers the status, the challenge, the content type,
-        // the empty body, the close, and the absence of a `Date` header.
         assert_eq!(
             response,
             "HTTP/1.1 401 Unauthorized\r\n\
@@ -363,10 +353,6 @@ fn unauthorized_request_is_answered_before_its_body_is_read()
 #[test]
 fn framing_errors_precede_authentication() -> Result<(), Box<dyn std::error::Error>> {
     let address = spawn(Auth::basic("alice", "secret"))?;
-    // No Authorization header: a 401 would be the answer if the gate ran
-    // before the framing checks. Nothing follows the head, so the server's
-    // close carries no unread bytes that could reset the connection under
-    // the 400.
     for head in [
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
         "POST / HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -385,8 +371,6 @@ fn framing_errors_precede_authentication() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Valid credentials pass the gate and the body is then read: a body cut
-/// short is a framing error, not a 401.
 #[test]
 fn authorized_request_with_a_truncated_body_is_a_framing_error()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -408,22 +392,11 @@ fn authorized_request_with_a_truncated_body_is_a_framing_error()
     Ok(())
 }
 
-/// POOL-08: pool management stays on the authenticated management surface.
-///
-/// `getpoolinfo` is a shipped pool-registry method (management-only per the
-/// registry notes). An authorized JSON-RPC request on the management
-/// listener reaches the pool handler — which refuses without an enabled
-/// ledger (`MethodDisabled`, or `MethodNotFound` when the pool feature is
-/// not compiled in) — while missing or wrong credentials get Core's 401 and
-/// the same body on the public listener gets 404 before authentication.
 #[test]
 fn pool_management_requires_authentication_and_management_surface()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = r#"{"jsonrpc":"2.0","method":"getpoolinfo","params":[],"id":1}"#;
 
-    // `getpoolinfo` must be the shipped pool-registered method in every
-    // build, so the refusal legs below target pool management specifically
-    // even when the pool dispatch arm is not compiled in.
     let row = bitcoin_rs_rpc::manifest::MANIFEST
         .iter()
         .find(|entry| entry.name == "getpoolinfo")

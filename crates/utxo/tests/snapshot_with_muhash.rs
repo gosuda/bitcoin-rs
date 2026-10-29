@@ -1,6 +1,3 @@
-//! Differential integration tests for the coinstats listener and the snapshot
-//! trailer: every commit-path shape must leave the listener holding exactly the
-//! stats a serial reference computes, and the trailer must be that `MuHash`.
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -10,14 +7,10 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const TRAILER_LEN: usize = 384;
 
-/// What the second commit does to the outputs the first one created.
 #[derive(Clone, Copy)]
 enum SecondCommit {
-    /// Re-adds every outpoint with a new payload, newest shard first.
     Overwrite,
-    /// Spends every outpoint and creates a fresh one in the same shard.
     Replace,
-    /// Spends every outpoint and creates nothing.
     SpendAll,
 }
 
@@ -28,9 +21,6 @@ struct Plan {
     second: SecondCommit,
 }
 
-/// Every commit-path shape the listener has to survive: one shard, two shards
-/// with enough entries to chunk, and twenty shards committed in parallel, each
-/// followed by an overwrite, a cross-shard replacement, or a full spend.
 #[test]
 fn listener_stats_and_snapshot_trailer_match_a_serial_reference() -> TestResult {
     let plans = [
@@ -81,8 +71,6 @@ fn run(plan: &Plan) -> TestResult {
     let mut first = BlockChanges::with_capacity(capacity, 0);
     let mut seeded = Vec::with_capacity(capacity);
     for index in 0..plan.entries {
-        // Four outputs per (shard, txid) pair, so each shard's commit carries
-        // same-transaction runs rather than one isolated output each.
         let shard = u8::try_from(index % u32::from(plan.shards))?;
         let slot = index / u32::from(plan.shards);
         let outpoint = OutPoint::new(
@@ -191,7 +179,6 @@ fn txout(index: u32) -> TxOut {
     }
 }
 
-/// The shard a UTXO key selects: the first little-endian txid byte.
 fn shard_of(outpoint: &OutPoint) -> u8 {
     outpoint.txid.0.to_le_bytes()[0]
 }

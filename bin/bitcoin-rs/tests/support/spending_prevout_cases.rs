@@ -4,7 +4,7 @@ use bitcoin::Sequence;
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin_rs_e2e::differential::{compare_rpc, mine_common_chain};
 use bitcoin_rs_e2e::{Error, Kind};
-use serde_json::{Value, json};
+use sonic_rs::{Value, json};
 
 use super::start;
 

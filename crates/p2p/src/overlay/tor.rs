@@ -189,12 +189,9 @@ impl OverlayTransport {
                         Err(error) => return Err(error),
                     }
                 }
-                // No Detach flag: closing the control socket removes only this service.
                 Ok(())
             })();
             *self.local_onion.write() = None;
-            // Forwarded connections belong to the lost service, but outbound Tor circuits
-            // use the independently configured SOCKS route and need not be retired.
             for session in shared.peer_table.sessions() {
                 if matches!(session.addr, crate::PeerRemote::AnonymousTor(_)) {
                     session.lease.cancel();

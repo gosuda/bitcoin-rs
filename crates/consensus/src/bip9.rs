@@ -1,6 +1,5 @@
 use bitcoin_rs_primitives::Network;
 
-/// BIP9 signalling period length in blocks.
 const BIP9_PERIOD: u32 = 2016;
 /// Deployment id for CSV (BIP68/112/113).
 pub const CSV_DEPLOYMENT_ID: u32 = 0;
@@ -11,23 +10,16 @@ const TESTNET3_THRESHOLD: u32 = 1512;
 const VERSIONBITS_TOP_MASK: u32 = 0xe000_0000;
 const VERSIONBITS_TOP_BITS: u32 = 0x2000_0000;
 
-/// BIP9 deployment state at a given block height.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DeploymentState {
-    /// Initial state; deployment not yet started.
     Defined,
-    /// Signalling window active; counting votes.
     Started,
-    /// Threshold reached; activation pending.
     LockedIn,
-    /// Deployment active.
     Active,
-    /// Deployment failed (timeout reached without lock-in).
     Failed,
 }
 
 impl DeploymentState {
-    /// Encodes this state as a stable cache tag.
     #[must_use]
     pub const fn cache_tag(self) -> u8 {
         match self {
@@ -39,7 +31,6 @@ impl DeploymentState {
         }
     }
 
-    /// Decodes a stable cache tag.
     #[must_use]
     pub const fn from_cache_tag(tag: u8) -> Option<Self> {
         match tag {
@@ -53,23 +44,16 @@ impl DeploymentState {
     }
 }
 
-/// Extended deployment parameters for the BIP9 state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentParams {
-    /// Bit number signalled in the block version.
     pub bit: u8,
-    /// Median-time-past at which signalling starts.
     pub start_time: u32,
-    /// Median-time-past at which signalling times out.
     pub timeout: u32,
-    /// Block window size, typically 2016.
     pub period: u32,
-    /// Signal count required for `LOCKED_IN`, typically 1916.
     pub threshold: u32,
 }
 
 impl DeploymentParams {
-    /// Whether this block version signals this deployment under BIP9.
     #[must_use]
     pub fn signals(self, version: i32) -> bool {
         let version = u32::from_ne_bytes(version.to_ne_bytes());
@@ -79,16 +63,12 @@ impl DeploymentParams {
     }
 }
 
-/// CSV/Segwit activation at one connect height.
 #[derive(Clone, Copy, Debug)]
 pub struct SoftforkState {
-    /// Whether CSV (BIP68/112/113) is active.
     pub csv_active: bool,
-    /// Whether Segwit (BIP141/143) is active.
     pub segwit_active: bool,
 }
 
-/// Versionbits parameters for a named deployment on `network`.
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
     let (threshold, csv_start_time, segwit_start_time, segwit_timeout) = match network {
@@ -120,17 +100,12 @@ pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<D
     })
 }
 
-/// Read-only chain context the state machine queries.
 pub trait DeploymentContext {
-    /// Returns the block version field at `height`, or `None` if unknown.
     fn block_version(&self, height: u32) -> Option<i32>;
 
-    /// Median at `height` over exactly [`crate::MEDIAN_TIME_PAST_WINDOW`]
-    /// (11 blocks), or `None` if unknown.
     fn median_time_past(&self, height: u32) -> Option<u32>;
 }
 
-/// Computes the BIP9 deployment state at `height`.
 #[must_use]
 pub fn compute_state(
     ctx: &impl DeploymentContext,
@@ -204,8 +179,6 @@ fn compute_state_at_boundary(
         DeploymentState::Failed => DeploymentState::Failed,
     }
 }
-/// Builds the version field for a candidate block from already-resolved BIP9
-/// states.
 #[must_use]
 pub fn versionbits_block_version(
     deployments: impl IntoIterator<Item = (u8, DeploymentState)>,

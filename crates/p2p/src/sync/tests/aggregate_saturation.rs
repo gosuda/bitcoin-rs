@@ -1,12 +1,7 @@
-//! The node's aggregate outbound budget is backpressure for block sync, never
-//! a reason to disconnect a healthy peer: a refused `getheaders` or `getdata`
-//! queues and marks nothing, and the next tick rebuilds the request.
-
 use super::*;
 use crate::connection::SharedOutboundBudget;
 use crate::test_support::hog;
 
-/// A registered connection whose queue also charges `aggregate`.
 fn connect_on(
     peers: &Arc<PeerTable>,
     aggregate: &Arc<SharedOutboundBudget>,

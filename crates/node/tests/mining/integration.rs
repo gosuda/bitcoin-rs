@@ -25,14 +25,12 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // A spend of the height-1 seed coinbase matures exactly at height 101.
     let mempool_tx = seed_coinbase_spend();
     admit_to_mempool(&state, &mempool_tx)?;
 
     let handler = mining_handler(&state);
     let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
 
-    // 1. Exact reward calculation: subsidy + all mempool transaction fees.
     assert_eq!(
         required_u64(&template, "coinbasevalue")?,
         REGTEST_SUBSIDY_SATS + MEMPOOL_TX_FEE_SATS,
@@ -45,7 +43,6 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
         .map_or(&[][..], |entries| entries.as_slice());
     assert_eq!(template_txs.len(), 1, "the mempool tx must be selected");
 
-    // 2. Exact transaction weight match (not just > 0).
     assert_eq!(
         required_u64(&template_txs[0], "weight")?,
         mempool_tx.weight(),
@@ -53,7 +50,6 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
     );
     assert_eq!(required_u64(&template_txs[0], "sigops")?, 0);
 
-    // 3. Essential BIP22 mutable and capability sets for external miner interop.
     let mutable = template
         .get("mutable")
         .and_then(|v| v.as_array())
@@ -75,7 +71,6 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
         );
     }
 
-    // 4. BIP22 header & constraint fields (preserves coverage from deleted e2e::block_template_shape).
     assert_eq!(
         required_str(&template, "previousblockhash")?,
         seed_tip_hash.to_string_be()
@@ -103,7 +98,6 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
         "segwit is mandatory"
     );
 
-    // 5. BIP141 witness commitment derivation and longpollid.
     assert_template_witness_commitment(&template, &mempool_tx)?;
     let long_poll_id = required_str(&template, "longpollid")?;
     assert_eq!(
@@ -117,7 +111,6 @@ fn template_renders_coinbase_subsidy_plus_fees_and_bip22_fields() -> Result<()> 
         "longpollid is {{tip}}{{mempool_sequence}}[:{{fee_delta_sequence}}] of the live pool"
     );
 
-    // A fee-only RPC change refreshes the cached identity without moving membership.
     let sequence = state.mempool().read().sequence_number();
     assert_eq!(
         handler
@@ -245,8 +238,6 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // Parent spends the matured height-1 coinbase; the child spends the
-    // parent. Both pay MEMPOOL_TX_FEE_SATS.
     let parent = seed_coinbase_spend();
     let parent_txid = parent.txid();
     let child = Tx {
@@ -304,7 +295,6 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     Ok(())
 }
 
-/// Records every published change as `(sequence, txid, outcome)`.
 #[derive(Default)]
 struct RecordingMempoolObserver {
     changes: Mutex<Vec<(u64, Hash256, MutationOutcome)>>,
@@ -321,18 +311,12 @@ impl MempoolObserver for RecordingMempoolObserver {
     }
 }
 
-/// Reorg re-admission publishes through the run-composed gateway:
-/// two Accepted changes, parent before child, origin `Reorg`, contiguous
-/// sequences. The apply path's raw sweep bypasses observers by design, so
-/// these two changes are the only publications the gateway emits here.
 #[test]
 fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // The node carries the gateway built for this pool, so publication runs
-    // through the same path production uses.
     let observer = Arc::new(RecordingMempoolObserver::default());
     let gateway = state.mempool_gateway();
     assert!(Arc::ptr_eq(gateway.pool(), &state.mempool()));
@@ -387,10 +371,6 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // The parent spends the matured seed coinbase but offers a 1-sat fee,
-    // far below the 1 000 sat/kvB relay floor. Reorg re-admission bypasses
-    // the floor, the way Core's `bypassLimits` skips `GetMinFee`: the family
-    // already paid for its place when it was mined.
     let parent = seed_coinbase_spend_with_fee(1);
     let parent_txid = parent.txid();
     let child = Tx {
@@ -439,7 +419,6 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // A consensus-valid spend that never passes through the mempool gateway.
     let tx = seed_coinbase_spend();
     assert!(!state.mempool().read().contains_txid(&tx.txid()));
 
@@ -486,7 +465,6 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
         "first block must be accepted, got: {verdict}"
     );
 
-    // A competing block built on the superseded template still points at old_tip.
     let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
     let stale_hex = consensus_bytes(&stale_block).to_lower_hex_string();
     let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
@@ -608,10 +586,6 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
     Ok(())
 }
 
-/// The miner's view through the real RPC dispatcher: `prioritisetransaction`
-/// reorders the next `getblocktemplate`, leaves the fees the coinbase claims
-/// alone, and moves only the fee-priority component of `longpollid`. Undoing
-/// the delta restores the order under a third, distinct generation.
 #[test]
 fn prioritisetransaction_reorders_the_rpc_template_and_moves_only_the_fee_component() -> Result<()>
 {
@@ -652,26 +626,17 @@ fn prioritisetransaction_reorders_the_rpc_template_and_moves_only_the_fee_compon
     Ok(())
 }
 
-/// A miner that still sends the legacy `longpollid` shape without a fee
-/// component is answered through the real RPC dispatcher: the id parses as
-/// fee revision zero.
 #[test]
 fn getblocktemplate_accepts_the_legacy_longpollid_shape_as_fee_zero() -> Result<()> {
     let fx = priority_fixture()?;
     let current = fx.template()?;
-    // No prioritisation has run, so the live fee revision is zero and the
-    // live id already carries no suffix: it is the legacy shape.
     assert!(
         !current.long_poll_id.contains(':'),
         "precondition: the live id {:?} carries no fee suffix",
         current.long_poll_id
     );
-    // A prioritisation moves only the fee component, so the previous legacy
-    // id is stale and must resolve at once instead of failing as malformed.
     fx.prioritise(&fx.low, PRIORITY_DELTA_SATS)?;
     let legacy = current.long_poll_id;
-    // A legacy id resolves against the fee-zero generation without waiting;
-    // the bound fails the test instead of hanging it if that regresses.
     let answered = fx.poll(&legacy).collect(PROMPT)??;
     assert_ne!(
         answered.long_poll_id, legacy,

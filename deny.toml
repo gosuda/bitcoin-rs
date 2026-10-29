@@ -40,6 +40,29 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 deny = [
+    # serde_json left the first-party graph on 2026-10-29: every workspace crate
+    # serializes with sonic-rs. The `wrappers` list holds every third-party
+    # crate that keeps a direct serde_json dependency we cannot remove:
+    # corepc-types models Bitcoin Core v31 RPC results, tracing-subscriber
+    # formats the node's JSON logs, criterion with tinytemplate back the
+    # benches, and usdt-impl with dof carry the optional USDT probe path. Any
+    # other direct dependent, including a workspace crate, fails this check, so
+    # a reintroduction needs an explicit decision here.
+    { crate = "serde_json", wrappers = [
+        "corepc-types",
+        "tracing-subscriber",
+        "criterion",
+        "tinytemplate",
+        "usdt-impl",
+        "dof",
+    ], reason = "first-party JSON goes through sonic-rs; only the listed third-party wrappers may depend on serde_json", use-instead = "sonic-rs" },
+    # One time stack: std::time for the wall clock, quanta for monotonic timing,
+    # jiff if a calendar type is ever required. All three crates are absent from
+    # the graph today, so each ban is a forward guard: a new dependency path
+    # cannot reintroduce a second time stack without an explicit edit here.
+    { crate = "chrono", reason = "wall clock is std::time and monotonic timing is quanta; a calendar type would use jiff", use-instead = "jiff" },
+    { crate = "chrono-tz", reason = "no timezone database is needed, and chrono is banned", use-instead = "jiff" },
+    { crate = "time", reason = "one time stack: std::time for the wall clock, quanta for monotonic timing, jiff for calendar types", use-instead = "jiff" },
     # Only the two audited base64 releases may coexist.
     { crate = "base64:<0.21.7", reason = "only audited base64 versions 0.21.7 and 0.22.1 are allowed" },
     { crate = "base64:>0.21.7,<0.22.1", reason = "only audited base64 versions 0.21.7 and 0.22.1 are allowed" },

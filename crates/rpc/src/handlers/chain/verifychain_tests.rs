@@ -1,11 +1,4 @@
 //! `verifychain` parameter boundaries and pre-delegation outcomes.
-//!
-//! The handler validates Core's signed parameters, honors handler shutdown,
-//! and answers a tip without a verifier as unverified. The node-owned
-//! verifier's answers, including the applied-genesis window, are proven
-//! against the real verifier in `node` (`lifecycle` tests) and in
-//! `chainstate::verify`; the stub control below proves delegation to the
-//! attached control, not its answers.
 #![expect(clippy::unwrap_used)]
 
 use alloc::sync::Arc;
@@ -15,7 +8,6 @@ use super::*;
 use crate::context::{ChainControl, ChainControlError};
 use crate::handlers::Handler;
 
-/// A context whose applied tip is genesis, with no chain control attached.
 fn tipped() -> Arc<Context> {
     Arc::new(tipped_context())
 }
@@ -41,7 +33,6 @@ fn tipped_context() -> Context {
 #[test]
 fn parameters_follow_core_signed_ranges() {
     let handler = Handler::new(Arc::new(Context::new()));
-    // No applied tip: nothing to verify, whatever the window.
     for params in [
         json!([]),
         json!([3, 6]),
@@ -58,8 +49,6 @@ fn parameters_follow_core_signed_ranges() {
         assert_eq!(result.as_bool(), Some(true), "{params:?}");
     }
 
-    // Core reads both parameters with `getInt`: a non-number is a type
-    // error, anything outside the signed 32-bit range is out of range.
     for params in [json!(["0"]), json!([0, false])] {
         assert_eq!(
             handler.dispatch("verifychain", &params).unwrap_err().code(),
@@ -94,9 +83,6 @@ fn parameters_follow_core_signed_ranges() {
 #[test]
 fn cancelled_requests_report_interruption() {
     let handler = Handler::new(tipped());
-    // The same request over the same applied tip answers `false` while the
-    // handler runs (no verifier attached), so the error below is the
-    // handler's own pre-dispatch interruption, not a verifier outcome.
     assert_eq!(
         handler.dispatch("verifychain", &json!([0, 0])).unwrap(),
         json!(false)

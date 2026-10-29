@@ -1,7 +1,5 @@
 use super::*;
 
-/// Regression guard for the byte-identical wire-text constraint: every
-/// variant must render the exact refusal text the crate emitted before
 /// the typed-cause retag. A later edit that drifts wire text fails here.
 fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
     for (cause, expected) in cases {
@@ -130,17 +128,9 @@ fn carried_unavailable_causes_render_pinned_wire_text() {
     ]);
 }
 
-/// Acceptance row 13 (type-level half): the scoped `ScriptLive` outage is a
-/// typed `Unavailable` carrying the stored worker reason verbatim, never a
 /// `Retry` and never new wire text. Engine-level proof (flag set with no
-/// watermark gives `Unavailable(ScriptLiveUnavailable)` for `ScriptLive`
-/// queries while TxLookup/history keep serving and global `failed` stays
-/// unset) lives in the worker harness; this pins the contract the engine
-/// observes: passthrough display, `Unavailable` error prefix, variant
-/// distinctness, and untouched sibling refusals.
 #[test]
 fn script_live_unavailable_is_typed_passthrough_not_retry() {
-    // Passthrough: the cause renders exactly the stored reason.
     for reason in [
         "script live seed pruned at height 100",
         "txindex worker: retained history unavailable: pruned at height 7",
@@ -155,7 +145,6 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         );
         assert!(!matches!(error, TxQueryError::Retry));
     }
-    // Scoped: the outage variant never aliases another capability's refusal.
     let outage = TxUnavailableCause::ScriptLiveUnavailable("pruned".into());
     assert_ne!(outage, TxUnavailableCause::WorkerStopped);
     assert_ne!(
@@ -167,13 +156,10 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive)
     );
     assert_ne!(outage, TxUnavailableCause::Other("pruned".into()));
-    // The historical wrapper carries the scoped reason through unchanged,
-    // should a historical path ever need to share it.
     let shared = HistoricalUnavailableCause::Shared(TxUnavailableCause::ScriptLiveUnavailable(
         "pruned".into(),
     ));
     assert_eq!(shared.to_string(), "pruned");
-    // Sibling capabilities keep their exact wire text while the flag is set.
     assert_renders(vec![
         (
             TxUnavailableCause::PrunedPrefixUnproven {
@@ -189,19 +175,6 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
     ]);
 }
 
-/// P1 acceptance row 13 (engine half): the scoped `ScriptLive` outage at
-/// the real query engine. Requires the `fjall` backend, like the worker
-/// owning suites (`recovery_tests`, `seed_paused_tests`): serving
-/// `TxLookup`/history needs committed watermarks plus real rows, which
-/// need a real store. Run with `--features fjall`.
-///
-/// A real engine is built over a real store holding one committed genesis
-/// block, with the real `script_live_failure` flag set and no watermark
-/// gap anywhere: `ScriptLive` answers `Unavailable(ScriptLiveUnavailable)`
-/// carrying the worker reason verbatim, while `TxLookup` and history on
-/// the same engine keep serving real data and global `failed` stays unset.
-/// The block body source below serves the genuine committed bytes to the
-/// real engine; the system under test is the query routing, not storage.
 #[cfg(all(test, feature = "fjall"))]
 mod script_live_outage_engine_tests {
     use super::{DerivedIndexQuery, ScriptIndexQuery, TxQueryError, TxUnavailableCause};
@@ -254,9 +227,6 @@ mod script_live_outage_engine_tests {
         }
     }
 
-    /// One spend-free bitcoin block plus its consensus bytes and the
-    /// matching primitives header: the same real pipeline the worker
-    /// prepares, committed here directly.
     fn genesis_block() -> (Block, Hash256, Vec<u8>) {
         let mut block = Block {
             header: BlockHeader {
@@ -330,9 +300,6 @@ mod script_live_outage_engine_tests {
 
         let store = Arc::new(FjallStore::open(dir.path())?);
         let mut index = IndexWriter::open(store, 1)?;
-        // HISTORICAL only: TxLookup and history commit a watermark at the
-        // tip while ScriptLive stays unwatermarked, the exact outage
-        // state this row proves.
         let prepared = index.prepare_block_with_spent_scripts(
             IndexCapabilities::HISTORICAL,
             0,
@@ -385,8 +352,6 @@ mod script_live_outage_engine_tests {
             },
         );
 
-        // Flag set with no watermark gap: ScriptLive is unavailable with
-        // the worker reason verbatim, never Retry.
         let script_hash = ScriptHash::from_script_bytes(&[0x51]);
         let expected_reason = outage.to_string();
         assert_eq!(
@@ -396,7 +361,6 @@ mod script_live_outage_engine_tests {
             ))
         );
 
-        // The same engine keeps serving the other families from real rows.
         let txid = expected_txid(&block);
         assert_eq!(engine.transaction_height(&txid)?, Some(0));
         let history = engine.confirmed_history(script_hash)?;
@@ -404,7 +368,6 @@ mod script_live_outage_engine_tests {
         assert_eq!(history[0].txid, txid);
         assert_eq!(history[0].height, 0);
 
-        // Scoped outage only: no global worker failure is published.
         assert!(runtime.failure_message().is_none());
         Ok(())
     }

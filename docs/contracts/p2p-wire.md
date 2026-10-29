@@ -1,404 +1,104 @@
 # P2P wire contract
 
-This page assigns ownership and cites proof under the
-[contracts precedence rule](README.md).
+Ownership and proof follow the [contracts precedence rule](README.md). `crates/p2p/src/compat.rs` owns the decoded command inventory and pinned Core version; [p2p-compatibility](../policies/p2p-compatibility.md) owns handshake fields, reject-or-ignore matrix, deviation ledger (§7), and verification process (§5 table is a checked projection of `COMMANDS`).
 
-- [`crates/p2p/src/compat.rs`](../../crates/p2p/src/compat.rs) owns the
-  decoded command inventory and the pinned Core version.
-- [docs/policies/p2p-compatibility.md](../policies/p2p-compatibility.md)
-  owns the handshake fields, reject-or-ignore matrix, deviation ledger,
-  and verification process. The §5 table is a checked projection of
-  `COMMANDS`.
+## Wire surface (checked projection of `COMMANDS`)
+
+Envelope (`wire.rs`): v1 frame is 4-byte magic, 12-byte NUL-padded command, u32 LE length, 4-byte checksum (double-SHA256 prefix), then payload. `MAX_MESSAGE_PAYLOAD` is 4,000,000 bytes on either transport; a v1 header declaring more is refused pre-body. Magic and ports come from `Network` (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444). Advertised protocol version is `70017` (`PROTOCOL_VERSION`; Core 31.1 uses `70016`). BIP324 v2 is on by default with v1 detection and fallback (`--v2transport=false` pins v1).
+Handshake order: outbound sends `version`, `wtxidrelay` (BIP339), `sendaddrv2` (BIP155), `sendheaders` (BIP130); inbound answers the same four, then `verack` completes readiness. BIP434 `feature` announcements go between `version` and `verack`, only to peers at 70017 or higher; post-handshake `feature` is refused as local caller error (lease cancelled, credit released, never shared backpressure). Stale-tip relay is default-off (`RelayOffers::stale_tip_relay`); when on, one `BIP332` announcement carries the one-byte `prefers_blocks` value. Package relay is default-off; `sendpackages` carries one LE u64 with `PKG_RELAY_PKGTXNS | PKG_RELAY_ANC` bits.
+`version` fields: `version` 70017 (deviation; `getheaders` version stays rust-bitcoin 70001); `services` `NETWORK|WITNESS`, or `NETWORK_LIMITED|WITNESS` when pruned, plus `P2P_V2` while v2transport is on and `COMPACT_FILTERS` only when the filter index is ready; `relay` true on full-relay, false on block-relay-only; `user_agent` `/bitcoin-rs:<version>/`; `timestamp` 0 (deviation, unscored by Core 31); `start_height` current applied tip height.
+
+| Command | Status | Bound and rule |
+| :--- | :--- | :--- |
+| `version`, `verack` | negotiated | Handshake order above; `verack`-before-`version` disconnects; duplicate `version` is a handshake-ordering violation (no replacement, no replay; protected connections ignore it under the deadline); non-handshake message pre-readiness disconnects (Core whitelists only `sendtxrcncl`, the one practical divergence). Post-`verack` unknown commands are ignored, connection stays up. |
+| `wtxidrelay`, `sendaddrv2`, `sendheaders` | negotiated | BIP339, BIP155, BIP130; sent in handshake, tracked inbound. |
+| `feature` | negotiated | BIP434 draft, BIP324 short ID 37, no Core equivalent. Minimal `CompactSize` framing; id 4 to 80 bytes, data at most 512 bytes, else invalid decoded payload; only a valid `BIP332` (one-byte 0/1) is retained per peer with first-valid-wins; unknown ids and invalid data for known ids are ignored; this node advertises printable ASCII (`0x20..=0x7e`) only. |
+| `sendpackages`, `ancpkginfo`, `getpkgtxns`, `pkgtxns` | negotiated, opt-in | BIP331 draft, no Core equivalent (`packages.rs`). `sendpackages` is one LE u64; list messages carry a minimal `CompactSize` count of 1 to 100, then wtxids (`ancpkginfo`, `getpkgtxns`) or witness txs (`pkgtxns`); `ancpkginfo` rejects a repeated wtxid. Relay is the intersection of known bits both sides sent, active only post-handshake with peer `wtxidrelay` pre-`verack` and `fRelay` in its `version`; first peer `sendpackages` wins, `0`/unknown bits ignored, post-`verack` `sendpackages` changes nothing. `ancpkginfo` needs the `ANC` bit and `getpkgtxns`/`pkgtxns` need `PKGTXNS`, else `Misbehavior`; `getdata` for `MSG_PKGTXNS` is `Misbehavior` (notfound-only, never served); `inv` of a package-only type is `Misbehavior`. Received `pkgtxns` stays raw (at most `MAX_MESSAGE_PAYLOAD`), parsed only by the charging consumer. |
+| `staletip` | negotiated, opt-in | BIP332 draft, no Core equivalent (`staletip.rs`); 12-byte name on both transports, no BIP324 short ID. Over-header-limit payload ignored without punishment; other malformed payloads are invalid decoded payloads. Relayed only when the node enabled it, the peer negotiated `BIP332`, and IBD is inactive. |
+| `ping`, `pong` | served, ignored | `ping` answered with `pong` echoing the nonce on ready peers; no latency telemetry kept; `pong` body unused. |
+| `inv` | consumed | Bound 50,000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). Missing tx vectors enter the connection-bound owner; only the selected eligible source gets `getdata`; `wtxidrelay` peers get `MSG_WTX` with actual wtxid, others `MSG_TX`; `NODE_WITNESS` sources get `MSG_WITNESS_TX` requests, others `MSG_TX`. IBD never requests tx vectors (`:4401-4404`). Block vectors are never answered with body `getdata` (P2P-07). Outbound block announce falls back to single-block `inv` (`MSG_BLOCK`) past `MAX_BLOCKS_TO_ANNOUNCE` (8) behind the tip. |
+| `getdata` | served | Bound 50,000. `MSG_BLOCK` streams stripped stored blocks, `MSG_WITNESS_BLOCK` witness-preserved (BIP144); tx from mempool, or orphan map only for resident-wtxid `MSG_WTX`; block-relay-only peers get tx vectors removed; `MSG_TX` stripped, `MSG_WITNESS_TX`/`MSG_WTX` witness form. `MSG_CMPCT_BLOCK` within 5 of the applied tip gets `cmpctblock`, deeper gets the full witness `block` (`:2705-2721`). Misses trail as one `notfound`; items served in request order. Saturation pauses, never disconnects: no free item slot (4,096 queued) or no room for one worst-case block under the 64 MiB cap; parked `notfound` reserved at exact length; a 20-minute request or hold, or a dead writer, ends the session (aggregate-refused time excluded). |
+| `notfound` | tx fallback | Matching tx request releases only its actual source and reconsiders retained alternatives; block entries ignored; same 50,000 bound. |
+| `getheaders` | served | Answered from the active chain: first on-chain locator hash anchors, total miss anchors after genesis, stop hash truncates inclusively, at most 2,000 headers (Core per-message maximum); locator at most 101 hashes (`MAX_LOCATOR_SZ`); empty locator with zero stop answers nothing. |
+| `getblocks` | ignored | Legacy locator request (deviation; Core answers `inv`); same locator bound. |
+| `headers` | sink, outbound | Forwarded to header sync; new active tips announced via BIP130 `headers` (at most 8, `MAX_BLOCKS_TO_ANNOUNCE`) to `sendheaders` peers anchorable on active history; at most 2,000 per message. |
+| `block` | sink | Forwarded with original wire bytes preserved; node-wide shared channel bounded once plus per-connection unsolicited share; window-requested bodies always admitted (P2P-07). |
+| `tx` | sink | Forwarded from Ready peers into the bounded ingress channel, except in IBD where unsolicited bodies drop pre-ingress with no score and no disconnect (`:4713-4716`); missing parents fetched txid-typed on the live connection; a full ingress channel drops the body while ping, headers, blocks keep flowing. |
+| `mempool` | ignored | BIP35 deviation, silent. |
+| `getaddr` | served | At most 32 retained IPv4/IPv6/Tor-v3/I2P addresses, once per full-relay connection; `sendaddrv2` peers get `addrv2` rows, others legacy `addr`; book-disabled connections stay silent. |
+| `addr`, `addrv2` | consumed | 1,000-entry wire bound; 32-per-connection allowance (1 per 10 s); source-group and routability checks pre-retention; Tor v3 and I2P kept as `addrv2`; Tor v2, CJDNS, unknown families ignored; anonymous Tor circuits supply no learning source. |
+| `feefilter` | applied | BIP133; valid nonnegative thresholds through `MAX_MONEY` filter queued outbound inv; invalid values ignored; never changes admission; 70013+ full-relay peers get rounded local floors on randomized refresh. |
+| `sendcmpct` | negotiated | BIP152; low-bandwidth mode post-`verack`; at most 3 high-bandwidth peers (oldest demoted at cap); Ready high-bandwidth peers get unsolicited `cmpctblock` for new tips with known parent (not in `blocksonly`); early announce allowed for a PoW-valid tip child with no retraction on later connect failure. |
+| `cmpctblock`, `blocktxn` | sink | Reconstruction only for valid-PoW, non-invalid, known-parent, context-passing headers that beat applied work within 2 above the applied tip (`:4664`) or answer an owned body fetch; other announcements route header-only to admission. Bounded per-peer reconstruction over prefilled plus short-ID matches against mempool and a 100-wtxid extra pool (replaced, orphan-held, sub-100,000-byte policy rejects; never coinbase; hint-only); v1 matches txid, v2 wtxid; missing fetched via same-connection `getblocktxn`; duplicate short ID, count mismatch, or bounds failure falls back to full `getdata`; deadline expiry drops silently. Completion re-verifies the txid merkle root (CVE-2012-2459) and rejects coinbaseless 64-byte-tx bodies (CVE-2017-12842), else falls back; verified blocks enter the ordinary pipeline. |
+| `getblocktxn` | served | BIP152; stored non-invalid blocks within 10 of the applied tip answered (including newly stale); deeper uses full-block policy with stale validation and age; unknown blocks unanswered; past-end index on the `blocktxn` path disconnects; empty or non-increasing indexes rejected at the boundary; headroom gate runs pre-load and saturated leaves the request unanswered without disconnect. |
+| `merkleblock`, `filterload`, `filteradd`, `filterclear` | ignored | BIP37; `NODE_BLOOM` never advertised. |
+| `getcfilters`, `getcfheaders`, `getcfcheckpt` | served when enabled and ready | BIP157 basic type 0 only; active-chain stop; at most 1,000 filters or 2,000 hashes; checkpoints at positive 1,000 multiples; headroom-gated streaming; budget-stopped pass parks only the remainder (no replay, stop height pinned); other early stops or moved stops close the connection; unknown, unavailable, oversized unanswered. |
+| `cfilter`, `cfheaders`, `cfcheckpt` | ignored | The node serves filters, never syncs through them. |
+| `reject`, `alert` | decoded only, ignored | `reject` never sent (Core 31 emits none for tx results); `alert` decoded opaque, dead in Core. |
+| `sendtxrcncl` and any other command | unknown | Decoded as `Unknown` under the message policy below (BIP330; the one Core 31 command absent above). |
+
+Message policy for an ordinary automatic nonlocal peer: unknown commands post-readiness are ignored; invalid handshake ordering, invalid decoded payloads, and checksum failures disconnect with temporary avoidance; wrong magic closes the transport without discouragement; invalid command bytes or lengths above 4,000,000 close the transport (plus avoidance for ordinary remote IPs); `inv`/`getdata` above 50,000, `addr`/`addrv2` above 1,000, `headers` above 2,000, locators above 101, or `notfound` above 50,000 disconnect with avoidance; past-end `getblocktxn` indexes disconnect with avoidance, as do empty or non-increasing index lists (empty is stricter than Core); `tx` or tx `inv` on a block-relay-only connection disconnects without discouragement; `addr` on such a connection is ignored.
+Queue accounting: per-connection 4,096 messages and 64 MiB; node aggregate one strict 64 MiB cap shared by every connection of a `P2pService`, pending total never above cap at any instant with no empty-queue exemption; a lone oversized message is admitted to an empty local queue but still charged to the aggregate; bulk body reservations must fit under cap minus one maximum frame. Deferred replies (`ping`, `getheaders`, answerable `getaddr`, `cmpctblock`/`blocktxn` follow-ups): the connection reads nothing until reservable, dispatches once, never emits unreserved replies; probe `ping` and outbound `getaddr` stay owed. Aggregate-refused time is a stall, not keepalive silence, parked-request age, or compact-filter allowance. Off-chain `getdata` and deep `getblocktxn` fallback need the recorded application count with timestamp and proof-equivalent age strictly below 30 days (`:1953-1959`; shallow `getblocktxn` uses `:4333-4391`); bodies parse and hash-check outside tree locks with eligibility rechecked post-read; unknown, invalid, pruned, missing, malformed bodies are never forwarded.
 
 ## Clauses
 
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
-- **Owner**: `crates/p2p/src/compat.rs` owns the 42-command inventory (the 36
-  Core-compatibility commands plus the extensions `feature`, the four BIP331
-  package messages, and `staletip`, which Core 31.1 does not have) and
-  `PINNED_CORE_VERSION` (Bitcoin Core 31.1). The policy document owns handshake
-  fields, reject-or-ignore semantics, and recorded deviations.
-- **Scope**: `crates/p2p` wire, handshake, protocol FSM, and message policy; the
-  chain-serving query `crates/p2p/src/chain_query.rs`; and node network flags.
-- Message framing, envelope decoder, service flags, and network magic follow
-  the inventory and the policy document. v1 frames for handshake and inventory
-  commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
-  `getdata` block serving validates the stored body and answers
-  `MSG_WITNESS_BLOCK` with its exact stored consensus payload bytes
-  (`Message::BlockPayload`). `MSG_BLOCK` copies the checked header, transaction
-  count, and stripped transaction spans into its payload, following BIP144.
-  Both forms validate the complete borrowed layout without materializing
-  scripts or witnesses; malformed bodies are never forwarded. Both forms
-  resolve `(height, hash)` directly and recheck serving eligibility after
-  preparing the payload.   Stored stale blocks remain servable under the policy
-  document's validation and age bounds; unsolicited announcements remain
-  active-only. Response depth uses the applied frontier rather than unapplied
-  headers. Locator-based `getheaders` replies walk the applied chain:
-  `ActiveChainQuery::headers_after` resolves the locator order, stop hash,
-  and height walk against the validated applied tip, never the header-best
-  tip; the empty-locator single-header direct lookup stays on the header-best
-  chain. The wire decoder types inbound `block` as
-  `Message::Block(BlockPayload)`, constructed once via
-  `BlockPayload::from_raw` on the frame bytes with no second decode; the
-  serving `Message::BlockPayload(Bytes)` envelope stays raw-only with no
-  decoded field. `InboundBlock` owns the one payload while peer/source and
-  `forward_credit` stay outer; `check_body_binding` runs on the decoded
-  block and credit is released at the existing handoff.
-- Proof: applied-tip `headers_after` in `crates/p2p/src/chain_query.rs`
-  (`applied_prefix_when_headers_lead` proves only the servable applied
-  prefix replies while headers lead and a header-best-only locator is not
-  an applied ancestor; `applied_fork_off_best_serves_own_ancestry`,
-  `best_only_locator_does_not_skip_applied_fork`, and
-  `stop_hash_bounds_applied_response` prove off-best ancestry, locator
-  fallback, and applied-stop bounding);
-  `committed_tip_reads_applied_tip_when_headers_are_ahead` and
-  `serving_depth_uses_applied_tip_when_headers_are_ahead` prove the
-  committed tip and serving depth follow the applied tip while headers
-  lead. Single `BlockPayload::from_raw` decode:
-  `crates/primitives/src/block.rs`
-  `payload_from_raw_retains_exact_fixture_bytes` and
-  `payload_from_raw_rejects_trailing_bytes` plus
-  `crates/p2p/src/wire.rs`
-  `block_message_roundtrip_preserves_wire_payload` (one decode carries the
-  frame; raw bytes preserved end to end).
-- Handshake boundary proof: `peer::tests::bip434_send_window_uses_remote_version_and_local_verack`
-  and `bip434_send_window_closes_only_after_a_successful_verack_write`;
-  `connection::tests::bip434_features_never_enter_the_post_handshake_queue`;
-  `dispatch::tests::version_reply_sends_the_offered_sendpackages_once_before_verack`;
-  `listener::v2_transport_tests::bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2`
-  exercises both transports with BIP332/BIP331 enabled. These are local and
-  loopback proofs, not live interoperability evidence against a BIP434 Core.
+- **Owner**: `crates/p2p/src/compat.rs`: 42-command inventory (36 Core commands plus `feature`, four BIP331 package messages, `staletip`) and `PINNED_CORE_VERSION` (Core 31.1). **Scope**: `crates/p2p` wire/handshake/FSM/policy, `chain_query.rs`, node network flags.
+- v1 handshake/inventory frames are byte-identical to rust-bitcoin `RawNetworkMessage`. `getdata` validates the stored body: `MSG_WITNESS_BLOCK` answers exact stored consensus bytes (`Message::BlockPayload`); `MSG_BLOCK` copies checked header, tx count, stripped spans (BIP144). Neither materializes scripts/witnesses; malformed bodies are never forwarded. Stale stored blocks stay servable under policy validation/age bounds; unsolicited announcements stay active-only. Response depth uses the applied frontier. Locator `getheaders` walks the applied chain (`ActiveChainQuery::headers_after`); empty-locator single-header lookup stays header-best.
+- Inbound `block` decodes once via `BlockPayload::from_raw` (`Message::Block(BlockPayload)`); serving `Message::BlockPayload(Bytes)` stays raw-only. `InboundBlock` owns the payload; peer/source and `forward_credit` stay outer; `check_body_binding` runs on the decoded block; credit releases at handoff.
+- Handshake boundary: BIP434 send window keyed on remote version plus local verack; BIP434 features never enter the post-handshake queue; version reply sends offered sendpackages once pre-verack; BIP434 windows preserve BIP332/BIP331 on v1 and v2. Local/loopback proofs only, not live Core evidence.
+- Proof: `chain_query.rs` applied-prefix tests; `primitives/src/block.rs` `payload_from_raw_*`; `p2p/src/wire.rs` roundtrip; `peer`/`connection`/`dispatch`/`listener::v2_transport_tests` handshake tests.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
-- Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
-  `connection::PeerRemote` distinguishes a destination from an anonymous
-  inbound Tor circuit identified by its lease's `ConnectionId`. Address-book
-  and dial APIs accept only `PeerEndpoint` destinations. Transaction attribution
-  retains the connection id even when no destination is known.
-- Automatic discouragement is owned by the P2P service's `BannedReader` and
-  bounded ephemeral policy. The listener records only typed remote violations
-  from a current lease. Immutable exclusion snapshots precede address-book
-  locks; socket admission rechecks them. Manual/local/operator protection and
-  the exact Core deviations are specified in policy §6, with deterministic
-  ownership/expiry tests and the real-process `peer_discouragement` comparison.
-- The node-side synchronization coordinator consumes peer lifecycle events
-  without duplicating connection replacement or cancellation rules.
-- Parent requests validate the delivering connection and enqueue under the
-  same peer-table authority that serializes replacement. Requests from an
-  already cancelled lease enqueue nothing.
-- Every queued outbound message is paid for before it exists. A charge takes
-  one message and its full wire bytes from the connection's own budget and the
-  same bytes from the node's aggregate budget (`SharedOutboundBudget`, 64 MiB
-  per `P2pService`, strict: the pending total is never above the cap at any
-  instant). The charge has one owner at every moment (the reservation, then the
-  `QueuedFrame` carrying it through the lease's channel, then the writer's
-  burst) and is released exactly once when that owner drops, whether the frame
-  was written, refused, discarded with the channel, or drained at writer exit.
-  A bulk body reservation must also fit under the cap less one maximum frame.
-- A refused charge takes nothing. A refusal by the connection's own bounds
-  (`Local`) cancels the lease. A refusal by the node aggregate (`Shared`) is
-  backpressure only: the lease stays live, and the sender defers the request,
-  parks the unserved items, returns the claim to its owner, or retries on the
-  next tick. The aggregate never ends a session, and the time it refuses a
-  session is a stall that is not silence for keepalive, not the age of a
-  parked request, and not charged to a compact-filter request's allowance.
-- Scheduler ownership is keyed on connection identity. Every tick runs two
-  sweep passes over the peer table's live session set, and a ready event
-  from a live connection runs one; a stale ready event runs none. Each
-  sweep releases every window assignment, election, probe racer, header
-  request and deferred body fetch owned by a connection outside that set,
-  so a same-address replacement never inherits or loses its predecessor's
-  work.
-
-Proof: `crates/p2p/src/discouragement.rs` tests
-`avoidance_is_bounded_expires_and_does_not_refresh_on_repetition` and
-`mapped_addresses_share_identity_and_local_exemptions` cover retention,
-expiry and canonical/local identity. `crates/p2p/src/listener.rs`'s
-`discouragement_tests` cover current-lease attribution, native socket teardown
-and admission refusal, exemptions and protected handshake recovery.
-`crates/p2p/src/service.rs` tests `automatic_policy_and_manual_bans_are_distinct`
-and `all_automatic_selection_classes_exclude_discouraged_addresses` cover
-policy precedence and regular/feeler/anchor selection. The lock boundaries are
-exercised by `with_current_rejects_stale_source_and_holds_live_identity` in
-`crates/p2p/src/peer_table.rs` and
-`policy_callbacks_run_unlocked_and_selection_rechecks_pending` in
-`crates/p2p/src/addrman/tests.rs`.
-
-For the process comparison, set `BITCOIN_RS_NODE` to a binary built from the
-tested commit and `BITCOIN_RS_REFERENCE_BITCOIND` to the pinned Core binary.
-`cargo test -p bitcoin-rs-e2e --test peer_discouragement` runs
-`e2e/tests/peer_discouragement.rs` against pinned Core 31.1 and the candidate on
-loopback: protected oversized-headers senders remain connected, unprotected
-local senders disconnect and can reconnect, RPC reflects `noban`, and no manual
-ban is added. It does not test nonlocal Core avoidance, retention capacity or
-expiry.
+- `crates/p2p` owns sessions and `PeerLease`. `PeerRemote` distinguishes a destination from an anonymous inbound Tor circuit (keeps `ConnectionId`); address book and dial take only `PeerEndpoint`. Transaction attribution keeps the connection id without a destination.
+- Automatic discouragement: P2P `BannedReader` plus bounded ephemeral policy; listener records only typed remote violations from a current lease. Immutable exclusion snapshots precede addrman locks; socket admission rechecks. Manual/local/operator protection and Core deviations live in policy §6. Live lane: `BITCOIN_RS_NODE` vs `BITCOIN_RS_REFERENCE_BITCOIND` (pinned Core 31.1), `cargo test -p bitcoin-rs-e2e --test peer_discouragement` on loopback. Protected oversized-headers senders stay connected, unprotected local senders disconnect/reconnect, RPC shows `noban`, no manual ban added. Nonlocal avoidance, retention capacity, expiry untested.
+- Node sync coordinator consumes lifecycle events without duplicating replacement/cancellation. Parent requests validate the delivering connection and enqueue under peer-table authority; cancelled-lease requests enqueue nothing.
+- Every queued outbound message is prepaid from the connection budget and the node aggregate (`SharedOutboundBudget`, 64 MiB per `P2pService`, strict: pending total never above cap). One owner at a time (reservation, then `QueuedFrame`, then writer burst), released exactly once on every exit (written, refused, channel-dropped, writer-exit drain). Bulk body reservations must also fit under cap minus one maximum frame.
+- Refusals: connection-bounds (`Local`) refusal cancels the lease; aggregate (`Shared`) refusal is backpressure only, so the lease lives while the sender defers/parks/returns/retries next tick. The aggregate never ends a session; shared-refusal stalls are not keepalive silence, parked-request age, or compact-filter allowance.
+- Scheduler keys on connection identity: each tick runs two sweeps over the live set; a live ready event runs one; a stale event runs none. Every sweep releases window assignments, elections, probe racers, header requests, deferred body fetches owned outside the live set, so a same-address replacement inherits nothing.
+- Proof: `discouragement.rs` with `listener.rs discouragement_tests` and `service.rs` policy/selection plus `peer_table.rs with_current_*` and `addrman/tests.rs` locks; `connection.rs` with `listener/aggregate_budget_tests.rs` and `inv.rs`/`peer_table.rs` cancellation/identity.
 
 ### `P2P-03`: Demonstrated best-known-height credit and request eligibility
 
-- **Owner**: `crates/p2p/src/peer_table.rs` owns the per-connection credit
-  record (`PeerInfo.best_known_height` plus the accepted header tips retained
-  by the live session) and its identity-checked mutation
-  (`PeerTable::note_announced_tip`, `PeerTable::note_announced_height`).
-  `crates/p2p/src/sync.rs` owns the eligibility/ordering consumption
-  (`sync_peer_candidate`, `outranks`) and the active-branch filter that
-  decides which accepted headers establish credit.
-- Credit is initialized from the handshake `start_height`, raised
-  monotonically (never lowered), raisable only by the delivering connection
-  (a same-address replacement never inherits its predecessor's credit), and
-  raised only for accepted headers whose retained tip shares ancestry with
-  the currently selected best chain (the best chain is re-selected during
-  acceptance, so a winning fork announcement earns credit in the same tick).
-  A retained tip attests the deepest active-chain node that is its ancestor
-  — `shared_active_height`: an on-active tip attests its own height, while a
-  losing fork tip still attests the shared prefix it proved the peer holds.
-  When a later announcement makes a previously losing retained tip active,
-  its delivering connection is re-evaluated before request selection. Body
-  and hedge selection may ask a connection up to the greater of its
-  handshake credit and the deepest shared ancestor across its retained
-  tips: branch evidence can raise what a peer may serve, never lower it
-  below the credit the connection already carries. A peer that cannot serve
-  what it claimed is judged by the request that times out, not by being
-  skipped without ever being asked (issue #1153). Retained-tip evidence is
-  compacted at each credit
-  refresh: a tip that resolves on the active chain at or below the recorded
-  maximum can never raise it again, so only unresolved (fork) tips and the
-  max-resolving tip are kept. Unresolved tips are deduplicated to the
-  maximal tip per branch and capped (`MAX_UNRESOLVED_DEMONSTRATED_TIPS`),
-  so a peer cannot grow the record by announcing distinct side chains.
+- **Owner**: `peer_table.rs` credit record (`PeerInfo.best_known_height` plus retained accepted header tips) and identity-checked mutation (`note_announced_tip`, `note_announced_height`); `sync.rs` eligibility/ordering (`sync_peer_candidate`, `outranks`) plus active-branch filter.
+- Credit starts at handshake `start_height`, rises monotonically (never lowered), only by the delivering connection (no same-address inheritance), only for accepted headers whose retained tip shares ancestry with the reselected best chain (a winning fork earns credit in the same tick). A retained tip attests its deepest active-chain ancestor (`shared_active_height`): on-active tips attest own height, losing-fork tips the shared prefix. Newly-winning retained tips are re-evaluated before selection. Body/hedge selection may ask up to the greater of handshake credit and deepest shared ancestor across retained tips: branch evidence raises, never lowers below carried credit. An unasked peer is judged by timed-out requests, never skipped silently (issue #1153).
+- Compaction per credit refresh: tips resolving on-chain at/below the recorded maximum are dropped, so only unresolved fork tips plus the max-resolving tip are kept; unresolved tips dedupe to the maximal tip per branch and cap at `MAX_UNRESOLVED_DEMONSTRATED_TIPS`.
+- Proof: `peer_table.rs note_announced_height_*`; `sync/tests/header_progress.rs` (at-tip eligibility #617, reorg-fork credit, losing-fork survival); `headroom_throttling.rs` hedge eligibility.
 
 ### `P2P-04`: Connected-socket posture and vectored emission
 
-- **Owner**: `CountingStream::from_connected` (`crates/p2p/src/counters.rs`).
-- Every accepted or dialed P2P `TcpStream` is wrapped by that constructor
-  before handshake bytes move. The constructor disables Nagle (`TCP_NODELAY`).
-- `CountingStream` forwards `write_vectored` so `wire::write_message` emits
-  header plus payload as one syscall. A wrapper that only implemented `write`
-  would split the frame again.
-- Handshake, the connection reader, and the writer-thread clone share one
-  `PeerCounters`. Timeouts stay with the listener: handshake and the message
-  loop use different poll intervals.
-- A poll timeout never loses inbound bytes. `Peer::read_message` reads through
-  the peer's `wire::V1Receiver`, which keeps a partial header or payload across
-  `TimedOut`/`WouldBlock`, so the retrying handshake and message loops continue
-  the same frame instead of resuming mid-frame. The retained buffer holds only
-  received bytes: a stalled frame never pins the declared payload length.
-  Proof: `wire::tests::receiver_resumes_a_frame_split_by_poll_timeouts`,
-  `wire::tests::receiver_retains_only_received_bytes_for_a_stalled_frame`,
-  `wire::tests::receiver_restarts_at_a_frame_boundary_after_a_rejected_frame`,
-  `handshake::tests::inbound_handshake_resumes_frames_split_by_poll_timeouts`,
-  `peer::tests::socket_read_continues_a_frame_that_outlasts_the_poll_timeout`.
+- **Owner**: `CountingStream::from_connected` (`counters.rs`). Every accepted/dialed `TcpStream` is wrapped pre-handshake; constructor disables Nagle (`TCP_NODELAY`).
+- `CountingStream` forwards `write_vectored` so `wire::write_message` emits header plus payload in one syscall; a `write`-only wrapper would re-split the frame. Handshake, reader, and writer-thread clone share one `PeerCounters`; timeouts stay with the listener (handshake vs message-loop poll intervals differ).
+- A poll timeout never loses inbound bytes: `Peer::read_message` reads via `wire::V1Receiver`, which retains partial header/payload across `TimedOut`/`WouldBlock`; a stalled frame pins only received bytes, never the declared length.
+- Proof: `wire::tests` resume/retain/restart rows; `handshake::tests` inbound resume; `peer::tests` socket continuation; `counters.rs` vectored-count rows; `listener.rs session_sockets_disable_nagle`; elapsed time in `p2p/benches/write_message.rs`.
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 
-- The applied chain and selected header ancestry own the next required body.
-  The download cursor is a scan hint. An unowned frontier behind that hint
-  becomes requestable again, including an applied rollback with unchanged
-  headers. Existing pending and staged bodies retain their ownership.
-- A known-header gap whose apply-frontier block is neither in flight nor
-  staged triggers a header probe from the applied chain; staged successors
-  behind an unowned frontier are stuck inventory, not progress. Beyond the
-  initial handshake capability (P2P-03), only a subsequent accepted
-  active-branch announcement grants body capability. Losing the last credited
-  peer must not require restart or an unsolicited announcement from a
-  surviving peer.
-- The existing header request and timeout pace discovery. Empty wire
-  responses mark a request answered without changing its original timestamp;
-  an identical retry is paced only until five seconds from that timestamp,
-  and answered requests are not blamed as silence. Frontier requests use the
-  same five-second deadline while unanswered. An unanswered chain-sync
-  eviction probe keeps its request gate for the existing two-minute
-  `HEADERS_RESPONSE_TIME`, aligned with its eviction response window.
-  A nonempty batch consumes its matching request only when it is a usable
-  answer: admitted, or already known in full. A batch this node rejects keeps
-  the gate and moves its deadline to the answer, because that connection did
-  respond.
-- Header-request expiry is a strike against the exact connection only while
-  its request is unanswered. On ordinary frontier expiry the gate clears,
-  that connection is marked unresponsive, and it is disconnected while
-  another usable peer remains, so the next tick elects a different peer.
-  Strikes lower that connection's header rank below peers that advertise as
-  much, and the sweep that releases a dead connection's work drops its
-  strikes with it, so a same-address replacement starts clean. Only silence
-  is blamed (Core `net_processing.cpp:3294-3301` clears the outstanding
-  request when a connecting header lands). The below-floor and live
-  download-twice timeout in P2P-10 retires its source even when it is the last
-  usable peer.
-- A delivered body whose embedded header cannot attach releases the gate that
-  connection owns before it asks for the missing ancestry
-  (`clear_header_request_for`), so the recovery request reaches the wire with
-  the delivery instead of waiting for the deadline. A wire `headers` answer
-  keeps its gate, and the live request suppresses a replay of the same
-  locator.
-- A `headers` batch that fills the wire page and connects continues from that
-  batch's own last header, so the peer resumes where the page stopped instead
-  of waiting one scheduler round trip. Core asks the same peer for the next
-  page after a maximum-size connected response (`net_processing.cpp:3360-3368`,
-  `MAX_HEADERS_RESULTS` from `net_processing.h:51-53`).
-- The block locator doubles its step only after the locator holds more than
-  ten entries, and the indexed walk and the parent-walk fallback produce the
-  same schedule (Core `GetLocator`, `chain.cpp:26-45`).
-- Session validation and request publication hold the peer table before
-  download or header-request state. A cancelled ready event does not wait for
-  the download writer or modify its replacement's state.
-- Body/header binding failures reject the delivery, not the header branch.
-  Rejection logs carry source, byte/transaction counts and coinbase witness
-  shape. Compact reconstruction logs include the same block hash for joining
-  evidence. A header ahead of the applied chain is not evidence that the
-  applied-chain `getblockhash` RPC should return it.
-
-Proof: `crates/p2p/src/sync/tests/frontier_recovery.rs` covers applied
-rollback, duplicate request suppression, empty-response pacing/rotation and
-cancelled readiness under contention.
-`crates/p2p/src/sync/tests/chain_sync.rs` tests
-`chain_sync_probe_holds_request_for_its_response_window`,
-`empty_chain_sync_probe_keeps_original_five_second_pacing`, and
-`replacing_expired_frontier_with_chain_sync_probe_releases_owner` cover probe
-exclusivity, answered-response pacing, and frontier selector ownership.
-`crates/p2p/src/sync/tests/witness_staging_gate.rs` covers bad delivery,
-peer replacement, relearned capability and eventual application. Existing
-branch-plan, attribution, timeout and bounded-staging suites remain required.
+- The applied chain plus selected header ancestry own the next required body; the download cursor is a scan hint. An unowned frontier behind the hint becomes requestable again, including applied rollback with unchanged headers. Pending and staged bodies keep ownership. Past handshake credit (P2P-03), only a subsequent accepted active-branch announcement grants body capability. Losing the last credited peer MUST NOT require restart or an unsolicited announcement from a survivor.
+- Header request plus timeout pace discovery. Empty answers mark a request answered, keep its original timestamp; identical retries pace to five seconds from it; answered requests are not blamed as silence. Frontier requests use the same five-second deadline while unanswered. An unanswered chain-sync eviction probe holds its gate for the existing two-minute `HEADERS_RESPONSE_TIME`. A nonempty batch consumes its request only when usable (admitted, or already known in full); a rejecting batch keeps the gate and moves the deadline to the answer.
+- Expiry strikes only the exact unanswered connection: ordinary frontier expiry clears the gate, marks it unresponsive, and disconnects it while another usable peer remains, so the next tick elects another. Strikes rank it below equal advertisers; the live-set sweep drops strikes with dead work, so a replacement starts clean. Only silence is blamed (Core `net_processing.cpp:3294-3301` clears on a connecting header). The below-floor and live download-twice timeout (P2P-10) retires its source even as the last usable peer.
+- A body whose embedded header cannot attach releases its owner's gate before the ancestry request (`clear_header_request_for`); a wire `headers` answer keeps its gate, and the live request suppresses locator replay. A full-page connected batch continues from its own last header (Core `:3360-3368`, `MAX_HEADERS_RESULTS` from `:51-53`). The locator doubles its step only past ten entries; indexed and parent-walk produce the same schedule (Core `GetLocator`, `chain.cpp:26-45`).
+- Session validation and request publication hold the peer table before download/header-request state; a cancelled ready event never waits on the writer nor mutates replacement state. Binding failures reject the delivery, not the branch; rejection logs carry source, byte/tx counts, coinbase-witness shape; compact-reconstruction logs share the block hash; a header ahead of the applied chain is not `getblockhash` evidence.
+- Proof: `sync/tests/frontier_recovery.rs` (rollback, duplicate suppression, empty pacing/rotation, cancelled readiness); `chain_sync.rs` (probe exclusivity, answered/unanswered pacing, selector ownership); `witness_staging.rs` (bad delivery, replacement, relearn, application).
 
 ### `P2P-06`: Body-carried announcements reach header admission
 
-- **Owner**: `ConnectionShared::send_block` (`crates/p2p/src/listener.rs`)
-  forwards every inbound body's embedded header through the headers sink;
-  `BlockSync::admit_staged_headers` (`crates/p2p/src/sync/receive.rs`) retries
-  admission for staged bodies still lacking a tree node.
-- A block body can never become the apply frontier's expected block while
-  the tree does not know its hash. Every delivery path — `block` messages
-  (`inv` getdata answers or unsolicited pushes), reconstructed compact
-  blocks, and `cmpctblock` announcements — routes its embedded header into
-  the same admission drain as `headers` messages, so credit (P2P-03),
-  peer-fault disconnection, and ancestry requests apply uniformly.
-- A batch that cannot attach (`MissingParent`) or cannot be admitted
-  (`Refused`) requests the header ancestry from the delivering peer — or an
-  eligible full-witness peer when no source was recorded — rather than
-  silently dropping the announcement and leaving the live tip wedged behind
-  one missed header. `Refused` re-requests are paced to the request timeout
-  (`refused_rerequest_at`): a paused admission would otherwise replay the
-  same locator at round-trip pace.
-- The forwarded header is marked as such (`InboundHeaders::wire_response =
-  false`): it is not a `getheaders` response, so it must not consume the
-  outstanding request's pending slot as an answer — otherwise every delivered
-  body would reset request pacing and redeem a peer that never answered. The
-  one release it earns is the recovery path above: a body-carried header that
-  cannot attach frees its owner's gate, so the ancestry request that delivery
-  motivates reaches the wire with it (P2P-05).
-- The stager MUST hold one `BlockPayload` per entry (`insert(payload)`). The
-  staged retry carries the delivering connection
-  (`ReceivedBlock::source`): a retry that admits credits that peer exactly
-  as the headers drain would (`note_announced_tip`), and a peer-fault
-  rejection drops the staged body (`stager.discard`, never re-queued;
-  its download-window record is only released when the delivery drains), disconnects the source, and marks
-  it unresponsive — the same outcome a rejected `headers` batch produces.
-  A staged body's recorded source is retained for work-floor validation and
-  header retry after that source disconnects, but exact-source checks prevent
-  the retry from crediting or faulting a same-address replacement
-  (`staged_body_retries_after_source_replacement_without_replacement_credit`).
-  The inbound body drain drops deliveries whose source is already retired
-  when checked at dequeue, before historical or foreground routing
-  (`queued_body_from_replaced_source_cannot_enter_staging`).
-  This check does not hold peer-table authority through body validation or
-  staging: a body accepted while its source is current may finish staging
-  after concurrent retirement. Credit and fault attribution still require
-  the exact source to be current.
-- A `cmpctblock` outcome that fetches the body itself (`RequestMissing`'s
-  `getblocktxn`, `Fallback`'s `getdata`) is marked
-  (`InboundHeaders::body_fetch_owned`): once the tip admits, the window
-  records the hash pending under the delivering connection
-  (`DownloadWindow::mark_owned_fetch`) so normal scheduling does not issue
-  a duplicate `getdata`. The mark honours the same gates a real request
-  faces — window request capacity, the owner's per-peer inflight share,
-  and the request frontier (a below-frontier mark could never be scheduled
-  and its expiry would drag `next_request_height` back into a re-request
-  sweep of applied heights). A tip that has not attached yet is retained
-  in the bounded `SchedulerState::owned_body_fetches` set and resolved
-  once ancestry admits it; marks whose source went stale are dropped, and
-  delivery resolves the mark like any window request while expiry or
-  disconnect hands it back to scheduling — a silently dropped compact
-  fetch re-requests instead of wedging the tip.
-- Every peer-removal path releases a `getheaders` gate the peer owned —
-  wire-response consumption, send failure, and peer-fault disconnects in
-  both the headers drain and the staged-header retry
-  (`clear_header_request_for`, identity-exact), and otherwise the live-set
-  sweep (P2P-02) — so a same-address reconnect cannot inherit a dead
-  request deadline.
-
-Proof: `crates/p2p/src/sync/tests/head_sync.rs` covers body-carried header
-admission and apply, gap-fill requests for staged bodies ahead of their
-header chain, announcer-directed `getheaders` on unattached batches,
-non-response forwards preserving pending-request state, staged-retry
-credit, `staged_body_retries_after_source_replacement_without_replacement_credit`,
-shared-ancestor capability, bounded fork evidence, credit for already-known
-tips, the compact-owned pending mark, and the retained mark resolving once its
-tip header attaches.
-`crates/p2p/src/sync/tests/limited_peers.rs` pins the block-body service clause
-on both paths: the `statically_fanout_eligible` rows for the
-initial-block-download exclusion, the 287/288-block retained-window boundary,
-and the below-requested-height case, plus the tick rows that show a pruned peer
-receiving `getheaders` and no `getdata` while the node syncs, receiving the deep
-batch inside its window after it, and staying out of the fan-out set during
-initial block download. `crates/p2p/src/listener.rs` test
-`inbound_admission_over_cap_drops_stream` and the `crates/p2p/src/peer_table.rs`
-reservation cases pin the admission boundary: cap-minus-one accepted, cap
-refused with no lease registered, inbound-only counting, a removal that frees
-the slot, and a same-address replacement that keeps its own identity.
-Capacity and frontier gates
-on the owned-fetch mark are covered in
-`crates/p2p/src/download_window.rs` tests; fault-path gate cleanup is
-covered in `crates/p2p/src/sync/tests/header_rotation.rs`.
-`crates/p2p/src/listener.rs` test `send_block_forwards_the_blocks_header`
-covers the delivery-path forward.
+- **Owner**: `ConnectionShared::send_block` forwards every inbound body's embedded header to the headers sink; `BlockSync::admit_staged_headers` retries staged bodies still lacking a tree node.
+- No body becomes the apply-frontier expectation while the tree lacks its hash. Every path (`block` answers and pushes, reconstructed compact blocks, `cmpctblock` announcements) routes its embedded header into the same admission drain as `headers`, so credit (P2P-03), peer-fault disconnect, and ancestry requests apply uniformly. An unattachable (`MissingParent`) or inadmissible (`Refused`) batch requests ancestry from the delivering peer (or an eligible full-witness peer if sourceless), never silently drops; `Refused` re-requests pace to the request timeout (`refused_rerequest_at`).
+- Forwarded headers are marked non-responses (`InboundHeaders::wire_response = false`): they consume no pending slot (else every body would redeem a silent peer). Their one release is the recovery path: an unattachable body-carried header frees its owner's gate so the motivated ancestry request reaches the wire with the delivery (P2P-05).
+- The stager holds one `BlockPayload` per entry; staged retries carry the delivering connection (`ReceivedBlock::source`). An admitting retry credits that peer (`note_announced_tip`); a peer-fault rejection discards the staged body (never re-queued; window record released at drain), disconnects the source, marks it unresponsive, the same outcome as a rejected `headers` batch. Recorded sources persist for work-floor validation and post-disconnect retry, but exact-source checks block credit/fault on a same-address replacement. The inbound drain drops retired-source deliveries at dequeue, pre-routing, without holding peer-table authority through validation/staging; credit/fault still require the exact source to be current.
+- Compact self-fetches (`RequestMissing` `getblocktxn`, `Fallback` `getdata`) are marked (`body_fetch_owned`): on tip admission the window records the hash pending under the delivering connection (`mark_owned_fetch`) so scheduling issues no duplicate `getdata`. Marks honor window capacity, per-peer inflight share, and request frontier; unattached tips wait in bounded `SchedulerState::owned_body_fetches` and resolve at ancestry admission; stale-source marks drop; delivery resolves like window requests; expiry/disconnect returns the fetch to scheduling.
+- Every removal path releases owned `getheaders` gates (wire consumption, send failure, peer-fault disconnects in both drains via identity-exact `clear_header_request_for`, else the live-set sweep in P2P-02), so a reconnect inherits no dead deadline.
+- Proof: `sync/tests/head_sync.rs` (admission/apply, gap-fill, announcer-directed `getheaders`, non-response forwards, staged-retry credit, replacement rules, fork evidence, compact marks); `limited_peers.rs` service-clause rows (IBD exclusion, 287/288 retained-window boundary, pruned-peer ticks); `listener.rs` admission-cap and forward tests; `peer_table.rs` reservation cases; `download_window.rs` owned-fetch gates; `sync/tests/header_rotation.rs` fault-path cleanup.
 
 ### `P2P-07`: Block announcements lead with headers; ingress is bounded twice
 
-- **Owner**: the block branch of `dispatch_inbound_full`
-  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block`
-  (`crates/p2p/src/sync.rs`) and `BlockSync::drain_block_announcements`
-  (`crates/p2p/src/sync/headers.rs`).
-- `MSG_BLOCK` and `MSG_WITNESS_BLOCK` inventory vectors are availability
-  information, never a body request: each one is queued against the
-  announcing connection and drained by the header drain, which credits that
-  connection with the hash when the tree already knows it
-  (`note_announced_tip`, P2P-03) and asks it for headers when the tree does
-  not. Body requests belong to header admission and the download window
-  alone (Core 31.1 `net_processing.cpp:4370-4410`). Transaction vectors keep
-  the relay gate, the have-filter, and the witness upgrade unchanged.
-- The queue holds one entry per connection — the first unprocessed
-  announcement wins — so a later vector cannot replace an unknown tip before
-  the drain sees it, and a peer cannot grow scheduler state by announcing.
-  While the frontier-owned `getheaders` request is outstanding, further
-  unknown announcements stay queued for a later drain: the frontier request
-  owner never changes mid-flight.
-- **Near-tip direct fetch**: `BlockSync::direct_fetch_announced_tip` asks the
-  connection that just proved a header for its body, inside the same drain
-  that admitted it, instead of waiting for the next scheduler tick (Core
-  `HeadersDirectFetchBlocks`, `net_processing.cpp:3098-3158`, gated by
-  `CanDirectFetch` at `:1450-1453`). The request goes through
-  `send_getdata_for_pending_blocks`, so the window's budget, the per-peer
-  in-flight cap, the pending ownership stamp, and the compact-block flavor
-  for a single near-tip fetch from a BIP152 peer all apply unchanged. A tip
-  that is not on the branch the header tip ends at, or that leaves the apply
-  frontier more than `COMPACT_RELAY_NEAR_TIP_BLOCKS` below it, is a bulk
-  download or a large reorg and stays with the ordinary scheduler.
-- **Ingress bounds**: the shared inbound block channel is bounded once for
-  the node (`P2pServiceConfig::inbound_block_queue_limit`, set from
-  `INBOUND_BLOCK_CHANNEL_LIMIT`), and
-  `PeerLease::admit_block_forward` bounds each connection's unsolicited
-  share of it at `MAX_UNSOLICITED_BLOCK_FORWARDS`
-  (`crates/p2p/src/connection.rs`) before that channel. A body the download
-  window owns for that exact connection — a window request or a deferred
-  compact fetch (`BlockSync::owns_body_fetch`) — is always admitted. An
-  over-bound unsolicited body is dropped together with its carried header —
-  refused bodies must not grow the header queue either — with a debug record
-  and a `node.sync.dropped_unsolicited_blocks` counter: the listener never
-  waits on the shared channel for it and the connection is never
-  disconnected for this bound alone. The credit rides the inbound payload and is released
-  when sync takes the body, so staging, discarding, and rejecting all return
-  the slot; ownership and credits are per connection, so a same-address
-  replacement inherits neither.
+- **Owner**: block branch of `dispatch_inbound_full` (`dispatch.rs`), `BlockSync::announce_block` (`sync.rs`), `BlockSync::drain_block_announcements` (`sync/headers.rs`).
+- `MSG_BLOCK`/`MSG_WITNESS_BLOCK` invs are availability, never body requests: each queues against the announcing connection for the header drain, which credits known hashes (`note_announced_tip`, P2P-03) and asks headers for unknown ones. Bodies come only from header admission plus the download window (Core 31.1 `net_processing.cpp:4370-4410`). Transaction vectors keep relay gate, have-filter, witness upgrade. The queue holds one entry per connection (first unprocessed wins); while the frontier-owned `getheaders` is outstanding, further unknown announcements wait, and the owner never changes mid-flight.
+- Near-tip direct fetch: `direct_fetch_announced_tip` asks the proving connection for the body inside the admitting drain (Core `HeadersDirectFetchBlocks` `:3098-3158`, `CanDirectFetch` `:1450-1453`) via `send_getdata_for_pending_blocks`, so window budget, per-peer inflight cap, pending ownership, and compact flavor for a single near-tip BIP152 fetch apply unchanged. Off-branch tips, or tips leaving the frontier more than `COMPACT_RELAY_NEAR_TIP_BLOCKS` below, stay with the ordinary scheduler.
+- Ingress bounds: node-wide shared inbound block channel (`P2pServiceConfig::inbound_block_queue_limit` from `INBOUND_BLOCK_CHANNEL_LIMIT`); per-connection unsolicited share ahead of it (`PeerLease::admit_block_forward`, `MAX_UNSOLICITED_BLOCK_FORWARDS`, `connection.rs`). Window-owned bodies (requests, deferred compact fetches via `owns_body_fetch`) are always admitted. Over-bound unsolicited bodies drop with their carried header (refused bodies MUST NOT grow the header queue), a debug record, and `node.sync.dropped_unsolicited_blocks`; the listener never blocks on the channel and the connection is never disconnected for this bound alone. Credit rides the payload and releases at sync take; ownership/credit are per-connection (no inheritance).
 - **Header ingress and tick fairness**: `P2pService` owns a shared channel
   capped at 64 header batches (`INBOUND_HEADER_QUEUE_LIMIT` in
   `crates/p2p/src/service.rs`). Wire decoding bounds a batch to 2,000 headers;
@@ -420,31 +120,9 @@ covers the delivery-path forward.
   producers, bodies, allocator overhead and process RSS are separate.
   `node.sync.inbound_header_queue_depth` samples the remaining batch count
   at the existing sync-metrics emission points, not the peak or byte count.
-- **Permanent consensus failure**: when a staged body's commit settles with
-  `WindowCommitDisposition::Permanent` — in the apply pass or inside a
-  branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
-  staged entry's recorded source) —
-  `BlockSync::punish_permanent_delivery_source` disconnects the delivering
-  connection — in the apply pass, after the invalidated hashes are purged;
-  in a branch switch, before the purge drops the staged entry that carries
-  the source — and releases its
-  `getheaders` gate and marks it unresponsive only when that exact
-  connection was current and removed (Core `net_processing.cpp:2031-2068`).
-  Each punishment increments `node.sync.invalid_block_disconnects`. A
-  `BodyMutated` or `Operational` settlement failure stays retryable and
-  non-punitive, and a `Fatal` settlement halts admission without peer blame.
-  `BodyMutated` names only the delivered bytes, so the header stays valid and
-  the body is fetched again: a Merkle or witness mismatch, and a body without a
-  coinbase that holds a 64-byte witness-stripped transaction (`SixtyFourByteMutation`; inner
-  Merkle nodes posing as transactions, CVE-2017-12842, Core `IsBlockMutated`).
-  Any other body without a coinbase is `Permanent`.
-  A body that fails header binding before it can be staged keeps its
-  existing delivery-rejection policy.
-- **Unresolved-body quota**: a body staged while the tree cannot resolve its
-  hash owes the admission clauses later (`gate_pending`); the staged
-  `gate_pending` population is capped at `MAX_UNRESOLVED_STAGED_BODIES`
-  (`crates/p2p/src/sync/receive.rs`), so a multi-peer orphan flood cannot
-  fill the shared staging budget and evict valid progress.
+- Permanent consensus failure (`WindowCommitDisposition::Permanent`, apply pass or branch-switch `ConnectFailed` via staged source): `punish_permanent_delivery_source` disconnects the deliverer (apply: after invalid-hash purge; branch-switch: before the purge drops the source entry), releases its `getheaders` gate, marks it unresponsive only when that exact connection was current and removed (Core `:2031-2068`); increments `node.sync.invalid_block_disconnects`. `BodyMutated`/`Operational` stay retryable and non-punitive; `Fatal` halts admission without peer blame. `BodyMutated` names only delivered bytes (header stays valid, body re-fetched): Merkle/witness mismatch, or a coinbaseless body holding a 64-byte witness-stripped tx (`SixtyFourByteMutation`; CVE-2017-12842, Core `IsBlockMutated`). Other coinbaseless bodies are `Permanent`. Pre-staging binding failures keep delivery-rejection policy.
+- Unresolved-body quota: hash-unresolvable staged bodies owe admission later (`gate_pending`), capped at `MAX_UNRESOLVED_STAGED_BODIES` (`sync/receive.rs`).
+- Proof: `dispatch.rs inv_block_uses_headers_not_body_getdata`; `head_sync.rs` direct-fetch test; `headers_presync.rs` ownership-suppression test; `listener.rs unsolicited_block_flood_is_bounded_per_source`; `sync/tests.rs` disposition tests; `window_recovery.rs` identity-change test; `compact_blocks.rs` 64-byte fallback tests; `peer_fanout.rs` mutated-forward retry test.
 
 Proof for header ingress: `crates/p2p/src/listener/header_ingress_tests.rs`
 covers sustained wire/body forwarding into real sync ticks, bounded queue
@@ -457,356 +135,49 @@ across the batch budget before completing both passes. These are local
 behavioral proofs, not a live-network throughput or multi-peer fairness
 campaign.
 
-Proof: `crates/p2p/src/dispatch.rs` test
-`inv_block_uses_headers_not_body_getdata`; `crates/p2p/src/sync/tests/head_sync.rs`
-test `announced_near_tip_is_direct_fetched_before_tick`;
-`crates/p2p/src/sync/tests/headers_presync.rs` test
-`owned_header_requests_suppress_competing_frontier_and_chain_sync_requests`;
-`crates/p2p/src/listener.rs` test
-`unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
-tests `permanent_consensus_body_disconnects_delivering_source` and
-`binding_and_operational_failures_do_not_disconnect`;
-`crates/p2p/src/sync/tests/window_recovery.rs` test
-`reconcile_forgets_window_state_only_when_connection_identity_changes`;
-`crates/p2p/src/compact_blocks.rs` tests
-`sixty_four_byte_transaction_without_coinbase_completion_falls_back` and
-`sixty_four_byte_transaction_completed_by_blocktxn_falls_back`, which prove a
-mutated body takes the full-block fallback with its header intact; and
-`crates/p2p/src/sync/tests/peer_fanout.rs` test
-`mutated_forward_body_preserves_descendant_for_retry`, which proves a mutated
-forward body is retried, never punished.
-
 ### `P2P-08`: Inbound admission and the outbound service gate
 
-- **Owner**: `PeerTable::try_register_inbound` (`crates/p2p/src/peer_table.rs`)
-  owns the capacity and eviction decision, `select_inbound_to_evict`
-  (`crates/p2p/src/eviction.rs`) owns the choice of connection, and the accept
-  loop in `serve` (`crates/p2p/src/listener.rs`) is the only inbound caller.
-  `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
-  ordinary outbound desirable-service predicate.
-- The accept loop reserves the connection's inbound lease before it spawns the
-  handshake thread, and the reservation, the live inbound count and any
-  eviction are one table write operation. A socket that arrives at
-  `max_inbound = max_peer_connections - outbound_full_relay_slots -
-  outbound_block_relay_slots` first removes and cancels the inbound connection
-  chosen by a port of Core's `SelectNodeToEvict` (Core derives the same
-  remainder at `bitcoin-core/src/net.h:1118` and evicts at
-  `net.cpp:1819-1826`). Outbound and `NoBan` connections are never chosen.
-  Every read on an inbound socket fails once its lease is cancelled, so an
-  evicted connection stops even while its peer keeps trickling a payload,
-  as Core closes an evicted socket at once. When every candidate is protected,
-  or the address holds a live outbound connection the newcomer would also
-  replace, the socket is closed with no lease and no thread. A replacement at
-  an address already holding a live inbound connection is admitted without
-  eviction: it takes the slot its predecessor held. The live count is always
-  derived from the live entry set, so no independent counter can drift from
-  it. A failed spawn releases the reservation it took.
-- Eviction protects, in Core's order: four connections by a process-keyed
-  netgroup hash, the four that most recently delivered a transaction the
-  mempool accepted, up to eight block-relay-only connections with wanted
-  services that most recently delivered a committed block, the four that most
-  recently delivered a committed block, and then half of the rest by uptime,
-  up to a quarter of the candidates reserved for localhost. It then evicts the
-  newest connection of the netgroup with the most remaining candidates.
-  `docs/policies/p2p-compatibility.md` section 7 item 12 lists where this
-  differs from Core.
-- `PeerTable::set_network_active` and conditional inbound/outbound socket
-  registration share the table write lock. If disable wins first, registration
-  returns no lease without replacement or capacity mutation. If registration
-  wins first, disable cancels that admitted lease for its connection owner to
-  remove. Re-enabling permits fresh leases without reviving cancelled ones.
-  Socket I/O, metadata queries and logging remain outside the write lock. TCP
-  already in progress may finish after disable; rejected registration closes
-  it before publishing metadata or sending handshake messages.
-- Ordinary `run_outbound_handshake` ends the connection when the remote `version` does
-  not offer the desirable set (`net_processing.cpp:1857-1872`, read for
-  an outbound connection at `:3864-3871`): `NETWORK | WITNESS`, or
-  `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks.
-  The check runs before the peer is published as usable, so a dial that cannot
-  serve blocks never occupies a selection slot that maintenance cannot replace.
-  Inbound handshakes and VERSION-only feelers are not service-gated, as in Core.
-- Ordinary automatic selection, anchor admission, dispatch and the final
-  pre-TCP check reuse that predicate against current AddrMan service metadata.
-  Accepted ordinary VERSION updates metadata before service rejection without
-  marking Good. Unknown DNS service metadata retains its bootstrap exemption;
-  an observed VERSION, including zero services, is known metadata. Representation
-  and persistence are owned by `docs/policies/p2p-compatibility.md` section 7;
-  manual dials and feelers bypass this metadata prefilter.
-- The advertised set follows the prune setting (`init.cpp:2022-2026`):
-  `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when
-  `storage.prune_target_mb > 0`, and both handshake paths use the same set from
-  `P2pServiceConfig::local_services`.
-
-Proof: `crates/p2p/src/peer_table.rs` tests
-`network_disable_orders_before_or_after_inbound_and_outbound_admission` and
-`inactive_registration_never_mutates_or_returns_an_existing_lease` cover both
-admission orders, inactive identity/capacity guards and re-enable behavior.
-`one_host_filling_every_inbound_slot_gives_way_to_another_netgroup`,
-`noban_inbound_connections_are_never_evicted`,
-`a_full_table_refuses_an_inbound_newcomer_at_a_live_outbound_address` and
-`useful_transactions_and_blocks_protect_inbound_connections` cover eviction at
-the cap, and the `crates/p2p/src/eviction.rs` tests cover each protection step
-and the final netgroup choice. `crates/p2p/src/counters.rs` test
-`a_cancelled_stream_stops_a_payload_that_keeps_arriving` covers the read that
-ends with cancellation mid-payload.
-`crates/p2p/src/service.rs` tests
-`disable_during_outbound_tip_query_refuses_registration_before_handshake`,
-`ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp`,
-`ordinary_selection_skips_known_incomplete_peer_and_anchor_return_preserves_age`
-and `a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot` cover
-the actual paused outbound worker, fresh service/tip checks, anchor preservation
-and probe accounting. `crates/p2p/src/listener.rs` tests
-`version_only_feeler_uses_native_acceptance_without_publishing_work`,
-`ordinary_handshake_still_requires_services_and_verack`,
-`rejected_ordinary_version_updates_services_without_good` and
-`manual_dial_bypasses_known_incomplete_stored_services` cover VERSION-only
-feelers, ordinary handshake requirements, metadata-only updates and manual
-prefilter exemption.
+- **Owner**: `PeerTable::try_register_inbound` (capacity/eviction), `select_inbound_to_evict` (`eviction.rs`, choice), `serve` accept loop (`listener.rs`, sole inbound caller); `has_all_desirable_service_flags` (sole ordinary outbound predicate).
+- The accept loop reserves the inbound lease before spawning the handshake thread; reservation, live inbound count, and eviction are one table operation. Cap: `max_inbound = max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots`; arrivals first evict the `SelectNodeToEvict` port (Core remainder `net.h:1118`, eviction `net.cpp:1819-1826`). Outbound and `NoBan` connections are never chosen. Every read on a cancelled lease fails, so an evicted connection stops mid-payload as Core closes evicted sockets at once. All-protected candidates, or an address holding a live outbound connection the newcomer would replace, mean close with no lease/thread. Same-address live-inbound replacement is admitted without eviction into its predecessor's slot. The live count derives from the live set (no drift). Failed spawns release the reservation.
+- Protection order (Core's): four by process-keyed netgroup hash; four most-recent mempool-accepted tx deliverers; up to eight wanted-service block-relay-only most-recent committed-block deliverers; four most-recent committed-block deliverers; then half of the rest by uptime; up to a quarter of candidates localhost-reserved. Then evict the newest connection of the largest-remaining netgroup. Deviation: no minimum-ping protection (no ping RTT measured), recorded in policy §7 item 12.
+- `set_network_active` and conditional socket registration share the table write lock: disable-first admits nothing (no lease, replacement, or capacity mutation); register-first cancels the admitted lease for its owner to remove. Re-enabling admits fresh leases only. I/O, metadata, logging stay outside the lock. In-flight TCP may finish post-disable; rejected registration closes pre-metadata/handshake.
+- Ordinary outbound handshake ends connections whose `version` lacks the desirable set (Core `:1857-1872`, read `:3864-3871`): `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks. The check precedes usable publication, so unservable dials never hold replaceable selection slots. Inbound handshakes and VERSION-only feelers are not service-gated (Core). Selection, anchors, dispatch, and the pre-TCP check reuse the predicate against current AddrMan metadata. Accepted ordinary VERSION updates metadata pre-rejection without Good. Unknown DNS metadata keeps its bootstrap exemption; any observed VERSION (including zero services) is known metadata. Representation/persistence: policy §7; manual dials and feelers bypass the prefilter.
+- Advertised set follows prune (`init.cpp:2022-2026`): `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when `storage.prune_target_mb > 0`; both handshake paths use `P2pServiceConfig::local_services`.
+- Proof: `peer_table.rs` admission-order/identity/eviction-cap tests; `eviction.rs` protection/netgroup tests; `counters.rs` cancelled-read test; `service.rs` pause/selection/probe tests; `listener.rs` feeler/handshake/metadata/manual-dial tests.
 
 ### `P2P-09`: Block-body service eligibility
 
-- **Owner**: `statically_fanout_eligible` (`crates/p2p/src/download_window.rs`)
-  is the only predicate that decides whether a connection may serve block
-  bodies. The request, fan-out, prefix-probe, and cold-front-hedge paths all
-  read it, and none re-derives a witness-only rule.
-- It consumes a `BlockDownloadPolicy` carrying the node's one
-  `InitialBlockDownload` latch and the height being requested. During initial
-  block download only a `NODE_NETWORK` peer qualifies
-  (`net_processing.cpp:6521`). Afterwards a peer without it qualifies only
-  inside the last 288 blocks of its own demonstrated chain
-  (`NODE_NETWORK_LIMITED_MIN_BLOCKS` at `net_processing.cpp:159`, applied at
-  `:1637`), and a peer below the requested height never qualifies. Inbound
-  peers stay outside the set: they are attacker-chosen, and counting them is the
-  recorded under-fill regression.
-- The service clause and the window's soft-block clause stay separate on
-  `FanoutCandidate`, so each path combines them as it always did: fan-out, the
-  probe set, and the counted threshold require both, and a soft-blocked peer
-  still serves as the single-deep-peer last resort. Header requests stay open
-  to every peer above the applied height regardless of services.
+- **Owner**: `statically_fanout_eligible` (`download_window.rs`) is the sole block-body service predicate; request, fan-out, prefix-probe, and cold-front-hedge paths read it, none re-derives a witness rule. It consumes a `BlockDownloadPolicy` (node IBD latch plus requested height).
+- During initial block download only `NODE_NETWORK` qualifies (`net_processing.cpp:6521`). Afterward a peer without it qualifies only inside the last 288 blocks of its demonstrated chain (`NODE_NETWORK_LIMITED_MIN_BLOCKS` at `:159`, applied at `:1637`); a peer below the requested height never qualifies. Inbound peers stay outside the set (attacker-chosen; counting them is the recorded under-fill regression).
+- Service clause and window soft-block clause stay separate on `FanoutCandidate`: fan-out, probe set, and counted threshold require both; a soft-blocked peer still serves as single-deep-peer last resort. Header requests stay open to every peer above the applied height regardless of services.
 
 ### `P2P-10`: Header presync gates admission on committed work
 
-- **Owner**: `HeadersSyncState` (`crates/p2p/src/sync/headers_presync.rs`)
-  is the only place that decides whether a connection's header chain is
-  worth admitting; `BlockSync::route_headers_batch`
-  (`crates/p2p/src/sync/headers.rs`) is the only caller, and
-  `SyncChain::admit_headers` is reached either directly (a fork already at
-  the network's assumed work, or a released chain) or with the committed
-  headers, never with a collected-but-unverified batch. Core's
-  `HeadersSync` (`bitcoin-core/src/headerssync.h:57-149`,
-  `headerssync.cpp:72-326`, wired in `net_processing.cpp:4648-4657`) is the
-  authority.
-- A connection whose chain starts below `Network::minimum_chain_work` is
-  collected first: each header is checked for continuity, its own proof of
-  work, and a permitted difficulty transition, then reduced to one salted
-  commitment bit every `commitment_period` heights. Nothing is inserted and
-  no body is requested during this pass. When the cumulative work crosses
-  the floor the sync restarts at the fork point and re-verifies every
-  header against those commitments; only then are headers admitted, in wire
-  order. The download-twice rule is what stops one unsynced connection from
-  installing an endless minimum-difficulty chain that is cheaper to extend
-  than the honest chain.
-- The state is keyed by `PeerSource`, not address: a replacement connection
-  never inherits a predecessor's collection, and a spent or faulted state
-  is removed so the next batch starts a fresh sync with a fresh salt. A
-  lost-continuity break is treated as possibly benign (the peer keeps its
-  connection, `headerssync.cpp:155-163`); every other failure — bad proof of
-  work, an impermitted difficulty transition, a commitment divergence, or
-  the commitment and buffer bounds — disconnects the connection.
-- One per-connection lifecycle entry owns both the optional presync cursor
-  and optional wire request. A nonempty wire answer clears only the request;
-  an empty answer ends presync but retains an answered request with its
-  original request timestamp; exact-source teardown removes the entry. A
-  request excludes competing `getheaders` on that exact connection while
-  unanswered: ordinary frontier requests, including PRESYNC/REDOWNLOAD
-  continuations, use five seconds, while a chain-sync eviction probe uses its
-  existing two-minute response window. An answered request paces only
-  identical locator/target requests until five seconds from that same original
-  timestamp. Only an
-  unanswered timeout below the work floor or during PRESYNC/REDOWNLOAD
-  retires the connection and its sync state before queued headers are
-  processed, even when it is the last usable peer. Recovery starts on another
-  connection. Wire deliveries whose source is retired or replaced at the
-  ingress identity check are ignored, never admitted or attributed to the
-  replacement. Foreground bodies accepted while their source is current may
-  finish staging and retry their embedded header after retirement through the
-  body-carried path, retaining their source for work-floor validation while
-  exact-source credit and fault checks exclude the replacement. The wire has
-  no request identifier with which to reconcile overlapping responses.
-- The serving side is the mirror rule: below the network's assumed work the
-  node answers `getheaders` with the empty response
-  (`ActiveChainQuery::headers_after`, `net_processing.cpp:3010-3018`), so a
-  syncing node does not spread its low-work branch.
-
-Proof: `crates/p2p/src/sync/tests/headers_presync.rs` tests
-`empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement`,
-`unowned_below_floor_peer_receives_one_tracked_chain_sync_probe`,
-`owned_header_requests_suppress_competing_frontier_and_chain_sync_requests`,
-`expired_header_syncs_drop_delayed_pages_before_recovery`, and
-`replaced_connection_cannot_admit_queued_predecessor_headers`, and pins the
-presync lifecycle end to end — first-pass commitment collection, the
-work-floor crossing that restarts the sync at the fork point, commitment
-divergence on a substituted redownload header, salted-commitment spends, the
-benign lost-continuity break, and the disconnects every other failure costs the
-connection. `crates/p2p/src/sync/tests/chain_sync.rs` test
-`frontier_and_eviction_probes_do_not_overwrite_live_requests` covers
-above-floor request ownership; `chain_sync_probe_holds_request_for_its_response_window`
-and `expired_chain_sync_probe_does_not_suppress_frontier_request` prove its
-unanswered two-minute gate; `empty_chain_sync_probe_keeps_original_five_second_pacing`
-and `replacing_expired_frontier_with_chain_sync_probe_releases_owner` cover
-answered pacing and selector ownership.
-`crates/p2p/src/sync/tests/head_sync.rs` test
-`staged_body_retries_after_source_replacement_without_replacement_credit`
-proves staged-body recovery without replacement credit after disconnect.
-`queued_body_from_replaced_source_cannot_enter_staging` in the same suite
-proves deliveries already stale at dequeue cannot enter staging through the
-inbound body drain.
-`crates/p2p/benches/headers_presync.rs` measures the hashing bound the first
-pass pays per page.
+- **Owner**: `HeadersSyncState` (`sync/headers_presync.rs`) is the sole admission decider; `BlockSync::route_headers_batch` (`sync/headers.rs`) the sole caller; `SyncChain::admit_headers` is reached directly (at-assumed-work fork, released chain) or with committed headers, never a collected-but-unverified batch. Authority: Core `HeadersSync` (`headerssync.h:57-149`, `headerssync.cpp:72-326`, wired at `net_processing.cpp:4648-4657`).
+- Below-`minimum_chain_work` chains are collected first: per-header continuity, own proof of work, permitted difficulty transition, reduced to one salted commitment bit per `commitment_period` heights. Nothing is inserted and no bodies are requested during this pass. Floor crossing restarts the sync at the fork point, re-verifies every header against commitments, admits in wire order. The download-twice rule stops one unsynced connection installing an endless minimum-difficulty chain cheaper than the honest chain.
+- State keys on `PeerSource` (no inheritance); spent/faulted states are removed for a fresh sync with fresh salt. Lost-continuity breaks are possibly benign (connection kept, `headerssync.cpp:155-163`); every other failure (bad PoW, impermitted transition, commitment divergence, commitment/buffer bounds) disconnects.
+- One lifecycle entry owns the optional presync cursor plus wire request. A nonempty answer clears only the request; an empty answer ends presync but retains the answered request with its original timestamp; exact-source teardown removes the entry. Unanswered requests suppress competing `getheaders` on that connection: five seconds for ordinary frontier (including PRESYNC/REDOWNLOAD continuations), the existing two-minute window for chain-sync eviction probes. Answered requests pace only identical locator/target pairs until five seconds from the original timestamp. Only an unanswered below-floor or PRESYNC/REDOWNLOAD timeout retires connection plus state pre-processing, even as the last usable peer; recovery starts elsewhere. Retired/replaced-source deliveries are ignored at the ingress identity check. Foreground bodies accepted while current may finish staging and retry embedded headers post-retirement (source kept for work-floor validation; exact-source credit/fault excludes the replacement). The wire has no request id for overlapping responses.
+- Mirror serving rule: below assumed work the node answers `getheaders` empty (`ActiveChainQuery::headers_after`, Core `:3010-3018`).
+- Proof: `headers_presync.rs` lifecycle/pacing/ownership tests; `chain_sync.rs` request-ownership rows; `head_sync.rs` staged-retry rows; hashing bound in `p2p/benches/headers_presync.rs`.
 
 ### `P2P-11`: BIP324 v2 transport negotiation
 
-- **Owner**: `crates/p2p/src/transport.rs` owns negotiation and the split
-  transport halves; `crates/p2p/src/bip324.rs` owns the key schedule, the
-  ciphers, the handshake state machine, the packet reader, and the message
-  type encoding.
-- **Default**: the node runs with `v2transport` on, as Core's `-v2transport`
-  defaults on, and advertises `NODE_P2P_V2`; `P2pServiceConfig::v2_transport`
-  itself defaults off for direct `bitcoin-rs-p2p` users. With it off, every
-  connection is v1 and the node does not advertise `NODE_P2P_V2`. A peer that
-  opens with a v2 key then fails the v1 magic check and is disconnected
-  without discouragement, as Core closes a transport on a wrong message start
-  (`PeerError::inbound`).
-- **Inbound**: with v2 on, the responder reads the first 16 bytes. A v1
-  `version` header under this node's magic hands those bytes to the v1
-  decoder, a v1 `version` header under another magic is refused, and anything
-  else is a v2 key, answered with this node's key and garbage. Nothing is sent
-  before v1 is ruled out.
-- **Outbound**: with v2 on, a manual connection, and an automatic one to an
-  address whose last known services include `NODE_P2P_V2`, start v2. When the
-  peer closes without sending a byte, the dial retries once over v1; the
-  unanswered attempt is neither a failure count nor misbehavior.
-- **One deadline**: the transport and version handshakes share the 60 s
-  handshake deadline, and a peer is never ready before its transport
-  handshake completes.
-- **Split halves**: the connection thread keeps the receive half and the
-  writer thread takes the send half when the session starts. Lease budgets
-  stay in v1 frame lengths for either transport; `CountingStream` counts the
-  bytes actually sent and received.
-- **Failures**: a transport error (no garbage terminator within the limit, an
-  authentication failure, an oversized packet) ends the connection without
-  discouraging the peer, because BIP324 does not authenticate peers. A
-  malformed message inside an authenticated packet keeps the v1 misbehavior
-  rules. A message of an empty or undefined type is dropped without
-  disconnecting.
-- **Observability**: the negotiated transport is published with the
-  handshake (`PeerInfo::transport`), and `getpeerinfo` reports it as Core
-  does: `transport_protocol_type` `v1` or `v2`, and for v2 the session id as
-  hex in byte order (empty for v1). Both ends of a session derive the same id.
-- **Bounds**: garbage is at most 4095 bytes; the terminator scan reads only up
-  to the terminator's earliest possible end; contents above 1 + 12 +
-  4,000,000 bytes are refused before their body is read, and a v2 payload is
-  sent only up to 4,000,000 bytes; a stalled packet retains only the bytes it
-  received.
-
-Proof: `crates/p2p/src/listener/v2_transport_tests.rs` tests
-`a_v2_listener_negotiates_bip324_with_a_v2_initiator`,
-`a_v2_listener_still_serves_a_v1_peer`, `an_outbound_v2_dial_negotiates_bip324`,
-`both_ends_publish_the_negotiated_v2_session`,
-`an_unanswered_v2_dial_retries_once_over_v1`, and
-`a_silent_responder_ends_at_the_handshake_deadline` cover negotiation over
-loopback sockets in both directions with the remote message loop answering
-over the session, the session id both ends publish, v1 detection on a v2
-listener, the single v1 retry against a v1-only listener, and the handshake
-deadline against a silent peer. `crates/rpc/src/handlers/network.rs` test
-`getpeerinfo_reports_the_negotiated_transport` covers the RPC fields, and
-`crates/p2p/src/listener.rs` test
-`only_current_remote_protocol_faults_change_automatic_avoidance` covers the
-undiscouraged wrong magic. The
-`crates/p2p/src/bip324` unit tests pin the BIP vectors, the handshake
-misbehaviours of Core's `p2p_v2_misbehaving.py`, and the packet bounds.
-`bin/bitcoin-rs/src/main.rs` test
-`v2_transport_defaults_on_and_disables_from_every_surface` pins the node
-default, and `docs/contracts/core-differential.md` CORE-06 owns the live Core
-31.1 run in both directions.
+- **Owner**: `transport.rs` (negotiation, split halves); `bip324.rs` (key schedule, ciphers, handshake machine, packet reader, type encoding).
+- Default: node `v2transport` on (Core default), advertising `NODE_P2P_V2`; `P2pServiceConfig::v2_transport` defaults off for direct library users. Off means all-v1 with no `NODE_P2P_V2`. A v2-key opener failing the v1 magic check disconnects without discouragement (Core wrong-start close, `PeerError::inbound`).
+- Inbound (v2 on): read the first 16 bytes. v1 `version` under own magic goes to the v1 decoder; under foreign magic is refused; anything else is a v2 key answered with key plus garbage. Nothing is sent before v1 is ruled out. Outbound (v2 on): manual dials and automatic dials to `NODE_P2P_V2` addresses start v2; a no-byte close retries once over v1, counted as neither failure nor misbehavior.
+- The transport and version handshakes share one 60 s deadline; a peer is never ready before its transport handshake completes. At session start the connection thread keeps the receive half and the writer thread takes the send half. Lease budgets stay in v1 frame lengths either way; `CountingStream` counts actual bytes.
+- Failures: transport errors (unterminated garbage, auth failure, oversized packet) end the connection without discouragement, because BIP324 authenticates no peer. Malformed messages inside authenticated packets keep v1 misbehavior rules. Empty/undefined-type messages drop without disconnect.
+- Observability: negotiated transport publishes in `PeerInfo::transport`; `getpeerinfo` reports Core-style `transport_protocol_type` (`v1`/`v2`) plus the v2 session id as hex in byte order (empty for v1); both ends derive the same id.
+- Bounds: garbage at most 4095 bytes; terminator scan reads only to its earliest possible end; contents above 1 + 12 + 4,000,000 bytes are refused pre-body; v2 payloads send at most 4,000,000 bytes; stalled packets retain only received bytes.
+- Proof: `listener/v2_transport_tests.rs` (both directions, v1 service, session-id publish, single v1 retry, silent-peer deadline); `rpc/handlers/network.rs getpeerinfo_reports_the_negotiated_transport`; `listener.rs only_current_remote_protocol_faults_*`; `bip324` BIP-vector/misbehavior/packet-bound units; `main.rs v2_transport_defaults_on_*`; live both-direction run owned by CORE-06 in core-differential.md.
 
 ## Live gaps
 
-- **Peer lifecycle boundary**: Header-request planning and getdata fan-out
-  execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
-  `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
-  holds a shadow download window.
-- **Inbound eviction protections**: eviction at the inbound cap lacks Core's
-  minimum-ping protection, because no ping round trip is measured; see
-  `docs/policies/p2p-compatibility.md` section 7 item 12.
+- Peer lifecycle boundary: header-request planning and getdata fan-out run in `BlockSync` behind the node `SyncChain` seam. Node owns applied-chain mutation; `P2pService` holds no shadow window.
+- Inbound eviction lacks Core's minimum-ping protection (no ping RTT measured); policy §7 item 12.
 
 ## Proven by
 
-- `crates/p2p/src/chain_query.rs` tests
-  `getdata_block_encoding_matches_requested_inventory_on_wire`,
-  `getdata_block_encodings_keep_headroom_and_body_failure_rules`, and
-  `getdata_block_encodings_recheck_active_chain_after_body_load` cover BIP144
-  block encodings against the independent rust-bitcoin envelope, request
-  order, retained body immutability, headroom, corruption, and stale reads
-  (P2P-01).
-- `crates/p2p/src/connection.rs` tests `strict_cap_no_empty_queue_bypass`,
-  `reservation_is_the_admission`, `concurrent_reservations_never_exceed_cap`,
-  and `credit_drop_exactly_once`, and
-  `crates/p2p/src/listener/aggregate_budget_tests.rs` tests
-  `request_deferred_not_reply` and `stall_exclusion_removes_only_shared_refusals`,
-  cover the strict aggregate, release on every exit path and the
-  no-disconnect-on-aggregate-refusal rule (P2P-02).
-- `crates/p2p/src/inv.rs` test
-  `cancelled_missing_parent_source_does_not_enqueue_a_request` and
-  `crates/p2p/src/peer_table.rs` test
-  `with_current_rejects_stale_source_and_holds_live_identity` protect
-  cancellation and identity-checked enqueue (P2P-02).
-- `crates/p2p/tests/core_compat.rs`:
-  - `desirable_service_policy_matches_core`,
-    `outbound_peer_without_network_flag_disconnected`,
-    `outbound_peer_with_network_and_witness_is_accepted`, and
-    `outbound_near_tip_limited_peer_is_accepted` pin the outbound service gate
-    and its near-tip `NETWORK_LIMITED` exception;
-    `pruned_version_message_advertises_network_limited_only` and
-    `unpruned_version_message_advertises_network` pin the advertised set;
-  - `cargo test -p bitcoin-rs-p2p --test core_compat` pins rust-bitcoin v1
-    envelopes, handshake fields, per-network framing, relay round-trips, the
-    reject-or-ignore matrix, and peer-visible reorg/restart behavior.
-- `crates/p2p/tests/core_interop_live.rs`: live differential lane running via
-  `scripts/run-p2p-core-interop.sh` against the pinned Core 31.1 `bitcoind`
-  (`docs/contracts/core-differential.md`).
-- `crates/p2p/src/counters.rs` tests
-  `a_vectored_write_counts_every_slice_the_socket_took`,
-  `a_short_vectored_write_counts_what_the_socket_took`, and
-  `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
-  and payload leave as one `write_vectored`, and the wrapper counts every byte
-  the socket took (`P2P-01`). Elapsed time is
-  `crates/p2p/benches/write_message.rs`.
-- `crates/p2p/src/peer_table.rs` tests
-  `note_announced_height_credits_only_the_delivering_connection` and
-  `note_announced_height_raises_monotonically_and_reports_actual_updates`
-  pin the identity-checked, monotonic credit mutation and retained tip
-  evidence (P2P-03).
-- `crates/p2p/src/sync/tests/header_progress.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
-  (at-tip request eligibility after catch-up, P2P-03/#617),
-  `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
-  earn credit on the reselected best chain),
-  and `losing_fork_credit_survives_winner_disconnect` (retained branch evidence).
-- `crates/p2p/src/sync/tests/headroom_throttling.rs` tests
-  `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
-  hedge eligibility).
-- `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
-  `from_connected_disables_nagle`: the counting wrapper forwards one
-  `write_vectored` for header plus payload, and the connected-socket
-  constructor owns `TCP_NODELAY` (P2P-04).
-- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
-  and outbound session sockets set `TCP_NODELAY` (`P2P-04`).
-- `crates/p2p/src/handshake.rs` test
-  `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
-  handshake writes framed version, feature, and verack bytes once and reaches
-  Ready (`P2P-01`).
-- `crates/p2p/src/counters.rs` tests `leftover_bytes_do_not_revisit_the_socket`,
-  `two_wire_messages_decode_from_one_socket_read`, and
-  `a_timed_out_refill_does_not_replay_consumed_bytes`: one kernel delivery of
-  two v1 frames decodes both without a second socket read, and a timed-out
-  refill does not replay consumed bytes (`P2P-01`).
+- P2P-01: `chain_query.rs` BIP144 encodings (order, immutability, headroom, corruption, stale reads); `counters.rs` vectored-write rows; `handshake.rs` framed-bytes Ready; `wire` two-frames/one-read rows; `p2p/tests/core_compat.rs` rust-bitcoin envelopes, handshake fields, framing, relay, reorg/restart; live lane `p2p/tests/core_interop_live.rs` via `scripts/run-p2p-core-interop.sh` (CORE-06).
+- P2P-02/08: `connection.rs` strict-cap/reservation/credit-drop; `aggregate_budget_tests.rs` deferral/stall-exclusion; `inv.rs`/`peer_table.rs` cancellation/identity; `core_compat.rs` service-gate rows (desirable policy, accept/disconnect cases, near-tip LIMITED exception, advertised set).
+- P2P-03: `peer_table.rs` credit-mutation rows; `header_progress.rs` eligibility/reorg/survival rows; `headroom_throttling.rs` hedge row. P2P-04: `counters.rs` Nagle/vectored rows; `listener.rs session_sockets_disable_nagle`.

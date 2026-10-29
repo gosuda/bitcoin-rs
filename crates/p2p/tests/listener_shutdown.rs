@@ -1,4 +1,3 @@
-//! P2P listener shutdown integration coverage.
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
 use bitcoin_rs_p2p::{ListenerExtras, NetworkActivity, PeerTable};
@@ -12,9 +11,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Stops the serve thread on every exit path: Drop stores the shutdown
-/// flag and joins the thread, so an early return never leaks an accepting
-/// listener thread.
 struct ServeGuard {
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -131,8 +127,6 @@ fn serve_returns_without_accepting_when_flag_preset() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// Wiring with an active network, no bans, and a start token that stays
-/// `false`.
 fn wiring(peer_table: Arc<PeerTable>) -> ConnectionShared {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();

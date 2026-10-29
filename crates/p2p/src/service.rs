@@ -1,8 +1,4 @@
 //! Runtime owner for the Bitcoin P2P subsystem.
-//!
-//! P2pService owns the mutable network control state and every worker that
-//! acts on it. The node supplies chain read/query and inbound event sinks, but
-//! does not construct listener, dial, DNS, or fixed-peer workers itself.
 
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::VecDeque;
@@ -27,21 +23,14 @@ mod pinned;
 
 use crate::listener::ListenerError;
 
-/// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
 const DEFAULT_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 
-/// Core's `MAX_OUTBOUND_BLOCK_RELAY_CONNECTIONS` (`net.h:73`).
 const DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
 
-/// How often the connection manager looks for a full-relay connection that the
-/// stale-tip allowance made extra.
 const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
-/// Core `random.cpp` `MakeExponentiallyDistributed` and `random.h` microsecond
-/// rounding, for a mean of 120 seconds. The 53-bit fraction is strictly <1,
-/// so the maximum delay is finite (4,408,416,068 microseconds), with zero allowed.
 #[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -62,73 +51,37 @@ const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 /// Full ingress backpressures the connection, rather than losing a response.
 const INBOUND_HEADER_QUEUE_LIMIT: usize = 64;
 
-/// Core's automatic-connection maximum, `-maxconnections`
-/// (`DEFAULT_MAX_PEER_CONNECTIONS`, `net.h:81`).
 const DEFAULT_MAX_PEER_CONNECTIONS: usize = 200;
 
-/// How many capacity-blocked automatic dials the drain worker holds for
-/// retry. Comfortably above any reachable slot count, so a saturated cap
-/// cannot let the parked backlog grow without limit.
 const MAX_PARKED_DIALS: usize = 64;
 
-/// Configuration needed by the P2P runtime, after node configuration has
-/// resolved the consensus network and message-start bytes.
 #[derive(Clone, Debug)]
 pub struct P2pServiceConfig {
-    /// Addresses on which inbound P2P connections are accepted.
     pub listen_addrs: Vec<std::net::SocketAddr>,
 
-    /// Network message-start bytes.
     pub magic: Magic,
-    /// Auxiliary peer-book base/legacy path. The owner adds the P2P magic to
-    /// the filename and imports a valid matching legacy file without deleting
-    /// it. None keeps discovery in memory.
     pub address_book_path: Option<std::path::PathBuf>,
-    /// Optional Core `ASMap` file; invalid configured files preserve peer books read-only.
     pub asmap_path: Option<std::path::PathBuf>,
-    /// Permit private/local peer addresses only on isolated regtest networks.
     pub allow_local_addresses: bool,
-    /// Whether DNS seed maintenance is enabled.
     pub dns_seeds_enabled: bool,
-    /// DNS seed host names. The service resolves them only in its worker.
     pub dns_seeds: Vec<String>,
-    /// Port appended to DNS seed results.
     pub dns_port: u16,
-    /// Fixed connect endpoints. Non-empty disables DNS maintenance.
     pub fixed_peers: Vec<String>,
-    /// Operator-protected subnets, exempt from automatic discouragement only.
     pub noban_subnets: Vec<crate::IpSubnet>,
-    /// Total automatic peer connections, the Core maximum inbound and
-    /// outbound admission is derived from.
-    ///
-    /// Core: `m_max_automatic_connections` (`net.h:1091`).
     pub max_peer_connections: usize,
-    /// Outbound full-relay connection slots (transaction, address, block relay,
-    /// and announcements).
     pub outbound_full_relay_slots: usize,
-    /// The services this node advertises in every `version`.
     pub local_services: ServiceFlags,
     /// Whether connections try BIP324 v2 (see [`ConnectionShared::v2_transport`]).
-    /// The operator advertises `NODE_P2P_V2` through `local_services`.
-    ///
-    /// [`ConnectionShared::v2_transport`]: crate::listener::ConnectionShared::v2_transport
     pub v2_transport: bool,
-    /// The opt-in relay capabilities connections offer: BIP331 ancestor
-    /// package relay and BIP332 stale-tip relay. Both are off by default; a
-    /// peer relays packages or stale tips only after both sides negotiate it.
-    /// The value is final: the node resolves any network policy before it
-    /// reaches the service, and nothing below re-checks the network.
+    /// The opt-in relay capabilities connections offer: BIP331 ancestor package relay
+    /// and BIP332 stale-tip relay.
+    ///
+    /// Both are off by default; a peer relays packages or stale tips only after both
+    /// sides negotiate it.
     pub relay_offers: crate::RelayOffers,
-    /// Outbound block-relay-only connection slots (blocks only, no `tx` or
-    /// `addr`).
     pub outbound_block_relay_slots: usize,
-    /// Outbound request queue capacity.
     pub outbound_queue_limit: usize,
-    /// Inbound block queue capacity.
     pub inbound_block_queue_limit: usize,
-    /// Overlay transports (Tor/I2P): proxies, Tor control, SAM bridge,
-    /// key persistence paths, and the onlynet restriction. Default
-    /// disables every overlay.
     pub overlay: crate::overlay::OverlayConfig,
 }
 
@@ -159,12 +112,6 @@ impl Default for P2pServiceConfig {
 }
 
 impl P2pServiceConfig {
-    /// Total outbound connection slots.
-    ///
-    /// PRE: none.
-    /// POST: returns the sum of the full-relay and block-relay slot counts,
-    ///   which bounds the live automatic-outbound target and simultaneous
-    ///   automatic attempts.
     /// INVARIANT: manual peers do not consume these slots; the two slot
     ///   counts are the only automatic outbound population knobs.
     #[must_use]
@@ -173,12 +120,6 @@ impl P2pServiceConfig {
             .saturating_add(self.outbound_block_relay_slots)
     }
 
-    /// Inbound connection capacity: what the automatic-connection maximum
-    /// leaves after the outbound slot counts.
-    ///
-    /// PRE: none.
-    /// POST: returns `max_peer_connections` minus both outbound slot counts,
-    ///   clamped at zero.
     /// INVARIANT: this is the only inbound capacity derivation; at the result
     ///   an inbound newcomer evicts an inbound connection or is refused
     ///   (`PeerTable::try_register_inbound`).
@@ -189,12 +130,6 @@ impl P2pServiceConfig {
             .saturating_sub(self.outbound_block_relay_slots)
     }
 
-    /// Hands the per-connection settings to one start epoch's shared wiring.
-    ///
-    /// PRE: `shared` was built by `ConnectionShared::new` for this start.
-    /// POST: every connection cloned from `shared` reads the configured
-    ///   inbound capacity, services, transport choice, and relay-feature
-    ///   switches.
     /// INVARIANT: this is the only place the service configuration reaches
     ///   these `ConnectionShared` fields, and each switch maps to exactly its
     ///   own field.
@@ -207,53 +142,38 @@ impl P2pServiceConfig {
     }
 }
 
-/// Errors returned while starting P2P workers.
 #[derive(Debug, Error)]
 pub enum P2pServiceError {
-    /// The service has already been started.
     #[error("p2p service is already started")]
     AlreadyStarted,
-    /// A worker could not be spawned.
     #[error("spawn p2p worker: {0}")]
     Spawn(#[from] io::Error),
-    /// A listener could not bind or run.
     #[error(transparent)]
     Listener(#[from] ListenerError),
-    /// An overlay transport (Tor control, SAM session) could not start.
     #[error("p2p overlay setup: {0}")]
     Overlay(io::Error),
 }
 
-/// Errors returned when joining P2P workers after shutdown.
 #[derive(Debug, Error)]
 pub enum P2pJoinError {
-    /// A listener worker returned a bind or accept failure.
     #[error(transparent)]
     Listener(#[from] ListenerError),
-    /// A listener worker panicked.
     #[error("p2p listener panicked")]
     ListenerPanic,
-    /// The outbound drain worker panicked.
     #[error("p2p outbound drain panicked")]
     OutboundPanic,
-    /// The bootstrap worker panicked.
     #[error("p2p bootstrap worker panicked")]
     BootstrapPanic,
 }
 
-/// Errors returned by RPC-facing P2P control operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum P2pControlError {
-    /// Destination network excluded by routing configuration.
     #[error("destination network disabled")]
     NetworkDisabled,
-    /// The destination is covered by an active manual ban.
     #[error("destination is banned")]
     Banned,
-    /// The bounded dial queue has no capacity.
     #[error("p2p outbound queue is full")]
     QueueFull,
-    /// The P2P service has already shut down.
     #[error("p2p outbound queue is closed")]
     Closed,
 }
@@ -320,12 +240,6 @@ impl Workers {
         }
     }
 
-    /// Cancels and joins one epoch.
-    ///
-    /// PRE: the caller holds the service's worker slot. Cancellation also
-    ///   cancels every peer in the table and clears the overlay addresses,
-    ///   and both outlive an epoch, so no later epoch may have been
-    ///   published yet.
     fn teardown(
         &mut self,
         peer_table: &crate::PeerTable,
@@ -336,21 +250,14 @@ impl Workers {
     }
 }
 
-/// One queued request to dial an outbound address, with the origin that
-/// asked for it.
+/// INVARIANT: the origin travels with the request to the lease.
 ///
-/// PRE: none.
-/// POST: `manual` records whether the operator named this address.
-/// INVARIANT: the origin travels with the request to the lease. Core's
-///   `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
-///   extra-peer retirement (`net_processing.cpp:5502`,
-///   `net_processing.cpp:5558-5604`), and the queue is the only place that
-///   still knows which dials were asked for by name.
+/// Core's `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
+/// extra-peer retirement (`net_processing.cpp:5502`, `net_processing.cpp:5558-5604`),
+/// and the queue is the only place that still knows which dials were asked for by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutboundDial {
-    /// The address to dial.
     pub addr: PeerEndpoint,
-    /// Whether the operator asked for this address by name.
     pub manual: bool,
     purpose: DialPurpose,
 }
@@ -363,7 +270,6 @@ enum DialPurpose {
 }
 
 impl OutboundDial {
-    /// A dial the seed list or the address book produced.
     #[must_use]
     pub const fn auto(addr: PeerEndpoint) -> Self {
         Self {
@@ -373,7 +279,6 @@ impl OutboundDial {
         }
     }
 
-    /// A dial the operator pinned with `--connect` or `addnode`.
     #[must_use]
     pub const fn pinned(addr: PeerEndpoint) -> Self {
         Self {
@@ -392,10 +297,6 @@ struct ActiveOutbound {
     manual: bool,
 }
 
-/// Cloneable read capability for manual bans and automatic reconnect policy.
-///
-/// Manual mutations remain with the P2P service. Its connection workers record
-/// typed remote violations through the private ephemeral policy boundary.
 #[derive(Clone, Debug)]
 pub struct BannedReader {
     inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
@@ -405,7 +306,6 @@ pub struct BannedReader {
 }
 
 impl BannedReader {
-    /// Wraps the shared ban table in a read-only reader capability.
     #[must_use]
     pub fn new(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
         Self::with_protection(inner, Vec::new())
@@ -425,7 +325,6 @@ impl BannedReader {
         }
     }
 
-    /// Snapshot all reconnect exclusions before taking an address-book lock.
     #[must_use]
     pub fn automatic_snapshot(
         &self,
@@ -442,7 +341,6 @@ impl BannedReader {
         }
     }
 
-    /// Whether operator configuration protects this logical remote IP.
     #[must_use]
     pub fn is_noban(&self, ip: impl Into<crate::PeerAddress>) -> bool {
         ip.into()
@@ -450,7 +348,6 @@ impl BannedReader {
             .is_some_and(|ip| self.protected.iter().any(|subnet| subnet.contains(ip)))
     }
 
-    /// Exact-IP ephemeral avoidance, kept separate from the manual ban view.
     #[must_use]
     pub fn is_discouraged(&self, ip: impl Into<crate::PeerAddress>) -> bool {
         {
@@ -459,17 +356,14 @@ impl BannedReader {
         }
     }
 
-    // Only current, typed remote violations at the connection boundary call this.
     pub(crate) fn discourage(&self, ip: impl Into<crate::PeerAddress>) -> bool {
         self.discouraged.lock().insert(ip, Instant::now())
     }
 
-    /// Acquires a shared read lock on the ban list.
     pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<crate::BannedSubnet>> {
         self.inner.read()
     }
 
-    /// Returns whether the given IP is banned at the given time.
     #[must_use]
     pub fn is_banned(&self, ip: impl Into<crate::PeerAddress>, now: SystemTime) -> bool {
         ip.into()
@@ -477,7 +371,6 @@ impl BannedReader {
             .is_some_and(|ip| crate::subnet::is_banned(&self.inner.read(), ip, now))
     }
 
-    /// Returns an empty fixture reader for tests.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn fixture_empty() -> Self {
@@ -491,7 +384,6 @@ impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
     }
 }
 
-/// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     overlay: Arc<crate::overlay::OverlayTransport>,
     config: P2pServiceConfig,
@@ -502,7 +394,6 @@ pub struct P2pService {
     banned: BannedReader,
     address_book: Arc<crate::addrman::AddressBook>,
     added_nodes: Arc<RwLock<Vec<PeerEndpoint>>>,
-    /// Current fixed-peer resolution, published only by the resolver worker.
     fixed_destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     outbound_tx: Sender<OutboundDial>,
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
@@ -511,17 +402,8 @@ pub struct P2pService {
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
-    /// Per-start cancellation observed by listener and connection threads.
-    /// A failed start leaves this token asserted; the next start installs a
-    /// fresh token so leftover workers cannot be un-cancelled.
     session_cancel: Mutex<Arc<AtomicBool>>,
-    /// Aggregate outbound queued-byte budget for this service's connections.
-    /// Owned here (never process-global) and handed to the connection wiring
-    /// at every start, so inbound, outbound, and manual connections of one
-    /// node draw from one aggregate.
     shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
-    /// Overlay service endpoints (onion service, I2P destination) the
-    /// service currently publishes, for `getnetworkinfo` reporting.
     overlay_addresses: Arc<Mutex<Vec<crate::PeerEndpoint>>>,
 }
 
@@ -535,7 +417,6 @@ impl std::fmt::Debug for P2pService {
 }
 
 impl P2pService {
-    /// Creates an unstarted P2P service and allocates all P2P-owned state.
     #[must_use]
     pub fn new(
         config: P2pServiceConfig,
@@ -584,48 +465,30 @@ impl P2pService {
         }
     }
 
-    /// Overlay service endpoints currently published (onion service,
-    /// I2P destination), as typed endpoint identities.
     #[must_use]
     pub fn overlay_addresses(&self) -> Vec<crate::PeerEndpoint> {
         self.overlay_addresses.lock().clone()
     }
 
-    /// SOCKS credential isolation policy.
     pub fn proxy_randomize_credentials(&self) -> bool {
         self.config.overlay.randomize_credentials
     }
 
-    /// Current configured routing and live operational state by remote network.
     pub fn network_states(&self) -> Vec<crate::OverlayNetworkState> {
         self.overlay.states(&self.peer_table)
     }
 
-    /// Resolve a manually supplied destination through its configured route.
     pub fn resolve_peer(&self, endpoint: &str) -> io::Result<Vec<PeerEndpoint>> {
         self.overlay
             .resolve(endpoint, &|| self.shutdown.is_triggered())
     }
 
-    /// Returns the aggregate outbound queued-byte budget this service's
-    /// connections count against.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn shared_outbound_budget(&self) -> Arc<crate::connection::SharedOutboundBudget> {
         Arc::clone(&self.shared_outbound)
     }
 
-    /// Starts listeners, outbound connection draining, and peer bootstrap.
-    ///
-    /// The node gives the service only read-only chain serving and event
-    /// delivery hooks. Worker construction and teardown remain P2P-owned.
-    ///
-    /// The worker slot is held from the occupancy check until the epoch is
-    /// published or, on failure, until its teardown has finished. A failed
-    /// epoch therefore cannot cancel peers or clear overlay addresses that a
-    /// later `start` published, because that `start` cannot take the slot
-    /// before the failed teardown is over. Lock order is the one `shutdown`
-    /// already uses: slot, then peer table, SAM session, and address list.
     pub fn start(
         &self,
         chain_query: Option<&Arc<dyn crate::ChainQuery + 'static>>,
@@ -651,9 +514,6 @@ impl P2pService {
                 Ok(())
             }
             Err(error) => {
-                // Still under the slot: this teardown cancels every peer and
-                // clears the overlay addresses, which are shared across
-                // epochs, so no replacement epoch may exist yet.
                 workers.teardown(&self.peer_table, &self.overlay_addresses);
                 Err(error)
             }
@@ -720,9 +580,6 @@ impl P2pService {
             workers.listeners.push(handle);
         }
 
-        // Snapshot the fully populated dial routes (SAM session included)
-        // before `shared` moves into the outbound worker: overlay
-        // configuration never changes after this start.
         let routes = crate::RouteTable::from_routes(&shared.dial_routes);
         let dial_allowance = shared.block_sync.clone();
         let outbound = self.spawn_outbound_worker(shared, &workers.shutdown)?;
@@ -764,8 +621,6 @@ impl P2pService {
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
                 let mut active: HashMap<PeerEndpoint, ActiveOutbound> = HashMap::new();
-                // Automatic dials that arrived while the automatic cap was
-                // full, retried in order once a slot opens.
                 let mut parked: VecDeque<OutboundDial> = VecDeque::new();
                 let mut handles = Vec::new();
                 let mut pinned = pinned::PinnedPeers::default();
@@ -796,14 +651,6 @@ impl P2pService {
                         .block_sync
                         .as_ref()
                         .is_some_and(|sync| sync.allow_extra_full_relay_dial());
-                    // Manual dials bypass admission and do not consume
-                    // automatic slots. Automatic dials at capacity are
-                    // parked and retried in order once a slot opens. When
-                    // the parked queue is full, the request is shed and its
-                    // Pending selection is cleared so the book can retry an
-                    // address that was never dialed. A stale tip raises the
-                    // automatic cap by one so an extra full-relay peer can
-                    // form beside a full slot set.
                     for _ in 0..parked.len() {
                         let Some(dial) = parked.pop_front() else { break; };
                         if !dial_has_capacity(&dial, &active, active_limit, block_relay_slots, extra_dial) {
@@ -944,10 +791,7 @@ impl P2pService {
             .map(Some)
     }
 
-    /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
-        // Capture before cancelling: `anchor_peers` excludes cancelled leases,
-        // so cancelling first would leave nothing to persist for restart.
         let demonstrated = anchor_peers(&self.peer_table, &self.address_book);
         if let Some(workers) = self.workers.lock().as_mut() {
             workers.cancel(&self.peer_table, &self.overlay_addresses);
@@ -967,14 +811,11 @@ impl P2pService {
         self.address_book.save();
     }
 
-    /// Returns a reference to the process-wide shutdown reader.
     #[must_use]
     pub fn shutdown_reader(&self) -> &bitcoin_rs_chain::LatchReader {
         &self.shutdown
     }
 
-    /// Joins listener and outbound workers. Bootstrap is joined separately so
-    /// node teardown can keep that drain after the bounded subsystem wait.
     pub fn join_core_workers(&self) -> Result<(), P2pJoinError> {
         let (listeners, outbound, overlay_threads) = {
             let mut slot = self.workers.lock();
@@ -1026,7 +867,6 @@ impl P2pService {
         }
     }
 
-    /// Joins the bootstrap worker if one was started.
     pub fn join_bootstrap_worker(&self) -> Result<(), P2pJoinError> {
         let bootstrap = {
             let mut slot = self.workers.lock();
@@ -1049,17 +889,12 @@ impl P2pService {
         Ok(())
     }
 
-    /// Joins every worker owned by this service. Calling it more than once is
-    /// harmless.
     pub fn join(&self) -> Result<(), P2pJoinError> {
         let core = self.join_core_workers();
         let bootstrap = self.join_bootstrap_worker();
         core.and(bootstrap)
     }
 
-    /// Test seam for node teardown coverage: installs a caller-spawned
-    /// handle as the outbound drain worker, so join-failure paths are
-    /// reachable without a live peer.
     #[cfg(feature = "test-seam")]
     #[doc(hidden)]
     pub fn test_install_outbound_worker(&self, handle: JoinHandle<()>) {
@@ -1069,8 +904,6 @@ impl P2pService {
             .outbound = Some(handle);
     }
 
-    /// Test seam for node teardown coverage: installs a caller-spawned
-    /// handle as the bootstrap worker.
     #[cfg(feature = "test-seam")]
     #[doc(hidden)]
     pub fn test_install_bootstrap_worker(&self, handle: JoinHandle<()>) {
@@ -1080,46 +913,37 @@ impl P2pService {
             .bootstrap = Some(handle);
     }
 
-    /// Returns the single session table owned by this service.
     #[must_use]
     pub fn table(&self) -> Arc<crate::PeerTable> {
         Arc::clone(&self.peer_table)
     }
 
-    /// Resolved overlay transport configuration for this service.
     #[must_use]
     pub fn overlay_config(&self) -> &crate::overlay::OverlayConfig {
         &self.config.overlay
     }
 
-    /// Base service flags. Handshakes and RPC add `COMPACT_FILTERS` only
-    /// while the optional filter index is healthy and caught up.
     #[must_use]
     pub fn local_services(&self) -> bitcoin::p2p::ServiceFlags {
         self.config.local_services
     }
 
-    /// Returns whether P2P network activity is enabled.
     #[must_use]
     pub fn network_active(&self) -> bool {
         self.network_active.load(Ordering::Acquire)
     }
 
-    /// Enables or disables network activity. Disabling cancels current peers;
-    /// their owners remove the leases during teardown.
     pub fn set_network_active(&self, active: bool) {
         self.peer_table
             .set_network_active(&self.network_active, active);
     }
 
-    /// Adds or replaces one manual ban entry.
     pub fn set_ban(&self, entry: crate::BannedSubnet) {
         let mut banned = self.banned.inner.write();
         banned.retain(|current| current.subnet != entry.subnet);
         banned.push(entry);
     }
 
-    /// Removes one manual ban entry.
     pub fn remove_ban(&self, subnet: crate::IpSubnet) {
         self.banned
             .inner
@@ -1127,30 +951,25 @@ impl P2pService {
             .retain(|entry| entry.subnet != subnet);
     }
 
-    /// Clears all manual bans.
     pub fn clear_banned(&self) {
         self.banned.inner.write().clear();
     }
 
-    /// Returns a read-only reader for the active manual bans.
     #[must_use]
     pub fn banned_reader(&self) -> BannedReader {
         self.banned.clone()
     }
 
-    /// Returns a snapshot of current manual bans.
     #[must_use]
     pub fn banned(&self) -> Vec<crate::BannedSubnet> {
         self.banned.read().clone()
     }
 
-    /// Returns configured addnode add addresses.
     #[must_use]
     pub fn added_nodes(&self) -> Vec<PeerEndpoint> {
         self.added_nodes.read().clone()
     }
 
-    /// Applies Core-like addnode state and requests a connection.
     pub fn add_node(&self, addr: PeerEndpoint, persist: bool) -> Result<(), P2pControlError> {
         if !self.overlay.config.allows(addr.address().network()) {
             return Err(P2pControlError::NetworkDisabled);
@@ -1175,39 +994,22 @@ impl P2pService {
         }
     }
 
-    /// Removes one configured addnode add address.
     pub fn remove_node(&self, addr: PeerEndpoint) {
         self.added_nodes.write().retain(|current| *current != addr);
     }
 
-    /// Disconnects any active connection with the given address.
     pub fn disconnect(&self, addr: impl Into<crate::PeerRemote>) -> bool {
         self.peer_table.disconnect(addr)
     }
 
-    /// Disconnects the handshake-complete connection at `addr`, the sessions
-    /// `getpeerinfo` lists. A vacant address and a session still handshaking
-    /// both answer `false` without mutation.
     pub fn disconnect_ready(&self, addr: impl Into<crate::PeerRemote>) -> bool {
         self.peer_table.disconnect_ready(addr)
     }
 
-    /// Disconnects exactly the handshake-complete connection whose
-    /// process-unique node id is `node_id`, the value `getpeerinfo.id`
-    /// reports.
-    ///
-    /// This is identity selection, and it is the only correct way to act on a
-    /// peer a caller has already named: an address can be taken over by a
-    /// replacement connection, an id cannot. Anonymous inbound overlay
-    /// sessions have no address to name and are reachable through this path
-    /// alone.
     pub fn disconnect_ready_node_id(&self, node_id: u64) -> bool {
         self.peer_table.disconnect_ready_node_id(node_id)
     }
 
-    /// Disconnects the handshake-complete connection at `addr` only when it is
-    /// the one whose node id is `node_id`; a same-address replacement is left
-    /// alone.
     pub fn disconnect_ready_node_id_at(
         &self,
         addr: impl Into<crate::PeerRemote>,
@@ -1216,8 +1018,6 @@ impl P2pService {
         self.peer_table.disconnect_ready_node_id_at(addr, node_id)
     }
 
-    /// Queues an automatic dial for the stale-tip slot-cap unit test.
-    /// Local addnode requests are manual and cannot exercise that allowance.
     #[cfg(test)]
     pub(crate) fn test_queue_automatic_dial(
         &self,
@@ -1226,25 +1026,20 @@ impl P2pService {
         self.outbound_tx.send(OutboundDial::auto(addr))
     }
 
-    /// Takes the inbound headers receiver for the single coordinator.
     pub fn take_inbound_headers_receiver(&self) -> Option<Receiver<crate::InboundHeaders>> {
         self.inbound_headers_rx.lock().take()
     }
 
-    /// Takes the inbound block receiver for the single coordinator.
     pub fn take_inbound_blocks_receiver(&self) -> Option<Receiver<crate::InboundBlock>> {
         self.inbound_blocks_rx.lock().take()
     }
 
-    /// Returns a sender for inbound block notifications.
     #[must_use]
     pub fn inbound_blocks_sender(&self) -> Sender<crate::InboundBlock> {
         self.inbound_blocks_tx.clone()
     }
 }
 
-/// Tear down one start epoch without leaving parked or completed automatic
-/// claims behind. Thread joins occur before releasing their lifetime claims.
 fn defer_rejected_dial(
     dial: &OutboundDial,
     book: &crate::addrman::AddressBook,
@@ -1314,8 +1109,6 @@ fn reap_finished_outbound_connections(
     finished
 }
 
-/// Use the existing outbound owner for one bounded probe; a feeler bypasses
-/// the steady slot count but cannot coexist with another unfinished probe.
 fn spawn_feeler(
     shared: &crate::listener::ConnectionShared,
     book: &crate::addrman::AddressBook,
@@ -1330,9 +1123,6 @@ fn spawn_feeler(
     {
         return;
     }
-    // TCP presence is separate from queued/in-flight work. Core's
-    // AlreadyConnectedToAddress may Good a TCP-present collision incumbent;
-    // a pending dial must not manufacture that success evidence.
     let connected: Vec<_> = shared
         .peer_table
         .sessions()
@@ -1370,8 +1160,6 @@ fn spawn_feeler(
     );
 }
 
-/// Compare endpoint identities using the address book's canonical spelling.
-/// Keep the configured spelling in the operator-owned list itself.
 fn is_manual_endpoint(manual: &[PeerEndpoint], addr: PeerEndpoint) -> bool {
     let addr = crate::addrman::canonical(addr);
     manual
@@ -1406,11 +1194,6 @@ fn bootstrap_fixed_peer_endpoints<R, I>(
         if !network_active.load(Ordering::Acquire) {
             break 'endpoints;
         }
-        // Typed endpoints dial without any DNS: an onion/I2P fixed peer
-        // reaches `connect_peer_stream` and fails transport-unavailable
-        // there, never a system-DNS lookup or a direct-TCP fallback.
-        // Malformed overlay names are rejected locally and MUST NOT fall
-        // through to system DNS resolution.
         match crate::endpoint::classify_endpoint(endpoint) {
             crate::endpoint::ClassifiedEndpoint::Valid(parsed) => {
                 if peer_table.is_connected(parsed) || !network_active.load(Ordering::Acquire) {
@@ -1476,26 +1259,19 @@ fn run_fixed_peer_resolution(
                 Err(error) => tracing::warn!(endpoint, %error, "fixed peer resolution failed"),
             }
         }
-        // Resolution owns desired destinations; the outbound drain owns all
-        // connection eligibility, active handles and retry timing.
         *destinations.write() = resolved;
         if wait_for_shutdown(&shutdown, Duration::from_secs(2)) {
             break;
         }
     }
 }
-/// Chooses the role of one dial, pinned or automatic.
+/// INVARIANT: an operator pin (`--connect`/`addnode`) asks for full relay because
+/// Core's `ConnectionType::MANUAL` peers relay transactions.
 ///
-/// PRE: `dial` is a dequeued outbound request; the remaining arguments are
-///   the automatic chooser's, over the same table and pending set.
-/// POST: a pinned dial is answered with full relay whatever the classes
-///   hold; an automatic one is answered by [`next_outbound_role`].
-/// INVARIANT: an operator pin (`--connect`/`addnode`) asks for full relay
-///   because Core's `ConnectionType::MANUAL` peers relay transactions.
-///   Feeding the pin through the slot chooser could hand it
-///   `BlockRelayOnly`, which advertises `relay = false` and ends the
-///   connection on the first transaction the operator's peer sends; the
-///   chooser only orders the dials the scheduler started itself.
+/// Feeding the pin through the slot chooser could hand it `BlockRelayOnly`, which
+/// advertises `relay = false` and ends the connection on the first transaction the
+/// operator's peer sends; the chooser only orders the dials the scheduler started
+/// itself.
 fn dial_outbound_role(
     dial: &OutboundDial,
     peer_table: &crate::PeerTable,
@@ -1522,9 +1298,6 @@ fn dial_outbound_role(
     )
 }
 
-// PeerTable registers outbound leases only after TCP establishment. Like Core's
-// CNode census, handshake-in-progress and manual persistent sessions count;
-// queued/inflight dial work and inbound/cancelled sessions do not.
 fn count_address_failure(
     peer_table: &crate::PeerTable,
     maximum: usize,
@@ -1546,8 +1319,6 @@ fn count_address_failure(
     book.count_failure(&outbound, maximum)
 }
 
-/// Starts one accepted dial: skips addresses already running or connected,
-/// picks the relay role, and records the in-flight attempt.
 fn spawn_outbound_dial(
     dial: &OutboundDial,
     shared: &crate::listener::ConnectionShared,
@@ -1595,9 +1366,6 @@ fn spawn_outbound_dial(
                 && session.addr.endpoint().map(crate::addrman::canonical) == Some(dial.addr)
         })
     {
-        // A manual request cannot release a queued automatic request's claim.
-        // A duplicate automatic request also cannot release a running automatic
-        // thread's ownership; otherwise the next maintenance tick can reselect it.
         if !dial.manual && active.get(&dial.addr).is_none_or(|running| running.manual) {
             if let Some(book) = &shared.address_book {
                 defer_rejected_dial(&dial, book, active);
@@ -1659,24 +1427,7 @@ fn spawn_outbound_dial(
     handles.push((dial.addr, handle));
 }
 
-/// Chooses the relay role of the next automatic outbound connection.
-///
-/// PRE: `peer_table` holds the live connections of the current epoch,
-///   `pending` holds every dial the caller has started whose thread is still
-///   running — connected ones included — keyed by address with its role and
-///   origin, and `extra_full_relay` reports the scheduler's allowance.
-/// POST: return `BlockRelayOnly` only while the automatic block-relay
-///   population is below its slots, which happens once automatic full-relay
-///   slots are filled.
 /// INVARIANT: only automatic connections count, once in their own class.
-///   The table and pending dials share one snapshot, so registration during a
-///   census cannot drop a dial from both groups. Manual peers and dials never
-///   consume automatic slots. Full-relay slots fill first, then block-relay
-///   slots, as Core orders its dial priorities (`net.cpp:2780-2799`). A stale
-///   tip raises the full-relay target by one, as Core's
-///   `GetTryNewOutboundPeer` (`net.cpp:2471-2480`). When both classes are
-///   satisfied the automatic dial is served as full relay. A pinned dial is
-///   assigned full relay by the caller and never reaches this chooser.
 fn next_outbound_role(
     peer_table: &crate::PeerTable,
     pending: &HashMap<PeerEndpoint, ActiveOutbound>,
@@ -1685,11 +1436,6 @@ fn next_outbound_role(
     extra_full_relay: bool,
 ) -> crate::peer_info::PeerRole {
     use crate::peer_info::PeerRole;
-    // One snapshot classifies every dial exactly once: a dial the table has
-    // taken counts in its class here and not in flight, a dial it has not
-    // taken counts in flight and not here. Reading the counts and the
-    // liveness checks from separate table passes could drop a dial that
-    // registers in between into neither population and over-dial its class.
     let sessions = peer_table.sessions();
     let census: Vec<&crate::peer_table::PeerSession> = sessions
         .iter()
@@ -1712,8 +1458,6 @@ fn next_outbound_role(
         .iter()
         .filter(|session| session.lease.role() == PeerRole::BlockRelayOnly)
         .count();
-    // A live connection stays in `pending` until its thread exits, so only a
-    // dial the table has not taken yet adds to its class.
     let in_flight = |want: PeerRole| {
         pending
             .iter()
@@ -1738,19 +1482,12 @@ fn next_outbound_role(
     }
 }
 
-/// Retires the newest full-relay outbound connection that the stale-tip
-/// allowance made extra, once the tip has moved again.
+/// INVARIANT: the extra connection exists to find a better chain, so it leaves as soon
+/// as the chain moves.
 ///
-/// PRE: `slots` is the configured full-relay count; `sync`, when the node
-///   wired one, answers whether the tip still looks stale and who is
-///   mid-download.
-/// POST: at most one connection is disconnected, and none while the tip still
-///   looks stale, while no connection is above `slots`, or while every
-///   candidate is too young or mid-download.
-/// INVARIANT: the extra connection exists to find a better chain, so it leaves
-///   as soon as the chain moves. Core retires one per check
-///   (`EvictExtraOutboundPeers`, `net_processing.cpp:5604-5668`) and passes
-///   over a peer with blocks in flight or a peer below the minimum age.
+/// Core retires one per check (`EvictExtraOutboundPeers`,
+/// `net_processing.cpp:5604-5668`) and passes over a peer with blocks in flight or a
+/// peer below the minimum age.
 fn retire_extra_full_relay_connection(
     peer_table: &crate::PeerTable,
     sync: Option<&crate::sync::BlockSync>,
@@ -1778,36 +1515,15 @@ fn retire_extra_full_relay_connection(
     }
 }
 
-/// The newest automatic full-relay outbound connection beyond the configured
-/// slots.
-///
-/// PRE: `slots` is the configured full-relay count, and `is_downloading`
-///   answers whether a candidate's body download is in flight, read from the
-///   same window the scheduler fetches with.
-/// POST: return `None` while the table holds no more than `slots` such
-///   connections; otherwise return the newest one among the newest `excess`
-///   connections that is old enough to be judged and has no body download
-///   in flight.
 /// INVARIANT: the census and the victim set hold automatic connections only:
 ///   a hand-pinned full-relay connection counts in neither, as Core's
 ///   `IsFullOutboundConn()` excludes `ConnectionType::MANUAL`
-///   (`net_processing.cpp:5558-5604`). An operator's peer therefore never
-///   forces the retirement of an automatic one. A connection that never
-///   finished its handshake still holds a slot, so it counts, while a
-///   candidate with blocks in flight is passed over, as Core's rule does
-///   (`net_processing.cpp:5604-5668`).
-///   `PeerTable::sessions` is ordered by connection identity, which is dial
-///   order, so the newest is last and the excess is taken from the tail.
 fn newest_excess_full_relay(
     peer_table: &crate::PeerTable,
     slots: usize,
     now: Instant,
     is_downloading: impl Fn(crate::PeerSource) -> bool,
 ) -> Option<crate::peer_table::PeerSession> {
-    // A hand-pinned full-relay connection is outside the census, as Core's
-    // `IsFullOutboundConn()` excludes `ConnectionType::MANUAL`
-    // (`net_processing.cpp:5558-5604`): it creates no excess and the victim
-    // selection below only ever sees automatic connections.
     let sessions: Vec<crate::peer_table::PeerSession> = peer_table
         .sessions()
         .into_iter()
@@ -1878,9 +1594,6 @@ struct AddressMaintenance {
     address_book: Arc<crate::addrman::AddressBook>,
     banned: BannedReader,
     manual_nodes: Arc<RwLock<Vec<crate::PeerEndpoint>>>,
-    /// Immutable snapshot of the local dial routes, taken after overlay
-    /// startup. Selection denies unroutable endpoints before any worker,
-    /// thread, or address-book claim is spent.
     routes: crate::RouteTable,
 }
 
@@ -1898,9 +1611,6 @@ fn park_automatic_dial(
     true
 }
 
-// One census preserves all automatic ready roles for recovery. Active peer
-// timestamps are not refreshed while connected to prevent topology leakage;
-// only disconnect updates full-relay timestamps in the book.
 fn ready_address_count(peer_table: &crate::PeerTable, book: &crate::addrman::AddressBook) -> usize {
     peer_table
         .sessions()
@@ -1938,8 +1648,6 @@ fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) ->
         .collect()
 }
 
-/// Queue consumed restart anchors before ordinary candidates using the same
-/// bounded channel and eligibility policy as automatic dialing.
 fn queue_restart_anchors(
     maintenance: &AddressMaintenance,
     anchors: &mut VecDeque<PeerEndpoint>,
@@ -2035,8 +1743,6 @@ fn queue_restart_anchors(
 
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
-    // Give a populated book one cooldown to establish a connection before
-    // asking seeds for replacements. Pending/failed dials are not successes.
     let mut next_dns = Instant::now()
         + if maintenance.address_book.len() < 64 {
             Duration::ZERO
@@ -2058,14 +1764,11 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 anchors = maintenance.address_book.take_restart_anchors(now).into();
                 anchors_taken = true;
             }
-            // Durable anchor consumption can block; activity may change during I/O.
             if maintenance.shutdown.load(Ordering::Acquire)
                 || !maintenance.network_active.load(Ordering::Acquire)
             {
                 continue;
             }
-            // Hold operator policy through the owner's timer mutation; callbacks
-            // execute outside the address-book lock and use one ban snapshot.
             let connected: Vec<_> = maintenance
                 .peer_table
                 .sessions()
@@ -2087,8 +1790,6 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                         !is_manual_endpoint(&manual, addr) && policy.allows(addr.address())
                     });
             }
-            // A fresh but unreachable book must not permanently suppress seed
-            // recovery. Retained candidates remain usable with DNS disabled.
             if dns_recovery_due(
                 maintenance.address_book.len(),
                 ready_count,
@@ -2164,8 +1865,6 @@ fn save_address_book_if_due(book: &crate::addrman::AddressBook, tick: Instant, n
     }
 }
 
-/// Fill the automatic deficit once. Address-book claims cover queued, parked,
-/// connecting and live automatic threads; live sessions are counted only once.
 fn queue_address_candidates(
     maintenance: &AddressMaintenance,
     now: u64,
@@ -2179,9 +1878,6 @@ fn queue_address_candidates(
             .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
     );
     let sessions = maintenance.peer_table.sessions();
-    // Connected-endpoint exclusion covers every direction; group diversity
-    // suppression counts outbound sessions only, so inbound peers cannot
-    // shrink the candidate space.
     let mut active: Vec<_> = sessions
         .iter()
         .filter(|session| !session.lease.is_cancelled())
@@ -2214,8 +1910,6 @@ fn queue_address_candidates(
         .collect();
     let occupied = automatic.len() + maintenance.address_book.pending_count_excluding(&automatic);
     let needed = (maintenance.target + extra).saturating_sub(occupied + reserved_anchors);
-    // Snapshot the ban table before taking the address-book lock. All candidates
-    // in this tick see the same expiry time and no nested ban lock per record.
     let policy = maintenance.banned.automatic_snapshot(tick_time);
     let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
@@ -2256,12 +1950,13 @@ mod tests {
     use super::*;
     use crate::PeerSource;
     use bitcoin_rs_primitives::PeerEndpoint;
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
     #[test]
     fn feeler_poisson_delay_matches_actual_core_uniform_vectors() {
-        let data: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/data/core-poisson-v31.1.json"))
+        let data: sonic_rs::Value =
+            sonic_rs::from_str(include_str!("../tests/data/core-poisson-v31.1.json"))
                 .expect("actual Core sampling fixture");
         for row in data["rows"].as_array().expect("rows") {
             assert_eq!(
@@ -2358,8 +2053,6 @@ mod tests {
         drop(occupied);
     }
 
-    /// Each service owns a distinct aggregate budget: exhausting one leaves
-    /// the other unaffected (no process-global singleton).
     #[test]
     fn independent_services_own_independent_aggregate_budgets() {
         let first = P2pService::new(
@@ -3641,7 +3334,6 @@ mod tests {
         );
         assert_eq!(receiver.try_recv().expect("diverse second").addr, other);
         assert_eq!(anchors, VecDeque::<PeerEndpoint>::new());
-        // A queued but never accepted anchor is returned, not discarded.
         book.defer_anchor(other);
         book.return_restart_anchors(10_004);
         assert_eq!(book.take_restart_anchors(10_004), vec![other]);
@@ -3753,8 +3445,6 @@ mod tests {
         assert_eq!(anchors, VecDeque::<PeerEndpoint>::new());
         let (headers, _) = crossbeam_channel::bounded(1);
         let (blocks, _) = crossbeam_channel::bounded(1);
-        // An inactive transport makes a regression fail locally before any TCP
-        // dial: this test never opens connections to its public-looking fixtures.
         let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&maintenance.peer_table),
             maintenance.banned.clone(),
@@ -3860,7 +3550,6 @@ mod tests {
     #[test]
     fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
         for target in [1, 2] {
-            // block-only total1; then one full plus one block slot
             let (mut maintenance, queue) = maintenance_fixture(target);
             maintenance.block_slots = 1;
             let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
@@ -3919,7 +3608,7 @@ mod tests {
                 "a racing feeler cannot claim a reserved anchor"
             );
             assert_eq!(anchors, VecDeque::from(vec![second]));
-            book.unqueue(first); // first attempt failed and its thread was reaped
+            book.unqueue(first);
             let reserved = queue_restart_anchors(
                 &maintenance,
                 &mut anchors,
@@ -4004,9 +3693,6 @@ mod tests {
         service.address_book.learn_dns("fixture", &[addr], now);
         service.address_book.succeeded(addr, 9, now);
         let lease = register_ready_block_peer(&service.peer_table, addr);
-        // Install an epoch so `shutdown` runs its worker-cancellation path
-        // (`cancel_all`); without it the anchor capture is never racing a
-        // cancel and the test would pass even with the old ordering.
         *service.workers.lock() = Some(Workers::default());
         assert!(service.workers.lock().is_some());
         service.shutdown();
@@ -4041,9 +3727,9 @@ mod tests {
             crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
         assert_eq!(restored.take_restart_anchors(now), vec![addr]);
     }
-    fn saved_book(path: &std::path::Path) -> serde_json::Value {
+    fn saved_book(path: &std::path::Path) -> sonic_rs::Value {
         let bytes = std::fs::read(path).expect("saved book");
-        serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
+        sonic_rs::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
     }
 
     #[test]
@@ -4158,8 +3844,6 @@ mod tests {
         let same_as: PeerEndpoint = "9.9.0.1:8333".parse::<PeerEndpoint>().expect("same ASN");
         book.learn_dns("seed", &[anchor], 10_000);
         book.succeeded(anchor, 9, 10_000);
-        // Promotion frees New before learning the same-AS peer: two fresh
-        // entries may otherwise collide in the keyed slot and drop that peer.
         book.learn_dns("seed", &[same_as], 10_000);
         assert_eq!(
             book.select(&[], &[], 10_000, u64::MAX, |addr| addr == same_as),
@@ -4491,9 +4175,6 @@ mod tests {
             .expect("read timeout");
         let mut byte = [0];
         let received = std::io::Read::read(&mut remote, &mut byte);
-        // Close before joining: the old unconditional registration would send a
-        // VERSION and wait for a response. Its failure must be the leaked byte,
-        // not a second fixture pause or the production handshake deadline.
         let _ = remote.shutdown(std::net::Shutdown::Both);
         drop(remote);
         let result = worker.join().expect("outbound worker");
@@ -4561,8 +4242,6 @@ mod tests {
         );
         let valid_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
 
-        // For valid overlay targets (TorV3 and I2P), resolver MUST remain untouched (0 calls)
-        // and pinned dials must be generated.
         let mut resolve_calls = 0;
         let valid_overlay_targets = vec![valid_onion, valid_i2p];
         bootstrap_fixed_peer_endpoints(
@@ -4588,7 +4267,6 @@ mod tests {
             crate::PeerEndpoint::I2p { .. }
         ));
 
-        // For direct IP, resolver MUST remain untouched (0 calls) and dial is generated.
         bootstrap_fixed_peer_endpoints(
             &network_active,
             &peer_table,
@@ -4626,29 +4304,21 @@ mod tests {
         let good_b32 = bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload);
 
         vec![
-            // Rejected overlay targets:
-            // - invalid checksum
             invalid_checksum_onion,
-            // - wrong base32 length
             "abc.onion:8333".to_owned(),
             format!("{}.b32.i2p:8333", "a".repeat(51)),
             format!("{}.b32.i2p:8333", "a".repeat(53)),
-            // - malformed port
             format!("{good_b32}.onion:notaport"),
             format!("{good_b32}.onion:0"),
             format!("{good_b32}.onion:99999"),
-            // - missing port
             format!("{good_b32}.onion"),
             format!("{}.b32.i2p", "a".repeat(52)),
-            // - mixed case
             valid_onion.to_uppercase(),
             valid_i2p.to_uppercase(),
-            // - trailing dot
             format!("{good_b32}.onion.:8333"),
             format!("{good_b32}.onion."),
             format!("{}.b32.i2p.:8333", "a".repeat(52)),
             format!("{}.b32.i2p.", "a".repeat(52)),
-            // Unsupported .i2p names (human-readable, short, or invalid canonical b32)
             "foo.i2p:8333".to_owned(),
             "foo.i2p".to_owned(),
             "FOO.I2P:8333".to_owned(),
@@ -4660,7 +4330,6 @@ mod tests {
             "B32.I2P:8333".to_owned(),
             "b32.i2p.:8333".to_owned(),
             "b32.i2p.".to_owned(),
-            // Absolute root overlay targets
             "onion.:8333".to_owned(),
             "onion.".to_owned(),
             "ONION.:8333".to_owned(),
@@ -4678,7 +4347,6 @@ mod tests {
 
         let rejected_overlay_targets = malformed_reserved_overlay_targets_testdata();
 
-        // For all rejected overlay targets, resolver MUST remain untouched (0 calls).
         let mut resolve_calls = 0;
         bootstrap_fixed_peer_endpoints(
             &network_active,
@@ -4706,8 +4374,6 @@ mod tests {
         let peer_table = crate::PeerTable::new();
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
 
-        // For ordinary hostnames (including legitimate fakeb32.i2p.org and single-label LAN names),
-        // injected resolver MUST be called.
         let ordinary_hostnames = vec![
             "seed.bitcoin.sipa.be:8333".to_owned(),
             "fakeb32.i2p.org:8333".to_owned(),
@@ -4742,7 +4408,6 @@ mod tests {
     fn bootstrap_fixed_peer_endpoints_queue_and_cancellation() {
         let peer_table = crate::PeerTable::new();
 
-        // Cancellation: when network_active is false, resolution and dial are skipped.
         let network_inactive = AtomicBool::new(false);
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let mut resolve_calls = 0;
@@ -4762,7 +4427,6 @@ mod tests {
         assert_eq!(resolve_calls, 0);
         assert!(outbound_rx.try_recv().is_err());
 
-        // Queue saturation: when outbound_tx is bounded and full, bootstrap breaks early.
         let network_active = AtomicBool::new(true);
         let (bounded_tx, bounded_rx) = crossbeam_channel::bounded(1);
         bootstrap_fixed_peer_endpoints(

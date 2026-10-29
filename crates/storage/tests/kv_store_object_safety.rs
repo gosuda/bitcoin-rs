@@ -1,15 +1,7 @@
-//! Object-safety proof for the backend-neutral store trait.
-//!
-//! The trait carries no associated types or generic methods, so a real
-//! backend dispatches every call through a `dyn KvStore` and performs the
-//! same storage operation it performs through its concrete type.
 #![cfg(feature = "fjall")]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
-/// PRE: none. POST: a put issued through `dyn KvStore` is readable through
-/// `dyn KvStore`. INVARIANT: trait-object dispatch performs the same storage
-/// operation as the concrete type.
 #[test]
 fn kv_store_dispatches_through_a_trait_object() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

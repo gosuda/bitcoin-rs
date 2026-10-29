@@ -1,6 +1,3 @@
-//! Integration test: `NodeState` opens the configured storage backend, and
-//! hands it the cache share the process budget allocated to chainstate.
-
 use std::sync::Arc;
 
 use hashbrown::HashMap;
@@ -38,11 +35,6 @@ fn assert_backend_opens(backend: &str) -> Result<()> {
     Ok(())
 }
 
-/// The chainstate cache share must reach the backend that was opened: a
-/// `dbcache` the operator set is only honored if the byte count survives every
-/// hop from [`NodeState::open`] down to `open_with_cache`. A hop that drops it
-/// falls back to the engine default, which no other assertion notices, so this
-/// reads the capacity each compiled-in backend published on open.
 #[test]
 fn open_gives_every_chainstate_backend_its_budgeted_cache_share() -> Result<()> {
     #[cfg(feature = "rocksdb")]
@@ -84,9 +76,6 @@ fn assert_chainstate_cache_share(backend: &str) -> Result<()> {
     Ok(())
 }
 
-/// The capacity each engine configures when no budget reaches it, so a dropped
-/// budget is distinguishable from a delivered one. Read from the storage crate
-/// so a changed default cannot make the guard below vacuous.
 #[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn engine_default_cache_bytes(backend: &str) -> u64 {
     match backend {
@@ -107,8 +96,6 @@ fn clamp_budget(config: &NodeConfig) -> u64 {
     bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb)
 }
 
-/// `NodeState::open` splits the budget on the capabilities the index config
-/// enables, so read the same predicate instead of a literal.
 #[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 fn txindex_enabled(config: &NodeConfig) -> bool {
     !config
@@ -118,8 +105,6 @@ fn txindex_enabled(config: &NodeConfig) -> bool {
         .is_empty()
 }
 
-/// Asserts a published capacity equals the expected byte count. Both are small
-/// integers (< 2^31) that `f64` represents exactly.
 #[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 #[expect(
     clippy::cast_precision_loss,
@@ -134,8 +119,6 @@ fn assert_capacity_eq(gauges: &GaugeSpy, key: &str, expected: u64) {
     );
 }
 
-/// Captures gauge values keyed `name{label="value",...}`; counters and
-/// histograms are discarded.
 #[derive(Clone, Default)]
 struct GaugeSpy {
     gauges: Arc<Mutex<HashMap<String, f64>>>,

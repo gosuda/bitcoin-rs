@@ -1,8 +1,4 @@
 //! Object-safe access to the existing durable index writer.
-//!
-//! Preparation takes a shared lock; fence capture, resets, and commits take
-//! an exclusive lock. This is the same writer and the same persistence
-//! protocol, not a second representation or a parallel mutation path.
 
 use bitcoin_rs_primitives::OutPoint;
 use parking_lot::RwLock;
@@ -13,27 +9,14 @@ use crate::{
     index::PortableImportRow,
 };
 
-/// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
 pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
     + 'a;
 
-/// Object-safe row producer used by [`TxIndexWriter::import_tx_lookup_stream`].
 pub(crate) type PortableImportProduce<'a> = dyn FnMut(&mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>) -> Result<(), IndexError>
     + 'a;
 
-/// Erased prepared-index writer used by derived-index reconciliation.
-///
-/// Prepare and rollback have one owner each: spent-script-aware
-/// [`Self::prepare_block_with_spent_scripts`] and
-/// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
-/// Callers that are not rebuilding `ScriptLive` pass [`crate::NoSpentScripts`].
-/// Durability, crash visibility, and failure classification for rollback are
-/// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
-/// (`IDX-06` / `IDX-07`).
 pub(crate) trait TxIndexWriter: Send + Sync {
-    /// Captures the exact write fence and all capability watermarks together.
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
-    /// Prepares rows using the supplied spent-coin script authority.
     fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,
@@ -42,33 +25,24 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         body: &[u8],
         spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<PreparedBlock, IndexError>;
-    /// Seeds the live view from a caller-fenced authoritative coin stream.
-    ///
-    /// `cancelled` is polled at entry, every 4,096 emitted rows, and before
-    /// the final watermark commit; a trip returns
-    /// [`IndexError::Cancelled`] with no watermark stamped.
     fn seed_script_live_stream(
         &self,
         produce: &mut ScriptLiveSeedProduce<'_>,
         tip: IndexWatermark,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<usize, IndexError>;
-    /// Imports verified portable `TxLookup` rows through bounded fenced commits,
-    /// stamping `base` and `floor` only in the final commit.
     fn import_tx_lookup_stream(
         &self,
         produce: &mut PortableImportProduce<'_>,
         base: IndexWatermark,
         floor: u32,
     ) -> Result<usize, IndexError>;
-    /// Commits prepared rows and the consumer cursor under one exact fence.
     fn commit_forward_with_cursor(
         &self,
         fence: IndexWriteFence,
         batch: PreparedBatch,
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<IndexWatermark, IndexError>;
-    /// Rolls back selected row families and the cursor atomically.
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &self,
         fence: IndexWriteFence,
@@ -79,23 +53,15 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<(), IndexError>;
 
-    /// Resets only the selected derived row families through the durable reset protocol.
     fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError>;
-    /// Clears rows left by an interrupted `ScriptLive` seed before genesis
-    /// replay; returns whether anything was reset.
     fn reset_interrupted_script_live_seed(&self) -> Result<bool, IndexError>;
-    /// Stamps `watermark` on the selected capabilities so a rebuild starts at
-    /// the first surviving height after a prune, without re-deriving deleted
-    /// rows. `floor` is the first covered height.
     fn anchor_watermark(
         &self,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
         floor: u32,
     ) -> Result<(), IndexError>;
-    /// Reads the opaque durable reconciliation cursor.
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
-    /// Commits an opaque cursor without changing rows, subject to the write fence.
     fn commit_consumer_cursor(
         &self,
         fence: IndexWriteFence,
@@ -103,11 +69,6 @@ pub(crate) trait TxIndexWriter: Send + Sync {
     ) -> Result<(), IndexError>;
 }
 
-/// `RwLock`-backed writer: `prepare_block_with_spent_scripts` and
-/// `consumer_cursor` take a shared read lock so the CPU-bound decode/row-build
-/// can run concurrently across the rayon pool, while `commit_*`,
-/// `fenced_watermarks`, and `reset_capabilities` take an exclusive write lock
-/// to preserve the single-writer atomic commit and watermark semantics.
 impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,

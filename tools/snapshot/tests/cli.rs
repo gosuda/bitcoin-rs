@@ -1,5 +1,3 @@
-//! Public CLI trust labels, exit codes, and read-only behavior against a Core fixture.
-
 use std::{
     error::Error,
     fs,
@@ -7,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use serde_json::Value;
+use sonic_rs::{JsonValueTrait as _, Value};
 use tempfile::tempdir;
 
 fn fixture() -> PathBuf {
@@ -29,7 +27,7 @@ fn report(output: &Output) -> Result<Value, Box<dyn Error>> {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stderr, b"");
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(sonic_rs::from_slice(&output.stdout)?)
 }
 
 #[test]
@@ -57,7 +55,6 @@ fn core_file_inspection_and_verification_are_distinct_read_only_operations()
         verified["verification"]["bytes_read"],
         u64::try_from(original.len())?
     );
-    // Independent Core v31.1 regtest-200 values, not computed by the CLI.
     assert_eq!(
         verified["base_block_hash"],
         "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9"
@@ -76,8 +73,6 @@ fn a_complete_header_can_be_inspected_without_verifying_a_truncated_body()
     let dir = tempdir()?;
     let path = dir.path().join("header-only.dat");
     let original = fs::read(fixture())?;
-    // Core SnapshotMetadata: 5-byte magic, u16 version, 4 network bytes,
-    // 32-byte block hash, u64 coin count.
     fs::write(&path, &original[..51])?;
     let inspected = report(&run(&["inspect", "--json"], &path)?)?;
     assert_eq!(inspected["validation"], "metadata_only");

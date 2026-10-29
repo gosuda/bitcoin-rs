@@ -2,15 +2,10 @@ use crate::ConsensusError;
 
 /// BIP68 disable flag (`1 << 31`).
 pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
-/// BIP68 type flag: set means time-based, clear means height-based (`1 << 22`).
 const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
-/// BIP68 relative-lock magnitude mask.
 const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
-/// BIP68 time-based granularity in seconds (`2^9`).
 const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
 
-/// Checks one input's BIP68 relative lock; `prevout_mtp` is only read for time-
-/// based locks.
 pub fn check_sequence_lock(
     tx_version: u32,
     sequence: u32,
@@ -50,14 +45,11 @@ pub fn check_sequence_lock(
     })
 }
 
-/// Returns whether `sequence` uses the time-based relative-lock encoding.
 #[must_use]
 pub const fn sequence_lock_is_time_based(sequence: u32) -> bool {
     sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0
 }
 
-/// Checks relative locks at `block_height` / `block_mtp`.
-/// Unconfirmed prevouts use `block_height`, so positive height locks fail.
 #[must_use]
 pub fn sequence_lock_satisfied(
     tx_version: u32,
@@ -128,9 +120,6 @@ mod tests {
 
     #[test]
     fn max_version_enforces_relative_lock_unsigned() {
-        // The wire version 0xFFFF_FFFF reads as 4294967295, not -1: the
-        // relative lock Core enforces applies to version >= 2 under unsigned
-        // comparison.
         assert!(!sequence_lock_satisfied(u32::MAX, 2, 100, 0, 100, 0));
         assert!(matches!(
             super::check_sequence_lock(u32::MAX, 2, 100, 0, 100, 0),

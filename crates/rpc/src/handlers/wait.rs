@@ -23,8 +23,6 @@ fn arguments<'a>(
         .as_array()
         .ok_or(RpcError::InvalidParams("params must be an array or object"))?;
     if array.len() < required || array.len() > names.len() {
-        // The code matches Core's RPCHelpMan arity error; the concise usage
-        // intentionally omits its generated help body (manifest Deviation).
         return Err(RpcError::Misc(usage.to_owned()));
     }
     let mut errors = Vec::new();

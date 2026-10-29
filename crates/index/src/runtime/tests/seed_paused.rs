@@ -1,19 +1,4 @@
 //! Paused-write, poison, lease, and demand proofs for the immutable snapshot
-//! `ScriptLive` seed.
-//!
-//! Contract: `.outline/requirements/immutable-snapshot-scriptlive-seed.md`
-//! section 8, rows 1, 2, 3, 4, 6, 7, 15. This module is the S3 seed harness
-//! (`crates/index/src/runtime/tests/seed_paused.rs`). It needs the S2 worker
-//! dispatch (`Worker.seed_slot` / `Worker.seed_bundle`, the
-//! `script_live_failure` seam) and is registered by the `P1WorkerSeed` owner;
-//! the parent gates the union after S2 lands.
-//!
-//! Every test below drives the actual `Worker` and real stores (fjall,
-//! `BlockTree`, the real pruning registry, real sealed snapshot bytes).
-//! Nothing here mocks the seed codec or the cell: witnesses come only from
-//! `write_snapshot_witnessed` / `read_snapshot_strict_v4_witnessed`, demand
-//! lives in a real `SeedSlot`, and leases come from a real
-//! `RetentionRegistry`.
 
 use super::super::*;
 
@@ -51,8 +36,6 @@ use crate::{
     PreparedBlock,
 };
 
-/// Distinct txid space for synthetic seed coins; never collides with the
-/// fixture chain's computed bitcoin txids.
 fn synthetic_txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
@@ -62,8 +45,6 @@ fn synthetic_txid(seed: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-/// Builds `n` synthetic live coins plus the exact `(outpoint, script)` list
-/// the seed stream must replay.
 fn seed_coin_set(n: u64) -> (UtxoSet, Vec<(OutPoint, Vec<u8>)>) {
     let set = UtxoSet::new();
     let mut changes = BlockChanges::default();
@@ -87,8 +68,6 @@ fn seed_coin_set(n: u64) -> (UtxoSet, Vec<(OutPoint, Vec<u8>)>) {
     (set, coins)
 }
 
-/// Mints a real sealed artifact: witnessed encode, witnessed strict decode of
-/// the same bytes, then seals the same descriptor the decode consumed.
 fn mint_seed_artifact(
     set: &UtxoSet,
     tip: Hash256,
@@ -119,7 +98,6 @@ fn mint_seed_artifact(
     (artifact, witness)
 }
 
-/// Exact expected `ScriptLive` row keys for `(outpoint, script)` coins.
 fn expected_live_keys(coins: &[(OutPoint, Vec<u8>)]) -> Vec<Vec<u8>> {
     let mut keys: Vec<Vec<u8>> = coins
         .iter()
@@ -133,7 +111,6 @@ fn expected_live_keys(coins: &[(OutPoint, Vec<u8>)]) -> Vec<Vec<u8>> {
     keys
 }
 
-/// Every durable `ScriptLive` row key in the store, in key order.
 fn scan_live_keys(store: &FjallStore) -> Vec<Vec<u8>> {
     let scan = store
         .scan_prefix_bounded(
@@ -151,27 +128,16 @@ fn scan_live_keys(store: &FjallStore) -> Vec<Vec<u8>> {
     keys
 }
 
-/// One-shot gate parked inside the writer: after the 4,097th emitted coin
-/// (the first intermediate commit is durable) it signals the test and holds
-/// the stream open until released. The test commits into a real authoritative
-/// set while held. The seed path takes no UTXO locks at all; the old
-/// `seed_live_from_utxo` held the stable view across DB writes and would
-/// block that commit until the stream drained.
 struct GatedSeedGate {
     started: Option<Sender<()>>,
     release: Receiver<()>,
 }
 
-/// Test-only writer wrapper: pure delegation except a gated
-/// `seed_script_live_stream`. Never a mock: every byte still flows through
-/// the real writer over the real store.
 struct GatedWriter {
     inner: Arc<dyn TxIndexWriter>,
     gate: Arc<Mutex<Option<GatedSeedGate>>>,
 }
 
-/// Releases the held seed stream even when the test unwinds, so a failing
-/// assertion can never hang the worker thread on the gate.
 struct ReleaseOnDrop(Option<Sender<()>>);
 
 impl Drop for ReleaseOnDrop {
@@ -426,7 +392,6 @@ impl SeedBranchCoins {
     }
 }
 
-/// Two rival branches over one shared genesis; every body is present.
 struct SeedFixture {
     tree: Arc<RwLock<BlockTree>>,
     bodies: Arc<SeedBodyStore>,
@@ -494,12 +459,10 @@ impl SeedFixture {
             .clone()
     }
 
-    /// Persists undo records for every non-genesis block of branch A.
     fn persist_branch_a_undo(&self) {
         self.persist_branch_undo(&self.a.clone());
     }
 
-    /// Persists undo records for every non-genesis block of branch B.
     fn persist_branch_b_undo(&self) {
         self.persist_branch_undo(&self.b.clone());
     }
@@ -563,8 +526,6 @@ impl SeedFixture {
     }
 }
 
-/// Worker harness with a real seed cell: the worker takes, wants, and rests
-/// through `seed_slot`; the bundle and lease stay worker-private.
 struct SeedHarness {
     _index_dir: tempfile::TempDir,
     store: Arc<FjallStore>,
@@ -579,10 +540,6 @@ struct SeedHarness {
 }
 
 impl SeedHarness {
-    /// Builds a harness over `source`: the authoritative set the seed
-    /// artifact was minted from. Concurrent applies in the paused-seed proof
-    /// commit into this same set, so the proof exercises the real
-    /// source-state concurrency instead of an unrelated empty set.
     fn new(fixture: &SeedFixture, enabled: IndexCapabilities, source: Arc<UtxoSet>) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
         let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
@@ -634,8 +591,6 @@ impl SeedHarness {
         }
     }
 
-    /// Arms the one-shot stream hold for the next seed: after the 4,097th
-    /// emitted coin the worker signals `started` and waits for `release`.
     fn arm_seed_gate(&self, started: Sender<()>, release: Receiver<()>) {
         *self.gate.lock() = Some(GatedSeedGate {
             started: Some(started),
@@ -651,8 +606,6 @@ impl SeedHarness {
         self.writer.fenced_watermarks().expect("watermarks").1
     }
 
-    /// Runs passes until `CaughtUp`, asserting the worker never errors, never
-    /// publishes global failure, and never holds more than one history pin.
     fn settle(&self, pending: &mut Option<PendingForward>) {
         for _ in 0..64 {
             assert!(
@@ -676,8 +629,6 @@ fn at(tip: &TipSnapshot) -> IndexWatermark {
     }
 }
 
-/// Commits one `TX_LOOKUP` block as an ordinary forward write (an `apply`
-/// analog): fresh fence, prepare, admit, commit.
 fn commit_lookup_block(writer: &Arc<dyn TxIndexWriter>, height: u32, hash: [u8; 32], body: &[u8]) {
     let (fence, _) = writer.fenced_watermarks().expect("fence");
     let mut batch = PreparedBatch::new(DEFAULT_BATCH_LIMITS);
@@ -696,7 +647,6 @@ fn commit_lookup_block(writer: &Arc<dyn TxIndexWriter>, height: u32, hash: [u8; 
         .expect("commit lookup block");
 }
 
-/// Net live coins of branch-A heights `through..=to` on top of `base`: every
 /// block adds its coinbase and spend outputs and spends the previous
 /// coinbase. All fixture scripts are `[0x51]`.
 fn expected_chain_live(
@@ -743,26 +693,12 @@ fn expected_chain_live(
         .collect()
 }
 
-/// Row 1: a paused seed write permits concurrent applies and a retiring
-/// publication, keeps the watermark `None`, then resumes to H and catches up
-/// to T with rows equal to the post-hoc live set at T.
-///
-/// Phase A holds the seed for real: the gate fires after the 4,097th emit
-/// (the first intermediate commit is durable) and the test commits into a
-/// real authoritative set while held. The seed path takes no UTXO locks at
-/// all; the old `seed_live_from_utxo` held the stable view across DB writes
-/// and would block that commit until the stream drained. Phase B stops the
-/// worker and lands ordinary applies plus a retiring publication while the
-/// bundle is retained.
 #[test]
 #[expect(clippy::too_many_lines, reason = "Paused seed lifecycle proof")]
 fn seed_paused_write_permits_apply_and_retires_generation() {
     let fixture = SeedFixture::new(4);
     fixture.persist_branch_a_undo();
 
-    // Token at H = 2 over real sealed bytes; the worker must take it. The
-    // harness runs over the same minted set, so the concurrent apply below
-    // proves source-state concurrency instead of touching an empty set.
     let (source, coins) = seed_coin_set(20_000);
     let source = Arc::new(source);
     let harness = SeedHarness::new(
@@ -782,8 +718,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
     let mut pending = None;
     std::thread::scope(|scope| {
         let pass = scope.spawn(|| harness.worker.reconcile_once(&mut pending));
-        // Phase A: the gate holds the stream open after the first
-        // intermediate commit landed rows without a watermark.
         assert!(
             start_rx.recv_timeout(Duration::from_secs(30)).is_ok(),
             "seed reached its first intermediate commit"
@@ -807,8 +741,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
         }
         commit_block_changes(&harness.utxo_set, &changes, &synthetic_txid(4242))
             .expect("concurrent apply while seed held");
-        // The apply landed in the minted source set the seed streams from,
-        // not an unrelated empty set: this is the concurrency under proof.
         assert!(Arc::ptr_eq(&harness.utxo_set, &source));
         for outpoint in &applied {
             assert!(
@@ -820,14 +752,12 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
         assert!(!harness.runtime.should_stop());
         assert!(harness.runtime.failure_message().is_none());
         drop(hold);
-        // Phase B: ordinary applies land while the seed is paused.
         harness.runtime.request_shutdown();
         match pass.join().expect("pass thread") {
             Ok(_) | Err(DerivedIndexWorkerError::Stopped) => {}
             Err(error) => panic!("unexpected pass error: {error:?}"),
         }
     });
-    // The stop retained the bundle: no watermark, one pin, demand consumed.
     assert!(harness.cell.take().is_none(), "no second take");
     let (artifact_state, lease_floor) = {
         let guard = harness.worker.seed_bundle.lock();
@@ -859,7 +789,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
         let body = fixture.body(height, Hash256::from_le_bytes(&key.1));
         commit_lookup_block(&harness.writer, height, key.1, &body);
     }
-    // Retiring publication: the next height commits on the new fence.
     let retire = fixture.a_key(2);
     let retire_body = fixture.body(2, Hash256::from_le_bytes(&retire.1));
     commit_lookup_block(&harness.writer, 2, retire.1, &retire_body);
@@ -870,7 +799,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
     }
     harness.runtime.shutdown.store(false, Ordering::Release);
 
-    // Resume with the same bundle: no second take, one pin, converge at H.
     for _ in 0..64 {
         assert!(harness.cell.take().is_none(), "no second take");
         assert!(
@@ -886,7 +814,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
     }
     assert_eq!(harness.watermarks().script_live, Some(at(&tip_a2)));
 
-    // Catch up H to T; rows equal the post-hoc live set at T.
     harness.set_tip(&fixture.tip(fixture.a[3]));
     harness.settle(&mut pending);
     let tip_a4 = fixture.tip(fixture.a[3]);
@@ -898,10 +825,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
     assert_eq!(scan_live_keys(&harness.store), expected);
 }
 
-/// Row 2: flipping one script byte, one txid byte, or truncating the file
-/// each yields `Integrity` with no watermark; a swapped generation file
-/// never pairs with the accepted witness; the poisoned bundle is dropped and
-/// the remaining families still converge by replay.
 #[test]
 #[expect(clippy::too_many_lines, reason = "Artifact integrity matrix proof")]
 fn seed_tamper_variants_yield_integrity_without_watermark() {
@@ -912,15 +835,11 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
         write_snapshot_witnessed(&set, &tip_hash, 9, &mut bytes, ()).expect("encode");
     let witness = witness.expect("valid encode mints a witness");
 
-    // One script byte flipped: lengths, counts, tip, and trailer still parse.
     let mut script_flip = bytes.clone();
     let flip_at = script_flip.len() / 2;
     script_flip[flip_at] ^= 0x01;
-    // One txid byte flipped.
     let mut txid_flip = bytes.clone();
     txid_flip[52] ^= 0x01;
-    // Cut through the final record as well as the 384-byte trailer, so the
-    // traversal cannot emit the complete coin set before detecting the loss.
     let truncated = bytes[..bytes.len() - 400].to_vec();
     let original_bytes = bytes.clone();
 
@@ -955,8 +874,6 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
         }
     }
 
-    // Swap between commit and open: the sealed descriptor still reads the
-    // accepted bytes even after the path is replaced.
     let dir = tempfile::tempdir().expect("generation dir");
     let path = dir.path().join("utxo-v4.dat");
     std::fs::write(&path, &original_bytes).expect("stage generation");
@@ -986,8 +903,6 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
         .expect("sealed descriptor pins the accepted bytes");
     assert_eq!(count, 200, "every accepted coin replays from the held fd");
 
-    // Worker take of a swapped artifact: poison drops the bundle, mints no
-    // watermark, and the remaining families still converge by replay.
     let fixture = SeedFixture::new(3);
     fixture.persist_branch_a_undo();
     let harness = SeedHarness::new(
@@ -1041,10 +956,6 @@ fn seed_tamper_variants_yield_integrity_without_watermark() {
     );
 }
 
-/// Row 3: the digest comparison is load-bearing. A length-preserving single
-/// script-byte flip passes every other binding check (length, tip, height,
-/// record and output counts all still agree), so only the digest comparison
-/// can refuse it; deleting that comparison must fail this test.
 #[test]
 fn seed_mutation_check_digest_removal_fails() {
     let (set, _) = seed_coin_set(64);
@@ -1057,8 +968,6 @@ fn seed_mutation_check_digest_removal_fails() {
     let mut flipped = bytes.clone();
     let midpoint = flipped.len() / 2;
     flipped[midpoint] ^= 0x01;
-    // Every non-digest binding still agrees: same length, and the strict read
-    // still accepts with identical counts.
     assert_eq!(
         u64::try_from(flipped.len()).expect("len"),
         witness.byte_len()
@@ -1076,7 +985,6 @@ fn seed_mutation_check_digest_removal_fails() {
         u64::try_from(load.set.len()).expect("outputs"),
         witness.output_count()
     );
-    // Yet the sealed traversal refuses: the digest no longer matches.
     let mut file = tempfile::tempfile().expect("artifact file");
     file.write_all(&flipped).expect("write flipped");
     file.rewind().expect("rewind");
@@ -1097,8 +1005,6 @@ fn seed_mutation_check_digest_removal_fails() {
     );
 }
 
-/// Row 4: a stop while paused retains the bundle. The same bundle resumes
-/// with no second take and one pin, and converges with exact rows.
 #[test]
 fn seed_stop_while_paused_retains_bundle() {
     let fixture = SeedFixture::new(4);
@@ -1135,7 +1041,6 @@ fn seed_stop_while_paused_retains_bundle() {
         Ok(_) | Err(DerivedIndexWorkerError::Stopped) => {}
         Err(error) => panic!("unexpected pass error: {error:?}"),
     }
-    // The stop retained the bundle: same artifact tip, same pin, no take left.
     assert!(harness.cell.take().is_none(), "no second take");
     let (artifact_state, lease_floor) = {
         let guard = harness.worker.seed_bundle.lock();
@@ -1166,7 +1071,6 @@ fn seed_stop_while_paused_retains_bundle() {
     assert_eq!(harness.retention.active_leases(), 1);
     assert!(harness.runtime.failure_message().is_none());
 
-    // Resume with the same bundle and converge with exact rows.
     harness.runtime.shutdown.store(false, Ordering::Release);
     for _ in 0..64 {
         assert!(harness.cell.take().is_none(), "no second take");
@@ -1183,7 +1087,6 @@ fn seed_stop_while_paused_retains_bundle() {
     }
     assert_eq!(harness.watermarks().script_live, Some(at(&tip_a2)));
 
-    // Catch up H to T with the same bundle lineage and exact rows.
     harness.set_tip(&fixture.tip(fixture.a[3]));
     harness.settle(&mut pending);
     let tip_a4 = fixture.tip(fixture.a[3]);
@@ -1193,10 +1096,6 @@ fn seed_stop_while_paused_retains_bundle() {
     assert_eq!(scan_live_keys(&harness.store), expected);
 }
 
-/// Catch-up holds at most one live seed lease: a live pin above the selected
-/// lower start is dropped once the lower grant lands (it pins a superset
-/// while the committed seed watermark already covers that height), so one
-/// pass leaves no parked seed lease behind and at most one live pin.
 #[test]
 fn catch_up_drops_subsumed_seed_lease_for_lower_start() {
     let fixture = SeedFixture::new(4);
@@ -1206,7 +1105,6 @@ fn catch_up_drops_subsumed_seed_lease_for_lower_start() {
         IndexCapabilities::TX_AND_SCRIPTS,
         Arc::new(UtxoSet::new()),
     );
-    // Plant a committed-seed-style bundle: artifact consumed, live pin at H.
     let tip_a2 = fixture.tip(fixture.a[1]);
     let seed_lease = harness
         .worker
@@ -1235,11 +1133,6 @@ fn catch_up_drops_subsumed_seed_lease_for_lower_start() {
     );
 }
 
-/// A scoped `ScriptLive` outage reloads the fence and watermarks after its
-/// reset: the pre-reset capture still names the erased watermark, so
-/// selecting legs from it would treat `ScriptLive` as synced and answer
-/// `CaughtUp` while storage holds no watermark. With fresh tuples the reset
-/// family replays instead.
 #[test]
 fn script_live_reset_reloads_watermarks_before_selection() {
     let fixture = SeedFixture::new(4);
@@ -1265,8 +1158,6 @@ fn script_live_reset_reloads_watermarks_before_selection() {
     }
     assert_eq!(harness.watermarks().script_live, Some(at(&tip_a2)));
 
-    // Withhold one body on the replay path so the post-reset leg retains
-    // rows instead of converging past the erased watermark in one pass.
     let absent = fixture.a_key(1);
     let withheld = fixture
         .bodies
@@ -1286,25 +1177,17 @@ fn script_live_reset_reloads_watermarks_before_selection() {
     assert!(pending.is_some(), "prefix retained for its deadline");
 }
 
-/// Row 6: a prune pass refuses history at or above a live pin; a forced
-/// budget expiry answers `Pruned` (never a `MissingBody` spin); `Reserved`
-/// waits; `Shutdown` stops. With nothing grantable at the frontier the worker
-/// reports terminal unavailable and stays alive.
 #[test]
 fn seed_prune_while_paused_refuses_at_or_above_floor() {
-    // Boundary discipline on a live pin: the reserve folds the pin, the pin
-    // is never crossed, and expiry answers Pruned.
     let registry = Arc::new(RetentionRegistry::new());
     let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
     let pin = access.request_history(2).expect("grant at 2");
     assert_eq!(pin.floor(), Some(2));
     assert_eq!(registry.retention_floor(), Some(2));
-    // A reserve above the pin folds to the pin: rows at the pin survive.
     let reservation = registry.reserve(7);
     assert_eq!(registry.retention_floor(), Some(2));
     assert!(access.request_history(2).is_ok(), "pin still grants");
     drop(reservation);
-    // Below a committed line is gone; the line itself still grants.
     registry.reserve(7).commit(7);
     assert!(matches!(
         access.request_history(3),
@@ -1312,7 +1195,6 @@ fn seed_prune_while_paused_refuses_at_or_above_floor() {
     ));
     assert!(access.request_history(7).is_ok(), "the line itself grants");
     drop(pin);
-    // Forced expiry: a held pin that lags beyond its budget answers Pruned.
     let registry = Arc::new(RetentionRegistry::new());
     let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
     let pin = access.request_history(2).expect("grant at 2");
@@ -1323,7 +1205,6 @@ fn seed_prune_while_paused_refuses_at_or_above_floor() {
         Err(HistoryUnavailable::Pruned { .. })
     ));
     drop(pin);
-    // A provisional reservation waits; shutdown stops.
     let registry = Arc::new(RetentionRegistry::new());
     let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
     let reservation = registry.reserve(5);
@@ -1339,9 +1220,6 @@ fn seed_prune_while_paused_refuses_at_or_above_floor() {
         Err(HistoryUnavailable::Shutdown)
     ));
 
-    // Worker fallback: pruned history never spins on MissingBody. With no
-    // token and nothing grantable at the frontier, ScriptLive reports
-    // terminal unavailable while the worker stays alive and stall-safe.
     let fixture = SeedFixture::new(3);
     fixture.persist_branch_a_undo();
     let harness = SeedHarness::new(
@@ -1377,9 +1255,6 @@ fn seed_prune_while_paused_refuses_at_or_above_floor() {
     );
 }
 
-/// Row 7: a sub-H reorg rolls back through the pinned undo and converges.
-/// Undo presence is load-bearing: without the H undo the live family resets
-/// while siblings keep their rows; with it, the rewind crosses branches.
 #[test]
 fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
     let fixture = SeedFixture::new(4);
@@ -1391,9 +1266,6 @@ fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
         Arc::new(UtxoSet::new()),
     );
 
-    // Token-seeded at H = 2, then the tip crosses to the rival branch. The
-    // only reset-free path is a rewind through the H and H-1 undos: the
-    // rollback cutover is disabled and every undo is present.
     let (set, _) = seed_coin_set(64);
     let tip_a2 = fixture.tip(fixture.a[1]);
     let (artifact, _) = mint_seed_artifact(&set, tip_a2.hash, tip_a2.height);
@@ -1412,8 +1284,6 @@ fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
     assert_eq!(harness.watermarks().script_history, Some(at(&tip_b3)));
     assert!(harness.runtime.failure_message().is_none());
 
-    // Control: without the H undo the same reorg resets live, proving the
-    // rollback above actually rode the pinned undo.
     let control = SeedFixture::new(4);
     control.persist_branch_a_undo();
     control.persist_branch_b_undo();
@@ -1468,14 +1338,8 @@ fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
     assert_eq!(denied.watermarks().script_live, Some(at(&tip_b3)));
 }
 
-/// Row 15: publication and import offers with a `Dormant` cell open no file
-/// and store nothing; with an `Offered` cell the newer file is closed and
-/// the queued tip is kept. A token that arrives while a pending batch holds
-/// `ScriptLive` rows waits; once replay clears past its tip, a stale token is
-/// discarded.
 #[test]
 fn seed_offer_skipped_without_demand() {
-    // Dormant arrival: the producer pre-check fails, so nothing opens.
     let cell: SeedOfferCell = Arc::new(SeedSlot::new());
     assert!(!cell.is_wanted());
     let mut opens = 0usize;
@@ -1485,7 +1349,6 @@ fn seed_offer_skipped_without_demand() {
     assert_eq!(opens, 0, "dormant arrival opens no file");
     assert!(cell.take().is_none());
 
-    // Offered arrival: the first tip wins; the newer file is dropped.
     let (set_a, _) = seed_coin_set(8);
     let tip_a = synthetic_txid(501);
     let (artifact_a, _) = mint_seed_artifact(&set_a, tip_a, 3);
@@ -1502,8 +1365,6 @@ fn seed_offer_skipped_without_demand() {
     assert!(cell.take().is_none());
     assert!(!cell.is_wanted(), "take clears demand with the artifact");
 
-    // Worker side: a token queued while a pending batch holds ScriptLive
-    // rows waits for replay; a token older than replayed rows is discarded.
     let fixture = SeedFixture::new(12);
     fixture.persist_branch_a_undo();
     let harness = SeedHarness::new(
@@ -1512,7 +1373,6 @@ fn seed_offer_skipped_without_demand() {
         Arc::new(UtxoSet::new()),
     );
     harness.set_tip(&fixture.tip(fixture.a[11]));
-    // Withhold one body so the first window is retained with ScriptLive rows.
     let absent = fixture.a_key(8);
     let withheld = fixture
         .bodies
@@ -1539,7 +1399,6 @@ fn seed_offer_skipped_without_demand() {
         harness.cell.take().is_some(),
         "token waits while replay holds ScriptLive rows"
     );
-    // Re-stage it: replay now clears past its tip, so it is stale on take.
     let (stale_set, _) = seed_coin_set(16);
     let (stale_token, _) = mint_seed_artifact(&stale_set, tip_a5.hash, tip_a5.height);
     harness.cell.want();
@@ -1556,9 +1415,6 @@ fn seed_offer_skipped_without_demand() {
     assert_eq!(scan_live_keys(&harness.store), expected);
 }
 
-/// Cancellation is polled at entry, every 4,096 rows, and before the final
-/// watermark commit; a trip returns `Cancelled` with no watermark so the
-/// caller can retry with the same coins.
 #[test]
 fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1569,7 +1425,6 @@ fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
         height: 7,
         hash: [0x07; 32],
     };
-    // Immediate cancellation writes nothing.
     let immediate = writer.seed_script_live_stream(
         &mut |_: &mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>| Ok(()),
         tip,
@@ -1588,7 +1443,6 @@ fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
         "a cancelled entry must not stamp the watermark"
     );
 
-    // Mid-stream cancellation stops at the next 4,096 boundary.
     let coins: Vec<(OutPoint, ScriptHash)> = (0..9_000_u32)
         .map(|v| {
             let mut bytes = [0x77_u8; 32];
@@ -1627,8 +1481,6 @@ fn seed_stream_polls_cancellation_and_leaves_no_watermark() {
         "a cancelled stream must not stamp the watermark"
     );
 
-    // The retry's opening reset clears the cancelled prefix; the same coins
-    // commit and stamp the watermark.
     let written = writer.seed_script_live(coins, tip).expect("retry seed");
     assert_eq!(written, 9_000, "retry must commit every coin");
     assert_eq!(

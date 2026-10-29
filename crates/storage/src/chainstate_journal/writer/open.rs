@@ -1,5 +1,3 @@
-//! Journal initialization and recovery of its exact durable append frontier.
-
 use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;
@@ -11,9 +9,6 @@ use crate::KvStore;
 use std::time::Instant;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// Opens (or creates) the journal directory and restores the durable
-    /// cursor from `head.json`.
-    ///
     /// Recovery rules (plan §2.3): a torn tail beyond the head is ignored
     /// (the active segment is truncated back to the head cursor); a missing
     /// `head.json` with no segments is a fresh journal.
@@ -33,7 +28,6 @@ impl<S: KvStore> JournalWriter<S> {
         Self::restore(dir, store, head)
     }
 
-    /// Creates a journal with a new checkpoint base and durable head.
     pub fn initialize(
         dir: cap_std::fs::Dir,
         store: std::sync::Arc<S>,
@@ -113,7 +107,6 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(writer)
     }
 
-    /// Truncates the active segment to the durable cursor (torn tail ignored).
     pub(super) fn recover_active_segment(&mut self) -> Result<(), JournalWriterError> {
         let name = segment_name(self.segment_gen);
         let file = match self.dir.open_with(

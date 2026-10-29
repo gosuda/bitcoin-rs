@@ -16,7 +16,6 @@ use crate::verify_block::merkle_root_and_mutation_borrowed;
 )]
 const HEADER_LEN: u64 = Header::LEN as u64;
 
-/// Facts derived once for a decoded block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockFacts {
     txids: Vec<Txid>,
@@ -28,7 +27,6 @@ pub struct BlockFacts {
 }
 
 impl BlockFacts {
-    /// Derives facts directly from a validated borrowed block layout.
     #[must_use]
     pub fn from_parsed(parsed: &ParsedBlock) -> Self {
         let tx_count = parsed.tx_count();
@@ -71,7 +69,6 @@ impl BlockFacts {
         }
     }
 
-    /// Derives facts from decoded transactions and precomputed transaction IDs.
     #[must_use]
     pub fn from_txids(txs: &[Tx], txids: Vec<Txid>) -> Self {
         debug_assert_eq!(
@@ -93,7 +90,6 @@ impl BlockFacts {
         }
     }
 
-    /// Returns transaction IDs in block order.
     #[must_use]
     pub fn txids(&self) -> &[Txid] {
         &self.txids
@@ -104,7 +100,6 @@ impl BlockFacts {
         self.txids.len()
     }
 
-    /// Consumes the facts and returns their transaction IDs.
     #[must_use]
     pub fn into_txids(self) -> Vec<Txid> {
         self.txids
@@ -120,13 +115,11 @@ impl BlockFacts {
         self.has_witness
     }
 
-    /// Returns BIP141 block weight.
     #[must_use]
     pub const fn weight(&self) -> u64 {
         self.weight
     }
 
-    /// Returns the transaction Merkle root, or `None` for an empty tree.
     #[must_use]
     pub const fn merkle_root(&self) -> Option<Txid> {
         self.merkle_root
@@ -139,7 +132,6 @@ impl BlockFacts {
 
     pub(crate) fn or_insert_wtxids_from(&mut self, txs: &[Tx]) {
         if self.wtxids.is_none() {
-            // Reuse legacy txids; iterate over txs so malformed ID counts cannot truncate.
             self.wtxids = Some(
                 txs.iter()
                     .enumerate()
@@ -155,7 +147,6 @@ impl BlockFacts {
     }
 }
 
-/// A decoded transaction slice paired with its shared block facts and prevouts.
 pub struct BlockView<'b> {
     txs: &'b [Tx],
     facts: BlockFacts,
@@ -163,7 +154,6 @@ pub struct BlockView<'b> {
 }
 
 impl<'b> BlockView<'b> {
-    /// Builds a view from decoded transactions and existing facts.
     #[must_use]
     pub fn from_facts(txs: &'b [Tx], facts: BlockFacts) -> Self {
         debug_assert_eq!(
@@ -178,31 +168,26 @@ impl<'b> BlockView<'b> {
         }
     }
 
-    /// Returns the shared block facts.
     #[must_use]
     pub const fn facts(&self) -> &BlockFacts {
         &self.facts
     }
 
-    /// Returns transaction IDs in block order.
     #[must_use]
     pub fn txids(&self) -> &[Txid] {
         self.facts.txids()
     }
 
-    /// Returns the decoded transactions in block order.
     #[must_use]
     pub fn txs(&self) -> &[Tx] {
         self.txs
     }
 
-    /// Returns whether the derived Merkle root equals `merkle_root`.
     #[must_use]
     pub fn merkle_root_matches(&self, merkle_root: bitcoin_rs_primitives::Hash256) -> bool {
         self.facts.merkle_root() == Some(Txid(merkle_root))
     }
 
-    /// Returns witness transaction IDs, deriving them once if necessary.
     pub fn witness_ids(&mut self) -> &[Wtxid] {
         self.facts.or_insert_wtxids_from(self.txs);
         self.facts
@@ -210,12 +195,10 @@ impl<'b> BlockView<'b> {
             .unwrap_or_else(|| unreachable!("witness IDs were just computed"))
     }
 
-    /// Sets the resolved prevout matrix in block and input order.
     pub fn set_resolved(&mut self, resolved: Vec<Vec<Option<TxOut>>>) {
         self.resolved = resolved;
     }
 
-    /// Consumes the view and returns its transaction IDs.
     #[must_use]
     pub fn into_txids(self) -> Vec<Txid> {
         self.facts.into_txids()
@@ -242,7 +225,6 @@ fn merkle_root_and_mutation(txids: &[Txid]) -> (Option<Txid>, bool) {
         .map_or((None, false), |(root, mutated)| (Some(root), mutated))
 }
 
-/// Hash the canonical base serialization without reconstructing its fields.
 fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
     let parts = tx.stripped_parts();
     if !tx.is_segwit() {

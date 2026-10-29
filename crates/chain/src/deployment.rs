@@ -1,9 +1,3 @@
-//! BIP9/softfork lookups over a [`BlockTree`].
-//!
-//! Consensus owns the state machine and deployment parameters. This module
-//! owns the tree walk, the BIP9 cache, and the CSV/Segwit snapshot an apply
-//! or mining caller needs at a connect height.
-
 use bitcoin_rs_consensus::bip9::versionbits_block_version;
 use bitcoin_rs_consensus::bip30::BIP34_IMPLIES_BIP30_LIMIT;
 use bitcoin_rs_consensus::{
@@ -14,17 +8,13 @@ use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, NodeId};
 
-/// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.
 struct DeploymentView<'a> {
     tree: &'a BlockTree,
     tip_id: NodeId,
-    // Only reporting captures an off-header-chain ancestry; validation keeps
-    // its existing direct view. The temporary IDs are not a state cache.
     ancestry: Option<Vec<NodeId>>,
 }
 
 impl<'a> DeploymentView<'a> {
-    /// Anchors lookups at `tip_id` within `tree`.
     #[must_use]
     const fn new(tree: &'a BlockTree, tip_id: NodeId) -> Self {
         Self {
@@ -94,7 +84,6 @@ impl DeploymentContext for DeploymentView<'_> {
     }
 }
 
-/// CSV/Segwit contextual state for the block that would extend `previous_tip_id`.
 #[must_use]
 pub fn softfork_state(
     tree: &BlockTree,
@@ -116,22 +105,15 @@ pub fn softfork_state(
     }
 }
 
-/// A BIP9 deployment currently in `Started` or `LockedIn` at a candidate height.
 #[derive(Debug)]
 pub struct SignallingDeployment {
-    /// BIP22 rule name (`csv`, `segwit`).
     pub name: &'static str,
-    /// Header-version bit assigned to the deployment.
     pub bit: u8,
 }
 
 const NAMED_DEPLOYMENTS: [(&str, u32); 2] =
     [("csv", CSV_DEPLOYMENT_ID), ("segwit", SEGWIT_DEPLOYMENT_ID)];
 
-/// Deployments a GBT caller must see in `vbavailable`.
-///
-/// Only `Started` and `LockedIn` states are signalling. Active and failed
-/// deployments are not negotiated as version bits.
 #[must_use]
 pub fn signalling_deployments(
     tree: &BlockTree,
@@ -150,7 +132,6 @@ pub fn signalling_deployments(
         .collect()
 }
 
-/// Versionbits candidate version at `height`, using the tree's BIP9 cache.
 #[must_use]
 pub fn candidate_version(
     tree: &BlockTree,
@@ -164,8 +145,6 @@ pub fn candidate_version(
     )
 }
 
-/// Resolves each named deployment's parameters and BIP9 state at `height`,
-/// reading through the tree's cache.
 fn deployment_states(
     tree: &BlockTree,
     network: Network,
@@ -182,63 +161,36 @@ fn deployment_states(
         })
 }
 
-/// Native activation facts for one deployment at a queried block.
 #[derive(Debug)]
 pub struct DeploymentStatus {
-    /// Consensus deployment name.
     pub name: &'static str,
-    /// Fixed activation height, or observed BIP9 activation height.
     pub height: Option<u32>,
-    /// Whether the next block enforces the deployment.
     pub active: bool,
-    /// Whether the queried block enforces the deployment.
     pub active_at_block: bool,
-    /// Historical BIP9 facts when this network uses version-bit activation.
     pub bip9: Option<VersionBitsStatus>,
 }
 
-/// BIP9 history projected from the same cache and parameters validation uses.
 #[derive(Debug)]
 pub struct VersionBitsStatus {
-    /// Authoritative deployment parameters.
     pub params: DeploymentParams,
-    /// State at the queried block.
     pub state: DeploymentState,
-    /// State at its successor.
     pub next: DeploymentState,
-    /// First height in the current state.
     pub since: u32,
-    /// Chronological signalling in the current window, only while signalling.
     pub signalling: Option<Vec<bool>>,
 }
 
-/// Maximum temporary ancestry IDs for an off-header-chain deployment query.
-/// Two million IDs occupy at most eight megabytes. Header-chain queries reuse
-/// the tree's existing height index and do not allocate this projection.
 const MAX_DEPLOYMENT_QUERY_ANCESTORS: usize = 2_000_000;
 
-/// Why native deployment history could not be projected.
 #[derive(Debug, thiserror::Error)]
 pub enum DeploymentQueryError {
-    /// A requested header identity is unavailable.
     #[error(transparent)]
     Chain(#[from] crate::ChainError),
-    /// The off-header-chain ancestry exceeds the query's temporary work budget.
     #[error("deployment query exceeds the {limit}-header ancestry budget")]
-    Budget {
-        /// Maximum ancestors captured by one query.
-        limit: usize,
-    },
-    /// Header ancestry is incomplete or inconsistent.
+    Budget { limit: usize },
     #[error("deployment query has incomplete header ancestry")]
     IncompleteAncestry,
 }
 
-/// Reads native deployment facts on the named ancestry; no tip is reloaded.
-///
-/// `None` identifies genesis before the first applied publication. Fixed-height
-/// Taproot and native CSV/Segwit BIP9 remain native facts, not Core's newer
-/// deployment model. This read never changes validation rules.
 pub fn deployment_statuses(
     tree: &BlockTree,
     network: Network,
@@ -305,8 +257,6 @@ pub fn deployment_statuses(
         let state_at = |height| cached_deployment_state(tree, view, height, id, params);
         let state = state_at(height);
         let next = state_at(next_height);
-        // States never return to a previous state. Binary search the first
-        // period with this state instead of walking every historical period.
         let mut low = 0;
         let mut high = height / params.period;
         while low < high {
@@ -345,7 +295,6 @@ pub fn deployment_statuses(
     Ok(statuses)
 }
 
-/// Returns whether the BIP30 duplicate-txid scan is required at `height`.
 #[must_use]
 pub fn bip30_duplicate_scan_required(
     tree: &BlockTree,
@@ -525,9 +474,6 @@ mod tests {
         let mut activation_id = None;
         for height in 0..=activation_height.saturating_add(1) {
             let header = synthetic_header(prev_hash, height);
-            // The activation header must enter the index under its
-            // authenticated hash; mutating afterwards would leave the child
-            // prev_blockhash and the by_hash key pointing at a discarded hash.
             let node_id = if height == activation_height {
                 tree.insert_header_with_hash(header, expected_hash, NodeStatus::HeaderValid)?
                     .id
@@ -554,8 +500,6 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
         let mut tree = BlockTree::new();
         let previous_tip = seed_known_bip34_activation_chain(&mut tree, network)?;
-        // The child of the activation header must commit to the authenticated
-        // hash, not to a pre-mutation synthetic hash.
         let expected = network
             .bip34_activation_hash()
             .ok_or_else(|| std::io::Error::other("network has no fixed BIP34 activation hash"))?;

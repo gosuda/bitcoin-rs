@@ -1,5 +1,4 @@
 #![allow(clippy::expect_used)]
-//! Package selection, limits, and adversarial candidate tests.
 
 #[path = "support/fixtures.rs"]
 mod common;
@@ -58,8 +57,6 @@ fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dy
     let candidate = assemble_candidate(&context(), &mempool, PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 50);
 
-    // Pool index order is authoritative; the candidate must preserve package
-    // order from walking that priority index.
     assert_eq!(
         selected(&candidate),
         snapshot
@@ -77,7 +74,6 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
     insert(&mut mempool, parent, 200, 1_000, 1, 100)?;
-    // High-fee child should outrank the parent individually and pull it in.
     insert(
         &mut mempool,
         tx(2, 40_000, Some(parent_txid)),
@@ -121,9 +117,6 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
 
 #[test]
 fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> {
-    // Each oversized entry exceeds exactly one dimension of its own context.
-    // Forged weight/size override the wire numbers; vsize stays 100 so the
-    // oversized entry still ranks first and is skipped atomically.
     let cases = [
         (
             1_u8,
@@ -167,10 +160,6 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-// POL-05/06: one chunk is indivisible, and its positive unconfirmed BIP68
-// lock is not final at the next block. The valid parent cannot be retried
-// separately after the whole child-parent chunk is skipped; with CSV inactive
-// the same lock is ignored and the chunk is selected whole.
 #[test]
 fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
 -> Result<(), Box<dyn Error>> {
@@ -199,10 +188,6 @@ fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
     Ok(())
 }
 
-// POL-05: CandidateContext resource limits apply to a complete chunk.
-// Exact configured limits fit; one excess unit skips both child and parent.
-// Core 31.1 node/miner.cpp::addChunks likewise skips the whole chunk after
-// its limit check, rather than extracting a parent from the failed chunk.
 #[test]
 fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
     let empty = zero_fee_pool();
@@ -231,10 +216,6 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
     assert_eq!(selected(&exact), vec![parent_txid, child_txid]);
     assert_eq!(exact.weight, exact_limits.max_weight);
 
-    // Step 20 tail fill: one excess unit skips the whole 2-transaction chunk in
-    // the main walk, but the fitting parent prefix fills the tail. The parent
-    // alone (40 WU / 40 B / 4 sigops, modified rate far above 1 sat/kvB) fits
-    // exactly in the 100-unit budget, so each over-limit chunk yields [parent].
     for (weight, size, sigop_cost) in [(61_u64, 60_u32, 6_u32), (60, 61, 6), (60, 60, 7)] {
         let mut over = zero_fee_pool();
         insert_forged(
@@ -337,8 +318,6 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Error>> {
-    // Coinbase reservation is ~476 WU with the default payout+commitment. Choose
-    // limits so parent alone and parent+child both overflow, while `other` fits.
     let parent_txid = tx(1, 1_000, None).txid();
     let mut child_tx = tx(2, 1_000, Some(parent_txid));
     child_tx.lock_time = LockTime::ZERO;
@@ -354,10 +333,6 @@ fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// Once a positive dimension is exactly full, later packages are skipped.
-/// Limits add the filler's forged 1,000 to the empty candidate's weight or
-/// serialized size (the candidate already counts the transaction-count byte),
-/// so the filler fills one dimension exactly and the leftover cannot fit.
 #[test]
 fn stops_candidate_package_construction_once_a_positive_dimension_is_full()
 -> Result<(), Box<dyn Error>> {
@@ -385,7 +360,6 @@ fn stops_candidate_package_construction_once_a_positive_dimension_is_full()
     Ok(())
 }
 
-/// Even an empty body needs one byte to encode its reserved coinbase count.
 #[test]
 fn transaction_count_reservation_rejects_zero_size_capacity() {
     let pool = zero_fee_pool();
@@ -395,10 +369,6 @@ fn transaction_count_reservation_rejects_zero_size_capacity() {
     ));
 }
 
-// Step 20 helpers: forged facts whose charged weight equals the wire weight,
-// so the prefix rate denominator is unambiguous without a private accessor.
-// `vsize` is set to `weight.div_ceil(4)` and `size` to the same vbytes, which
-// keeps the size dimension non-binding unless a test tightens it.
 fn consistent(fee: u64, weight: u64) -> Forged {
     let vsize = u32::try_from(weight.div_ceil(4)).expect("test weight fits vsize");
     Forged::new(fee, weight, vsize).with_vsize(vsize)
@@ -427,11 +397,6 @@ fn chunk_has_missing_ancestor(chunk: &ChunkView<'_>, selected: &HashSet<EntryId>
     false
 }
 
-// Whole-chunk-only oracle for the tail proptest: the main walk without any
-// tail pass. It walks the maintained index in order, stops at the first chunk
-// below the 1 sat/kvB aggregate floor, skips chunks with an unselected outside
-// ancestor, and skips chunks that would overflow weight/size/sigops including
-// CompactSize count growth. Fixtures are always final, so finality passes.
 fn whole_chunk_oracle_fees(
     pool: &Mempool,
     ctx: &CandidateContext,
@@ -499,9 +464,6 @@ fn candidate_positions(candidate: &Candidate) -> HashMap<Txid, usize> {
     positions
 }
 
-// Step 20: a standalone negative-modified-fee chunk is absent while the same
-// size positive chunk is present. The negative chunk sorts last and stops the
-// walk; the positive chunk is selected and its actual fee funds the coinbase.
 #[test]
 fn negative_modified_fee_standalone_chunk_is_excluded_while_same_size_positive_is_included()
 -> Result<(), Box<dyn Error>> {
@@ -520,8 +482,6 @@ fn negative_modified_fee_standalone_chunk_is_excluded_while_same_size_positive_i
     Ok(())
 }
 
-// Step 20: a two-transaction chunk whose aggregate modified fee is negative is
-// excluded as a whole, while the same shape with positive fees is included.
 #[test]
 fn negative_modified_fee_chunk_is_excluded_as_a_whole() -> Result<(), Box<dyn Error>> {
     let parent_txid = tx(12, 1_000, None).txid();
@@ -553,9 +513,6 @@ fn negative_modified_fee_chunk_is_excluded_as_a_whole() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-// Step 20: aggregation, not per-transaction rates. A zero-fee parent alone is
-// below the floor and absent, but the same parent with a high-fee child forms
-// one chunk whose aggregate rate passes and both are selected parent-first.
 #[test]
 fn zero_fee_parent_is_rescued_by_child_aggregate() -> Result<(), Box<dyn Error>> {
     let parent_txid = tx(14, 1_000, None).txid();
@@ -582,8 +539,6 @@ fn zero_fee_parent_is_rescued_by_child_aggregate() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-// Step 20: a negative-modified parent is rescued when the child fees carry the
-// chunk aggregate above the floor. The parent alone would stop the walk.
 #[test]
 fn negative_modified_parent_is_rescued_by_child_fees() -> Result<(), Box<dyn Error>> {
     let parent_txid = tx(16, 1_000, None).txid();
@@ -612,9 +567,6 @@ fn negative_modified_parent_is_rescued_by_child_fees() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-// Step 20: the required tail shape. A 1,200 WU parent-child chunk does not fit
-// in 1,000 WU remaining, so the main walk skips it whole and the tail fills
-// the 600 WU parent prefix. Both rates are far above the floor.
 #[test]
 fn tail_fills_weight_with_prefix_of_skipped_chunk() -> Result<(), Box<dyn Error>> {
     let empty = zero_fee_pool();
@@ -637,13 +589,6 @@ fn tail_fills_weight_with_prefix_of_skipped_chunk() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-// Step 20: prefix rates sum exact charged weights once, then round. Parent
-// 1,997 WU (vsize 500) plus child 2,001 WU (vsize 501) charge 3,998 WU, whose
-// ceiling is 1,000 vB; a 1 sat aggregate therefore meets the floor. Summing
-// rounded vsizes gives 1,001 vB and a zero rate, which would wrongly skip the
-// prefix. The test chain forces one chunk with increasing fees, overflows the
-// whole 8,998 WU chunk in a 5,000 WU budget, and requires the tail to select
-// the exact-rounded [parent, child] prefix.
 #[test]
 fn tail_prefix_rate_uses_exact_charged_weight_not_summed_vsize() -> Result<(), Box<dyn Error>> {
     let empty = zero_fee_pool();
@@ -671,9 +616,6 @@ fn tail_prefix_rate_uses_exact_charged_weight_not_summed_vsize() -> Result<(), B
     Ok(())
 }
 
-// Step 20: parent closure for the tail. The 1,200 WU parent does not fit in
-// 1,000 WU remaining, so its chunk is not even recorded (no prefix could fit)
-// and the fitting child that spends it stays unavailable.
 #[test]
 fn tail_skips_child_when_parent_prefix_cannot_fit() -> Result<(), Box<dyn Error>> {
     let empty = zero_fee_pool();
@@ -697,12 +639,6 @@ fn tail_skips_child_when_parent_prefix_cannot_fit() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-// Step 20: finality is not retried in the tail. A low-fee final parent with a
-// high-fee future-locktime child forms one non-final chunk (increasing fees
-// keep the chain together); the main walk skips it for finality and the tail
-// must not rescue the final parent prefix. Equal fees would split the chain
-// into a final parent chunk plus a non-final child chunk and select [parent]
-// through the main walk instead.
 #[test]
 fn tail_does_not_rescue_prefix_from_non_final_chunk() -> Result<(), Box<dyn Error>> {
     let parent_txid = tx(40, 1_000, None).txid();
@@ -737,7 +673,6 @@ proptest! {
     ) {
         let mut pool = zero_fee_pool();
         for (index, fee) in fees.iter().enumerate() {
-            // The vec holds at most 30 entries, so the label always fits.
             let label = u8::try_from(index).expect("proptest vec is bounded");
             insert_forged(&mut pool, tx(label, 1_000, None), Forged::new(*fee, 400, 100))
                 .expect("pool admits fixture");
@@ -760,11 +695,6 @@ proptest! {
         assert_eq!(left.coinbase_value, right.coinbase_value);
     }
 
-    // Step 20: over random small pools under weight pressure, the tail pass
-    // only adds transactions. Fees are at least the whole-chunk-only oracle,
-    // every in-pool parent precedes its child, and the candidate respects the
-    // weight, size, and sigop limits. All fixtures are final, so finality
-    // passes and the oracle omits it by construction.
     #[test]
     fn tail_pass_never_loses_fees_and_preserves_invariants(
         inputs in prop::collection::vec(

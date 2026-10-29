@@ -30,8 +30,6 @@ pub(super) struct Confirmation {
     pub time: u32,
 }
 
-/// Already selected bodies remain borrowed; only one batch's referenced
-/// outputs are copied. Block candidates additionally require index readiness.
 #[derive(Clone, Copy)]
 pub(super) enum ParentSource<'a> {
     Block(&'a [Tx]),
@@ -62,12 +60,6 @@ pub(super) struct ScriptActivity {
 }
 
 impl ScriptActivity {
-    /// Sums the confirmed funding rows the script index already resolved.
-    ///
-    /// Reading one transaction per history entry would answer the same
-    /// question, but each read is a separate index query with its own budget,
-    /// so a script with a long history turns one HTTP request into unbounded
-    /// storage I/O. The rows carry the values; the snapshot is the bound.
     pub(super) fn chain_stats(&self) -> ScriptStats {
         let funded_txo_count = u64::try_from(self.confirmed_funding.len()).unwrap_or(u64::MAX);
         let funded_txo_sum = self
@@ -216,13 +208,6 @@ impl<'a> Projection<'a> {
         confirmation.map_or_else(TransactionStatus::unconfirmed, TransactionStatus::from)
     }
 
-    /// Resolves each distinct parent once for this batch. Retain only the
-    /// referenced outputs, not unrelated parent inputs, witnesses or outputs.
-    /// By default the selected transactions are already resolved from the
-    /// mempool or verified index queries. Block routes override the parent
-    /// candidates with the verified active block, or an empty slice for a
-    /// stale block; block reuse also requires a ready transaction index.
-    /// Backend GET batches may borrow parents from the full captured selection.
     pub(super) fn transaction_values<'t>(
         &self,
         transactions: impl IntoIterator<Item = (&'t Tx, Option<Confirmation>)>,
@@ -258,9 +243,6 @@ impl<'a> Projection<'a> {
                 retain(*txid, *tx);
             }
         }
-        // Consult the authoritative snapshot once, and only if this batch
-        // can actually reuse an in-block parent. Otherwise ordinary parent
-        // queries enforce index health and watermarks themselves.
         if matches!(parents, Some(ParentSource::Block(_)))
             && !available.is_empty()
             && !self
@@ -293,7 +275,6 @@ impl<'a> Projection<'a> {
                 collect(tx)?;
                 continue;
             }
-            // Arc capture releases the pool guard before output copying.
             let mempool = self.ctx.mempool.gateway.read().transaction_by_txid(&txid);
             if let Some(tx) = mempool {
                 collect(&tx)?;
@@ -446,8 +427,6 @@ impl<'a> Projection<'a> {
         if block.block_hash() != record.hash {
             return Err(internal_error("stored block body identity mismatch"));
         }
-        // Activation belongs to this block's ancestry, including when the
-        // requested block is on a losing branch, rather than today's tip.
         let segwit_active = {
             let tree = self.ctx.chain.block_tree.read();
             let parent = tree
@@ -548,10 +527,6 @@ impl<'a> Projection<'a> {
         self.mempool_activity(script_hash, &confirmed_unspent)
     }
 
-    /// PRE: `script_hash` and the script index identify one script.
-    /// POST: Capture the unspent pool overlay under one read guard.
-    /// POST: Release the guard before building statuses and output strings.
-    /// INVARIANT: Confirmed and mempool outputs retain the prior order.
     pub(super) fn script_utxos(&self, script_hash: ScriptHash) -> Result<Vec<UtxoValue>, Response> {
         let mut confirmed = self
             .ctx
@@ -562,9 +537,6 @@ impl<'a> Projection<'a> {
             .unspent_outputs(script_hash)
             .map_err(query_error)?;
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
-        // The read guard protects pool facts only: which of a funder's outputs
-        // the pool already spends. Script hashing, statuses, and output
-        // strings are derived from those facts and run after the release.
         let funding = {
             let pool = self.ctx.mempool.gateway.read();
             confirmed
@@ -631,20 +603,12 @@ impl<'a> Projection<'a> {
         }
     }
 
-    /// PRE: `confirmed_unspent` contains the script index's current records.
-    /// POST: Capture funders, then spenders after output matching releases the first guard.
-    /// POST: Release both guards before hashing scripts, deduplicating and sorting.
-    /// INVARIANT: Both sets use one pool sequence; each txid appears once in descending `(time, txid)` order.
     fn mempool_activity(
         &self,
         script_hash: ScriptHash,
         confirmed_unspent: &[ScriptIndexRecord],
     ) -> Result<Vec<Arc<Tx>>, Response> {
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
-        // The guard covers pool facts only. Funders are captured as `Arc`
-        // clones rather than txids alone: resolving a txid back to an entry
-        // afterwards costs a scan of the whole pool per selected
-        // transaction.
         let (sequence, funders) = {
             let pool = self.ctx.mempool.gateway.read();
             let sequence = pool.sequence_number();
@@ -656,9 +620,6 @@ impl<'a> Projection<'a> {
         };
         #[cfg(test)]
         crate::esplora::tests::gate_mempool_activity_for_tests();
-        // Match outputs after releasing the first guard. The second guard
-        // checks the captured sequence before reading spenders, so a concurrent
-        // membership change returns Retry instead of mixing pool views.
         let mut outputs = confirmed_unspent
             .iter()
             .map(|record| (record.txid, record.vout))
@@ -691,8 +652,6 @@ impl<'a> Projection<'a> {
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
-        // Keyed by txid so a transaction reached through both the funding index
-        // and the spend scan is selected once.
         let mut selected = std::collections::BTreeMap::new();
         for (txid, time, transaction) in &funders {
             selected.insert(*txid, (*time, Arc::clone(transaction)));
@@ -715,9 +674,6 @@ impl<'a> Projection<'a> {
             .collect())
     }
 
-    /// The outputs of `transaction` that pay `script`, as their position in the
-    /// output list, their `vout`, and the output itself. A position that cannot
-    /// be addressed as a `vout` has no output here.
     fn outputs_paying(
         transaction: &Tx,
         script: MempoolScriptHash,
@@ -735,18 +691,9 @@ impl<'a> Projection<'a> {
 }
 
 /// Names one script shape in the Esplora `scriptpubkey_type` dialect.
-///
-/// PRE: `shape` is a value returned by `convert::classify`.
-/// POST: returns the exact Esplora name for the shape. Bare multisig is
-///   `multisig` and pay-to-anchor is `anchor`, as the Esplora and electrs
-///   dialects spell them; an empty script keeps `empty`, and every
-///   unrecognized or future witness shape keeps `unknown`.
-/// INVARIANT: the match is exhaustive. A new `ScriptShape` variant does not
-///   compile until both this table and the Core table name it.
 const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
     match shape {
         convert::ScriptShape::Empty => "empty",
-        // An unrecognized script and a future witness version share `unknown`.
         convert::ScriptShape::Nonstandard | convert::ScriptShape::WitnessUnknown => "unknown",
         convert::ScriptShape::Pubkey => "p2pk",
         convert::ScriptShape::PubkeyHash => "p2pkh",
@@ -835,7 +782,6 @@ mod tests {
 
     #[test]
     fn transaction_output_renders_address_through_the_shared_seam() {
-        // BIP 173 program `751e76e8…3bd6` on the fixture's mainnet.
         let mut script = vec![0x00, 0x14];
         script.extend([
             0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3,

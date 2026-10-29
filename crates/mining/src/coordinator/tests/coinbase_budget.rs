@@ -1,9 +1,3 @@
-// CONTRACT: `crates/mining/README.md` owns budgeted template acquisition:
-// identity, reuse, finite admission, and the retryable failure classes.
-//
-// A real pool and block tree prove fit and reuse; a gated capability source
-// holds a budgeted walk after it ran, so publication, cancellation, and
-// unwinding are observed while the single budgeted slot is occupied.
 use super::fee_revision::service_over;
 use super::*;
 use crate::MiningError;
@@ -14,15 +8,12 @@ use std::thread::JoinHandle;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// Leaves room for the 98-byte input extension (80 cost units per byte),
-/// plus exactly five additional output cost units.
 const HEAVY_SIGOPS: u32 = 72_155;
 
 const FITS: CoinbaseBudget = CoinbaseBudget {
     additional_size: 100,
     additional_sigops: 5,
 };
-/// One sigop cost unit more than the ordinary candidate has room for.
 const TIGHT: CoinbaseBudget = CoinbaseBudget {
     additional_size: 100,
     additional_sigops: 6,
@@ -45,14 +36,11 @@ fn tx(label: u8) -> Tx {
     }
 }
 
-/// A pool of one sigop-heavy transaction and one ordinary one paying the same
-/// rate. Returns the pool with the heavy and the light txids.
 fn heavy_pool() -> TestResult<(Mempool, Txid, Txid)> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let heavy = tx(1);
     let light = tx(2);
     let (heavy_id, light_id) = (heavy.txid(), light.txid());
-    // Entries supply admitted mining facts; this is not a consensus-spend test.
     pool.insert_entry(MempoolEntry::new(
         Arc::new(heavy),
         100,
@@ -69,7 +57,6 @@ fn txids(candidate: &Candidate) -> Vec<Txid> {
     candidate.transactions.iter().map(|tx| tx.txid).collect()
 }
 
-/// Sigop cost of the whole block: the coinbase and every selected transaction.
 fn block_sigops(candidate: &Candidate) -> u64 {
     u64::from(transaction_sigop_cost(
         &candidate.coinbase,
@@ -93,7 +80,6 @@ fn tight_budget_gets_a_fitting_selection_not_a_post_selection_refusal() -> TestR
     let (source, service) = service_over(pool)?;
     let ordinary = service.get_block_template(None, None)?.candidate;
     assert_eq!(sorted(txids(&ordinary)), sorted(vec![heavy, light]));
-    // The ordinary candidate leaves exactly five sigop cost units of room.
     ordinary.admits(FITS)?;
     assert!(matches!(
         ordinary.admits(TIGHT),
@@ -101,7 +87,6 @@ fn tight_budget_gets_a_fitting_selection_not_a_post_selection_refusal() -> TestR
     ));
 
     let served = service.get_block_template(None, Some(TIGHT))?.candidate;
-    // The selector dropped the heavy transaction; nothing was refused after it.
     served.admits(TIGHT)?;
     assert_eq!(txids(&served), vec![light]);
     assert!(block_sigops(&served) + u64::from(TIGHT.additional_sigops) <= served.max_sigops);
@@ -117,11 +102,9 @@ fn tight_budget_gets_a_fitting_selection_not_a_post_selection_refusal() -> TestR
     assert_ne!(served.template_id, ordinary.template_id);
     assert_eq!(source.budgeted_walks.load(Ordering::SeqCst), 1);
 
-    // The same budget in the same generation is answered from the cache.
     let again = service.get_block_template(None, Some(TIGHT))?.candidate;
     assert_eq!(again.template_id, served.template_id);
     assert_eq!(source.budgeted_walks.load(Ordering::SeqCst), 1);
-    // A different budget is a different candidate with its own walk.
     let other = CoinbaseBudget {
         additional_size: 100,
         additional_sigops: 7,
@@ -138,8 +121,6 @@ fn ordinary_request_is_never_served_a_budgeted_candidate_and_is_unchanged() -> T
     let (source, service) = service_over(pool)?;
     let budgeted = service.get_block_template(None, Some(TIGHT))?.candidate;
     assert_eq!(txids(&budgeted), vec![light]);
-    // A fresh budgeted assembly is the newest candidate the node served, so
-    // the mining-info observation must describe it, not stay absent.
     let reported = service
         .state
         .lock()
@@ -158,8 +139,6 @@ fn ordinary_request_is_never_served_a_budgeted_candidate_and_is_unchanged() -> T
         Some(budgeted.weight)
     );
 
-    // A subsequent stricter budget walks again under a new key and the
-    // observation follows the newest install.
     let stricter = CoinbaseBudget {
         additional_size: 100,
         additional_sigops: 7,
@@ -177,8 +156,6 @@ fn ordinary_request_is_never_served_a_budgeted_candidate_and_is_unchanged() -> T
     assert_ne!(ordinary.template_id, budgeted.template_id);
     assert_eq!(sorted(txids(&ordinary)), sorted(vec![heavy, light]));
     assert!(service.state.lock().last_candidate.is_some());
-    // The standalone assembler over the same pool and context agrees with what
-    // the service served, byte for byte where identity is concerned.
     let tip = source.tip.clone();
     let context = service.candidate_context(&tip)?;
     let expected = assemble_candidate(&context, &source.pool.lock(), &[0x51])?;
@@ -195,8 +172,6 @@ fn budgeted_request_reuses_the_ordinary_candidate_when_it_admits_the_budget() ->
     let (source, service) = service_over(pool)?;
     let ordinary = service.get_block_template(None, None)?.candidate;
     let served = service.get_block_template(None, Some(FITS))?.candidate;
-    // No budgeted selection ran: the ordinary candidate already admits FITS,
-    // and the returned id says so.
     assert_eq!(source.budgeted_walks.load(Ordering::SeqCst), 0);
     assert_eq!(served.template_id, ordinary.template_id);
     served.admits(FITS)?;
@@ -222,7 +197,6 @@ fn publication_drops_every_budget_of_the_old_generation_and_the_cache_stays_boun
     let walks = source.budgeted_walks.load(Ordering::SeqCst);
     assert_eq!(walks, usize::from(distinct));
     assert_eq!(service.state.lock().cache.len(), CANDIDATE_CACHE_LIMIT);
-    // The oldest budget was evicted; asking again reassembles it correctly.
     let first = CoinbaseBudget {
         additional_size: 100,
         additional_sigops: 6,
@@ -233,8 +207,6 @@ fn publication_drops_every_budget_of_the_old_generation_and_the_cache_stays_boun
         .admits(first)?;
     assert_eq!(source.budgeted_walks.load(Ordering::SeqCst), walks + 1);
 
-    // A membership change publishes a new generation: every budgeted entry of
-    // the old one goes with it.
     source
         .pool
         .lock()
@@ -286,7 +258,6 @@ fn unsatisfiable_budget_fails_typed_and_leaves_the_slot_free() -> TestResult {
     assert!(state.budgeted.is_none());
     assert!(state.cache.is_empty());
     drop(state);
-    // The ordinary template is unaffected.
     service
         .get_block_template(None, None)?
         .candidate
@@ -341,7 +312,6 @@ fn budgeted_request_serves_an_installable_preparation_without_discarding_it() ->
     service.publish_block_generation(tip.hash, &MutationResult::empty());
 
     let served = service.get_block_template(None, Some(FITS))?.candidate;
-    // The preparation answered: the pool was not walked for this request.
     assert_eq!(source.budgeted_walks.load(Ordering::SeqCst), 0);
     assert_eq!(source.ordinary_walks.load(Ordering::SeqCst), 0);
     served.admits(FITS)?;
@@ -349,8 +319,6 @@ fn budgeted_request_serves_an_installable_preparation_without_discarding_it() ->
         served.template_id,
         service.live_generation_key().template_id()
     );
-    // It now also serves the ordinary caller; nothing was discarded and
-    // reassembled.
     let ordinary = service.get_block_template(None, None)?.candidate;
     assert_eq!(ordinary.template_id, served.template_id);
     assert_eq!(source.ordinary_walks.load(Ordering::SeqCst), 0);
@@ -366,8 +334,6 @@ fn budgeted_request_before_the_receipt_leaves_the_preparation_for_the_ordinary_c
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_ready(&service, tip.hash);
 
-    // No committed receipt yet, and the prepared candidate does not admit
-    // TIGHT: the request must not park on the preparation or discard it.
     let served = service.get_block_template(None, Some(TIGHT))?.candidate;
     served.admits(TIGHT)?;
     assert_eq!(txids(&served), vec![light]);
@@ -385,7 +351,6 @@ fn budgeted_request_before_the_receipt_leaves_the_preparation_for_the_ordinary_c
         "the budgeted request must not touch the preparation"
     );
 
-    // The commit arrives: the ordinary caller installs the very preparation.
     service.publish_block_generation(tip.hash, &MutationResult::empty());
     let ordinary = service.get_block_template(None, None)?.candidate;
     assert_eq!(sorted(txids(&ordinary)), sorted(vec![heavy, light]));
@@ -394,8 +359,6 @@ fn budgeted_request_before_the_receipt_leaves_the_preparation_for_the_ordinary_c
     Ok(())
 }
 
-/// Capability source that runs a budgeted selection and then holds its
-/// result, so the walk is finished while the slot is still occupied.
 struct BudgetGate {
     inner: StaticPool,
     budgeted_calls: AtomicUsize,
@@ -419,9 +382,6 @@ impl BudgetGate {
         }
     }
 
-    /// Parks until released. The deadline fires only on test failure, and
-    /// proceeding then still ends the assembler so the service can drop. It
-    /// outlasts a caller's whole retry budget (eight one-second slices).
     fn park(&self) {
         if !self.hold.load(Ordering::SeqCst) {
             return;
@@ -503,7 +463,6 @@ const BUDGET_B: CoinbaseBudget = CoinbaseBudget {
     additional_sigops: 6,
 };
 
-/// A service over a gated pool at generation `(tip, 5, 2)`.
 fn gated_service() -> (
     Arc<MiningService>,
     Arc<BudgetGate>,
@@ -536,8 +495,6 @@ fn spawn_budgeted(
     std::thread::spawn(move || worker.budgeted_candidate(generation, budget))
 }
 
-/// Blocks until an assembler is parked inside the gated selection. The
-/// deadline fires only on failure.
 fn wait_until_held(pool: &BudgetGate) {
     let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
     while !pool.entered.load(Ordering::SeqCst) {
@@ -556,8 +513,6 @@ fn budgeted_walks_are_serialized_and_a_blocked_caller_gives_up_after_one_slice()
     let holder = spawn_budgeted(&service, generation, BUDGET_A);
     wait_until_held(&pool);
 
-    // A different budget cannot start a second walk. It waits one bounded
-    // slice and then fails with a retryable error.
     let started = Instant::now();
     let blocked = service.budgeted_candidate(generation, BUDGET_B);
     assert!(
@@ -567,7 +522,6 @@ fn budgeted_walks_are_serialized_and_a_blocked_caller_gives_up_after_one_slice()
     assert!(started.elapsed() < WAKE_PROOF_TIMEOUT);
     assert_eq!(pool.budgeted_calls(), 1);
 
-    // The ordinary template neither waits for the held walk nor displaces it.
     let ordinary = service.candidate_for_key(generation)?;
     assert_eq!(ordinary.template_id, generation.template_id());
     assert_eq!(pool.ordinary_calls.load(Ordering::SeqCst), 1);
@@ -586,8 +540,6 @@ fn budgeted_walks_are_serialized_and_a_blocked_caller_gives_up_after_one_slice()
     );
     assert!(service.state.lock().budgeted.is_none());
 
-    // With the slot free, the other budget is answered by the cached ordinary
-    // candidate, which admits it: no further walk.
     let reused = service.budgeted_candidate(generation, BUDGET_B)?;
     assert_eq!(reused.template_id, generation.template_id());
     reused.admits(BUDGET_B)?;
@@ -602,8 +554,6 @@ fn a_caller_behind_a_held_slot_ends_with_a_retryable_error_not_a_hang() -> TestR
     let holder = spawn_budgeted(&service, generation, BUDGET_A);
     wait_until_held(&pool);
 
-    // The whole call, with its eight attempts of one bounded wait each, ends
-    // by itself while the walk is still held.
     let started = Instant::now();
     let outcome = service.live_candidate(Some(BUDGET_B));
     assert!(
@@ -617,7 +567,6 @@ fn a_caller_behind_a_held_slot_ends_with_a_retryable_error_not_a_hang() -> TestR
         "and it never walked beside the holder"
     );
 
-    // The holder is untouched, and the same caller succeeds once it releases.
     pool.release.store(true, Ordering::SeqCst);
     holder.join().map_err(|_| "the holder panicked")??;
     let served = service.live_candidate(Some(BUDGET_B))?;
@@ -650,7 +599,6 @@ fn publication_neither_frees_the_slot_nor_lets_a_stale_install_through() -> Test
     let holder = spawn_budgeted(&service, generation, BUDGET_A);
     wait_until_held(&pool);
 
-    // The generation moves while the walk is held.
     pool.inner.set(6, 2);
     service.publish_generation();
     assert!(
@@ -690,7 +638,6 @@ fn publication_neither_frees_the_slot_nor_lets_a_stale_install_through() -> Test
         );
     }
 
-    // A fresh attempt serves the live generation.
     let fresh = service.live_candidate(Some(BUDGET_A))?;
     assert_eq!(fresh.mempool_sequence, 6);
     fresh.admits(BUDGET_A)?;

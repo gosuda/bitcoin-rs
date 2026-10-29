@@ -1,18 +1,6 @@
 # Fuzz corpus provenance
 
-Seeds live in the companion repository
-[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus)
-under `corpus/<target>/` — this document stays the single owner of their
-provenance (per `docs/contracts/qa-corpus.md`, `QAC-01`). They were imported
-from the sources recorded in the run-dependent sections below:
-rust-bitcoin/qa-assets (this section) and the upstream reference corpora
-(`## Reference corpora`). Importers publish into the corpus directory named
-by `FUZZ_CORPUS_DIR` (default: the `corpus/` directory of a sibling
-`bitcoin-rs-fuzz-corpus` clone).
-
-Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
-license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
-(public domain; no attribution required, recorded here for provenance).
+Seeds live in [gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus) under `corpus/<target>/`; this document solely owns their provenance (`QAC-01` in [qa-corpus.md](../docs/contracts/qa-corpus.md)). Importers publish into `FUZZ_CORPUS_DIR` (default: `corpus/` of a sibling `bitcoin-rs-fuzz-corpus` clone). Sources: [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets) ([CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE), public domain, recorded for provenance) and the upstream reference corpora (`## Reference corpora` below).
 
 | Field | Value |
 |---|---|
@@ -22,11 +10,7 @@ license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
 | Import tool | scripts/import-qa-assets.sh (clone pinned to the commit above, then cargo fuzz cmin per target) |
 | Size policy | source files >= 65536 bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
 
-Ownership: this document is the single owner of the target-to-corpus
-mapping below. `scripts/import-qa-assets.sh` does not restate it; on re-import
-it refreshes only the run-dependent fields in the table above and carries this
-Mapping section forward verbatim. Update the mapping here, in the same commit
-as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
+Ownership: the target-to-corpus mapping below is owned here. `scripts/import-qa-assets.sh` does not restate it; on re-import it refreshes only the run-dependent fields above and carries the mapping forward verbatim. Update the mapping here, in the same commit as the corpus change (`QAC-01`).
 
 ## Mapping
 
@@ -41,30 +25,20 @@ as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
 | tx_validate | bitcoin-core | src/test/data/tx_valid.json, tx_invalid.json, sighash.json, bip341_wallet_vectors.json | tx hex decoded to consensus bytes |
 | tx_validate | btcd | txscript/data/tx_valid.json, tx_invalid.json, sighash.json, many_inputs_tx.hex, taproot-ref/*.json (`tx` field) | tx hex decoded to consensus bytes; the BADTX pseudo-flag only marks rows whose tx fails CheckTransaction |
 | script_eval | qa-assets | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
-| script_eval | bitcoin-core | src/test/data/script_tests.json, tx_valid.json, tx_invalid.json, bip341_wallet_vectors.json | row ASM assembled with the Core opcode table; flags encoded via the harness EXPLICIT_FLAGS framing from the row's own flag names — tx_valid names the flags Core turns OFF, so its seeds carry `FULL & ~listed`; rows that declare a prevout amount (witness rows, tx prevouts) append it as a trailing u64 of satoshis; `#SCRIPT#`/`#CONTROLBLOCK#`/`#TAPROOTOUTPUT#` markers resolve the BIP341 tweaked key and control block the upstream harness generates (internal key = key0); tx rows emit one frame per input (scriptSig + prevout scriptPubKey + witness) and, when every declared prevout resolves, one TX_CONTEXT frame per input carrying the spending tx and all prevouts so signatures verify under their original context; bip341_wallet_vectors.json rows use a separate transform — each row's expected scriptPubKey is wrapped verbatim as a TAPROOT key-path seed rather than assembled from row ASM |
+| script_eval | bitcoin-core | src/test/data/script_tests.json, tx_valid.json, tx_invalid.json, bip341_wallet_vectors.json | row ASM assembled with the Core opcode table; flags encoded via the harness EXPLICIT_FLAGS framing from the row's own flag names. tx_valid names the flags Core turns OFF, so its seeds carry `FULL & ~listed`; rows that declare a prevout amount (witness rows, tx prevouts) append it as a trailing u64 of satoshis; `#SCRIPT#`/`#CONTROLBLOCK#`/`#TAPROOTOUTPUT#` markers resolve the BIP341 tweaked key and control block the upstream harness generates (internal key = key0); tx rows emit one frame per input (scriptSig + prevout scriptPubKey + witness) and, when every declared prevout resolves, one TX_CONTEXT frame per input carrying the spending tx and all prevouts so signatures verify under their original context; bip341_wallet_vectors.json rows use a separate transform: each row's expected scriptPubKey is wrapped verbatim as a TAPROOT key-path seed rather than assembled from row ASM |
 | script_eval | btcd | txscript/data/script_tests.json, tx_valid.json, tx_invalid.json, taproot-ref/*.json | same framing; taproot-ref rows take the spent output's scriptPubKey and amount from `prevouts[index]` and the witness/scriptSig from `success`/`failure` |
 | utxo_snapshot | btcd | blockchain/testdata/277647.utxostore.bz2 | foreign-format serialized UTXO store truncated to the seed bound; negative seed for the strict v4 snapshot decoder |
 | utxo_snapshot | bitcoin-core v31.1 | crates/utxo/tests/fixtures/core-v2/core200.dat (embedded reference, not a companion-corpus seed) | preserve the 51-byte Core header; apply at most 256 input triples as little-endian body offset modulo body length plus XOR byte; empty/no-op input retains the complete positive artifact |
 
-Corpora were minimized with cargo fuzz cmin after import; only minimized
-seeds are tracked here. Re-run the matching import script after major
-decoder changes to refresh.
+Corpora were minimized with cargo fuzz cmin after import; only minimized seeds are tracked here. Re-run the matching import script after major decoder changes to refresh.
 
-The embedded Core snapshot was produced by the unmodified pinned v31.1 binary
-from the deterministic regtest-200 chain. Its SHA-256 is
-`bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c`.
-[Fixture provenance and reproduction](../crates/utxo/tests/fixtures/core-v2/README.md)
-record the binary digest and immutable upstream source at
-`9be056a8a72b624dae9623b2f7bded92c2a21c91` (Bitcoin Core, MIT).
-This harness arm is authored here and does not imply a corpus import,
-minimization run, or executed fuzz campaign.
+The embedded Core snapshot was produced by the unmodified pinned v31.1 binary from the deterministic regtest-200 chain. Its SHA-256 is `bb96a8a22e8114c36e0f570217795f5cc46baf366b0e74e7588de5b1e4392e7c`. [Fixture provenance and reproduction](../crates/utxo/tests/fixtures/core-v2/README.md) record the binary digest and immutable upstream source at `9be056a8a72b624dae9623b2f7bded92c2a21c91` (Bitcoin Core, MIT). This harness arm is authored here and does not imply a corpus import, minimization run, or executed fuzz campaign.
 
-See also docs/contracts/qa-corpus.md for the contracts index and precedence rule.
+See also [qa-corpus.md](../docs/contracts/qa-corpus.md) for the contracts index and precedence rule.
 
 ## Reference corpora
 
-Generated by scripts/import-reference-corpora.sh; refreshed on each run.
-Authored content lives above this heading.
+Generated by scripts/import-reference-corpora.sh; refreshed on each run. Authored content lives above this heading.
 
 | Field | bitcoin/bitcoin | btcsuite/btcd |
 |---|---|---|
@@ -73,4 +47,3 @@ Authored content lives above this heading.
 | License | MIT | ISC |
 | Import tool | scripts/import-reference-corpora.sh + scripts/import_reference_corpora.py | (same) |
 | Size policy | rows and payloads larger than 65536 bytes are skipped or truncated and counted in the import log; witness stacks longer than the harness cap and framed elements over the u16 bound are skipped, never truncated |
-

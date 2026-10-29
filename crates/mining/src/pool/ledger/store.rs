@@ -1,14 +1,4 @@
 //! The authoritative backend-neutral ledger.
-//!
-//! Every mutation buffers all logical table effects against one coherent snapshot, then commits
-//! one durable batch guarded by that snapshot's revision. A local mutex serializes this handle;
-//! the revision comparison rejects stale writes from other handles. Reads use coherent snapshots.
-//! Authoritative chain observations are fetched
-//! before the write transaction (no external call is made while the write lock is held) and each
-//! applied observation is re-validated against the stored record inside the transaction. Every
-//! mutating call is idempotent: replaying it after a crash or a lost reply changes nothing the
-//! second time, because the identity it keys on (header hash, block hash, idempotency key, txid,
-//! round or batch state) is checked inside the same transaction that would apply it.
 
 use super::kv::{Database, Table, TableDefinition, WriteTransaction};
 use bitcoin_rs_storage::KvStore;
@@ -30,15 +20,8 @@ use super::{
     verify_payout_transaction,
 };
 
-/// Most signed transactions (RBF replacements) recorded for one batch.
 pub const MAX_SIGNED_TXS_PER_BATCH: usize = 32;
-/// Maximum rounds observed per bounded reconcile commit. Each round can fetch
-/// a block body and decode it, so an unbounded scan would stall chain
-/// transitions that need the same stores.
 pub const RECONCILE_ROUND_BATCH_LIMIT: usize = 32;
-/// Maximum payout batches observed per bounded reconcile commit. Each batch
-/// scans signed transactions and script indexes, so the work per commit stays
-/// bounded while the generation check keeps every financial commit coherent.
 pub const RECONCILE_PAYOUT_BATCH_LIMIT: usize = 16;
 const MAX_INPUTS_PER_TX: usize = 100_000;
 const SCHEMA_VERSION: u64 = 1;
@@ -84,113 +67,64 @@ const M_PRUNED_BELOW: &str = "pruned_below_seq";
 const M_CONFIG: &str = "config";
 const M_AUDIT_HEAD: &str = "audit_head";
 
-/// Operation name of [`Ledger::record_share`] for fail plans.
 pub const OP_RECORD_SHARE: &str = "record_share";
-/// Operation name of [`Ledger::retire_job`] for fail plans.
 pub const OP_RETIRE_JOB: &str = "retire_job";
-/// Operation name of [`Ledger::prune_shares`] for fail plans.
 pub const OP_PRUNE_SHARES: &str = "prune_shares";
-/// Operation name of [`Ledger::record_found_block`] for fail plans.
 pub const OP_RECORD_BLOCK: &str = "record_found_block";
-/// Operation name of [`Ledger::reconcile_rounds`] for fail plans.
 pub const OP_RECONCILE_ROUNDS: &str = "reconcile_rounds";
-/// Operation name of [`Ledger::set_payout_script`] for fail plans.
 pub const OP_SET_SCRIPT: &str = "set_payout_script";
-/// Operation name of [`Ledger::prepare_payout_batch`] for fail plans.
 pub const OP_PREPARE_PAYOUT: &str = "prepare_payout_batch";
-/// Operation name of [`Ledger::record_signed`] for fail plans.
 pub const OP_RECORD_SIGNED: &str = "record_signed";
-/// Operation name of [`Ledger::record_broadcast`] for fail plans.
 pub const OP_RECORD_BROADCAST: &str = "record_broadcast";
-/// Operation name of [`Ledger::cancel_prepared`] for fail plans.
 pub const OP_CANCEL_PREPARED: &str = "cancel_prepared";
-/// Operation name of [`Ledger::reconcile_payouts`] for fail plans.
 pub const OP_RECONCILE_PAYOUTS: &str = "reconcile_payouts";
 
-// ---------------------------------------------------------------------------------------------
-// Fail plan (test seam for crash and power-loss interruption)
-// ---------------------------------------------------------------------------------------------
-
-/// Where in an operation the fail plan fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(feature = "test-seam")]
 pub enum FailPoint {
-    /// After every table change, immediately before durable commit (the change is lost).
     BeforeCommit,
-    /// Immediately after durable commit (the change is durable but the caller sees no result).
     AfterCommit,
 }
 
-/// What the fail plan does when it fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(feature = "test-seam")]
 pub enum FailAction {
-    /// Return [`LedgerError::Injected`].
     ReturnError,
-    /// Abort the whole process (SIGABRT), as a power loss would: no destructor runs.
     AbortProcess,
 }
 
-/// A one-shot interruption of the named operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(feature = "test-seam")]
 pub struct FailPlan {
-    /// One of the `OP_*` constants.
     pub op: &'static str,
-    /// Where the plan fires.
     pub point: FailPoint,
-    /// What it does.
     pub action: FailAction,
 }
 
-// ---------------------------------------------------------------------------------------------
-// Reports
-// ---------------------------------------------------------------------------------------------
-
-/// A round that needs operator attention and was left unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoundAnomaly {
-    /// Round id.
     pub round: u64,
-    /// Why the round was not advanced.
     pub reason: &'static str,
 }
 
-/// Result of [`Ledger::reconcile_rounds`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundReconcileReport {
-    /// State changes applied.
     pub transitions: Vec<RoundTransition>,
-    /// Rounds left unchanged because the chain contradicts the job owner's claim.
     pub anomalies: Vec<RoundAnomaly>,
 }
 
-/// Totals verified by [`Ledger::check_invariants`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InvariantReport {
-    /// Accounts with a balance or any credited allocation.
     pub accounts: usize,
-    /// Rounds.
     pub rounds: usize,
-    /// Batches.
     pub batches: usize,
-    /// Sum of allocations of Matured rounds.
     pub credited_sat: u128,
-    /// Sum of `available_sat`.
     pub available_sat: u128,
-    /// Sum of `reserved_sat`.
     pub reserved_sat: u128,
-    /// Sum of `paid_sat`.
     pub paid_sat: u128,
-    /// Sum of `deficit_sat`.
     pub deficit_sat: u128,
 }
 
-// ---------------------------------------------------------------------------------------------
-// Ledger
-// ---------------------------------------------------------------------------------------------
-
-/// Durable PPLNS accounting over a node-owned backend-neutral store.
 pub struct Ledger {
     db: Database,
     config: PoolConfig,
@@ -247,11 +181,6 @@ impl<'t> Tables<'t> {
 }
 
 impl Ledger {
-    /// Create a ledger in an empty ledger namespace of the supplied store.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::PathExists`] if the ledger namespace is occupied.
-    /// Existing data is never migrated, overwritten or reset implicitly.
     pub fn create(store: Arc<dyn KvStore>, config: PoolConfig) -> Result<Self, LedgerError> {
         config.validate()?;
         let encoded = config.encode()?;
@@ -274,11 +203,6 @@ impl Ledger {
         })
     }
 
-    /// Reopen an existing ledger. The stored configuration must equal `config`.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::NotALedger`] if the store holds no valid ledger,
-    /// [`LedgerError::ConfigMismatch`] if the stored configuration differs, or a storage error.
     pub fn open(store: Arc<dyn KvStore>, config: PoolConfig) -> Result<Self, LedgerError> {
         config.validate()?;
         let encoded = config.encode()?;
@@ -308,20 +232,11 @@ impl Ledger {
         })
     }
 
-    /// The immutable accounting configuration.
     #[must_use]
     pub fn config(&self) -> &PoolConfig {
         &self.config
     }
 
-    /// Allocate a durable, nonzero namespace for one pool runtime's wire-job identifiers.
-    ///
-    /// Combine this epoch with a 32-bit wire id as `(u64::from(epoch) << 32) | wire_id`.
-    /// Epochs are never reused, including after an ambiguous durability error; a caller must
-    /// allocate again rather than assume a failed allocation did not commit.
-    ///
-    /// # Errors
-    /// Returns a revision conflict, storage error, or overflow once the epoch space is exhausted.
     pub fn allocate_run_epoch(&self) -> Result<u32, LedgerError> {
         let txn = self.db.begin_write()?;
         let epoch = {
@@ -333,7 +248,6 @@ impl Ledger {
         Ok(epoch)
     }
 
-    /// Arm a one-shot interruption (test seam). Replaces any armed plan.
     #[cfg(feature = "test-seam")]
     pub fn arm_fail_plan(&self, plan: FailPlan) {
         let mut slot = self
@@ -343,7 +257,6 @@ impl Ledger {
         *slot = Some(plan);
     }
 
-    /// Remove any armed plan.
     #[cfg(feature = "test-seam")]
     pub fn disarm_fail_plan(&self) {
         let mut slot = self
@@ -377,7 +290,6 @@ impl Ledger {
         }
     }
 
-    /// Commit with the fail plan hooks. Returning early drops (rolls back) the transaction.
     fn commit(&self, txn: WriteTransaction<'_>, op: &'static str) -> Result<(), LedgerError> {
         let _ = self;
         #[cfg(feature = "test-seam")]
@@ -389,15 +301,7 @@ impl Ledger {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Shares
-    // -----------------------------------------------------------------------------------------
-
     /// Credit one accepted share. Idempotent on the header hash.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::JobRetired`], [`LedgerError::ShareConflict`],
-    /// [`LedgerError::ShareIdentityConflict`] or an input/storage error.
     pub fn record_share(&self, share: &ShareCredit) -> Result<ShareReceipt, LedgerError> {
         share.validate()?;
         let txn = self.db.begin_write()?;
@@ -411,14 +315,6 @@ impl Ledger {
         Ok(receipt)
     }
 
-    /// Retire a job: later shares for it are refused, its secondary-identity rows are deleted
-    /// so the per-job index stays bounded, and its header hashes move to a durable tombstone
-    /// table so the same header hash can never be credited again under another job. Call only
-    /// after the job's found block (if any) is recorded. Returns the number of index rows
-    /// retired.
-    ///
-    /// # Errors
-    /// Returns a storage error.
     pub fn retire_job(&self, job: u64) -> Result<usize, LedgerError> {
         let txn = self.db.begin_write()?;
         let removed = {
@@ -443,10 +339,6 @@ impl Ledger {
             }
             for (key, hash) in &rows {
                 tables.share_tuples.remove(key.as_slice())?;
-                // Tombstone the header hash instead of deleting it: the hash stays reserved
-                // forever, so replaying it under a different job fails as a share conflict
-                // rather than crediting the same work a second time. The entry keeps its
-                // original encoding so conflict reports still name the first credit.
                 if let Some(entry) = tables.share_hashes.get(hash.as_slice())? {
                     tables
                         .retired_hashes
@@ -461,29 +353,20 @@ impl Ledger {
         Ok(removed)
     }
 
-    /// Largest delete batch in one [`Self::prune_shares`] write transaction.
-    /// Pruning streams the doomed range in batches of this size, releasing the
-    /// writer lock between commits, so one call never buffers every doomed key
-    /// or holds the lock across an unbounded commit.
     const PRUNE_BATCH_SIZE: usize = 1024;
 
-    /// Delete the oldest shares, keeping the newest shares that hold at least `keep_work` work.
-    /// `keep_work` must cover the PPLNS window. A block found later for an older solving share
-    /// fails with [`LedgerError::WindowPruned`] instead of using a short window.
-    /// Deletes stream in bounded batches; returns the total number deleted.
+    /// Delete the oldest shares, keeping the newest shares that hold at least
+    /// `keep_work` work.
     ///
-    /// # Errors
-    /// Returns [`LedgerError::InvalidInput`] if `keep_work` is below the window, or an
-    /// overflow/storage error.
+    /// `keep_work` must cover the PPLNS window. A block found later for an older
+    /// solving share fails with [`LedgerError::WindowPruned`] instead of using a short
+    /// window.
     pub fn prune_shares(&self, keep_work: u128) -> Result<u64, LedgerError> {
         if keep_work < self.config.window_work {
             return Err(LedgerError::InvalidInput(
                 "keep_work must cover the PPLNS window",
             ));
         }
-        // Find the retention boundary on a read snapshot: the walk is
-        // read-only and must not hold the writer lock. Sequence numbers only
-        // grow, so the exclusive boundary stays valid while batches commit.
         let (boundary, cumulative) = {
             let read = self.db.begin_read()?;
             let shares = read.open_table(SHARES)?;
@@ -529,15 +412,8 @@ impl Ledger {
                     }
                 }
                 let previous = meta_u64(&tables.meta_u64, M_PRUNED_BELOW)?;
-                // `batch_end` is the floor: `doomed` holds every live key
-                // below it (seqs are dense), so every remaining key meets or
-                // exceeds it even before the last batch lands. The final
-                // slice restores the exact boundary.
                 let floor = batch_end;
                 if doomed.is_empty() {
-                    // A fully gapped slice cannot happen for contiguous seqs;
-                    // advancing the floor guarantees progress instead of
-                    // stalling on it. No audit for an empty slice.
                     if floor > previous {
                         tables.meta_u64.insert(M_PRUNED_BELOW, floor)?;
                         0
@@ -572,10 +448,6 @@ impl Ledger {
         Ok(removed_total)
     }
 
-    /// The PPLNS window ending at the newest share: `(account, work)` ascending by account.
-    ///
-    /// # Errors
-    /// Returns a storage or overflow error.
     pub fn current_window(&self) -> Result<Vec<(MinerId, u128)>, LedgerError> {
         let read = self.db.begin_read()?;
         let shares = read.open_table(SHARES)?;
@@ -589,10 +461,6 @@ impl Ledger {
         Ok(window.into_weights())
     }
 
-    /// Sequence number and work of the credited share with this header hash.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn share_by_hash(&self, header_hash: &Hash32) -> Result<Option<(u64, u128)>, LedgerError> {
         let read = self.db.begin_read()?;
         let hashes = read.open_table(SHARE_HASHES)?;
@@ -608,16 +476,6 @@ impl Ledger {
         Ok(entry.map(|(seq, work, _)| (seq, work)))
     }
 
-    /// Number of shares currently stored (pruned shares are not counted).
-    ///
-    /// Derived in O(1) from the share sequence and pruned-prefix metadata
-    /// (`next_share_seq - pruned_below_seq`): share seqs are contiguous from
-    /// zero with only a pruned prefix removed, so no table scan is needed.
-    /// Snapshot isolation: both counters come from one read snapshot.
-    ///
-    /// # Errors
-    /// Returns a storage error or [`LedgerError::Invariant`] when the pruned
-    /// prefix runs past the allocated sequence.
     pub fn share_count(&self) -> Result<u64, LedgerError> {
         let read = self.db.begin_read()?;
         let meta = read.open_table(META_U64)?;
@@ -628,28 +486,11 @@ impl Ledger {
         })
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Found blocks and rounds
-    // -----------------------------------------------------------------------------------------
-
-    /// Record a found block: credit its share, snapshot the PPLNS window, and open the round.
     /// The round starts Pending; no money exists until [`Ledger::reconcile_rounds`] observes the
     /// block on the active chain. Idempotent on the block hash.
-    ///
-    /// The window walk runs on a read snapshot, never under the writer lock:
-    /// phase one credits the share in one short write transaction, phase two
-    /// walks the window with no lock held, and phase three opens the round in
-    /// a second short write. A concurrent record for the same block converges
-    /// on the same idempotent verdict, and a crash between phases replays to
-    /// the same round through the share's idempotent identity.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::BlockConflict`] if the block is already recorded with a different
-    /// claim, [`LedgerError::WindowPruned`], or any share-crediting error.
     pub fn record_found_block(&self, found: &BlockFound) -> Result<BlockRecorded, LedgerError> {
         found.share.validate()?;
         let block_hash = found.share.header_hash;
-        // Phase one: idempotent credit in one short write transaction.
         let (solving_seq, share_receipt) = {
             let txn = self.db.begin_write()?;
             let tables = Tables::open(&txn)?;
@@ -670,9 +511,6 @@ impl Ledger {
             }
             (share_receipt.seq(), share_receipt)
         };
-        // Phase two: walk the window on a read snapshot. No writer lock is
-        // held across the unbounded share walk; sequence numbers only grow,
-        // so the solving sequence from phase one stays valid.
         let (window_total, weights) = {
             let read = self.db.begin_read()?;
             let tables = Tables::open(&read)?;
@@ -688,10 +526,6 @@ impl Ledger {
             )?;
             (window.total(), window.into_weights())
         };
-        // Phase three: open the round in a second short write transaction. A
-        // concurrent record may have opened it first, and a concurrent prune
-        // may have retired the solving share; both re-checks fail closed with
-        // the same verdicts as the single-transaction path.
         let txn = self.db.begin_write()?;
         let recorded = {
             let tables = Tables::open(&txn)?;
@@ -751,9 +585,6 @@ impl Ledger {
         Ok(recorded)
     }
 
-    /// The [`LedgerError::BlockConflict`] check shared by the idempotent
-    /// re-record paths: a known block hash with a different claim is a
-    /// conflicting block, never a second round.
     fn check_round_claim(round: &Round, found: &BlockFound) -> Result<(), LedgerError> {
         if round.height != found.height
             || round.coinbase_txid != found.coinbase_txid
@@ -764,12 +595,6 @@ impl Ledger {
         Ok(())
     }
 
-    /// Advance every monitored round from authoritative chain observations: fix the reward from
-    /// the observed coinbase, mature it, orphan it on a reorg, and reverse credits when a matured
-    /// block is displaced. Safe to call as often as desired.
-    ///
-    /// # Errors
-    /// Returns a chain-observer error (nothing is changed) or a storage/overflow error.
     pub fn reconcile_rounds(
         &self,
         chain: &dyn ChainView,
@@ -777,10 +602,6 @@ impl Ledger {
         self.reconcile_rounds_checked(chain, &|| false)
     }
 
-    /// Same as [`Self::reconcile_rounds`], but `abort` is evaluated inside the
-    /// write transaction before any observation is applied. A mid-reconcile
-    /// chain transition defers the whole batch, keeping torn views from
-    /// fixing rewards or orphaning rounds.
     pub fn reconcile_rounds_checked(
         &self,
         chain: &dyn ChainView,
@@ -842,11 +663,6 @@ impl Ledger {
         Ok(report)
     }
 
-    /// Bounded variant of [`Self::reconcile_rounds_checked`]: observes at most
-    /// `limit` open rounds per commit, returning whether more remain. Each
-    /// commit still evaluates `abort` inside its write transaction, so a
-    /// generation change aborts the financial commit instead of applying a
-    /// torn view.
     pub fn reconcile_rounds_checked_limit(
         &self,
         chain: &dyn ChainView,
@@ -854,12 +670,6 @@ impl Ledger {
         limit: usize,
         after: Option<u64>,
     ) -> Result<(RoundReconcileReport, bool, Option<u64>), LedgerError> {
-        // Bounded snapshot page with a key cursor: one `page_after` seek
-        // (`limit + 1` rows) plus `limit` point gets, never the whole
-        // open-rounds and rounds tables before offset/limit. Linearizable
-        // seek; snapshot isolation per commit; idempotent retry from `after`.
-        // Sheds no work; each commit observes at most `limit` rounds so chain
-        // stalls cannot wedge on history.
         let (open, more, next) = {
             let read = self.db.begin_read()?;
             let open_tbl = read.open_table(OPEN_ROUNDS)?;
@@ -874,10 +684,6 @@ impl Ledger {
                     list.push(round);
                 }
             }
-            // `next` advances past the raw page even when filtering drops rows
-            // (no filter here, but keep the cursor contract for callers).
-            // `limit == 0` with data returns `(empty, true, after)`: no advance,
-            // more remains.
             let next = if page.is_empty() { after } else { last };
             (list, more, next)
         };
@@ -950,19 +756,11 @@ impl Ledger {
         Ok(list)
     }
 
-    /// The round with this id.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn round(&self, id: u64) -> Result<Option<Round>, LedgerError> {
         let read = self.db.begin_read()?;
         load_round(&read.open_table(ROUNDS)?, id)
     }
 
-    /// The round recorded for this block hash.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn round_for_block(&self, block_hash: &Hash32) -> Result<Option<Round>, LedgerError> {
         let read = self.db.begin_read()?;
         let index = read.open_table(ROUND_BY_BLOCK)?;
@@ -972,52 +770,27 @@ impl Ledger {
         }
     }
 
-    /// Stored allocations of a round (empty until the reward is fixed).
-    ///
-    /// # Errors
-    /// Returns a storage error.
     pub fn round_allocations(&self, id: u64) -> Result<Vec<(MinerId, u64)>, LedgerError> {
         let read = self.db.begin_read()?;
         load_allocs(&read.open_table(ROUND_ALLOCS)?, id)
     }
 
-    /// The PPLNS window weights snapshotted for a round.
-    ///
-    /// # Errors
-    /// Returns a storage error.
     pub fn round_weights(&self, id: u64) -> Result<Vec<(MinerId, u128)>, LedgerError> {
         let read = self.db.begin_read()?;
         load_weights(&read.open_table(ROUND_WEIGHTS)?, id)
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Accounts
-    // -----------------------------------------------------------------------------------------
-
-    /// Balance of an account (all zero if unknown).
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn balance(&self, account: MinerId) -> Result<Balance, LedgerError> {
         let read = self.db.begin_read()?;
         load_balance(&read.open_table(BALANCES)?, account)
     }
 
-    /// The payout script of an account, if one is registered.
-    ///
-    /// # Errors
-    /// Returns a storage error.
     pub fn payout_script(&self, account: MinerId) -> Result<Option<Vec<u8>>, LedgerError> {
         let read = self.db.begin_read()?;
         let scripts = read.open_table(SCRIPTS)?;
         Ok(scripts.get(account.0)?.map(|guard| guard.value().to_vec()))
     }
 
-    /// Register or change the payout script of an account. Batches already prepared keep the
-    /// script they snapshotted. Authenticating the account owner is the pool server's job.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::InvalidInput`] for an empty, oversized or `OP_RETURN` script.
     pub fn set_payout_script(&self, account: MinerId, script: &[u8]) -> Result<(), LedgerError> {
         super::validate_script(script)?;
         let txn = self.db.begin_write()?;
@@ -1048,15 +821,6 @@ impl Ledger {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Payout batches
-    // -----------------------------------------------------------------------------------------
-
-    /// Reserve available balances into a new immutable payout batch (or return the batch already
-    /// created for `idempotency_key`). Returns `None` when no account qualifies.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::InvalidInput`] for a policy below the dust limit or out of range.
     pub fn prepare_payout_batch(
         &self,
         idempotency_key: Hash32,
@@ -1098,11 +862,6 @@ impl Ledger {
                     Some(guard) => guard.value().to_vec(),
                     None => continue,
                 };
-                // Serialized-output weight budget with funding headroom: the
-                // count cap alone admits 2,500 P2TR/P2WSH outputs (~430,000 WU)
-                // before funding inputs and signatures, exceeding the 400,000-WU
-                // standard limit. Stop before exceeding the budget so any signed
-                // funding of the reserved outputs stays standard.
                 let weight = payout_output_weight_wu(script.len());
                 if picks_weight_wu.saturating_add(weight) > MAX_PAYOUT_OUTPUT_WEIGHT_WU {
                     break;
@@ -1169,19 +928,11 @@ impl Ledger {
         Ok(Some(created))
     }
 
-    /// The batch with this id.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn batch(&self, id: &Hash32) -> Result<Option<PayoutBatch>, LedgerError> {
         let read = self.db.begin_read()?;
         load_batch(&read.open_table(BATCHES)?, id)
     }
 
-    /// The batch created for an idempotency key.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn batch_for_idempotency_key(
         &self,
         key: &Hash32,
@@ -1198,10 +949,6 @@ impl Ledger {
         }
     }
 
-    /// Batches still reserving funds or inside the reorg watch window, oldest first.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn active_batches(&self) -> Result<Vec<PayoutBatch>, LedgerError> {
         let read = self.db.begin_read()?;
         let active = read.open_table(ACTIVE_BATCHES)?;
@@ -1217,11 +964,6 @@ impl Ledger {
         Ok(list)
     }
 
-    /// The canonical unsigned instructions for an open batch.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::UnknownBatch`] or [`LedgerError::IllegalTransition`] for a batch
-    /// that no longer awaits payment.
     pub fn request_for(&self, id: &Hash32) -> Result<PayoutRequest, LedgerError> {
         let batch = self.batch(id)?.ok_or(LedgerError::UnknownBatch(*id))?;
         if !batch.state.holds_reservation() {
@@ -1239,10 +981,6 @@ impl Ledger {
         })
     }
 
-    /// Ask `signer` to sign the batch and record its receipt.
-    ///
-    /// # Errors
-    /// Returns the signer's error, or any [`Ledger::record_signed`] error.
     pub fn sign_via(
         &self,
         id: &Hash32,
@@ -1258,14 +996,6 @@ impl Ledger {
         self.record_signed(&receipt)
     }
 
-    /// Record a signed transaction for a batch after verifying that it pays exactly the batch
-    /// outputs (plus at most one allowed change output) and that its recomputed txid equals the
-    /// claimed one. A replacement transaction must share an input with every earlier signed
-    /// transaction of the batch so at most one of them can ever confirm. Idempotent per txid.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::Receipt`] when the transaction is refused,
-    /// [`LedgerError::UnknownBatch`] or [`LedgerError::IllegalTransition`].
     pub fn record_signed(&self, receipt: &PayoutReceipt) -> Result<PayoutBatch, LedgerError> {
         let parsed = parse_transaction(&receipt.raw_tx).map_err(ReceiptError::from)?;
         if parsed.txid != receipt.txid {
@@ -1336,11 +1066,6 @@ impl Ledger {
         Ok(batch)
     }
 
-    /// Mark a batch Broadcast after the chain observer sees one of its signed transactions in the
-    /// mempool or in a block. Nothing is inferred from the signer or from a "sent" claim.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::NotObserved`] if the observer does not know the transaction.
     pub fn record_broadcast(
         &self,
         batch_id: &Hash32,
@@ -1411,13 +1136,6 @@ impl Ledger {
         Ok(batch)
     }
 
-    /// Cancel a Prepared batch and release its reservation. The ledger cannot verify the
-    /// operator's attestation about the signer; it is recorded in the audit trail. A batch with a
-    /// signed transaction can never be cancelled, only failed by chain evidence.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::IllegalTransition`] unless the batch is Prepared (or already
-    /// Cancelled with the same basis).
     pub fn cancel_prepared(
         &self,
         id: &Hash32,
@@ -1463,13 +1181,6 @@ impl Ledger {
         Ok(batch)
     }
 
-    /// Advance every active batch from authoritative chain observations: Broadcast/Signed to
-    /// Confirmed at `payout_confirmations` depth, Confirmed back to Broadcast when its block is
-    /// reorged out, and Failed (reservation released) only when every signed transaction was
-    /// conclusively double-spent at `abandon_confirmations` depth.
-    ///
-    /// # Errors
-    /// Returns a chain-observer error (nothing is changed) or a storage/overflow error.
     pub fn reconcile_payouts(
         &self,
         chain: &dyn ChainView,
@@ -1477,14 +1188,6 @@ impl Ledger {
         self.reconcile_payouts_checked(chain, &|| false)
     }
 
-    /// Same as [`Self::reconcile_payouts`], but `abort` is evaluated inside the
-    /// write transaction before any decision is applied. When it reports a
-    /// chain transition mid-reconcile, observations may span a reorg, so the
-    /// call commits nothing and reports no transitions: the next reconcile
-    /// converges. This keeps a torn view from permanently failing a payout.
-    /// Snapshot isolation: a commit only applies observations taken under one
-    /// generation. Linearizability is not needed; callers are idempotent, so a
-    /// deferred reconcile is retried.
     pub fn reconcile_payouts_checked(
         &self,
         chain: &dyn ChainView,
@@ -1512,10 +1215,6 @@ impl Ledger {
         }
         let tip = tip.unwrap_or(0);
         let txn = self.db.begin_write()?;
-        // Validate the chain generation inside the write transaction before
-        // applying `Fail`: a transition after observation means the batch view
-        // may span a reorg. Defer (drop the write transaction, commit nothing)
-        // rather than permanently releasing the reservation on a torn view.
         if abort() {
             return Ok(Vec::new());
         }
@@ -1552,11 +1251,6 @@ impl Ledger {
         Ok(transitions)
     }
 
-    /// Bounded variant of [`Self::reconcile_payouts_checked`]: observes at most
-    /// `limit` observable batches per commit, returning whether more remain.
-    /// Each commit still evaluates `abort` inside its write transaction, so a
-    /// generation change aborts the financial commit instead of failing a
-    /// payout on a torn view.
     pub fn reconcile_payouts_checked_limit(
         &self,
         chain: &dyn ChainView,
@@ -1564,15 +1258,6 @@ impl Ledger {
         limit: usize,
         after: Option<u64>,
     ) -> Result<(Vec<BatchTransition>, bool, Option<u64>), LedgerError> {
-        // Bounded snapshot page with a key cursor over raw `ACTIVE_BATCHES`
-        // seqs: one `page_after` seek (`limit + 1` rows) plus `limit` point
-        // gets, never the whole active-batch and round tables before
-        // offset/limit. Raw pagination bounds storage reads and allocations
-        // per page; observable filtering happens after the bounded load, and
-        // the cursor advances past raw keys (including filtered-out
-        // non-observable batches) so pages never re-scan the head.
-        // Linearizable seek; snapshot isolation per commit; idempotent retry
-        // from `after`. Each commit observes at most `limit` batches.
         let (observable, more, next) = {
             let read = self.db.begin_read()?;
             let active_tbl = read.open_table(ACTIVE_BATCHES)?;
@@ -1592,19 +1277,9 @@ impl Ledger {
                 }
                 list.push(batch);
                 if list.len() >= limit {
-                    // Observable cap reached, but `more`/`next` still track raw
-                    // pagination: further raw rows in this page are left for
-                    // the next cursor (which is the last raw seq, not just
-                    // observable). Break to bound per-commit work.
                     break;
                 }
             }
-            // Advance past the raw page even when filtering drops rows;
-            // `limit == 0` with data returns `(empty, true, after)`.
-            // Note: when `list` hits `limit` early, `last` may point beyond
-            // the last observable (skipping raw rows in this page). To avoid
-            // skipping those raw rows, use the last observable seq as cursor
-            // when capped, else the last raw seq.
             let next = if page.is_empty() {
                 after
             } else if list.len() >= limit {
@@ -1612,9 +1287,6 @@ impl Ledger {
             } else {
                 last
             };
-            // `more` from raw pagination may be true while observable `list`
-            // is empty (all filtered): still advance via `next`, converge on
-            // the tail instead of re-scanning the head.
             (list, more, next)
         };
         if observable.is_empty() {
@@ -1674,14 +1346,6 @@ impl Ledger {
         Ok((transitions, more, next))
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Audit and integrity
-    // -----------------------------------------------------------------------------------------
-
-    /// Audit records with `seq >= from_seq`, at most `limit`.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn audit_records(
         &self,
         from_seq: u64,
@@ -1698,12 +1362,6 @@ impl Ledger {
         Ok(records)
     }
 
-    /// Return up to `limit` newest audit records in ascending sequence order.
-    ///
-    /// Uses the audit counter and rows from one coherent snapshot; does not verify the full chain.
-    ///
-    /// # Errors
-    /// Returns a storage or codec error.
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditRecord>, LedgerError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -1722,10 +1380,6 @@ impl Ledger {
         Ok(records)
     }
 
-    /// Recompute the whole audit hash chain and compare it with the stored head.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::Invariant`] on any gap, mismatch or truncation.
     pub fn verify_audit_chain(&self) -> Result<u64, LedgerError> {
         let read = self.db.begin_read()?;
         verify_audit_tables(
@@ -1735,14 +1389,6 @@ impl Ledger {
         )
     }
 
-    /// Verify the conservation invariants over the whole ledger:
-    /// per account `available + reserved + paid - deficit == credited allocations of Matured
-    /// rounds`, `reserved == outputs of batches holding a reservation`, `paid == outputs of
-    /// Confirmed batches`; per round `fee + net == gross` and `sum(allocations) == net`; and the
-    /// audit chain.
-    ///
-    /// # Errors
-    /// Returns [`LedgerError::Invariant`] describing the first violation.
     pub fn check_invariants(&self) -> Result<InvariantReport, LedgerError> {
         let read = self.db.begin_read()?;
         verify_audit_tables(
@@ -1932,7 +1578,6 @@ fn verify_account_conservation(
 }
 
 impl PayoutBatch {
-    /// True for states a chain observer can still move.
     fn state_is_observable(&self) -> bool {
         matches!(
             self.state,
@@ -1940,10 +1585,6 @@ impl PayoutBatch {
         )
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Share crediting and the PPLNS window
-// ---------------------------------------------------------------------------------------------
 
 fn credit_share(tables: &Tables<'_>, share: &ShareCredit) -> Result<ShareReceipt, LedgerError> {
     if tables.retired_jobs.get(share.job)?.is_some() {
@@ -1960,8 +1601,6 @@ fn credit_share(tables: &Tables<'_>, share: &ShareCredit) -> Result<ShareReceipt
         }
         return Ok(ShareReceipt::Duplicate { seq });
     }
-    // A tombstoned hash belongs to a retired job: the same header hash can never be
-    // credited again, under any job. Report the original credit as the conflict.
     if let Some(guard) = tables.retired_hashes.get(share.header_hash.as_slice())? {
         let (seq, _, _) = decode_hash_entry(guard.value())?;
         return Err(LedgerError::ShareConflict { seq });
@@ -1995,7 +1634,6 @@ fn credit_share(tables: &Tables<'_>, share: &ShareCredit) -> Result<ShareReceipt
     Ok(ShareReceipt::Credited { seq })
 }
 
-/// Walk shares newest first from `end_seq`, filling a window of `target` work.
 fn collect_window(
     shares: &Table<'_, u64, &'static [u8]>,
     pruned_below: u64,
@@ -2003,11 +1641,6 @@ fn collect_window(
     target: u128,
 ) -> Result<WindowAccumulator, LedgerError> {
     let mut window = WindowAccumulator::new(target);
-    // Newest-first point lookups stop once the window fills. `range(..=end_seq)`
-    // materializes the whole share history before `.rev()` can stop early, so a
-    // busy pool pays full-history cost on every found block. Share seqs are
-    // contiguous (`bump` from zero) with only a pruned prefix removed, so this
-    // countdown covers every live row; gaps, if any, are skipped.
     let mut seq = end_seq;
     loop {
         if seq < pruned_below {
@@ -2030,10 +1663,6 @@ fn collect_window(
     }
     Ok(window)
 }
-
-// ---------------------------------------------------------------------------------------------
-// Rounds
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Canon {
@@ -2172,11 +1801,6 @@ fn apply_round_observation(
             )?;
         }
         (RoundState::Matured, Canon::Canonical) => {
-            // A lower-height higher-work reorg can retain the rewarded block
-            // while reducing its depth below maturity. The round must not
-            // stay Matured and payable: recheck maturity, reverse credits
-            // with the deficit-preserving accounting, and return to Immature
-            // so a deeper tip can mature it again.
             if depth < u64::from(config.coinbase_maturity) {
                 let (reversed, deficit) = reverse_round_credits(tables, round.id)?;
                 reversed_sat = reversed;
@@ -2251,8 +1875,6 @@ fn apply_round_observation(
     Ok(outcome)
 }
 
-/// Read the actual coinbase value from the chain, fix fee, net and allocations. Returns a reason
-/// when the chain contradicts the job owner's claim (the round is left unchanged).
 enum CanonicalApply {
     MissingCoinbase,
     Anomaly(&'static str),
@@ -2377,7 +1999,6 @@ fn credit_round_allocations(tables: &Tables<'_>, round_id: u64) -> Result<u64, L
     Ok(total)
 }
 
-/// Remove a matured round's credits. Returns `(reversed_total, deficit_created)`.
 fn reverse_round_credits(tables: &Tables<'_>, round_id: u64) -> Result<(u64, u64), LedgerError> {
     let allocations = load_allocs(&tables.round_allocs, round_id)?;
     let mut reversed: u64 = 0;
@@ -2401,10 +2022,6 @@ fn reverse_round_credits(tables: &Tables<'_>, round_id: u64) -> Result<(u64, u64
     }
     Ok((reversed, deficit_total))
 }
-
-// ---------------------------------------------------------------------------------------------
-// Payout reconciliation
-// ---------------------------------------------------------------------------------------------
 
 struct TxObservation {
     txid: Hash32,
@@ -2434,9 +2051,6 @@ fn observe_batch(
     batch: &PayoutBatch,
     tip: u32,
 ) -> Result<BatchObservation, LedgerError> {
-    // Phase one: authoritative transaction confirmation evidence. Spend observations
-    // (abandonment evidence) require a script index and must not block confirmation
-    // when the transaction evidence alone is conclusive.
     let mut confirmed = Vec::with_capacity(batch.transactions.len());
     for tx in &batch.transactions {
         let status = chain.tx_status(&tx.txid)?;
@@ -2455,10 +2069,6 @@ fn observe_batch(
     let mut txs = Vec::with_capacity(batch.transactions.len());
     for (tx, status, canonical, depth) in confirmed {
         let confirmed_here = canonical && matches!(status, TxStatus::Confirmed { .. });
-        // When one transaction conclusively confirms the payout, skip spend-index
-        // lookups entirely: missing abandonment evidence (e.g. no script index
-        // after the replaced transaction left the mempool) must not abort the
-        // confirmation. Only without conclusive confirmation do we need spends.
         let dead_by = if conclusive || confirmed_here || status == TxStatus::InMempool {
             None
         } else {
@@ -2479,8 +2089,6 @@ fn observe_batch(
     })
 }
 
-/// A confirmed spend of one of `tx`'s inputs by a transaction outside the batch, buried at least
-/// `abandon_confirmations` deep on the active chain.
 fn find_dead_spend(
     chain: &dyn ChainView,
     config: &PoolConfig,
@@ -2559,10 +2167,6 @@ fn decide(batch: &PayoutBatch, observation: &BatchObservation, config: &PoolConf
     }
 }
 
-/// Applies `mutate` to the balance of every batch output, loading and storing
-/// each account exactly once. The closure receives the loaded balance and the
-/// output amount and performs the checked debit/credit; this keeps the
-/// load-mutate-store loop in one place.
 fn apply_to_outputs(
     tables: &Tables<'_>,
     outputs: &[PayoutOutput],
@@ -2607,8 +2211,6 @@ fn release_reservation(tables: &Tables<'_>, batch: &PayoutBatch) -> Result<(), L
         balance.reserved_sat = balance.reserved_sat.checked_sub(amount).ok_or_else(|| {
             LedgerError::Corrupt("releasing a payout exceeds the reservation".into())
         })?;
-        // Released money first repays any deficit left by a reversed reward, so a reorged
-        // reward can never become payable again through a cancelled or failed batch.
         let offset = balance.deficit_sat.min(amount);
         balance.deficit_sat -= offset;
         balance.available_sat = balance
@@ -2624,15 +2226,10 @@ fn next_rev(rev: u64) -> Result<u64, LedgerError> {
         .ok_or(LedgerError::Overflow("batch revision"))
 }
 
-// ---------------------------------------------------------------------------------------------
-// Counters, audit
-// ---------------------------------------------------------------------------------------------
-
 fn meta_u64(meta: &Table<'_, &'static str, u64>, key: &'static str) -> Result<u64, LedgerError> {
     Ok(meta.get(key)?.map_or(0, |guard| guard.value()))
 }
 
-/// Return the current counter value (or `first` when unset) and store the next one.
 fn bump(
     meta: &Table<'_, &'static str, u64>,
     key: &'static str,
@@ -2708,10 +2305,6 @@ fn decode_audit(seq: u64, bytes: &[u8]) -> Result<AuditRecord, LedgerError> {
         chain,
     })
 }
-
-// ---------------------------------------------------------------------------------------------
-// Row encoding and loading
-// ---------------------------------------------------------------------------------------------
 
 fn hash_from(bytes: &[u8]) -> Result<Hash32, LedgerError> {
     bytes

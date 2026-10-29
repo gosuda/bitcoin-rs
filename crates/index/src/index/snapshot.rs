@@ -11,14 +11,8 @@ use crate::{
 use bitcoin_rs_primitives::{OutPoint, Txid};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
 
-/// One persisted `TxIndex` row family that [`TxIndexSnapshot::scan_family_page`]
-/// pages.
-///
-/// `ScriptHistory` occurrences are intentionally absent: that family has no
-/// qualified portable layout yet, and a variant is added only with its codec.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TxIndexFamily {
-    /// Confirmed-transaction rows: `txid prefix (8) || height (4, BE)` keys
     /// carrying packed `TxPosition` values.
     TxConfirmed,
 }
@@ -31,23 +25,18 @@ impl TxIndexFamily {
     }
 }
 
-/// One typed row from a `TxIndex` prefix scan, including its raw value.
 #[derive(Debug)]
 pub struct TxIndexScanRow {
     /// Parsed fixed-width prefix row.
     pub row: HashPrefixRow,
-    /// Raw storage value associated with the row.
     pub value: Vec<u8>,
 }
 
-/// Result of one bounded typed `TxIndex` prefix scan.
 #[derive(Debug)]
 pub struct TxIndexScan {
     /// Parsed fixed-width prefix rows.
     pub rows: Vec<TxIndexScanRow>,
-    /// Encoded key and value bytes returned by storage.
     pub encoded_bytes: usize,
-    /// Whether storage returned the complete matching prefix.
     pub complete: bool,
 }
 
@@ -56,41 +45,27 @@ pub struct TxIndexScan {
 pub struct TxIndexPage {
     /// Parsed rows of this page in ascending stored-key order.
     pub rows: Vec<TxIndexScanRow>,
-    /// Whether the family ends with this page. With a positive `max_rows`
-    /// limit, a page that is not complete is always non-empty, so callers
-    /// advance with the last returned key until `complete`.
     pub complete: bool,
 }
 
-/// Result of one bounded `ScriptLive` prefix scan.
 #[derive(Debug)]
 pub struct ScriptLiveScan {
-    /// Parsed live-output locator rows.
     pub rows: Vec<crate::ScriptLiveRow>,
-    /// Encoded key and value bytes returned by storage.
     pub encoded_bytes: usize,
-    /// Whether storage returned the complete matching prefix.
     pub complete: bool,
 }
 
-/// Point-in-time, typed view of durable `TxIndex` rows.
 pub trait TxIndexSnapshot: Send + Sync {
-    /// Reads one persisted basic filter from the same snapshot as its watermark.
     fn compact_filter(&self, _hash: &[u8; 32]) -> Result<Option<super::BasicFilter>, IndexError> {
         Ok(None)
     }
-    /// Loads one capability's exact durable watermark from this snapshot.
     fn capability_watermark(
         &self,
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError>;
     /// Scans one bounded page of `family` in ascending stored-key order.
-    ///
-    /// `start_after = None` starts at the family head; otherwise the page
     /// begins at the first key strictly above `start_after`. Backends seek
     /// the snapshot to the cursor, so no family-sized copy is made on any
-    /// backend. A malformed key or a storage failure ends the page with an
-    /// error.
     fn scan_family_page(
         &self,
         family: TxIndexFamily,
@@ -103,25 +78,21 @@ pub trait TxIndexSnapshot: Send + Sync {
         let _ = capability;
         Ok(0)
     }
-    /// Scans confirmed-transaction rows for `txid`.
     fn transaction_rows(
         &self,
         txid: &Txid,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
-    /// Scans funding rows for `scripthash`.
     fn funding_rows(
         &self,
         scripthash: ScriptHash,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
-    /// Scans spending rows for `outpoint`.
     fn spending_rows(
         &self,
         outpoint: &OutPoint,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
-    /// Scans compact live-output locator rows for `scripthash`.
     fn live_rows(
         &self,
         scripthash: ScriptHash,
@@ -176,15 +147,14 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         crate::index::capability::read_coverage_floor(self.snapshot.as_ref(), capability)
     }
 
+    /// Resumes after `cursor` with `cursor || 0x00`: fixed-width keys make the suffixed key
+    /// the least key strictly above `cursor`.
     fn scan_family_page(
         &self,
         family: TxIndexFamily,
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError> {
-        // Resume after `cursor` with `cursor || 0x00`: stored keys are
-        // fixed-width, so the suffixed key is the least key strictly above
-        // `cursor`. No `start_after` begins at the family head.
         let start: Vec<u8> = match start_after {
             Some(cursor) => {
                 let mut start = Vec::with_capacity(cursor.len().saturating_add(1));
@@ -279,9 +249,7 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
     }
 }
 
-/// Read-only `TxIndex` interface.
 pub trait IndexReader: Send + Sync {
-    /// Captures a point-in-time typed `TxIndex` snapshot.
     fn snapshot(&self) -> Result<Box<dyn TxIndexSnapshot + '_>, IndexError>;
 }
 

@@ -46,9 +46,6 @@ impl ActiveHeightIndex {
         self.state = TrustState::Tainted;
     }
 
-    /// Extends a trusted index by one tip when parent/height preconditions hold.
-    ///
-    /// Must not promote [`TrustState::Tainted`] to [`TrustState::Trusted`].
     pub(super) fn extend_validated(
         &mut self,
         parent: NodeId,
@@ -66,7 +63,6 @@ impl ActiveHeightIndex {
         }
     }
 
-    /// Commits a fully validated rebuild. This is the only Trusted transition.
     pub(super) fn commit_validated_rebuild(&mut self, entries: Vec<NodeId>) {
         self.entries = entries;
         self.state = TrustState::Trusted;
@@ -75,7 +71,6 @@ impl ActiveHeightIndex {
 
 #[cfg(test)]
 impl ActiveHeightIndex {
-    /// Test seam: taints first, then optionally replaces a height slot.
     pub(super) fn replace_slot_for_test(&mut self, height: u32, id: NodeId) -> bool {
         self.taint();
         let Some(index) = usize::try_from(height).ok() else {

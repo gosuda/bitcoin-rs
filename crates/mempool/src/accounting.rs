@@ -1,9 +1,3 @@
-//! Prevout-aware accounting shared by admission and acceptance previews.
-//!
-//! These are accounting facts, not a second validation engine. The gateway
-//! still verifies scripts and commits policy decisions; a preview may provide
-//! incomplete prevouts and must retain its explicit missing-input fact.
-
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
@@ -30,7 +24,6 @@ pub(crate) fn policy_vsize(tx: &Tx, sigop_cost: u32) -> u32 {
     u32::try_from(weight.div_ceil(4)).unwrap_or(u32::MAX)
 }
 
-/// Derives admission accounting from the resolved input outputs.
 #[must_use]
 pub(crate) fn prepared_context(
     tx: &Tx,

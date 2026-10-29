@@ -13,8 +13,6 @@ use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
-/// Fails with `ENOSPC` when `configured` armed `boundary`; called by the
-/// publication sequence immediately before the boundary it names.
 #[cfg(any(test, feature = "test-seam"))]
 fn injected_io(
     configured: Option<CheckpointFailpoint>,
@@ -26,12 +24,10 @@ fn injected_io(
     Ok(())
 }
 
-/// Size and SHA-256 digest produced while writing one checkpoint artifact.
 pub struct ArtifactDigest {
     pub bytes: u64,
     pub sha256: [u8; 32],
 }
-/// Capability-scoped staging state for one checkpoint generation.
 pub struct CheckpointStage {
     pub(crate) root: CheckpointRoot,
     pub(crate) staging: Dir,
@@ -42,11 +38,9 @@ pub struct CheckpointStage {
     pub(crate) failpoint: Option<CheckpointFailpoint>,
 }
 impl CheckpointStage {
-    /// Returns the generation reserved by this staging transaction.
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Writes, hashes, and synchronizes one staged artifact.
     pub fn write_artifact<T, E: From<CheckpointError>>(
         &self,
         name: &str,
@@ -60,7 +54,6 @@ impl CheckpointStage {
         )
     }
 
-    /// Writes an artifact while arming its test-only write and sync boundaries.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn write_artifact_with_failpoints<T, E: From<CheckpointError>>(
         &self,
@@ -105,7 +98,6 @@ impl CheckpointStage {
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
 }
-/// Reserves a new generation directory and opens its staging transaction.
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
     begin_publication_at(
         data_dir,
@@ -114,7 +106,6 @@ pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointEr
     )
 }
 
-/// Reserves a generation in an explicit checkpoint namespace.
 pub fn begin_publication_at(
     data_dir: &Dir,
     root_name: &str,
@@ -129,7 +120,6 @@ pub fn begin_publication_at(
     )
 }
 
-/// Reserves a staging transaction with an optional test-only failure boundary.
 #[cfg(any(test, feature = "test-seam"))]
 pub fn begin_publication_with_failpoint(
     data_dir: &Dir,
@@ -143,8 +133,6 @@ pub fn begin_publication_with_failpoint(
     )
 }
 
-/// Reserves a generation in an explicit checkpoint namespace with a test-only
-/// failure boundary armed.
 #[cfg(any(test, feature = "test-seam"))]
 pub fn begin_publication_at_with_failpoint(
     data_dir: &Dir,
@@ -178,12 +166,11 @@ fn begin_publication_inner(
     })
 }
 
-/// Atomically publishes a staged generation through CURRENT.
+/// Runs the write → flush → sync → rename → sync-root barrier sequence once.
 ///
-/// The write → flush → sync → rename → sync-root barrier sequence exists
-/// exactly once; under `test`/`test-seam` each boundary is armed through
-/// `injected_io` immediately before the operation it names, so a failpoint
-/// run exercises this same sequence.
+/// Under `test`/`test-seam` each boundary is armed through `injected_io`
+/// immediately before the operation it names, so a failpoint run exercises
+/// this same sequence.
 pub fn commit_publication(
     stage: CheckpointStage,
     manifest: &CheckpointManifestV1,
@@ -204,7 +191,7 @@ pub fn commit_publication(
             manifest.generation
         )));
     }
-    let manifest_bytes = serde_json::to_vec(manifest)?;
+    let manifest_bytes = sonic_rs::to_vec(manifest)?;
     let mut mf = create_file(&staging, MANIFEST_FILE)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::ManifestWrite)?;
@@ -239,7 +226,7 @@ pub fn commit_publication(
         directory: paths.directory.clone(),
         manifest_sha256: bitcoin_rs_primitives::encode::hex_encode(&reference.manifest_sha256),
     };
-    let current_bytes = serde_json::to_vec(&current)?;
+    let current_bytes = sonic_rs::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentTempWrite)?;
@@ -259,8 +246,6 @@ pub fn commit_publication(
     }
     Ok(reference)
 }
-/// Retires generations only after the authoritative owner accepts `generation`.
-/// Cleanup failure leaves recoverable extra files in place.
 pub fn retire_checkpoint_generations_at(
     data_dir: &Dir,
     root_name: &str,
@@ -272,10 +257,6 @@ pub fn retire_checkpoint_generations_at(
     Ok(())
 }
 
-/// Clears checkpoint generations and CURRENT when the owner no longer needs them.
-///
-/// Unknown namespace entries are preserved; cleanup failures are logged and may
-/// be retried without blocking recovery.
 pub fn clear_checkpoint_generations_at(
     data_dir: &Dir,
     root_name: &str,

@@ -1,7 +1,3 @@
-// CONTRACT: `docs/contracts/external-api.md#API-05` and `#API-11` own
-// mining validation/submission projection; the BIP22 reject vocabulary is
-// the in-code mapping contract from consensus/chain refusal to reject
-// reason strings.
 use super::{chain_reject_reason, consensus_reject_reason, header_reject_reason};
 use crate::MiningControlError;
 use bitcoin_rs_chain::{ChainError, ChainWork, NodeId};
@@ -146,7 +142,6 @@ fn header_failures_use_core_bip22_reasons() {
             "bad-version(0x00000001)",
         ),
         (
-            // Core prints the unsigned bit pattern of the signed version.
             ChainError::BadVersion {
                 version: -1,
                 required: 4,
@@ -167,7 +162,6 @@ fn header_failures_use_core_bip22_reasons() {
     }
 }
 
-// CONTRACT: docs/contracts/external-api.md#API-13
 #[test]
 fn header_reject_reason_uses_chain_vocabulary() {
     let hash = Hash256::default();

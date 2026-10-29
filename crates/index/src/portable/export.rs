@@ -1,17 +1,5 @@
 //! Export: stream the `TxLookup` family of one coherent snapshot into a
 //! hashed artifact, then publish the manifest last.
-//!
-//! Every exported locator must equal a real top-level block transaction
-//! boundary: the recorded offset and length must match one parsed transaction
-//! span of the block body, the same rule restore enforces.
-//!
-//! Consistency: the row stream is read from one point-in-time key-value
-//! snapshot whose `TxLookup` watermark is the applied tip (snapshot
-//! isolation). The writer's fenced watermark capture before and after the
-//! stream is a linearizable compare; any movement aborts and removes the
-//! output, so a published manifest always names a bundle taken at one
-//! watermark. Re-running an export into a fresh directory is idempotent: it
-//! reads state and writes only new files.
 
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, IO_BUFFER_BYTES, hash_file,
@@ -40,14 +28,9 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use zerocopy::IntoBytes;
 
-/// Rows per export page. Export streams the family through bounded pages
-/// over one snapshot, so export memory stays flat in family size on every
-/// backend instead of materializing the whole family before emitting rows.
 const EXPORT_PAGE_ROWS: usize = 1_024;
-/// Cap on returned key-plus-value bytes per page after the first row.
 const EXPORT_PAGE_BYTES: usize = 1 << 20;
 
-/// Limit for one export page scan.
 fn export_page_limit() -> PrefixScanLimit {
     PrefixScanLimit {
         max_rows: EXPORT_PAGE_ROWS,
@@ -56,12 +39,6 @@ fn export_page_limit() -> PrefixScanLimit {
 }
 
 /// Streams every `TxConfirmed` row of one snapshot in stored-key order
-/// through bounded pages, calling `emit` once per row.
-///
-/// Cancellation is polled every [`CANCEL_POLL_RECORDS`] visited rows.
-/// Pages concatenate to the family's stored order; a page scan that
-/// returns an empty incomplete page can make no progress, so it refuses
-/// rather than loops.
 #[expect(
     clippy::type_complexity,
     reason = "the page emitter signature is the streaming interface; an alias would hide the output contract"
@@ -94,37 +71,21 @@ fn stream_family_pages(
             return Ok(totals);
         }
         let Some(last) = last_key else {
-            // A conforming page scan always returns its first row while rows
-            // remain; without one there is no cursor to advance.
             return Err(IndexError::from(StorageError::InvalidOperation(
                 "export page scan returned an empty incomplete page",
             ))
             .into());
         };
-        // Stored keys are fixed-width: the suffixed key is the least key
-        // strictly above the page, so the next page resumes without overlap
-        // or gap.
         let mut next = last;
         next.push(0);
         start_after = Some(next);
     }
 }
 
-/// Directory fsync used by a [`Publication`].
 type SyncDir = fn(&Path) -> Result<(), IndexBundleError>;
 
-/// Owns every file one export creates in its bundle directory.
-///
-/// Files are created with create-new, so an entry that existed before the
-/// export is never opened, replaced, or removed. Until [`Self::commit`]
-/// makes the final directory entry durable, dropping the publication removes
-/// the created files newest first: the manifest goes before the artifact it
-/// names, and the artifact is removed only once the manifest's removal is
-/// itself durable. A failed, stale, or cancelled export therefore never
-/// leaves a manifest that names a missing artifact.
 struct Publication {
     dir: PathBuf,
-    /// Created paths, oldest first.
     created: Vec<PathBuf>,
     committed: bool,
     sync: SyncDir,
@@ -144,7 +105,6 @@ impl Publication {
         }
     }
 
-    /// Creates `path`, refusing to overwrite anything already there, and
     /// takes ownership of its removal.
     fn create_new(&mut self, path: &Path) -> Result<File, IndexBundleError> {
         let file = create_new_file(path)?;
@@ -152,9 +112,6 @@ impl Publication {
         Ok(file)
     }
 
-    /// Makes every created entry durable. Only success disarms the cleanup;
-    /// a failed directory fsync is returned, never retried, and the drop
-    /// removes the created files.
     fn commit(mut self) -> Result<(), IndexBundleError> {
         (self.sync)(&self.dir)?;
         self.committed = true;
@@ -181,8 +138,6 @@ impl Drop for Publication {
                 }
             }
             if let Err(error) = (self.sync)(&self.dir) {
-                // The removal may not be durable; removing an older file now
-                // could leave a surviving manifest naming a missing artifact.
                 tracing::warn!(
                     path = %path.display(),
                     %error,
@@ -194,7 +149,6 @@ impl Drop for Publication {
     }
 }
 
-/// Creates `path`, refusing to overwrite anything already there.
 fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
     OpenOptions::new()
         .write(true)
@@ -209,7 +163,6 @@ fn create_new_file(path: &Path) -> Result<File, IndexBundleError> {
         })
 }
 
-/// Exports the `TxLookup` family at the applied tip into `request.dir`.
 pub(super) fn export(
     host: &BundleHost<'_>,
     request: &IndexBundleRequest,
@@ -234,16 +187,11 @@ pub(super) fn export(
     let identity = captured.identity(request);
     let artifact = captured.write_artifact(host, file, &artifact_path, &identity)?;
 
-    // Abort stale output: the writer must still show exactly the captured
-    // fence (reset state, ordinary revision, and watermarks), or the stream
-    // may describe rows the index no longer holds; an equal watermark alone
-    // would miss a completed reset and rebuild in between.
     let (after, _) = host.writer.fenced_watermarks()?;
     if after != captured.fence {
         return Err(IndexBundleError::Stale);
     }
 
-    // The artifact's directory entry is durable before any manifest names it.
     sync_dir(dir)?;
     let mode = if host.enabled.contains(IndexCapability::ScriptHistory) {
         IndexMode::Full
@@ -263,9 +211,6 @@ pub(super) fn export(
     })
 }
 
-/// Writes and fsyncs `manifest.json` with create-new. Its directory entry
-/// becomes durable only through [`Publication::commit`]; until then the
-/// publication removes it on failure.
 fn write_manifest(
     publication: &mut Publication,
     path: &Path,
@@ -277,13 +222,9 @@ fn write_manifest(
         .map_err(|error| io_error(path, error))
 }
 
-/// Everything an export fixes at its start: the exact watermarks, the chain
-/// identity of the applied tip, and the base watermark every per-page
-/// snapshot must still show.
 struct Captured<'a> {
     fence: IndexWriteFence,
     chain: ChainBase,
-    /// The applied tip's cumulative transaction count, which is the base's.
     chain_tx_count: u64,
     base: IndexWatermark,
     floor: u32,
@@ -291,8 +232,6 @@ struct Captured<'a> {
 }
 
 impl<'a> Captured<'a> {
-    /// Requires the `TxLookup` watermark to be exactly the applied tip and the
-    /// snapshot to agree with it; otherwise nothing is written.
     fn take(host: &BundleHost<'a>) -> Result<Self, IndexBundleError> {
         let (fence, watermarks) = host.writer.fenced_watermarks()?;
         let base = watermarks
@@ -313,7 +252,6 @@ impl<'a> Captured<'a> {
                 "the base block is not on the active chain",
             ));
         }
-        // The base is the applied tip, so no block lies above it to read.
         let chain_tx_count = chain.counted_base().ok_or(IndexBundleError::NotReady(
             "the chain transaction count at the base is not established",
         ))?;
@@ -349,13 +287,6 @@ impl<'a> Captured<'a> {
         }
     }
 
-    /// Streams the records, patches the final header over the placeholder,
-    /// fsyncs, and returns the artifact's exact identity.
-    ///
-    /// The header's record and payload counts are known only after the row
-    /// stream, and the digest covers the header first, so the digest is taken
-    /// by one bounded hashed read of the final fsynced bytes rather than
-    /// during the write: it names exactly the file a manifest will publish.
     fn write_artifact(
         &self,
         host: &BundleHost<'_>,
@@ -404,17 +335,13 @@ impl<'a> Captured<'a> {
     }
 }
 
-/// Turns stored `TxConfirmed` rows into full-txid records, one row at a time.
 struct RowExporter<'a> {
     host: &'a BundleHost<'a>,
     chain: &'a ChainBase,
     floor: u32,
     reader: BodyReader<'a>,
-    /// `(txid, position)` pairs of the current row, sorted by id then position.
     located: Vec<([u8; 32], TxPosition)>,
-    /// Scratch position list of the record being written.
     positions: Vec<TxPosition>,
-    /// Positions already written to the artifact.
     positions_written: u64,
     path: &'a Path,
 }
@@ -427,19 +354,10 @@ const RESOLVED_SORT_KEY_LEN: usize = 8;
 /// Staged payload of one row: the fixed-width stored key, the value length,
 /// then the value.
 const STAGED_KEY_LEN: usize = HASH_PREFIX_ROW_SIZE;
-/// Bytes accumulated per external-sort run. Runs are cut by bytes rather than
-/// by entries so one run never exceeds a constant even when single rows carry
-/// unusually large position lists.
 const SORT_RUN_BYTES: usize = 4 << 20;
-/// Sorted runs merged at once. The merge holds one decoded head entry plus
-/// one open file per run, so descriptors and memory stay bounded no matter
-/// how many runs a family needs.
 const SORT_MERGE_FAN_IN: usize = 32;
 
-/// One framed external-sort record: `sort_key || payload_len (u64 LE) ||
-/// payload`. Merge passes compare only the fixed-width sort key, so one
-/// implementation sorts both the staged file (keyed by height) and the
-/// resolved file (keyed by sequence).
+/// Writes one framed record: sort key, value length, then value.
 fn write_framed(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<()> {
     let payload_len = u64::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload length exceeds u64"))?;
@@ -448,9 +366,6 @@ fn write_framed(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<
     out.write_all(payload)
 }
 
-/// Reads one framed record, or `None` at a clean record boundary. A file
-/// that ends inside a key, length, or payload is corruption, never a clean
-/// end.
 fn read_framed(reader: &mut impl Read, key_len: usize) -> io::Result<Option<(Vec<u8>, Vec<u8>)>> {
     let mut key = vec![0_u8; key_len];
     match reader.read_exact(&mut key) {
@@ -468,16 +383,6 @@ fn read_framed(reader: &mut impl Read, key_len: usize) -> io::Result<Option<(Vec
     Ok(Some((key, payload)))
 }
 
-/// Sorts every framed record of `file` by its sort key, using bounded memory.
-///
-/// The file is split into sorted runs of at most [`SORT_RUN_BYTES`], then the
-/// runs merge [`SORT_MERGE_FAN_IN`] at a time until one sorted file remains;
-/// the file is rewritten in place and left at its start. Anonymous temp files
-/// back the runs, so cancelling or failing the export removes every staging
-/// byte with the file handles. Cancellation is polled every
-/// [`CANCEL_POLL_RECORDS`] records during run generation and merging, and
-/// once per bounded copy chunk, so a large sort stops promptly instead of
-/// running to completion after shutdown.
 fn external_sort(
     file: &mut File,
     key_len: usize,
@@ -556,9 +461,6 @@ fn external_sort(
     Ok(())
 }
 
-/// Copies one sorted run back into `file` in bounded chunks, polling
-/// cancellation once per chunk so a large single-run copy cannot block
-/// shutdown after the record passes already polled.
 fn copy_sort_run(
     run: &mut File,
     file: &mut File,
@@ -583,12 +485,6 @@ fn copy_sort_run(
     Ok(())
 }
 
-/// Merges one group of sorted runs into `out`, holding one head entry and
-/// one open file per run.
-///
-/// Cancellation is polled every [`CANCEL_POLL_RECORDS`] merged records, so a
-/// large merge stops promptly instead of running to completion after
-/// shutdown.
 fn merge_runs(
     runs: &mut [File],
     out: &mut File,
@@ -633,7 +529,6 @@ fn merge_runs(
 }
 
 /// Staged payload of one stored row: the fixed-width stored key, the value
-/// length, then the value.
 fn encode_staged(key: &[u8; STAGED_KEY_LEN], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(STAGED_KEY_LEN + 8 + value.len());
     payload.extend_from_slice(key);
@@ -643,7 +538,6 @@ fn encode_staged(key: &[u8; STAGED_KEY_LEN], value: &[u8]) -> Vec<u8> {
     payload
 }
 
-/// Splits one staged payload back into its stored key and value.
 fn decode_staged(payload: &[u8]) -> Option<([u8; STAGED_KEY_LEN], &[u8])> {
     let key: [u8; STAGED_KEY_LEN] = payload.get(..STAGED_KEY_LEN)?.try_into().ok()?;
     let rest = payload.get(STAGED_KEY_LEN..)?;
@@ -656,7 +550,6 @@ fn decode_staged(payload: &[u8]) -> Option<([u8; STAGED_KEY_LEN], &[u8])> {
     Some((key, value))
 }
 
-/// Resolved payload of one row: the height, the entry count, then one
 /// `txid || position` pair per entry, with positions in [`TxPosition`]'s
 /// little-endian 6-byte layout.
 fn encode_resolved(height: u32, located: &[([u8; 32], TxPosition)]) -> Vec<u8> {
@@ -673,7 +566,6 @@ fn encode_resolved(height: u32, located: &[([u8; 32], TxPosition)]) -> Vec<u8> {
 
 type ResolvedPairs = Vec<([u8; 32], TxPosition)>;
 
-/// Splits one resolved payload back into its height and located pairs.
 fn decode_resolved(payload: &[u8]) -> Option<(u32, ResolvedPairs)> {
     if payload.len() < 12 {
         return None;
@@ -700,35 +592,11 @@ fn decode_resolved(payload: &[u8]) -> Option<(u32, ResolvedPairs)> {
 impl RowExporter<'_> {
     /// Streams every row once, in stored-key order, and returns
     /// `(records, payload bytes)`.
-    ///
-    /// Stored order is transaction-id order while bodies are keyed by block,
-    /// so resolving in stored order reloads and reparses one body per row,
-    /// and grouping only within each page still reloads one body per page a
-    /// block touches. The export instead stages every row into an anonymous
-    /// temp file, sorts the staging file by `(height, sequence)`, resolves
-    /// the height-ordered rows so each covered body is read and parsed once,
-    /// then re-sorts the resolved rows by sequence and emits them in stored
-    /// order. The artifact keeps its strictly ascending record order while
-    /// body I/O stays height-local.
-    ///
-    /// Each page is read through a short-lived snapshot that must still show
-    /// `base` at `self.floor`; snapshots are dropped before any body I/O, so
-    /// a long export never pins one key-value snapshot across the whole
-    /// family. Rows stream through bounded pages, sorts spill through bounded
-    /// runs, and only one row is resolved or emitted at a time, so export
-    /// memory stays flat in family size on every backend. Cancellation is
-    /// polled every [`CANCEL_POLL_RECORDS`] scanned, resolved, or emitted
-    /// rows, and on the same interval through both sorts (run generation,
-    /// merging, and the final copy). The writer's end-to-end fence, checked
-    /// after the stream, covers the whole external pass: any watermark
-    /// movement aborts and removes the output.
     fn stream(
         &mut self,
         base: IndexWatermark,
         out: &mut impl Write,
     ) -> Result<(u64, u64), IndexBundleError> {
-        // `host` is itself a shared reference, so copying the cancellation
-        // probe out ends the borrow of `self` immediately.
         let cancelled = self.host.cancelled;
         let (mut staged, rows) = self.enumerate(base, cancelled)?;
         if rows == 0 {
@@ -740,12 +608,6 @@ impl RowExporter<'_> {
         self.emit(&mut resolved, rows, out, cancelled)
     }
 
-    /// Validates one stored row value and charges its positions against the
-    /// running total, returning the new total. Invalid rows fail here with
-    /// `SourceRow` before any staging write, matching the later resolve
-    /// check. Totals past the shared restore bound fail with
-    /// `ExportTooLarge` before the row is written or sorted, so an
-    /// unimportable family never pays staging or sort I/O.
     fn charge_row(value: &[u8], height: u32, total: u64) -> Result<u64, IndexBundleError> {
         let positions = TxPositionValue::decode(value)
             .filter(|found| positions_are_valid(found))
@@ -763,19 +625,6 @@ impl RowExporter<'_> {
     }
 
     /// Streams every stored row once, in stored-key order, into an anonymous
-    /// staging file keyed by `(height, sequence)`.
-    ///
-    /// Each page is read through a short-lived snapshot that must still show
-    /// `base` at `self.floor`; the snapshot is dropped before the next page,
-    /// so a long export never pins one key-value snapshot across the whole
-    /// family. No body I/O happens here: bodies are read once the staging
-    /// file is sorted by height. Positions are decoded, validated, and
-    /// counted against the shared restore bound before staging: over-limit
-    /// families fail with `ExportTooLarge` before any write or sort, while
-    /// corrupt rows fail with `SourceRow`. The later resolve and emit checks
-    /// remain as defense. Cancellation is polled every
-    /// [`CANCEL_POLL_RECORDS`] scanned rows. Returns the staging file, left
-    /// at its start, and the stored-order row count.
     fn enumerate(
         &self,
         base: IndexWatermark,
@@ -822,16 +671,11 @@ impl RowExporter<'_> {
                 break;
             }
             let Some(last) = page.rows.last() else {
-                // A conforming page scan always returns its first row while
-                // rows remain; without one there is no cursor to advance.
                 return Err(IndexError::from(StorageError::InvalidOperation(
                     "export page scan returned an empty incomplete page",
                 ))
                 .into());
             };
-            // Stored keys are fixed-width: the suffixed key is the least key
-            // strictly above the page, so the next page resumes without
-            // overlap or gap.
             let mut next = last.row.to_db_row().to_vec();
             next.push(0);
             start_after = Some(next);
@@ -840,20 +684,6 @@ impl RowExporter<'_> {
         Ok((staged, seq))
     }
 
-    /// Resolves the height-sorted staging file into a sequence-keyed resolved
-    /// file, reading and parsing each covered body once.
-    ///
-    /// `staged` must already sort by `(height, sequence)`, so consecutive
-    /// rows for one block resolve against one cached body no matter how the
-    /// stored order scattered them across pages. One row is resolved and
-    /// filed at a time; the body stays resident across its consecutive rows
-    /// through the bounded LRU, and a block never recurs once its rows are
-    /// filed. Every position still must equal a real top-level transaction
-    /// span whose id carries the row's prefix, exactly as direct resolution
-    /// enforces, and positions stop at the shared restore bound before the
-    /// resolved file can outgrow an importable bundle. Cancellation is polled
-    /// every [`CANCEL_POLL_RECORDS`] resolved rows. Returns the resolved
-    /// file, left at its start, holding `rows` entries in height order.
     fn resolve(
         &mut self,
         staged: &mut File,
@@ -932,14 +762,7 @@ impl RowExporter<'_> {
         Ok(resolved)
     }
 
-    /// Emits the sequence-sorted resolved file into the artifact in stored
     /// order, returning `(records, payload bytes)`.
-    ///
-    /// `resolved` must already sort by sequence, so emission follows the page
-    /// stream's stored order exactly and the artifact keeps its strictly
-    /// ascending record order. One row is held at a time; the position budget
-    /// is re-checked while writing, exactly as direct emission does.
-    /// Cancellation is polled every [`CANCEL_POLL_RECORDS`] emitted rows.
     fn emit(
         &mut self,
         resolved: &mut File,
@@ -999,8 +822,6 @@ impl RowExporter<'_> {
         Ok(totals)
     }
 
-    /// Writes one record per distinct transaction id in `located`, which must
-    /// already be sorted by id then position.
     fn emit_row(
         &mut self,
         height: u32,
@@ -1038,10 +859,6 @@ impl RowExporter<'_> {
         Ok((records, bytes))
     }
 
-    /// Resolves every position of `row` to its full transaction id, refusing
-    /// any position that is not a top-level transaction span whose id carries
-    /// the row's prefix. Bytes that merely decode to a transaction elsewhere
-    /// in the block never resolve a locator.
     fn locate(&mut self, row: HashPrefixRow, value: &[u8]) -> Result<(), IndexBundleError> {
         let height = row.height();
         let corrupt = |reason: &'static str| IndexBundleError::SourceRow { height, reason };
@@ -1102,7 +919,6 @@ mod tests {
         io_error(dir, io::Error::other("injected directory fsync failure"))
     }
 
-    /// Fails only the first directory fsync: the publication's final commit.
     fn fail_first_sync(dir: &Path) -> Result<(), IndexBundleError> {
         let call = calls();
         SYNC_CALLS.with(|count| count.set(call + 1));
@@ -1118,7 +934,6 @@ mod tests {
         Err(injected(dir))
     }
 
-    /// Creates the artifact and manifest the way `export` does.
     fn stage(
         publication: &mut Publication,
         dir: &Path,
@@ -1174,7 +989,6 @@ mod tests {
         Ok(())
     }
 
-    /// Small page size over a multi-page family: pages concatenate in
     /// stored-key order with no overlap, gap, or repeat.
     #[test]
     fn paged_stream_preserves_row_order_across_small_pages() {
@@ -1204,8 +1018,6 @@ mod tests {
         );
     }
 
-    /// Cancellation trips mid-stream: the poll fires every
-    /// `CANCEL_POLL_RECORDS` visited rows even across page boundaries.
     #[test]
     fn paged_stream_stops_at_cancellation() {
         let fake = PagedFake::new(5_000);
@@ -1236,9 +1048,6 @@ mod tests {
         );
     }
 
-    /// A cancelled sort aborts instead of running to completion: without
-    /// the run-generation, merge, and copy polls this large file would sort
-    /// fully and return `Ok`, blocking shutdown.
     #[test]
     fn external_sort_aborts_when_cancelled() -> TestResult {
         let mut file = tempfile::tempfile()?;
@@ -1259,9 +1068,6 @@ mod tests {
         Ok(())
     }
 
-    /// Enumeration charges positions before staging: over-limit totals fail
-    /// with `ExportTooLarge` before any write or sort, while corrupt values
-    /// fail with `SourceRow` exactly as the later resolve check would.
     #[test]
     fn enumeration_charges_positions_before_staging() -> TestResult {
         let valid = TxPositionValue::encode(&[TxPosition::new(0, 1), TxPosition::new(1, 1)]);
@@ -1294,7 +1100,6 @@ mod tests {
         Ok(())
     }
 
-    /// An empty family completes with no rows and no error.
     #[test]
     fn paged_stream_accepts_an_empty_family() {
         let fake = PagedFake::new(0);
@@ -1312,8 +1117,6 @@ mod tests {
         assert_eq!(fake.pages.load(Ordering::SeqCst), 1);
     }
 
-    /// A page that returns no rows without completing can make no
-    /// progress: the loop refuses instead of spinning.
     #[test]
     fn paged_stream_refuses_a_page_that_makes_no_progress() {
         let fake = PagedFake {
@@ -1336,11 +1139,6 @@ mod tests {
         );
     }
 
-    /// In-memory `TxIndexSnapshot` that honors a page limit exactly like the
-    /// storage seam: key order, first row always returned, byte accounting
-    /// after it. Row lookups are never served: the page loop under test
-    /// never calls them, and calling one is an explicit typed error rather
-    /// than a panic.
     struct PagedFake {
         rows: Vec<(HashPrefixRow, Vec<u8>)>,
         pages: AtomicUsize,

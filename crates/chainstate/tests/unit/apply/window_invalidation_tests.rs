@@ -1,8 +1,3 @@
-//! Window invalidation must keep the published header tip and the
-//! assume-valid gate in sync with the mutated tree, exactly as reorg
-//! invalidation does. A body that only mutates the delivered bytes must leave
-//! its valid header alone.
-
 use std::sync::Arc;
 
 use bitcoin_rs_chain::NodeStatus;
@@ -18,8 +13,6 @@ use parking_lot::Mutex;
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition, WindowApplyError};
 use crate::test_fixtures::{StagedFire, handles, seed_genesis, staging_recorder};
 
-/// A solved, empty block: the commit refuses its body with `EmptyBlock`, a
-/// permanent failure, while its header is already in the tree.
 fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static str> {
     let mut block = Block {
         header: Header {
@@ -37,9 +30,6 @@ fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static
     Ok(block)
 }
 
-/// A solved child of `prev_blockhash` whose whole body is one transaction that
-/// is not a coinbase, and whose header commits to that body. Its
-/// witness-stripped size is `60 + script_len` bytes.
 fn coinbase_less_child(
     prev_blockhash: BlockHash,
     script_len: usize,
@@ -75,11 +65,6 @@ fn coinbase_less_child(
     Ok(Block { header, txs })
 }
 
-/// Delivers a coinbase-less body of `60 + script_len` bytes as a one-block
-/// window for its already-known header, to a fresh regtest chainstate.
-/// Returns the window failure, the header's tree status right after insert
-/// (the preexisting status a body failure must preserve) and after delivery,
-/// and the published applied tip after delivery.
 fn deliver_coinbase_less_body(
     script_len: usize,
 ) -> Result<(WindowApplyError, NodeStatus, NodeStatus, Hash256), Box<dyn std::error::Error>> {
@@ -92,8 +77,6 @@ fn deliver_coinbase_less_body(
         .block_tree
         .write()
         .insert_header(block.header, NodeStatus::HeaderValid)?;
-    // Inserting a best-work header publishes it as the header tip, so the
-    // preexisting status is whatever the tree assigned, not the requested one.
     let before = {
         let tree = chainstate.block_tree.read();
         tree.lookup(hash)
@@ -179,8 +162,6 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
     let mut handles: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles).map_err(|error: ApplyError| error.to_string())?;
 
-    // The empty child at height 1 becomes both the assume-valid anchor and
-    // the published header tip, so the gate starts trusted.
     let anchor = empty_child(genesis.block_hash(), 1)?;
     let anchor_hash = Hash256::from(anchor.block_hash());
     handles
@@ -202,9 +183,6 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.invalidated.to_vec(), vec![anchor_hash]);
 
-    // The invalidation removed the anchor from the active chain. The shared
-    // operation must have republished the best valid tip and re-evaluated
-    // the gate against the mutated tree under the same write lock.
     assert!(
         !handles.assume_valid_gate.trusted(),
         "window invalidation must re-evaluate the assume-valid gate"
@@ -217,12 +195,6 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// When a later block in a window fails permanently, the failure-prefix flush
-/// hands the hook the last successfully staged block — never the failed one —
-/// and still publishes the committed prefix. The hook fires before the
-/// flush's durable sync, so the published tip inside the hook is the
-/// pre-window tip. A hook wired to the failing block, or a flush that
-/// published the staged tip early, fails this test.
 #[test]
 fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -230,8 +202,6 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
     let genesis_hash = Hash256::from(genesis.block_hash());
     let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&chainstate).map_err(|error: ApplyError| error.to_string())?;
-    // The prefix flush below commits a durable batch, so the window's
-    // lineage fence needs the genesis head seeded first.
     chainstate.durable_head.commit(
         None,
         &bitcoin_rs_storage::DurableHead {
@@ -249,8 +219,6 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
     let first = mined_child(genesis.block_hash(), 1)?;
     let second = mined_child(first.block_hash(), 2)?;
     let second_hash = Hash256::from(second.block_hash());
-    // An empty body is refused with `EmptyBlock`, a permanent failure: the
-    // header branch is poisoned, but the two committed blocks stay staged.
     let bad = empty_child(second.block_hash(), 3)?;
     let bad_hash = Hash256::from(bad.block_hash());
     {

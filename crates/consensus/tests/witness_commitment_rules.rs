@@ -1,9 +1,3 @@
-//! BIP141 witness-commitment rules at both exported block entries.
-//!
-//! BIP141 and Core v31.0 `CheckWitnessMalleation` / `CheckBlock` references.
-//! The staging gate and block-rule entry share a witness/activation table.
-//! Fixtures isolate block witness rules; they are not mined or UTXO-valid.
-
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
@@ -16,7 +10,6 @@ use bitcoin_rs_primitives::{
 };
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-// SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
 const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
     0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69, 0x53, 0x75,
     0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e, 0x8c, 0xf9,
@@ -64,8 +57,6 @@ fn single(tx: Tx) -> Block {
     block(vec![tx], root)
 }
 
-/// The block-rule entry under an explicit activation context; the active
-/// context goes through the context-free default entry.
 fn rules(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
     if segwit_active {
         return verify_block_rules(block);
@@ -82,19 +73,14 @@ fn rules(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
 fn staging_gate_and_block_rules_agree_on_witness_commitment_shapes() {
     use ConsensusError::{UnexpectedWitness, WitnessCommitment, WitnessNonceSize};
     let zero = Some(ZERO_RESERVED_COMMITMENT);
-    // (coinbase witness, commitment, segwit active, verdict at both entries)
     let cases = [
-        // A peer stripped the reserved value from a committed coinbase.
         (None, zero, true, Err(WitnessNonceSize)),
         (Some(31), zero, true, Err(WitnessNonceSize)),
         (Some(33), zero, true, Err(WitnessNonceSize)),
         (Some(32), Some([0xff; 32]), true, Err(WitnessCommitment)),
         (Some(32), zero, true, Ok(())),
         (None, None, true, Ok(())),
-        // Injected witness without a commitment keeps the txid and block hash.
         (Some(32), None, true, Err(UnexpectedWitness)),
-        // Pre-activation a commitment-like output is not enforced (P1-1) and
-        // never authorizes witness data.
         (None, zero, false, Ok(())),
         (None, None, false, Ok(())),
         (Some(32), zero, false, Err(UnexpectedWitness)),
@@ -151,8 +137,6 @@ fn witness_without_commitment_is_unexpected_even_outside_coinbase() {
     }
 }
 
-/// A peer cannot replace non-witness transaction bytes while retaining the
-/// valid header: the changed txid no longer matches the header Merkle root.
 #[test]
 fn altered_non_witness_transaction_is_rejected() {
     let mut malformed = single(coinbase(None, None));
@@ -165,7 +149,6 @@ fn altered_non_witness_transaction_is_rejected() {
     );
 }
 
-/// A matching but ambiguous transaction-ID tree is rejected before staging.
 #[test]
 fn merkle_mutation_is_rejected() {
     let tx = coinbase(None, None);

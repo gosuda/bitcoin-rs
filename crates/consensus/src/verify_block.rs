@@ -7,38 +7,18 @@ use crate::bip9::SoftforkState;
 use crate::block_view::BlockFacts;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 
-/// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36`
-/// `commitment_header`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
-/// Shortest script that can carry a BIP141 commitment: the prefix and the
-/// 32-byte hash (Core `MINIMUM_WITNESS_COMMITMENT`).
 const MINIMUM_WITNESS_COMMITMENT: usize = 38;
 
-/// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
-/// the batch kernel can issue work.
 const AVX2_MERKLE_MIN_LEAVES: usize = sha256d64::LANES * 2;
 
-/// BIP141 maximum block weight in weight units.
 pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 
-/// Consensus maximum serialized block size.
 pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
 
-/// Serialized size of two concatenated Merkle child hashes: a transaction of
-/// exactly this many witness-stripped bytes can pose as an inner tree node.
 const MERKLE_NODE_SERIALIZED_SIZE: usize = 64;
 
-/// Whether `txs` is a body whose first transaction is not a coinbase and any
-/// transaction is exactly 64 witness-stripped bytes: Core `IsBlockMutated`
-/// (`validation.cpp:4035-4061`, CVE-2017-12842).
-///
-/// Such a body can hash to a valid header's Merkle root with fabricated
-/// "transactions" standing in for inner nodes, so the header is not at fault
-/// and the delivered body is the mutation. A coinbase-less body of any other
-/// shape does prove its header invalid, and stays [`ConsensusError::MissingCoinbase`].
-/// A body that starts with a coinbase is never reported, as in Core: forging a
-/// 64-byte coinbase needs at least 224 bits of work.
 #[must_use]
 pub fn is_sixty_four_byte_mutation(txs: &[Tx]) -> bool {
     txs.first().is_some_and(|first| !first.is_coinbase())
@@ -47,7 +27,6 @@ pub fn is_sixty_four_byte_mutation(txs: &[Tx]) -> bool {
             .any(|tx| tx.base_size() == MERKLE_NODE_SERIALIZED_SIZE)
 }
 
-/// Computes contextual script verification flags for a block.
 #[must_use]
 pub fn verify_flags(
     network: Network,
@@ -57,7 +36,6 @@ pub fn verify_flags(
 ) -> bitcoin_rs_script::VerifyFlags {
     use bitcoin_rs_script::VerifyFlags;
 
-    // P2SH (BIP16) is enforced except for Core's single grandfathered block.
     let mut flags = VerifyFlags::NONE;
     if !network.is_bip16_p2sh_exception(block_hash) {
         flags = flags.union(VerifyFlags::P2SH);
@@ -82,28 +60,23 @@ pub fn verify_flags(
     flags
 }
 
-/// Context needed for block rules whose activation is height-dependent.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockRuleContext {
-    /// Whether BIP141 segwit block rules are active for the candidate block.
     pub segwit_active: bool,
 }
 
-/// Verifies non-contextual block rules that do not require a UTXO set.
 pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     let mut facts = BlockFacts::from_txids(&block.txs, txids);
     if facts.has_witness() {
         facts.or_insert_wtxids_from(&block.txs);
     }
-    // Conservative non-contextual mode: enforce checks from active softforks.
     let context = BlockRuleContext {
         segwit_active: true,
     };
     verify_block_rules_precomputed(block, context, &facts)
 }
 
-/// Verifies block rules from facts derived once for the supplied block.
 pub fn verify_block_rules_precomputed(
     block: &Block,
     context: BlockRuleContext,
@@ -129,11 +102,6 @@ pub fn verify_block_rules_precomputed(
     Ok(())
 }
 
-/// Checks the context-free body rules used by Core 31.1 `CheckBlock`.
-///
-/// Header/PoW and signet-solution authentication belong to the caller.
-/// Witness commitments, total witness weight, finality and UTXO/script checks
-/// are contextual and deliberately absent from this level-one verification.
 pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> {
     let facts = BlockFacts::from_txids(&block.txs, block.txids());
     verify_block_structure(block, &facts)?;
@@ -142,8 +110,6 @@ pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> 
     if size > max {
         return Err(ConsensusError::BlockBaseSize { size, max });
     }
-    // The block-wide stripped-size bound also bounds each transaction and the
-    // transaction count. No witness-derived fact participates in these checks.
     let mut sigop_cost = 0_u32;
     for tx in &block.txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
@@ -193,8 +159,6 @@ fn verify_block_structure(block: &Block, facts: &BlockFacts) -> Result<(), Conse
     Ok(())
 }
 
-/// Verifies the header Merkle root and rejects mutated Merkle trees.
-/// `txids` must cover the block in transaction order; root errors precede mutation errors.
 pub fn verify_merkle_root_with_txids(block: &Block, txids: &[Txid]) -> Result<(), ConsensusError> {
     let Some((root, mutated)) = merkle_root_and_mutation_borrowed(txids) else {
         return Err(ConsensusError::MerkleRoot);
@@ -208,8 +172,6 @@ pub fn verify_merkle_root_with_txids(block: &Block, txids: &[Txid]) -> Result<()
     Ok(())
 }
 
-/// Root-only precheck for the hot windowed apply path.
-/// Mutation is ignored here and checked by full consensus validation.
 #[doc(hidden)]
 pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
     match merkle_root_and_mutation_borrowed(txids) {
@@ -218,7 +180,6 @@ pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
     }
 }
 
-/// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
 fn hash_merkle_pair(left: Txid, right: Txid) -> Txid {
     Txid(hash_merkle_bytes(left.as_bytes(), right.as_bytes()))
 }
@@ -230,7 +191,6 @@ fn hash_merkle_bytes(left: &[u8; 32], right: &[u8; 32]) -> Hash256 {
     double_sha256(&pair)
 }
 
-/// Merkle reduction over borrowed leaves.
 pub(crate) fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.len() >= AVX2_MERKLE_MIN_LEAVES && detect_avx2().is_some() {
         let mut hashes = txids.to_vec();
@@ -239,13 +199,10 @@ pub(crate) fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid,
     merkle_root_spine(txids)
 }
 
-/// Allocation-free scalar walker: one pending node per tree level, so scratch
-/// is O(log n) and the caller's slice is neither cloned nor mutated.
 fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.is_empty() {
         return None;
     }
-    // One pending node per level; u64::MAX leaves span 64 levels.
     let mut spine: [Option<Txid>; 64] = [None; 64];
     let mut mutated = false;
     for leaf in txids.iter().copied() {
@@ -261,7 +218,6 @@ fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
         }
         spine[height] = Some(current);
     }
-    // Duplicate-last self-pairs pad the spine without flagging mutation.
     let mut carry: Option<(Txid, usize)> = None;
     for (height, slot) in spine.iter().enumerate() {
         let Some(node) = *slot else { continue };
@@ -360,11 +316,6 @@ fn hash_avx2_parent_batches<T: Copy>(
     idx
 }
 
-/// Output index of the last coinbase output carrying the BIP141 commitment
-/// prefix: Core `GetWitnessCommitmentIndex` (`src/consensus/validation.h`).
-/// The output script is at least [`MINIMUM_WITNESS_COMMITMENT`] bytes; the
-/// bytes after the commitment hash are free, which BIP325 uses for the signet
-/// solution.
 pub(crate) fn witness_commitment_index(coinbase: &Tx) -> Option<usize> {
     coinbase.outputs.iter().rposition(|output| {
         output.script_pubkey.len() >= MINIMUM_WITNESS_COMMITMENT
@@ -372,7 +323,6 @@ pub(crate) fn witness_commitment_index(coinbase: &Tx) -> Option<usize> {
     })
 }
 
-/// The 32-byte commitment hash of the block's last BIP141 commitment output.
 fn witness_commitment(block: &Block) -> Option<&[u8]> {
     let coinbase = block.txs.first()?;
     let index = witness_commitment_index(coinbase)?;
@@ -383,7 +333,6 @@ fn witness_commitment(block: &Block) -> Option<&[u8]> {
         .get(6..MINIMUM_WITNESS_COMMITMENT)
 }
 
-/// Verifies witness commitment and rejects malleated witness trees.
 fn check_witness_malleation(
     block: &Block,
     expect_commitment: bool,
@@ -409,12 +358,10 @@ fn check_witness_malleation(
     Ok(())
 }
 
-/// Returns whether the block's BIP141 commitment matches `wtxids`.
 #[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     check_witness_malleation(block, true, wtxids).is_ok()
 }
-/// Checks that a block body is bound to its header before staging.
 pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     verify_merkle_root_with_txids(block, &txids)?;
@@ -426,7 +373,6 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
-    // Reject malformed nonces before deriving witness IDs.
     if segwit_active && commitment.is_some() {
         let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
             return Err(ConsensusError::WitnessNonceSize);
@@ -534,23 +480,18 @@ mod tests {
         spend_tx(2, vec![vec![1; 32]])
     }
 
-    /// A non-coinbase transaction whose fixed fields take 60 stripped bytes, so
-    /// a `script_len`-byte output script makes it `60 + script_len` bytes.
     fn sized_spend_tx(seed: u8, script_len: usize, witness: Vec<Vec<u8>>) -> Tx {
         let mut tx = spend_tx(seed, witness);
         tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x51; script_len]);
         tx
     }
 
-    /// A non-coinbase transaction that serializes, witness stripped, to the
-    /// size of two Merkle child hashes.
     fn sixty_four_byte_tx(seed: u8, witness: Vec<Vec<u8>>) -> Tx {
         let tx = sized_spend_tx(seed, 4, witness);
         assert_eq!(tx.base_size(), 64, "fixture must be a Merkle node's size");
         tx
     }
 
-    /// A coinbase whose stripped serialization is exactly 64 bytes.
     fn sixty_four_byte_coinbase() -> Tx {
         let mut tx = coinbase_tx();
         tx.inputs[0].script_sig = Script::from_bytes(vec![1; 4]);
@@ -688,8 +629,6 @@ mod tests {
     fn non_contextual_checks_do_not_apply_witness_or_chain_context() {
         let mut coinbase = coinbase_tx();
         coinbase.outputs[0].script_pubkey = Script::from_bytes(vec![0; 300_000]);
-        // Invalid witness nonce/commitment and excessive full weight are not
-        // CheckBlock rules; witness does not affect the txid or stripped bound.
         coinbase.inputs[0].witness = Witness::from_stack(vec![vec![0; 3_000_000]]);
         let mut spend = spend_tx(1, vec![]);
         spend.lock_time = LockTime::from_consensus(499_999_999);
@@ -818,7 +757,6 @@ mod tests {
                 vec![duplicated.clone(), duplicated.clone()],
                 Err(ConsensusError::MissingCoinbase),
             ),
-            // Adjacent duplicate txids make the Merkle tree ambiguous.
             (
                 vec![
                     coinbase_tx(),
@@ -828,8 +766,6 @@ mod tests {
                 ],
                 Err(ConsensusError::MerkleMutation),
             ),
-            // Non-adjacent duplicates are not a Merkle mutation; BIP30 owns
-            // that rejection at a later stage.
             (
                 vec![
                     coinbase_tx(),
@@ -935,8 +871,6 @@ mod tests {
         }
     }
 
-    /// Both entry points report the 64-byte mutation for `txs`, whose header
-    /// commits to them, with segwit on and off.
     fn assert_sixty_four_byte_mutation(txs: Vec<Tx>, label: &str) {
         let block = block_with_transactions(txs);
         for segwit_active in [false, true] {
@@ -945,8 +879,6 @@ mod tests {
                 Err(ConsensusError::SixtyFourByteMutation),
                 "rules, {label}, segwit_active {segwit_active}"
             );
-            // Without the early mutation return, a witness here would surface
-            // as UnexpectedWitness.
             assert_eq!(
                 check_block_body_binding(&block, segwit_active),
                 Err(ConsensusError::SixtyFourByteMutation),
@@ -1138,7 +1070,6 @@ mod tests {
             (vec![a, b, b], false),
             (vec![a, b, b, b], true),
             (one_to_six.clone(), false),
-            // Core's ambiguous pair: same root, only the tail copy mutated.
             ((1u8..=6).chain([5, 6]).map(txid).collect(), true),
             (vec![txid(0x2b); 3], true),
             (vec![txid(0x2b); 7], true),

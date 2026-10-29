@@ -14,7 +14,6 @@ const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
 const KEY_LEN: usize = 37;
 
-/// Column family used for serialized block-body rows.
 pub const BLOCK_DATA_CF: ColumnFamily = ColumnFamily::BlockBodies;
 
 /// Builds the canonical pruning key for a stored block body.

@@ -1,6 +1,3 @@
-//! Native selection always uses the Rust interpreter; kernel selection fails
-//! closed when the kernel backend is not compiled.
-
 use bitcoin_rs_consensus::kernel::BlockParse;
 #[cfg(feature = "kernel")]
 use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
@@ -145,8 +142,6 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
         other => panic!("kernel engine must fail closed without the feature, got {other:?}"),
     }
 
-    // A coinbase returns from the pre-phase before any engine dispatch; the
-    // selection check must still fire.
     let coinbase = Tx {
         version: 1,
         lock_time: LockTime::ZERO,

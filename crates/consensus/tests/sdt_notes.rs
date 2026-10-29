@@ -1,7 +1,3 @@
-//! Checks `probes.d` against Core's ABI and the artifact's embedded SDT notes.
-//! `SDT_ELF` selects another artifact; otherwise the test reads itself.
-//! Non-ELF hosts retain the declaration check but skip ELF note assertions.
-
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -13,9 +9,6 @@ struct ProbeDef {
     args: Vec<String>,
 }
 
-/// Core's released binary ABI, in provider/probe/argument order.
-/// Block-connected arguments 5/6 are signed despite Core's doc/tracing.md.
-/// Buffers are pointers by value (`8@`), not dereferenced (`8@(%reg)`).
 const CORE_ABI: &[(&str, &str, &[&str])] = &[
     (
         "validation",
@@ -45,7 +38,6 @@ fn layout_prefix(d_type: &str) -> &'static str {
         "int32_t" => "-4@",
         "uint32_t" => "4@",
         "int64_t" => "-8@",
-        // `char*` and byte-buffer `uint64_t` are pointer-sized unsigned.
         "uint64_t" | "char*" => "8@",
         other => panic!("unhandled probe argument type `{other}`"),
     }
@@ -55,9 +47,7 @@ fn layout_prefixes(def: &ProbeDef) -> Vec<&'static str> {
     def.args.iter().map(|arg| layout_prefix(arg)).collect()
 }
 
-/// Parses the declaration-order subset of `DTrace` syntax used by `probes.d`.
 fn parse_probes_d(text: &str) -> Vec<ProbeDef> {
-    // `probes.d` comments are all `/* */` blocks.
     let mut stripped = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("/*") {
@@ -113,14 +103,8 @@ struct SdtNote {
 }
 
 enum SdtParse {
-    /// Parsed notes and the ELF machine id for operand selection.
     Notes(u16, Vec<SdtNote>),
-    /// Not a little-endian ELF64 binary (e.g. Mach-O on macOS carries DOF
-    /// instead of SDT notes): there is legitimately nothing to parse.
     NotElf,
-    /// The artifact claims ELF64 but its note sections are unparsable: a
-    /// damaged artifact or a parser regression that must fail the test
-    /// rather than skip the assertions.
     Malformed(&'static str),
 }
 
@@ -134,7 +118,6 @@ fn parse_sdt_notes(bytes: &[u8]) -> SdtParse {
     }
 }
 
-/// Returns the ELF machine and notes; `None` indicates malformed ELF64.
 fn parse_elf64_sdt_notes(bytes: &[u8]) -> Option<(u16, Vec<SdtNote>)> {
     let read_u16 = |offset: usize| -> Option<u16> {
         Some(u16::from_le_bytes(
@@ -234,10 +217,7 @@ fn width_index(d_type: &str) -> usize {
     }
 }
 
-/// Full operand spelling is verified on x86-64; other architectures check
-/// size/sign prefixes because register allocation and spelling differ.
 fn expected_layout(def: &ProbeDef, machine: u16) -> Option<String> {
-    // EM_X86_64: register name depends on the argument's width.
     if machine != 0x3E {
         return None;
     }
@@ -264,7 +244,6 @@ fn layout_prefixes_of(layout: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Matches Core's providers, probes and argument prefixes in order.
 #[test]
 fn probes_d_matches_core_argument_layout() -> io::Result<()> {
     let probes = probes_d()?;
@@ -279,8 +258,6 @@ fn probes_d_matches_core_argument_layout() -> io::Result<()> {
     Ok(())
 }
 
-/// Link every wrapper's SDT note without firing probes: `black_box(false)`
-/// retains the monomorphizations while preventing argument preparation.
 #[cfg(feature = "usdt")]
 #[inline(never)]
 fn instantiate_probes() {

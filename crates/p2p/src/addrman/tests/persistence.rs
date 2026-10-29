@@ -1,4 +1,5 @@
 use super::*;
+use sonic_rs::JsonValueMutTrait as _;
 
 fn rejected_backup(path: &Path, bytes: &[u8]) -> PathBuf {
     path.with_extension(format!(
@@ -9,22 +10,20 @@ fn rejected_backup(path: &Path, bytes: &[u8]) -> PathBuf {
 
 #[test]
 fn pre_release_version_is_frozen_and_the_format_marker_is_required() {
-    // #1688: edit the canonical v1 directly until the first official release.
     assert_eq!(SCHEMA_VERSION, 1);
-    let value = serde_json::to_value(&book().state.lock().stored).expect("schema");
+    let value = sonic_rs::to_value(&book().state.lock().stored).expect("schema");
     assert_eq!(value["format"], "bitcoin-rs-addrman");
     assert_eq!(value["version"], 1);
-    assert_eq!(value["magic"], serde_json::json!([1, 1, 1, 1]));
-    assert_eq!(value["records"], serde_json::json!([]));
-    assert_eq!(value["anchors"], serde_json::json!([]));
+    assert_eq!(value["magic"], sonic_rs::json!([1, 1, 1, 1]));
+    assert_eq!(value["records"], sonic_rs::json!([]));
+    assert_eq!(value["anchors"], sonic_rs::json!([]));
     assert!(value["asmap_id"].is_null());
 }
 
 #[test]
 fn canonical_fixture_pins_endpoint_source_anchor_and_netgroup_semantics() {
-    // Shared adoption fixture for #1684/#1687; no historical reader is needed.
     let payload = include_str!("persistence/canonical-v1.json");
-    let expected: serde_json::Value = serde_json::from_str(payload).expect("canonical fixture");
+    let expected: sonic_rs::Value = sonic_rs::from_str(payload).expect("canonical fixture");
     let mut bytes = payload.as_bytes().to_vec();
     bytes.extend_from_slice(&Sha256::digest(payload.as_bytes()));
     let dir = tempfile::tempdir().expect("directory");
@@ -35,7 +34,7 @@ fn canonical_fixture_pins_endpoint_source_anchor_and_netgroup_semantics() {
     assert!(book.state.lock().writable);
     assert_eq!(book.len(), 3);
     assert_eq!(
-        serde_json::to_value(&book.state.lock().stored).expect("state"),
+        sonic_rs::to_value(&book.state.lock().stored).expect("state"),
         expected
     );
     let onion = PeerEndpoint::new(crate::PeerAddress::Onion([0; 32]), 8333);
@@ -56,7 +55,7 @@ fn canonical_fixture_pins_endpoint_source_anchor_and_netgroup_semantics() {
     publish_book(&path, &book.state.lock().stored, &mut installed).expect("canonical write");
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
     assert_eq!(
-        serde_json::to_value(&restored.state.lock().stored).expect("round trip"),
+        sonic_rs::to_value(&restored.state.lock().stored).expect("round trip"),
         expected
     );
     assert_indexes(&restored.state.lock());
@@ -70,9 +69,7 @@ fn incompatible_snapshots_are_preserved_without_decoding_or_migration() {
             let base = dir.path().join("peers.dat");
             let path = network_path(&base, [1; 4]);
             let source = if scoped { &path } else { &base };
-            // Only the old envelope matters. In particular, the divergent v9
-            // record/source/netgroup layouts never pass through a decoder.
-            let bytes = fixture_bytes(&serde_json::json!({
+            let bytes = fixture_bytes(&sonic_rs::json!({
                 "version": version, "magic": [1, 1, 1, 1],
                 "records": [{"obsolete_layout": "not a canonical candidate"}]
             }));
@@ -83,7 +80,6 @@ fn incompatible_snapshots_are_preserved_without_decoding_or_migration() {
             assert_eq!(fs::read(source).expect("source before save"), bytes);
             let backup = rejected_backup(source, &bytes);
             assert_eq!(fs::read(&backup).expect("durable preservation"), bytes);
-            // A restart before the first fresh save must reuse the backup.
             assert!(
                 AddressBook::open(Some(base.clone()), [1; 4], false, None)
                     .state
@@ -108,8 +104,8 @@ fn missing_marker_never_aliases_canonical_v1() {
     let path = network_path(&base, [1; 4]);
     let known = book();
     known.learn_dns("seed", &[target()], EPOCH);
-    let mut value = serde_json::to_value(&known.state.lock().stored).expect("schema");
-    value.as_object_mut().expect("object").remove("format");
+    let mut value = sonic_rs::to_value(&known.state.lock().stored).expect("schema");
+    value.as_object_mut().expect("object").remove(&"format");
     let bytes = fixture_bytes(&value);
     fs::write(&path, &bytes).expect("unmarked v1");
     let fresh = AddressBook::open(Some(base), [1; 4], false, None);
@@ -129,7 +125,7 @@ fn failed_preservation_never_replaces_the_source_and_can_be_retried() {
         let dir = tempfile::tempdir().expect("directory");
         let base = dir.path().join("peers.dat");
         let path = network_path(&base, [1; 4]);
-        let bytes = fixture_bytes(&serde_json::json!({"version": 9, "magic": [1, 1, 1, 1]}));
+        let bytes = fixture_bytes(&sonic_rs::json!({"version": 9, "magic": [1, 1, 1, 1]}));
         fs::write(&path, &bytes).expect("old snapshot");
         let backup = rejected_backup(&path, &bytes);
         if directory_obstruction {
@@ -160,18 +156,18 @@ fn corrupt_unknown_and_wrong_network_files_are_not_disposable_snapshots() {
     let dir = tempfile::tempdir().expect("directory");
     let base = dir.path().join("peers.dat");
     let path = network_path(&base, [1; 4]);
-    let current = serde_json::to_value(&book().state.lock().stored).expect("schema");
+    let current = sonic_rs::to_value(&book().state.lock().stored).expect("schema");
     let mut cases = vec![b"corrupt bytes".to_vec()];
     let mut bad_checksum = fixture_bytes(&current);
     bad_checksum[0] ^= 1;
     cases.push(bad_checksum);
     let mut wrong_network = current.clone();
-    wrong_network["magic"] = serde_json::json!([2, 2, 2, 2]);
+    wrong_network["magic"] = sonic_rs::json!([2, 2, 2, 2]);
     cases.push(fixture_bytes(&wrong_network));
     let mut wrong_format = current.clone();
     wrong_format["format"] = "another-format".into();
     cases.push(fixture_bytes(&wrong_format));
-    for marker in [serde_json::Value::Null, "".into()] {
+    for marker in [sonic_rs::json!(null), "".into()] {
         let mut malformed_marker = current.clone();
         malformed_marker["format"] = marker;
         cases.push(fixture_bytes(&malformed_marker));
@@ -180,15 +176,15 @@ fn corrupt_unknown_and_wrong_network_files_are_not_disposable_snapshots() {
     wrong_version["version"] = 2.into();
     cases.push(fixture_bytes(&wrong_version));
     let mut orphan_anchor = current.clone();
-    orphan_anchor["anchors"] = serde_json::json!([
+    orphan_anchor["anchors"] = sonic_rs::json!([
         {"addr": "8.8.8.8:8333", "confirmed_at": EPOCH}
     ]);
     cases.push(fixture_bytes(&orphan_anchor));
     let mut invalid_record = current;
-    invalid_record["records"] = serde_json::json!([{"broken": true}]);
+    invalid_record["records"] = sonic_rs::json!([{"broken": true}]);
     cases.push(fixture_bytes(&invalid_record));
     cases.push(fixture_bytes(
-        &serde_json::json!({"version": 99, "magic": [1, 1, 1, 1]}),
+        &sonic_rs::json!({"version": 99, "magic": [1, 1, 1, 1]}),
     ));
     for bytes in cases {
         fs::write(&path, &bytes).expect("rejected input");
@@ -210,9 +206,9 @@ fn invalid_configured_map_preserves_current_and_pre_release_files_until_repaired
         let map = dir.path().join("map.raw");
         let current = book();
         current.learn_dns("seed", &[target()], EPOCH);
-        let mut value = serde_json::to_value(&current.state.lock().stored).expect("schema");
+        let mut value = sonic_rs::to_value(&current.state.lock().stored).expect("schema");
         if stale {
-            value.as_object_mut().expect("object").remove("format");
+            value.as_object_mut().expect("object").remove(&"format");
             value["version"] = 9.into();
         }
         let bytes = fixture_bytes(&value);

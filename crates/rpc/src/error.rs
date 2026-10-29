@@ -3,57 +3,39 @@ use thiserror::Error;
 /// JSON-RPC 2.0 and Bitcoin Core-compatible RPC errors.
 #[derive(Debug, Error)]
 pub enum RpcError {
-    /// JSON text could not be parsed.
     #[error("parse error: {0}")]
     Parse(String),
-    /// Request object is not a valid JSON-RPC call.
-    ///
     /// The payload is rendered verbatim: Core's `JSONRPCError` message text
     /// has no prefix (`src/rpc/request.cpp:206-260`), and the pinned client
     /// comparison checks the exact string.
     #[error("{0}")]
     InvalidRequest(&'static str),
-    /// A top-level JSON value that is neither an object nor an array.
-    ///
     /// Bitcoin Core answers `RPC_PARSE_ERROR` (-32700) with its own message
     /// for this case (`src/httprpc.cpp`: "Top-level object parse error").
     /// The payload is rendered verbatim.
     #[error("{0}")]
     TopLevelParse(&'static str),
-    /// Method name is not supported.
     #[error("method not found: {0}")]
     MethodNotFound(String),
-    /// Parameters have the wrong shape.
     #[error("invalid params: {0}")]
     InvalidParams(&'static str),
-    /// Parameter value has the wrong JSON type.
-    ///
     /// Bitcoin Core's `RPC_TYPE_ERROR` (-3). Display is the Core message text
     /// with no wrapper prefix.
     #[error("{0}")]
     InvalidType(String),
-    /// Requested object was not found.
     #[error("not found: {0}")]
     NotFound(&'static str),
-    /// A method is intentionally disabled by policy.
     #[error("{0}")]
     MethodDisabled(&'static str),
-    /// A parameter's value is unacceptable, as opposed to malformed.
-    ///
     /// Bitcoin Core's `RPC_INVALID_PARAMETER` (-8). Distinct from
     /// [`RpcError::InvalidParams`], which is the JSON-RPC shape error.
     #[error("{0}")]
     InvalidParameter(String),
-    /// An address, key or descriptor was rejected by the thing that parses it.
-    ///
     /// Bitcoin Core's `RPC_INVALID_ADDRESS_OR_KEY` (-5).
     #[error("{0}")]
     InvalidAddressOrKey(String),
-    /// A transaction was rejected by consensus or mempool policy.
     #[error("{0}")]
     TxRejected(String),
-    /// A transaction was refused before the network's rules were consulted.
-    ///
     /// Bitcoin Core's `RPC_VERIFY_ERROR` (-25), which it uses for submissions
     /// stopped by a caller-configured guard rather than by consensus or policy.
     #[error("{0}")]
@@ -73,7 +55,6 @@ pub enum RpcError {
     /// Bitcoin Core internal failure whose wire message has no local prefix.
     #[error("{0}")]
     CoreInternal(String),
-    /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -93,7 +74,6 @@ impl RpcError {
     pub(crate) const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
     pub(crate) const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
 
-    /// Returns the JSON-RPC numeric error code.
     #[must_use]
     pub const fn code(&self) -> i64 {
         match self {
@@ -130,7 +110,6 @@ impl From<sonic_rs::Error> for RpcError {
 }
 
 impl From<crate::context::TxQueryError> for RpcError {
-    /// Maps a transaction-index failure to an explicit JSON-RPC error.
     fn from(error: crate::context::TxQueryError) -> Self {
         match error {
             crate::context::TxQueryError::Retry => {

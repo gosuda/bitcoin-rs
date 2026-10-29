@@ -1,8 +1,3 @@
-//! Model/property coverage: the canonical frontier reconciler's invariant
-//! over `SyncFrontier::plan`, exercised directly against synthesized frontier
-//! states, plus the connection-identity pins that close the same-address-
-//! replacement race.
-
 use super::*;
 
 use super::super::frontier::{
@@ -13,8 +8,6 @@ use crate::BlockStager;
 use crate::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
 use bitcoin_rs_chain::{ChainWork, NodeId};
 
-/// Advances the unified blockage observation one tick and returns the stall
-/// blame's owner, if this tick convicted one.
 fn stall_blame(
     window: &mut DownloadWindow,
     stager: &BlockStager,
@@ -76,8 +69,6 @@ fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer 
     }
 }
 
-/// A diverged chain (`applied` at 0x01, `chain` tip at 0x02) requiring the
-/// body at `required_height`.
 fn chain_frontier(required_height: u32, apply_halted: bool) -> ChainFrontier {
     ChainFrontier {
         applied_tip: Some(snap(1, required_height.saturating_sub(1), 0x01)),
@@ -104,8 +95,6 @@ fn frontier(
     }
 }
 
-/// The issue's invariant in one place: whenever a next-required body
-/// exists and recovery did not run, the plan names exactly why.
 fn assert_invariant(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
     let plan = frontier.plan();
     if frontier.chain.next_required.is_some() {
@@ -283,9 +272,6 @@ fn live_pending_header_request_awaits_its_connection() {
 
 #[test]
 fn probe_rotates_past_the_dead_pending_owner() {
-    // Rotation orders by connection id, not endpoint: the dead owner is
-    // allocated first so both usable peers sort after it, and the smallest
-    // usable id (the 9001 peer) wins despite its lower endpoint.
     let dead_owner = PeerSource::for_test(addr_of(9005));
     let mut frontier = frontier(
         chain_frontier(5, false),

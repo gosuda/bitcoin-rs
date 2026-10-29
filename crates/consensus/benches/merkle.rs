@@ -1,5 +1,3 @@
-//! Merkle root computation benchmarks for the AVX2-capable reducer.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 
 use std::hint::black_box;
@@ -47,8 +45,6 @@ fn scalar_merkle(level: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     Some((level[0], mutated))
 }
 
-/// Differential oracle: computes the merkle root via the `bitcoin` crate's
-/// `calculate_root` to validate the benchmark inputs. Cross-binary by design.
 fn oracle_merkle_root(input: &[Txid]) -> Hash256 {
     use bitcoin::hashes::Hash as _;
     let bitcoin_txids: Vec<bitcoin::Txid> = input

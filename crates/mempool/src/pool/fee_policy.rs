@@ -1,5 +1,3 @@
-//! Immutable fee-policy projections captured from this pool's own links.
-
 use super::{
     EntryId, Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolPolicySnapshot,
     PolicyError, VisitSet,
@@ -14,9 +12,6 @@ use hashbrown::{HashMap, HashSet};
 pub(crate) struct PolicyStamp {
     sequence: u64,
     fee_sequence: u64,
-    /// Revision of the rolling floor's raising transitions: a concurrent
-    /// floor raise that moves no other component still invalidates prepared
-    /// work captured before it.
     rolling_epoch: u64,
     limits: MempoolLimits,
     policy: MempoolPolicySnapshot,
@@ -91,9 +86,6 @@ impl PolicyGraph {
     }
 }
 
-/// Raw pool APIs accept policy vsize supplied by their caller. Preserve its
-/// vbyte granularity when it differs from the resolved wire/sigop weight;
-/// the gateway supplies consistent facts and retains exact weight there.
 pub(crate) fn policy_weight(wire_weight: u64, vsize: u32, sigops: u32) -> Result<u32, RbfError> {
     let weight = crate::accounting::charged_weight(wire_weight, vsize, sigops);
     if weight == 0 || weight > u64::from(i32::MAX.unsigned_abs()) {

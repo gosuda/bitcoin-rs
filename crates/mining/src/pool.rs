@@ -1,7 +1,4 @@
 //! Native mining pool jobs, protocols, and durable accounting.
-//!
-//! One JobBook owns job projection and share validation for both protocols.
-//! Node composition supplies mining control, storage, and chain observations.
 #![forbid(unsafe_code)]
 
 mod core;

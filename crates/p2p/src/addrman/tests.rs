@@ -1,4 +1,5 @@
 use super::*;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use std::net::Ipv4Addr;
 
 fn addr(n: u8) -> PeerEndpoint {
@@ -60,7 +61,6 @@ fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
         book.select(&[], &[same_group], 10_000, u64::MAX, |_| true),
         Some(picked)
     );
-    // Inbound connections suppress the exact endpoint but never its group.
     assert!(
         book.select(&[same_group], &[], 10_000, u64::MAX, |_| true)
             .is_some()
@@ -445,10 +445,8 @@ fn gossip_cursor_cache_shared_across_projections() {
         legacy,
         "shared cache keeps both replies stable until expiry"
     );
-    // Same cached rows, overlay disabled: IP-only projection.
     book.set_addrv2_gossip(false, false);
     assert_eq!(book.gossip_addrv2_at(10_000, tick).len(), 5);
-    // After TTL expiry both projections refresh from one new selection.
     let refreshed = book.gossip_addrv2_at(10_000, tick + GOSSIP_CACHE_TTL);
     assert_eq!(refreshed.len(), 5);
     assert_eq!(book.gossip_at(10_000, tick + GOSSIP_CACHE_TTL).len(), 6);
@@ -571,7 +569,6 @@ fn pending_attempts_keep_endpoint_and_network_group_ownership_until_released() {
     let book = book();
     book.learn_dns("seed", &[addr(1)], 10_000);
     let other = PeerEndpoint::new(addr(1).address(), 18333);
-    // A vacant different new slot is needed for both same-group records.
     let candidate = (1..65535)
         .map(|port| PeerEndpoint::new(other.address(), port))
         .find(|&candidate| {
@@ -666,8 +663,8 @@ fn assert_indexes(manager: &Manager) {
 
 #[test]
 fn placement_matches_68_unmodified_core_vectors() {
-    let data: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
+    let data: sonic_rs::Value =
+        sonic_rs::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
             .expect("Core vectors");
     for row in data["rows"].as_array().expect("rows") {
         let secret =
@@ -721,11 +718,11 @@ fn placement_matches_68_unmodified_core_vectors() {
         for bucket in [0, 1, 17, 63] {
             assert_eq!(
                 u64::try_from(bucket_position(&secret, addr, true, bucket)).expect("position"),
-                row[format!("new_pos{bucket}")]
+                row[format!("new_pos{bucket}").as_str()]
             );
             assert_eq!(
                 u64::try_from(bucket_position(&secret, addr, false, bucket)).expect("position"),
-                row[format!("tried_pos{bucket}")]
+                row[format!("tried_pos{bucket}").as_str()]
             );
         }
     }
@@ -733,7 +730,7 @@ fn placement_matches_68_unmodified_core_vectors() {
 
 #[test]
 fn health_matches_71_actual_core_boundaries_and_probabilities() {
-    let data: serde_json::Value = serde_json::from_str(include_str!(
+    let data: sonic_rs::Value = sonic_rs::from_str(include_str!(
         "../../tests/data/core-addrman-health-v31.1.json"
     ))
     .expect("Core health");
@@ -839,7 +836,7 @@ fn global_good_epoch_limits_failures_and_good_keeps_advertised_time() {
     book.attempted(target(), true, EPOCH + 1);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 1);
-    book.succeeded(addr(77), 9, EPOCH + 10); // Core updates the epoch even when the address is absent.
+    book.succeeded(addr(77), 9, EPOCH + 10);
     book.attempted(target(), true, EPOCH + 12);
     book.unqueue(target());
     assert_eq!(book.state.lock().stored.records[0].failures, 2);
@@ -968,8 +965,8 @@ fn one_source_flood_is_bucket_bounded_and_retains_legitimate_peers() {
     assert_indexes(&manager);
 }
 
-fn fixture_bytes(value: &serde_json::Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec(value).expect("fixture");
+fn fixture_bytes(value: &sonic_rs::Value) -> Vec<u8> {
+    let mut bytes = sonic_rs::to_vec(value).expect("fixture");
     let hash = Sha256::digest(&bytes);
     bytes.extend_from_slice(&hash);
     bytes
@@ -988,7 +985,7 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
             let before = refs(&manager, target());
             if before == 8 {
                 break;
-            } // Colliding source buckets do not manufacture a reference.
+            }
             for _ in 0..4096 {
                 if manager.learn(target(), Some(9), origin.clone(), EPOCH - 999, EPOCH, 0) {
                     break;
@@ -1015,13 +1012,13 @@ fn same_layout_restart_retains_all_refs_and_resets_only_runtime_attempt_times() 
     assert_eq!(entry.failures, 1);
     assert_eq!(entry.last_attempt, 0);
     assert_indexes(&manager);
-    let mut value = serde_json::to_value(&manager.stored).expect("stored");
+    let mut value = sonic_rs::to_value(&manager.stored).expect("stored");
     drop(manager);
     for bad in [
-        serde_json::json!([]),
-        serde_json::json!([0, 0]),
-        serde_json::json!([1024]),
-        serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8]),
+        sonic_rs::json!([]),
+        sonic_rs::json!([0, 0]),
+        sonic_rs::json!([1024]),
+        sonic_rs::json!([0, 1, 2, 3, 4, 5, 6, 7, 8]),
     ] {
         value["records"][0]["new_buckets"] = bad;
         let bytes = fixture_bytes(&value);
@@ -1095,7 +1092,7 @@ fn capacity_and_file_budget_have_explicit_bounded_representations() {
         last_attempt: u64::MAX,
         last_count_attempt: u64::MAX,
     };
-    let size = serde_json::to_vec(&entry).expect("max-width fields").len();
+    let size = sonic_rs::to_vec(&entry).expect("max-width fields").len();
     assert!(size <= 512, "fixed-width field serialization bound");
     assert!(MAX_RECORDS * 513 + 512 + 32 < usize::try_from(MAX_FILE_BYTES).expect("file cap"));
     assert_eq!(
@@ -1143,7 +1140,7 @@ fn force_reference_draw(manager: &mut Manager, pass: bool) {
     manager.rng = StdRng::seed_from_u64(seed);
 }
 fn assert_core_operation(manager: &Manager, case: &str, accepted: Option<bool>) {
-    let data: serde_json::Value = serde_json::from_str(include_str!(
+    let data: sonic_rs::Value = sonic_rs::from_str(include_str!(
         "../../tests/data/core-addrman-addsingle-v31.1.json"
     ))
     .expect("Core operations");
@@ -1186,7 +1183,7 @@ fn assert_core_operation(manager: &Manager, case: &str, accepted: Option<bool>) 
         }
     } else {
         let entry = entry.expect("health entry");
-        let actual = serde_json::json!({"case":case,"attempts":entry.failures,"seen":entry.last_seen,"last_try":entry.last_attempt,"last_success":entry.last_success,"tried":entry.tried});
+        let actual = sonic_rs::json!({"case":case,"attempts":entry.failures,"seen":entry.last_seen,"last_try":entry.last_attempt,"last_success":entry.last_success,"tried":entry.tried});
         assert_eq!(&actual, expected, "{case}");
     }
     assert_indexes(manager);
@@ -1308,7 +1305,7 @@ fn actual_core_attempt_good_sequence() {
 }
 
 fn ring_manager(second_port: u16) -> (Manager, PeerEndpoint, PeerEndpoint) {
-    let data: serde_json::Value = serde_json::from_str(include_str!(
+    let data: sonic_rs::Value = sonic_rs::from_str(include_str!(
         "../../tests/data/core-addrman-ring-v31.1.json"
     ))
     .expect("actual Core ring");
@@ -1346,7 +1343,6 @@ fn ring_manager(second_port: u16) -> (Manager, PeerEndpoint, PeerEndpoint) {
 }
 fn assert_fraction(hits: u32, samples: u32, expected: f64) {
     let actual = f64::from(hits) / f64::from(samples);
-    // Six binomial standard deviations plus one observation for quantization.
     let tolerance = 6.0_f64.mul_add(
         (expected * (1.0 - expected) / f64::from(samples)).sqrt(),
         1.0 / f64::from(samples),
@@ -1373,7 +1369,7 @@ fn randomized_circular_slot_proposals_match_core_ring_bias() {
 
 #[test]
 fn getchance_distributions_follow_independent_escalation_recurrence() {
-    let data: serde_json::Value = serde_json::from_str(include_str!(
+    let data: sonic_rs::Value = sonic_rs::from_str(include_str!(
         "../../tests/data/core-addrman-selection-v31.1.json"
     ))
     .expect("independent rational recurrence");
@@ -1448,8 +1444,8 @@ fn table_choice_is_half_even_when_new_health_is_bad_and_selection_work_is_bounde
 }
 
 fn core_mapped_alias() -> PeerEndpoint {
-    let data: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
+    let data: sonic_rs::Value =
+        sonic_rs::from_str(include_str!("../../tests/data/core-addrman-v31.1.json"))
             .expect("actual Core identity vectors");
     let rows = data["rows"].as_array().expect("rows");
     let row = |address: &str| {

@@ -7,51 +7,35 @@ use crate::{
     encode::{ConsensusEncode, Sha256Sink, encode_tx, finalize_double_sha256, tx_base_size},
 };
 
-/// A Bitcoin transaction input in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxIn {
-    /// The outpoint being spent.
     pub previous_output: OutPoint,
-    /// The input's scriptSig (empty for segwit spends).
     pub script_sig: Script,
-    /// The input sequence number.
     pub sequence: Sequence,
-    /// The BIP144 witness stack; empty when the input has no witness.
     pub witness: Witness,
 }
 
-/// A Bitcoin transaction output in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxOut {
-    /// The output value in satoshis.
     pub value: Amount,
-    /// The output scriptPubKey.
     pub script_pubkey: Script,
 }
 
-/// A Bitcoin transaction in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tx {
-    /// Transaction version (the unsigned wire value).
     pub version: u32,
-    /// Inputs in consensus order.
     pub inputs: Vec<TxIn>,
-    /// Outputs in consensus order.
     pub outputs: Vec<TxOut>,
-    /// Lock time.
     pub lock_time: LockTime,
 }
 
 impl Tx {
     /// Returns true for exactly one input spending the null outpoint.
-    ///
-    /// This identifies the coinbase shape; it does not validate the transaction.
     #[must_use]
     pub fn is_coinbase(&self) -> bool {
         self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
     }
 
-    /// Returns true when any input carries BIP144 witness data.
     #[must_use]
     pub fn has_witness(&self) -> bool {
         self.inputs.iter().any(|input| !input.witness.is_empty())
@@ -96,7 +80,6 @@ impl Tx {
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
     }
 
-    /// Derives BIP141 virtual size from a transaction weight, rounded up.
     #[must_use]
     pub const fn vsize_from_weight(weight: u64) -> u64 {
         weight.div_ceil(4)
@@ -110,9 +93,6 @@ impl Tx {
 
     /// Returns the heap bytes allocated for this transaction's inputs, outputs,
     /// scripts, and witness stacks, including spare capacity.
-    ///
-    /// Excludes inline `Tx` struct overhead (which is counted in `Block::txs`
-    /// capacity or on the stack) and allocator metadata/rounding.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self
@@ -216,7 +196,6 @@ mod tests {
         let tx = native_tx();
 
         let bytes = consensus_bytes(&tx);
-        // version || marker 0x00 || flag 0x01
         assert_eq!(&bytes[4..6], &[0x00, 0x01]);
 
         let decoded = deserialize::<Tx>(&bytes).expect("roundtrip");
@@ -233,7 +212,6 @@ mod tests {
         let error = deserialize::<Tx>(&bytes).expect_err("trailing garbage must fail");
         assert_eq!(error, DecodeError::TrailingBytes { remaining: 2 });
 
-        // Without the garbage the same bytes decode cleanly.
         assert_eq!(deserialize::<Tx>(&consensus_bytes(&tx)), Ok(tx));
     }
 

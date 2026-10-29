@@ -89,7 +89,6 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Resu
 }
 
 #[test]
-// CONTRACT: docs/contracts/chain-events.md#EVT-01
 fn record_returns_hints_in_commit_order_and_advances_the_snapshot() {
     let publisher = ChainEventPublisher::detached(7);
     let epoch = publisher.epoch();

@@ -19,28 +19,17 @@ mod sam;
 mod tests;
 mod tor;
 
-/// Operator routing policy. No overlay service is started or contacted by default.
 #[derive(Clone, Debug)]
 pub struct OverlayConfig {
-    /// General SOCKS5 proxy for IP destinations. DNS seeds are disabled when set.
     pub proxy: Option<SocketAddr>,
-    /// Separate SOCKS5 route for onion destinations; never inherited from `proxy`.
     pub onion_proxy: Option<SocketAddr>,
-    /// Fresh SOCKS username/password per connection; requires proxy support.
     pub randomize_credentials: bool,
-    /// Allowed remote networks. Empty means IP plus explicitly configured overlays.
     pub onlynet: Vec<PeerNetwork>,
-    /// Operator-managed IVNP SAM bridge.
     pub i2p_sam: Option<SocketAddr>,
-    /// Enable I2P STREAM ACCEPT with a persistent application destination.
     pub i2p_accept: bool,
-    /// External Tor control socket, enabling a persistent inbound onion service.
     pub tor_control: Option<SocketAddr>,
-    /// Tor SAFECOOKIE file. Absence selects NULL authentication on a local control socket.
     pub tor_cookie: Option<PathBuf>,
-    /// Application identity directory, separate from IVNP router keys.
     pub identity_dir: PathBuf,
-    /// Bitcoin service port advertised in overlay service endpoints.
     pub port: u16,
 }
 impl Default for OverlayConfig {
@@ -60,7 +49,6 @@ impl Default for OverlayConfig {
     }
 }
 impl OverlayConfig {
-    /// Validate routing and persistence requirements before starting workers.
     pub fn validate(&self) -> io::Result<()> {
         for socket in [self.proxy, self.onion_proxy, self.i2p_sam, self.tor_control]
             .into_iter()
@@ -100,19 +88,16 @@ impl OverlayConfig {
         }
         Ok(())
     }
-    /// Whether any Tor route or control surface is configured.
     #[must_use]
     pub fn tor_configured(&self) -> bool {
         self.onion_proxy.is_some() || self.proxy.is_some() || self.tor_control.is_some()
     }
 
-    /// Whether an I2P SAM bridge is configured.
     #[must_use]
     pub fn i2p_configured(&self) -> bool {
         self.i2p_sam.is_some()
     }
 
-    /// Whether this network has a route.
     pub fn configured(&self, network: PeerNetwork) -> bool {
         match network {
             PeerNetwork::Ipv4 | PeerNetwork::Ipv6 => true,
@@ -120,7 +105,6 @@ impl OverlayConfig {
             PeerNetwork::I2p => self.i2p_sam.is_some(),
         }
     }
-    /// Single allowed-network predicate, used at every outbound and inbound admission.
     pub fn allows(&self, network: PeerNetwork) -> bool {
         self.configured(network) && (self.onlynet.is_empty() || self.onlynet.contains(&network))
     }
@@ -128,9 +112,6 @@ impl OverlayConfig {
         self.proxy.is_none() && (self.allows(PeerNetwork::Ipv4) || self.allows(PeerNetwork::Ipv6))
     }
 
-    /// Snapshot of the dial routes for the shared selection prefilter. The
-    /// SAM session stays transport-owned and is attached by the transport;
-    /// only proxy routes and the `onlynet` restriction are snapshotted here.
     #[must_use]
     pub fn dial_routes(&self) -> crate::DialRoutes {
         fn label(network: PeerNetwork) -> bitcoin_rs_primitives::NetworkLabel {
@@ -152,18 +133,12 @@ impl OverlayConfig {
     }
 }
 
-/// One configured network's current transport/service state, independent of peer identity.
 #[derive(Clone, Debug)]
 pub struct OverlayNetworkState {
-    /// Remote network.
     pub network: PeerNetwork,
-    /// Effective routing policy allows this network.
     pub allowed: bool,
-    /// A live routed Bitcoin session or live inbound service currently exists.
     pub operational: bool,
-    /// Configured local proxy/router endpoint.
     pub proxy: Option<SocketAddr>,
-    /// Stable inbound service endpoint while its service is active.
     pub local_address: Option<PeerEndpoint>,
 }
 
@@ -328,7 +303,6 @@ impl OverlayTransport {
         shutdown: &Arc<AtomicBool>,
     ) -> io::Result<Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>> {
         self.config.validate()?;
-        // Read/validate existing keys synchronously: damaged/unreadable identities fail startup.
         let i2p_key = if self.config.i2p_accept {
             identity::read(
                 &self.config.identity_dir.join("i2p.key"),
@@ -389,8 +363,6 @@ pub(super) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-// Only explicit destination failures reported by a live proxy/router carry
-// this attribution. I/O, authentication and control-session errors stay local.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct RemoteConnectFailure(String);
@@ -410,7 +382,6 @@ fn cancelled_error() -> io::Error {
 }
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
-// All setup I/O has one absolute deadline, retains partial reads, and polls cancellation.
 struct Setup<'a> {
     stream: TcpStream,
     deadline: Instant,

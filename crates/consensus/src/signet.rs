@@ -1,11 +1,4 @@
 //! BIP325 signet block solution check: a port of Core `src/signet.cpp`.
-//!
-//! A signet block commits to its own solution. The miner signs a synthetic
-//! transaction (`to_sign`) that spends a zero-value output locked by the
-//! network challenge (`to_spend`), and places the `scriptSig` and witness of
-//! that spend after a 4-byte header inside the coinbase witness-commitment
-//! output. The signed data binds the header fields and a Merkle root computed
-//! with the solution removed, so the solution cannot sign itself.
 
 use bitcoin_rs_primitives::{
     Amount, Block, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
@@ -16,13 +9,8 @@ use bitcoin_rs_script::{PreparedTransaction, VerifyFlags, push_data};
 use crate::ConsensusError;
 use crate::verify_block::{compute_merkle_root, witness_commitment_index};
 
-/// Marks the solution inside the witness-commitment output (Core
-/// `SIGNET_HEADER`).
 const SIGNET_HEADER: [u8; 4] = [0xec, 0xc7, 0xda, 0xa2];
 
-/// Script flags the solution is verified under (Core
-/// `BLOCK_SCRIPT_VERIFY_FLAGS`), independent of the height: never the
-/// contextual block flags.
 const BLOCK_SCRIPT_VERIFY_FLAGS: VerifyFlags = VerifyFlags::P2SH
     .union(VerifyFlags::WITNESS)
     .union(VerifyFlags::DERSIG)
@@ -34,17 +22,6 @@ const OP_PUSHDATA2: u8 = 0x4d;
 const OP_PUSHDATA4: u8 = 0x4e;
 const OP_RETURN: u8 = 0x6a;
 
-/// Checks the BIP325 solution of `block` against `challenge`.
-///
-/// The signet genesis block always passes. A block without a BIP141
-/// commitment, with a malformed solution, or whose solution does not satisfy
-/// `challenge` fails with [`ConsensusError::SignetSolution`]. A commitment
-/// without a solution header is a trivially empty solution, which satisfies a
-/// challenge such as `OP_TRUE`.
-///
-/// The solution lives in the coinbase, so a caller runs this after the block
-/// rules have bound the body to the header, and only for a block it is about
-/// to commit: Core skips the check when it is not checking proof of work.
 pub fn check_signet_block_solution(block: &Block, challenge: &[u8]) -> Result<(), ConsensusError> {
     if block.block_hash().0 == Network::Signet.genesis_block_hash() {
         return Ok(());
@@ -56,16 +33,11 @@ pub fn check_signet_block_solution(block: &Block, challenge: &[u8]) -> Result<()
     }
 }
 
-/// The synthetic spend BIP325 verifies (Core `SignetTxs`): `to_sign` spends
-/// `prevout`, the zero-value challenge output of the virtual `to_spend`,
-/// which is built only to derive that outpoint.
 struct SolutionSpend {
     to_sign: Tx,
     prevout: (OutPoint, TxOut),
 }
 
-/// Core `SignetTxs::Create`: `None` when the block has no coinbase or
-/// commitment, or carries an undecodable solution.
 fn signet_spend(block: &Block, challenge: &[u8]) -> Option<SolutionSpend> {
     let coinbase = block.txs.first()?;
     let commitment_index = witness_commitment_index(coinbase)?;
@@ -116,10 +88,6 @@ fn signet_spend(block: &Block, challenge: &[u8]) -> Option<SolutionSpend> {
     Some(SolutionSpend { to_sign, prevout })
 }
 
-/// Verifies the solution with the native interpreter under
-/// [`BLOCK_SCRIPT_VERIFY_FLAGS`]. Any script failure, including one the
-/// block-level script checks would report with another reason, is a bad
-/// solution.
 fn verify_solution(spend: &SolutionSpend) -> bool {
     let Ok(prepared) =
         PreparedTransaction::new(&spend.to_sign, std::slice::from_ref(&spend.prevout))
@@ -132,9 +100,6 @@ fn verify_solution(spend: &SolutionSpend) -> bool {
     )
 }
 
-/// The data the solution signs: the header fields a miner chooses before
-/// grinding, with the Merkle root computed without the solution
-/// (`version || prev_blockhash || modified_root || time`, 72 bytes).
 fn signet_block_data(header: &Header, modified_root: &[u8; 32]) -> Vec<u8> {
     let mut data = Vec::with_capacity(72);
     data.extend_from_slice(&header.version.to_le_bytes());
@@ -144,8 +109,6 @@ fn signet_block_data(header: &Header, modified_root: &[u8; 32]) -> Vec<u8> {
     data
 }
 
-/// Merkle root over the block's txids with the coinbase replaced by
-/// `coinbase_txid`, the id of the coinbase without its solution.
 fn modified_merkle_root(block: &Block, coinbase_txid: Txid) -> Option<[u8; 32]> {
     let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(block.txs.len());
     leaves.push(*coinbase_txid.as_bytes());
@@ -153,30 +116,17 @@ fn modified_merkle_root(block: &Block, coinbase_txid: Txid) -> Option<[u8; 32]> 
     compute_merkle_root(&mut leaves)
 }
 
-/// Id of `coinbase` with output `index` carrying `commitment_script`.
 fn coinbase_txid_with_commitment(coinbase: &Tx, index: usize, commitment_script: Vec<u8>) -> Txid {
     let mut modified = coinbase.clone();
     modified.outputs[index].script_pubkey = Script::from_bytes(commitment_script);
     modified.txid()
 }
 
-/// The commitment script after Core `FetchAndClearCommitmentSection` found a
-/// solution: the script without the solution bytes, and the solution.
 struct CommitmentSection<'a> {
     rewritten: Vec<u8>,
     solution: &'a [u8],
 }
 
-/// Core `FetchAndClearCommitmentSection`, byte for byte.
-///
-/// Walks the script as `GetOp` does and stops silently at the first
-/// instruction that runs past the end, dropping the rest. The first push that
-/// starts with [`SIGNET_HEADER`] and carries at least one more byte is the
-/// solution; it is rewritten to the bare header. Every other push is
-/// re-encoded canonically, and an empty push or non-push opcode keeps only its
-/// opcode byte, so a zero-length `OP_PUSHDATA1` loses its length byte exactly
-/// as in Core. `None` when no push carries a solution; the script is then
-/// used unchanged.
 fn fetch_and_clear_commitment_section(script: &[u8]) -> Option<CommitmentSection<'_>> {
     let mut rewritten = Vec::with_capacity(script.len());
     let mut solution = None;
@@ -200,22 +150,16 @@ fn fetch_and_clear_commitment_section(script: &[u8]) -> Option<CommitmentSection
     })
 }
 
-/// The bytes after [`SIGNET_HEADER`], provided there is at least one: a push
-/// of the header alone is not a solution.
 fn solution_after_header(push: &[u8]) -> Option<&[u8]> {
     push.strip_prefix(&SIGNET_HEADER[..])
         .filter(|after_header| !after_header.is_empty())
 }
 
-/// One instruction as Core `CScript::GetOp` yields it: the opcode byte and
-/// its push payload (empty unless the opcode pushes data).
 struct ScriptOp<'a> {
     opcode: u8,
     push: &'a [u8],
 }
 
-/// Core `GetScriptOp`: the next instruction and the unread tail, or `None`
-/// at the end of the script or when a push runs past it.
 fn next_script_op(script: &[u8]) -> Option<(ScriptOp<'_>, &[u8])> {
     let (&opcode, rest) = script.split_first()?;
     let (length, rest) = match opcode {
@@ -229,7 +173,6 @@ fn next_script_op(script: &[u8]) -> Option<(ScriptOp<'_>, &[u8])> {
     Some((ScriptOp { opcode, push }, tail))
 }
 
-/// A little-endian push length of `width` bytes and the bytes after it.
 fn read_le_length(bytes: &[u8], width: usize) -> Option<(usize, &[u8])> {
     let (raw, rest) = bytes.split_at_checked(width)?;
     let length = raw
@@ -239,15 +182,9 @@ fn read_le_length(bytes: &[u8], width: usize) -> Option<(usize, &[u8])> {
     Some((usize::try_from(length).ok()?, rest))
 }
 
-/// Decodes the solution as Core does: a compact-size-prefixed `scriptSig`,
-/// then a witness stack as a compact size count of compact-size-prefixed
-/// items. Non-canonical or truncated sizes and trailing bytes are `None`.
 fn decode_solution(solution: &[u8]) -> Option<(Script, Witness)> {
     let (script_sig, rest) = read_prefixed(solution)?;
     let (count, mut rest) = read_compact_size(rest)?;
-    // Each item costs at least its length byte, so a count above the unread
-    // bytes cannot be satisfied. Checking it first also bounds the
-    // allocation by the solution, not by the claimed count.
     if count > rest.len() {
         return None;
     }
@@ -265,13 +202,11 @@ fn decode_solution(solution: &[u8]) -> Option<(Script, Witness)> {
     })
 }
 
-/// A canonical compact size and the bytes after it.
 fn read_compact_size(bytes: &[u8]) -> Option<(usize, &[u8])> {
     let (value, used) = varint::decode(bytes).ok()?;
     Some((usize::try_from(value).ok()?, bytes.get(used..)?))
 }
 
-/// A compact-size-prefixed byte string and the bytes after it.
 fn read_prefixed(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let (length, rest) = read_compact_size(bytes)?;
     rest.split_at_checked(length)

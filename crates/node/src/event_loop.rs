@@ -6,14 +6,8 @@ use crossbeam_channel::{Receiver, select, tick};
 const STATS_INTERVAL: u64 = 1024;
 
 const SYNC_TICK: Duration = Duration::from_secs(1);
-/// Elapsed time owns telemetry cadence, independently of inbound wake volume.
 const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Central v1 event loop for process-level tick coordination.
-///
-/// The p2p, JSON-RPC, and `ScriptIndex` subsystems still own their connection
-/// channels and worker threads. This loop coordinates the shared tick-style
-/// work that must stop cleanly with the process.
 pub(crate) struct EventLoop {
     shutdown_signal: Receiver<()>,
     sync_tick: Receiver<Instant>,
@@ -22,14 +16,6 @@ pub(crate) struct EventLoop {
 }
 
 impl EventLoop {
-    /// Builds an event loop that wakes sync work from inbound P2P data.
-    ///
-    /// PRE: the shutdown receiver is bridged and the sync orchestrator is
-    /// constructed.
-    /// POST: `spin` runs sync ticks and telemetry while shutdown remains
-    /// unset.
-    /// INVARIANT: every caller supplies a wake receiver, and sync work
-    /// progresses on both the wake and the one-second sync tick.
     #[must_use]
     pub(crate) fn with_sync_wake(
         shutdown_signal: Receiver<()>,
@@ -44,7 +30,6 @@ impl EventLoop {
         }
     }
 
-    /// Runs the event loop until a shutdown notification arrives.
     pub(crate) fn spin(
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,

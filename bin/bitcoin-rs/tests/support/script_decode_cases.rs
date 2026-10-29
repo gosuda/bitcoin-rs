@@ -2,7 +2,7 @@
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_e2e::Kind;
 use bitcoin_rs_e2e::differential::compare_rpc;
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 
 use super::start;
 
@@ -97,8 +97,6 @@ fn decodescript_matches_core_opcode_and_wrapper_matrix() {
 fn decoded_transaction_uses_the_same_core_script_projection() {
     let mut core = start(Kind::Core);
     let mut node = start(Kind::BitcoinRs);
-    // Strict-DER scalar encodings test formatting only; these are not signatures
-    // over a transaction, so no signing or wallet is involved.
     for hash_type in [1_u8, 2, 3, 0x81, 0x82, 0x83, 0, 4] {
         let script_sig =
             bitcoin::ScriptBuf::from_hex(&format!("093006020101020101{hash_type:02x}"))
@@ -206,8 +204,6 @@ fn decodescript_parameter_forms_and_errors_follow_core() {
         )
         .expect("same result or exact parameter error");
     }
-    // The compact usage body is an explicit registry deviation. Code and
-    // method signature retain Core's invalid-arity behavior.
     for params in [
         json!([]),
         json!(null),
@@ -297,8 +293,6 @@ fn invalid_curve_key_in_complex_miniscript_has_a_declared_address_fallback() {
     let mut candidate = node
         .rpc("decodescript", &json!([script]))
         .expect("address fallback");
-    // Observed against the pinned Core process: Core permits a syntactically
-    // encoded public key here; rust-miniscript refuses its invalid curve point.
     assert_eq!(
         reference["segwit"]["desc"],
         "wsh(and_v(v:pk(020000000000000000000000000000000000000000000000000000000000000000),older(10)))#v8fq6k7d"

@@ -23,9 +23,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const HEADER_MAGIC: [u8; 8] = *b"BRSHEAD\0";
-/// Version written by this node: active ancestry plus retained side branches.
 pub(super) const HEADER_VERSION: u32 = 2;
-/// Earlier active-ancestry-only version, still read without side branches.
 pub(super) const ACTIVE_ONLY_HEADER_VERSION: u32 = 1;
 pub(super) const HEADER_PREFIX_LEN: usize = 56;
 const HEADER_LEN: usize = Header::LEN;
@@ -54,9 +52,7 @@ pub(crate) struct HeaderCheckpointTip {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HeaderCheckpointMetadata {
-    /// Artifact version the manifest binds.
     pub(crate) version: u32,
-    /// Active-ancestry header count; side headers are not counted.
     pub(crate) header_count: u64,
     pub(crate) best: HeaderCheckpointTip,
     pub(crate) applied: HeaderCheckpointTip,
@@ -323,8 +319,6 @@ fn resolve_artifact_sizes<R: Read + Seek>(
     })
 }
 
-/// Binds the artifact bytes to the manifest after the length check: the
-/// artifact version must equal the manifest version, then the count.
 fn verify_artifact_prefix<R: Read + Seek>(
     reader: &mut R,
     config: HeaderCheckpointConfig,
@@ -349,7 +343,6 @@ fn verify_artifact_prefix<R: Read + Seek>(
     Ok(count)
 }
 
-/// The replayed active ancestry with its recomputed commitments.
 struct ActiveReplay {
     tree: BlockTree,
     best_tip_id: NodeId,
@@ -357,8 +350,6 @@ struct ActiveReplay {
     applied_prefix_commitment: [u8; 32],
 }
 
-/// Replays exactly `count` headers from after the prefix with the same
-/// historical contextual validation, in height order without gaps.
 fn replay_active_headers<R: Read + Seek>(
     reader: &mut R,
     config: HeaderCheckpointConfig,
@@ -385,10 +376,6 @@ fn replay_active_headers<R: Read + Seek>(
         reader.read_exact(&mut encoded)?;
         let header: Header = deserialize(&encoded)
             .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
-        // Historical replay: already-committed checkpoint headers must not
-        // become invalid solely because the host clock rolled backwards after
-        // publication. All other contextual checks (PoW, nBits, MTP, version
-        // floors, ancestry, chainwork) still run.
         let accepted = accept_headers(
             &mut tree,
             core::slice::from_ref(&header),
@@ -416,8 +403,6 @@ fn replay_active_headers<R: Read + Seek>(
     })
 }
 
-/// Checks the replayed active chain against the manifest: best tip identity,
-/// applied-tip prefix, then both commitments.
 fn verify_active_against_manifest(
     tree: &BlockTree,
     best_tip_id: NodeId,
@@ -446,8 +431,6 @@ fn verify_active_against_manifest(
     Ok(applied_tip_id)
 }
 
-/// Replays the side section after the authenticated active chain and confirms
-/// the best tip did not move.
 fn restore_side_branches<R: Read + Seek>(
     reader: &mut R,
     tree: &mut BlockTree,
@@ -467,14 +450,10 @@ fn restore_side_branches<R: Read + Seek>(
     Ok(())
 }
 
-/// Whether this node reads header artifacts of `version`.
 pub(super) const fn is_readable_version(version: u32) -> bool {
     version == HEADER_VERSION || version == ACTIVE_ONLY_HEADER_VERSION
 }
 
-/// Replays side headers after the authenticated active ancestry. Each must
-/// pass the same historical contextual validation and add exactly one new
-/// node under an already restored, valid parent.
 fn replay_side_headers<R: Read>(
     reader: &mut R,
     tree: &mut BlockTree,
@@ -501,9 +480,6 @@ fn replay_side_headers<R: Read>(
     Ok(())
 }
 
-/// Byte length of a version-2 artifact: the active section, the side count,
-/// and `side_count` headers. Active and side nodes share the `u32` node-id
-/// domain of the tree they restore.
 fn side_section_end(count: u64, side_count: u64) -> Result<u64, HeaderCheckpointError> {
     let active_end = checkpoint_size(count)?;
     if count
@@ -612,7 +588,6 @@ fn tip_from_node(
     })
 }
 
-/// Bounded byte-slice sink for fixed-layout header encoding.
 struct ByteSliceSink<'a>(&'a mut [u8]);
 
 impl bitcoin_rs_primitives::Sink for ByteSliceSink<'_> {

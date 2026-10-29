@@ -27,7 +27,6 @@ pub enum StorageError {
 }
 
 impl StorageError {
-    /// Converts a backend-specific error into a stable storage error.
     pub fn backend(error: impl Display) -> Self {
         Self::Backend(error.to_string())
     }

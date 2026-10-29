@@ -1,22 +1,4 @@
 //! Stage 2 portable `TxLookup` bundle lifecycle over real Fjall stores.
-//!
-//! Every case drives the public worker route the node uses:
-//! [`DerivedIndexWorker::spawn_with_open`] with a
-//! [`DerivedIndexOpenSpec::bundle`] directive, a real [`FjallStore`] opened
-//! through [`open_derived_index_store_on_worker`], and observation only
-//! through the published query adapter, the bundle files on disk, and the
-//! durable store reopened after the worker has exited. Nothing here calls the
-//! bundle codec directly.
-//!
-//! Two body seams keep restore and ordinary backfill apart. The worker's
-//! [`BlockBodyStore`] feeds ordinary backfill; the [`BlockBodySource`] feeds
-//! restore locator checks and queries. A receiver whose body store serves
-//! nothing can only gain `TxLookup` rows from a restore, so its rows prove
-//! which path wrote them.
-//!
-//! Not covered here (needs a separate process or the owner-local seam):
-//! a real process kill during the applying pass, and a failing directory
-//! fsync after manifest publication.
 
 #![cfg(feature = "fjall")]
 #![expect(
@@ -67,33 +49,22 @@ use parking_lot::RwLock;
 const MANIFEST: &str = "manifest.json";
 const ARTIFACT: &str = "txlookup-v1.dat";
 const STORE_CACHE_BYTES: u64 = 8 << 20;
-/// Bundle work polls cancellation every 4,096 records; cancellation cases
-/// need more rows than that.
 const CANCEL_POLL_RECORDS: usize = 4_096;
-/// The fenced import commits every 65,536 rows; the interrupted-import case
-/// needs more rows than one import batch so rows land before readiness.
 const IMPORT_BATCH_ROWS: usize = 65_536;
 
 static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 type BodyMap = HashMap<(u32, [u8; 32]), Vec<u8>>;
 
-// ---------------------------------------------------------------------------
-// Chain fixture
-// ---------------------------------------------------------------------------
-
-/// A linear chain from a synthetic genesis with every body available.
 struct ChainFixture {
     tree: Arc<RwLock<BlockTree>>,
     bodies: Arc<BodyMap>,
     tip: Arc<TipSnapshot>,
-    /// Every confirmed transaction with its height, in chain order.
     txids: Vec<(Txid, u32)>,
 }
 
 impl ChainFixture {
     /// `blocks` blocks above genesis, each holding a coinbase plus `extra`
-    /// transactions with distinct ids.
     fn new(blocks: u32, extra: usize) -> Self {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
@@ -141,10 +112,6 @@ impl ChainFixture {
         }
     }
 
-    /// The block tree as a checkpoint restart leaves it: the applied tip keeps
-    /// its cumulative transaction count and every ancestor is uncounted
-    /// (`crates/chainstate/src/checkpoint.rs`, `load_payloads`, restores the
-    /// count through the same `restore_chain_tx_count` on the tip alone).
     fn restarted(self) -> Self {
         {
             let mut tree = self.tree.write();
@@ -158,7 +125,6 @@ impl ChainFixture {
         self
     }
 
-    /// Distinct `(txid prefix, height)` keys: one `TxConfirmed` row each.
     fn tx_row_keys(&self) -> usize {
         self.txids
             .iter()
@@ -252,12 +218,6 @@ fn mine_block(prev: [u8; 32], height: u32, extra: usize) -> bitcoin::Block {
     block
 }
 
-// ---------------------------------------------------------------------------
-// Node seams: bodies, chain cursor, rollback evidence, store opener
-// ---------------------------------------------------------------------------
-
-/// Observes that the worker left bundle work and entered reconciliation:
-/// a caught-up pass reads the chain cursor, a backfill pass loads a body.
 #[derive(Default)]
 struct Probe {
     reconciling: AtomicBool,
@@ -292,9 +252,6 @@ impl IndexAheadSink for NoIndexAhead {
     }
 }
 
-/// The node's body source: restore locator checks, export reads, queries.
-/// Counts whole-body reads per height, so export tests can prove each covered
-/// body is read and parsed exactly once.
 #[derive(Debug, Default)]
 struct BodyLoadCounter {
     total: AtomicU64,
@@ -304,12 +261,8 @@ struct BodyLoadCounter {
 struct SourceBodies {
     bodies: Arc<BodyMap>,
     hidden: HashSet<u32>,
-    /// Shutdown latch tripped on the first body read, so bundle work is
-    /// cancelled at its next poll while it is already streaming.
     trip: Option<Arc<AtomicBool>>,
-    /// Records whether this path existed at the first body read.
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
-    /// Whole-body read counter, if the test counts body loads.
     loads: Option<Arc<BodyLoadCounter>>,
 }
 
@@ -364,12 +317,9 @@ impl BlockBodySource for SourceBodies {
     }
 }
 
-/// The worker's backfill body store. `serve == false` models a node whose
-/// ordinary backfill cannot progress, so only a restore can write rows.
 struct StoreBodies {
     bodies: Arc<BodyMap>,
     serve: bool,
-    /// Heights below this are never served, even when `serve` is set.
     from_height: u32,
     probe: Arc<Probe>,
 }
@@ -401,10 +351,6 @@ impl BlockBodyStore for StoreBodies {
     }
 }
 
-/// Real Fjall store that models a process killed during a portable import:
-/// once a committed batch carried a full import batch of `TxConfirmed` rows,
-/// every later write fails, so neither the final readiness commit nor the
-/// in-process cleanup reset reaches disk.
 struct CrashAfterBulkImport {
     inner: FjallStore,
     crashed: AtomicBool,
@@ -520,36 +466,23 @@ impl KvStore for CrashAfterBulkImport {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker harness
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Default)]
 enum Bodies {
-    /// Restore checks and queries see every body.
     #[default]
     All,
-    /// One height is absent from the body source.
     Hidden(u32),
-    /// The node has no body source at all.
     NoSource,
 }
 
 #[derive(Default)]
 struct Start {
     bundle: IndexBundleDirective,
-    /// Ordinary backfill can read bodies.
     backfill: bool,
-    /// Ordinary backfill serves no body below this height.
     backfill_from: u32,
     bodies: Bodies,
-    /// Trip shutdown on the first body-source read.
     cancel_on_body_read: bool,
-    /// Open the store through [`CrashAfterBulkImport`].
     crash_after_bulk_import: bool,
-    /// Path whose existence is recorded on body-source reads.
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
-    /// Whole-body read counter attached to the body source, if any.
     body_loads: Option<Arc<BodyLoadCounter>>,
 }
 
@@ -680,7 +613,6 @@ impl Node {
         )
     }
 
-    /// Waits until the index serves the whole chain through `height`.
     fn wait_synced(&self, height: u32) {
         wait_until("txindex synced at the tip", || {
             assert!(
@@ -693,7 +625,6 @@ impl Node {
         });
     }
 
-    /// Waits until bundle work is over and ordinary reconciliation runs.
     fn wait_reconciling(&self) {
         wait_until("worker to enter reconciliation", || {
             assert!(
@@ -724,10 +655,6 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Durable inspection after the worker exited
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
 struct Durable {
@@ -789,8 +716,6 @@ fn copy_bundle(from: &Path, to: &Path) {
     }
 }
 
-/// Backfills a source index through the worker, then exports it through the
-/// worker. Returns the source's durable state.
 fn backfilled_source(fixture: &ChainFixture, source: &Path) -> Durable {
     let node = Node::start(
         fixture,
@@ -841,13 +766,6 @@ fn assert_untouched_fresh(receiver: &Path) {
     assert_eq!(state.watermark, None);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-/// Export at the applied tip, restore on a node that cannot backfill, and
-/// require the restored node to answer every lookup exactly as the backfilled
-/// source does, with identical durable rows, and to re-export the same bundle.
 #[test]
 fn export_then_restore_serves_the_same_queries_as_backfill() {
     let fixture = ChainFixture::new(6, 40);
@@ -916,12 +834,6 @@ fn export_then_restore_serves_the_same_queries_as_backfill() {
     );
 }
 
-/// A restart restores the cumulative transaction count on the applied tip
-/// only, so a receiver that restarted and is ahead of the bundle base holds no
-/// count at the base. Restore must still prove that count from the
-/// receiver's own blocks above the base, import through the base without any
-/// backfill, and leave the blocks above it to ordinary reconciliation. A
-/// receiver whose blocks above the base cannot be read withholds the bundle.
 #[test]
 fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     let bundle_chain = ChainFixture::new(5, 25);
@@ -991,9 +903,6 @@ fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     assert_eq!(durable(&receiver), truth_state);
 }
 
-/// Corrupt, truncated, and incomplete bundles are refused before anything is
-/// written: a fresh receiver stays empty and un-watermarked, a ready index is
-/// neither reset nor changed, and the bundle files are never rewritten.
 #[test]
 fn damaged_bundles_are_refused_before_any_write_or_reset() {
     type Damage = fn(&Path, u64);
@@ -1062,7 +971,6 @@ fn damaged_bundles_are_refused_before_any_write_or_reset() {
             "{name}: bundle rewritten"
         );
 
-        // A ready index is never reset by a refused bundle.
         let ready = Node::start(
             &fixture,
             &source,
@@ -1090,9 +998,6 @@ fn flip_byte(path: &Path, offset: u64) {
     fs::write(path, bytes).expect("rewrite artifact");
 }
 
-/// Export never replaces or removes files it did not create: an existing
-/// manifest or artifact at the destination refuses the export and stays
-/// byte-identical, with the operator's other files beside it.
 #[test]
 fn export_preserves_a_preexisting_destination() {
     let fixture = ChainFixture::new(4, 20);
@@ -1135,17 +1040,8 @@ fn export_preserves_a_preexisting_destination() {
     exported_bundle(&fixture, &source, &fresh);
 }
 
-/// Exporting a multi-page artifact reads and parses each covered block body
-/// exactly once, no matter how the stored (transaction-id) order scatters one
-/// block's rows across pages. The export stages rows across pages by height
-/// before touching bodies, so the bounded body cache never reloads a body it
-/// already resolved; emission still follows stored order, so the bundle
-/// restores exactly like a backfilled index.
 #[test]
 fn export_loads_each_block_body_once_across_pages() {
-    // More stored rows than one 1,024-row page, spread over more blocks than
-    // the 8-body cache holds, so each page mixes every block's transactions
-    // in stored order and no cache can hide a cross-page reload.
     let fixture = ChainFixture::new(15, 150);
     let rows = fixture.tx_row_keys();
     assert!(
@@ -1216,9 +1112,6 @@ fn export_loads_each_block_body_once_across_pages() {
     assert_eq!(durable(&receiver), source_state);
 }
 
-/// Shutdown while an export is streaming removes the artifact the export
-/// created, publishes no manifest, leaves the operator's files and the index
-/// untouched, and a restarted export then publishes normally.
 #[test]
 fn cancelled_export_removes_only_its_own_staging() {
     let fixture = ChainFixture::new(3, 2 * CANCEL_POLL_RECORDS / 3 + 1);
@@ -1242,7 +1135,6 @@ fn cancelled_export_removes_only_its_own_staging() {
             ..Start::default()
         },
     );
-    // Cancelled bundle work stops the worker (`DerivedIndexWorkerError::Stopped`).
     node.wait_finished();
     node.stop();
     assert!(
@@ -1263,8 +1155,6 @@ fn cancelled_export_removes_only_its_own_staging() {
     );
 }
 
-/// Shutdown during restore validation writes nothing; the restarted restore
-/// then completes from the same bundle.
 #[test]
 fn cancelled_restore_writes_nothing_and_restart_completes() {
     let fixture = ChainFixture::new(3, 2 * CANCEL_POLL_RECORDS / 3 + 1);
@@ -1303,9 +1193,6 @@ fn cancelled_restore_writes_nothing_and_restart_completes() {
     assert_eq!(durable(&receiver), source_state);
 }
 
-/// A valid bundle whose locators cannot be checked is withheld: nothing is
-/// written and the index is not ready. The node then reaches readiness only
-/// through ordinary backfill, with the same rows a backfilled source holds.
 #[test]
 fn missing_bodies_withhold_readiness_until_ordinary_backfill() {
     let fixture = ChainFixture::new(5, 25);
@@ -1355,9 +1242,6 @@ fn missing_bodies_withhold_readiness_until_ordinary_backfill() {
     }
 }
 
-/// A restore killed after its first import batch reached disk leaves
-/// `TxConfirmed` rows without a watermark. The next start clears them before
-/// serving anything, and a restarted restore completes with the source rows.
 #[test]
 fn interrupted_import_is_cleared_on_restart_and_restore_retries() {
     let blocks = 24_u32;
@@ -1389,8 +1273,6 @@ fn interrupted_import_is_cleared_on_restart_and_restore_retries() {
     );
     node.stop();
     let interrupted = durable(&receiver);
-    // The first import batch holds `IMPORT_BATCH_ROWS` rows: one header per
-    // covered height, the rest `TxConfirmed` rows taken from the bundle.
     let headers = usize::try_from(blocks + 1).expect("header count fits usize");
     assert_eq!(
         interrupted.tx_confirmed.len(),

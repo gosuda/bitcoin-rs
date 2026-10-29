@@ -1,6 +1,3 @@
-// CONTRACT: `docs/contracts/external-api.md#API-05` and `#API-11` own
-// mining validation/submission projection; `map_apply_error` is the in-code
-// mapping contract from chainstate refusal to BIP22/BIP23 validation results.
 use super::{map_apply_error, test_block_validity_error};
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::ChainWork;
@@ -84,7 +81,6 @@ fn journal_backpressure_is_operational() {
     ));
 }
 
-// CONTRACT: docs/contracts/external-api.md#API-30
 #[test]
 fn generateblock_validity_wraps_bip22_reason() {
     let error = test_block_validity_error(&ApplyError::UndoPrevoutMissing {
@@ -102,7 +98,6 @@ fn generateblock_validity_wraps_bip22_reason() {
     }
 }
 
-// CONTRACT: docs/contracts/external-api.md#API-30
 #[test]
 fn generateblock_validity_keeps_shutdown_operational() {
     assert!(matches!(

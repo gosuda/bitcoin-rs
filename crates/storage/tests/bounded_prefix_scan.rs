@@ -1,5 +1,3 @@
-//! Cross-backend tests for bounded prefix scans.
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError};
@@ -111,7 +109,6 @@ fn assert_prefix_boundaries<S: KvStore>(store: &S) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// One continuation scan over `TxConfirmed`: `(prefix, start, limit)`.
 type ContinuationScan<'a> =
     &'a dyn Fn(&[u8], &[u8], PrefixScanLimit) -> Result<PrefixScan, StorageError>;
 
@@ -131,12 +128,9 @@ fn scan_keys(scan: &PrefixScan) -> Vec<Vec<u8>> {
     scan.rows.iter().map(|(key, _)| key.clone()).collect()
 }
 
-/// Seek position, ordering, prefix exit, and exhaustion of
-/// `scan_prefix_from_bounded` over the rows written by `seed_rows`.
 fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError> {
     let one = vec![vec![0x01], vec![0x01, 0xff]];
 
-    // A seek before the prefix, at it, or on its first row starts at the first row.
     let from_first: [&[u8]; 3] = [&[], &[0x00, 0xff], &[0x01]];
     for start in from_first {
         let page = scan(&[0x01], start, ROOMY)?;
@@ -144,7 +138,6 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
         assert!(page.complete);
     }
 
-    // The seek is inclusive and stops at the last row of the prefix.
     let from_last: [&[u8]; 2] = [&[0x01, 0x00], &[0x01, 0xff]];
     for start in from_last {
         let page = scan(&[0x01], start, ROOMY)?;
@@ -152,7 +145,6 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
         assert!(page.complete);
     }
 
-    // A seek past the last row of the prefix, or past the prefix, is exhausted.
     let beyond: [&[u8]; 3] = [&[0x01, 0xff, 0x00], &[0x02], &[0xff]];
     for start in beyond {
         let page = scan(&[0x01], start, ROOMY)?;
@@ -160,7 +152,6 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
         assert!(page.complete);
     }
 
-    // An all-0xff prefix has no successor prefix to bound the engine range.
     let page = scan(&[0xff], &[], ROOMY)?;
     assert_eq!(scan_keys(&page), vec![vec![0xff], vec![0xff, 0x00]]);
     assert!(page.complete);
@@ -171,7 +162,6 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
     assert_eq!(page.rows, []);
     assert!(page.complete);
 
-    // The empty prefix continues across every row.
     let page = scan(&[], &[0x01, 0xff], ROOMY)?;
     assert_eq!(
         scan_keys(&page),
@@ -179,7 +169,6 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
     );
     assert!(page.complete);
 
-    // A prefix without rows is exhausted, not truncated.
     let page = scan(&[0x09], &[], ROOMY)?;
     assert_eq!(page.rows, []);
     assert!(page.complete);
@@ -187,12 +176,9 @@ fn assert_seek_positions(scan: ContinuationScan<'_>) -> Result<(), StorageError>
     Ok(())
 }
 
-/// Row and byte limits of `scan_prefix_from_bounded` over the rows written by
-/// `seed_rows`.
 fn assert_limit_boundaries(scan: ContinuationScan<'_>) -> Result<(), StorageError> {
     let one = vec![vec![0x01], vec![0x01, 0xff]];
 
-    // Zero rows: withheld rows make the scan incomplete; none left completes it.
     let page = scan(&[0x01], &[], rows_limit(0))?;
     assert_eq!(page.rows, []);
     assert!(!page.complete);
@@ -203,7 +189,6 @@ fn assert_limit_boundaries(scan: ContinuationScan<'_>) -> Result<(), StorageErro
         assert!(page.complete);
     }
 
-    // A row limit that exactly fits the remaining rows is complete.
     let page = scan(&[0x01], &[], rows_limit(1))?;
     assert_eq!(scan_keys(&page), vec![vec![0x01]]);
     assert!(!page.complete);
@@ -214,7 +199,6 @@ fn assert_limit_boundaries(scan: ContinuationScan<'_>) -> Result<(), StorageErro
     assert_eq!(scan_keys(&page), vec![vec![0x01, 0xff]]);
     assert!(page.complete);
 
-    // Byte limits count key plus value and always admit the first row.
     let bytes = |max_bytes| PrefixScanLimit {
         max_rows: 10,
         max_bytes,
@@ -231,7 +215,6 @@ fn assert_limit_boundaries(scan: ContinuationScan<'_>) -> Result<(), StorageErro
     Ok(())
 }
 
-/// Resuming each page just after its last key visits every row once, in order.
 fn assert_pages_resume_without_gaps(scan: ContinuationScan<'_>) -> Result<(), StorageError> {
     let prefixes: [&[u8]; 3] = [&[], &[0x01], &[0xff]];
     for prefix in prefixes {

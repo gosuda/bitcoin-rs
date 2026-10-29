@@ -42,7 +42,6 @@ secp256k1.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 
 [[bench]]
 name = "merkle"

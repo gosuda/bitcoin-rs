@@ -1,5 +1,3 @@
-//! Cross-backend equivalence tests for the storage abstraction.
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
@@ -315,8 +313,6 @@ fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
     Ok(())
 }
 
-/// Reopening a store must carry every pre-existing row across unchanged and
-/// serve the newest column family without any reset or migration.
 fn run_reopen_pool_ledger_suite<S: KvStore>(
     open: impl Fn(&std::path::Path) -> Result<S, StorageError>,
 ) -> TestResult<()> {
@@ -367,9 +363,6 @@ fn redb_reopen_preserves_rows_and_serves_pool_ledger() -> TestResult<()> {
     run_reopen_pool_ledger_suite(|path| bitcoin_rs_storage::RedbStore::open(path))
 }
 
-/// Builds a raw redb database whose schema predates `PoolLedger` (only the
-/// `block_headers` table exists) and proves opening it creates the missing
-/// table while legacy rows survive untouched.
 #[cfg(feature = "redb")]
 #[test]
 fn redb_open_creates_missing_pool_ledger_table_without_reset() -> TestResult<()> {
@@ -599,8 +592,6 @@ fn run_write_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Competing writers holding the same pre-image: exactly one claim wins, the
-/// loser's batch never lands, and the winner's bytes are the final state.
 fn run_competing_writer_laws<S: KvStore>(store: &S) -> Result<(), StorageError> {
     const CF: ColumnFamily = ColumnFamily::BlockBodies;
     let key = b"write-condition-race".as_slice();
@@ -651,8 +642,6 @@ fn run_competing_writer_laws<S: KvStore>(store: &S) -> Result<(), StorageError> 
     Ok(())
 }
 
-/// `write_durable_if` success is durable on its own: a reopened store sees the
-/// committed bytes without any caller flush.
 fn run_reopen_durability_law<S, Reopen>(reopen: Reopen) -> Result<(), StorageError>
 where
     S: KvStore,

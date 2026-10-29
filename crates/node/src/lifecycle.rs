@@ -1,8 +1,3 @@
-//! The single owner of node startup, rollback, and ordered service shutdown.
-//!
-//! Startup returns a fully owned `Node`, not detached state and worker handles.
-//! The daemon and embedding surfaces both enter this lifecycle directly.
-
 use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,16 +24,12 @@ use crate::embed::Node;
 use crate::event_loop::EventLoop;
 use crate::state::NodeState;
 
-/// Teardown-entry observation seam local to the lifecycle owner.
 mod shutdown {
     #[cfg(test)]
     thread_local! {
         static SHUTDOWN_STAGES_REACHED: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
     }
 
-    /// Records that the shared teardown ran. Test builds count the entry through
-    /// the observation seam; other builds record nothing. Both builds share one
-    /// plain `()`-returning call shape.
     #[cfg(test)]
     pub(super) fn mark_shutdown_stage() {
         SHUTDOWN_STAGES_REACHED.with(|slot| slot.set(slot.get().saturating_add(1)));
@@ -49,14 +40,10 @@ mod shutdown {
         SHUTDOWN_STAGES_REACHED.with(core::cell::Cell::take)
     }
 
-    /// Non-test builds record nothing.
     #[cfg(not(test))]
     pub(super) fn mark_shutdown_stage() {}
 }
 
-/// Bounded wait for the derived-index worker join on explicit shutdown and
-/// on Drop; expiry abandons the join, revokes the generation token, and
-/// poisons the index namespace.
 pub(crate) const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,10 +108,6 @@ impl ChainControl for RpcChainControl {
                 crate::reorg::ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
                 other => ChainControlError::Failed(other.to_string()),
             })?;
-        // The transition is already released; the invalid descendants must
-        // not keep occupying bounded download staging. A valid tip the
-        // invalidation displaced is recorded afterwards, outside the
-        // transition, because recording reads the block tree.
         self.sync.purge_invalidated(&outcome.invalid);
         if let Some(demoted) = outcome.demoted_tip {
             self.sync.record_demoted_tip(demoted);
@@ -142,8 +125,6 @@ impl ChainControl for RpcChainControl {
         request.cancellation = Some(cancellation.clone());
         match verify_recent_blocks(&self.handles, request) {
             Ok(VerifyOutcome::Passed { .. }) => Ok(true),
-            // Core reports a window that reaches blocks it does not hold as
-            // `SKIPPED_MISSING_BLOCKS`, which `verifychain` answers false.
             Ok(VerifyOutcome::SkippedNoBlockData { height }) => {
                 tracing::info!(
                     height,
@@ -161,9 +142,6 @@ impl ChainControl for RpcChainControl {
     }
 }
 
-/// Maps Core's `verifychain` arguments onto the chainstate verifier. Levels
-/// above 2 run the level-2 checks: the verifier does not replay disconnect or
-/// reconnect. Zero blocks means the whole chain.
 fn verify_request(check_level: u8, nblocks: u32) -> VerifyRequest {
     let level = match check_level {
         0 => CheckLevel::ReadBodies,
@@ -182,8 +160,6 @@ struct RpcBindings {
     listeners: Vec<(RpcServer, RpcSurface)>,
 }
 
-/// Binds every RPC/HTTP listener before spawning a worker. Startup records each
-/// worker immediately after spawning, so a later failure cannot detach it.
 #[cfg(test)]
 fn bind_rpc(
     state: &NodeState,
@@ -265,9 +241,6 @@ fn bind_rpc_with_pool(
     .with_context(|| format!("failed to bind RPC listener at {}", config.rpc.bind))?;
     let mut servers = Vec::with_capacity(2);
     if let Some(address) = config.rpc.public_bind {
-        // RpcServer's existing binding API requires Auth. Public mode shares
-        // this object only for API compatibility: its closed route policy
-        // rejects JSON-RPC before consulting credentials, even valid ones.
         let public = RpcServer::bind(
             address,
             rpc_auth,
@@ -288,8 +261,6 @@ fn bind_rpc_with_pool(
     })
 }
 
-// Records that teardown reached the bootstrap join on the current thread.
-// This seam never adds state or an API to production builds.
 #[cfg(test)]
 std::thread_local! {
     static BOOTSTRAP_DRAIN_REACHED: std::cell::Cell<bool> =
@@ -330,34 +301,22 @@ fn run_before_clean_checkpoint_hook() {
 #[cfg(not(test))]
 const fn run_before_clean_checkpoint_hook() {}
 
-/// How the one ordered teardown was reached.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TeardownMode {
-    /// Startup did not complete; never publish a successful-run marker.
     StartupAbort,
-    /// Publish a checkpoint only after every service joined successfully.
     CleanShutdown,
 }
 
-/// Node-owned workers and socket owners. P2P workers are owned by
-/// `P2pService`, whose joins participate in this graph's teardown.
-///
-/// Each handle is taken exactly once. The idempotence guard makes explicit
-/// shutdown followed by Drop safe, and prevents repeated lifecycle work.
 #[derive(Default)]
 pub(crate) struct NodeServices {
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
     event_loop_signal: Option<crossbeam_channel::Sender<()>>,
-    /// Stops and joins its listener in Drop.
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
-    /// Chainstate idle maintenance (journal flush, retention); joined
-    /// before the final clean checkpoint publication.
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
     tx_ingress: Option<std::thread::JoinHandle<()>>,
-    /// Publishes the capability readiness gauge until shutdown.
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
     tx_relay: Option<std::thread::JoinHandle<()>>,
     block_announce: Option<std::thread::JoinHandle<()>>,
@@ -366,11 +325,6 @@ pub(crate) struct NodeServices {
 }
 
 impl NodeServices {
-    /// Raises shutdown, wakes and joins the event loop, joins core services,
-    /// drains subsystems, joins bootstrap/maintenance/signal workers, and only
-    /// then publishes a clean checkpoint. The derived-index worker is joined
-    /// before the remaining services. The first error is returned after all
-    /// remaining cleanup stages run and suppresses the clean checkpoint.
     pub(crate) fn teardown(
         &mut self,
         state: Option<&mut NodeState>,
@@ -399,17 +353,12 @@ impl NodeServices {
             state.p2p().shutdown();
         }
         if let Some(tx) = self.event_loop_signal.take() {
-            // A full bounded channel already carries a wake. Blocking here
-            // could prevent teardown from reaching the worker joins.
             let _ = tx.try_send(());
         }
 
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
-        // Owner-local fee-estimator history: the event loop has drained, so
-        // no further mempool mutations run and this snapshot is final.
-        // docs/policies/db-migration.md — owner-local, degrade-not-fail.
         if let Some(state) = state {
             let history = state.mempool_reader().read().estimator_history();
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
@@ -434,19 +383,16 @@ impl NodeServices {
     ) {
         if let Some(handle) = self.event_loop.take() {
             if handle.join().is_err() {
-                // Event loop thread panic.
                 set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
             }
         }
         for handle in self.rpc_threads.drain(..) {
             match handle.join() {
                 Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
-                // RPC listener returned an I/O error.
                 Ok(Err(error)) => {
                     tracing::warn!(%error, "rpc listener exited with i/o error");
                     set_first_error(first_error, anyhow::Error::new(error));
                 }
-                // RPC listener thread panic.
                 Err(_) => {
                     tracing::error!("rpc listener panicked");
                     set_first_error(first_error, anyhow::anyhow!("rpc listener thread panicked"));
@@ -459,20 +405,17 @@ impl NodeServices {
             set_first_error(first_error, error);
         }
         if let Some(handle) = self.readiness_sampler.take() {
-            // Readiness sampler thread panic.
             if handle.join().is_err() {
                 tracing::error!("readiness sampler panicked");
                 set_first_error(first_error, anyhow::anyhow!("readiness sampler panicked"));
             }
         }
         if let Some(state) = state {
-            // P2P core worker join failure.
             if let Err(error) = state.p2p().join_core_workers() {
                 set_first_error(first_error, error.into());
             }
         }
         if let Some(handle) = self.tx_ingress.take() {
-            // Tx ingress worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("tx ingress consumer exited cleanly");
             } else {
@@ -481,9 +424,6 @@ impl NodeServices {
             }
         }
         if let Some(state) = state {
-            // The consumer has stopped and dropped its channel, which dropped
-            // every queued package and returned its charge. Retire the claims
-            // they left behind and observe the ledger.
             let package_teardown = state
                 .peer_table()
                 .clear_package_claims(&state.package_capacity());
@@ -494,7 +434,6 @@ impl NodeServices {
             }
         }
         if let Some(handle) = self.tx_relay.take() {
-            // Tx relay worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("tx relay worker exited cleanly");
             } else {
@@ -503,7 +442,6 @@ impl NodeServices {
             }
         }
         if let Some(handle) = self.block_announce.take() {
-            // Block announce worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("block announce worker exited cleanly");
             } else {
@@ -522,14 +460,12 @@ impl NodeServices {
         first_error: &mut Option<anyhow::Error>,
     ) {
         if let Some(state) = state {
-            // P2P bootstrap worker join failure.
             if let Err(error) = state.p2p().join_bootstrap_worker() {
                 set_first_error(first_error, anyhow::Error::new(error));
             }
             mark_bootstrap_drain_reached();
         }
         if let Some(handle) = self.maintenance_worker.take() {
-            // Chainstate maintenance worker panic.
             if matches!(handle.join(), Ok(())) {
                 tracing::info!("chainstate maintenance worker exited cleanly");
             } else {
@@ -541,7 +477,6 @@ impl NodeServices {
             }
         }
         if let Some(mut handler) = self.signal_handler.take() {
-            // Signal forwarding thread failed to close or join.
             if let Err(error) = handler.close_and_join() {
                 tracing::error!(%error, "signal forwarding thread did not shut down cleanly");
                 set_first_error(first_error, error);
@@ -550,8 +485,6 @@ impl NodeServices {
     }
 }
 
-// The worker can only stage bytes. Publication belongs to this shutdown thread,
-// so an abandoned worker cannot overwrite a subsequent embedded node's file.
 fn save_mempool_snapshot(state: &NodeState) {
     let budget = Duration::from_secs(10);
     let deadline = std::time::Instant::now() + budget;
@@ -592,7 +525,6 @@ fn publish_mempool_snapshot(
             tracing::warn!(%error, "mempool snapshot save did not finish within the shutdown budget");
         }
     }
-    // Disconnect before returning, so a late staging result is dropped.
     drop(receiver);
 }
 
@@ -610,7 +542,6 @@ fn publish_clean_checkpoint_if_eligible(
             Ok(Some(generation)) => {
                 tracing::info!(generation, "published clean chainstate checkpoint");
             }
-            // Checkpoint write failure suppresses the clean-shutdown report.
             Err(error) => {
                 tracing::error!(%error, "clean checkpoint publication failed");
                 set_first_error(first_error, error);
@@ -629,15 +560,12 @@ fn set_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
 
 impl Drop for NodeServices {
     fn drop(&mut self) {
-        // Abandoned services still run the shared teardown.
         if let Err(error) = self.teardown(None, TeardownMode::StartupAbort) {
             tracing::warn!(%error, "dropped node services; teardown reported an error");
         }
     }
 }
 
-/// Records each successfully created service immediately. Until finished,
-/// Drop rolls back through the same teardown without publishing a checkpoint.
 struct StartupGuard {
     state: Option<NodeState>,
     services: NodeServices,
@@ -670,29 +598,13 @@ impl Drop for StartupGuard {
     }
 }
 
-/// Boots an owned node after validation, storage open, and crash recovery.
-///
-/// The returned node already owns every worker and the RPC context. No caller
-/// receives detached startup parts or needs to reconstruct lifecycle ownership.
-/// `install_signals` is the daemon's only difference from embedded startup.
-/// A failure after any service starts rolls it back through `StartupGuard`.
 #[expect(clippy::too_many_lines)]
 pub(crate) fn start_node(
     config: NodeConfig,
     runtime: RuntimeInputs,
     install_signals: bool,
 ) -> Result<Node> {
-    // The engine/build compatibility check is owned by configuration
-    // validation (`validation.engine`); repeat it on the direct embedding path
-    // so a caller that skips `resolve` cannot open chainstate or start workers
-    // on an engine this build cannot execute. It runs before anything else:
-    // not even the tracer or the rayon pool may be primed for a run that
-    // cannot start.
     config.validate()?;
-    // Registers the Bitcoin Core-compatible USDT probes with the platform
-    // tracer so consumers (bpftrace, BCC, DTrace) can discover them — shared
-    // startup, so daemon (`run`) and embedded (`Node::start`) nodes are
-    // equally discoverable. A no-op without the `usdt` feature.
     bitcoin_rs_consensus::trace::register_probes();
     cap_global_thread_pool();
     let injected_shutdown = runtime.shutdown;
@@ -717,9 +629,6 @@ pub(crate) fn start_node(
     } else {
         None
     };
-    // The sampler only publishes to the metrics recorder: without a bound
-    // server its writes go nowhere, so do not spend the thread (and its
-    // join latency in every start_node test) when metrics are off.
     guard.services.readiness_sampler = if guard.services.metrics.is_some() {
         Some(crate::metrics::spawn_readiness_sampler(
             state.derived_index_status(),
@@ -745,9 +654,6 @@ pub(crate) fn start_node(
     guard.services.event_loop_signal = event_loop_signal;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
-    // The early-announce body rendezvous: one slot shared by the announcer
-    // (writer, on every early send) and the chain query (reader, for compact
-    // `getdata` and `getblocktxn` before the body is durable).
     let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
     let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         bitcoin_rs_p2p::ActiveChainQuery::new(
@@ -773,7 +679,6 @@ pub(crate) fn start_node(
     let sequence_wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
     let signal = state.mining_generation_signal();
-    // The signal holds a Weak reference; the RPC context owns the coordinator.
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
@@ -789,10 +694,6 @@ pub(crate) fn start_node(
         .with_recent_block(recent_block)
         .with_stale_tips(peer_ready_sync.stale_tips(), chainstate.block_tree_reader()),
     );
-    // Early compact-block announce: connect fires this hook after block rules
-    // pass for a tip child, before the durable commit. The hook only hands
-    // the block to the announcer — it never publishes a tip or advances the
-    // mining generation, so miners switch on the post-commit path.
     let announcer_for_hook = Arc::clone(&block_announcer);
     let pow_valid_hook: bitcoin_rs_chainstate::PowValidBlockHook =
         Arc::new(move |block, hash, height| {
@@ -813,12 +714,7 @@ pub(crate) fn start_node(
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
         package_capacity: Some(state.package_capacity()),
-        // The node's one latch, built with the chainstate at open and already
-        // held by the block-download executor: `initialblockdownload`, the
-        // transaction-relay gate, and block-peer eligibility read one signal.
         ibd: Some((state.ibd(), state.config().network)),
-        // One orchestrator: the listener announces block inventory to the
-        // same sync loop the event loop drives.
         block_sync: Some(Arc::clone(&peer_ready_sync)),
         block_announcer: Some(block_announcer),
     };
@@ -853,11 +749,6 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::msg)?;
 
-    // A fresh chainstate leaves the applied-tip slot empty until the sync
-    // loop's first tick; applying genesis before the listener binds keeps
-    // RPC from answering mining calls it cannot yet serve, and a refused
-    // or unsettled connect aborts startup rather than serving that broken
-    // state.
     crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
         .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
     #[cfg(feature = "pool")]
@@ -919,18 +810,6 @@ pub(crate) fn start_node(
     Ok(guard.finish(context))
 }
 
-/// The one final payout-script owner for pool jobs and ordinary
-/// `getblocktemplate`.
-///
-/// Both paths share the coordinator's `coinbase_script`: pool templates fetch
-/// through `MiningControl::get_block_template` with a coinbase budget, and
-/// ordinary GBT uses the same candidate without a budget. Neither path may
-/// pick a script on its own.
-///
-/// Precedence is explicit so differing configuration cannot split the two
-/// paths: the pool reward wins whenever a pool is configured, otherwise the
-/// ordinary mining payout wins. Validation still requires a mining payout
-/// alongside a pool, but the mining value is ignored while a pool is present.
 fn final_payout_script(config: &NodeConfig) -> Vec<u8> {
     #[cfg(feature = "pool")]
     if let Some(pool) = config.pool.as_ref() {
@@ -938,17 +817,11 @@ fn final_payout_script(config: &NodeConfig) -> Vec<u8> {
     }
     config.mining.payout_script.clone()
 }
-/// Threads for the process-wide rayon pool.
-///
-/// This pool runs coarse hashing and shard-commit jobs. Script verification
-/// owns its separate pool; sizing both pools to the whole host oversubscribes
-/// the process. The existing four-worker cap is unchanged by this owner cut.
 const GLOBAL_RAYON_THREADS: usize = 4;
 
 fn cap_global_thread_pool() {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let threads = available.min(GLOBAL_RAYON_THREADS);
-    // A second node start in one process finds the pool already installed.
     if let Err(error) = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()

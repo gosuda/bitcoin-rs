@@ -1,8 +1,3 @@
-//! Bounded, cancellable reads of the authoritative UTXO set.
-//!
-//! The reservation belongs to the set, including across snapshot replacement.
-//! No coins or scan state are persisted here. A dropped reservation is idle.
-
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -21,16 +16,12 @@ const MAX_MATCH_SCRIPT_BYTES: usize = 8 * 1_048_576;
 const MAX_DURATION: Duration = Duration::from_secs(60);
 const CHECK_INTERVAL: usize = 256;
 
-/// A scan cannot acquire its reservation or exceeds an explicit work budget.
 #[derive(Debug, thiserror::Error)]
 pub enum UtxoScanError {
-    /// The same authoritative set already has a reserved scan.
     #[error("Scan already in progress, use action \"abort\" or \"status\"")]
     InProgress,
-    /// An enforced bound was reached; no complete result is claimed.
     #[error("UTXO scan limit exceeded: {0}")]
     Limit(&'static str),
-    /// A caller of the legacy complete-scan API was interrupted.
     #[error("UTXO scan aborted")]
     Aborted,
 }
@@ -70,10 +61,6 @@ impl ScanState {
     }
 }
 
-/// Exclusive transient reservation for a scan of one authoritative set.
-///
-/// The caller must also exclude chain transitions while collecting the tip
-/// and coins. This guard controls resource use, not chain publication.
 pub struct UtxoScanPermit<'a> {
     set: &'a UtxoSet,
     started: Instant,
@@ -88,8 +75,6 @@ impl<'a> UtxoScanPermit<'a> {
         })
     }
 
-    /// Checks abort/shutdown and the total 60-second reservation budget.
-    /// The predicate is called without holding the scan-state mutex.
     pub fn cancelled(&self, stopping: impl FnOnce() -> bool) -> Result<bool, UtxoScanError> {
         let abort = self.set.scan.0.lock().as_ref().is_some_and(|p| p.abort);
         if abort || stopping() {
@@ -101,8 +86,6 @@ impl<'a> UtxoScanPermit<'a> {
         Ok(false)
     }
 
-    /// Prepares the existing complete-scan API's needles without copying
-    /// unchecked caller input. Duplicate scripts consume no additional needle budget.
     pub(crate) fn scan_scripts(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoScanError> {
         let mut needles = BTreeSet::<Vec<u8>>::new();
         let mut script_bytes = 0usize;
@@ -113,8 +96,6 @@ impl<'a> UtxoScanPermit<'a> {
             if needles.contains(script.as_slice()) {
                 continue;
             }
-            // Admit the needle's count and bytes before cloning it, so caller
-            // input past either budget is refused without being copied.
             if needles.len() == MAX_SCAN_SCRIPTS {
                 return Err(UtxoScanError::Limit("1024 scripts"));
             }
@@ -131,12 +112,11 @@ impl<'a> UtxoScanPermit<'a> {
         Ok(scan)
     }
 
-    /// Visits a stable view, returning false with partial results on abort.
+    /// Script matching is logarithmic in the bounded needle set.
     ///
-    /// Script matching is logarithmic in the bounded needle set. Traversal
-    /// stops before exceeding 250 million coins, 10,000 matches or 8 MiB of
-    /// matched scripts. Abort/deadline checks occur every 256 coins and between
-    /// shards. No write lock or durable mutation is used.
+    /// Traversal stops before exceeding 250 million coins, 10,000 matches or 8 MiB of
+    /// matched scripts. Abort/deadline checks occur every 256 coins and between shards.
+    /// No write lock or durable mutation is used.
     pub fn scan(
         &self,
         scripts: &BTreeSet<Vec<u8>>,
@@ -269,8 +249,6 @@ mod tests {
     #[test]
     fn complete_scan_deduplicates_before_charging_script_budgets() {
         let reader = UtxoReader::new(coins(1));
-        // Raw input exceeds both budgets, but there are only two distinct
-        // needles. The compatibility API retains distinct-script semantics.
         let mut scripts = vec![vec![0u8; 1_024]; MAX_SCAN_SCRIPTS + 1];
         scripts.push(vec![0x51]);
         let scan = reader

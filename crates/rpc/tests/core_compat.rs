@@ -1,18 +1,4 @@
 //! Bitcoin Core wire-contract compatibility tests.
-//!
-//! Representable response fixtures deserialize into the pinned `corepc_types`
-//! structured types under the strict `serde-deny-unknown-fields` feature.
-//! Those DTOs narrow transaction versions to i32; the full unsigned wire range
-//! is instead qualified against actual Core by the process harness's
-//! `verbose_transaction_cases` and `script_decode_cases`. A DTO range is not
-//! authority to narrow Core's JSON. `getblockchaininfo` additionally carries
-//! declared extension keys: its decoder strips exactly that declared set
-//! before the strict decode, so any other unlisted key still fails the gate.
-//!
-//! Schema-proof surface named by `docs/policies/source-compatibility.md`
-//! §5.2 (RPC methods match current Bitcoin Core schemas; clean cutover, no
-//! deprecation shims).
-
 extern crate alloc;
 
 #[expect(
@@ -37,12 +23,11 @@ use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, json};
 
-/// Re-parses one dispatched response against the pinned upstream wire type.
 fn typed<T: serde::de::DeserializeOwned>(
     value: &sonic_rs::Value,
 ) -> Result<T, Box<dyn std::error::Error>> {
     let text = sonic_rs::to_string(value)?;
-    Ok(serde_json::from_str(&text)?)
+    Ok(sonic_rs::from_str(&text)?)
 }
 
 fn tipped_context() -> Arc<Context> {
@@ -99,8 +84,6 @@ fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn s
         typed(&handler.dispatch("getchaintxstats", &json!([]))?)?;
     assert_eq!(stats.window_final_block_height, 42);
 
-    // The synthetic tip above has no ancestry or bodies and cannot certify
-    // verification. An empty applied chain has a legitimately empty window.
     let empty = Handler::new(Arc::new(Context::new()));
     let verify: corepc_types::v31::VerifyChain =
         typed(&empty.dispatch("verifychain", &json!([0, 6]))?)?;
@@ -108,14 +91,11 @@ fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn s
 
     let verify: corepc_types::v31::VerifyChain =
         typed(&handler.dispatch("verifychain", &json!([0, 6]))?)?;
-    // The fixture has an applied tip but no chain control: nothing verifies
-    // the chain, so it cannot be declared verified.
     assert!(!verify.0);
 
     let at_tip: corepc_types::v31::GetBlockHash =
         typed(&handler.dispatch("getblockhash", &json!([42]))?)?;
     assert_eq!(at_tip.0, best.0);
-    // Pruning needs block-log rows this fixture does not provide.
     assert!(handler.dispatch("pruneblockchain", &json!([1])).is_err());
 
     Ok(())
@@ -149,16 +129,12 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
         typed(&handler.dispatch("getmempoolinfo", &json!([]))?)?;
     assert!(info.loaded);
     assert_eq!(info.size, 0);
-    // Policy fields project the enforced MempoolPolicySnapshot defaults:
-    // bare multisig permitted, the 83-byte nulldata budget, and the cluster
-    // limits admission enforces.
     assert!(info.permit_bare_multisig);
     assert!(info.optimal);
     assert_eq!(info.max_data_carrier_size, 83);
     assert_eq!(info.limit_cluster_count, 64);
     assert_eq!(info.limit_cluster_size, 101_000);
     assert_eq!(info.max_mempool, 300_000_000);
-    // Core 31.1 and the pool both allow replacements without opt-in signaling.
     assert!(info.full_rbf);
 
     let raw: corepc_types::v31::GetRawMempool =
@@ -181,7 +157,6 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// The `protocolversion` Bitcoin Core 31.1 reports and advertises.
 const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
 
 #[test]
@@ -252,12 +227,13 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Both validateaddress failure classes answer exactly Core's sparse
-/// `{"isvalid": false}` object: `isvalid` is the only key and every
-/// valid-only field (`address`, `scriptPubKey`, `isscript`, `iswitness`,
-/// `witness_version`, `witness_program`) is absent. The pinned corepc type
-/// models those fields as required, so this branch cannot round-trip
-/// through `typed()` and is pinned by key-set assertions (`local_shape`).
+/// Both validateaddress failure classes answer exactly Core's sparse `{"isvalid":
+/// false}` object: `isvalid` is the only key and every valid-only field (`address`,
+/// `scriptPubKey`, `isscript`, `iswitness`, `witness_version`, `witness_program`) is
+/// absent.
+///
+/// The pinned corepc type models those fields as required, so this branch cannot
+/// round-trip through `typed()` and is pinned by key-set assertions (`local_shape`).
 fn assert_sparse_invalid(value: &sonic_rs::Value) {
     let object = value
         .as_object()
@@ -294,15 +270,11 @@ fn util_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::err
     assert!(estimate.fee_rate.is_none());
     assert_eq!(estimate.blocks, 2);
 
-    // The standard burn address is valid on the default mainnet selector.
     let valid: corepc_types::v31::ValidateAddress =
         typed(&handler.dispatch("validateaddress", &json!(["1111111111111111111114oLvT2"]))?)?;
     assert!(valid.is_valid);
     assert_ne!(valid.script_pubkey, "");
 
-    // Core answers a malformed address with the sparse `{"isvalid": false}`
-    // object only, and a well-formed address from another network fails
-    // identically; the corepc type cannot model that branch (local_shape).
     assert_sparse_invalid(&handler.dispatch("validateaddress", &json!(["not a real address"]))?);
     assert_sparse_invalid(&handler.dispatch(
         "validateaddress",
@@ -330,9 +302,6 @@ fn mining_responses_error_without_a_control() {
     assert!(handler.dispatch("getmininginfo", &json!([])).is_err());
 }
 
-/// Mirrors the `handler_smoke` mining-control fixture so the typed mining
-/// response schemas are exercised against real template facts instead of the
-/// unavailable-control error path.
 struct CompatMiningControl;
 
 impl MiningControl for CompatMiningControl {
@@ -388,8 +357,6 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
-    // API-12 mainnet gates (peers + IBD) live in the handler unit tests.
-    // This rendering proof runs off-mainnet so it reaches the template.
     let mut ctx = Context::new();
     ctx.chain.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
@@ -401,7 +368,6 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");
-    // Compact 0x1d00ffff expanded to Core's 64-char target spelling.
     assert_eq!(
         template.target,
         "00000000ffff0000000000000000000000000000000000000000000000000000"
@@ -409,7 +375,6 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(template.previous_block_hash, "0".repeat(64));
     assert_eq!(template.nonce_range, "00000000ffffffff");
     assert_eq!(template.capabilities, ["coinbasetxn"]);
-    // TemplateMutation variants render as Core's `mutable` vocabulary.
     assert_eq!(template.mutable, ["time", "transactions", "prevblock"]);
     assert_eq!(template.sigop_limit, 80_000);
     assert_eq!(template.size_limit, 4_000_000);
@@ -445,19 +410,17 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     );
     assert!((mining.network_hash_ps - 0.0).abs() < f64::EPSILON);
     assert_eq!(mining.pooled_tx, 0);
-    // 1_000 sat/kvB crosses the sat-to-BTC unit boundary Core reports.
     assert!((mining.block_min_tx_fee - 1e-5).abs() < f64::EPSILON);
     assert!((mining.next.difficulty - 1.0).abs() < f64::EPSILON);
     assert!(mining.signet_challenge.is_none());
     assert_eq!(mining.warnings, Vec::<String>::new());
-    // Nested next-block facts must survive the round-trip.
     assert_eq!(mining.next.height, 1);
     assert_eq!(mining.next.bits, "207fffff");
     assert_eq!(mining.next.target, mining.target);
 
     let rate: f64 = typed(&handler.dispatch("getnetworkhashps", &json!([]))?)?;
     assert!((rate - 0.0).abs() < f64::EPSILON);
-    let prioritised: std::collections::BTreeMap<String, serde_json::Value> =
+    let prioritised: std::collections::BTreeMap<String, sonic_rs::Value> =
         typed(&handler.dispatch("getprioritisedtransactions", &json!([]))?)?;
     assert!(prioritised.is_empty());
 
@@ -493,10 +456,6 @@ fn primitive_responses_stay_primitives() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// API-15 cooked boundary: `submitblock` hex carrying trailing bytes after
-/// the block truncates to the consumed prefix and submits that truncated
-/// payload. The submitter records the retained bytes so the test proves the
-/// remainder was discarded, not re-encoded or persisted.
 #[test]
 fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -578,14 +537,11 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
         "the submitted payload must retain exactly the consumed prefix"
     );
 
-    // Bytes that cannot start a block still fail exactly like Core.
     let error = match handler.dispatch("submitblock", &json!(["zz"])) {
         Err(error) => error,
         Ok(_) => return Err("undecodable hex was accepted".into()),
     };
     assert_eq!(error.to_string(), "Block decode failed");
-    // Core `-22` (`RpcError::CORE_DESERIALIZATION_ERROR`, crate-internal):
-    // undecodable blocks fail deserialization exactly like Core.
     assert_eq!(error.code(), -22);
     Ok(())
 }

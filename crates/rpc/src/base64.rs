@@ -1,23 +1,8 @@
 //! Base64 codec for the RPC crate, with one owner for the alphabet.
-//!
-//! Auth header decoding and PSBT rendering previously carried two decoders
-//! whose acceptance rules had drifted. Both surfaces now share these
-//! functions; the decoder accepts exactly the standard alphabet with
-//! canonical padding, so every string one surface rejects the other
-//! rejects too.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Decodes standard-alphabet Base64 with canonical padding.
-///
-/// Padding follows RFC 4648: at most one pad block at the end, written as
-/// `=` at the third or fourth position of the final chunk and nowhere else.
-/// The empty string is not a valid encoding.
-///
-/// PRE: `input` is the string a caller received on its boundary.
-/// POST: `Ok(bytes)` with the decoded octets, or `Err(())` for an empty,
-///   non-multiple-of-four, wrongly padded, or off-alphabet input.
-/// INVARIANT: `Ok` output round-trips through [`encode`].
 pub(crate) fn decode(input: &str) -> Result<Vec<u8>, ()> {
     let bytes = input.as_bytes();
     if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
@@ -30,9 +15,6 @@ pub(crate) fn decode(input: &str) -> Result<Vec<u8>, ()> {
         let last = index + 1 == chunk_count;
         let pad2 = chunk[2] == b'=';
         let pad3 = chunk[3] == b'=';
-        // `pad2` and `pad3` mark the `=` at positions 2 and 3. The pad bits
-        // of the preceding sextet must be zero — Core's decoder (and RFC
-        // 4648 canonical form) rejects encodings that smuggle data there.
         if chunk[0] == b'='
             || chunk[1] == b'='
             || pad2 && !pad3
@@ -90,12 +72,6 @@ const fn value(byte: u8) -> Option<u8> {
 }
 
 /// Encodes bytes as standard-alphabet Base64 with canonical padding.
-///
-/// PRE: none; any byte slice encodes.
-/// POST: the encoded string, padded to a multiple of four characters with
-///   `=` only where a final chunk carries fewer than three octets.
-/// INVARIANT: for non-empty `bytes`, `decode(&encode(bytes)) == Ok(bytes)`;
-///   the empty slice encodes to the empty string, which [`decode`] rejects.
 pub(crate) fn encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

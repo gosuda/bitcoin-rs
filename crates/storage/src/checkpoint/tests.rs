@@ -139,7 +139,7 @@ fn publication_replaces_current_and_cleans_previous_generation()
     assert_eq!(publish_fixture(&data, None)?, 1);
     assert_eq!(publish_fixture(&data, None)?, 2);
     let root = dir.path().join(CHECKPOINT_ROOT);
-    let current: CurrentV1 = serde_json::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     assert_eq!(current.generation, 2);
     assert!(!root.join(generation_name(1)).exists());
     let entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
@@ -380,14 +380,14 @@ fn current_and_manifest_validation_reject_tampering() -> Result<(), Box<dyn std:
     let original_current = fs::read(&current_path)?;
     for mutation in 0..4 {
         fs::write(&current_path, &original_current)?;
-        let mut current: CurrentV1 = serde_json::from_slice(&original_current)?;
+        let mut current: CurrentV1 = sonic_rs::from_slice(&original_current)?;
         match mutation {
             0 => current.version += 1,
             1 => current.format.push_str("-wrong"),
             2 => current.directory.push_str("-wrong"),
             _ => current.manifest_sha256 = "zz".repeat(32),
         }
-        fs::write(&current_path, serde_json::to_vec(&current)?)?;
+        fs::write(&current_path, sonic_rs::to_vec(&current)?)?;
         assert!(matches!(
             read_current(&root),
             Err(CheckpointError::Invalid(_))
@@ -400,7 +400,7 @@ fn current_and_manifest_validation_reject_tampering() -> Result<(), Box<dyn std:
     let original_manifest = fs::read(&manifest_path)?;
     for mutation in 0..6 {
         fs::write(&manifest_path, &original_manifest)?;
-        let mut manifest: CheckpointManifestV1 = serde_json::from_slice(&original_manifest)?;
+        let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&original_manifest)?;
         match mutation {
             0 => {
                 let stale = current.clone();
@@ -424,7 +424,7 @@ fn current_and_manifest_validation_reject_tampering() -> Result<(), Box<dyn std:
             4 => manifest.network.push_str("-wrong"),
             _ => manifest.genesis_hash.push_str("-wrong"),
         }
-        let bytes = serde_json::to_vec(&manifest)?;
+        let bytes = sonic_rs::to_vec(&manifest)?;
         fs::write(&manifest_path, &bytes)?;
         let mut authenticated = current.clone();
         authenticated.manifest_sha256 = hex_encode(&Sha256::digest(&bytes));
@@ -520,7 +520,7 @@ fn commit_rejects_manifest_for_wrong_generation() -> Result<(), Box<dyn std::err
     let data = open_root(dir.path())?;
     let stage = begin_publication_with_failpoint(&data, None)?;
     let generation = stage.generation();
-    let manifest: CheckpointManifestV1 = serde_json::from_value(serde_json::json!({
+    let manifest: CheckpointManifestV1 = sonic_rs::from_value(&sonic_rs::json!({
         "format": MANIFEST_FORMAT,
         "version": MANIFEST_VERSION,
         "generation": generation + 1,
@@ -582,7 +582,6 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::error::Error>> {
-    // Only the lock file initializes.
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     {
@@ -591,7 +590,6 @@ fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::err
         lock.sync_all()?;
     }
     ensure_current_schema(&data)?;
-    // The lock plus any other entry still errors.
     {
         let mut other = data.create("other")?;
         other.write_all(b"data")?;
@@ -599,7 +597,6 @@ fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::err
     }
     data.remove_file(CURRENT_SCHEMA_FILE)?;
     assert!(ensure_current_schema(&data).is_err());
-    // A lock directory does not exempt.
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     data.create_dir(super::fs::DATA_DIR_LOCK_FILE)?;
@@ -622,21 +619,15 @@ fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
     let data = open_root(dir.path())?;
     let root = CheckpointRoot::open_or_create(&data, CHECKPOINT_ROOT)?;
 
-    // A valid same-directory rename retains its behavior.
     root.create_dir("stage-a")?;
     super::fs::rename_noreplace(root.dir(), "stage-a", "stage-b")?;
     assert!(root.entry_exists("stage-b")?);
     assert!(!root.entry_exists("stage-a")?);
 
-    // Operator data that must survive the attack attempts.
     let mut operator = root.create_file("operator-notes")?;
     operator.write_all(b"keep")?;
     drop(operator);
 
-    // Crafted destinations: parent traversal, absolute paths, nested paths
-    // (including symlink-intermediate and replacement-path shapes), trailing
-    // directory slashes, and non-entry structures. Each must fail with
-    // `InvalidInput` before any syscall, leaving the source in place.
     root.create_dir("victim")?;
     let hostile_destinations = [
         "..",
@@ -667,8 +658,6 @@ fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
         "rejected destinations must not consume the source"
     );
 
-    // Crafted sources are confined symmetrically: an outside path must not be
-    // importable into the root.
     for hostile in ["../victim", "/tmp/victim", "a/b", "", ".", "..", "link/"] {
         let error = match super::fs::rename_noreplace(root.dir(), hostile, "fresh-dest") {
             Ok(()) => panic!("source {hostile:?} was accepted"),
@@ -682,8 +671,6 @@ fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
     }
     assert!(!root.entry_exists("fresh-dest")?);
 
-    // A planted symlink plus a trailing-slash destination must not resolve
-    // outside the root: the raw `/` is rejected before component analysis.
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -712,8 +699,6 @@ fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
         );
     }
 
-    // An existing destination is preserved by NOREPLACE: the collision fails
-    // without consuming the source or clobbering operator data.
     let collision = match super::fs::rename_noreplace(root.dir(), "victim", "operator-notes") {
         Ok(()) => panic!("rename onto operator data was accepted"),
         Err(collision) => collision,
@@ -727,7 +712,6 @@ fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
         "operator data must survive collision"
     );
 
-    // Nothing escaped the checkpoint root and the root still behaves.
     assert!(!dir.path().join("escape").exists());
     assert!(!dir.path().join("tmp").join("checkpoint-escape").exists());
     super::fs::rename_noreplace(root.dir(), "victim", "victim-promoted")?;
@@ -747,8 +731,6 @@ fn open_file_reads_regular_file() -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     assert_eq!(bytes, b"checkpoint-bytes");
-    // The public caller delegates to `open_file`, so it inherits the same
-    // no-follow, regular-file-only posture.
     assert_eq!(
         read_file(&cap_dir, "utxo-v4.dat", 1024)?,
         b"checkpoint-bytes"
@@ -791,8 +773,6 @@ fn open_file_refuses_fifo_without_blocking() -> Result<(), Box<dyn std::error::E
 
     let cap_dir = open_root(dir.path())?;
     let worker_dir = cap_dir.try_clone()?;
-    // Bounded queue: the worker owns exactly one outcome and the test owns
-    // the join, so a regressed reader cannot outlive this test.
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         let result = super::fs::open_file(&worker_dir, "utxo-v4.dat").map(|_| ());
@@ -800,9 +780,6 @@ fn open_file_refuses_fifo_without_blocking() -> Result<(), Box<dyn std::error::E
     });
     let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
     let rescue = if observed.is_err() {
-        // Unblock a regressed reader before reporting failure. O_RDWR
-        // plus NONBLOCK prevents this rescue from introducing another
-        // FIFO wait.
         use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
         let mut options = cap_std::fs::OpenOptions::new();
         options
@@ -817,7 +794,6 @@ fn open_file_refuses_fifo_without_blocking() -> Result<(), Box<dyn std::error::E
     worker
         .join()
         .map_err(|_| "checkpoint open worker panicked")?;
-    // Keep queued rescue bytes alive even if the worker started late.
     drop(rescue);
     assert_eq!(
         observed.map_err(|_| "opening a substituted FIFO must not block")?,

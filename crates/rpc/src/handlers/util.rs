@@ -30,7 +30,6 @@ fn conf_target_blocks(conf_target: u64) -> u32 {
     u32::try_from(conf_target).unwrap_or(u32::MAX)
 }
 
-/// Decode a script without querying chain state or supplying wallet keys.
 pub(crate) fn decodescript(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, &["hexstring"])?;
     let params = bound.as_ref();
@@ -55,9 +54,6 @@ pub(crate) fn decodescript(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     ))
 }
 
-/// `uptime` measures from the instant this context's RPC listener bound
-/// (recorded by `RpcServer::bind`), or from its first call for contexts
-/// that never bind a server.
 pub(crate) fn uptime(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
     let secs = ctx.server_start().elapsed().as_secs();
@@ -88,14 +84,11 @@ pub(crate) fn getmemoryinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value
         .and_then(JsonValueTrait::as_str)
         .unwrap_or("stats");
     if mode != "stats" {
-        // Core's mallocinfo mode emits allocator XML; this node exposes stats only.
         return Err(RpcError::InvalidParams(
             "only mode=stats is supported in this implementation",
         ));
     }
 
-    // Bitcoin Core reports locked-pool allocator stats. This implementation
-    // exposes resident set size from Linux /proc as the available v1 proxy.
     let rss_bytes = read_linux_rss_bytes().unwrap_or(0);
     let mut locked = alloc::collections::BTreeMap::new();
     locked.insert(
@@ -140,7 +133,6 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 }
 
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    // CONTRACT: docs/contracts/external-api.md#API-26
     ensure_at_most_params(params, 2)?;
     let conf_target = required_i64(params, 0, "conf_target is required")?;
     if !(1_i64..=ESTIMATE_SMART_FEE_MAX_TARGET_I64).contains(&conf_target) {
@@ -234,12 +226,6 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .ok()
         .and_then(|address| address.require_network(network).ok())
     else {
-        // Core answers a malformed or wrong-network address with the sparse
-        // `{"isvalid": false}` object alone: no address, scriptPubKey,
-        // isscript, iswitness, or witness fields. `v31::ValidateAddress`
-        // models the valid-address fields as required and cannot represent
-        // that wire shape, so this branch is hand-built (local_shape
-        // exception; see the manifest row note).
         return Ok(json!({"isvalid": false}));
     };
 
@@ -262,24 +248,12 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 
 pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let descriptor = required_str(params, 0, "descriptor is required")?;
-    // Optional here, as in Core: `Parse` is called without `require_checksum`,
-    // so a bare descriptor is analysed and one carrying a checksum has it
-    // checked.
     let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
     let info = analyse(payload, convert::bitcoin_network(ctx.chain.chain_network))
         .map_err(descriptor_error)?;
 
     typed_to_sonic_omitting_nulls(&v31::GetDescriptorInfo {
-        // The canonical form comes from the parse, so a descriptor handed to this
-        // call with an `xprv` in it does not get one back.
-        //
-        // It carries its own checksum, as Core's does: `DescriptorImpl::ToString`
-        // ends in `return AddChecksum(ret)`. That checksum is of the *canonical*
-        // string and the `checksum` field below is of the *input*, which is not a
-        // duplication -- the two differ whenever the parse rewrites anything, an
-        // `xprv` replaced by its `xpub` most obviously. A caller copying the
-        // canonical form back out needs the one that matches what they copied.
         descriptor: with_checksum(&info.canonical),
         multipath_expansion: if info.multipath_expansion.is_empty() {
             None
@@ -301,10 +275,6 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let descriptor = required_str(params, 0, "descriptor is required")?;
-    // Core passes `require_checksum = true` here, and only here. These
-    // addresses are what someone will send money to; a mistyped descriptor
-    // derives perfectly good addresses that nobody holds the keys for, and the
-    // checksum is the only thing between a typo and that.
     let (payload, _checksum) = checked_checksum(descriptor, ChecksumRequirement::Required)?;
     let range = array
         .get(1)
@@ -319,8 +289,6 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     )
     .map_err(descriptor_error)?;
 
-    // Core returns a flat array for a single-path descriptor and an array per
-    // expansion for a multipath one.
     match <[Vec<String>; 1]>::try_from(expansions) {
         Ok([single]) => typed_to_sonic(&v31::DeriveAddresses(single)),
         Err(many) => typed_to_sonic(&v31::DeriveAddressesMultipath(
@@ -329,12 +297,8 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     }
 }
 
-/// Maps a descriptor failure onto the code Bitcoin Core answers it with.
-///
 /// A descriptor that does not parse is `-5`; a range that does not match a
 /// descriptor that parsed fine is `-8`. They are different questions and Core
-/// keeps them apart, so a client can tell "I sent you nonsense" from "I asked
-/// the wrong thing about something valid".
 fn descriptor_error(error: DescriptorError) -> RpcError {
     match error {
         DescriptorError::Range(message) => RpcError::InvalidParameter(message.to_owned()),
@@ -345,52 +309,17 @@ fn descriptor_error(error: DescriptorError) -> RpcError {
     }
 }
 
-/// A canonical descriptor with its own checksum attached, as Core returns it.
-///
-/// Falls back to the bare form if the payload somehow carries a character
-/// outside BIP380's input charset. That cannot happen for a string this node
-/// just produced from a parsed descriptor, and returning a descriptor without a
-/// checksum is a better failure than refusing to answer about one that parsed.
 fn with_checksum(canonical: &str) -> String {
     descriptor_checksum(canonical)
         .map_or_else(|| canonical.to_owned(), |sum| format!("{canonical}#{sum}"))
 }
 
-/// Whether a descriptor must carry a checksum to be accepted.
-///
-/// Core decides this per call site, and the two answers are not arbitrary.
-/// `getdescriptorinfo` analyses whatever it is handed, so a checksum is
-/// optional there. `deriveaddresses` turns a descriptor into addresses someone
-/// will send money to, so Core passes `require_checksum = true` -- a mistyped
-/// descriptor derives perfectly good addresses that nobody holds the keys for,
-/// and the checksum is the only thing standing between a typo and that.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChecksumRequirement {
-    /// Accept a descriptor with no checksum; verify one that is present.
     Optional,
-    /// Refuse a descriptor with no checksum.
     Required,
 }
 
-/// Verifies a descriptor's checksum and returns the body plus the computed sum.
-///
-/// Bitcoin Core's `CheckChecksum` in `script/descriptor.cpp`, rule for rule.
-/// Callers parse the returned payload. `combo(` / `addr(` / `raw(` look for a
-/// trailing `)`, so the original `desc#checksum` string is not a descriptor
-/// body.
-///
-/// The previous implementation split the text on its last `#` and threw the
-/// supplied checksum away, which meant a *wrong* checksum was accepted and
-/// silently replaced with the right one in the response. The checksum exists to
-/// catch a mistyped descriptor; discarding it defeats the entire mechanism, and
-/// the caller is told their typo is fine.
-///
-/// The three refusals, in Core's order:
-///
-/// - more than one `#`, which is a malformed descriptor rather than a
-///   descriptor with an odd checksum;
-/// - a checksum that is present but not exactly eight characters;
-/// - a checksum that does not match the one the payload computes.
 fn checked_checksum(
     descriptor: &str,
     requirement: ChecksumRequirement,
@@ -398,11 +327,6 @@ fn checked_checksum(
     checksummed_payload(descriptor, requirement).map_err(RpcError::InvalidAddressOrKey)
 }
 
-/// Splits an optional BIP380 checksum and verifies it when present.
-///
-/// Returns the descriptor body and the computed checksum. A supplied checksum
-/// may be omitted when `requirement` is [`ChecksumRequirement::Optional`], but
-/// a present checksum is always checked.
 fn checksummed_payload(
     descriptor: &str,
     requirement: ChecksumRequirement,
@@ -483,40 +407,22 @@ pub(crate) fn parse_derivation_range(value: &Value) -> Result<(u32, u32), RpcErr
     Ok((begin, end))
 }
 
-/// Core's ceiling on how much work one derive request may ask for.
-///
-/// `ParseDescriptorRange` in `rpc/util.cpp` refuses `high >= low + 1000000`.
-/// Without it `[0, 4294967295]` is a legal request that derives four billion
-/// addresses and holds every one of them in memory before answering -- an
-/// unauthenticated caller turning one JSON object into an out-of-memory kill.
-/// The refusal has to happen before the work starts, which is why it lives in
-/// the parser rather than in the loop.
 const MAX_DERIVATION_COUNT: u32 = 1_000_000;
 
-/// Core's ceiling on the index itself: `(high >> 31) != 0` is refused, so the
-/// top bit is reserved and the largest derivable index is `2^31 - 1`. That is
-/// BIP32's unhardened range, and an index above it is not a large request but
-/// an impossible one.
 const MAX_DERIVATION_INDEX: u32 = (1 << 31) - 1;
 
 fn bound_derivation_work(begin: u32, end: u32) -> Result<(), RpcError> {
-    // Core compares `high >= low + 1000000` on `int64_t`, so the sum cannot
-    // wrap there; here both are `u32` and it can, which would turn the ceiling
-    // into a floor. Widened rather than saturated for that reason.
     if u64::from(end) >= u64::from(begin).saturating_add(u64::from(MAX_DERIVATION_COUNT)) {
         return Err(RpcError::InvalidParameter("Range is too large".to_owned()));
     }
     Ok(())
 }
 
-/// One scan script and its Core-specialized attribution.
 pub(crate) struct ScanScript {
     pub(crate) script_pubkey: Vec<u8>,
     pub(crate) desc: String,
 }
 
-/// Parsed scan input, retained until the whole request's derivation budget
-/// has been checked. Parsing performs no public-key derivation.
 pub(crate) enum ScanDescriptor {
     Fixed(ScanScript),
     Keys {
@@ -527,7 +433,6 @@ pub(crate) enum ScanDescriptor {
 }
 
 impl ScanDescriptor {
-    /// Counts work before deduplication, including every multipath branch.
     pub(crate) fn script_count(&self) -> usize {
         match self {
             Self::Fixed(_) => 1,
@@ -536,7 +441,6 @@ impl ScanDescriptor {
                 range: (begin, end),
                 ..
             } => {
-                // Supported key descriptors have exactly one key.
                 let mut paths = 1;
                 descriptor.for_each_key(|key| {
                     if let DescriptorPublicKey::MultiXPub(key) = key {
@@ -568,8 +472,6 @@ impl ScanDescriptor {
         let paths = descriptor
             .into_single_descriptors()
             .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
-        // Core expands indexes first, then paths. Keep deterministic first
-        // attribution when different derivations produce the same script.
         for index in begin..=end {
             for path in &paths {
                 if cancelled()? {
@@ -585,7 +487,6 @@ impl ScanDescriptor {
     }
 }
 
-/// Existing checksum, network and public-key rules stay in this owner.
 pub(crate) fn scan_descriptor(
     text: &str,
     range: Option<(u32, u32)>,
@@ -606,8 +507,6 @@ pub(crate) fn scan_descriptor(
             script_pubkey: script.into_bytes(),
         }));
     }
-    // Parsing public keys directly rejects WIF/xprv without converting or
-    // deriving secrets. Other descriptor endpoints retain their own contract.
     let descriptor = MiniscriptDescriptor::<DescriptorPublicKey>::from_str(payload)
         .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
     ensure_keys_match_network(&descriptor, chain).map_err(descriptor_error)?;
@@ -631,8 +530,6 @@ pub(crate) fn scan_descriptor(
                     .into(),
             )),
         };
-    // Miniscript accepts repeated alternatives; Core rejects them. Inspect
-    // the parsed paths rather than introducing a second descriptor parser.
     if let Some(DescriptorPublicKey::MultiXPub(key)) = descriptor.iter_pk().next() {
         let mut seen = std::collections::BTreeSet::new();
         if key
@@ -647,7 +544,6 @@ pub(crate) fn scan_descriptor(
         }
     }
     let range = if descriptor.has_wildcard() {
-        // Core's scan default is inclusive: 0 through 1000.
         range.unwrap_or((0, 1000))
     } else {
         (0, 0)
@@ -678,10 +574,6 @@ fn scan_key_script(
     } else {
         format!("/{path}")
     };
-    // Core's constant key provider uses the full public key ID even when
-    // the descriptor wrote only an x coordinate. Miniscript's bare x-only
-    // fingerprint hashes the 32-byte coordinate instead, so derive this
-    // fallback from the normalized compressed public key.
     let fingerprint = match key.as_descriptor_public_key() {
         DescriptorPublicKey::Single(single) if single.origin.is_none() => public
             .pubkey_hash()
@@ -704,7 +596,6 @@ fn scan_key_script(
     })
 }
 
-/// Expands a scan descriptor over an optional derivation range, bounded by script and byte budgets.
 #[cfg_attr(
     not(test),
     expect(
@@ -721,7 +612,6 @@ pub(crate) fn scan_descriptor_range(
     scan_descriptor_range_budgeted(text, network, range, 1024_u64, 1_048_576_u64, cancelled)
 }
 
-/// Expands a scan descriptor over an optional derivation range against remaining caller-supplied budgets.
 #[expect(
     clippy::too_many_lines,
     reason = "descriptor range expansion and budget validation"
@@ -761,8 +651,6 @@ pub(crate) fn scan_descriptor_range_budgeted(
             script_pubkey: script.into_bytes(),
         }]);
     }
-    // Parsing public keys directly rejects WIF/xprv without converting or
-    // deriving secrets. Other descriptor endpoints retain their own contract.
     let descriptor = MiniscriptDescriptor::<DescriptorPublicKey>::from_str(payload)
         .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
     ensure_keys_match_network(&descriptor, chain).map_err(descriptor_error)?;
@@ -849,17 +737,9 @@ pub(crate) fn scan_descriptor_range_budgeted(
     Ok(scripts)
 }
 
-// ---------------------------------------------------------------------------
-// Descriptor analysis and derivation (ported from the removed wallet crate).
-// ---------------------------------------------------------------------------
-
-/// What `getdescriptorinfo` reports about a descriptor.
 #[derive(Debug)]
 struct DescriptorInfo {
     /// Canonical form, with private keys replaced by their public counterparts.
-    ///
-    /// For a multipath descriptor this is the first expansion, as Bitcoin Core
-    /// documents.
     canonical: String,
     /// One entry per multipath expansion; empty for a single-path descriptor.
     multipath_expansion: Vec<String>,
@@ -871,13 +751,9 @@ struct DescriptorInfo {
     has_private_keys: bool,
 }
 
-/// Errors from descriptor analysis or derivation.
 enum DescriptorError {
-    /// The text is not a descriptor.
     Parse(String),
-    /// The derivation range does not match the descriptor.
     Range(&'static str),
-    /// `Expand` needs a private key (hardened path from an xpub, …).
     PrivateKeys,
 }
 
@@ -891,15 +767,6 @@ impl core::fmt::Display for DescriptorError {
     }
 }
 
-/// Analyses a descriptor without keeping anything private it carried.
-///
-/// The returned `canonical` form is derived from the parsed descriptor, whose
-/// keys are public by construction: `parse_descriptor` hands the private key
-/// material back separately, and this function keeps only the fact that there
-/// was some. Echoing the caller's text back would return an `xprv` to whoever
-/// asked, which is the one thing this call must not do.
-///
-/// `text` is the descriptor body after checksum verification (no `#checksum`).
 fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, DescriptorError> {
     if let Some(key) = parse_combo(text)? {
         let combo = parse_combo_info(key, network)?;
@@ -940,11 +807,6 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
                 has_private_keys,
             })
         }
-        // `addr()` and `raw()` name an output without saying how to spend it,
-        // so miniscript does not model them at all. They are still descriptors,
-        // and Core reports them as the unsolvable ones they are rather than
-        // refusing the question -- but it still checks that what is inside the
-        // brackets is an address or a script, and so does this.
         Err(error) => match parse_unspendable(text) {
             Some(unspendable) => {
                 let unspendable = unspendable?;
@@ -980,11 +842,6 @@ fn parse_combo(text: &str) -> Result<Option<&str>, DescriptorError> {
     Ok(None)
 }
 
-/// A parsed `combo(KEY)`, using a single `pkh(KEY)` parse for every later step.
-///
-/// miniscript has no `combo` variant — BIP 384 is a set of scripts, not one —
-/// so the key is parsed through `pkh(...)` once and reused for canonicalization,
-/// private-key detection, network checks, and address derivation.
 struct ComboInfo {
     canonical: String,
     multipath_expansion: Vec<String>,
@@ -1023,8 +880,6 @@ fn parse_combo_info(key: &str, network: bitcoin::Network) -> Result<ComboInfo, D
         .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
     Ok(ComboInfo {
         canonical,
-        // Single-path descriptors must leave this empty so the RPC omits
-        // `multipathexpansion`, matching Core and the documented response.
         multipath_expansion: if is_multipath { forms } else { Vec::new() },
         is_range,
         has_private_keys,
@@ -1062,11 +917,6 @@ fn require_range_match(
     }
 }
 
-/// Derives the addresses a descriptor describes.
-///
-/// The outer vector is one entry per multipath expansion, in specifier order;
-/// a single-path descriptor yields exactly one. `range` is inclusive at both
-/// ends, matching Bitcoin Core. `text` is the checksum-verified descriptor body.
 fn derive_descriptor_addresses(
     text: &str,
     network: bitcoin::Network,
@@ -1082,7 +932,6 @@ fn derive_descriptor_addresses(
         return Ok(expansions);
     }
 
-    // An `addr()` or `raw()` descriptor has exactly one output and no range.
     if let Some(unspendable) = parse_unspendable(text) {
         if range.is_some() {
             return Err(DescriptorError::Range(
@@ -1128,9 +977,6 @@ fn derive_descriptor_addresses(
     Ok(expansions)
 }
 
-/// BIP 384 / Core `combo(KEY)`: P2PKH, and for a compressed key also P2WPKH
-/// and P2SH-P2WPKH. Bare P2PK has no address and is skipped, as Core's
-/// `ExtractDestination` does in `DeriveAddresses`.
 fn derive_combo_addresses(
     path: &MiniscriptDescriptor<DescriptorPublicKey>,
     network: bitcoin::Network,
@@ -1175,24 +1021,6 @@ fn descriptor_address(
         })
 }
 
-/// Refuses a descriptor whose extended keys belong to another network.
-///
-/// Bitcoin Core never reaches this check because it cannot: `DecodeExtPubKey`
-/// resolves the version bytes against the running chain's Base58 prefix, so a
-/// `tpub` on mainnet fails to decode and the descriptor never parses.
-/// rust-bitcoin decodes both prefixes into the same type and keeps the network
-/// as a field, so the descriptor parses fine and the mismatch survives to
-/// derivation -- where `address(network)` re-encodes the key with *this*
-/// network's prefix and hands back a `bc1...` address for a testnet key.
-///
-/// That address is well-formed, and nobody holds its private key. Someone
-/// checking the descriptor by eye sees mainnet addresses and has no way to tell.
-/// So the check is here rather than absent, and it runs before any derivation.
-///
-/// `NetworkKind` is the right granularity: BIP32 has two prefix sets, one for
-/// mainnet and one shared by every test network, so a signet key and a testnet
-/// key are genuinely indistinguishable and refusing between them would refuse
-/// something valid.
 fn ensure_keys_match_network(
     descriptor: &MiniscriptDescriptor<DescriptorPublicKey>,
     network: bitcoin::Network,
@@ -1203,8 +1031,6 @@ fn ensure_keys_match_network(
         let found = match key {
             DescriptorPublicKey::XPub(xkey) => Some(xkey.xkey.network),
             DescriptorPublicKey::MultiXPub(xkey) => Some(xkey.xkey.network),
-            // A bare public key carries no network. Core does not check one
-            // either -- there is nothing in the encoding to check.
             DescriptorPublicKey::Single(_) => None,
         };
         if let Some(found) = found
@@ -1222,10 +1048,6 @@ fn ensure_keys_match_network(
     }
 }
 
-/// WIF and other secret keys keep their network on the `KeyMap` that
-/// `parse_descriptor` returns, not on the public descriptor. A Single public
-/// key is networkless, so a testnet WIF would otherwise pass
-/// [`ensure_keys_match_network`] on a mainnet node.
 fn ensure_secret_keys_match_network(
     secrets: KeyMap,
     network: bitcoin::Network,
@@ -1255,16 +1077,12 @@ fn network_mismatch(found: bitcoin::NetworkKind, network: bitcoin::Network) -> D
     ))
 }
 
-/// A descriptor that names an output without saying how to spend it.
 enum Unspendable {
-    /// `addr(<address>)`.
     Address(bitcoin::Address<bitcoin::address::NetworkUnchecked>),
-    /// `raw(<script hex>)`.
     Raw(bitcoin::ScriptBuf),
 }
 
 impl Unspendable {
-    /// The descriptor re-encoded from what was parsed, not echoed back.
     fn canonical(&self) -> String {
         match self {
             Self::Address(address) => format!("addr({})", address.clone().assume_checked()),
@@ -1272,7 +1090,6 @@ impl Unspendable {
         }
     }
 
-    /// The address this output pays to, when it has one.
     fn address(&self, network: bitcoin::Network) -> Result<String, DescriptorError> {
         match self {
             Self::Address(address) => address
@@ -1280,8 +1097,6 @@ impl Unspendable {
                 .require_network(network)
                 .map(|address| address.to_string())
                 .map_err(|error| DescriptorError::Parse(error.to_string())),
-            // Core's `ExtractDestination`: a raw script only has an address if
-            // it is one of the standard forms.
             Self::Raw(script) => bitcoin::Address::from_script(script, network)
                 .map(|address| address.to_string())
                 .map_err(|_error| {
@@ -1293,12 +1108,6 @@ impl Unspendable {
     }
 }
 
-/// Recognises `addr()` and `raw()`, and checks what is inside the brackets.
-///
-/// `None` means the text is not one of these two forms at all -- the caller
-/// should report whatever the real descriptor parser said about it. `Some(Err)`
-/// means it is one of them and the contents are not valid, which is a rejection
-/// in its own right rather than a reason to fall through.
 fn parse_unspendable(text: &str) -> Option<Result<Unspendable, DescriptorError>> {
     let body = text.strip_suffix(')')?;
     if let Some(address) = body.strip_prefix("addr(") {
@@ -1324,7 +1133,6 @@ pub(crate) const GENERATEBLOCK_NEEDS_PRIVATE_KEYS: &str =
     "Cannot derive script without private keys";
 
 /// Coinbase script for `generateblock`'s `output` argument (`API-05`).
-///
 /// CONTRACT: docs/contracts/external-api.md#API-29
 /// CONTRACT: docs/contracts/external-api.md#API-31
 pub(crate) fn generateblock_payout_script(
@@ -1340,7 +1148,6 @@ pub(crate) fn generateblock_payout_script(
     }
 }
 
-/// Network-valid address script, with no descriptor or raw-script fallback.
 pub(crate) fn payout_script_from_address(
     text: &str,
     network: bitcoin::Network,
@@ -1416,7 +1223,6 @@ fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, 
     let derived = path
         .at_derivation_index(0)
         .map_err(|_| DescriptorError::PrivateKeys)?;
-    // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
     let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
     Ok(pk.script_pubkey().as_bytes().to_vec())
 }
@@ -1425,11 +1231,6 @@ fn multipath_descriptor_rejected() -> DescriptorError {
     DescriptorError::Range(GENERATEBLOCK_MULTIPATH)
 }
 
-/// A derivation path with hardened steps cannot be expanded without private
-/// keys. Core's `getScriptFromDescriptor` refuses such a descriptor at
-/// `Expand(0)`; miniscript's own derivation machinery would panic instead of
-/// erroring, so the check runs before expansion.
-/// CONTRACT: docs/contracts/external-api.md#API-31
 fn descriptor_needs_private_keys(descriptor: &MiniscriptDescriptor<DescriptorPublicKey>) -> bool {
     let mut needs = false;
     descriptor.for_each_key(|key| {
@@ -1491,13 +1292,11 @@ fn descriptor_polymod(c: u64, val: u32) -> u64 {
     result
 }
 
-/// Computes the BIP380 descriptor checksum for `payload`.
 pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
     let mut c: u64 = 1;
     let mut cls: u64 = 0;
     let mut clscount: u64 = 0;
     for ch in payload.chars() {
-        // INPUT_CHARSET is ASCII-only; find ch's byte position.
         let mut byte = [0_u8; 4];
         let encoded = ch.encode_utf8(&mut byte);
         if encoded.len() != 1 {
@@ -1564,7 +1363,6 @@ mod tests {
         );
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-26
     #[test]
     fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());
@@ -1828,8 +1626,6 @@ mod validateaddress_tests {
     use alloc::sync::Arc;
     use sonic_rs::JsonValueTrait;
 
-    /// Both invalid classes must answer exactly `{"isvalid": false}`: the
-    /// valid-only fields are absent, never default-valued.
     fn assert_sparse_invalid(result: &Value) {
         let object = result
             .as_object()
@@ -1867,8 +1663,6 @@ mod validateaddress_tests {
 
     #[test]
     fn validateaddress_returns_sparse_object_for_wrong_network() {
-        // ctx defaults to the Mainnet selector; this testnet address parses
-        // but fails require_network, and Core answers it sparsely too.
         let ctx = Arc::new(Context::new());
         let result = validateaddress(&ctx, &json!(["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"]))
             .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
@@ -1877,9 +1671,7 @@ mod validateaddress_tests {
 
     #[test]
     fn validateaddress_returns_isvalid_true_for_p2pkh_mainnet() {
-        // ctx defaults to Mainnet network selector.
         let ctx = Arc::new(Context::new());
-        // 1BoatSLRHtKNngkdXEeobR76b53LETtpyT is a famous P2PKH address.
         let result = validateaddress(&ctx, &json!(["1BoatSLRHtKNngkdXEeobR76b53LETtpyT"]))
             .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
         let Some(isvalid) = result
@@ -1909,7 +1701,6 @@ mod descriptor_checksum_tests {
             panic!("checksum missing: {result:?}");
         };
         assert_eq!(checksum.len(), 8, "checksum must be 8 chars: {checksum}");
-        // All chars should be in the bech32 charset.
         for ch in checksum.chars() {
             assert!(
                 BIP380_CHECKSUM_CHARSET.iter().any(|b| char::from(*b) == ch),
@@ -1918,12 +1709,6 @@ mod descriptor_checksum_tests {
         }
     }
 
-    /// The BIP380 vector, so the checksum is not certified by its own output.
-    ///
-    /// Every other test here compares this implementation against itself. This
-    /// one compares it against the specification: the descriptor and checksum
-    /// are the worked example in BIP380, and Core answers the same eight
-    /// characters for it.
     #[test]
     fn the_checksum_matches_the_bip380_vector() {
         const DESCRIPTOR: &str = "raw(deadbeef)";
@@ -1937,7 +1722,6 @@ mod descriptor_checksum_tests {
             Some(CHECKSUM)
         );
 
-        // And the same descriptor with its checksum attached is accepted.
         let with_checksum = getdescriptorinfo(&ctx, &json!([format!("{DESCRIPTOR}#{CHECKSUM}")]))
             .unwrap_or_else(|err| panic!("a correct checksum must be accepted: {err}"));
         assert_eq!(
@@ -1948,28 +1732,16 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// A checksum that does not match is refused, not replaced.
-    ///
-    /// This used to split the text on its last `#`, throw the supplied checksum
-    /// away, and answer with a freshly computed one -- so a caller who mistyped
-    /// a descriptor was told it was fine and handed a different descriptor than
-    /// the one they meant. Catching that typo is the checksum's entire purpose.
-    ///
-    /// Core's three refusals, from `CheckChecksum` in `script/descriptor.cpp`,
-    /// each with the message Core gives.
     #[test]
     fn a_checksum_that_does_not_match_is_refused() {
         let ctx = Arc::new(Context::new());
 
         for (input, expected) in [
-            // Right length, wrong value.
             (format!("addr({ADDRESS})#qqqqqqqq"), "does not match"),
-            // Present but not eight characters.
             (
                 format!("addr({ADDRESS})#short"),
                 "Expected 8 character checksum",
             ),
-            // More than one `#` is a malformed descriptor, not an odd checksum.
             (
                 format!("addr({ADDRESS})#aaaaaaaa#bbbbbbbb"),
                 "Multiple '#' symbols",
@@ -1986,11 +1758,6 @@ mod descriptor_checksum_tests {
         }
     }
 
-    /// A descriptor with no checksum is still analysed.
-    ///
-    /// Core calls `Parse` without `require_checksum` here, so the field is
-    /// optional -- unlike `deriveaddresses`, where it is not. The two call
-    /// sites differ on purpose and this pins that they still do.
     #[test]
     fn getdescriptorinfo_does_not_require_a_checksum() {
         let ctx = Arc::new(Context::new());
@@ -2005,16 +1772,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// The canonical descriptor carries a checksum, as Core's does.
-    ///
-    /// `DescriptorImpl::ToString` ends in `return AddChecksum(ret)`, so every
-    /// descriptor Core hands back is ready to be pasted into the next call.
-    /// This returned the bare form, so a caller copying it out got something
-    /// `deriveaddresses` then refuses for having no checksum.
-    ///
-    /// The checksum on the canonical form is of the *canonical* string, and the
-    /// separate `checksum` field is of the *input*. They differ whenever the
-    /// parse rewrites anything, which is what the second half checks.
     #[test]
     fn the_canonical_descriptor_carries_its_own_checksum() {
         let ctx = Arc::new(Context::new());
@@ -2030,14 +1787,11 @@ mod descriptor_checksum_tests {
         assert_eq!(body, format!("addr({ADDRESS})"));
         assert_eq!(sum.len(), 8);
 
-        // Round trip: what comes out must be accepted by the call that demands
-        // a checksum, which is the whole point of putting one there.
         let derived = deriveaddresses(&ctx, &json!([canonical]))
             .unwrap_or_else(|err| panic!("the canonical form must be usable as-is: {err}"));
         assert_eq!(derived, json!([ADDRESS]));
     }
 
-    /// A descriptor that names an output cannot produce a spend for it.
     #[test]
     fn an_address_descriptor_is_not_solvable() {
         let ctx = Arc::new(Context::new());
@@ -2077,7 +1831,6 @@ mod descriptor_checksum_tests {
     #[test]
     fn a_private_key_is_reported_and_not_echoed_back() {
         let ctx = Arc::new(Context::new());
-        // BIP32 test vector 1, master private key.
         let xprv = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
         let with_key = format!("wpkh({xprv}/0/0)");
         let result = getdescriptorinfo(&ctx, &json!([with_key]))
@@ -2102,7 +1855,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// Text that is not a descriptor is refused with Core's code.
     #[test]
     fn a_descriptor_that_does_not_parse_is_refused() {
         let ctx = Arc::new(Context::new());
@@ -2112,12 +1864,6 @@ mod descriptor_checksum_tests {
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND, "{error:?}");
     }
 
-    /// BIP 384 / Core `doc/descriptors.md`: `combo(KEY)` is the top-level
-    /// collection of `pk`/`pkh` (and, for a compressed key, `wpkh`/`sh(wpkh)`).
-    ///
-    /// A single-path combo must omit `multipathexpansion`. A private key is
-    /// reported and replaced by its public form, same as Core's
-    /// `provider.keys.size() > 0` plus `DescriptorImpl::ToString`.
     #[test]
     fn combo_is_canonicalized_and_private_keys_are_redacted() {
         let ctx = Arc::new(Context::new());
@@ -2149,8 +1895,6 @@ mod descriptor_checksum_tests {
             "single-path combo must omit multipath_expansion: {result:?}"
         );
 
-        // BIP32 test vector 1 master private key, so the redaction is against
-        // a published vector rather than this function's own output.
         let xprv = "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi";
         let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
         let private = getdescriptorinfo(&ctx, &json!([format!("combo({xprv}/0/0)")]))
@@ -2174,8 +1918,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// A supplied checksum is verified, then the body is analysed. `combo` is
-    /// not miniscript, so the parser must see `combo(KEY)` and not `combo(KEY)#sum`.
     #[test]
     fn checksummed_combo_is_analysed() {
         let ctx = Arc::new(Context::new());
@@ -2191,8 +1933,6 @@ mod descriptor_checksum_tests {
         assert_eq!(without, with);
     }
 
-    /// Core's `getdescriptorinfo` expands a multipath descriptor into one
-    /// entry per path and returns the first as `descriptor`.
     #[test]
     fn combo_multipath_is_expanded() {
         let ctx = Arc::new(Context::new());
@@ -2227,9 +1967,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// rust-bitcoin decodes both WIF prefixes; Core refuses a WIF whose
-    /// version byte is not this chain's. The network lives on the secret in
-    /// the keymap, not on the public `Single` key.
     #[test]
     fn combo_rejects_a_wif_from_another_network() {
         let ctx = Arc::new(Context::new());
@@ -2244,8 +1981,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// Same network check as derivation: a testnet extended key is not valid
-    /// descriptor info on a mainnet node.
     #[test]
     fn combo_rejects_a_testnet_extended_key_on_mainnet() {
         let ctx = Arc::new(Context::new());
@@ -2280,12 +2015,6 @@ mod deriveaddresses_tests {
 
     const ADDRESS: &str = "1111111111111111111114oLvT2";
 
-    /// `descriptor#checksum`, because this call requires one.
-    ///
-    /// These tests are about derivation, not about the checksum, so they append
-    /// the computed one rather than hard-coding eight characters per fixture.
-    /// The checksum's own correctness is pinned against the BIP380 vector in
-    /// `descriptor_checksum_tests`, and its enforcement by the refusals there.
     fn checksummed(descriptor: &str) -> String {
         let Some(checksum) = descriptor_checksum(descriptor) else {
             panic!("the fixture descriptor `{descriptor}` must have a checksum");
@@ -2293,7 +2022,6 @@ mod deriveaddresses_tests {
         format!("{descriptor}#{checksum}")
     }
 
-    /// An `addr()` descriptor derives the address it names.
     #[test]
     fn an_address_descriptor_derives_its_own_address() {
         let ctx = Arc::new(Context::new());
@@ -2303,17 +2031,6 @@ mod deriveaddresses_tests {
         assert_eq!(result, json!([ADDRESS]));
     }
 
-    /// A range Core would refuse never starts deriving.
-    ///
-    /// `ParseDescriptorRange` in `rpc/util.cpp` refuses `high >= low + 1000000`
-    /// and any `high` with its top bit set. Without those, `[0, 4294967295]` is
-    /// a legal request that derives four billion addresses and holds every one
-    /// of them before answering -- one JSON object turning into an
-    /// out-of-memory kill. The refusal has to land before the work starts,
-    /// which is why it lives in the parser.
-    ///
-    /// The test asserts it is *fast* as well as refused: a bound checked inside
-    /// the loop would also return an error, eventually, having done the damage.
     #[test]
     fn a_range_too_large_to_serve_is_refused_before_any_work() {
         let ctx = Arc::new(Context::new());
@@ -2322,12 +2039,8 @@ mod deriveaddresses_tests {
 
         let started = std::time::Instant::now();
         for (range, expected) in [
-            // Top bit set: not a large request but an impossible index.
             (json!([0, 4_294_967_295_u64]), "End of range is too high"),
             (json!([0, 2_147_483_648_u64]), "End of range is too high"),
-            // `2^31 - 1` is the largest legal *index*, so it clears the check
-            // above and trips the size limit instead -- which is the order Core
-            // applies them in, and the reason both messages exist.
             (json!([0, 2_147_483_647_u64]), "Range is too large"),
             (json!([0, 1_000_000]), "Range is too large"),
             (json!(1_000_000), "Range is too large"),
@@ -2350,29 +2063,13 @@ mod deriveaddresses_tests {
             "the refusals must happen before the derivation, not after it"
         );
 
-        // One below the ceiling is served, so the bound is a ceiling and not a
-        // blanket refusal. Kept small: this is about the boundary being in the
-        // right place, and 999,999 derivations would prove it slowly.
         let ok = deriveaddresses(&ctx, &json!([descriptor, [10, 12]]))
             .unwrap_or_else(|err| panic!("a modest range must still work: {err}"));
         assert_eq!(ok.as_array().map(sonic_rs::Array::len), Some(3));
     }
 
-    /// A key from another network does not derive addresses for this one.
-    ///
-    /// Bitcoin Core never reaches this: `DecodeExtPubKey` resolves the version
-    /// bytes against the running chain's Base58 prefix, so a `tpub` on mainnet
-    /// fails to decode and the descriptor never parses. rust-bitcoin decodes
-    /// both prefixes into one type and keeps the network as a field, so the
-    /// descriptor parses and the mismatch survives to derivation -- where
-    /// `address(network)` re-encodes the key with *this* network's prefix and
-    /// hands back a `bc1...` address for a testnet key.
-    ///
-    /// That address is well-formed and nobody holds its private key. Someone
-    /// checking the descriptor by eye sees mainnet addresses and cannot tell.
     #[test]
     fn a_testnet_key_does_not_derive_mainnet_addresses() {
-        // A mainnet context, which is `Context::new()`'s default.
         let ctx = Arc::new(Context::new());
         let tpub = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp";
         let descriptor = checksummed(&format!("wpkh({tpub}/0/*)"));
@@ -2400,18 +2097,11 @@ mod deriveaddresses_tests {
             "got {error}"
         );
 
-        // The paired acceptance, so the refusal is the missing checksum and not
-        // something else about the descriptor.
         let accepted = deriveaddresses(&ctx, &json!([checksummed(&format!("addr({ADDRESS})"))]))
             .unwrap_or_else(|err| panic!("the same descriptor with a checksum: {err}"));
         assert_eq!(accepted, json!([ADDRESS]));
     }
 
-    /// A key descriptor derives a real address, where this used to answer `[]`.
-    ///
-    /// Every descriptor but `addr()` returned an empty array -- not an error,
-    /// an empty answer, which reads as "this descriptor describes no
-    /// addresses" rather than "this node did not look".
     #[test]
     fn a_key_descriptor_derives_an_address() {
         let ctx = Arc::new(Context::new());
@@ -2433,7 +2123,6 @@ mod deriveaddresses_tests {
         );
     }
 
-    /// A ranged descriptor derives one address per index, inclusive at both ends.
     #[test]
     fn a_ranged_descriptor_derives_one_address_per_index() {
         let ctx = Arc::new(Context::new());
@@ -2457,7 +2146,6 @@ mod deriveaddresses_tests {
         );
     }
 
-    /// A range is required for a ranged descriptor, and refused for a fixed one.
     #[test]
     fn the_range_argument_must_match_the_descriptor() {
         let ctx = Arc::new(Context::new());
@@ -2468,8 +2156,6 @@ mod deriveaddresses_tests {
             .unwrap_or_else(|| panic!("a ranged descriptor needs a range"));
         assert_eq!(missing.code(), RpcError::CORE_INVALID_PARAMETER);
 
-        // Both kinds of fixed descriptor: one miniscript parses, and one it
-        // does not model at all. They take separate paths to the same refusal.
         let fixed_key =
             checksummed("wpkh(02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9)");
         for fixed in [fixed_key, checksummed(&format!("addr({ADDRESS})"))] {
@@ -2484,14 +2170,11 @@ mod deriveaddresses_tests {
         }
     }
 
-    /// Bitcoin Core `test/functional/rpc_deriveaddresses.py`: `combo(tprv…/1/1/0)`
-    /// on regtest yields P2PKH, P2WPKH, and P2SH-P2WPKH. Bare P2PK is skipped.
     #[test]
     fn combo_derives_core_regtest_addresses() {
         let mut ctx = Context::new();
         ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
         let ctx = Arc::new(ctx);
-        // Bitcoin Core `rpc_deriveaddresses.py`.
         let tprv = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
         let result = deriveaddresses(&ctx, &json!([checksummed(&format!("combo({tprv}/1/1/0)"))]))
             .unwrap_or_else(|err| panic!("combo must derive: {err}"));
@@ -2505,8 +2188,6 @@ mod deriveaddresses_tests {
         );
     }
 
-    /// BIP 384: an uncompressed key is only `pk` + `pkh`, so derivation is the
-    /// P2PKH address — the same address `pkh(KEY)` produces.
     #[test]
     fn combo_uncompressed_derives_only_p2pkh() {
         let ctx = Arc::new(Context::new());
@@ -2519,7 +2200,6 @@ mod deriveaddresses_tests {
         assert_eq!(combo.as_array().map(sonic_rs::Array::len), Some(1));
     }
 
-    /// A compressed combo is the flat BIP 384 set: `pkh`, `wpkh`, `sh(wpkh)`.
     #[test]
     fn combo_compressed_derives_the_bip384_address_set() {
         let ctx = Arc::new(Context::new());
@@ -2550,8 +2230,6 @@ mod deriveaddresses_tests {
         assert_eq!(combo, expected);
     }
 
-    /// Ranged combo uses the same range contract as every other descriptor, and
-    /// each index contributes the BIP 384 address set.
     #[test]
     fn combo_range_must_match_and_derives_one_set_per_index() {
         let ctx = Arc::new(Context::new());
@@ -2587,7 +2265,6 @@ mod deriveaddresses_tests {
         );
     }
 
-    /// A testnet WIF combo is refused on mainnet during derivation too.
     #[test]
     fn combo_does_not_derive_from_a_testnet_wif_on_mainnet() {
         let ctx = Arc::new(Context::new());

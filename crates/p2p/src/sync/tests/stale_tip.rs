@@ -1,6 +1,3 @@
-//! Stale-tip policy: the one extra full-relay dial a stalled tip buys, and
-//! the conditions that refuse it.
-
 use std::io;
 use std::net::TcpListener;
 use std::sync::atomic::AtomicBool;
@@ -13,14 +10,10 @@ use crate::listener::ListenerExtras;
 use crate::service::{P2pService, P2pServiceConfig};
 use bitcoin_rs_primitives::Hash256;
 
-/// The network's target spacing: ten minutes, as every production chain
-/// configures it.
 const SPACING: Duration = Duration::from_mins(10);
 
-/// A stand-in tip hash for staleness fixtures; only identity matters.
 const GENESIS_HASH: Hash256 = Hash256::from_le_bytes(&[7u8; 32]);
 
-/// A second stand-in tip hash at the same height as [`GENESIS_HASH`].
 const REPLACEMENT_HASH: Hash256 = Hash256::from_le_bytes(&[9u8; 32]);
 
 #[test]
@@ -255,15 +248,8 @@ fn in_flight_bodies_hold_staleness_off() {
         "bodies still arriving is progress, not a stalled tip"
     );
 }
-// Deferred-backlog probes for [`StaleTipRetainer::pending_for`]. They live
-// here rather than in the retainer's inline suite so a red-green probe can
-// restore the pre-fix retainer while keeping them: the pre-fix floor drops a
-// tip refused on opening, failing the first test below.
 type TestError = Box<dyn std::error::Error>;
 
-/// A block tree grown with mined regtest headers, mirroring the retainer
-/// owner's fixture: every sibling under one parent is a distinct equal-work
-/// block, so rank order is newest first.
 struct RetainerFixture {
     tree: BlockTree,
     genesis: NodeId,
@@ -332,18 +318,13 @@ fn a_refused_initial_tip_stays_offerable_until_sent_or_retired() -> Result<(), T
     assert!(retainer.learn(&fixture.tree, tip, None));
     let peer = retainer_peer(41);
 
-    // The body is still being fetched: nothing is offerable, but the refusal
-    // must not retire the tip the way the opening floor used to.
     assert_eq!(retainer.pending_for(peer, |_| false), Vec::<Hash256>::new());
-    // The body arrived: the same tip is offered although it predates opening.
     assert_eq!(retainer.pending_for(peer, |_| true), vec![tip]);
-    // A refused retry stays offerable too.
     assert_eq!(
         retainer.pending_for(peer, |hash| hash != tip),
         Vec::<Hash256>::new()
     );
     assert_eq!(retainer.pending_for(peer, |_| true), vec![tip]);
-    // Sending marks it known exactly once.
     retainer.mark_known(peer, tip);
     assert!(retainer.knows(peer, tip));
     assert_eq!(retainer.pending_for(peer, |_| true), Vec::<Hash256>::new());
@@ -355,7 +336,6 @@ fn multiple_refused_initial_tips_retry_in_rank_order() -> Result<(), TestError> 
     let mut fixture = RetainerFixture::new()?;
     let main = fixture.main_chain(20)?;
     let fork = fixture.id(main[9])?;
-    // Three equal-work tips: rank is newest first.
     let first = fixture.child(fork)?;
     let second = fixture.child(fork)?;
     let third = fixture.child(fork)?;
@@ -365,11 +345,8 @@ fn multiple_refused_initial_tips_retry_in_rank_order() -> Result<(), TestError> 
     assert!(retainer.learn(&fixture.tree, third, None));
     let peer = retainer_peer(42);
 
-    // The two best tips have no body yet; only the weakest is offered.
     let opening = retainer.pending_for(peer, |hash| hash == first);
     assert_eq!(opening, vec![first]);
-    // Nothing was marked, so every unacked selected tip comes back, best
-    // first: the refused retries and the offered-but-unsent weakest.
     assert_eq!(
         retainer.pending_for(peer, |_| true),
         vec![third, second, first]
@@ -395,15 +372,12 @@ fn deferred_initial_tips_never_exceed_the_opening_cap() -> Result<(), TestError>
     }
     let peer = retainer_peer(43);
 
-    // No body is available anywhere: nothing is offered, but the best ten
-    // stay deferred.
     assert_eq!(retainer.pending_for(peer, |_| false), Vec::<Hash256>::new());
     let mut expected = leaves[3..].to_vec();
     expected.reverse();
     let retry = retainer.pending_for(peer, |_| true);
     assert_eq!(retry.len(), MAX_ADVERTISED_STALETIPS);
     assert_eq!(retry, expected);
-    // The three weakest tips were beyond the cap: they are never offered.
     for hash in &leaves[..3] {
         assert!(!retry.contains(hash));
     }
@@ -421,7 +395,6 @@ fn known_sent_and_retired_tips_leave_the_deferred_backlog() -> Result<(), TestEr
     let tip = fixture.child(fixture.id(main[9])?)?;
     let retainer = StaleTipRetainer::default();
 
-    // The origin announced the tip: it is never echoed, not even deferred.
     let origin = retainer_peer(44);
     assert!(retainer.learn(&fixture.tree, tip, Some(origin)));
     assert_eq!(
@@ -429,15 +402,12 @@ fn known_sent_and_retired_tips_leave_the_deferred_backlog() -> Result<(), TestEr
         Vec::<Hash256>::new()
     );
 
-    // Another peer defers it, then the send lands: known exactly once.
     let peer = retainer_peer(45);
     assert_eq!(retainer.pending_for(peer, |_| false), Vec::<Hash256>::new());
     assert_eq!(retainer.pending_for(peer, |_| true), vec![tip]);
     retainer.mark_known(peer, tip);
     assert_eq!(retainer.pending_for(peer, |_| true), Vec::<Hash256>::new());
 
-    // A late peer defers it; disconnecting forgets the backlog, so the
-    // reconnect opens fresh and is offered the backlog again.
     let late = retainer_peer(46);
     assert_eq!(retainer.pending_for(late, |_| false), Vec::<Hash256>::new());
     retainer.forget_peer(late);
@@ -445,7 +415,6 @@ fn known_sent_and_retired_tips_leave_the_deferred_backlog() -> Result<(), TestEr
     retainer.mark_known(late, tip);
     assert_eq!(retainer.pending_for(late, |_| true), Vec::<Hash256>::new());
 
-    // Invalidating the branch retires the tip: it leaves every backlog.
     fixture.tree.invalidate_subtree(fixture.id(tip)?)?;
     retainer.prune(&fixture.tree);
     let last = retainer_peer(47);
@@ -462,16 +431,12 @@ fn eligible_initial_offer_without_send_ack_is_offered_again() -> Result<(), Test
     assert!(retainer.learn(&fixture.tree, tip, None));
     let peer = retainer_peer(48);
 
-    // Eligible on opening, but the send queue is saturated: the caller
-    // breaks without marking anything known.
     assert_eq!(retainer.pending_for(peer, |_| true), vec![tip]);
     assert!(
         !retainer.knows(peer, tip),
         "offering is not delivery: no send-Ok, no mark"
     );
-    // Next sweep: the same hash is offered again.
     assert_eq!(retainer.pending_for(peer, |_| true), vec![tip]);
-    // Only the send-Ok mark retires it.
     retainer.mark_known(peer, tip);
     assert_eq!(retainer.pending_for(peer, |_| true), Vec::<Hash256>::new());
     Ok(())
@@ -482,7 +447,6 @@ fn saturated_batch_tail_retries_only_the_unacked_remainder() -> Result<(), TestE
     let mut fixture = RetainerFixture::new()?;
     let main = fixture.main_chain(20)?;
     let fork = fixture.id(main[9])?;
-    // Three equal-work tips: rank is newest first.
     let first = fixture.child(fork)?;
     let second = fixture.child(fork)?;
     let third = fixture.child(fork)?;
@@ -492,17 +456,11 @@ fn saturated_batch_tail_retries_only_the_unacked_remainder() -> Result<(), TestE
     assert!(retainer.learn(&fixture.tree, third, None));
     let peer = retainer_peer(49);
 
-    // The opening batch is eligible, but the sends saturate after the
-    // first, so only it is marked known.
     let opening = retainer.pending_for(peer, |_| true);
     assert_eq!(opening, vec![third, second, first]);
     retainer.mark_known(peer, third);
 
-    // The unacked tail is offered again — same hashes, rank order — with
-    // no beyond-cap inflation: only three were ever retained.
     assert_eq!(retainer.pending_for(peer, |_| true), vec![second, first]);
-    // A newly ineligible body keeps the tail offerable rather than
-    // retiring it.
     assert_eq!(retainer.pending_for(peer, |_| false), Vec::<Hash256>::new());
     assert_eq!(retainer.pending_for(peer, |_| true), vec![second, first]);
     retainer.mark_known(peer, second);

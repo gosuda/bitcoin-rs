@@ -1,10 +1,3 @@
-//! Embedded node lifecycle: start → observe → broadcast → read back →
-//! shutdown → reopen, all in process.
-//!
-//! This is the executable contract for `docs/contracts/embedding.md`: one
-//! `Node` on the caller's (here: std-only) executor, no daemon subprocess,
-//! no reachable RPC socket — the JSON-RPC listener is bound ephemeral and
-//! never contacted.
 use std::task::{Context, Poll, Waker};
 
 use anyhow::{Result, bail};
@@ -27,11 +20,6 @@ const SEED_BLOCK_INTERVAL: u32 = 600;
 const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 
-/// Polls an embedding future to completion without a runtime.
-///
-/// `Node::start` and `Node::shutdown` drive the node's own threads
-/// synchronously, so they never park; one poll finishes the work. This
-/// helper exists so the test needs no async executor dependency.
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     let waker = Waker::noop();
@@ -49,10 +37,6 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // --- seed chain state on the same datadir through the test seam --------
-    // The height-1 coinbase (anyone-can-spend OP_1) becomes spendable by the
-    // next block once the tip reaches height 100 — the same fixture shape
-    // the mining e2e test uses.
     let (seed_tip_hash, first_block_hash, first_block_bytes) = {
         let state = NodeState::open(seed_config(&data_dir), None)?;
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
@@ -64,7 +48,6 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
         outcome
     };
 
-    // --- start an embedded node on the seeded datadir -----------------------
     let spawn_config = embedded_config(&data_dir)?;
     let reopen_config = spawn_config.clone();
     let node = block_on(Node::start(
@@ -88,10 +71,8 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
 
     assert_broadcast_and_lookups(&node)?;
 
-    // Consuming shutdown: ordered drain and clean checkpoint, exactly once.
     block_on(node.shutdown())?;
 
-    // Reopen the same datadir: the clean checkpoint resumes without a daemon.
     let node = block_on(Node::start(
         reopen_config,
         bitcoin_rs_node::RuntimeInputs::default(),
@@ -115,7 +96,6 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     Ok(())
 }
 
-/// RCV-09: a normal shutdown cannot authorize replacing rejected owner data.
 #[test]
 fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -142,17 +122,12 @@ fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
     Ok(())
 }
 
-/// Readiness, sync progress, capability snapshot, and the typed block
-/// read-back for the first seeded block — the observational half of the
-/// embedded lifecycle that must hold the moment `Node::start` returns.
 fn assert_embedded_node_readiness(
     node: &Node,
     seed_tip_hash: Hash256,
     first_block_hash: Hash256,
     first_block_bytes: &[u8],
 ) -> Result<()> {
-    // Readiness: the snapshot resumes the seeded tip; progress is typed and
-    // agrees with it.
     let snapshot = node.snapshot();
     assert_eq!(snapshot.tip_height, SEED_BLOCKS, "seeded tip must be live");
     assert_eq!(snapshot.tip_hash, seed_tip_hash);
@@ -180,8 +155,6 @@ fn assert_embedded_node_readiness(
         "default config does not prune"
     );
 
-    // Capability snapshot comes from the node registry: both compiled
-    // capabilities are reported even while disabled by runtime toggles.
     let capabilities = node.capabilities();
     assert!(
         !capabilities.capabilities.is_empty(),
@@ -195,7 +168,6 @@ fn assert_embedded_node_readiness(
         "compiled rows are reported regardless of the runtime toggle"
     );
 
-    // Typed block query: the first seeded block resolves with its bytes.
     let first_block = block_on(node.block_by_hash(BlockHash::from(first_block_hash)))?
         .unwrap_or_else(|| panic!("seeded block must resolve"));
     assert_eq!(first_block.block_hash(), BlockHash::from(first_block_hash));
@@ -212,11 +184,7 @@ fn assert_embedded_node_readiness(
     Ok(())
 }
 
-/// Broadcast, mempool read-back, fee estimate, and the `TxLookup` capability
-/// gate — the mutation half of the embedded lifecycle.
 fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
-    // Broadcast: spend the matured height-1 coinbase through the production
-    // gateway admission path.
     let spend = seed_coinbase_spend();
     let spend_txid = spend.txid();
     let mutation = block_on(node.broadcast(spend))?;
@@ -232,20 +200,16 @@ fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
         "first change of the run carries mempool sequence 1"
     );
 
-    // Read back by id: the mempool answers without any index.
     let read_back = block_on(node.tx_by_id(spend_txid))?;
     assert_eq!(read_back.txid(), spend_txid);
     assert_eq!(node.mempool_info().txs, 1, "the spend sits in the pool");
 
-    // Fee estimate: no confirmation history yet, so the honest answer is None.
     assert_eq!(
         node.fee_estimate(6),
         None,
         "an estimator without history must refuse, not fabricate"
     );
 
-    // Confirmed lookup is TxLookup-gated: with txindex and scriptindex off,
-    // an unknown txid is Unavailable (capability missing), never NotFound.
     let unknown_txid = Txid(Hash256::from_le_bytes(&[0xAA; 32]));
     match block_on(node.tx_by_id(unknown_txid)) {
         Err(NodeError::Unavailable(message)) => {
@@ -259,7 +223,6 @@ fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
     Ok(())
 }
 
-/// `NodeConfig` for chain seeding: isolated regtest datadir, P2P listeners off.
 fn seed_config(data_dir: &std::path::Path) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir.to_path_buf();
@@ -267,7 +230,6 @@ fn seed_config(data_dir: &std::path::Path) -> NodeConfig {
     config
 }
 
-/// `NodeConfig` for the embedded node: ephemeral RPC bind on the seeded datadir.
 fn embedded_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     let mut config = seed_config(data_dir);
     let rpc_bind: std::net::SocketAddr = "127.0.0.1:0".parse()?;
@@ -275,8 +237,6 @@ fn embedded_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     Ok(config)
 }
 
-/// `NodeConfig` for the historical-prefix node: seeded datadir plus full
-/// derived-index capabilities, ephemeral RPC bind, P2P listeners off.
 fn historical_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     let mut config = seed_config(data_dir);
     config.indexes.txindex = true;
@@ -286,9 +246,6 @@ fn historical_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     Ok(config)
 }
 
-/// Polls the synchronous historical surface until the index worker proves a
-/// complete answer or the bounded wait expires. Retry and unavailable answers
-/// keep polling; a storage error ends the wait.
 fn wait_historical_transaction(
     node: &Node,
     txid: &Txid,
@@ -314,7 +271,6 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // --- seed chain state through the existing seam (fixture prep only) ----
     {
         let state = NodeState::open(seed_config(&data_dir), None)?;
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
@@ -324,25 +280,21 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
         let _ = state.publish_checkpoint()?;
     }
 
-    // --- start a real node with full index capabilities --------------------
     let node = block_on(Node::start(
         historical_config(&data_dir)?,
         bitcoin_rs_node::RuntimeInputs::default(),
     ))?;
 
-    // Known fixture: the height-1 coinbase pays anyone-can-spend OP_1.
     let known_tx = seed_coinbase(1);
     let known_txid = known_tx.txid();
     let known_outpoint = OutPoint::new(known_txid, 0);
     let script = ScriptHash::from_script_bytes(&[0x51]);
 
-    // Bounded readiness through the public sync surface (no seam queries).
     let ready = wait_historical_transaction(&node, &known_txid)?;
     assert_eq!(ready.prefix.floor, 0, "seeded chain covers from genesis");
     assert_eq!(ready.prefix.height, SEED_BLOCKS);
     assert_eq!(ready.prefix.hash, node.snapshot().tip_hash);
 
-    // Positive known transaction with its actual confirmation height.
     let at = node.transaction_at_prefix(&known_txid)?;
     assert_eq!(at.prefix.floor, 0);
     assert_eq!(at.prefix.height, SEED_BLOCKS);
@@ -354,14 +306,12 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     assert!(at.prefix.floor <= height && height <= at.prefix.height);
     assert_eq!(consensus_bytes(&tx), consensus_bytes(&known_tx));
 
-    // Scoped negative: an unknown txid proves absence in range, not Retry.
     let unknown_txid = Txid(Hash256::from_le_bytes(&[0xAA; 32]));
     let absent = node.transaction_at_prefix(&unknown_txid)?;
     assert!(absent.answer.is_none(), "unknown txid is a scoped None");
     assert_eq!(absent.prefix.height, SEED_BLOCKS);
     assert_eq!(absent.prefix.hash, node.snapshot().tip_hash);
 
-    // Script output history for the OP_1 fixture script.
     let history = node.script_history_at_prefix(script)?;
     assert_eq!(history.prefix.floor, 0);
     assert_eq!(history.prefix.height, SEED_BLOCKS);
@@ -384,7 +334,6 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
         "history rows stay inside the covered prefix"
     );
 
-    // Spender of an unspent seed outpoint: no spend in range.
     let spend = node.spender_at_prefix(known_outpoint)?;
     assert_eq!(spend.prefix.height, SEED_BLOCKS);
     assert_eq!(spend.prefix.hash, node.snapshot().tip_hash);
@@ -393,7 +342,6 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
         "unspent seed outpoint has no spend in range"
     );
 
-    // Existing typed surfaces keep their behavior with the index enabled.
     let via_index = block_on(node.tx_by_id(known_txid))?;
     assert_eq!(consensus_bytes(&via_index), consensus_bytes(&known_tx));
 
@@ -401,11 +349,6 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     Ok(())
 }
 
-/// Applies genesis plus `count` trivial-PoW regtest blocks through ordinary
-/// validation; each coinbase pays the anyone-can-spend `OP_1` script.
-///
-/// Returns the final tip hash, the first seeded block's hash, and its
-/// consensus bytes for the read-back assertion.
 fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8>)> {
     let applied = state.chainstate().applied_tip_reader();
     let mut tip = applied
@@ -444,14 +387,11 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     Ok((tip.hash, first_hash, first_bytes))
 }
 
-/// The height-`height` seed coinbase: BIP34 height push, `OP_1` payout.
 fn seed_coinbase(height: u32) -> Tx {
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // BIP34 height push plus one pad byte: consensus requires a
-            // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
             script_sig: [push_int(i64::from(height)), push_int(0)].concat().into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -464,8 +404,6 @@ fn seed_coinbase(height: u32) -> Tx {
     }
 }
 
-/// The transaction this test broadcasts: a `MEMPOOL_TX_FEE_SATS`-fee spend
-/// of the height-1 seed coinbase, matured once the tip passes height 100.
 fn seed_coinbase_spend() -> Tx {
     let seed_coinbase = seed_coinbase(1);
     Tx {
@@ -478,17 +416,12 @@ fn seed_coinbase_spend() -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - MEMPOOL_TX_FEE_SATS),
-            // P2WPKH. The prevout is anyone-can-spend, but the mempool also
-            // enforces output standardness, which a bare OP_TRUE output fails.
             script_pubkey: [vec![0x00, 0x14], vec![0x11; 20]].concat().into(),
         }],
         lock_time: LockTime::ZERO,
     }
 }
 
-/// Dropping a node without `shutdown` must still run the ordered teardown in
-/// startup-abort mode: services stop and join, the datadir is released, and
-/// no clean-shutdown checkpoint is published over the seed's own.
 #[test]
 fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -513,9 +446,6 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
             bitcoin_rs_node::RuntimeInputs::default(),
         ))?;
         assert_eq!(node.snapshot().tip_height, 1);
-        // Deliberately no `shutdown`: the Drop impl must stop every service
-        // and release the storage before this block ends — and must not
-        // publish a checkpoint for the aborted run.
     }
     assert_eq!(
         std::fs::read(&current_path)?,
@@ -523,7 +453,6 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
         "a dropped node must not publish a clean-shutdown checkpoint"
     );
 
-    // The released datadir reopens and resumes the seeded checkpoint.
     let resumed = NodeState::open(seed_config(&data_dir), None)?;
     let tip = resumed
         .chainstate()
@@ -535,18 +464,12 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     Ok(())
 }
 
-/// A startup that fails after state is open — an RPC port already held by
-/// another node — must roll the partially built graph back through the
-/// shared teardown: the error surfaces as [`NodeError::Startup`], and the
-/// rolled-back datadir is immediately reusable (its storage locks were
-/// released by the same teardown that joined the graph's workers).
 #[test]
 fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let held_dir = dir.path().join("held");
     let failed_dir = dir.path().join("failed");
 
-    // Reserve a port, release the probe, and let node A hold it.
     let probe = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = probe.local_addr()?;
     drop(probe);
@@ -558,8 +481,6 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
         bitcoin_rs_node::RuntimeInputs::default(),
     ))?;
 
-    // Node B targets the same port: `start_node` opens B's state first,
-    // then fails at the RPC bind. The rollback must release B's state.
     let mut failed_config = embedded_config(&failed_dir)?;
     failed_config.rpc.bind = port;
     match block_on(Node::start(
@@ -582,11 +503,9 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
         ),
     }
 
-    // B's datadir is free: open it directly.
     let resumed = NodeState::open(seed_config(&failed_dir), None)?;
     drop(resumed);
 
-    // A is unaffected and still shuts down cleanly.
     block_on(held.shutdown())?;
     Ok(())
 }

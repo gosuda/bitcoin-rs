@@ -21,9 +21,6 @@ use thiserror::Error;
 
 use crate::inv::MAX_INV_PER_MSG;
 
-/// Latest protocol version implemented by this crate.
-///
-/// Authoritative for the `version` message this node sends and for
 /// `getnetworkinfo.protocolversion`. It is at least the version at which BIP434
 /// `feature` negotiation starts, so a peer that honors our advertisement also
 /// honors the feature handshake.
@@ -31,106 +28,57 @@ pub const PROTOCOL_VERSION: u32 = 70_017;
 
 const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
 
-/// Maximum payload length of one network message on either transport: Bitcoin
-/// Core's `MAX_PROTOCOL_MESSAGE_LENGTH`. No block serializes above it.
 pub const MAX_MESSAGE_PAYLOAD: usize = 4_000_000;
-/// Maximum control messages coalesced into one vectored write.
 pub(crate) const MAX_WRITE_BURST: usize = 8;
 
-/// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
-/// Maximum block locator hashes accepted in one locator-based request.
 pub const MAX_LOCATOR_HASHES: usize = 101;
 
-/// Maximum address entries accepted in one `addr` or `addrv2` message.
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
 
-/// Fixed size of a Bitcoin v1 network message header.
 pub(crate) const HEADER_LEN: usize = 24;
 
 const COMMAND_LEN: usize = 12;
 
-/// Bitcoin P2P message payload.
-///
-/// Identical to the retained `bitcoin::p2p::NetworkMessage` envelope except
-/// `tx`, `block`, and `headers` payloads use the native consensus types.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
-    /// `version`
     Version(VersionMessage),
-    /// `verack`
     Verack,
-    /// `addr`
     Addr(Vec<(u32, bitcoin::p2p::Address)>),
-    /// `inv`
     Inv(Vec<Inventory>),
-    /// `getdata`
     GetData(Vec<Inventory>),
-    /// `notfound`
     NotFound(Vec<Inventory>),
-    /// `getblocks`
     GetBlocks(GetBlocksMessage),
-    /// `getheaders`
     GetHeaders(GetHeadersMessage),
-    /// `mempool`
     MemPool,
-    /// `tx`
     Tx(Tx),
-    /// `block`: one decode at the wire decoder via `BlockPayload::from_raw`.
     Block(BlockPayload),
-    /// Already-serialized `block` payload. Written as a `block` command
-    /// without re-encoding; the decoder never produces this variant.
     BlockPayload(bytes::Bytes),
-    /// `headers`
     Headers(Vec<Header>),
-    /// `sendheaders`
     SendHeaders,
-    /// `getaddr`
     GetAddr,
-    /// `ping`
     Ping(u64),
-    /// `pong`
     Pong(u64),
-    /// `merkleblock`
     MerkleBlock(bitcoin::merkle_tree::MerkleBlock),
-    /// BIP 37 `filterload`
     FilterLoad(FilterLoad),
-    /// BIP 37 `filteradd`
     FilterAdd(FilterAdd),
-    /// BIP 37 `filterclear`
     FilterClear,
-    /// BIP157 getcfilters
     GetCFilters(GetCFilters),
-    /// BIP157 cfilter
     CFilter(CFilter),
-    /// BIP157 getcfheaders
     GetCFHeaders(GetCFHeaders),
-    /// BIP157 cfheaders
     CFHeaders(CFHeaders),
-    /// BIP157 getcfcheckpt
     GetCFCheckpt(GetCFCheckpt),
-    /// BIP157 cfcheckpt
     CFCheckpt(CFCheckpt),
-    /// BIP152 sendcmpct
     SendCmpct(SendCmpct),
-    /// BIP152 cmpctblock
     CmpctBlock(CmpctBlock),
-    /// BIP152 getblocktxn
     GetBlockTxn(GetBlockTxn),
-    /// BIP152 blocktxn
     BlockTxn(BlockTxn),
-    /// `alert`
     Alert(Vec<u8>),
-    /// `reject`
     Reject(Reject),
-    /// `feefilter`
     FeeFilter(i64),
-    /// `wtxidrelay`
     WtxidRelay,
-    /// `addrv2`
     AddrV2(Vec<AddrV2Message>),
-    /// `sendaddrv2`
     SendAddrV2,
     /// BIP434 `feature`
     Feature(crate::feature::FeatureAnnouncement),
@@ -144,24 +92,21 @@ pub enum Message {
     /// decoder never produces it; decode a received frame explicitly with
     /// [`crate::packages::PkgTxns::decode`].
     PkgTxns(crate::packages::PkgTxns),
-    /// BIP331 `pkgtxns` exactly as received or already serialized. The decoder
-    /// produces this variant instead of parsing the transactions, so a caller
-    /// charges the frame against its ingress budget before any decoded
-    /// `Vec<Tx>` exists. Written as a `pkgtxns` command without re-encoding.
+    /// BIP331 `pkgtxns` exactly as received or already serialized.
+    ///
+    /// The decoder produces this variant instead of parsing the transactions, so a
+    /// caller charges the frame against its ingress budget before any decoded `Vec<Tx>`
+    /// exists. Written as a `pkgtxns` command without re-encoding.
     PkgTxnsPayload(bytes::Bytes),
     /// BIP332 `staletip`
     StaleTip(crate::staletip::StaleTipAnnouncement),
-    /// Any other message.
     Unknown {
-        /// The command of this message.
         command: CommandString,
-        /// The payload of this message.
         payload: Vec<u8>,
     },
 }
 
 impl Message {
-    /// Returns the message command for the wire header.
     pub fn command(&self) -> CommandString {
         let name = match self {
             Self::Version(_) => "version",
@@ -214,7 +159,6 @@ impl Message {
         }
     }
 
-    /// Large relay payloads that the writer emits as their own writev.
     #[must_use]
     pub(crate) const fn is_bulk_payload(&self) -> bool {
         matches!(
@@ -291,19 +235,14 @@ impl Message {
     }
 }
 
-/// Wire and peer protocol errors.
 #[derive(Debug, Error)]
 pub enum PeerError {
-    /// I/O failed while reading or writing the transport.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// Consensus payload encoding or decoding failed.
     #[error("bitcoin consensus encoding error: {0}")]
     Encode(#[from] encode::Error),
-    /// Native varint decoding failed.
     #[error("varint decode error: {0}")]
     Varint(#[from] bitcoin_rs_primitives::varint::VarintError),
-    /// Native consensus payload decoding failed.
     #[error("native consensus decode error: {0}")]
     NativeDecode(#[from] bitcoin_rs_primitives::DecodeError),
     /// BIP434 feature announcement decoding or encoding failed.
@@ -315,37 +254,22 @@ pub enum PeerError {
     /// BIP332 stale-tip announcement decoding or encoding failed.
     #[error("staletip error: {0}")]
     StaleTip(#[from] crate::staletip::StaleTipError),
-    /// Command name is not valid for a v1 P2P header.
     #[error("invalid command `{0}`")]
     InvalidCommand(String),
-    /// Peer sent a message for a different network.
     #[error("message magic {actual} does not match expected {expected}")]
-    WrongNetwork {
-        /// Expected magic bytes.
-        expected: Magic,
-        /// Actual magic bytes.
-        actual: Magic,
-    },
-    /// A payload, declared by a v1 frame header or about to be sent on either
-    /// transport, exceeds [`MAX_MESSAGE_PAYLOAD`].
+    WrongNetwork { expected: Magic, actual: Magic },
     #[error("payload length {0} exceeds the transport's payload bound")]
     PayloadTooLarge(usize),
-    /// Payload checksum did not match the header checksum.
     #[error("invalid payload checksum")]
     BadChecksum,
-    /// A connection-local operational or non-punitive policy condition ended processing.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
-    /// A complete remote message violated a structural or handshake rule.
     #[error("remote protocol violation: {0}")]
     Misbehavior(&'static str),
-    /// Non-I/O failure from the inbound decoder, distinguished from local encoding.
     #[error("invalid inbound message: {0}")]
     Incoming(#[source] Box<Self>),
-    /// Automatic dialing is temporarily avoided after a prior remote violation.
     #[error("discouraged destination {0}")]
     DiscouragedDestination(bitcoin_rs_primitives::PeerAddress),
-    /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
     BannedDestination(bitcoin_rs_primitives::PeerAddress),
     /// The BIP324 transport failed: a malformed handshake, or a packet that
@@ -356,10 +280,11 @@ pub enum PeerError {
 }
 
 impl PeerError {
-    /// Attributes a receive failure to the remote, except I/O, transport
-    /// failures and a frame under another network's magic. Core closes a
-    /// transport on a wrong message start without `Misbehaving`, and a BIP324
-    /// key read by a node with v2 off arrives exactly this way.
+    /// Attributes a receive failure to the remote, except I/O, transport failures and a
+    /// frame under another network's magic.
+    ///
+    /// Core closes a transport on a wrong message start without `Misbehaving`, and a
+    /// BIP324 key read by a node with v2 off arrives exactly this way.
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
             Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
@@ -367,13 +292,10 @@ impl PeerError {
         }
     }
 
-    /// Only explicitly attributed remote failures can affect reconnect policy.
     pub(crate) const fn is_misbehavior(&self) -> bool {
         matches!(self, Self::Misbehavior(_) | Self::Incoming(_))
     }
 
-    /// Protected peers may discard a fully consumed bad message. Header errors
-    /// leave an unread payload, so the transport still closes without punishment.
     pub(crate) fn recoverable_for_protected(&self) -> bool {
         match self {
             Self::Misbehavior(_) => true,
@@ -393,8 +315,6 @@ impl PeerError {
     }
 }
 
-/// Writes every byte in `slices` with `write_vectored`, advancing through
-/// short writes until the frame is on the wire.
 fn write_all_vectored<W: Write + ?Sized>(
     writer: &mut W,
     mut slices: &mut [IoSlice<'_>],
@@ -415,16 +335,12 @@ fn write_all_vectored<W: Write + ?Sized>(
     Ok(())
 }
 
-/// One encoded outbound message, the analogue of Core's `CSerializedNetMsg`:
-/// what the vectored write emits, and the payload the lease admitted.
 pub(crate) struct FramedMessage {
     wire: FrameWire,
     payload: bytes::Bytes,
 }
 
-/// The bytes a frame puts on the wire around its payload.
 enum FrameWire {
-    /// The 24-byte v1 header, written before the payload.
     V1([u8; HEADER_LEN]),
     /// A sealed BIP324 packet, written instead of the header and payload.
     V2(Vec<u8>),
@@ -439,18 +355,14 @@ impl FramedMessage {
         }
     }
 
-    /// The budget the lease charged for this message: the v1 frame length,
-    /// whichever transport carries it ([`wire_len`]).
     fn wire_len(&self) -> usize {
         HEADER_LEN + self.payload.len()
     }
 
-    /// The encoded payload bytes the frame carries.
     pub(crate) fn payload(&self) -> &[u8] {
         &self.payload
     }
 
-    /// Appends the slices this frame writes, in order.
     fn push_slices<'a>(&'a self, slices: &mut Vec<IoSlice<'a>>) {
         match &self.wire {
             FrameWire::V1(header) => {
@@ -462,8 +374,6 @@ impl FramedMessage {
     }
 }
 
-/// The encoded payload of `message`, sharing a block's retained bytes, or an
-/// error when it exceeds [`MAX_MESSAGE_PAYLOAD`].
 pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerError> {
     let payload = match message {
         Message::Block(block) => block.bytes().clone(),
@@ -476,7 +386,6 @@ pub(crate) fn message_payload(message: &Message) -> Result<bytes::Bytes, PeerErr
     Ok(payload)
 }
 
-/// Encodes `message` into its v1 wire frame.
 pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
     let payload = message_payload(message)?;
 
@@ -495,25 +404,16 @@ pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMess
     })
 }
 
-/// Writes one encoded frame with a single vectored write and returns the
-/// frame's wire length.
 pub(crate) fn write_frame<W: Write + ?Sized>(
     writer: &mut W,
     frame: &FramedMessage,
 ) -> Result<usize, PeerError> {
-    // Header and payload ride in one vectored write so each message is
-    // emitted with a single syscall instead of five (avoids header/payload
-    // segment splits and per-part syscall overhead on TcpStream).
     let mut slices = Vec::with_capacity(2);
     frame.push_slices(&mut slices);
     write_all_vectored(writer, &mut slices)?;
     Ok(frame.wire_len())
 }
 
-/// Writes encoded frames in one vectored pass.
-///
-/// The caller owns each frame's outbound charge and releases it by dropping
-/// the queued frame; this function reports no lengths for accounting.
 pub(crate) fn write_frames<W: Write + ?Sized>(
     writer: &mut W,
     frames: &[FramedMessage],
@@ -526,7 +426,6 @@ pub(crate) fn write_frames<W: Write + ?Sized>(
     Ok(())
 }
 
-/// Write a Bitcoin v1 network message.
 pub fn write_message<W: Write + ?Sized>(
     writer: &mut W,
     magic: Magic,
@@ -536,11 +435,6 @@ pub fn write_message<W: Write + ?Sized>(
     write_frame(writer, &frame)
 }
 
-/// Read and validate a Bitcoin v1 network message.
-///
-/// One-shot: a read timeout part-way through a frame discards the bytes
-/// already consumed. Connection loops that retry poll timeouts read through
-/// [`Peer::read_message`](crate::Peer::read_message) instead.
 pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -548,14 +442,6 @@ pub fn read_message<R: Read>(
     V1Receiver::default().read_message_with(reader, expected_magic, |_, _| {})
 }
 
-/// Receive state for one v1 byte stream that survives poll timeouts.
-///
-/// Peer sockets poll with a short read timeout, so a frame can stop arriving
-/// anywhere inside its header or payload. The receiver keeps every byte it
-/// has consumed: after `TimedOut` or `WouldBlock` the caller retries and the
-/// same frame continues, instead of the next read starting mid-frame. Every
-/// other outcome, a complete frame or a rejected one, returns the receiver
-/// to the start of a header.
 #[derive(Debug, Default)]
 pub(crate) struct V1Receiver {
     header: [u8; HEADER_LEN],
@@ -563,12 +449,10 @@ pub(crate) struct V1Receiver {
     body: Option<PendingBody>,
 }
 
-/// A validated header whose payload is still arriving.
 #[derive(Debug)]
 struct PendingBody {
     command: String,
     checksum: [u8; 4],
-    /// Validated declared payload length; `payload` holds only received bytes.
     expected: usize,
     payload: Vec<u8>,
 }
@@ -584,10 +468,6 @@ impl V1Receiver {
         receiver
     }
 
-    /// Read one validated wire payload, observing it before typed decoding.
-    ///
-    /// POST: a poll-timeout I/O error keeps the partial frame for the next
-    /// call; any other result leaves the receiver at a frame boundary.
     pub(crate) fn read_message_with<R: Read>(
         &mut self,
         reader: &mut R,
@@ -615,8 +495,6 @@ impl V1Receiver {
         Ok((message, payload))
     }
 
-    /// Completes the current header, then validates it before any payload
-    /// byte is read.
     fn read_header<R: Read>(
         &mut self,
         reader: &mut R,
@@ -633,10 +511,6 @@ impl V1Receiver {
     }
 }
 
-/// Validates a complete header and records its declared payload length:
-/// magic, command, and length are checked before any payload byte is read.
-/// The declared length never allocates; `payload` grows only with received
-/// bytes.
 fn pending_body(
     header: &[u8; HEADER_LEN],
     expected_magic: Magic,
@@ -656,7 +530,6 @@ fn pending_body(
     let payload_len_u32 = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
     let payload_len =
         usize::try_from(payload_len_u32).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    // Core refuses a v1 message above this bound before reading its body.
     if payload_len > MAX_MESSAGE_PAYLOAD {
         return Err(PeerError::PayloadTooLarge(payload_len));
     }
@@ -671,11 +544,6 @@ fn pending_body(
     })
 }
 
-/// Returns the full encoded wire size of `message`: the 24-byte framing
-/// header plus the encoded payload length.
-///
-/// Admission accounts this exact count and `write_message` returns it for
-/// release, so budget accounting and wire emission charge identical bytes.
 pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
     let payload_len = match message {
         Message::BlockPayload(payload) | Message::PkgTxnsPayload(payload) => payload.len(),
@@ -694,13 +562,9 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
         Message::SendPackages(_) => std::mem::size_of::<u64>(),
-        // At most `MAX_GETPKGTXNS` wtxids: measuring by encoding is bounded
-        // and shares the encoder's bounds exactly.
         Message::AncPkgInfo(info) => info.encode()?.len(),
         Message::GetPkgTxns(request) => request.encode()?.len(),
         Message::PkgTxns(package) => pkgtxns_payload_len(package)?,
-        // At most `MAX_PAYLOAD_LEN` bytes; measuring by encoding shares the
-        // encoder's bounds exactly.
         Message::StaleTip(announcement) => crate::staletip::encode(announcement)?.len(),
         Message::Feature(feature) => {
             let id_len = feature.id.as_bytes().len();
@@ -728,7 +592,6 @@ pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
         .ok_or(PeerError::PayloadTooLarge(usize::MAX))
 }
 
-/// Encode only a message payload.
 pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     let mut payload = Vec::new();
     match message {
@@ -762,8 +625,6 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     Ok(payload)
 }
 
-/// Payload length of a `pkgtxns` under the bounds [`crate::packages::PkgTxns::encode`]
-/// enforces, without serializing the transactions.
 fn pkgtxns_payload_len(package: &crate::packages::PkgTxns) -> Result<usize, PeerError> {
     use crate::packages::{MAX_GETPKGTXNS, PackageError};
 
@@ -793,13 +654,7 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
     payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(value));
 }
 
-/// Decodes a command's payload, or an unknown command into [`Message::Unknown`].
-///
-/// `pkgtxns` is the one typed command whose transactions are not parsed here:
-/// [`Message::PkgTxnsPayload`] shares `payload` as received, so the listener
-/// charges the frame before any decoded transaction exists.
 pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Message, PeerError> {
-    // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
             command: command_string(command)?,
@@ -856,10 +711,6 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
         "pkgtxns" => Message::PkgTxnsPayload(payload.clone()),
         "staletip" => match crate::staletip::decode(payload) {
             Ok(announcement) => Message::StaleTip(announcement),
-            // BIP332: an announcement over its header limit is ignored, not
-            // punished. It surfaces as an `Unknown` `staletip` without its
-            // payload, which a ready peer's dispatch ignores like any other
-            // unknown command.
             Err(error) if error.is_policy_limit() => Message::Unknown {
                 command: command_string(crate::staletip::STALETIP_COMMAND)?,
                 payload: Vec::new(),
@@ -1071,7 +922,6 @@ mod tests {
         write_message,
     };
 
-    /// Serves exactly one v1 wire header and fails on any read beyond it.
     struct HeaderOnlyReader {
         header: Cursor<Vec<u8>>,
     }
@@ -1086,7 +936,6 @@ mod tests {
         }
     }
 
-    /// Build a regtest `ping` wire header declaring `payload_len` bytes of payload.
     fn header_declaring(payload_len: usize) -> Result<Vec<u8>, PeerError> {
         let len = u32::try_from(payload_len)
             .map_err(|_| PeerError::Protocol("payload length does not fit in u32"))?;
@@ -1094,7 +943,7 @@ mod tests {
         header.extend_from_slice(&Magic::REGTEST.to_bytes());
         header.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
         header.extend_from_slice(&len.to_le_bytes());
-        header.extend_from_slice(&[0u8; 4]); // checksum (never reached / wrong on purpose)
+        header.extend_from_slice(&[0u8; 4]);
         Ok(header)
     }
 
@@ -1137,7 +986,6 @@ mod tests {
         write_message(&mut ping, Magic::REGTEST, &super::Message::Ping(42))?;
         let mut pong = Vec::new();
         write_message(&mut pong, Magic::REGTEST, &super::Message::Pong(7))?;
-        // The ping stops arriving once inside its header and once inside its payload.
         let mut stream = StallingStream::new([
             Inbound::Bytes(ping[..10].to_vec()),
             Inbound::Stall(ErrorKind::TimedOut),
@@ -1166,9 +1014,6 @@ mod tests {
         use crate::test_support::{Inbound, OrFail, StallingStream};
         use std::io::ErrorKind;
 
-        // A peer declares a maximum-size payload, delivers a fragment, then
-        // stalls: the retained buffer holds received bytes, not the declared
-        // length.
         let dribble = [7u8; 100];
         let mut stream = StallingStream::new([
             Inbound::Bytes(header_declaring(MAX_MESSAGE_PAYLOAD)?),
@@ -1382,7 +1227,6 @@ mod tests {
 
     #[test]
     fn feature_message_rejects_malformed_wire_payload() {
-        // Feature command with empty payload (truncated).
         let mut frame = Vec::with_capacity(HEADER_LEN);
         frame.extend_from_slice(&Magic::REGTEST.to_bytes());
         frame.extend_from_slice(b"feature\0\0\0\0\0");
@@ -1401,7 +1245,6 @@ mod tests {
         bitcoin_rs_primitives::Wtxid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[tag; 32]))
     }
 
-    /// A one-input, one-output transaction whose prevout hash is `tag`.
     fn package_tx(tag: u8) -> Result<bitcoin_rs_primitives::Tx, PeerError> {
         let mut raw = vec![1, 0, 0, 0, 1];
         raw.extend_from_slice(&[tag; 32]);
@@ -1452,8 +1295,6 @@ mod tests {
             let (decoded, raw) = read_message(&mut Cursor::new(wire.clone()), Magic::REGTEST)?;
             assert_eq!(raw.as_ref(), encode_payload(message)?.as_slice());
             if let super::Message::PkgTxns(package) = message {
-                // The receive path parses no transaction: the caller charges
-                // the frame, then decodes it explicitly.
                 assert_eq!(decoded, super::Message::PkgTxnsPayload(raw.clone()));
                 assert_eq!(&crate::packages::PkgTxns::decode(&raw)?, package);
                 let mut rewritten = Vec::new();
@@ -1586,7 +1427,6 @@ mod tests {
         assert_eq!(decoded, message);
         assert_eq!(raw.as_ref(), encode_payload(&message)?.as_slice());
 
-        // 21 headers: over the BIP332 limit, decided from the count alone.
         let mut over = vec![0u8; 32];
         over.push(21);
         let (ignored, _) = read_message(
@@ -1599,7 +1439,6 @@ mod tests {
             "{ignored:?}"
         );
 
-        // Any other defect is a malformed payload.
         let result = read_message(
             &mut Cursor::new(frame_of(b"staletip", &[0u8; 31])?),
             Magic::REGTEST,
@@ -1613,8 +1452,6 @@ mod tests {
 
     #[test]
     fn pkgtxns_receive_defers_every_transaction_parse() -> Result<(), PeerError> {
-        // A payload no `PkgTxns` decoder accepts still arrives as the raw
-        // variant: the listener charges the frame before any decode.
         let frame = frame_of(b"pkgtxns", &[0])?;
         let (message, raw) = read_message(&mut Cursor::new(frame), Magic::REGTEST)?;
         assert_eq!(raw.as_ref(), [0]);
@@ -1636,7 +1473,7 @@ mod tests {
     fn empty_command_in_v1_header_is_rejected() {
         let mut frame = Vec::with_capacity(HEADER_LEN);
         frame.extend_from_slice(&Magic::REGTEST.to_bytes());
-        frame.extend_from_slice(&[0u8; 12]); // all zeroes command
+        frame.extend_from_slice(&[0u8; 12]);
         frame.extend_from_slice(&0u32.to_le_bytes());
         frame.extend_from_slice(&super::checksum(&[]));
 

@@ -135,9 +135,6 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     Ok(())
 }
 
-/// Builds a live-tip race: the applied tip sits two deep on a losing
-/// branch while a heavier three-block branch heads the tree. Winning
-/// bodies are real mined blocks so they pass the binding gate when staged.
 fn pending_reorg_fixture()
 -> Result<(SyncHarness, TipSnapshot, Vec<Block>), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
@@ -202,8 +199,6 @@ fn chain_frontier_uses_captured_header_tip_during_branch_change() -> TestResult 
         Arc::clone(&harness.applied_tip),
         Arc::clone(&harness.block_tree),
     );
-    // Model publication falling back to the applied branch after the winning
-    // branch is abandoned, immediately after capturing the old header tip.
     *chain.scripted_tip_update.lock() = Some((Arc::clone(&replacement), Arc::clone(&replacement)));
     harness.sync.chain = Arc::new(chain);
 

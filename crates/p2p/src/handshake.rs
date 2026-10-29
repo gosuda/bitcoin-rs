@@ -15,18 +15,6 @@ use crate::peer_info::PeerRole;
 use crate::wire::{Message, PROTOCOL_VERSION, PeerError};
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 
-/// Build a local version message for handshake initiation.
-///
-/// PRE: `role` is the role of the connection that will send the message,
-///   and `local_services` contains the services this node can provide.
-/// POST: the message advertises transaction relay only for a full-relay
-///   connection; a block-relay-only connection advertises `relay = false`,
-///   as Core's `PushNodeVersion` does (`net_processing.cpp:1651-1689`).
-///   Prune mode never advertises `NODE_NETWORK`; non-prune mode advertises
-///   `NODE_NETWORK`; `WITNESS` remains advertised in both modes (Core
-///   `init.cpp:2022-2026`).
-/// INVARIANT: services, height, and nonce do not vary with the role; both
-///   inbound and outbound handshakes use the same service set.
 pub fn version_message(
     nonce: u64,
     start_height: i32,
@@ -48,7 +36,6 @@ pub fn version_message(
     }
 }
 
-/// Messages sent during feature negotiation after `version` and before readiness.
 pub const fn feature_messages() -> [Message; 3] {
     [
         Message::WtxidRelay,
@@ -57,21 +44,12 @@ pub const fn feature_messages() -> [Message; 3] {
     ]
 }
 
-/// BIP434 feature announcements sent after [`feature_messages`] and before our
-/// `verack`, once the peer's `version` has arrived.
+/// BIP434 feature announcements sent after [`feature_messages`] and before our POST:
+/// empty for a peer below [`FEATURE_VERSION`]: BIP434 forbids sending it a `feature`,
+/// so its handshake bytes are those of a pre-BIP434 session.
 ///
-/// PRE: `remote_version` is the protocol version the peer announced in its
-///   `version`; `peer` carries this connection's offers
-///   ([`Peer::offer_stale_tip_relay`]).
-/// POST: empty for a peer below [`FEATURE_VERSION`]: BIP434 forbids sending it
-///   a `feature`, so its handshake bytes are those of a pre-BIP434 session.
-///   Otherwise the announcements this node was told to make, in send order:
-///   BIP332 when offered, nothing by default. BIP330 and BIP331 negotiate on
-///   their own messages and never appear here.
-/// INVARIANT: `dispatch_inbound_full`'s `version` reply is the only caller.
-///   Both roles negotiate through it, because only there is the peer's
-///   version known, and it runs before `verack`, the last point at which
-///   BIP434 permits a `feature`.
+/// BIP332 when offered, nothing by default. BIP330 and BIP331 negotiate on BIP434
+/// permits a `feature`.
 pub(crate) fn negotiated_features<S>(
     peer: &Peer<S>,
     remote_version: u32,
@@ -86,7 +64,6 @@ pub(crate) fn negotiated_features<S>(
 }
 
 /// The BIP434 version rule: `local` announcements go only to a peer at
-/// [`FEATURE_VERSION`] or above, in the given order.
 fn announceable_to(
     remote_version: u32,
     local: Vec<FeatureAnnouncement>,
@@ -98,12 +75,7 @@ fn announceable_to(
     }
 }
 
-/// Messages sent after the handshake completes (post-`verack`).
-///
 /// BIP152 compact-block relay is announced in low-bandwidth mode: we ask for
-/// version 2 (wtxid identity, witness-bearing prefills) but never take a
-/// high-bandwidth announcement slot, so peers relay compact blocks only when
-/// we request them. See `docs/policies/p2p-compatibility.md` §5.
 const fn post_verack_messages() -> [Message; 1] {
     [Message::SendCmpct(SendCmpct {
         send_compact: false,
@@ -111,13 +83,6 @@ const fn post_verack_messages() -> [Message; 1] {
     })]
 }
 
-/// Sends the post-verack preference messages and records what we advertised.
-///
-/// PRE: `peer` finished the `version`/`verack` exchange.
-/// POST: The messages are written and the advertised compact-block version
-/// is recorded.
-/// INVARIANT: This function counts no bytes; the stream owns byte
-/// accounting.
 pub(crate) fn send_post_verack_messages<S: Read + Write>(
     peer: &mut Peer<S>,
 ) -> Result<(), PeerError> {
@@ -129,15 +94,7 @@ pub(crate) fn send_post_verack_messages<S: Read + Write>(
     Ok(())
 }
 
-/// Start an outbound handshake and return messages to send to the remote peer.
-///
-/// PRE: `role` is the dialing connection's role and `local_services` are
-///   the services this node provides.
-/// POST: the first message advertises relay per `role` and the supplied
-///   service set.
-/// INVARIANT: feature negotiation is identical for both roles, except that a
 ///   role advertising `relay = false` offers no BIP331 package relay: that
-///   handshake requires `fRelay` from both sides.
 pub fn start<S>(
     peer: &mut Peer<S>,
     nonce: u64,
@@ -160,31 +117,8 @@ pub fn start<S>(
     messages
 }
 
-/// Drive a Bitcoin v1 handshake from the inbound listener side.
-///
-/// The caller has already accepted the TCP connection and constructed a
-/// `Peer<S>` whose `magic` matches the network. This reads the remote
-/// `Version`, sends our `Version` followed by feature-negotiation messages and
-/// `Verack`, then dispatches inbound messages until the peer is ready.
-///
-/// Reads tolerate transient `WouldBlock`/`TimedOut` errors so the caller can
-/// poll a short stream timeout: the handshake fails with a timeout error once
-/// `deadline` passes and with a lease-revoked protocol error as soon as the
-/// connection is cancelled, leaving connection teardown to the caller.
-///
 /// # Errors
-///
 /// Returns [`PeerError`] if reading or writing the wire stream fails, if the
-/// finite-state machine rejects any inbound message, if `deadline` passes
-/// before the peer reaches the ready state, or if the connection's lease is
-/// revoked mid-handshake.
-///
-/// PRE: `peer` wraps an accepted connection, `lease` belongs to it, and
-///   `local_services` are the services this node provides.
-/// POST: `peer` is `Ready`, the post-verack messages are sent, and our
-///   `Version` advertised `local_services`.
-/// INVARIANT: This function counts no bytes; the stream that `peer` wraps
-/// owns byte accounting.
 pub fn run_inbound_handshake<S: Read + Write>(
     peer: &mut Peer<S>,
     our_nonce: u64,
@@ -216,8 +150,6 @@ pub fn run_inbound_handshake<S: Read + Write>(
     Ok(())
 }
 
-/// Return the accepted handshake message and its responses. Protected connections
-/// discard recoverable violations without widening the existing deadline.
 pub(crate) fn next_handshake_step<S: Read>(
     peer: &mut Peer<S>,
     lease: &PeerLease,
@@ -234,14 +166,6 @@ pub(crate) fn next_handshake_step<S: Read>(
     }
 }
 
-/// Reads one handshake message, retrying transient poll timeouts and v2
-/// decoy/undefined-type packets.
-///
-/// PRE: `deadline` bounds the whole handshake phase.
-/// POST: Return the first complete message, or the error that ended the
-/// read: a protocol error for a revoked lease, a timeout after `deadline`.
-/// INVARIANT: This function counts no bytes; the stream the caller wraps
-/// (`CountingStream` on live connections) owns socket byte accounting.
 fn read_handshake_message<S: Read>(
     peer: &mut Peer<S>,
     lease: &PeerLease,
@@ -343,8 +267,6 @@ mod tests {
         })
     }
 
-    /// A `feature` frame as a remote peer sends it: its identifier need not be
-    /// printable.
     fn remote_feature(id: &[u8], data: &[u8]) -> Message {
         Message::Feature(FeatureAnnouncement::new(
             FeatureId::from_raw_unchecked(id.to_vec()),
@@ -352,16 +274,12 @@ mod tests {
         ))
     }
 
-    /// Drives one inbound handshake over `remote`, the frames the peer sends,
-    /// and returns the peer with the handshake's outcome.
     fn inbound_handshake_over(
         remote: &[Message],
     ) -> Result<(Peer<ScriptedStream>, Result<(), PeerError>), PeerError> {
         inbound_handshake_offering(0, remote)
     }
 
-    /// [`inbound_handshake_over`] on a node that offers package relay with
-    /// `offer`.
     fn inbound_handshake_offering(
         offer: u64,
         remote: &[Message],
@@ -369,8 +287,6 @@ mod tests {
         inbound_handshake_with(|peer| peer.offer_package_relay(offer), remote)
     }
 
-    /// [`inbound_handshake_over`] on a node `configure` set up before the
-    /// handshake.
     fn inbound_handshake_with(
         configure: impl FnOnce(&mut Peer<ScriptedStream>),
         remote: &[Message],
@@ -744,7 +660,6 @@ mod tests {
         )?;
         let mut verack = Vec::new();
         write_message(&mut verack, magic, &Message::Verack)?;
-        // Each frame stops arriving part-way for longer than one socket poll.
         let stream = StallingStream::new([
             Inbound::Bytes(version[..30].to_vec()),
             Inbound::Stall(io::ErrorKind::TimedOut),

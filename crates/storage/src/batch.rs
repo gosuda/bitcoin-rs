@@ -5,15 +5,15 @@ use crate::ColumnFamily;
 /// One recorded mutation inside a [`BufferedWriteBatch`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchOp {
-    /// Inserts or replaces `key` with `value` in `cf`.
     Put {
         cf: ColumnFamily,
         key: Vec<u8>,
         value: Bytes,
     },
-    /// Deletes `key` from `cf`.
-    Delete { cf: ColumnFamily, key: Vec<u8> },
-    /// Deletes every key in `[start, end)` from `cf`.
+    Delete {
+        cf: ColumnFamily,
+        key: Vec<u8>,
+    },
     DeleteRange {
         cf: ColumnFamily,
         start: Vec<u8>,
@@ -22,12 +22,6 @@ pub enum BatchOp {
 }
 
 /// Ordered, backend-neutral operations awaiting an engine commit.
-///
-/// The batch is the only recorder: it appends [`BatchOp`] values through
-/// `put`, `put_value`, `delete`, and `delete_range`, and a backend applies
-/// the recorded sequence atomically through `KvStore::write` and its durable
-/// variants.
-///
 /// INVARIANT: the recorded sequence keeps its append order, and every backend
 /// applies the operations in that order inside one atomic commit.
 #[derive(Default)]
@@ -39,17 +33,12 @@ pub struct BufferedWriteBatch {
 
 impl BufferedWriteBatch {
     /// Inserts or replaces `key` with `value` in `cf`.
-    ///
     /// PRE: none. POST: the batch records one `BatchOp::Put` after its
     /// recorded operations. INVARIANT: append order equals commit order.
     pub fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
         self.put_value(cf, key, Bytes::copy_from_slice(value));
     }
 
-    /// Inserts or replaces `key` with an owned `value` in `cf`.
-    ///
-    /// PRE: none. POST: the batch records one `BatchOp::Put` after its
-    /// recorded operations. INVARIANT: append order equals commit order.
     pub fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
         self.encoded_bytes = self.encoded_bytes.saturating_add(key.len() + value.len());
         self.ops.push(BatchOp::Put {
@@ -59,10 +48,6 @@ impl BufferedWriteBatch {
         });
     }
 
-    /// Deletes `key` from `cf`.
-    ///
-    /// PRE: none. POST: the batch records one `BatchOp::Delete` after its
-    /// recorded operations. INVARIANT: append order equals commit order.
     pub fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
         self.encoded_bytes = self.encoded_bytes.saturating_add(key.len());
         self.ops.push(BatchOp::Delete {
@@ -71,10 +56,6 @@ impl BufferedWriteBatch {
         });
     }
 
-    /// Deletes keys in `[start, end)` from `cf`.
-    ///
-    /// PRE: none. POST: the batch records one `BatchOp::DeleteRange` after
-    /// its recorded operations. INVARIANT: append order equals commit order.
     pub fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
         self.encoded_bytes = self
             .encoded_bytes
@@ -89,9 +70,9 @@ impl BufferedWriteBatch {
 
     /// Consumes the batch and returns its recorded operations.
     ///
-    /// PRE: none. POST: returns every recorded [`BatchOp`] in the order the
-    /// backend applies it. INVARIANT: consuming it leaves no batch from
-    /// which those operations can be read again.
+    /// PRE: none. POST: returns every recorded [`BatchOp`] in the order the backend
+    /// applies it. INVARIANT: consuming it leaves no batch from which those operations
+    /// can be read again.
     #[must_use]
     pub fn into_ops(self) -> Vec<BatchOp> {
         self.ops

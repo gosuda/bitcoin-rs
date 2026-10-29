@@ -18,56 +18,28 @@ use crate::packages::{
 use crate::peer::{PackageRequest, Peer, PeerState};
 use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, MAX_MESSAGE_PAYLOAD, Message, PeerError};
 
-/// Fully applied active-chain tip published by chainstate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedTip {
-    /// Applied height.
     pub height: u32,
-    /// Applied block hash.
     pub hash: BlockHash,
-    /// Previous block hash from the applied tip's header.
     pub prev_hash: BlockHash,
 }
 
-/// Maximum block locator hashes accepted in one locator-based request.
 pub(crate) use crate::wire::MAX_LOCATOR_HASHES;
 
-/// Outcome of streamed inventory serving. Bodies pass through the serving
-/// sink as they load and are never materialized as a whole.
 #[derive(Debug, Default)]
 pub struct InventoryServing {
-    /// Inventory this node cannot serve (unknown type, stale, pruned, no
-    /// body).
     pub not_found: Vec<Inventory>,
-    /// True when production stopped at the headroom gate with items
-    /// unexamined. A halt loads no body and reports no unserved item as
-    /// served or missing: the caller keeps the unexamined items and resumes
-    /// them once the gate opens (I9: no silent half-serve).
     pub halted: bool,
 }
 
-/// The single durable record of one compact-filter request across serving
-/// attempts.
-///
-/// The first attempt carries the peer's request unchanged with no expected
-/// end. When a serving pass stops after emitting a prefix of a range
-/// (`getcfilters` only), the remainder is the same request narrowed to start
-/// after the emitted prefix, with `expected_end` pinning the stop height the
-/// emitted prefix was computed against. A later pass recomputes the range and
-/// fails if the chain moved under the cursor, instead of splicing two
-/// different ranges into one reply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilterRequest {
-    /// The request still to serve: the peer's original message, or its
-    /// narrowed remainder.
     pub request: Message,
-    /// Height of the last filter the full range ends at, fixed by the first
-    /// pass that emitted a prefix. `None` before anything was emitted.
     pub expected_end: Option<u32>,
 }
 
 impl FilterRequest {
-    /// Wraps a peer's compact-filter request for its first serving attempt.
     #[must_use]
     pub const fn new(request: Message) -> Self {
         Self {
@@ -77,47 +49,25 @@ impl FilterRequest {
     }
 }
 
-/// Outcome of one compact-filter serving attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FilterServing {
-    /// The whole request was answered (or there was nothing to answer).
     Done,
-    /// Nothing more could be sent now: publication or send headroom is
-    /// pending. The record is the exact remainder; passing it back resumes
-    /// without replaying anything already sent.
     Pending(FilterRequest),
 }
 
 /// Header response for a BIP332 stale tip announcement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StaleTipHeaders {
-    /// The stale branch headers starting immediately after `fork_point`.
     Headers(crate::staletip::StaleTipAnnouncement),
-    /// The stale branch is longer than [`crate::staletip::MAX_STALETIP_HEADERS`].
     TooMany,
 }
 
-/// Read-only active-chain view used by server-side P2P responders.
 pub trait ChainQuery: Send + Sync {
-    /// Whether the optional filter index currently covers the applied chain.
     fn compact_filters_ready(&self) -> bool {
         false
     }
 
     /// Serves a bounded BIP157 request from persisted filters only.
-    ///
-    /// PRE: `request` is a [`FilterRequest`] built by
-    /// [`FilterRequest::new`] or returned by an earlier
-    /// [`FilterServing::Pending`] of this same request. `headroom` reserves
-    /// (or reuses) the caller's production credit immediately before each
-    /// filter is loaded and returns false when none is available.
-    /// POST: `Done` when every filter in the range was sent. `Pending` with
-    /// the exact remainder when publication or `headroom` stopped serving; a
-    /// pending record never repeats a message already sent, and `Pending`
-    /// carries the input unchanged when nothing was sent. `Err` for a range
-    /// that is interrupted for good (the index stopped early, or the chain
-    /// moved under a resumed cursor) and for send failures.
-    /// INVARIANT: a saturated outbound gate is `Pending`, never an error.
     fn serve_compact_filters(
         &self,
         _request: &FilterRequest,
@@ -126,9 +76,6 @@ pub trait ChainQuery: Send + Sync {
     ) -> Result<FilterServing, PeerError> {
         Ok(FilterServing::Done)
     }
-    /// Returns a bounded contiguous header response: locator-based ranges
-    /// walk the applied chain, while the empty-locator single-header direct
-    /// lookup stays on the header-best chain.
     fn headers_after(
         &self,
         locator_hashes: &[BlockHash],
@@ -136,19 +83,8 @@ pub trait ChainQuery: Send + Sync {
         limit: usize,
     ) -> Vec<Header>;
 
-    /// Serves block inventory one response at a time, in `items` order. For
-    /// each block-typed item `headroom` is consulted EXACTLY ONCE,
-    /// immediately BEFORE its body load; `false` halts production and sets
-    /// `halted` (I7, I9). `headroom` reserves or reuses the caller's
-    /// worst-case outbound reservation, which the following `serve` spends.
-    /// Full-block items are served as
-    /// [`Message::BlockPayload`]; `MSG_CMPCT_BLOCK` items as
     /// [`Message::CmpctBlock`] built at the given BIP152 version — `None`
-    /// (peer never negotiated) leaves compact items in `not_found`. Each
-    /// `MSG_WITNESS_BLOCK` body preserves the stored consensus payload;
     /// `MSG_BLOCK` strips witness data from the validated body (BIP144).
-    /// A `serve` error aborts production and propagates. Non-block / unservable items
-    /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
@@ -157,19 +93,8 @@ pub trait ChainQuery: Send + Sync {
         serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 
-    /// PRE: `request` carries decoded absolute transaction indexes for one
     /// block. `compact_version` is the peer's servable BIP152 profile.
-    /// POST: return the reply to send — a `blocktxn` for a block shallow
-    /// enough to reconstruct, encoded for `compact_version` (v1 strips
-    /// witnesses, any other profile keeps them), or the whole
-    /// witness-bearing `block` for one too deep for a useful hint set
-    /// (Core 31.1 answers both instead of leaving a peer to time out);
-    /// `Ok(None)` leaves the request unanswered (unknown, stale, pruned,
-    /// or headless block, or a saturated `headroom` gate). `Err` reports
-    /// an out-of-range transaction index — a protocol disconnect per
     /// BIP152 (Core scores misbehavior).
-    /// INVARIANT: `headroom` is evaluated before any block body is loaded,
-    /// so a saturated outbound gate materializes no body for this request.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -177,26 +102,14 @@ pub trait ChainQuery: Send + Sync {
         headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError>;
 
-    /// Header time of the active tip, `None` when no active tip is known.
-    ///
-    /// PRE: none.
-    /// POST: returns UNIX seconds of the tip header Core would read as
-    ///   `m_best_block_time` (`net_processing.cpp:1445-1448`); `None` means
-    ///   nothing is applied, which the outbound service policy reads as the
-    ///   deepest possible local chain.
-    /// INVARIANT: the only local tip-age source for peer admission; no
-    ///   caller walks the block tree per handshake for it.
     fn best_block_time(&self) -> Option<u32> {
         None
     }
 
-    /// Returns the active-chain height of `hash` if it is currently an ancestor
-    /// of the active tip.
     fn active_height(&self, _hash: BlockHash) -> Option<u32> {
         None
     }
 
-    /// Builds one `cmpctblock` message for the block at `height` and `hash`
     /// at the given BIP152 version.
     fn compact_block_for(
         &self,
@@ -207,19 +120,11 @@ pub trait ChainQuery: Send + Sync {
         None
     }
 
-    /// The fully applied active-chain tip, or `None` if uninitialized.
-    ///
-    /// This is deliberately distinct from the header-tree tip: consumers of
-    /// committed block effects must never treat fresher, unapplied headers as
-    /// the publication frontier.
     fn committed_tip(&self) -> Option<CommittedTip> {
         None
     }
 
     /// Returns the BIP332 stale-tip headers for `tip` given the peer's
-    /// demonstrated tips, or `None` if the tip is unknown, not stale, or
-    /// not an ancestor of any demonstrated tip. Returns `TooMany` if the
-    /// branch exceeds [`crate::staletip::MAX_STALETIP_HEADERS`].
     fn stale_tip_announcement(
         &self,
         tip: Hash256,
@@ -227,47 +132,19 @@ pub trait ChainQuery: Send + Sync {
     ) -> Option<StaleTipHeaders>;
 }
 
-/// Transaction inventory view and successful-getdata acknowledgement seam,
-/// used by the Inv filter and transaction responder.
-///
-/// Implemented here for the mempool gateway; the p2p crate owns the protocol
-/// adapter while mempool owns admission, orphan, and rejection state.
-/// The dispatch path consults this trait to suppress redundant `getdata`
-/// requests for transactions the node already holds and to serve
-/// transaction bodies in reply to `getdata`.
 pub trait TxInventory: Send + Sync {
-    /// Returns `true` when the node already holds the transaction identified by
-    /// `hash` — in the mempool, the orphan map, or the recent-rejects cache.
-    /// `hash_is_wtxid` is true for `WTx` (wtxid) and false for
-    /// `Transaction`/`WitnessTransaction` (txid).
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
-    /// Returns the witness transaction body for `txid`, or `None` when the
-    /// node does not have it. Used to answer `getdata` for txid-typed items.
     fn get_tx(&self, txid: Txid) -> Option<Tx>;
 
-    /// Returns the witness transaction body for `wtxid`, or `None` when the
     /// node does not have it. Used to answer BIP339 `getdata` (`WTx`) items.
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
 
-    /// Called only after a transaction body was successfully queued for getdata.
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
     /// The BIP331 ancestor package of `wtxid` the node can serve: its
-    /// unconfirmed ancestors in topological order, then `wtxid` itself.
-    ///
-    /// POST: resident pool members only, never an orphan or a recent reject,
-    /// and `None` when `wtxid` is not resident, the package is too large, or
-    /// the provider has no resident pool. The last element is `wtxid`.
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
 
-    /// The bodies of `wtxids`, in request order, when every one is resident.
-    ///
-    /// POST: all or none, read from one view of the resident pool, as the
-    /// pool's own handles; never an orphan or a recent reject, and never the
-    /// general [`Self::get_tx_by_wtxid`] lookup. `None` when any member is
-    /// absent or the provider has no resident pool. The caller bounds
-    /// `wtxids.len()`.
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
 }
 
@@ -310,12 +187,6 @@ impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGat
     }
 }
 
-/// Chainless dispatch: collects the protocol responses and returns them.
-///
-/// With `chain: None` responses can never contain a block body, so the batch
-/// is protocol-bounded (at most [`MAX_HEADERS_MESSAGE_COUNT`] headers, or one
-/// inventory-bound notfound/getdata echo) and safe to materialize whole.
-/// Block announcements go to a no-op sink.
 pub fn dispatch_inbound<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -338,37 +209,6 @@ pub fn dispatch_inbound<S>(
     Ok(responses.into_inner())
 }
 
-/// Dispatch with an active-chain view and a transaction-inventory filter.
-///
-/// Every response is emitted through `send` in the identical order the
-/// former batch form produced (I8); `send` errors abort emission and
-/// propagate. `headroom` gates block-body materialization (I7) and is
-/// evaluated before each load. It reserves the outbound bytes of one
-/// worst-case frame (or reuses a reservation already held) and returns
-/// `false` when the connection or the node cannot take them; the next `send`
-/// spends that reservation, so a body is loaded only while its queue space is
-/// already owned.
-///
-/// When `tx_inventory` is `Some`, the `inv` arm suppresses `getdata` for
-/// transactions the node already holds (mempool, orphan map, or
-/// recent-rejects) and the `getdata` arm serves tx bodies for tx-typed
-/// items the node has, reporting the rest as `notfound`. Inventory types
-/// identify txids or wtxids independently of the peer's outbound preference.
-///
-/// `tx_relay_open` reports whether the node accepts transaction relay from
-/// peers (it is not in initial block download). While it returns `false`,
-/// the `inv` arm requests no transaction-typed vector and every other arm
-/// is unchanged. The gate is evaluated lazily per `inv` message.
-///
-/// `announce_tx` receives missing transaction vectors for the shared request
-/// owner; dispatch never chooses a download source.
-///
-/// `announce_block` receives the hash of every `MSG_BLOCK` and
-/// `MSG_WITNESS_BLOCK` vector of an `inv`.
-/// PRE: `announce_block` belongs to the connection that `peer` wraps.
-/// POST: block inventory reaches `announce_block` and never a `getdata`.
-/// INVARIANT: block bodies are requested only by header sync and the
-/// download window (Core 31.1 `net_processing.cpp:4370-4410`).
 #[expect(clippy::too_many_arguments, reason = "independent protocol sinks")]
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
@@ -466,9 +306,6 @@ pub fn dispatch_inbound_full<S>(
 }
 
 /// Answers the peer's `version` with our feature offers, the one BIP331
-/// `sendpackages` offer, and `verack`.
-///
-/// POST: `sendpackages` is sent at most once per connection, before `verack`.
 fn reply_to_version<S>(
     peer: &mut Peer<S>,
     remote_version: u32,
@@ -487,11 +324,6 @@ fn reply_to_version<S>(
     send(Message::Verack)
 }
 
-/// Routes one `inv`: block vectors go to `announce_block`, and the
-/// transaction vectors this node wants go to `announce_tx` as one request.
-///
-/// POST: an `inv` of a package-relay-only type is misbehavior. Compact,
-/// unknown, and error vectors are ignored (Core `ProcessMessage(INV)`).
 fn receive_inv<S>(
     peer: &Peer<S>,
     items: &[Inventory],
@@ -533,11 +365,6 @@ fn receive_inv<S>(
 }
 
 /// Applies one BIP331 package message once its sequence step passed.
-///
-/// POST: the message's `PKG_RELAY_*` bit was negotiated, otherwise the peer is
-/// disconnected through the returned error. A `pkgtxns` frame is charged and
-/// admitted by the node's ingress, which decodes it only after planning, so
-/// dispatch checks the negotiation alone.
 fn receive_package_message<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -586,10 +413,6 @@ fn is_package_inventory(item: &Inventory) -> bool {
 }
 
 /// The BIP331 `PKG_RELAY_*` bit `bit` must have been negotiated for the
-/// connection before a message that rides it is accepted.
-///
-/// POST: otherwise the sender violated its own negotiation and no reply is
-/// sent; the peer is disconnected through the returned error.
 fn ensure_package_relay<S>(peer: &Peer<S>, bit: u64, error: &'static str) -> Result<(), PeerError> {
     if peer.package_relay_versions() & bit == 0 {
         return Err(PeerError::Misbehavior(error));
@@ -598,7 +421,6 @@ fn ensure_package_relay<S>(peer: &Peer<S>, bit: u64, error: &'static str) -> Res
 }
 
 /// Rejects the `getdata` item types BIP331 forbids: `MSG_PKGTXNS` is a
-/// `notfound`-only type, and `MSG_ANCPKGINFO` needs ancestor-package relay.
 fn ensure_getdata_package_types_negotiated<S>(
     peer: &Peer<S>,
     items: &[Inventory],
@@ -627,15 +449,6 @@ fn ensure_getdata_package_types_negotiated<S>(
     Ok(())
 }
 
-/// The download an `ancpkginfo` asks the request owner for.
-///
-/// A member counts as held only when it is resident in the pool: an orphan
-/// or a recent reject is exactly what the package exists to resolve, so it
-/// is requested again and admitted with its ancestors as one package.
-/// POST: `None` when the subject is already resident or more than
-/// `MAX_PACKAGE_COUNT` members are missing. Otherwise the non-resident
-/// members in announced order, the subject last: the one sequence the
-/// `getpkgtxns` is written from and the claim records.
 fn package_request(
     tx_inventory: Option<&dyn TxInventory>,
     info: &AncPkgInfo,
@@ -663,16 +476,6 @@ fn package_request(
     Some(PackageRequest { subject, wtxids })
 }
 
-/// Answers one `getpkgtxns`: every requested transaction in one `pkgtxns`,
-/// or one `notfound` of type `MSG_PKGTXNS` carrying the request's combined
-/// hash and nothing else.
-///
-/// Members come from the resident pool only, read as one view, never from
-/// the orphan or recent-reject sets. A package whose `pkgtxns` could not fit
-/// one frame is unavailable too.
-/// INVARIANT: one reply message, so one `headroom` reservation covers it and
-/// no body is loaded while the gate is closed. A closed gate leaves the
-/// request unanswered, like `getblocktxn`.
 fn serve_getpkgtxns(
     tx_inventory: Option<&dyn TxInventory>,
     request: &GetPkgTxns,
@@ -703,7 +506,6 @@ fn serve_getpkgtxns(
     Ok(())
 }
 
-/// Whether `bodies`, as one `pkgtxns`, fit the transport frame.
 fn fits_one_frame(bodies: &[Arc<Tx>]) -> bool {
     let count = u64::try_from(bodies.len()).unwrap_or(u64::MAX);
     let mut total = bitcoin_rs_primitives::varint::encoded_len(count);
@@ -716,11 +518,6 @@ fn fits_one_frame(bodies: &[Arc<Tx>]) -> bool {
     true
 }
 
-/// Answers one `getdata(MSG_ANCPKGINFO)` item with the resident ancestor
-/// package of its subject, or reports the item missing.
-///
-/// Returns `false`, having done nothing, when `headroom` is closed; `true`
-/// once the `ancpkginfo` was sent or the item appended to `not_found`.
 fn serve_ancpkginfo_item(
     tx_inventory: Option<&dyn TxInventory>,
     item: &Inventory,
@@ -757,15 +554,6 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
     Message::Headers(headers)
 }
 
-/// Serves one decoded `getdata` and parks what the production gate stops.
-///
-/// PRE: `items` passed the inventory bound and nothing is parked on `peer`:
-/// the session reads nothing while a tail is parked, so a second request here
-/// is a caller bug, and replacing or reordering the parked tail would
-/// silently half-serve it.
-/// POST: the tail [`serve_getdata`] returns is `peer.pending_getdata` and the
-/// misses it keeps are `peer.pending_notfound`; both are empty when the whole
-/// request was handled.
 fn serve_inbound_getdata<S>(
     peer: &mut Peer<S>,
     chain: Option<&dyn ChainQuery>,
@@ -795,38 +583,7 @@ fn serve_inbound_getdata<S>(
     Ok(())
 }
 
-/// Serves `items` of one `getdata` through the sink, one item at a time and
-/// in request order, until the outbound production gate halts it.
-///
-/// Block-typed and unknown items resolve through the chain query; with no
-/// chain view they are reported missing. When `tx_inventory` is `Some`,
-/// tx-typed items are served from the transaction inventory (the node's
-/// mempool): a held tx is emitted as a `tx` message with the serialization
 /// requested by its inventory type (P2P-01 / BIP144). BIP339 `WTx` items are
-/// resolved by wtxid; `Transaction`/`WitnessTransaction` items by txid. With
-/// `tx_inventory` `None` a tx-typed item is not a block and is reported
-/// missing by the chain query.
-///
-/// PRE: `not_found` holds no item of `items`; `send` queues one message on
-/// the connection that asked.
-/// POST: every item before the returned tail was answered: served through
-/// `send`, or appended to `not_found`. A non-empty return is `items` from the
-/// first item the gate stopped at; nothing was sent for it. An empty return
-/// means the whole request was handled: then one `notfound` carrying all of
-/// `not_found` has been sent (I8), or — when the gate closed between the
-/// last item and the trailing report — nothing was sent, `not_found` keeps
-/// the misses, and the caller parks them like any other parked tail (I9).
-/// A `send` or chain error aborts and propagates.
-/// INVARIANT: `headroom` is consulted before every body load, every tx
-/// lookup, and the trailing `notfound` send, so a saturated gate materializes
-/// nothing and queues no message, and a halt neither sends nor disconnects.
-/// The reservation `headroom` takes is held across lookups that send nothing
-/// (a miss) and is spent by the next `send`, so a run of misses never takes
-/// a second reservation. The caller, which owns the budget, reports the kept
-/// misses once an exactly sized reply fits, and resumes the tail once it can
-/// reserve production room again. At most one decoded request
-/// (`MAX_INV_PER_MSG` items) is ever pending, so the tail and `not_found`
-/// are bounded.
 pub(crate) fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
@@ -864,14 +621,6 @@ pub(crate) fn serve_getdata(
     if not_found.is_empty() {
         return Ok(Vec::new());
     }
-    // The trailing misses are answered behind every served item, but a gate
-    // that closed while the last items were served must not turn into a
-    // refused send: that cancels the lease for the session's own queue state.
-    // The headroom check runs immediately before the send, so only a sender
-    // that wins the slot concurrently can still refuse it. When it is closed,
-    // the misses stay in `not_found` for the caller to park: they are not
-    // items, and returning them as the tail would send them as `getdata`
-    // answers.
     if !headroom() {
         return Ok(Vec::new());
     }
@@ -879,10 +628,6 @@ pub(crate) fn serve_getdata(
     Ok(Vec::new())
 }
 
-/// Answers one tx-typed `getdata` item from the transaction inventory.
-///
-/// Returns `false`, having done nothing, when `headroom` is closed; `true`
-/// once the transaction was sent or the item appended to `not_found`.
 fn serve_tx_item(
     inv: &dyn TxInventory,
     item: &Inventory,
@@ -922,11 +667,6 @@ fn serve_tx_item(
     Ok(true)
 }
 
-/// Answers one block-typed or unknown `getdata` item through the chain
-/// query, which consults `headroom` once before a body load.
-///
-/// Returns `false`, having sent nothing, when the chain query halted at the
-/// gate; `true` once the item was served or appended to `not_found`.
 fn serve_block_item(
     chain: Option<&dyn ChainQuery>,
     compact_version: Option<u64>,
@@ -952,16 +692,7 @@ fn serve_block_item(
     Ok(true)
 }
 
-/// Answers one `getblocktxn` through the chain view and sends whatever reply
-/// it produces. PRE: the request's indexes are structurally valid.
 /// `compact_version` is the peer's servable BIP152 profile (`None` leaves
-/// witness encoding untouched). POST: a servable block gets its `blocktxn`
-/// in the peer's profile encoding, a block too deep for a compact answer
-/// gets the whole `block`, and an unknown, stale, headless, or
-/// production-gated block — or a node with no chain view — leaves the
-/// request unanswered. INVARIANT: the dispatch boundary never learns which
-/// reply shape the chain chose, and a saturated `headroom` gate loads no
-/// block body here.
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,
@@ -978,14 +709,6 @@ fn serve_block_txn(
     Ok(())
 }
 
-/// Enforces native decoded `getblocktxn` policy: nonempty, increasing indexes.
-///
-/// PRE: the request carries decoded absolute indexes. POST: a rejected list
-/// returns `PeerError::Misbehavior` before any chain query, even without a chain.
-/// Core 31.1 establishes increasing wire indexes during deserialization
-/// (`blockencodings.h:23-54`, `net_processing.cpp:4333-4340`); the order check here
-/// also defends in-process requests. Empty-list rejection is stricter native
-/// policy: Core accepts an empty decoded list.
 fn ensure_block_txn_indexes_valid(request: &BlockTransactionsRequest) -> Result<(), PeerError> {
     if request.indexes.is_empty() {
         return Err(PeerError::Misbehavior("getblocktxn with empty index list"));
@@ -1142,9 +865,6 @@ mod tests {
         }
     }
 
-    /// Streaming fake mirroring `ActiveChainQuery`: block-typed items that
-    /// resolve to a stored body are served behind `headroom`; everything
-    /// else lands in `not_found` without a load.
     fn inv_hash(item: &Inventory) -> Option<[u8; 32]> {
         match item {
             Inventory::Block(hash) | Inventory::WitnessBlock(hash) => Some(hash.to_byte_array()),
@@ -1197,7 +917,6 @@ mod tests {
         }
     }
 
-    /// Collecting-sink wrapper mirroring the listener's streaming send.
     fn dispatch_collect<S>(
         peer: &mut Peer<S>,
         message: &Message,
@@ -1421,8 +1140,6 @@ mod tests {
         Ok(())
     }
 
-    /// Refuses one `getblocktxn` index list both with a chain attached and
-    /// with none, so the boundary decision cannot depend on chain state.
     fn assert_getblocktxn_refused(indexes: Vec<u64>) {
         let chain = FakeChain::with_headers(2);
         let message = Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
@@ -1543,14 +1260,10 @@ mod tests {
         Ok(())
     }
 
-    /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
-    /// that resolve to a stored body are served behind `headroom`; all other
-    /// items land in `not_found` without a load.
     struct StreamingChain {
         blocks: Vec<Block>,
         loads: AtomicUsize,
         headroom_calls: AtomicUsize,
-        /// Panics when a load would reach this count (mutation-gate tripwire).
         load_tripwire: Option<usize>,
     }
     impl ChainQuery for StreamingChain {
@@ -1760,9 +1473,6 @@ mod tests {
         assert!(!lease.is_cancelled(), "parking never cancels the lease");
     }
 
-    /// A gate that closes mid-request parks the unexamined remainder in
-    /// request order, keeps the misses found so far unsent, and the tail
-    /// resumed later answers in the order the peer asked.
     #[test]
     fn halted_mixed_getdata_parks_ordered_tail_and_unsent_misses() -> Result<(), PeerError> {
         let headers = FakeChain::with_headers(2).headers;
@@ -1792,7 +1502,6 @@ mod tests {
         };
         let mut peer = ready_peer();
         let emitted = RefCell::new(Vec::new());
-        // Consultations: tx_miss (1), block_a (2) pass; tx_hit (3) halts.
         let consulted = std::cell::Cell::new(0_usize);
 
         dispatch_inbound_full(
@@ -1852,9 +1561,6 @@ mod tests {
         Ok(())
     }
 
-    /// The probe's tail shape: the gate closes between the last served item
-    /// and the trailing report. The misses must come back parked instead of
-    /// being sent into a full queue, which would cancel the lease.
     #[test]
     fn gate_closed_at_the_trailing_report_parks_the_misses() -> Result<(), PeerError> {
         let headers = FakeChain::with_headers(1).headers;
@@ -1874,8 +1580,6 @@ mod tests {
         };
         let inventory = FakeTxInventory::empty();
         let emitted = RefCell::new(Vec::new());
-        // Consultations: the miss (1) and the block (2) pass; the trailing
-        // report (3) finds the gate closed.
         let consulted = std::cell::Cell::new(0_usize);
         let mut not_found = Vec::new();
 
@@ -2010,14 +1714,10 @@ mod tests {
         assert_eq!(peer_snapshot(&peer), before);
     }
 
-    /// A fake `TxInventory` that knows a fixed set of txids/wtxids and can
-    /// serve their bodies.
     struct FakeTxInventory {
         txs_by_txid: hashbrown::HashMap<bitcoin::Txid, Tx>,
         txs_by_wtxid: hashbrown::HashMap<bitcoin::Wtxid, Tx>,
         have_hashes: hashbrown::HashSet<[u8; 32]>,
-        /// The resident pool: a subset of the bodies above. A body known
-        /// only through `with_tx` models an orphan.
         resident: Vec<Arc<Tx>>,
         ancestor_packages: hashbrown::HashMap<Wtxid, Vec<Wtxid>>,
     }
@@ -2033,7 +1733,6 @@ mod tests {
             }
         }
 
-        /// A transaction resident in the pool, so also known and servable.
         fn with_resident_tx(mut self, tx: Tx) -> Self {
             self.resident.push(Arc::new(tx.clone()));
             self.with_tx(tx)
@@ -2649,7 +2348,6 @@ mod tests {
         );
     }
 
-    /// The hash dispatch routes to header sync for one announced block vector.
     fn announced_hash(block_hash: bitcoin::BlockHash) -> Hash256 {
         use bitcoin::hashes::Hash as _;
         Hash256::from_le_bytes(block_hash.as_byte_array())
@@ -2664,7 +2362,6 @@ mod tests {
         dispatch_collect_gated(peer, message, chain, tx_inventory, true)
     }
 
-    /// Same helper with the transaction-relay gate under test control.
     fn dispatch_collect_gated<S>(
         peer: &mut Peer<S>,
         message: &Message,
@@ -2675,8 +2372,6 @@ mod tests {
         dispatch_collect_announcements(peer, message, chain, tx_inventory, relay_open).0
     }
 
-    /// Same helper, additionally returning the block-inventory hashes that
-    /// dispatch routed to header sync instead of requesting their bodies.
     #[expect(clippy::expect_used)]
     fn dispatch_collect_announcements<S>(
         peer: &mut Peer<S>,
@@ -2763,8 +2458,6 @@ mod tests {
         Ok(())
     }
 
-    /// Serves the first filter of a request and hands back the rest, as a
-    /// serving pass stopped by the outbound budget does.
     struct NarrowingChain;
 
     impl ChainQuery for NarrowingChain {
@@ -2819,8 +2512,6 @@ mod tests {
         }
     }
 
-    /// The remainder a serving pass returns is the parked request's only
-    /// cursor: the sent prefix is not replayed and the fixed end is kept.
     #[test]
     fn filter_remainder_is_the_parked_requests_only_cursor() -> Result<(), PeerError> {
         let mut peer = ready_peer();
@@ -2877,8 +2568,6 @@ mod tests {
         })
     }
 
-    /// The reply to a peer's `version` is the feature messages, then the
-    /// features negotiated for its protocol version, then `verack`; a peer
     /// below BIP434's version never receives a `feature` frame.
     #[test]
     fn version_reply_orders_features_between_feature_messages_and_verack() -> Result<(), PeerError>
@@ -2905,9 +2594,6 @@ mod tests {
         Ok(())
     }
 
-    /// A `feature` from the peer is absorbed silently between its `version`
-    /// and `verack`, and is a protocol violation that changes nothing once the
-    /// peer is ready.
     #[test]
     fn remote_feature_is_accepted_before_verack_and_rejected_after() -> Result<(), PeerError> {
         let feature = Message::Feature(FeatureAnnouncement::new(
@@ -2932,8 +2618,6 @@ mod tests {
         Ok(())
     }
 
-    /// An offered `sendpackages` follows the feature messages and precedes
-    /// `verack`, once; a repeated `version` does not repeat it.
     #[test]
     fn version_reply_sends_the_offered_sendpackages_once_before_verack() -> Result<(), PeerError> {
         let both = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
@@ -2966,7 +2650,6 @@ mod tests {
 
     const BOTH_PACKAGE_BITS: u64 = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
 
-    /// A ready peer that negotiated package relay for `bits` on both sides.
     fn package_peer(bits: u64) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.offer_package_relay(bits);
@@ -2988,7 +2671,6 @@ mod tests {
         }
     }
 
-    /// Dispatches one message against `inventory` with every gate open.
     fn dispatch_over<S>(
         peer: &mut Peer<S>,
         message: &Message,
@@ -3072,7 +2754,6 @@ mod tests {
                 Err(PeerError::Misbehavior(_))
             ));
         }
-        // `pkgtxns` bytes are admitted by the node's ingress, not dispatch.
         let mut peer = package_peer(PKG_RELAY_PKGTXNS)?;
         assert_eq!(
             dispatch_inbound(&mut peer, &Message::PkgTxnsPayload(bytes::Bytes::new()))?,
@@ -3115,8 +2796,10 @@ mod tests {
             .with_resident_tx(misdirected.clone())
             .with_tx(orphan.clone())
             .with_ancestor_package(child.wtxid(), vec![parent.wtxid(), child.wtxid()])
-            // A package that does not end at its subject is never served.
-            .with_ancestor_package(misdirected.wtxid(), vec![misdirected.wtxid(), parent.wtxid()]);
+            .with_ancestor_package(
+                misdirected.wtxid(),
+                vec![misdirected.wtxid(), parent.wtxid()],
+            );
         let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
 
         let responses = dispatch_over(
@@ -3192,8 +2875,6 @@ mod tests {
             })]
         );
 
-        // One member that is only an orphan, or absent altogether, makes the
-        // whole request unavailable: one notfound, nothing else.
         for unavailable in [orphan.wtxid(), unknown] {
             let wtxids = vec![parent.wtxid(), unavailable, child.wtxid()];
             let responses = dispatch_over(
@@ -3299,7 +2980,6 @@ mod tests {
         Ok(())
     }
 
-    /// Counts resident package loads, forwarding to `inner`.
     struct CountingResident<'a> {
         inner: &'a FakeTxInventory,
         loaded: &'a AtomicUsize,
@@ -3337,8 +3017,6 @@ mod tests {
         });
         let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
 
-        // The child is a held orphan and the parent a recent reject: both are
-        // known to the node, neither is resident, so both are requested.
         let refused = FakeTxInventory::empty()
             .with_tx(child.clone())
             .with_have(*parent.wtxid().as_bytes())
@@ -3353,7 +3031,6 @@ mod tests {
         );
         assert_eq!(peer.take_package_request(), None, "one handoff per message");
 
-        // A resident parent is not asked for again.
         let resident_parent = FakeTxInventory::empty().with_resident_tx(parent);
         dispatch_over(&mut peer, &message, &resident_parent)?;
         assert_eq!(

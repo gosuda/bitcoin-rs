@@ -1,36 +1,7 @@
 # Chainstate journal writer contract
-
-**Contract:** `chainstate-journal-writer/v1.0.0`
-
-This document is the normative contract for the writer tests in
-`crates/storage/src/chainstate_journal/writer/tests/`. Test names and comments
-refer to the requirement IDs below; implementation details are not part of the
-contract.
-
+**Contract:** `chainstate-journal-writer/v1.0.0`; normative for `crates/storage/src/chainstate_journal/writer/tests/` (test names/comments cite IDs below; implementation is not contractual). Guarantee changes require a new version or requirement revision with test review.
 ## Requirements
-
-- **JW-BOOT-1**: opening a new writer uses the configured chainstate-journal
-  defaults.
-- **JW-REC-1**: on reopen, bytes after the durable head are ignored or
-  truncated; an incomplete append can be retried without duplicating a record.
-- **JW-ORDER-1**: appends are contiguous and failed or out-of-order appends
-  block further apply and checkpoint compaction until the gap is resolved.
-- **JW-DUR-1**: the head advances only after the required storage flush and
-  filesystem synchronization succeed; failed boundaries are retryable.
-- **JW-ROT-1**: rotation preserves cursor invariants and a published head never
-  names a missing segment.
-- **JW-RET-1**: retention limits prevent apply until checkpoint compaction;
-  successful compaction permits apply again.
-- **JW-LIFE-1**: freeze, resume, and compaction failures leave the writer in a
-  retryable state and successful lifecycle transitions preserve the contract.
-- **JW-MARK-1**: clearing the full-revalidation marker is idempotent and a
-  failed directory sync is retried.
-- **JW-MARK-2**: checkpoint compaction performed only to advance boot replay
-  preserves the full-revalidation marker; only a completed recovery or an
-  ordinary replacement checkpoint may retire it.
-- **JW-FAIL-1**: documented failpoints fail their named boundary without
-  publishing an advanced head.
-
-This is version 1.0.0 of the test contract. Changes to a guarantee require a
-new version (or an explicit requirement revision) and corresponding test
-review.
+**JW-BOOT-1**: new writer uses configured defaults. **JW-REC-1**: on reopen, post-head bytes ignored/truncated; incomplete append retried without duplication. **JW-ORDER-1**: appends contiguous; failed/out-of-order appends block apply and checkpoint compaction until resolved.
+**JW-DUR-1**: head advances only after storage flush and filesystem sync succeed; failed boundaries retryable. **JW-ROT-1**: rotation preserves cursor invariants; published head never names a missing segment. **JW-RET-1**: retention limits block apply until checkpoint compaction; success re-permits apply.
+**JW-LIFE-1**: freeze/resume/compaction failures leave retryable state; successful transitions preserve contract. **JW-MARK-1**: clearing full-revalidation marker idempotent; failed directory sync retried. **JW-MARK-2**: boot-replay-only compaction preserves marker; only completed recovery or ordinary replacement checkpoint retires it.
+**JW-FAIL-1**: documented failpoints fail their named boundary without publishing an advanced head.

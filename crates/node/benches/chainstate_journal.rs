@@ -43,8 +43,6 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     let config = test_config(data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config, None)?;
-    // Locally assembled genesis: one encode retains the exact bytes. Replay
-    // order, checkpoint gate, and tip assertions stay identical.
     let genesis_payload = BlockPayload::from_local(genesis.clone());
     state.apply_block(&genesis_payload)?;
     ensure!(
@@ -72,7 +70,7 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
         bail!("10k replay probe exited with {status}");
     }
 
-    let result: ProbeResult = serde_json::from_slice(&std::fs::read(&result_path)?)?;
+    let result: ProbeResult = sonic_rs::from_slice(&std::fs::read(&result_path)?)?;
     eprintln!(
         "10k journal replay: {} ms, peak RSS delta {} KiB ({} -> {} KiB)",
         result.elapsed_ms, result.rss_delta_kib, result.rss_before_kib, result.rss_after_kib
@@ -112,7 +110,7 @@ fn replay_10k_subprocess_probe() -> Result<()> {
         tip_height: tip.height,
         tip_hash: tip.hash.to_string_be(),
     };
-    std::fs::write(result_path, serde_json::to_vec_pretty(&result)?)?;
+    std::fs::write(result_path, sonic_rs::to_vec_pretty(&result)?)?;
     Ok(())
 }
 

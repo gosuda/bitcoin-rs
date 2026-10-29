@@ -2,19 +2,15 @@ use crate::ChainTxCount;
 use bitcoin_rs_primitives::{Hash256, Header};
 use ruint::Uint;
 
-/// 256-bit accumulated proof-of-work for a block-tree node.
 pub type ChainWork = Uint<256, 4>;
 
-/// Bitcoin block header type stored in block-tree nodes.
 pub type BlockHeader = Header;
 
-/// Stable slab key for a block-tree node.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NodeId(u32);
 
 impl NodeId {
-    /// Builds a node id from its compact integer representation.
     #[must_use]
     pub const fn new(id: u32) -> Self {
         Self(id)
@@ -25,36 +21,21 @@ impl NodeId {
     }
 }
 
-/// Validation and chain-selection state for a block-tree node.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
-    /// Header-level checks passed but the block is not the active tip.
     HeaderValid,
-    /// Node is currently considered part of the best chain.
     Active,
-    /// Node is valid but currently off the best chain.
     Stale,
-    /// Node or one of its ancestors is invalid.
     Invalid,
 }
 
-/// One block in the in-memory block tree.
 #[derive(Debug)]
 pub struct BlockTreeNode {
-    /// Parent node id, or `None` for a root header.
     pub parent: Option<NodeId>,
-    /// Block height, with roots at height zero.
     pub height: u32,
-    /// Header hash in consensus little-endian byte order.
     pub hash: Hash256,
-    /// Full Bitcoin block header.
     pub header: BlockHeader,
-    /// Accumulated work through this header.
     pub chainwork: ChainWork,
-    /// Cumulative transaction count through this node: `UNKNOWN` until a
-    /// counted parent or genesis establishes it, or a checkpoint restore
-    /// applies an authenticated count directly (`restore_chain_tx_count`).
     pub chain_tx_count: ChainTxCount,
-    /// Node validation and chain-selection status.
     pub status: NodeStatus,
 }

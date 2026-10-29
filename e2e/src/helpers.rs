@@ -14,26 +14,21 @@ use bitcoin::{
     Address, Amount, Block, BlockHash, CompactTarget, Network, OutPoint, PrivateKey, ScriptBuf,
     Sequence, Target, Transaction, TxIn, TxMerkleNode, TxOut, WPubkeyHash, Witness,
 };
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use crate::error::{Error, Result};
 use crate::node::{Kind, ProcessNode, SpawnOptions};
 
-/// Regtest block subsidy in satoshis (50 BTC).
 pub const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
-/// Blocks until a coinbase is spendable.
 pub use bitcoin::constants::COINBASE_MATURITY;
-/// Fixed regtest funding key: deterministic, unrelated to any wallet.
 const FUNDING_SECRET: [u8; 32] = [1_u8; 32];
 
-/// The deterministic funding key used across scenarios.
 fn funding_key() -> Result<PrivateKey> {
     let secret = bitcoin::secp256k1::SecretKey::from_slice(&FUNDING_SECRET)
         .map_err(|e| Error::Assertion(e.to_string()))?;
     Ok(PrivateKey::new(secret, Network::Regtest))
 }
 
-/// P2PKH address owned by the funding key (spendable via [`signed_spend`]).
 pub fn funding_address() -> Result<Address> {
     let key = funding_key()?;
     Ok(Address::p2pkh(
@@ -42,19 +37,15 @@ pub fn funding_address() -> Result<Address> {
     ))
 }
 
-/// The sink every unsigned test spend pays: owned by nobody in particular.
 fn sink_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
 }
 
-/// The regtest genesis block.
 #[must_use]
 pub fn genesis_block() -> Block {
     bitcoin::constants::genesis_block(Network::Regtest)
 }
 
-/// Ensure genesis is applied: a submit that races the startup sync tick may
-/// apply it, or may answer "duplicate" once the tick already has.
 pub fn submit_genesis(node: &mut ProcessNode) -> Result<()> {
     let hex = serialize_hex(&genesis_block());
     let result = node.rpc("submitblock", &json!([hex]))?;
@@ -65,17 +56,10 @@ pub fn submit_genesis(node: &mut ProcessNode) -> Result<()> {
     }
 }
 
-/// Mine `count` blocks paying an `OP_TRUE` coinbase so outputs are spendable
-/// without signatures.
 pub fn mine_bare_blocks(node: &mut ProcessNode, count: u32) -> Result<Vec<String>> {
     mine_blocks_to(node, count, "raw(51)")
 }
 
-/// Mine `count` blocks paying `descriptor`.
-///
-/// A distinct coinbase script produces a distinct block hash at each
-/// height, which lets reorg tests prove a regenerated branch diverged
-/// rather than reproduce the old one.
 pub fn mine_blocks_to(node: &mut ProcessNode, count: u32, descriptor: &str) -> Result<Vec<String>> {
     let mut hashes = Vec::new();
     for _ in 0..count {
@@ -89,7 +73,6 @@ pub fn mine_blocks_to(node: &mut ProcessNode, count: u32, descriptor: &str) -> R
     Ok(hashes)
 }
 
-/// Fetch the coinbase transaction of the block at `height`.
 pub fn coinbase_at(node: &mut ProcessNode, height: u64) -> Result<Transaction> {
     let hash = node
         .rpc("getblockhash", &json!([height]))?
@@ -111,9 +94,6 @@ pub fn coinbase_at(node: &mut ProcessNode, height: u64) -> Result<Transaction> {
     deserialize_hex(hex).map_err(|e| Error::Assertion(format!("coinbase decode: {e}")))
 }
 
-/// Read output 0 of a coinbase as the funding outpoint — `(txid, 0)` plus
-/// its `TxOut`. The output script is not inspected: callers must ensure the
-/// coinbase pays the script they intend to spend.
 pub fn funding_output(coinbase: &Transaction) -> Result<(OutPoint, TxOut)> {
     let output = coinbase
         .output
@@ -123,8 +103,6 @@ pub fn funding_output(coinbase: &Transaction) -> Result<(OutPoint, TxOut)> {
     Ok((OutPoint::new(coinbase.compute_txid(), 0), output))
 }
 
-/// Mine `COINBASE_MATURITY + 1` blocks on a fresh genesis chain so the
-/// first coinbase is spendable, then return its funding outpoint.
 pub fn mature_funding(node: &mut ProcessNode) -> Result<(OutPoint, TxOut)> {
     submit_genesis(node)?;
     let _ = mine_bare_blocks(node, COINBASE_MATURITY + 1)?;
@@ -132,14 +110,11 @@ pub fn mature_funding(node: &mut ProcessNode) -> Result<(OutPoint, TxOut)> {
     funding_output(&coinbase)
 }
 
-/// An `OP_TRUE` script — spendable by anyone with an empty scriptSig.
 #[must_use]
 pub fn op_true_script() -> ScriptBuf {
     Builder::new().push_int(1).into_script()
 }
 
-/// Build an unsigned spend of `outpoint`/`prevout` paying `dest` minus
-/// `fee_sats`. Works for both `OP_TRUE` and signed prevouts.
 #[must_use]
 pub fn raw_spend_to(
     outpoint: OutPoint,
@@ -165,13 +140,11 @@ pub fn raw_spend_to(
     }
 }
 
-/// An unsigned spend of an `OP_TRUE` coinbase: valid with an empty scriptSig.
 #[must_use]
 pub fn spend_anyone(outpoint: OutPoint, prevout: &TxOut, fee_sats: u64) -> Transaction {
     raw_spend_to(outpoint, prevout, fee_sats, Sequence::MAX, &sink_script())
 }
 
-/// A signed P2PKH spend of `outpoint`/`prevout` under the funding key.
 pub fn signed_spend(
     outpoint: OutPoint,
     prevout: &TxOut,
@@ -183,7 +156,6 @@ pub fn signed_spend(
     Ok(tx)
 }
 
-/// Sign every input of `tx` against `prevouts` as P2PKH under the funding key.
 pub fn sign_p2pkh_inputs(tx: &mut Transaction, prevouts: &[TxOut]) -> Result<()> {
     if tx.input.len() != prevouts.len() {
         return Err(Error::Assertion("input/prevout count mismatch".into()));
@@ -207,18 +179,11 @@ pub fn sign_p2pkh_inputs(tx: &mut Transaction, prevouts: &[TxOut]) -> Result<()>
     Ok(())
 }
 
-/// Serialize a transaction to hex for `sendrawtransaction`.
 #[must_use]
 pub fn tx_hex(tx: &Transaction) -> String {
     serialize_hex(tx)
 }
 
-/// Assemble a full [`Block`] from a `getblocktemplate` reply and grind its
-/// `PoW`.
-///
-/// The coinbase pays `coinbase_script`, so the reward is spendable exactly
-/// as the caller intends; the default witness commitment output is included
-/// when the template provides one.
 pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) -> Result<Block> {
     let prev_hex = template
         .get("previousblockhash")
@@ -320,7 +285,6 @@ pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) 
 }
 
 /// BIP34 coinbase `script_sig` for `height`, padded to the two-byte minimum
-/// the consensus coinbase-size rule requires.
 #[must_use]
 pub fn coinbase_script_sig(height: u32) -> ScriptBuf {
     let mut builder = Builder::new().push_int(i64::from(height));
@@ -330,7 +294,6 @@ pub fn coinbase_script_sig(height: u32) -> ScriptBuf {
     builder.into_script()
 }
 
-/// Brute-force a regtest nonce until the header meets its target.
 pub fn grind_pow(header: &mut Header) -> Result<()> {
     let target = Target::from(header.bits);
     loop {
@@ -344,9 +307,6 @@ pub fn grind_pow(header: &mut Header) -> Result<()> {
     }
 }
 
-/// Spin up a pinned Core peer and a bitcoin-rs node connected to it.
-///
-/// Returns `(core, node)`; the node is started with `--connect <core p2p>`.
 pub fn spawn_synced_pair(core_blocks: u32) -> Result<(ProcessNode, ProcessNode)> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
     let connect = format!("--connect=127.0.0.1:{}", core.p2p_addr.port());
@@ -365,7 +325,6 @@ pub fn spawn_synced_pair(core_blocks: u32) -> Result<(ProcessNode, ProcessNode)>
     Ok((core, node))
 }
 
-/// Read a whole mempool's txid set.
 pub fn mempool_txids(node: &mut ProcessNode) -> Result<Vec<String>> {
     node.rpc("getrawmempool", &json!([]))?
         .as_array()
@@ -377,7 +336,6 @@ pub fn mempool_txids(node: &mut ProcessNode) -> Result<Vec<String>> {
         .ok_or_else(|| Error::Assertion("getrawmempool is not an array".into()))
 }
 
-/// Poll until `txid` appears in the node's mempool.
 pub fn wait_for_mempool_tx(node: &mut ProcessNode, txid: &str, timeout: Duration) -> Result<()> {
     node.wait_for("mempool tx", timeout, |node| {
         Ok(mempool_txids(node)?
@@ -387,8 +345,6 @@ pub fn wait_for_mempool_tx(node: &mut ProcessNode, txid: &str, timeout: Duration
     })
 }
 
-/// The coinbase `script_sig`: `height` in little-endian significant bytes,
-/// then a single-byte `tag` push that separates competing branches.
 fn bip34_script_sig(height: u32, tag: u8) -> Vec<u8> {
     let le = height.to_le_bytes();
     let used = le
@@ -403,17 +359,9 @@ fn bip34_script_sig(height: u32, tag: u8) -> Vec<u8> {
 }
 
 /// Builds a BIP141 segwit coinbase-only block on `parent`.
-///
-/// The coinbase carries the 32-byte reserved nonce in its input witness and an
-/// `OP_RETURN` commitment output (`aa21a9ed`), so the body binds to the header
-/// only when witness data is intact. `tag` separates competing branches so
-/// coinbases (and therefore txids and headers) differ across forks at equal
-/// heights.
 #[must_use]
 pub fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
     let reserved = [tag; 32];
-    // Coinbase-only tree: witness leaf 0 is zeroed out, so the wtxid merkle
-    // root is exactly [0;32]; commitment = sha256d(root || reserved).
     let mut buffer = [0_u8; 64];
     buffer[32..].copy_from_slice(&reserved);
     let commitment = bitcoin::hashes::sha256d::Hash::hash(&buffer).to_byte_array();
@@ -460,8 +408,6 @@ pub fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
     block
 }
 
-/// Builds a chain of `count` segwit coinbase blocks extending `parent`; each
-/// block carries a distinct tag so competing branches never collide.
 #[must_use]
 pub fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Vec<Block> {
     let mut chain = Vec::with_capacity(usize::try_from(count).unwrap_or(64));
@@ -475,7 +421,6 @@ pub fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Ve
     chain
 }
 
-/// The node's applied height.
 pub fn block_count(node: &mut ProcessNode) -> Result<u64> {
     Ok(node
         .rpc("getblockcount", &json!([]))?
@@ -483,7 +428,6 @@ pub fn block_count(node: &mut ProcessNode) -> Result<u64> {
         .unwrap_or(u64::MAX))
 }
 
-/// The node's applied tip hash, hex.
 pub fn best_hash(node: &mut ProcessNode) -> Result<String> {
     Ok(node
         .rpc("getbestblockhash", &json!([]))?
@@ -492,7 +436,6 @@ pub fn best_hash(node: &mut ProcessNode) -> Result<String> {
         .to_owned())
 }
 
-/// The node's live peer count.
 pub fn connection_count(node: &mut ProcessNode) -> Result<u64> {
     Ok(node
         .rpc("getconnectioncount", &json!([]))?
@@ -500,7 +443,6 @@ pub fn connection_count(node: &mut ProcessNode) -> Result<u64> {
         .unwrap_or(u64::MAX))
 }
 
-/// Polls `check` every 200ms until it holds or `dur` elapses.
 pub fn wait_for(dur: Duration, check: &mut dyn FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + dur;
     while std::time::Instant::now() < deadline {
@@ -512,14 +454,11 @@ pub fn wait_for(dur: Duration, check: &mut dyn FnMut() -> bool) -> bool {
     false
 }
 
-/// The node's stderr evidence so far.
 #[must_use]
 pub fn node_stderr(node: &ProcessNode) -> String {
     std::fs::read_to_string(node.evidence.join("stderr.log")).unwrap_or_default()
 }
 
-/// Asserts the node's stderr shows no panic and no `PrevHashMismatch` —
-/// `context` names where a mismatch would indicate commit churn.
 pub fn assert_clean_stderr(node: &ProcessNode, context: &str) {
     let stderr = node_stderr(node);
     assert_eq!(

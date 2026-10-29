@@ -1,11 +1,10 @@
-//! Manual consensus-valid undo/restart boundary evidence against pinned Core.
 #![cfg(feature = "fjall")]
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use bitcoin_rs_storage::{FjallStore, KvUndoStore, UndoStore};
-use serde_json::json;
+use sonic_rs::json;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,8 +69,6 @@ fn valid_large_undo_reopens_and_verifies() -> Result {
             started.elapsed().as_millis()
         );
         assert!(record.len() > 64 * 1024 * 1024);
-        // The manual evidence run retains real encoded bytes for independent
-        // decoder allocation measurements; ordinary CI never runs this case.
         std::fs::write(evidence.join("undo.dat"), &record)?;
     }
     let started = Instant::now();
@@ -139,14 +136,14 @@ fn peak_rss(pid: u32) -> Result<String> {
 }
 
 fn fund_spendable_scripts(core: &ProcessNode, native: &ProcessNode) -> Result<bitcoin::Block> {
-    let mut script = vec![0x00, 0x63]; // OP_FALSE OP_IF
+    let mut script = vec![0x00, 0x63];
     for _ in 0..19 {
         script.extend_from_slice(&[0x4d, 0x08, 0x02]);
         script.extend_from_slice(&[0; 520]);
     }
     script.push(58);
     script.extend_from_slice(&[0; 58]);
-    script.extend_from_slice(&[0x68, 0x51]); // OP_ENDIF OP_TRUE
+    script.extend_from_slice(&[0x68, 0x51]);
     assert_eq!(script.len(), 10_000);
     let funding = TxOut {
         value: Amount::from_sat(1_000),
@@ -162,7 +159,6 @@ fn fund_spendable_scripts(core: &ProcessNode, native: &ProcessNode) -> Result<bi
     println!("D fixture_time={time}");
     let mut inputs = Vec::new();
     let started = Instant::now();
-    // 88 blocks fund 7,040 outputs; 100 more blocks mature even the last.
     for height in 1..=188 {
         let outputs = if height <= 88 {
             vec![funding.clone(); 80]

@@ -10,27 +10,15 @@ use bitcoin_rs_primitives::{NetworkLabel, PeerEndpoint};
 use crate::counters::PeerCounters;
 use crate::endpoint::TransportRemote;
 
-/// What one connection relays.
-///
-/// PRE: assigned once, by the code that creates the connection.
-/// POST: `FullRelay` carries transactions, addresses, blocks, and
-///   announcements; `BlockRelayOnly` carries blocks and headers alone.
 /// INVARIANT: a connection's role never changes after assignment; a
 ///   same-address replacement is a new connection and gets a fresh role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerRole {
-    /// Full relay: transactions, addresses, blocks, and announcements.
     FullRelay,
-    /// Block relay only: blocks and headers, never a transaction or address
-    /// message in either direction.
     BlockRelayOnly,
 }
 
 impl PeerRole {
-    /// Whether this role may carry transaction and address relay.
-    ///
-    /// PRE: none.
-    /// POST: `true` only for `FullRelay`.
     /// INVARIANT: block and header relay is never restricted by role.
     #[must_use]
     pub(crate) const fn relays_transactions(self) -> bool {
@@ -38,63 +26,38 @@ impl PeerRole {
     }
 }
 
-/// Information collected during a successful Bitcoin handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
-    /// Logical peer endpoint; `None` for unidentified inbound sessions.
     pub endpoint: Option<PeerEndpoint>,
-    /// Network classification, set at accept/dial construction.
     pub network: NetworkLabel,
-    /// Logical remote Bitcoin endpoint.
     pub addr: PeerRemote,
-    /// Protocol version advertised by the remote.
     pub version: u32,
     /// Whether this connection requested BIP339 witness-id announcements.
-    /// Published with the completed handshake; never inherited by a replacement.
     pub wtxid_relay: bool,
-    /// Whether the remote version requested transaction announcements.
     pub relay_transactions: bool,
-    /// Whether this connection announced BIP152 compact-block relay (sent a
-    /// `sendcmpct` with a known version). Published `false` at handshake and
-    /// raised by the listener when the peer's post-verack announcement
-    /// arrives; compact-fetch eligibility reads this, never a stale guess.
-    /// The high-bandwidth push preference is a separate per-peer decision and
-    /// does not gate eligibility.
+    /// Whether this connection announced BIP152 compact-block relay (sent a `sendcmpct`
+    /// with a known version).
+    ///
+    /// Published `false` at handshake and raised by the listener when the peer's
+    /// post-verack announcement arrives; compact-fetch eligibility reads this, never a
+    /// stale guess.
     pub compact_block_relay: bool,
     /// Whether this connection requested BIP130 header announcements (`sendheaders`).
     pub send_headers: bool,
-    /// Service flags advertised by the remote (`ServiceFlags::to_u64`).
     pub services: u64,
-    /// User-agent string advertised by the remote.
     pub user_agent: String,
-    /// Best-chain height the remote reports at handshake.
     pub start_height: i32,
-    /// Highest chain height this peer has demonstrated while connected: starts
-    /// at the handshake `start_height` and is raised monotonically as the peer
-    /// hands us accepted headers.
     pub best_known_height: i32,
-    /// Unix-epoch seconds of handshake completion.
     pub conn_time: u64,
-    /// Whether this connection was inbound (`true` for listener-accepted peers).
     pub inbound: bool,
-    /// Local socket this connection is bound to (Core `addrbind`).
-    ///
-    /// Bitcoin Core reports it as `addrbind`, and it is the node's own address
-    /// on this connection -- not the peer's. Reporting the peer's address
-    /// twice, as this used to, tells an operator listening on several
-    /// interfaces nothing about which one carried the connection.
     pub addr_bind: TransportRemote,
-    /// Seconds the peer's clock is ahead of this node's, from its version.
     pub time_offset: i64,
-    /// Live traffic counters for the connection.
     pub counters: Arc<PeerCounters>,
-    /// The transport the connection negotiated before its handshake.
     pub transport: crate::TransportProtocol,
 }
 
 impl PeerInfo {
-    /// Constructs a `PeerInfo` for an inbound peer from the captured remote `VersionMessage`.
     #[must_use]
     pub fn inbound_from_version(
         addr: impl Into<PeerRemote>,
@@ -122,7 +85,6 @@ impl PeerInfo {
                 conn_time,
                 inbound: true,
                 addr_bind: TransportRemote::new(addr_bind),
-                // Freeze the offset at version receipt, not handshake completion.
                 time_offset: version
                     .timestamp
                     .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
@@ -143,7 +105,6 @@ impl PeerInfo {
         }
     }
 
-    /// Constructs a `PeerInfo` for an outbound peer from the captured remote `VersionMessage`.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn outbound_from_version(
@@ -167,8 +128,6 @@ impl PeerInfo {
         )
     }
 
-    /// Endpoint-identified form of [`Self::outbound_from_version`]: the
-    /// logical peer is `endpoint`; `addr_bind` is only the local socket.
     #[must_use]
     pub(crate) fn outbound_from_version_endpoint(
         endpoint: PeerEndpoint,
@@ -194,7 +153,6 @@ impl PeerInfo {
             conn_time,
             inbound: false,
             addr_bind: TransportRemote::new(addr_bind),
-            // Freeze the offset at version receipt, not handshake completion.
             time_offset: version
                 .timestamp
                 .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
@@ -203,15 +161,12 @@ impl PeerInfo {
         }
     }
 
-    /// Returns Bitcoin Core service-flag names decoded from `self.services`.
     #[must_use]
     pub fn services_names(&self) -> Vec<&'static str> {
         service_flag_names(self.services)
     }
 }
 
-/// Bitcoin Core `GetServiceNames` names for a wire service bitmask, in bit
-/// order. Unrecognized bits are dropped.
 #[must_use]
 pub fn service_flag_names(flags: u64) -> Vec<&'static str> {
     [
@@ -278,7 +233,6 @@ mod tests {
         }
     }
 
-    /// A `version` message whose remote peer advertises `services`.
     fn version_with_services(services: ServiceFlags) -> VersionMessage {
         VersionMessage {
             services,
@@ -437,13 +391,13 @@ mod tests {
 
     #[test]
     fn services_names_match_bitcoin_core_service_flag_names() {
-        let all_known = (1_u64 << 0)  // NETWORK
-            | (1_u64 << 1)            // GETUTXO
-            | (1_u64 << 2)            // BLOOM
-            | (1_u64 << 3)            // WITNESS
-            | (1_u64 << 6)            // COMPACT_FILTERS
-            | (1_u64 << 10)           // NETWORK_LIMITED
-            | (1_u64 << 11); // P2P_V2
+        let all_known = (1_u64 << 0)
+            | (1_u64 << 1)
+            | (1_u64 << 2)
+            | (1_u64 << 3)
+            | (1_u64 << 6)
+            | (1_u64 << 10)
+            | (1_u64 << 11);
 
         assert_eq!(
             peer_info_with_services(all_known).services_names(),

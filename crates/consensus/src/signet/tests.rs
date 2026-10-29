@@ -1,11 +1,3 @@
-//! BIP325 solution behavior.
-//!
-//! `CORE_SIGNET_BLOCKS` are the ten signet blocks of Bitcoin Core
-//! `test/functional/feature_signet.py`, solved with the default challenge by
-//! an independent implementation, so they are the oracle for the message
-//! construction. The parse cases mirror Core's `signet_parse_tests`
-//! (`src/test/validation_tests.cpp`).
-
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, deserialize, encode::double_sha256,
@@ -21,7 +13,6 @@ use crate::verify_block::witness_commitment_index;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// Core's signet blocks 1 through 10, as serialized by the reference node.
 const CORE_SIGNET_BLOCKS: [&str; 10] = [
     "00000020f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000f575c83235984e7dc4afc1f30944c170462e84437ab6f2d52e16878a79e4678bd1914d5fae77031eccf4070001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025151feffffff0200f2052a010000001600149243f727dd5343293eb83174324019ec16c2630f0000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa2490047304402205e423a8754336ca99dbe16509b877ef1bf98d008836c725005b3c787c41ebe46022047246e4467ad7cc7f1ad98662afcaf14c115e0095a227c7b05c5182591c23e7e01000120000000000000000000000000000000000000000000000000000000000000000000000000",
     "00000020533b53ded9bff4adc94101d32400a144c54edc5ed492a3b26c63b2d686000000b38fef50592017cfafbcab88eb3d9cf50b2c801711cad8299495d26df5e54812e7914d5fae77031ecfdd0b0001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025251feffffff0200f2052a01000000160014fd09839740f0e0b4fc6d5e2527e4022aa9b89dfa0000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa24900473044022031d64a1692cdad1fc0ced69838169fe19ae01be524d831b95fcf5ea4e6541c3c02204f9dea0801df8b4d0cd0857c62ab35c6c25cc47c930630dc7fe723531daa3e9b01000120000000000000000000000000000000000000000000000000000000000000000000000000",
@@ -57,14 +48,12 @@ fn default_challenge() -> Result<&'static [u8], Box<dyn std::error::Error>> {
     Ok(challenge)
 }
 
-/// The index and script of the block's witness-commitment output.
 fn commitment_output(block: &Block) -> Result<(usize, Vec<u8>), Box<dyn std::error::Error>> {
     let coinbase = block.txs.first().ok_or("block has a coinbase")?;
     let index = witness_commitment_index(coinbase).ok_or("coinbase has a witness commitment")?;
     Ok((index, coinbase.outputs[index].script_pubkey.to_vec()))
 }
 
-/// A coinbase paying one zero-value output with `script`.
 fn coinbase_with_script(script: Vec<u8>) -> Tx {
     Tx {
         version: 2,
@@ -82,7 +71,6 @@ fn coinbase_with_script(script: Vec<u8>) -> Tx {
     }
 }
 
-/// A non-coinbase transaction distinguished by `seed`.
 fn spend_tx(seed: u8) -> Tx {
     Tx {
         version: 2,
@@ -100,14 +88,12 @@ fn spend_tx(seed: u8) -> Tx {
     }
 }
 
-/// The BIP141 commitment section: prefix and 32 bytes of `0xff`.
 fn witness_section() -> Vec<u8> {
     let mut section = vec![0xaa, 0x21, 0xa9, 0xed];
     section.extend([0xff; 32]);
     section
 }
 
-/// `OP_RETURN`, the BIP141 section, then each further section as one push.
 fn commitment_script(sections: &[Vec<u8>]) -> Vec<u8> {
     let mut script = vec![OP_RETURN];
     script.extend(push_data(&witness_section()));
@@ -117,8 +103,6 @@ fn commitment_script(sections: &[Vec<u8>]) -> Vec<u8> {
     script
 }
 
-/// A two-transaction block whose coinbase output is `script`; the header is
-/// irrelevant to every case that uses it.
 fn block_with_coinbase_script(script: Vec<u8>) -> Block {
     Block {
         header: Header::default(),
@@ -126,7 +110,6 @@ fn block_with_coinbase_script(script: Vec<u8>) -> Block {
     }
 }
 
-/// The signet header followed by `tail`.
 fn header_then(tail: &[u8]) -> Vec<u8> {
     let mut section = SIGNET_HEADER.to_vec();
     section.extend_from_slice(tail);
@@ -175,8 +158,6 @@ fn the_genesis_block_needs_no_solution() -> TestResult {
     let genesis = Network::Signet.genesis_block();
     assert_eq!(check_signet_block_solution(&genesis, challenge), Ok(()));
 
-    // The exemption is by hash: under any other header the same coinbase has
-    // no commitment, so there is nothing to verify.
     let mut other = genesis;
     other.header.nonce ^= 1;
     assert_eq!(
@@ -331,9 +312,6 @@ fn the_rewrite_removes_exactly_the_solution() -> TestResult {
 
 #[test]
 fn empty_pushes_keep_only_their_opcode_byte() {
-    // `OP_0`, an empty `OP_PUSHDATA1`, and an empty `OP_PUSHDATA2` each
-    // re-emit one opcode byte, as Core's `replacement << opcode` does; the
-    // non-empty pushes are re-encoded.
     let script = [
         0x6a, 0x00, 0x4c, 0x00, 0x4d, 0x00, 0x00, 0x06, 0xec, 0xc7, 0xda, 0xa2, 0x01, 0x51, 0x02,
         0xaa, 0xbb,
@@ -363,7 +341,6 @@ fn pushes_are_reencoded_canonically() {
         ))
     );
 
-    // A 296-byte solution needs `OP_PUSHDATA2`; the rewrite is the bare header.
     let mut long_push = vec![0x4d, 0x2c, 0x01];
     long_push.extend(header_then(&[0x07; 296]));
     assert_eq!(
@@ -390,16 +367,12 @@ fn only_the_first_header_push_is_the_solution() {
 
 #[test]
 fn the_walk_stops_at_the_first_truncated_instruction() {
-    // The truncated `OP_PUSHDATA1` ends the walk after the solution; the tail
-    // is dropped.
     let script = [0x6a, 0x06, 0xec, 0xc7, 0xda, 0xa2, 0x01, 0x51, 0x4c];
     assert_eq!(
         rewrite(&script),
         Some((vec![0x6a, 0x04, 0xec, 0xc7, 0xda, 0xa2], vec![0x01, 0x51]))
     );
 
-    // A push that claims nine bytes but has six ends the walk before the
-    // header inside it can count.
     let overlong_push = [0x6a, 0x4c, 0x09, 0xec, 0xc7, 0xda, 0xa2, 0x01, 0x51];
     assert_eq!(rewrite(&overlong_push), None);
 }

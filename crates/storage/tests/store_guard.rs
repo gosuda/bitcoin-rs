@@ -1,8 +1,3 @@
-//! The single-installation lifetime guard every store builder enforces.
-//!
-//! A second `guarded_by` must fail loudly instead of releasing the first
-//! guard early, and dropping the store must release the installed guard.
-
 use bitcoin_rs_storage::StoreGuard;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -10,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// A lifetime probe the store holds only through its installed guard.
 struct Probe {
     live: Arc<AtomicBool>,
 }

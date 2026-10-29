@@ -10,9 +10,11 @@ use bitcoin_rs_utxo::contract::{
     OutputSource, RollbackError, UndoLoadError, load_block_undo, rollback_block_recovery,
 };
 
-/// What one durable head commit certified: the commit id and the exact
-/// cumulative transaction count publication may carry. A receipt exists only
-/// for a committed head, so publication cannot carry an uncommitted count.
+/// What one durable head commit certified: the commit id and the exact cumulative
+/// transaction count publication may carry.
+///
+/// A receipt exists only for a committed head, so publication cannot carry an
+/// uncommitted count.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DurableReceipt {
     pub(super) commit_id: u64,
@@ -20,8 +22,6 @@ pub(super) struct DurableReceipt {
 }
 
 impl DurableReceipt {
-    /// The receipt of an already committed head. Replay never mints a commit:
-    /// it republishes under this receipt.
     fn from_head(head: &DurableHead) -> Self {
         Self {
             commit_id: head.commit_id,
@@ -35,7 +35,6 @@ impl DurableReceipt {
     }
 }
 
-/// Facts of one connected block that its durable head commit names.
 pub(super) struct ConnectCommitFacts {
     /// Parent the durable head must currently name — for a group, the parent
     /// of its first block. Any other stored tip is divergence the commit
@@ -44,12 +43,9 @@ pub(super) struct ConnectCommitFacts {
     pub tip: Hash256,
     pub height: u32,
     pub chain_tx_count_after: u64,
-    /// Newest undo row this commit certifies: a connect or group names its
-    /// last block, a disconnect keeps the prior extent.
     pub undo_extent: Option<(u32, Hash256)>,
 }
 
-/// Makes the appended block data durable before the head may name it.
 pub(super) fn sync_appended_blocks(handles: &Chainstate) -> Result<(), ApplyError> {
     let Some(store) = handles.block_body_store.as_ref() else {
         return Ok(());
@@ -57,7 +53,6 @@ pub(super) fn sync_appended_blocks(handles: &Chainstate) -> Result<(), ApplyErro
     store.sync().map_err(ApplyError::DurableHeadCommit)
 }
 
-/// Advances the durable head for one connected block.
 pub(super) fn commit_connect_head(
     handles: &Chainstate,
     facts: &ConnectCommitFacts,
@@ -68,8 +63,6 @@ pub(super) fn commit_connect_head(
         .load()
         .map_err(ApplyError::DurableHeadCommit)?;
     if let Some(head) = prior.as_ref() {
-        // Recovery replays to the head at boot, so a connect must always
-        // extend the head exactly.
         if head.tip != facts.prev_hash {
             return Err(ApplyError::DurableHeadLineage {
                 head: head.tip,
@@ -101,8 +94,6 @@ pub(super) fn commit_connect_head(
     Ok(DurableReceipt::from_head(&next))
 }
 
-/// Resolves the stored flat-file locator of one committed block, when the
-/// store indexes positions. A group lands one locator row per block.
 pub(super) fn stored_body_row(
     handles: &Chainstate,
     height: u32,
@@ -117,7 +108,6 @@ pub(super) fn stored_body_row(
         .map(|position| (height, hash, position)))
 }
 
-/// Advances the durable head for one disconnected block.
 pub(super) fn commit_disconnect_head(
     handles: &Chainstate,
     parent_tip: &bitcoin_rs_chain::TipSnapshot,
@@ -165,9 +155,6 @@ pub(super) fn commit_disconnect_head(
     Ok(DurableReceipt::from_head(&next))
 }
 
-/// Resolves one replayed block's spends from its own durable undo row. The
-/// head certifies undo record and body in one batch, so the restored coins
-/// are exactly the inputs the committed block saw.
 struct UndoRowSpends<'a>(&'a bitcoin_rs_utxo::contract::UndoBatch);
 
 impl OutputSource for UndoRowSpends<'_> {
@@ -185,7 +172,6 @@ impl OutputSource for UndoRowSpends<'_> {
     }
 }
 
-/// Boot-time reconciliation of the stored head against the restored tip.
 pub(crate) fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     let stored = handles
         .durable_head
@@ -201,7 +187,6 @@ pub(crate) fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> 
     replay_committed_gap(handles, &head, restored.as_deref())
 }
 
-/// Reconciles disconnect evidence before the node accepts work.
 pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError> {
     let marker = handles
         .undo_store
@@ -231,12 +216,6 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
             "a disconnect marker exists with no durable head to reconcile it against",
         ));
     };
-    // Gap replay is valid only when the restored tip already lies on the
-    // certified head chain. Height alone cannot answer that: a checkpointed
-    // tip can sit below the head on a branch a reorg already left. The head
-    // tip itself may be absent from the restored tree, so the tip is measured
-    // against the deepest head-chain point the tree resolves. Anything else
-    // must first rewind to the fork through the stored undo rows.
     let restored = handles.applied_tip.load_full();
     let mode = match restored.as_deref() {
         None => "cold-replay",
@@ -259,32 +238,19 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         mode,
         "automatic disconnect recovery replayed the certified head chain"
     );
-    // Publication is the durability fence: the recovery checkpoint retires
-    // the marker only after the repaired state, the journal compaction, and
-    // the resume all land. A failure retains it.
     if let Err(error) = handles.publish_recovery_checkpoint() {
         return Err(ApplyError::RecoveryPublication(Box::new(error)));
     }
     Ok(())
 }
 
-/// The deepest point of the certified head chain the restored block tree
-/// resolves. When the head tip is itself a tree node the anchor is the head
-/// and `above` is empty; otherwise the anchor is the first head-chain
-/// ancestor the tree knows, found by walking the self-authenticating durable
-/// body chain down from `head.tip`.
 struct HeadChainAnchor {
     pub(super) anchor_height: u32,
     pub(super) anchor: Hash256,
-    /// Head-chain `(height, hash)` pairs strictly above the anchor, ascending
-    /// — the segment the tree cannot resolve.
     pub(super) above: Vec<(u32, Hash256)>,
 }
 
 impl HeadChainAnchor {
-    /// Whether `tip` lies on the head chain the anchor certifies: at or below
-    /// the anchor it must be its ancestor; above it the tip must equal the
-    /// descriptor the body walk recorded at that height.
     fn contains_tip(&self, handles: &Chainstate, tip: &TipSnapshot) -> bool {
         if tip.height <= self.anchor_height {
             let tree = handles.block_tree.read();
@@ -299,7 +265,6 @@ impl HeadChainAnchor {
     }
 }
 
-/// Resolves the deepest head-chain point the restored block tree knows.
 fn resolve_head_anchor(
     handles: &Chainstate,
     head: &DurableHead,
@@ -377,14 +342,10 @@ fn gap_unrecoverable(
     }
 }
 
-/// [`gap_unrecoverable`] against whatever tip is currently applied, for the
-/// rewind walk that moves that tip as it goes.
 fn rewind_refused(handles: &Chainstate, head: &DurableHead, reason: &'static str) -> ApplyError {
     gap_unrecoverable(head, handles.applied_tip.load_full().as_deref(), reason)
 }
 
-/// Rolls a restored state that leads the durable head back onto that head,
-/// one block at a time, under a single transition.
 fn rewind_restored_to_head(
     handles: &Chainstate,
     head: &DurableHead,
@@ -413,8 +374,6 @@ fn rewind_restored_to_head(
     walked
 }
 
-/// Rolls one applied block back against the undo row its head commit
-/// certified, then publishes the parent tip the stored head names.
 fn rewind_one_step(
     handles: &Chainstate,
     head: &DurableHead,
@@ -442,9 +401,6 @@ fn rewind_one_step(
             "a rewound block body does not hash to the applied tip",
         ));
     }
-    // A header-matching body can still carry altered transactions; the
-    // txid-level merkle check the ordinary disconnect path runs applies
-    // here for the same reason.
     let txids: Vec<bitcoin_rs_primitives::Txid> = block
         .txs
         .iter()
@@ -462,9 +418,6 @@ fn rewind_one_step(
     })?;
     let tx_count_delta = tx_count_delta_for(&block);
     let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
-    // Recovery owns the surviving marker — the ordinary path's arming
-    // guard would refuse every step under it, and overwriting it would
-    // erase the evidence being reconciled.
     rollback_block_recovery(
         handles.utxo.as_ref(),
         handles.coin_stats.as_ref(),
@@ -497,8 +450,6 @@ fn rewind_one_step(
     Ok(())
 }
 
-/// The parent tip one rewind step lands on, resolved against the block tree
-/// and the block's own previous hash.
 fn rewound_parent(
     handles: &Chainstate,
     head: &DurableHead,
@@ -536,17 +487,12 @@ fn rewound_parent(
     Ok(parent_tip)
 }
 
-/// Replays the committed-but-unpublished gap onto the restored chainstate:
-/// every authenticated durable-head body above `restored`, or the complete
-/// certified head chain when `restored` is `None`.
 fn replay_committed_gap(
     handles: &Chainstate,
     head: &DurableHead,
     restored: Option<&TipSnapshot>,
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
-    // The first height the replay must re-apply: the restored tip's child,
-    // or genesis when nothing was restored.
     let base_height = match restored {
         Some(tip) => {
             if head.height <= tip.height {
@@ -558,18 +504,12 @@ fn replay_committed_gap(
         }
         None => 0,
     };
-    // Width bounds the descriptor allocation only; the body-identity and
-    // ancestry checks below decide recoverability.
     let gap_width = usize::try_from(head.height - base_height + 1)
         .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
 
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };
-    // Single construction via `from_raw`: malformed bytes map to the existing
-    // unrecoverable gap error here (never `BodyBytesMismatch`); hash mismatch
-    // keeps its existing mapping. Linearizability: replay holds one
-    // transition across the gap; idempotent: a failed replay stays the gap.
     let load_body = |height: u32, hash: Hash256| -> Result<BlockPayload, ApplyError> {
         let bytes = store
             .load_block_body(height, hash)
@@ -585,7 +525,6 @@ fn replay_committed_gap(
         Ok(payload)
     };
 
-    // Walk the head chain down to the base, keeping only hash descriptors.
     let mut chain = Vec::with_capacity(gap_width);
     let mut cursor = (head.height, head.tip);
     loop {
@@ -679,19 +618,10 @@ fn relieve_replay_journal_backpressure<'a>(
     Ok(())
 }
 
-/// Re-applies the walked head chain through the ordinary commit path under
-/// one transition and publishes the state the head already certified.
+/// Any failure leaves the fence closed rather than half-served.
 ///
-/// Replay normally holds one transition across the gap. Journal retention pressure
-/// is the exception: the refused block has not mutated state, so replay drops
-/// the transition, publishes a marker-preserving progress checkpoint to
-/// compact the journal, reacquires the transition, verifies the published tip
-/// did not move, and retries that same block once. The maintenance worker does
-/// not exist yet at this boot stage, so recovery itself owns that relief.
-///
-/// Any failure leaves the fence closed rather than half-served. The gap blocks
-/// re-apply idempotently on the next boot — their durable facts are unchanged
-/// — so a failed replay stays exactly the gap it started as, and the next
+/// The gap blocks re-apply idempotently on the next boot — their durable facts are
+/// unchanged — so a failed replay stays exactly the gap it started as, and the next
 /// restart retries it from the same durable state.
 fn replay_gap_chain(
     handles: &Chainstate,
@@ -702,15 +632,11 @@ fn replay_gap_chain(
 ) -> Result<(), ApplyError> {
     let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     let mut transition = Some(handles.begin_transition()?);
-    // A length always fits u64; the metrics counter counts in u64.
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
     let replayed = (|| {
         let mut commit_id = 0_u64;
         for (height, hash) in chain {
             let payload = load_body(height, hash)?;
-            // The head receipt certifies the body and undo inputs. Rebuild the
-            // proof for the retry because the first call consumes it even
-            // when journal admission refuses before mutation.
             let outcome = match apply_replayed_gap_block(
                 handles, head, restored, &payload, height, hash,
             ) {
@@ -735,9 +661,6 @@ fn replay_gap_chain(
             tracing::debug!(height, hash = %hash.to_string_be(), "replayed committed gap block");
         }
         let published = handles.applied_tip.load_full();
-        // A head stored before counts were tracked records the unknown
-        // marker (wire 0): replay may reconstruct a real count, so the count
-        // is part of the landing check only when the head actually knows it.
         let (head_tip, head_height, head_count, head_commit) =
             (head.tip, head.height, head.chain_tx_count, head.commit_id);
         let landed = published.as_ref().is_some_and(|tip| {

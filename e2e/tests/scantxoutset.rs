@@ -3,7 +3,7 @@
 use bitcoin_rs_e2e::differential::{compare_reply, compare_rpc};
 use bitcoin_rs_e2e::helpers::submit_genesis;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 fn compare_scan(
     core: &mut ProcessNode,
@@ -17,7 +17,7 @@ fn compare_scan(
     let candidate = node.rpc_raw(&request)?;
     std::fs::write(
         node.evidence.join(format!("scan-{name}.json")),
-        serde_json::to_vec_pretty(&json!({
+        sonic_rs::to_vec_pretty(&json!({
             "request":request, "reference":reference, "candidate":candidate,
             "reference_evidence":core.evidence, "candidate_evidence":node.evidence,
         }))?,
@@ -107,7 +107,6 @@ fn fixed_descriptors_scan_identical_core_created_coins() -> Result<()> {
             ]
         ]),
     )?;
-    // Infer raw descriptors from actual independently generated output bytes.
     let reference = core.rpc("scantxoutset", &json!(["start", descs]))?;
     let coins = reference["unspents"]
         .as_array()
@@ -171,12 +170,13 @@ fn ranged_and_multipath_scans_match_core_and_fixed_scripts() -> Result<()> {
         "ranged-all-forms",
         json!(["start", ranged]),
     )?;
-    // This also checks that funded indexes outside the requested range do not
-    // leak into the result. Fixed scripts are supplied independently to Core.
     let expected = core.rpc("scantxoutset", &json!(["start", fixed]))?;
     let actual = node.rpc("scantxoutset", &json!(["start", ranged]))?;
     compare_reply("ranged-versus-fixed", &expected, &actual)?;
-    assert_eq!(actual["unspents"].as_array().map(Vec::len), Some(16));
+    assert_eq!(
+        actual["unspents"].as_array().map(sonic_rs::Array::len),
+        Some(16)
+    );
 
     let multi = format!("wpkh({key}/<0;1>/*)");
     for (name, objects) in [
@@ -201,16 +201,12 @@ fn ranged_and_multipath_scans_match_core_and_fixed_scripts() -> Result<()> {
         compare_scan(&mut core, &mut node, name, json!(["start", objects]))?;
     }
 
-    // Both parsers reject repeated path alternatives; native diagnostic text
-    // differs. Overlap between valid scan objects is tested separately below.
     let duplicate = json!({"jsonrpc":"2.0", "id":"duplicate", "method":"scantxoutset",
         "params":["start", [{"desc":format!("wpkh({key}/<0;0>/*)"),"range":2}]]});
     for response in [core.rpc_raw(&duplicate)?, node.rpc_raw(&duplicate)?] {
         assert_eq!(response["error"]["code"], json!(-5));
     }
 
-    // Distinct origin metadata for the same derived key must retain the
-    // first scan object's attribution, regardless of object order.
     let alias = multi.replace("deadbeef", "12345678");
     for (index, (first, second)) in [(&multi, &alias), (&alias, &multi)].into_iter().enumerate() {
         compare_scan(
@@ -248,7 +244,10 @@ fn ranged_and_multipath_scans_match_core_and_fixed_scripts() -> Result<()> {
         compare_scan(&mut core, &mut node, name, json!(["start", objects]))?;
     }
     let default = node.rpc("scantxoutset", &json!(["start", [single]]))?;
-    assert_eq!(default["unspents"].as_array().map(Vec::len), Some(4));
+    assert_eq!(
+        default["unspents"].as_array().map(sonic_rs::Array::len),
+        Some(4)
+    );
     Ok(())
 }
 

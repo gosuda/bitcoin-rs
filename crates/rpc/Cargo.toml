@@ -33,7 +33,6 @@ bitcoin.workspace = true
 miniscript.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true
 crossbeam-channel.workspace = true
@@ -46,6 +45,7 @@ sha2.workspace = true
 corepc-types.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
+mio.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]

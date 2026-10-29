@@ -1,8 +1,9 @@
 use super::*;
+use sonic_rs::JsonValueMutTrait as _;
 
-fn stored_value(path: &Path) -> serde_json::Value {
+fn stored_value(path: &Path) -> sonic_rs::Value {
     let bytes = fs::read(path).expect("book bytes");
-    serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
+    sonic_rs::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
 }
 
 #[test]
@@ -15,12 +16,12 @@ fn unmarked_v8_book_is_preserved_without_migration() {
     book.learn_dns("seed", &[target()], EPOCH);
     book.save();
     let v9_payload = fs::read(&path).expect("saved book");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&v9_payload[..v9_payload.len() - 32]).expect("saved JSON");
+    let mut value: sonic_rs::Value =
+        sonic_rs::from_slice(&v9_payload[..v9_payload.len() - 32]).expect("saved JSON");
     let records_before = value["records"].clone();
-    value.as_object_mut().expect("object").remove("format");
-    value["version"] = serde_json::json!(8);
-    let mut v8_bytes = serde_json::to_vec(&value).expect("v8 payload");
+    value.as_object_mut().expect("object").remove(&"format");
+    value["version"] = sonic_rs::json!(8);
+    let mut v8_bytes = sonic_rs::to_vec(&value).expect("v8 payload");
     let checksum = Sha256::digest(&v8_bytes);
     v8_bytes.extend_from_slice(&checksum);
     fs::write(&path, &v8_bytes).expect("write v8 book");
@@ -39,10 +40,10 @@ fn unmarked_v8_book_is_preserved_without_migration() {
     assert_eq!(fs::read(&path).expect("source before publish"), v8_bytes);
     preserved.save();
     let canonical = stored_value(&path);
-    assert_eq!(canonical["version"], serde_json::json!(1));
+    assert_eq!(canonical["version"], sonic_rs::json!(1));
     assert_eq!(
         canonical["records"],
-        serde_json::json!([]),
+        sonic_rs::json!([]),
         "no pre-release record is migrated"
     );
     assert_ne!(canonical["records"], records_before);
@@ -59,7 +60,7 @@ fn unknown_dns_zero_version_is_durable_metadata_without_good() {
     book.save();
     assert_eq!(
         stored_value(&path)["records"][0]["services"],
-        serde_json::Value::Null
+        sonic_rs::json!(null)
     );
     assert!(
         AddressBook::open(Some(base.clone()), [1; 4], false, None)
@@ -195,7 +196,7 @@ fn current_services_field_is_required_nullable_or_u64_and_unknown_has_valid_prov
     book.save();
     let original = stored_value(&path);
     for scalar in ["null", "0", "18446744073709551615"] {
-        let payload = serde_json::to_string(&original)
+        let payload = sonic_rs::to_string(&original)
             .expect("JSON")
             .replace("\"services\":null", &format!("\"services\":{scalar}"));
         let mut bytes = payload.into_bytes();
@@ -214,7 +215,7 @@ fn current_services_field_is_required_nullable_or_u64_and_unknown_has_valid_prov
         );
     }
     for scalar in ["false", "-1", "1.5", "\"0\"", "18446744073709551616"] {
-        let payload = serde_json::to_string(&original)
+        let payload = sonic_rs::to_string(&original)
             .expect("JSON")
             .replace("\"services\":null", &format!("\"services\":{scalar}"));
         let mut bytes = payload.into_bytes();
@@ -229,9 +230,9 @@ fn current_services_field_is_required_nullable_or_u64_and_unknown_has_valid_prov
                 invalid["records"][0]
                     .as_object_mut()
                     .expect("record")
-                    .remove("services");
+                    .remove(&"services");
             }
-            1 => invalid["records"][0]["source"] = serde_json::json!({"ip":"1.1.1.1"}),
+            1 => invalid["records"][0]["source"] = sonic_rs::json!({"ip":"1.1.1.1"}),
             2 => invalid["records"][0]["last_success"] = 1.into(),
             _ => invalid["version"] = 99.into(),
         }
@@ -271,7 +272,7 @@ fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     book.save();
     assert_eq!(
         stored_value(&path)["records"][0]["services"],
-        serde_json::Value::Null
+        sonic_rs::json!(null)
     );
     let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     restored.learn_dns("seed", &[target()], EPOCH + 7200);

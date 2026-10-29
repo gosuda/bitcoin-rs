@@ -1,7 +1,6 @@
-//! Manual Core reference for expiry before the allocator-capacity trim.
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 use std::error::Error;
 
 #[path = "support/regtest_blocks.rs"]

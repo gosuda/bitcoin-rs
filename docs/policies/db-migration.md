@@ -1,201 +1,32 @@
-# Current Datadir Format Policy
-
-`bitcoin-rs` supports exactly one persistent datadir format for authoritative chainstate bytes. It does not migrate, translate, or silently recover incompatible state from an older release. Fresh replay is the migration policy: a schema change increments `CURRENT_SCHEMA` and requires the operator to move to a separately named datadir — by fresh replay, or by an optional epoch-specific offline migration tool when one is offered.
-
-On-disk format is internal architecture, not a compatibility promise: a format break is a permitted redesign, not a defect — operator data safety, not format preservation, is the invariant this policy enforces. An optional, separate offline migration tool may supplement replay; it is never part of the node and never guaranteed.
-
+# Current datadir format policy
+`bitcoin-rs` supports exactly one persistent datadir format for authoritative chainstate bytes. It does not migrate, translate, or silently recover incompatible state. A schema change increments `CURRENT_SCHEMA`; the operator moves to a separately named datadir by fresh replay, or by an optional epoch-specific offline tool when one is offered. Format breaks are permitted redesigns, not defects; operator data safety is the invariant.
 ## CURRENT_SCHEMA scope
-
-`CURRENT_SCHEMA` covers only authoritative chainstate bytes: the durable head, the coin set it commits, body and undo extents and references, and their identity metadata. Owner-local state does not belong to this marker. Fee estimator state, peer discovery state, and index-only layouts carry their own versions (see the owner-local section below).
-
-Every node datadir contains a small `CURRENT_SCHEMA` epoch record. Its current schema epoch is `2`. It is the sole authority for authoritative persistent-format compatibility. Epoch 2 binds the head's historical checkpoint reference to its publication-time manifest digest; epoch 0 and 1 datadirs require an explicit fresh resync into a separately named directory. The node writes and syncs the marker before any authoritative store opens. Its file contents are synced everywhere; the containing directory is synced on platforms that expose a reliable directory-sync primitive.
-
-Startup follows this contract:
-
+`CURRENT_SCHEMA` covers only authoritative chainstate bytes: the durable head, the coin set, body and undo extents and references, and identity metadata. Owner-local state (fee estimator, peer discovery, mempool snapshots, index layouts) carries its own versions and never moves this marker. The current epoch is `2`. The marker is written and synced before any authoritative store opens (contents synced everywhere; the directory synced where the primitive exists). The node never deletes user data automatically. Network/backend datadir ownership and multi-process locking are configuration and lifecycle concerns outside this marker (tracked in issue #242).
 | Datadir state | Startup action |
 | --- | --- |
-| Empty directory | Create and sync the current `CURRENT_SCHEMA` epoch, then initialize the current schema |
-| `CURRENT_SCHEMA` matches the current epoch | Continue startup |
-| Non-empty directory without `CURRENT_SCHEMA` | Treat the datadir as implicit epoch `0` and refuse open with `incompatible_schema` |
-| Marker is malformed or has another epoch | Refuse open with `incompatible_schema` before opening persistent state |
-| Current marker with no durable head | Start cold; this is normal before the first committed head |
-| Durable head references missing or corrupt authoritative bytes | Refuse open with `incompatible_schema`; committed-range corruption is diagnosed, never silently accepted |
-
-The node never deletes user data automatically. Schema incompatibility fails the open with `incompatible_schema`. The operator then follows the resync procedure below into a separately named directory. Network/backend datadir ownership and multi-process locking are separate configuration and lifecycle concerns; they are not encoded in `CURRENT_SCHEMA`. A future breaking change increments the single epoch and provides no conversion path inside the node: replay is the migration route unless an optional offline tool exists for that epoch. The initial unmarked format is the epoch `0` baseline: adopting it while epoch `0` is current does not require a migration or legacy reader. Once the epoch advances, an unmarked non-empty datadir is refused as implicit epoch `0`. Datadir ownership and process locking are tracked in [issue #242](https://github.com/gosuda/bitcoin-rs/issues/242).
-
-The durable head is the only authoritative commit point. A writer appends body and undo frames, syncs those files and any required directories, then commits coins, head, and metadata in one atomic named-family batch and completes durability before publication. Until durability resolves, storage shows only the prior or the wholly proposed root, never a mix. A crash can leave append or temp residue. Recovery ignores orphan append tails: file length and discovered valid frames never promote a head. An unresolved batch resolves to the prior or the wholly proposed root.
-
-## Owner-local versions and degrade behavior
-
-Estimator, discovery, and index formats evolve outside `CURRENT_SCHEMA`. Each carries its own version:
-
-- Fee estimator state carries an estimator-owned version. A corrupt, missing, or unknown version degrades to insufficient-data status. The node starts. It never fabricates a rate or a default confidence.
-- Peer discovery state uses the single canonical AddrMan v1 defined in [P2P compatibility section 7](p2p-compatibility.md#7-deviation-ledger). Its schema version remains 1 until the first official release. Unmarked development snapshots are preserved byte-for-byte before fresh discovery is published; no historical records are migrated. Corrupt or unreadable files disable replacement while in-memory discovery and node startup continue.
-- Mempool restart snapshots carry a mempool-owned version, genesis identity and checksum. Rejected candidates never prevent Chainstate startup. On clean save, a rejected ordinary snapshot is moved intact into a unique `mempool-snapshot-rejected-*` directory before publishing fresh candidates. Failure to read or quarantine it prevents replacement. The gateway revalidates candidates against recovered Chainstate; fee-estimator history remains independent.
-- Index layout carries one durable marker in `UtxoMeta`. The durability marker (`[0x00, b'V']`, currently row-format 5) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The marker covers key layout and row-value widths alike; format 5 changed both.
-
-In every case:
-
-- Authoritative startup never fails because of an owner-local version.
-- Owner-local evolution keeps `CURRENT_SCHEMA` unchanged.
-- No translator, converter, or legacy reader exists for any owner-local format.
-- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exceptions: incompatible pre-release AddrMan files are durably preserved before replacement as described above; mempool restart snapshots are quarantined intact as described above; disposable derived index namespaces recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
-- No backup or rotation framework exists. Recovery is reseed, rebuild, or re-admission from canonical data.
-
+| Empty directory | Create and sync the current epoch, then initialize the current schema |
+| Marker matches current epoch | Continue startup (no durable head yet starts cold) |
+| Missing marker (implicit epoch `0`), malformed marker, other epoch, or head referencing missing/corrupt bytes | Refuse open with `incompatible_schema`; never open, convert, reset, or repair in place |
 ## Operator resync procedure
-
-A `CURRENT_SCHEMA` change has no in-place path. The operator resyncs into a separately named directory:
-
-1. Stop the node on the old datadir. Keep the old datadir untouched.
+1. Stop the node on the old datadir. Keep the old datadir untouched; incompatible code never opens it.
 2. Create a separately named datadir for the new schema epoch.
-3. Start the new binary against that datadir and replay the chain from the network, or from an explicit archive or reindex input.
-4. Verify identity before use: the pinned stop identity (height and block hash), the durable head hash, and recorded body and undo digests must match the replay record.
-5. The replay path fsyncs body, undo, and metadata bytes and their directories before the durable head commits.
-6. Switch the manifest to the new store atomically. The switch touches the new store only.
-
-The node performs the identity and digest verification, the fsync, and the atomic manifest switch. It never opens the old datadir with incompatible code.
-
-## Optional offline migration tooling
-
-A schema break never puts a converter inside the node, but a full resync is not the only possible operational path. When the cost justifies it, a separate, explicit, offline migration tool may be offered — for example a dedicated binary under `tools/`. No such tool exists today, and none is guaranteed for any epoch.
-
-Any such tool follows these rules:
-
-- The production node understands and writes only the current authoritative schema. Legacy decoders live in the tool, outside the node's runtime and build-dependency path.
-- Never in place: the tool reads the source datadir without mutating it, produces a new datadir, and verifies network/chain identity and the applicable durability invariants. Cutover is an explicit operator action — confirm the tool's verification report, which covers the provenance of every reused byte, then start the node against the produced datadir. On any failure the source remains untouched and fresh replay is the fallback.
-- Migrating bytes is not proof of consensus validity. The tool reuses only state whose provenance and integrity can be verified; anything else means revalidation or resync. Derived, rebuildable indexes are not migrated.
-- Optional, not guaranteed: no converter is owed for any schema revision, perpetual old-format support is never promised, and better internal designs are never blocked on migration tooling.
-
-## Existing datadirs are untouched
-
-- Fresh replay writes only new or disposable data. The node never deletes, rewrites, or upgrades an existing operator datadir.
-- An incompatible datadir fails the open with `incompatible_schema`. It is never opened, converted, or repaired in place.
-- Existing operator databases and files stay exactly as the old binary left them.
-
+3. Replay the chain from the network (or an explicit archive/reindex input) with the new binary.
+4. Verify identity before use: pinned stop identity (height, block hash), durable head hash, and recorded body/undo digests.
+5. Body, undo, and metadata bytes and their directories are fsynced before the durable head commits.
+6. Switch the manifest to the new store atomically; the switch touches the new store only.
+The durable head is the only commit point: body/undo frames are appended and synced, then coins, head, and metadata commit in one atomic named-family batch. Crash residue is ignored: file length and valid frames never promote a head; an unresolved batch resolves to the prior or the wholly proposed root, never a mix. An optional offline tool (e.g. under `tools/`; none exists today and none is guaranteed) MUST read without mutating the source, produce a new datadir, verify identity and durability, and keep fresh replay as the fallback; cutover is an explicit operator action on the tool's verification report, covering the provenance of every reused byte.
+## Owner-local versions and degrade behavior
+Authoritative startup never fails because of an owner-local version; rejected artifacts are preserved and quarantined, never silently deleted. Fee estimator state degrades to insufficient-data status (never a fabricated rate or confidence); peer discovery is the canonical AddrMan v1 per [P2P compatibility section 7](p2p-compatibility.md#7-deviation-ledger) (schema version 1 until first release; unmarked development snapshots are preserved byte-for-byte, never migrated; corrupt files disable replacement while startup continues); mempool snapshots carry a mempool-owned version, genesis identity, and checksum (rejected candidates move intact to `mempool-snapshot-rejected-*` and never block Chainstate; an unreadable or unquarantinable candidate blocks replacement; the gateway revalidates against recovered Chainstate while fee-estimator history stays independent); the index durability marker (`[0x00, b'V']`, row-format 5, covering key layout and row-value widths) is the hard gate (mismatch refuses open and recovery full-resets for rebuild; the affected capability reports unavailable or rebuilding and rebuilds from retained canonical data).
 ## Current persisted formats
-
-The marker covers the authoritative surfaces:
-
-- KV chainstate uses the chainstate owner's current durable layout and has no historical translation layer.
-- Flat block files use the current `BRSB` record format.
-- Undo records use only the current undo codec.
-- Block-body index rows must decode to 16-byte flat-file positions. That validation is lazy (per read, not a boot-time column-family scan): a non-decoding row is `IncompatibleData`, never a missing body.
-- Owner-local state (fee estimator, peer discovery, mempool restart snapshots, index capabilities) persists under its own version fields (see the owner-local section).
-
-Current readers still validate magic values, versions, filenames, lengths, hashes, checksums, ancestry, tips, and semantic invariants. Those checks detect corruption in the current format. They are not compatibility or migration machinery.
-
+KV chainstate uses the current durable layout with no translation layer; block files use `BRSB`; undo uses the current codec; body-index rows must decode to 16-byte positions (lazy per-read validation; non-decoding rows are `IncompatibleData`). Magic, version, hash, checksum, ancestry, and semantic checks detect corruption in the current format only; they are not migration machinery.
 ## Approved checkpoint header compatibility
-
-Checkpoint header artifacts have one explicit compatibility exception.
-The current writer MUST emit version 2. Checkpoints written as version 1
-MUST remain readable by current code: the current reader MUST read version 1
-and version 2 within the current datadir epoch. The forward-compat read path
-is `read_headers` gated by `is_readable_version` in
-`crates/chainstate/src/checkpoint/headers.rs`
-(`ACTIVE_ONLY_HEADER_VERSION = 1`, `HEADER_VERSION = 2`).
-Version 1 contains active
-ancestry only. Version 2 also contains replayable side-branch headers.
-Both versions MUST pass the manifest, digest, ancestry, commitment, and
-historical-header validation checks. Side-header replay MUST NOT change the
-restored best tip. Unknown versions and corrupt artifacts MUST fail closed.
-The reader MUST NOT reset or convert an old artifact to make it readable.
-This exception does not authorize another legacy reader or an operator-data
-migration. All other format changes follow the schema rules below.
-
+The writer MUST emit version 2 (`HEADER_VERSION = 2`); the reader MUST read versions 1 and 2 (`read_headers` gated by `is_readable_version` in `crates/chainstate/src/checkpoint/headers.rs`; `ACTIVE_ONLY_HEADER_VERSION = 1`). Version 1 holds active ancestry only; version 2 adds replayable side-branch headers. Both MUST pass manifest, digest, ancestry, commitment, and historical-header checks; side-header replay MUST NOT change the restored best tip. Unknown versions and corrupt artifacts MUST fail closed; the reader MUST NOT reset or convert an old artifact. No other legacy reader or migration is authorized.
 ## Schema changes
-
-A change is breaking when a current binary cannot parse or safely interpret bytes written by another version. This includes column-family names or discriminants, key/value layouts, block-file records, undo records, and every authoritative surface that `CURRENT_SCHEMA` covers.
-
-`CURRENT_SCHEMA` covers only authoritative chainstate bytes. Estimator-only, discovery-only, and index-only format evolution keep `CURRENT_SCHEMA` unchanged: estimator state carries its own estimator-owned version, discovery state carries its own discovery-owned version, and index-only layouts bump only the index durability marker (`[0x00, b'V']`), which recovery full-resets for rebuild. A corrupt, missing, or unknown owner-local version never fails authoritative startup. The estimator degrades to insufficient-data. Discovery degrades to seeded or empty with reseed or rebuild. An affected index capability reports unavailable or rebuilding through the existing status vocabulary and rebuilds from retained canonical data. No legacy reader, converter, or translator exists. Rejected owner-local artifacts follow the preservation and quarantine rules in the owner-local section above; none is silently deleted. No general backup or rotation framework is introduced. Explicit fresh replay for authoritative chainstate is unchanged.
-
-For every breaking change:
-
-1. Increment the datadir schema epoch.
-2. Keep one current writer and one current reader.
-3. Do not add an in-place converter, legacy reader, compatibility adapter, or automatic fallback for existing state. `Cold` is only the result of no committed durable head, including an unpublished first write.
-4. Keep current-format integrity and corruption tests.
-5. Document the migration route operators must follow — the resync procedure above, or an offered offline tool — into a separately named directory.
-
-The `Cold` path is for a datadir with the current marker and no committed durable head. It is also the recovery result for a store containing only unpublished residue. It is not a compatibility mode for an old schema or for a head that references invalid state.
-
-## Schema history
-
+A change is breaking when a current binary cannot parse or safely interpret bytes written by another version (column-family names/discriminants, key/value layouts, block/undo records, every covered surface). Every breaking change increments the epoch, keeps one current writer and reader, adds no converter/legacy reader/adapter/fallback, keeps current-format integrity tests, and documents the resync-or-tool route into a separately named directory. `Cold` is only the no-committed-head result (including an unpublished first write), never a compatibility mode.
 | Epoch | Change | Status |
 | --- | --- | --- |
-| `0` | Initial baseline format. Unmarked non-empty datadirs are implicit epoch `0` and are refused. | retired |
-| `1` | The durable head carries the AssumeUTXO anchor, lifecycle, pending-validation reference, and historical checkpoint reference (frame version 3). | retired |
-| `2` | The durable head binds the historical checkpoint generation to its publication-time manifest SHA256 (frame version 4). Older datadirs are refused with `incompatible_schema`; explicit operator resync into a separate directory is required. | current |
-
+| `0` | Initial baseline; unmarked non-empty datadirs are implicit epoch `0` and refused | retired |
+| `1` | Head carries AssumeUTXO anchor, lifecycle, pending-validation and checkpoint references (frame version 3) | retired |
+| `2` | Head binds checkpoint generation to publication-time manifest SHA256 (frame version 4) | current |
 ## Removed settings and changed input syntax
-
-The sections above govern persistent bytes. Process inputs change separately,
-under the same no-compatibility-layer rule: a removed setting gets no alias,
-and a changed value grammar pins the meaning of the old spellings instead of
-guessing. These are configuration-only changes. No `CURRENT_SCHEMA` epoch
-moves, no datadir is touched, and a restart with updated inputs is the whole
-migration.
-
-How each input layer treats an entry it no longer knows:
-
-- TOML (`--config`): unknown keys fail startup (the generated reader names the
-  accepted keys, and the nested `chainstate_journal` table carries
-  `deny_unknown_fields`), so a removed key must be deleted from the file before
-  the new binary starts.
-- CLI: an unknown flag is rejected at argument parsing, before any state
-  opens.
-- `BITCOIN_RS_*` environment: unknown variables are skipped, not rejected. A
-  stale variable left in a service unit stays silently inert; the operator
-  removes it.
-- `bitcoin.conf` (`--bitcoin-conf`): the only Core keys read are the ones the
-  option table names (`dbcache`, `prune`, `rest`, `txindex`, `rpcuser`,
-  `rpcpassword`, `rpccookiefile`) plus `listen`, a fixed exception that no
-  table row can express; every other line is ignored. Removed bitcoin-rs
-  settings never had Core-key spellings.
-
-### Removed without an alias
-
-`--index-rollback-rebuild-cutover` (CLI), `BITCOIN_RS_INDEX_ROLLBACK_REBUILD_CUTOVER`
-(environment), and `index_rollback_rebuild_cutover` (TOML) are removed with
-no replacement. The rollback-versus-rebuild cutover is a measured threshold,
-not operator configuration: the single semantic owner is the derived index
-runtime's internal constant (`DEFAULT_ROLLBACK_REBUILD_CUTOVER`, currently
-`100_000`), and the measurement that owns the value lives in
-`docs/benchmarks/index-rollback-rebuild-cutover.md`. An operator carrying any
-of these entries must delete them; the TOML entry fails startup, the CLI flag
-fails parsing, and the environment variable is ignored.
-
-The per-topic ZMQ publication flags (`--zmqpubhashblock`, `--zmqpubhashtx`,
-`--zmqpubrawblock`, `--zmqpubrawtx`, `--zmqpubsequence`, and their `...hwm`
-variants) and the matching flat TOML keys were removed with the endpoint
-grouping change. ZMQ publication is now declared only in TOML, grouped by
-endpoint:
-
-```toml
-[[notifications.zmq]]
-endpoint = "tcp://127.0.0.1:28332"
-topics = ["hashblock", "rawblock", "sequence"]
-hwm = 1000
-```
-
-Legacy flat `zmqpub*` keys are hard-rejected, never translated; one grouped
-endpoint table replaces each set of per-topic entries plus its HWM override.
-
-### Changed value grammar: `scriptindex`
-
-`script_index` inputs (the `--scriptindex` flag, `BITCOIN_RS_SCRIPTINDEX`,
-and the TOML `script_index` key) accepted only boolean spellings. They now
-accept the mode words `utxo` and `full`:
-
-- Boolean spellings keep their meaning: the bare flag and `true` select
-  `full`, `false` selects disabled. Existing files and units stay valid.
-- `utxo` maintains only the live-output view; `full` adds historical
-  funding and spending rows. There is no history-only mode.
-- Any other value is a hard error, so a typo cannot silently disable a
-  configured index.
-- The hyphenated flag spelling `--script-index` remains supported; no other
-  compatibility alias exists.
-
-The capability semantics of the modes, and the distinct disabled, catching
-up, rebuilding, and failed outcomes an index can report, are owned by the
-indexing contract (`docs/contracts/indexing.md`, `IDX-02`) and are not
-redefined here.
+Removed settings get no alias and changed grammars pin old spellings; no epoch moves and no datadir is touched. TOML unknown keys fail startup (the generated reader names accepted keys; nested `chainstate_journal` carries `deny_unknown_fields`); CLI unknown flags fail parsing; `BITCOIN_RS_*` unknown variables are skipped; `bitcoin.conf` reads only the option-table keys (`dbcache`, `prune`, `rest`, `txindex`, `rpcuser`, `rpcpassword`, `rpccookiefile`) plus `listen`. Removed with no replacement: `--index-rollback-rebuild-cutover` / `BITCOIN_RS_INDEX_ROLLBACK_REBUILD_CUTOVER` / `index_rollback_rebuild_cutover` (owner: derived index runtime `DEFAULT_ROLLBACK_REBUILD_CUTOVER`, currently `100_000`; see `docs/benchmarks/index-rollback-rebuild-cutover.md`) and flat per-topic `zmqpub*` keys with `...hwm` variants (ZMQ is TOML-only, grouped by endpoint; legacy flat keys are hard-rejected, never translated). `script_index` inputs (`--scriptindex`, `BITCOIN_RS_SCRIPTINDEX`, TOML `script_index`) accept `utxo`/`full` plus booleans (`true`/bare flag = `full`, `false` = disabled); any other value is a hard error; `--script-index` stays supported. Index capability semantics are owned by `docs/contracts/indexing.md` (`IDX-02`).

@@ -64,7 +64,7 @@ fn scanned_trailer_restores_independently_scanned_stats() -> Result<(), Box<dyn 
     )?;
 
     let root = dir.path().join(CHECKPOINT_ROOT);
-    let current: CurrentV1 = serde_json::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
+    let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     let generation = root.join(current.directory);
     let mut reader = std::io::BufReader::new(std::fs::File::open(generation.join(UTXO_FILE))?);
     let snapshot = bitcoin_rs_utxo::snapshot::read_snapshot_strict_v4(&mut reader)?;

@@ -50,7 +50,6 @@ mod serde_hash256 {
 /// Bitcoin Core's serialized-set hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssumeUtxoDiskStatus {
-    /// No `AssumeUTXO` snapshot has been activated.
     Uninitialized,
     /// Snapshot is active; background historical validation is progressing towards `base_height`.
     Validating {
@@ -69,11 +68,9 @@ pub enum AssumeUtxoDiskStatus {
         historical_hash: Hash256,
         /// Unfinished validation must complete during startup before serving.
         pending: Option<PendingHistoricalBlock>,
-        /// Latest complete historical checkpoint accepted by the durable head.
         checkpoint: Option<HistoricalCheckpointRef>,
     },
     /// Background historical validation succeeded and matched the pinned commitment.
-    /// Chainstate roles have converged to `Ordinary`.
     Finalized {
         base_height: u32,
         #[serde(with = "serde_hash256")]

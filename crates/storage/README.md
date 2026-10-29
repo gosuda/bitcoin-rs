@@ -20,7 +20,7 @@ and commit.
 
 ## Pruning
 
-`pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It is here rather than in a crate of its own (issue #164) because it is a retention policy over rows this crate already owns -- the former `bitcoin-rs-pruning` declared `bitcoin-rs-utxo`, `bitcoin-rs-chain` and `bitcoin` and referenced none of them.
+`pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It is here rather than in a crate of its own because it is a retention policy over rows this crate already owns.
 
 `stage_block_and_undo_prune` stages block-body and undo-row deletion together with prune-height metadata into one caller-owned atomic batch, so node wiring commits them in a single backend commit; `reclaim_staged_flat_block_files` then deletes the staged flat block files, and `PruneOutcome` reports the bytes and rows freed. Block bodies and undo rows are pruned against the durable tip rather than the in-memory tip: retained bodies support local replay after a crash, and retained undo rows support disconnecting through recovered state. The per-row machinery is `block_pruner` (`block_body_key`, `BLOCK_DATA_CF`) and `undo` (`block_undo_key`, `ColumnFamily::UndoData`); `PrunePolicy` is defined in `pruning.rs`: it converts the configured mebibyte target to bytes and applies the reorg-safety retention floor, while the pruning pass owns deletion. The node builds the policy from configuration and hands it in.
 

@@ -9,11 +9,6 @@ pub(super) struct Session {
     pub(super) alive: Arc<AtomicBool>,
     pub(super) local_address: PeerEndpoint,
 }
-// run_sam alone publishes/removes session records and starts replacements.
-// Each epoch has one irreversible alive marker, shared by streams and leases.
-// An INVALID_ID only revokes the marker observed by that request; it never
-// replaces a session or cancels peers by network. Ordinary lease teardown and
-// the sync reconciler consume that revocation through PeerLease::is_cancelled.
 fn hello(setup: &mut Setup<'_>) -> io::Result<()> {
     setup.write(b"HELLO VERSION MIN=3.1 MAX=3.3\n")?;
     let line = setup.line()?;
@@ -43,8 +38,6 @@ struct InvalidSession;
 
 fn retire_invalid_session(error: &io::Error, alive: &AtomicBool) {
     if matches!(error.get_ref(), Some(cause) if cause.is::<InvalidSession>()) {
-        // The flag belongs to the session used by this request. A late reply
-        // cannot revoke a replacement session's distinct flag.
         alive.store(false, Ordering::Release);
     }
 }
@@ -66,10 +59,6 @@ fn status(setup: &mut Setup<'_>, prefix: &str) -> io::Result<String> {
         if prefix == "STREAM STATUS " && line.starts_with(prefix) && result == "INVALID_ID" {
             return Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession));
         }
-        // Naming is part of dialing: an unresolved destination must reach the
-        // same AddrMan attempt owner as an explicit stream refusal. Only the
-        // documented naming miss qualifies; router errors and malformed replies
-        // are still local failures, not evidence against the requested peer.
         if line.starts_with(prefix)
             && matches!(
                 (prefix, result),
@@ -164,7 +153,6 @@ impl OverlayTransport {
             Setup::new_until(address, &stop, deadline.min(Instant::now() + SETUP_TIMEOUT))?;
         hello(&mut setup)?;
         setup.deadline = deadline.min(Instant::now() + Duration::from_secs(60));
-        // Connect to the validated public destination, not a second name lookup.
         setup.write(
             format!(
                 "STREAM CONNECT ID={id} DESTINATION={} TO_PORT={} SILENT=false\n",
@@ -280,9 +268,6 @@ impl OverlayTransport {
                     monitored
                 })
             })();
-            // This worker alone unpublishes the epoch and wakes its leases.
-            // Connect/accept failures may revoke admission through `alive`, but
-            // cannot remove sessions or cancel connections of another epoch.
             let retired = self.sam.write().take();
             if let Some(session) = retired {
                 session.alive.store(false, Ordering::Release);
@@ -313,8 +298,6 @@ impl OverlayTransport {
                 )?;
                 hello(&mut setup)?;
                 setup.write(format!("STREAM ACCEPT ID={id} SILENT=false\n").as_bytes())?;
-                // IVNP sends STATUS only after accepting a circuit. This is a listener wait,
-                // not an unbounded setup operation; cancellation still polls every 100ms.
                 setup.deadline = Instant::now() + Duration::from_hours(24);
                 if let Err(error) = status(&mut setup, "STREAM STATUS ") {
                     retire_invalid_session(&error, alive);

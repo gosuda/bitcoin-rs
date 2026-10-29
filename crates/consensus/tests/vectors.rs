@@ -1,13 +1,10 @@
-//! Consensus vector loading and hash-computation tests.
-
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 use std::path::Path;
 
 use bitcoin::hex::FromHex;
 use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
-use serde_json::Value;
+use sonic_rs::Value;
 
-/// Every Core `tx_valid` vector must decode; a vector that fails to
-/// deserialize is a decoder defect, not a consensus verdict.
 #[test]
 fn tx_valid_vectors_deserialize() {
     let (total, parsed) = parse_tx_vectors("tx_valid.json");
@@ -68,7 +65,7 @@ fn sighash_vectors_match_bitcoin_cache() {
         let Some(row) = row.as_array() else {
             continue;
         };
-        if row.len() != 5 || !row.first().is_some_and(Value::is_string) {
+        if row.len() != 5 || !row.first().is_some_and(JsonValueTrait::is_str) {
             continue;
         }
         total = total.saturating_add(1);
@@ -130,7 +127,7 @@ fn read_json(name: &str) -> Value {
         Ok(text) => text,
         Err(error) => panic!("{} should be readable: {error}", path.display()),
     };
-    match serde_json::from_str(&text) {
+    match sonic_rs::from_str(&text) {
         Ok(value) => value,
         Err(error) => panic!("{} should parse as JSON: {error}", path.display()),
     }

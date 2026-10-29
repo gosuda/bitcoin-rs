@@ -1,5 +1,3 @@
-//! REF-07/P2P-01: the compatibility lane enters through real loopback peers.
-
 #![expect(clippy::expect_used, reason = "public process test assertions")]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -12,9 +10,8 @@ use bitcoin_rs_e2e::process_peer::{
     FrameBuffer, ProcessPeer, connect_loopback, decode_frame, read_frame,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 
-/// REF-07b/c: RPC may become ready before the independent P2P bind.
 #[test]
 fn p2p_connect_waits_for_a_delayed_listener() {
     use std::net::TcpListener;
@@ -57,7 +54,6 @@ fn p2p_connect_to_an_absent_listener_has_a_fixed_deadline() {
     assert!(start.elapsed() < Duration::from_millis(600));
 }
 
-/// REF-07b/c: a failed operation after handshake closes the peer and reaps the child.
 #[test]
 #[cfg(target_os = "linux")]
 fn p2p_timeout_releases_the_connected_peer_and_process() {
@@ -94,8 +90,6 @@ fn p2p_timeout_releases_the_connected_peer_and_process() {
     }
 }
 
-/// REF-07c: a peer sending one byte at a time cannot renew the operation's
-/// total deadline. The test fixture only faults transport, not node behavior.
 #[test]
 fn fragmented_p2p_response_obeys_one_total_deadline() {
     use std::io::Write as _;
@@ -143,7 +137,6 @@ fn fragmented_p2p_response_obeys_one_total_deadline() {
     );
 }
 
-/// REF-07c/d: reject the header before allocating or waiting for its body.
 #[test]
 fn oversized_p2p_length_is_rejected_without_a_body() {
     use std::io::Write as _;
@@ -176,8 +169,6 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     let mut peer = ProcessPeer::connect(process).expect("real version/verack handshake");
     peer.send_transaction(transaction)
         .expect("wire transaction and ping barrier");
-    // A pong orders wire processing but does not claim asynchronous admission
-    // completion. Observe that completion only through the public RPC.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let pool = process
@@ -194,9 +185,9 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     }
     let transcript = std::fs::read_to_string(process.evidence.join("p2p.jsonl"))
         .expect("retained ordered P2P wire evidence");
-    let messages: Vec<serde_json::Value> = transcript
+    let messages: Vec<sonic_rs::Value> = transcript
         .lines()
-        .map(|line| serde_json::from_str(line).expect("wire event JSON"))
+        .map(|line| sonic_rs::from_str(line).expect("wire event JSON"))
         .collect();
     assert!(
         messages
@@ -210,13 +201,6 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     );
 }
 
-/// Move both processes onto a tip that is recent on the candidate's real
-/// clock. Core mines at a frozen launch-time mocktime, so a shared chain
-/// older than the tip-age bound leaves the candidate in initial block
-/// download — the phase where Core itself refuses relayed transactions
-/// (`net_processing.cpp:4713-4716`). Advancing the reference clock and
-/// mining one empty common block first makes wire admission observable on
-/// both binaries.
 fn advance_to_fresh_common_tip(core: &mut ProcessNode, node: &mut ProcessNode) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -233,10 +217,6 @@ fn advance_to_fresh_common_tip(core: &mut ProcessNode, node: &mut ProcessNode) {
     );
 }
 
-/// No listener, service, or pool is constructed in the test process. The same
-/// signed transaction enters each binary's ordinary inbound P2P path. The
-/// candidate must first leave initial block download, so the shared tip is
-/// refreshed before any wire admission.
 #[test]
 fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
     let mut core = ProcessNode::spawn(Kind::Core).expect("reference process");
@@ -259,7 +239,6 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         compare_rpc(&mut core, &mut node, "getrawmempool", &json!([])).expect("initial pools"),
         json!([]),
     );
-    // Wire admission is observable only outside initial block download.
     advance_to_fresh_common_tip(&mut core, &mut node);
     for process in [&mut core, &mut node] {
         admit_over_p2p(process, &transaction);
@@ -329,7 +308,6 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         .expect("confirmed funding spend"),
         json!(null)
     );
-    // Block acceptance publishes the chain tip before the derived index catches up.
     wait_for_txindex(&mut node, 103);
     assert_eq!(
         node.http_get_json(&format!("/api/tx/{txid}/status"))
@@ -367,7 +345,6 @@ fn wait_for_txindex(node: &mut ProcessNode, height: u32) {
     }
 }
 
-/// A valid envelope is a positive control for each independent rejection.
 #[test]
 fn malformed_p2p_frames_are_protocol_failures_not_behavior_evidence() {
     let valid = serialize(&RawNetworkMessage::new(

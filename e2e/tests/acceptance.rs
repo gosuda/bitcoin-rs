@@ -1,7 +1,4 @@
 //! Curated acceptance comparisons against a pinned live Bitcoin Core.
-//!
-//! Only public RPCs and independently produced Core funding/candidate blocks
-//! are used. The suite owns no consensus implementation or production hooks.
 
 use std::fs;
 
@@ -13,7 +10,7 @@ use bitcoin_rs_e2e::helpers::{
     coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 #[derive(Clone, Copy)]
 enum Input<'a> {
@@ -127,8 +124,6 @@ fn shared_state(core: &mut ProcessNode, node: &mut ProcessNode) -> Result<Value>
     Ok(reference)
 }
 
-/// Save input identity before checking state or calling either node, then
-/// retain both replies and the final classification alongside process logs.
 fn compare_case(
     core: &mut ProcessNode,
     node: &mut ProcessNode,
@@ -150,7 +145,7 @@ fn compare_case(
         "candidate_evidence": node.evidence,
         "outcome": "incomplete",
     });
-    fs::write(&evidence_path, serde_json::to_vec_pretty(&evidence)?)?;
+    fs::write(&evidence_path, sonic_rs::to_vec_pretty(&evidence)?)?;
     let result = (|| {
         let before = shared_state(core, node)?;
         evidence["before"] = before.clone();
@@ -167,8 +162,7 @@ fn compare_case(
         };
         let reference = core.rpc(input.method(), &params)?;
         evidence["reference_reply"] = reference.clone();
-        // Persist the first observation even if the second process dies.
-        fs::write(&evidence_path, serde_json::to_vec_pretty(&evidence)?)?;
+        fs::write(&evidence_path, sonic_rs::to_vec_pretty(&evidence)?)?;
         let candidate = node.rpc(input.method(), &params)?;
         evidence["candidate_reply"] = candidate.clone();
         let reference_allowed = input.verdict(&reference)?;
@@ -203,13 +197,11 @@ fn compare_case(
     if let Err(error) = &result {
         evidence["error"] = json!(error.to_string());
     }
-    fs::write(&evidence_path, serde_json::to_vec_pretty(&evidence)?)?;
+    fs::write(&evidence_path, sonic_rs::to_vec_pretty(&evidence)?)?;
     result
 }
 
 fn core_candidate(core: &mut ProcessNode, transactions: &[String]) -> Result<Block> {
-    // submit=false returns independently assembled, solved bytes without
-    // making the reference's eventual submitblock response a duplicate.
     let reply = core.rpc(
         "generateblock",
         &json!([funding_address()?.to_string(), transactions, false]),
@@ -230,9 +222,6 @@ fn update_merkle_and_pow(block: &mut Block) -> Result<()> {
 }
 
 fn common_active_chain(core: &mut ProcessNode, node: &mut ProcessNode) -> Result<CommonFunds> {
-    // Core 31.1 activates regtest CSV/BIP34 at height 1, whereas the candidate
-    // uses 432/500. Funding only to coinbase maturity does not establish the
-    // same active rules. Cross both thresholds before comparing these cases.
     let mut funds = mine_common_chain(core, node, 100)?;
     for _ in 0..4 {
         let batch = mine_common_chain(core, node, 100)?;
@@ -244,7 +233,7 @@ fn common_active_chain(core: &mut ProcessNode, node: &mut ProcessNode) -> Result
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     fs::write(
         node.evidence.join("acceptance-setup.json"),
-        serde_json::to_vec_pretty(&json!({
+        sonic_rs::to_vec_pretty(&json!({
             "shared_state": shared,
             "reference_deployments": deployment,
             "candidate_template": template,
@@ -350,8 +339,6 @@ fn curated_live_acceptance() -> Result<()> {
     ] {
         compare_case(&mut core, &mut node, name, Input::Block(&block), false)?;
     }
-    // A max-version (0xFFFFFFFF) BIP68 spend: the version is read unsigned,
-    // so the relative lock applies and both nodes must reject the block.
     let (_, funding_prevout) = funds.confirmed_output(0)?;
     let mut version_max = core_candidate(&mut core, &[serialize_hex(&valid)])?;
     {
@@ -359,8 +346,6 @@ fn curated_live_acceptance() -> Result<()> {
         spend.version = bitcoin::transaction::Version(-1);
         spend.input[0].sequence = Sequence::from_consensus(1000);
         sign_p2pkh_inputs(spend, &[funding_prevout])?;
-        // Refresh the coinbase witness commitment from the recomputed witness
-        // root (the segwit candidate is Merkle- and commitment-bound).
         let root = version_max
             .witness_root()
             .ok_or_else(|| Error::Assertion("fixture has no witness root".into()))?;
@@ -399,8 +384,6 @@ fn curated_live_acceptance() -> Result<()> {
         Input::Block(&version_max),
         false,
     )?;
-    // A positive control after all rejections also proves the shared parent
-    // is still usable and the mature coin has not been consumed by previews.
     let spend_block = core_candidate(&mut core, &[serialize_hex(&valid)])?;
     compare_case(
         &mut core,
@@ -428,7 +411,7 @@ fn state_and_malformed_results_are_never_consensus_rejections() {
     ] {
         assert!(block_verdict(&reply).is_err(), "{reply}");
     }
-    assert!(matches!(block_verdict(&Value::Null), Ok(true)));
+    assert!(matches!(block_verdict(&Value::new()), Ok(true)));
     assert!(matches!(block_verdict(&json!("bad-cb-amount")), Ok(false)));
 }
 
@@ -456,6 +439,6 @@ fn transaction_identity_and_result_shape_are_harness_invariants() {
         assert!(transaction_verdict(&json!([duplicate]), tx).is_err());
     }
     let mut absent_verdict = row;
-    absent_verdict["allowed"] = Value::Null;
+    absent_verdict["allowed"] = Value::new();
     assert!(transaction_verdict(&json!([absent_verdict]), tx).is_err());
 }

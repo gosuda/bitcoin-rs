@@ -4,7 +4,6 @@ use super::capability::IndexWatermark;
 use bitcoin_rs_storage::StorageError;
 use thiserror::Error;
 
-/// Errors returned while indexing confirmed blocks.
 #[derive(Debug, Error)]
 pub enum IndexError {
     #[error("storage error: {0}")]

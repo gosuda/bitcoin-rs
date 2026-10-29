@@ -1,5 +1,3 @@
-//! End-to-end crash-recovery coverage for the chainstate journal.
-
 use anyhow::Result;
 
 use bitcoin_rs_chain::regtest_fixture;
@@ -34,7 +32,6 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     ))?;
     let _ = initial.publish_checkpoint()?;
 
-    // Publication must rebase the live writer in the same process.
     let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_tip =
         initial.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(child))?;
@@ -55,7 +52,6 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     );
     drop(initial);
 
-    // No checkpoint was published for `child`: only the journal can recover it.
     let resumed = NodeState::open(config, None)?;
     let resumed_tip = resumed
         .chainstate()
@@ -255,10 +251,6 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     Ok(())
 }
 
-/// Retention enforcement still runs without the periodic worker:
-/// the chainstate maintenance worker answers journal retention pressure
-/// with a checkpoint publication used purely as a compaction-base advance
-/// (`RCV-10`); the durable root stays the only recovery authority.
 #[test]
 fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -278,8 +270,6 @@ fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<(
     let current = config.data_dir.join("chainstate-checkpoints/CURRENT");
     let baseline = std::fs::read_to_string(&current)?;
 
-    // Inflate the measured journal size past the retention budget: apply
-    // is refused before any tip mutation while the pressure stands.
     let pressure = config
         .data_dir
         .join("chainstate-journal/segment-9999999999.log");

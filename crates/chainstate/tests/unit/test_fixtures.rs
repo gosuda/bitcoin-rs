@@ -1,5 +1,3 @@
-//! Fixtures and in-memory test doubles shared by in-crate unit tests.
-
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -27,7 +25,6 @@ pub(crate) fn journal_coin(marker: u8, height: u32, value: u64) -> Coin {
     }
 }
 
-/// An empty in-memory chainstate over `utxo`.
 pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
     Chainstate::new(
         network,
@@ -40,7 +37,6 @@ pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
     )
 }
 
-/// Publishes the regtest genesis as the applied tip with count 1.
 pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = crate::connect::applied_header_tip(
@@ -57,9 +53,6 @@ pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyErr
     Ok(tip)
 }
 
-/// What the staged-tip hook observed: the staged tip it was handed, the
-/// borrowed block's identity, and the published tip still in the cell.
-/// Only hashes and heights cross the hook boundary — never a block clone.
 pub(crate) struct StagedFire {
     pub(crate) staged_hash: Hash256,
     pub(crate) staged_height: u32,
@@ -67,7 +60,6 @@ pub(crate) struct StagedFire {
     pub(crate) published: Option<(Hash256, u32)>,
 }
 
-/// Records every staged-tip fire with the published tip still in the cell.
 pub(crate) fn staging_recorder(
     chain: &Chainstate,
     fires: &Arc<Mutex<Vec<StagedFire>>>,
@@ -75,8 +67,6 @@ pub(crate) fn staging_recorder(
     let fires = Arc::clone(fires);
     let chain = chain.clone();
     Arc::new(move |staged, block| {
-        // `applied_tip_snapshot` is a lock-free read; the hook takes no
-        // domain write lock and never reenters chainstate mutation.
         let published = chain
             .applied_tip_snapshot()
             .map(|tip| (tip.hash, tip.height));

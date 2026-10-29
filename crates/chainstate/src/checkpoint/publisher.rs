@@ -63,11 +63,6 @@ enum DisconnectRetirement {
     RecoveryProgress,
 }
 
-/// All the shared handles needed to publish a checkpoint from a background
-/// thread without retaining the full [`crate::Chainstate`].
-/// Seed offer cell shared with the index worker of this process open.
-/// `None` when `ScriptLive` seeding is disabled; the cell itself carries
-/// demand, so the publisher never invents it.
 pub(crate) struct CheckpointPublisher {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -90,23 +85,16 @@ pub(crate) struct CheckpointPublisher {
 }
 
 impl CheckpointPublisher {
-    /// Publishes the same durable checkpoint exposed by
-    /// [`crate::Chainstate::publish_checkpoint`].
     pub(crate) fn publish(&self) -> core::result::Result<CheckpointWrite, CheckpointError> {
         self.publish_transaction(DisconnectRetirement::Ordinary)
     }
 
-    /// Publishes the recovery checkpoint of the disconnect-marker recovery
-    /// transaction.
     pub(crate) fn publish_recovered(
         &self,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         self.publish_transaction(DisconnectRetirement::Recovered)
     }
 
-    /// Publishes a marker-preserving checkpoint while boot replay is still in
-    /// progress, allowing journal compaction before the maintenance worker
-    /// exists.
     pub(crate) fn publish_recovery_progress(
         &self,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
@@ -127,8 +115,6 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // One applied-tip load supplies the tip and the count it certifies,
-        // so the checkpoint and the journal compaction share one value.
         let applied_tip = self.applied_tip.load_full();
         let chain_tx_count = applied_tip
             .as_ref()
@@ -174,12 +160,6 @@ impl CheckpointPublisher {
                 tracing::error!(%error, "failed to resume chainstate journal after publication error");
             }
         }
-        // The disconnect marker is the recovery latch: it retires only once
-        // the checkpoint, the journal compaction, and the journal resume all
-        // succeeded. Completed recovery retires unconditionally —
-        // reconstruction already made the state coherent — while an ordinary
-        // publish merely disarms an `InFlight`-free marker. A progress
-        // checkpoint leaves the latch armed until replay reaches the head.
         if result.is_ok()
             && let Err(error) = match retirement {
                 DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
@@ -192,7 +172,6 @@ impl CheckpointPublisher {
         result
     }
 
-    /// Publishes a checkpoint when a `RolledBack` disconnect marker is present.
     pub(crate) fn settle_disconnect_debt(&self) -> core::result::Result<bool, CheckpointError> {
         let Some(marker) = self.undo_store.load_disconnect_marker()? else {
             return Ok(false);
@@ -223,6 +202,13 @@ impl CheckpointPublisher {
             })
     }
 
+    /// The disconnect marker is the recovery latch: it retires only once the
+    /// checkpoint, the journal compaction, and the journal resume all succeeded.
+    ///
+    /// The durable head is the chain's commit point and publication follows it, so a
+    /// checkpoint — which freezes the published state — can never legitimately name a
+    /// tip the head has not certified. The two authorities must not disagree about the
+    /// durable tip.
     fn publish_frozen(
         &self,
         applied_tip: Option<&TipSnapshot>,
@@ -237,10 +223,6 @@ impl CheckpointPublisher {
                 height: marker.height,
             });
         }
-        // The durable head is the chain's commit point and publication
-        // follows it, so a checkpoint — which freezes the published state —
-        // can never legitimately name a tip the head has not certified. The
-        // two authorities must not disagree about the durable tip.
         if let (Some(head), Some(tip)) = (
             self.durable_head.load().map_err(|error| {
                 CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
@@ -249,10 +231,6 @@ impl CheckpointPublisher {
             })?,
             applied_tip,
         ) {
-            // A tip below the head is the committed-but-unpublished gap a
-            // crash can leave; checkpointing the older state is harmless. A
-            // tip at or above the head that the head does not certify is
-            // genuine divergence between the two authorities.
             let same_tip = head.tip == tip.hash;
             let diverged = head.height < tip.height || (head.height == tip.height && !same_tip);
             if diverged {
@@ -277,8 +255,6 @@ impl CheckpointPublisher {
             &self.coin_stats,
             applied_tip,
         )?;
-        // A2: Only after `CheckpointWrite::Published` and root fsync, write
-        // the applied-tip witness for the same captured tip.
         if let CheckpointWrite::Published { .. } = written
             && let Some(tip) = applied_tip
         {
@@ -298,37 +274,22 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // The disconnect marker retires in `publish_transaction`, after the
-        // journal steps that can still fail the publication.
-        // Marker retirement is a second durability step after `CURRENT`.
-        // Propagate failure so the worker retries next tick; the published
-        // checkpoint stays, and the marker stays until unlink+dirsync commits.
         if matches!(written, CheckpointWrite::Published { .. })
             && !matches!(retirement, DisconnectRetirement::RecoveryProgress)
         {
             retire_full_revalidation_marker(&self.data_dir)?;
         }
-        // C5 offer: only a full gate pass mints a witness, and only after
-        // `commit_publication` inside the writer. Reopen the committed
-        // generation read-only (never by the staging path), refuse a fused
-        // overwrite on length mismatch, and offer only into demand. Any
-        // failure here leaves the cell untouched and never fails publication.
         if let (CheckpointWrite::Published { reference }, Some(witness)) = (&written, stage_witness)
             && let Some(cell) = &self.seed_offer
             && cell.is_wanted()
         {
             Self::offer_committed_seed(&self.checkpoint_data_dir, cell, *reference, witness);
         }
-        // Everything up to this tip is now recoverable, so undo records below
-        // it may be pruned.
         self.durable_tip_height
             .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)
     }
 
-    /// Opens the committed generation's UTXO artifact read-only, checks the
-    /// staged length binding, and offers the sealed descriptor. Drops the
-    /// opened file without storing on any disagreement.
     fn offer_committed_seed(
         checkpoint_data_dir: &cap_std::fs::Dir,
         cell: &SeedOfferCell,
@@ -339,9 +300,6 @@ impl CheckpointPublisher {
         let Ok(CheckpointOpen::Selected { generation_dir, .. }) = opened else {
             return;
         };
-        // Guarded open (nonblocking, no-follow, regular-file-only) so a
-        // substituted FIFO cannot stall publication; any disagreement leaves
-        // the cell untouched.
         let Ok(file) = open_file(&generation_dir, UTXO_FILE) else {
             return;
         };
@@ -405,8 +363,6 @@ mod tests {
     fn committed_fifo_does_not_block_or_seal() -> anyhow::Result<()> {
         use std::os::unix::fs::FileTypeExt as _;
 
-        // Empty set still mints a witness, so the FIFO refusal below exercises
-        // the guarded open rather than a missing-witness path.
         let set = bitcoin_rs_utxo::UtxoSet::new();
         let tip = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0_u8; 32]);
         let mut encoded = Vec::new();
@@ -450,10 +406,7 @@ mod tests {
             let _ = sender.send(());
         });
         let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
-        // Capture the rescue result without `?` so the worker join below runs
-        // even if the unblock open fails; no early return may orphan the thread.
         let rescue: Option<std::io::Result<cap_std::fs::File>> = if observed.is_err() {
-            // Unblock a regressed blocking reader before reporting failure.
             use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
             let mut options = cap_std::fs::OpenOptions::new();
             options

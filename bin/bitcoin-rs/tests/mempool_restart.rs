@@ -1,5 +1,3 @@
-//! Real-process mempool restart/reconciliation through public RPC and mining.
-
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -8,7 +6,7 @@ use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::{OutPoint, Sequence, Transaction};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions, helpers};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -32,7 +30,6 @@ fn parent_and_child(
 ) -> Result<(Transaction, Transaction), Box<dyn std::error::Error>> {
     let (point, prevout) = helpers::mature_funding(node)?;
     let script = helpers::funding_address()?.script_pubkey();
-    // The parent spends an OP_TRUE coinbase but pays a standard, signable output.
     let mut parent = helpers::spend_anyone(point, &prevout, 10_000);
     parent.output[0].script_pubkey = script;
     let mut child = helpers::raw_spend_to(
@@ -63,7 +60,7 @@ fn assert_membership(node: &mut ProcessNode, transactions: &[&Transaction]) -> T
         let entry = node.rpc("getmempoolentry", &json!([txid]))?;
         assert_eq!(verbose.get(&txid), Some(&entry));
         let raw = node.rpc("getrawtransaction", &json!([txid]))?;
-        assert_eq!(raw, Value::String(serialize_hex(tx)));
+        assert_eq!(raw, sonic_rs::Value::from(serialize_hex(tx).as_str()));
     }
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     let ids: Vec<_> = template["transactions"]
@@ -198,15 +195,12 @@ fn clean_restart_restores_dependencies_priority_lookup_and_mining() -> TestResul
     assert_eq!(template["transactions"][1]["depends"], json!([1]));
     let dir = node.stop_keep_datadir()?;
 
-    // Disabled persistence starts fresh and does not replace the old artifact.
     let before_disabled = std::fs::read(&file)?;
     let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options(false), dir)?;
     assert_eq!(helpers::mempool_txids(&mut node)?, Vec::<String>::new());
     let dir = node.stop_keep_datadir()?;
     assert_eq!(std::fs::read(&file)?, before_disabled);
 
-    // Advance the authoritative tip while persistence is disabled. On return,
-    // a now-confirmed parent is skipped and its unconfirmed child is rechecked.
     let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &options(false), dir)?;
     node.rpc("sendrawtransaction", &json!([serialize_hex(&parent)]))?;
     node.rpc(
@@ -218,7 +212,6 @@ fn clean_restart_restores_dependencies_priority_lookup_and_mining() -> TestResul
     assert_membership(&mut node, &[&child])?;
     let dir = node.stop_keep_datadir()?;
 
-    // Rejected payload is quarantined intact; later clean shutdowns can save.
     let mut rejected = snapshot;
     rejected[0] ^= 1;
     std::fs::write(&file, &rejected)?;

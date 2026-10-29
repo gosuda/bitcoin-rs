@@ -1,17 +1,9 @@
 //! Authority check against the const `MANIFEST`.
-//!
-//! The manifest is the sole method authority; fixtures are custody only.
-//! Every method a fixture replays must be exactly accounted for: a fixture
-//! that expects its method declared must find a shipped JSON-RPC row, and a
-//! fixture that deliberately speaks an unknown method (case 07) must find
-//! none, so the corpus can never drift into naming methods the dispatcher
-//! does not declare.
 
 use bitcoin_rs_rpc::manifest::{Entry, SurfaceKind};
 
 use super::fixture::Fixture;
 
-/// True when `method` is a shipped JSON-RPC row of `manifest`.
 #[must_use]
 pub(crate) fn is_shipped_rpc_method(method: &str, manifest: &[Entry]) -> bool {
     manifest
@@ -19,12 +11,6 @@ pub(crate) fn is_shipped_rpc_method(method: &str, manifest: &[Entry]) -> bool {
         .any(|entry| entry.kind == SurfaceKind::Rpc && entry.name == method && entry.shipped())
 }
 
-/// Proves every method a fixture carries is exactly accounted for in
-/// `manifest` under `kind`.
-///
-/// # Errors
-/// A string naming the first method that is declared but not shipped, or
-/// expected but undeclared, or declared when the fixture demands absence.
 pub(crate) fn check_fixture_methods(
     fixture: &Fixture,
     manifest: &[Entry],

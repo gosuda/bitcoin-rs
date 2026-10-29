@@ -1,60 +1,28 @@
-//! Neutral block-body read seam.
-//!
-//! Headers live on [`crate::BlockTree`]. Bodies are stored elsewhere. This
-//! trait is the one lookup both P2P inventory serving and index/RPC readers
-//! use; it is not an RPC type.
-
 use bitcoin_rs_primitives::{BlockBodyMetadata, BlockHash};
 
-/// A failed body read, distinct from an unavailable body (for example, pruned
-/// or not yet present in snapshot history). Storage errors stay behind this seam.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum BlockBodyReadError {
-    /// The stored representation is demonstrably malformed or truncated.
     #[error("{0}")]
     Corrupt(String),
-    /// The read could not complete, without establishing corruption.
     #[error("{0}")]
     Read(String),
 }
 
-/// Storage-backed block body reader used when headers and bodies are stored
-/// separately.
 pub trait BlockBodySource: Send + Sync {
-    /// Returns serialized block bytes for `height` and `hash`, if available.
-    /// `Ok(None)` does not certify corruption or successful verification.
-    /// Implementations must preserve read failures as `Err`.
     fn block_body(
         &self,
         height: u32,
         hash: BlockHash,
     ) -> Result<Option<Vec<u8>>, BlockBodyReadError>;
 
-    /// Returns indexed body facts. Implementations that cannot answer without
-    /// I/O may leave this absent; header-only callers then remain header-only.
     fn block_body_metadata(&self, _height: u32, _hash: BlockHash) -> Option<BlockBodyMetadata> {
         None
     }
 
-    /// Bytes this source's block storage currently occupies on disk.
-    ///
-    /// This is `getblockchaininfo`'s `size_on_disk`. It has to come from
-    /// whatever owns the bytes: the block-record log can only offer the sum of
-    /// sizes it has seen, which keeps counting bytes pruning has already
-    /// deleted. `None` means this source does not know; callers then fall back
-    /// to that sum.
     fn disk_usage(&self) -> Option<u64> {
         None
     }
 
-    /// Returns `len` body bytes starting `offset` bytes into the serialized
-    /// block, letting a caller read one transaction without materializing the
-    /// whole body.
-    ///
-    /// Defaults to `None` so a backend that cannot slice keeps working:
-    /// callers must treat `None` as "read the whole body instead", never as
-    /// "those bytes do not exist". An out-of-range request also yields
-    /// `None` rather than a short read.
     fn block_body_range(
         &self,
         _height: u32,

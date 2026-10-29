@@ -45,17 +45,11 @@ use super::{BlockSync, Inventory};
 use crate::block_stager::StagedBlock;
 use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
 
-/// One-shot scripted branch switch: `connected` hashes are reported as
-/// committed (applied tip advanced, `connected_body` fired) before `error`
-/// is returned, mirroring a connect walk that stopped partway.
 struct ScriptedBranchSwitch {
     connected: Vec<Hash256>,
     error: ReorgError,
 }
 
-/// Applied-chain stub for executor tests: real [`BlockTree`] header admission
-/// and block-at-a-time applied-tip advance, with one-shot scripted commit and
-/// branch-switch failures.
 pub(crate) struct TestChain {
     network: Network,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -64,8 +58,6 @@ pub(crate) struct TestChain {
     minimum_chain_work: ChainWork,
     scripted_commit_failure: Mutex<Option<(Hash256, WindowApplyDisposition)>>,
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
-    /// Publishes a new tip pair immediately after returning the old header
-    /// snapshot, making an observation-time tip race deterministic.
     scripted_tip_update: Mutex<Option<(Arc<TipSnapshot>, Arc<TipSnapshot>)>>,
     historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
     historical_connected: Mutex<Vec<Hash256>>,
@@ -95,9 +87,6 @@ impl TestChain {
 }
 
 impl TestChain {
-    /// Binding check over an already-held tree guard — the same
-    /// `softfork_state` parent derivation node applies before delegating to
-    /// the consensus binding check.
     fn body_binding(&self, tree: &BlockTree, block: &Block) -> Result<(), SyncChainError> {
         let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
         let segwit_active = tree
@@ -111,8 +100,6 @@ impl TestChain {
             .map_err(|error| -> SyncChainError { Box::new(error) })
     }
 
-    /// Overrides the assumed-work floor the presync gate reads, so a test
-    /// can make a fixture chain pass or fail it at will.
     #[must_use]
     pub(crate) const fn with_minimum_chain_work(mut self, minimum: ChainWork) -> Self {
         self.minimum_chain_work = minimum;
@@ -378,9 +365,6 @@ impl SyncChain for TestChain {
     }
 }
 
-/// Chain stub whose header admission is always refused, mirroring the
-/// production executor's paused admission: the chain transition lock is
-/// unavailable, so the batch is dropped before validation.
 struct RefusingChain(Arc<TestChain>);
 
 impl SyncChain for RefusingChain {
@@ -878,8 +862,6 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
         inbound.source = Some(source);
         inbound_blocks_tx.send(inbound)?;
     }
-    // Whichever order the pass tries the carried headers, the second drain
-    // admits whichever waited on the other's parent.
     sync.tick();
     sync.tick();
 
@@ -947,8 +929,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         "unattachable header must not be admitted"
     );
 
-    // The reply covers the gap; the still-missing parent body is fetched
-    // through the ordinary window path.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![block1.header, block2.header],
         source: Some(source),
@@ -986,9 +966,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
 
 #[test]
 fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline() -> TestResult {
-    // A 16-block chain: the deep single-peer window takes all 16 while
-    // the one-shot probe sends the first 8 (PREFIX_PROBE_BLOCK_LIMIT), so
-    // the probe getdata is distinguishable from the deep getdata.
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(16)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
 
@@ -1048,9 +1025,6 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline() -> TestResult {
     Ok(())
 }
 
-/// Seven eligible peers plus one candidate that fails a fan-out clause: were
-/// that peer counted, fan-out (many shallow getdatas) would engage; instead the
-/// window collapses to one deep single-peer batch.
 fn assert_fallback_with_ineligible_candidate(
     ineligible: PeerInfo,
     serves_fallback: bool,
@@ -1088,12 +1062,10 @@ fn assert_fallback_with_ineligible_candidate(
     Ok(())
 }
 
-/// The candidate passes the block-service clause and holds the deep batch.
 fn assert_fallback_served_by_candidate(candidate: PeerInfo) -> TestResult {
     assert_fallback_with_ineligible_candidate(candidate, true)
 }
 
-/// The candidate fails the block-service clause and receives no body request.
 fn assert_fallback_refused_to_candidate(candidate: PeerInfo) -> TestResult {
     assert_fallback_with_ineligible_candidate(candidate, false)
 }
@@ -1245,7 +1217,6 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         inbound_blocks_tx,
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
-    // Staging byte budget that exactly one staged block exhausts.
     install_budget(
         &sync,
         super::SyncBudget {
@@ -1278,9 +1249,6 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     );
     let _headers = stalled_rx.try_recv()?;
 
-    // Deliver only the successor: it stages (waiting on block1, which the
-    // stalled peer will never send) and exactly exhausts the staging byte
-    // budget, closing the request gate.
     inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
     assert!(!{
@@ -1361,10 +1329,6 @@ struct ApplyCacheFixture {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
 }
 
-/// Builds a regtest chain with `body_height` mined block bodies followed by
-/// `header_only` header-only blocks, applies genesis, and returns a fixture
-/// whose stager is empty so individual rounds can stage bodies directly and
-/// exercise the apply-side cache miss/hit transitions.
 fn apply_cache_fixture(
     body_height: u32,
     header_only: u32,
@@ -1379,8 +1343,6 @@ fn apply_cache_fixture(
         ..
     } = SyncHarness::new(tree);
     let chain_tip = block_tree.write().tip_handle();
-    // Apply genesis so the applied tip starts at height 0; no block bodies
-    // are staged yet, leaving every round below to drive cache state.
     sync.chain.bootstrap_genesis();
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.height),
@@ -1411,8 +1373,6 @@ fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
     sync.scheduler.lock().expected_apply_cache.clone()
 }
 
-/// Commit a delivered fixture through the ordinary binding and apply path.
-/// Scheduler tests must not fake application by only erasing a window slot.
 fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
     let hash = Hash256::from(block.block_hash());
     sync.buffer_received_block_chunk(
@@ -1429,10 +1389,6 @@ fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
 
 #[test]
 fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> TestResult {
-    // One valid block, then a two-coinbase body whose header the tree
-    // knows: the commit classifier treats the body as a permanent
-    // ExtraCoinbase invalidity and invalidates its subtree while the
-    // transition is held.
     let (mut tree, mut blocks) = mined_chain(1, 0)?;
     let tip_id = tree.tip_id().ok_or("missing mined tip")?;
     let extra_coinbase = regtest_fixture::mined_block_with_prev_hash(
@@ -1462,9 +1418,6 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> T
     sync.tick();
     let failing_hash = Hash256::from(extra_coinbase.block_hash());
 
-    // Deliver all three bodies: staging releases each one's pending, so
-    // the request cursor sits strictly above the failing height and a
-    // rewind onto it would be observable.
     let staged = sync.buffer_received_block_chunk(
         &mut vec![
             crate::InboundBlock::from_local(blocks.remove(0)),
@@ -1616,7 +1569,6 @@ fn unrequested_body_gate_rejects_below_floor_and_below_applied_work() -> TestRes
     Ok(())
 }
 
-/// Shared executor wiring; callers keep or drop each sender explicitly.
 struct SyncHarness {
     sync: BlockSync,
     peers: Arc<PeerTable>,
@@ -1631,7 +1583,6 @@ impl SyncHarness {
         Self::with_ibd(tree, crate::sync::syncing_ibd_latch())
     }
 
-    /// The same executor over a caller-chosen initial-block-download latch.
     fn with_ibd(tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
         Self::with_chain_work(
             tree,
@@ -1640,9 +1591,6 @@ impl SyncHarness {
         )
     }
 
-    /// The same executor with the network's assumed-work floor overridden,
-    /// so a fixture chain can be made to pass or fail the header-presync
-    /// gate at will.
     fn with_chain_work(
         mut tree: BlockTree,
         ibd: Arc<InitialBlockDownload>,
@@ -1676,7 +1624,6 @@ impl SyncHarness {
     }
 }
 
-/// [`sync_with_header_chain`] over a caller-chosen latch.
 pub(crate) fn sync_with_header_chain_and_ibd(
     height: u32,
     ibd: Arc<InitialBlockDownload>,
@@ -1693,10 +1640,6 @@ pub(crate) fn sync_with_header_chain_and_ibd(
     ))
 }
 
-/// A latch that has left initial block download: a two-block regtest chain
-/// whose tip header is stamped with the current wall-clock second, so the
-/// work floor (zero on regtest) and the tip-age rule both pass on the first
-/// read and the answer latches off for good.
 pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
     let applied_tip = Arc::new(ArcSwapOption::empty());
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -1729,7 +1672,6 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
     ))
 }
 
-/// Mine real bodies, then extend their header chain without applying anything.
 pub(crate) fn mined_chain(
     body_height: u32,
     header_only: u32,
@@ -1770,8 +1712,6 @@ type SyncFixture = (
 type InboundBlockSender = crossbeam_channel::Sender<crate::InboundBlock>;
 
 fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
-    // Dropping the sender mirrors the original fixture: a disconnected
-    // inbound-blocks channel that never yields a block.
     let (fixture, _inbound_blocks_tx) = sync_with_header_chain_and_blocks(height)?;
     Ok(fixture)
 }
@@ -1804,9 +1744,6 @@ type MinedChainFixture = (
     InboundBlockSender,
 );
 
-/// Like [`sync_with_header_chain_and_blocks`] but with fully applicable
-/// mined regtest blocks (coinbase-bearing, PoW-valid), so tests can drive
-/// real apply progress through the inbound channel.
 fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::error::Error>> {
     let (tree, blocks) = mined_chain(count, 0)?;
     let SyncHarness {
@@ -1830,7 +1767,6 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
         harness.applied_tip.clone(),
         harness.block_tree.clone(),
     ));
-    // Model an active snapshot at height two, with ordinary work above it.
     chain.bootstrap_genesis();
     for block in &blocks[..2] {
         let fixture_payload = BlockPayload::from_local(block.clone());
@@ -1972,11 +1908,6 @@ type WedgeFixture = (
     InboundBlockSender,
 );
 
-/// The recorded-collapse construction at `install_budget` scale: eight eligible
-/// peers stripe a 16-block window at per-peer fan-out cap 2 against a 64-block
-/// header chain; the front-stripe owner (the highest peer, heights 1-2) stalls
-/// while the seven healthy peers deliver heights 3..=16 into the inbound
-/// channel.
 fn wedge_budget(pending_timeout: Duration) -> super::SyncBudget {
     super::SyncBudget {
         max_pending_blocks: 16,
@@ -2028,8 +1959,6 @@ fn staged_count_wedge(
     Ok((sync, peers, expected, rxs, blocks_tx))
 }
 
-/// Returns the next `getdata` inventory from `rx`, skipping header
-/// traffic; fails when none is queued.
 fn next_getdata(
     rx: &crate::test_support::MessageReceiver,
 ) -> Result<Vec<Inventory>, Box<dyn std::error::Error>> {
@@ -2041,7 +1970,6 @@ fn next_getdata(
     Err(std::io::Error::other("expected a queued getdata").into())
 }
 
-/// Drains `rx`, failing on any `getdata` while ignoring header traffic.
 fn assert_no_getdata(rx: &crate::test_support::MessageReceiver) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         if matches!(message, Message::GetData(_)) {
@@ -2051,9 +1979,6 @@ fn assert_no_getdata(rx: &crate::test_support::MessageReceiver) -> TestResult {
     Ok(())
 }
 
-/// Reconstructs the deliverable block body (header-only, empty `txs`)
-/// for `height` of a [`sync_with_header_chain`] fixture: the block hash
-/// is the header hash, so the delivery matches the fixture's tree node.
 fn header_chain_block(
     expected: &[BlockHash],
     height: u32,
@@ -2308,9 +2233,6 @@ fn genesis_header() -> Header {
     Network::Regtest.genesis_block().header
 }
 
-/// [`header_sync_with_genesis`] over a chain whose header admission is
-/// always refused: the fixture for the paused-admission path that
-/// [`TestChain`], whose admission always validates, cannot produce.
 fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
@@ -2390,7 +2312,6 @@ pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: PeerRemote) -> P
     )
 }
 
-/// The canonical frontier `tick()` would observe right now.
 fn test_frontier(sync: &BlockSync) -> super::ChainFrontier {
     sync.observe_chain_frontier()
 }
@@ -2404,8 +2325,6 @@ fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     peer_table.register(endpoint, lease.clone());
     peer_table.publish_info(endpoint, &lease, info);
 }
-/// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK` plus
-/// `NODE_WITNESS`, so it may serve block bodies at any height.
 pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         addr,
@@ -2434,8 +2353,6 @@ pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     }
 }
 
-/// A peer that may not serve block bodies at all: inbound (attacker-chosen)
-/// and advertising no services.
 pub(crate) fn ineligible_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         services: 0,
@@ -2454,10 +2371,6 @@ pub(crate) fn test_addr(
     )))
 }
 
-/// The canonical sync-test anonymous peer: inbound Tor (`endpoint: None`,
-/// `network = Onion`), mirroring what the listener publishes for an
-/// unidentified session. Anonymous sessions schedule by exact connection
-/// identity, never by endpoint.
 pub(crate) fn connect_anonymous_peer(
     peer_table: &Arc<PeerTable>,
     mut info: PeerInfo,
@@ -2587,9 +2500,6 @@ fn service_and_range_gate_both_request_paths() -> TestResult {
     Ok(())
 }
 
-/// A candidate whose node aggregate is full refuses the hedge without being
-/// cancelled: with it as the only candidate nothing is sent, and once another
-/// candidate exists the request still goes out to exactly that one.
 #[test]
 fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestResult {
     let mut tree = BlockTree::new();
@@ -2622,7 +2532,6 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
         &saturated_lease,
         synthetic_peer(saturated_addr, 300),
     );
-    // The saturated peer is the only candidate, so it is certainly asked.
     assert_eq!(
         sync.send_cold_front_hedge(owner, front_hash, 15, Instant::now()),
         None,
@@ -2635,8 +2544,6 @@ fn cold_front_hedge_skips_a_saturated_candidate_without_cancelling_it() -> TestR
     );
     assert!(peers.is_connected(saturated_addr));
 
-    // Whichever order the candidates are tried in, the request reaches the
-    // healthy one and the saturated one stays untouched and connected.
     let healthy_addr = test_addr(18_910, 2)?;
     let healthy_rx = connect_peer(&peers, synthetic_peer(healthy_addr, 300));
     let healthy = current_source(&peers, healthy_addr);
@@ -2712,9 +2619,6 @@ mod head_sync;
 mod limited_peers;
 mod stale_tip;
 
-/// A permanently failed connect hands the executor the valid tip its
-/// invalidation displaced, once: with the heavier branch invalid, the next
-/// call finds no outweighed branch and reports no tip.
 #[test]
 fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
     let genesis = genesis_header();
@@ -2729,8 +2633,6 @@ fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
     let second = regtest_fixture::mined_regtest_header(first.compute_hash(), 102)
         .or_fail("regtest fixture header");
     tree.insert_node(Some(first_id), second, NodeStatus::HeaderValid)?;
-    // A valid stale leaf that survives the invalidation: the displaced tip
-    // must be neither the applied tip nor part of the invalid subtree.
     let other = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 201)
         .or_fail("regtest fixture header");
     tree.insert_node(Some(genesis_id), other, NodeStatus::HeaderValid)?;
@@ -2791,8 +2693,6 @@ fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
     Ok(())
 }
 
-/// A sync loop over an applied chain whose commit fails on command for one
-/// hash, with block 2 announced and its body owed to one live connection.
 struct PunishmentFixture {
     sync: Arc<BlockSync>,
     peers: Arc<PeerTable>,
@@ -2800,8 +2700,6 @@ struct PunishmentFixture {
     blocks_tx: crossbeam_channel::Sender<crate::InboundBlock>,
     block2: Block,
     source: PeerSource,
-    /// The announcing connection's outbound queue, kept alive so a send
-    /// failure can never masquerade as a disconnect.
     _peer_rx: crate::test_support::MessageReceiver,
 }
 
@@ -2855,7 +2753,6 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
     })
 }
 
-/// Delivers the fixture's block 2 body from the connection that announced it.
 fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
     let mut inbound = crate::InboundBlock::from_local(fixture.block2.clone());
     inbound.source = Some(fixture.source);
@@ -2904,9 +2801,6 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
     let now = bitcoin_rs_primitives::unix_time_secs();
 
     let syncing = SyncHarness::new(BlockTree::new());
-    // Pin the fixture frontier the doc comment names: no header tip and no
-    // applied tip. If the harness starts seeding either, the disagreement
-    // this snapshot exercises quietly disappears while the test stays green.
     assert!(
         syncing.block_tree.read().tip().is_none(),
         "the active snapshot must run over a frontier with no header tip"
@@ -2926,9 +2820,6 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
 
     let (tree, _blocks) = mined_chain(0, 3)?;
     let synced = SyncHarness::with_ibd(tree, synced_ibd_latch());
-    // Pin the second fixture frontier: header-tip height 3 with the applied
-    // tip still absent — the shape the old applied-behind-header rule read
-    // as still syncing while the latch had already left it.
     assert!(
         synced.applied_tip.load_full().is_none(),
         "the latched-off snapshot must leave the applied tip absent"
@@ -2950,9 +2841,6 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
     Ok(())
 }
 
-/// Two peers over a mined three-block header chain. `owner` advertises the
-/// taller chain, so the standard scheduler asks it first; `alternate` is the
-/// peer a released body must move to.
 struct NotFoundFixture {
     sync: BlockSync,
     peers: Arc<PeerTable>,
@@ -2966,12 +2854,10 @@ struct NotFoundFixture {
 }
 
 impl NotFoundFixture {
-    /// The owner and the alternate both connected.
     fn two_peers(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
         Self::connect(budget, true)
     }
 
-    /// Only the owner connected: nobody else can serve a body it lacks.
     fn owner_only(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
         Self::connect(budget, false)
     }
@@ -3037,8 +2923,6 @@ impl NotFoundFixture {
     }
 }
 
-/// A window of one block with one request peer: nothing is pending between
-/// requests, so the tick's request scan visits only the highest-ranked peer.
 fn one_request_peer_budget() -> super::SyncBudget {
     super::SyncBudget {
         max_pending_blocks: 1,
@@ -3048,8 +2932,6 @@ fn one_request_peer_budget() -> super::SyncBudget {
     }
 }
 
-/// Every `getdata` inventory vector queued on `rx`, in order; other traffic
-/// is skipped.
 fn drain_getdata_items(rx: &crate::test_support::MessageReceiver) -> Vec<Inventory> {
     let mut items = Vec::new();
     while let Ok(message) = rx.try_recv() {
@@ -3068,13 +2950,11 @@ fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_p
     let alternate_source = current_source(&fixture.peers, fixture.alternate);
     let x1 = fixture.hash(0);
 
-    // The highest-ranked peer is asked for the first body, compact, alone.
     fixture.sync.tick();
     assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
     assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
     assert!(fixture.sync.owns_body_fetch(owner_source, x1));
 
-    // It answers `notfound`: the exact owner's request is released.
     assert!(
         fixture
             .sync
@@ -3082,8 +2962,6 @@ fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_p
     );
     assert!(!fixture.sync.owns_body_fetch(owner_source, x1));
 
-    // With one request peer per tick, the standard selection now picks the
-    // alternate; the unavailable owner is never polled for the body.
     for _ in 0..4 {
         fixture.sync.tick();
     }
@@ -3101,7 +2979,6 @@ fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_p
         "a peer that lacks a body is not punished"
     );
 
-    // The alternate supplies the body and the rest of the chain completes.
     fixture.deliver(alternate_source, 0)?;
     let mut requests: Vec<(usize, usize)> = Vec::new();
     for _ in 0..16 {
@@ -3144,7 +3021,6 @@ fn notfound_owner_with_request_headroom_is_skipped_and_the_alternate_serves_the_
     let owner_source = current_source(&fixture.peers, fixture.owner);
     let alternate_source = current_source(&fixture.peers, fixture.alternate);
 
-    // The whole chain goes to the highest-ranked peer in one compact batch.
     fixture.sync.tick();
     assert_eq!(
         fixture.owner_getdata(),
@@ -3156,9 +3032,6 @@ fn notfound_owner_with_request_headroom_is_skipped_and_the_alternate_serves_the_
     );
     assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
 
-    // It lacks the first body only and keeps the other two in flight, so the
-    // request scan visits both peers and the owner's plan names the refused
-    // body.
     assert!(
         fixture
             .sync
@@ -3191,10 +3064,6 @@ fn notfound_owner_with_request_headroom_is_skipped_and_the_alternate_serves_the_
 #[test]
 fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
     let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
-    // A lower-ranked third peer holds the body both higher-ranked peers
-    // lack. A budget-bounded ledger would let the second refusal evict the
-    // first, so the scheduler would alternate between the refusers and never
-    // reach this holder; retention-bounded records demote both refusers.
     let holder = test_addr(9_810, 2)?;
     let holder_rx = connect_peer(&fixture.peers, synthetic_peer(holder, 90));
     let owner_source = current_source(&fixture.peers, fixture.owner);
@@ -3202,7 +3071,6 @@ fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
     let holder_source = current_source(&fixture.peers, holder);
     let x0 = fixture.hash(0);
 
-    // The highest-ranked peer is asked first and answers `notfound`.
     fixture.sync.tick();
     assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
     assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
@@ -3213,8 +3081,6 @@ fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
             .block_not_found(owner_source, &[fixture.inventory(0, true)])
     );
 
-    // The second-ranked peer is asked next — not the demoted owner — and it
-    // answers `notfound` too.
     fixture.sync.tick();
     assert_eq!(
         fixture.owner_getdata(),
@@ -3232,8 +3098,6 @@ fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
             .block_not_found(alternate_source, &[fixture.inventory(0, true)])
     );
 
-    // Both refusals are retained, so the scan reaches the lower-ranked
-    // holder instead of alternating between the refusers.
     let now = Instant::now();
     assert!(
         fixture
@@ -3291,20 +3155,16 @@ fn notfound_only_releases_for_the_exact_current_owner_session() -> TestResult {
     fixture.sync.tick();
     assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
 
-    // A connection that does not own the request cannot release it, and is
-    // not remembered for it.
     assert!(
         !fixture
             .sync
             .block_not_found(alternate_source, &[fixture.inventory(0, true)])
     );
-    // The owner answering for a body nobody asked it for changes nothing.
     assert!(
         !fixture
             .sync
             .block_not_found(owner_source, &[fixture.inventory(1, true)])
     );
-    // Vectors that are not block vectors are left to their own lifecycles.
     let txid = bitcoin::Txid::from_byte_array([7; 32]);
     assert!(
         !fixture
@@ -3327,9 +3187,6 @@ fn notfound_only_releases_for_the_exact_current_owner_session() -> TestResult {
         );
     }
 
-    // A same-address replacement is a different connection: neither the
-    // retired session's late notfound nor the replacement's own releases the
-    // predecessor's request.
     let replacement_rx = connect_peer(&fixture.peers, synthetic_peer(fixture.owner, 200));
     let replacement_source = current_source(&fixture.peers, fixture.owner);
     assert_ne!(replacement_source, owner_source);
@@ -3356,8 +3213,6 @@ fn notfound_only_releases_for_the_exact_current_owner_session() -> TestResult {
         );
     }
 
-    // Ordinary session reconciliation hands the dead session's request to
-    // the standard scheduler: the replacement carries no inherited refusal.
     fixture.sync.tick();
     assert_eq!(
         drain_getdata_items(&replacement_rx),
@@ -3378,9 +3233,6 @@ fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() 
     assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
     assert!(fixture.sync.block_not_found(owner_source, &notfound));
 
-    // Nobody else can serve the body, and the owner is the last resort for
-    // it: nothing is sent and the owner is neither convicted nor starved
-    // forever.
     for _ in 0..4 {
         fixture.sync.tick();
     }
@@ -3393,8 +3245,6 @@ fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() 
         "a peer that lacks a body is not disconnected"
     );
 
-    // The retry interval is measured on the monotonic clock: once it has
-    // passed, the owner is asked exactly once more.
     let aged = Instant::now()
         .checked_sub(BODY_UNAVAILABLE_RETRY + Duration::from_secs(1))
         .ok_or("monotonic clock is younger than the retry interval")?;
@@ -3409,7 +3259,6 @@ fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() 
     fixture.sync.tick();
     assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
 
-    // A second notfound starts a fresh interval.
     assert!(fixture.sync.block_not_found(owner_source, &notfound));
     for _ in 0..3 {
         fixture.sync.tick();
@@ -3421,7 +3270,6 @@ fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() 
         Instant::now()
     ));
 
-    // The record belongs to the connection: it leaves with it.
     assert!(fixture.peers.disconnect_source(owner_source));
     fixture.sync.tick();
     assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
@@ -3448,8 +3296,6 @@ fn delivering_the_body_ends_the_notfound_demotion() -> TestResult {
         Instant::now()
     ));
 
-    // A peer that answered notfound and then delivers the body anyway shows
-    // it has the body: the delivery ends the record.
     fixture.deliver(owner_source, 0)?;
     fixture.sync.tick();
     assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
@@ -3468,8 +3314,6 @@ fn notfound_releases_a_deferred_owned_fetch_only_for_its_exact_owner() -> TestRe
     let x1 = fixture.hash(0);
     let notfound = [fixture.inventory(0, false)];
 
-    // A compact follow-up the owner was asked for before the header attached:
-    // the deferred ownership mark is the only record of the request.
     assert!(
         fixture
             .sync
@@ -3500,9 +3344,6 @@ fn notfound_releases_a_deferred_owned_fetch_only_for_its_exact_owner() -> TestRe
     Ok(())
 }
 
-/// Chain stub that runs one scripted action the next time the block tree is
-/// read: the deterministic way to land a wire event between a resolve's
-/// snapshot and its install.
 struct TreeReadHook {
     chain: Arc<TestChain>,
     on_next_tree_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -3601,8 +3442,6 @@ fn notfound_landing_inside_a_deferred_fetch_resolve_still_releases_the_exact_own
     assert!(sync.enqueue_owned_body_fetch(declining_source, declined, || true));
     assert!(sync.enqueue_owned_body_fetch(bystander_source, kept, || true));
 
-    // The owner's `notfound` lands after the resolve snapshot and before its
-    // install: the mark is still in the scheduler, so the answer matches it.
     let matched = Arc::new(Mutex::new(false));
     let action_sync = Arc::clone(&sync);
     let action_matched = Arc::clone(&matched);
@@ -3634,7 +3473,6 @@ fn notfound_landing_inside_a_deferred_fetch_resolve_still_releases_the_exact_own
         "a mark nobody released still resolves"
     );
 
-    // Nothing re-installs the declined request on a later resolve.
     sync.resolve_owned_body_fetches();
     assert!(!sync.owns_body_fetch(declining_source, declined));
     Ok(())
@@ -3649,9 +3487,6 @@ fn retired_generation_cannot_install_a_resolved_deferred_fetch_snapshot() -> Tes
             .sync
             .enqueue_owned_body_fetch(fixture.source, hash, || true)
     );
-    // Resolution has already produced (source, hash, height), but has not
-    // published it. Retire that generation while leaving its deferred mark
-    // present, as happens before the next scheduler session sweep.
     assert!(fixture.peers.disconnect_source(fixture.source));
     let addr = test_addr(9770, 0)?;
     let _replacement_rx = connect_peer(&fixture.peers, synthetic_peer(addr, 2));
@@ -3696,8 +3531,6 @@ fn unavailable_body_ledger_is_bounded_exact_source_and_expires() {
     let base = Instant::now();
     let mut ledger = UnavailableBodies::new();
 
-    // Retention-bounded, not budget-bounded: every live record is kept, so a
-    // small pending budget can no longer evict another peer's live answer.
     ledger.note(first, hash(1), base);
     ledger.note(first, hash(2), base + Duration::from_secs(1));
     ledger.note(second, hash(3), base + Duration::from_secs(2));
@@ -3736,9 +3569,6 @@ fn unavailable_body_ledger_is_bounded_exact_source_and_expires() {
 
 #[test]
 fn small_pending_budget_keeps_live_records_for_other_peers() -> TestResult {
-    // The window only ever holds one pending block, but the availability
-    // ledger is retention-bounded: two refusers alternating must not evict
-    // each other's live records and starve the replanned body.
     let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
     let owner_source = current_source(&fixture.peers, fixture.owner);
     let alternate_source = current_source(&fixture.peers, fixture.alternate);
@@ -3753,7 +3583,6 @@ fn small_pending_budget_keeps_live_records_for_other_peers() -> TestResult {
             .block_not_found(owner_source, &[fixture.inventory(0, true)])
     );
 
-    // The released body is replanned to the alternate, which refuses it too.
     for _ in 0..4 {
         fixture.sync.tick();
     }
@@ -3767,8 +3596,6 @@ fn small_pending_budget_keeps_live_records_for_other_peers() -> TestResult {
             .block_not_found(alternate_source, &[fixture.inventory(0, false)])
     );
 
-    // Both live refusal records survive despite the one-block budget, so a
-    // lower-ranked holder would still be asked instead of a refuser.
     let scheduler = fixture.sync.scheduler.lock();
     assert!(
         scheduler.body_unavailable.refuses(owner_source, x1, now),

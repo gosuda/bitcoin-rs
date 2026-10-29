@@ -1,4 +1,3 @@
-//! Pruning retention coverage for shallow reorg safety.
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -29,8 +28,6 @@ const AGGRESSIVE: PrunePolicy = PrunePolicy {
     keep_below_tip: 0,
 };
 
-/// A memory-backed store paired with a flat block store under a temporary
-/// data directory; the directory guard must outlive both.
 fn memory_store_with_block_files()
 -> Result<(Arc<MemoryStore>, tempfile::TempDir, FlatFileBlockStore), Box<dyn std::error::Error>> {
     let data_dir = tempdir()?;
@@ -38,8 +35,6 @@ fn memory_store_with_block_files()
     Ok((Arc::new(MemoryStore::default()), data_dir, block_files))
 }
 
-/// Runs one prune pass to `height`, with both the applied and durable tips a
-/// full reorg margin above it and nothing to do before the commit.
 fn prune_at(
     store: &MemoryStore,
     block_files: &FlatFileBlockStore,
@@ -57,16 +52,12 @@ fn prune_at(
     )
 }
 
-/// Returns whether a raw key is present in the block-body family.
 fn row_stored(store: &MemoryStore, key: &[u8]) -> Result<bool, StorageError> {
     Ok(store.get(BLOCK_DATA_CF, key)?.is_some())
 }
 
-/// One appended body row: height, hash, and its flat-file position.
 type StoredRow = (u32, Hash256, BlockFilePosition);
 
-/// Appends `(height, payload)` bodies into one flat file, writing each
-/// locator row plus the file's max-height row.
 fn write_body_rows(
     store: &MemoryStore,
     block_files: &FlatFileBlockStore,
@@ -172,11 +163,6 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
     Ok(())
 }
 
-/// A live retention lease clamps the manual prune line: rows the lease
-/// pins survive a prune that would otherwise delete them, the recorded
-/// line only names what actually went, a floor the line crossed is
-/// refused as gone, and releasing the lease hands the authority back
-/// exactly once (`RCV-08`).
 #[test]
 fn prune_to_height_respects_an_active_retention_lease() -> Result<(), Box<dyn std::error::Error>> {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
@@ -389,10 +375,6 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// The reservation is the prune/retention linearization point: a lease
-/// request that arrives after a pass planned its deletions but before the
-/// batch commits is refused, so it can never pin rows the batch staged. A
-/// pass that fails before committing releases the claim again.
 #[test]
 fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -499,8 +481,6 @@ fn executed_frontier_survives_restart_and_refuses_deleted_heights()
     Ok(())
 }
 
-/// Repeated passes, and rows a reorg reintroduces below the line, never move
-/// the persisted frontier backwards, and the rows stay deleted.
 #[test]
 fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -552,8 +532,6 @@ fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
     Ok(())
 }
 
-/// Missing metadata is valid before the first committed pass, even when
-/// history starts above genesis (for example after snapshot activation).
 #[test]
 fn unpruned_store_has_no_executed_frontier() -> Result<(), Box<dyn std::error::Error>> {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
@@ -581,8 +559,6 @@ fn unpruned_store_has_no_executed_frontier() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Neither survivor rows nor a requested line may substitute for the receipt
-/// of deletions. Startup cannot construct a retention registry from this state.
 #[test]
 fn missing_executed_frontier_after_prune_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
     for survivors in [false, true] {
@@ -602,7 +578,6 @@ fn missing_executed_frontier_after_prune_fails_closed() -> Result<(), Box<dyn st
             ExecutedFrontier::reconstruct(&*store),
             Err(StorageError::IncompatibleData(_))
         ));
-        // The per-pass receipt independently proves that this was pruned.
         let mut damaged = store.new_batch();
         damaged.delete(ColumnFamily::UtxoMeta, b"node:pruneheight");
         store.write(damaged)?;
@@ -611,7 +586,6 @@ fn missing_executed_frontier_after_prune_fails_closed() -> Result<(), Box<dyn st
             Err(StorageError::IncompatibleData(_))
         ));
     }
-    // Requested height without either other record must also refuse.
     let store = MemoryStore::default();
     store.put(
         ColumnFamily::UtxoMeta,
@@ -643,10 +617,6 @@ fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> Result<(), Box<dy
     Ok(())
 }
 
-/// A durability error is not a rollback receipt. Before the pass releases
-/// its claim it reconciles the persisted record: a provably-applied batch
-/// promotes the line, a provably-unapplied one releases the claim, and an
-/// unprovable one holds it until a restart reconciles record and deletions.
 #[test]
 fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -744,10 +714,6 @@ fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
     Ok(())
 }
 
-/// A retry at the same requested height can stage deletions whose batch then
-/// fails before apply: the frontier and requested height read back as the
-/// earlier pass's values, so only the per-batch receipt can refuse to
-/// mistake them for this pass's proof.
 #[test]
 fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -778,10 +744,6 @@ fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
     Ok(())
 }
 
-/// An optional consumer inside its budget still clamps the line; one that
-/// lags beyond it stops blocking pruning, and the owner tells it the
-/// capability is gone instead of the consumer guessing from a read that
-/// returns nothing.
 #[test]
 fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -828,27 +790,17 @@ fn fake_hash(height: u32) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-/// One-shot outcomes for the next `write_durable`, simulating the ambiguous
-/// durability error the `KvStore` contract documents: `Err` is not a
-/// rollback receipt.
 #[derive(Clone, Copy)]
 enum WriteDurableOutcome {
-    /// The atomic batch applied and durability completion then failed.
     AppliedThenFailed,
-    /// The batch never became visible.
     FailedBeforeApply,
 }
 
-/// The executed-frontier record key, mirrored here so the store can fault
-/// its reads; the pruning module keeps the constant private.
 const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
 
 struct MemoryStore {
     cfs: RwLock<Families>,
-    /// Armed outcome for the next `write_durable`.
     write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
-    /// Reads of `node:prune_executed` fail once this many have succeeded,
-    /// making a pass's write outcome unprovable at the reconcile.
     executed_reads_allowed: AtomicUsize,
 }
 
@@ -863,13 +815,10 @@ impl Default for MemoryStore {
 }
 
 impl MemoryStore {
-    /// Arms the outcome of the next `write_durable` call.
     fn arm_write_durable(&self, outcome: WriteDurableOutcome) {
         *self.write_durable_outcome.lock() = Some(outcome);
     }
 
-    /// Allows `allowed` reads of the executed-frontier record before its
-    /// reads start failing.
     fn arm_executed_reads(&self, allowed: usize) {
         self.executed_reads_allowed
             .store(allowed, AtomicOrdering::Relaxed);
@@ -904,7 +853,6 @@ impl KvStore for MemoryStore {
         Ok(guard[cf.index()].get(key).cloned())
     }
 
-    // RATIONALE: `KvIter` outlives the lock guard, so test rows are cloned before returning.
     #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
@@ -997,8 +945,6 @@ impl KvStore for MemoryStore {
 
 type Families = [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()];
 
-/// Ordered continuation scan over one family: seeks the map to the clamped
-/// start key and stops at the prefix end or the first row `limit` refuses.
 fn scan_family_from(
     rows: &BTreeMap<Vec<u8>, Vec<u8>>,
     prefix: &[u8],
@@ -1076,7 +1022,6 @@ impl KvSnapshot for MemorySnapshot {
         ))
     }
 
-    // RATIONALE: the returned `KvIter` must not borrow the caller-owned prefix slice.
     #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,

@@ -1,7 +1,4 @@
 //! Mempool-backend electrs extensions: `/internal/*` and `/block-template`.
-//!
-//! These are not wallet-facing. They exist so `mempool/backend` can set
-//! `ESPLORA_REST_API_URL` to the `/esplora` directory on this listener.
 
 use alloc::sync::Arc;
 use core::str::FromStr as _;
@@ -20,8 +17,6 @@ use crate::rest::Response;
 use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
 
-// Bound temporary prevouts on GET and POST, and owned bodies on POST, without
-// imposing a client-visible limit. Completed batches keep only response rows.
 const TRANSACTION_BATCH_SIZE: usize = 25;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
@@ -61,18 +56,12 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     if max_txs == 0 {
         return json_ok(Vec::<TransactionValue>::new());
     }
-    // A cursor previously matched the exact lowercase Display text. Parse
-    // once, but keep malformed, noncanonical, and absent cursors restarting
-    // at the beginning instead of silently broadening the accepted syntax.
     let last = last.and_then(|text| {
         let txid = Txid::from_str(text).ok()?;
         (txid.to_string() == text).then_some(txid)
     });
     let transactions = {
         let pool = ctx.mempool.gateway.read();
-        // Cursor lookup, selection, and Arc capture share one read guard.
-        // Only the selected page escapes the guard; no second lookup can
-        // observe a removal or replacement between selection and capture.
         let after = last
             .and_then(|txid| pool.entry_by_txid(&txid))
             .map(|entry| (entry.time, entry.txid));
@@ -81,7 +70,6 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
-        // Final ordering and transaction projection stay outside the guard.
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
@@ -91,8 +79,6 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
             .collect::<Vec<_>>()
     };
     let projection = Projection::new(ctx);
-    // Borrow the captured page, including parents in other batches, rather
-    // than depending on their continued presence in the live pool.
     let parents = transactions
         .iter()
         .map(|(txid, tx)| (*txid, tx.as_ref()))
@@ -110,13 +96,6 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     json_ok(values)
 }
 
-/// Selects the API-09 page without retaining the entire eligible suffix.
-///
-/// At most 2K borrowed entries are live for a positive limit K. Every full
-/// batch discards K entries in linear time; only the final page is cloned by
-/// the caller. `Vec` capacity grows with observed entries, not an untrusted
-/// requested limit. Selection holds the caller's read guard; it trades that
-/// work for bounded scratch space and avoids `Arc` churn on rejected entries.
 fn select_mempool_page<'a>(
     entries: impl Iterator<Item = &'a MempoolEntry>,
     after: Option<(u64, Txid)>,
@@ -133,13 +112,9 @@ fn select_mempool_page<'a>(
             continue;
         }
         selected.push(entry);
-        // This is len >= 2K without multiplying the caller's usize limit.
-        // K > 0 also proves the nth index is strictly below the length.
         if selected.len() / 2 >= max_txs {
             let (_, excluded, _) =
                 selected.select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
-            // Txids are unique in a pool snapshot. Everything retained is
-            // strictly before this first excluded key; later keys cannot win.
             cutoff = Some((excluded.time, excluded.txid));
             selected.truncate(max_txs);
         }
@@ -152,7 +127,7 @@ fn select_mempool_page<'a>(
 }
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
-    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
+    let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
         return bad_request("transaction request body must be a JSON array of txids");
     };
     let ids = match text_ids
@@ -200,7 +175,7 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
 }
 
 fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
+    let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
         return bad_request("outspend request body must be a JSON array of txids");
     };
     let projection = Projection::new(ctx);
@@ -220,7 +195,7 @@ fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
 }
 
 fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(outpoints) = serde_json::from_slice::<Vec<String>>(body) else {
+    let Ok(outpoints) = sonic_rs::from_slice::<Vec<String>>(body) else {
         return bad_request("outspend request body must be a JSON array of outpoints");
     };
     let projection = Projection::new(ctx);
@@ -273,7 +248,7 @@ mod pagination_tests {
     use bitcoin_rs_primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
-    use serde_json::Value;
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
     use super::{internal_mempool_txs, select_mempool_page};
     use crate::context::Context;
@@ -282,8 +257,6 @@ mod pagination_tests {
         let ctx = Context::new();
         let mut expected = Vec::new();
         for (index, &time) in times.iter().enumerate() {
-            // No-input fixtures isolate the projection/pagination owner;
-            // they do not claim to exercise consensus or admission validity.
             let tx = Tx {
                 version: 2,
                 inputs: Vec::new(),
@@ -304,7 +277,6 @@ mod pagination_tests {
                 .insert_entry(entry)
                 .expect("insert independent fixture entry");
         }
-        // Independent reference: fully order all admission keys, then slice.
         expected.sort_unstable();
         (ctx, expected)
     }
@@ -317,7 +289,7 @@ mod pagination_tests {
             "{}",
             String::from_utf8_lossy(&response.body)
         );
-        let values: Value = serde_json::from_slice(&response.body).expect("response JSON");
+        let values: Value = sonic_rs::from_slice(&response.body).expect("response JSON");
         values
             .as_array()
             .expect("transaction array")
@@ -362,9 +334,6 @@ mod pagination_tests {
         }
     }
 
-    // Contract: docs/contracts/external-api.md, API-09 (Esplora dialects),
-    // which defines exact lowercase txid cursors and restart behavior for
-    // malformed, noncanonical, unknown, and missing values.
     #[test]
     fn noncanonical_and_missing_cursors_keep_restart_behavior() {
         let (ctx, expected) = fixture(&[4, 1, 4, 2, 4, 3]);
@@ -436,8 +405,6 @@ mod pagination_tests {
         assert_eq!(page(&ctx, None, "max_txs=0"), []);
     }
 
-    // API-09 in docs/contracts/external-api.md owns order and strict cursor
-    // exclusion. Full sorting is the independent selection reference.
     #[test]
     fn batched_selection_matches_full_sort_across_flush_boundaries() {
         let entries: Vec<_> = (0_u32..257)
@@ -473,7 +440,6 @@ mod pagination_tests {
         }
     }
 
-    // Regression: selection borrows candidates and clones only the returned page.
     #[test]
     fn selection_borrows_payloads_and_only_the_final_page_is_cloned() {
         let entries: Vec<_> = (0_u32..129)
@@ -524,7 +490,6 @@ mod pagination_tests {
         );
     }
 
-    // Regression: a zero-sized page must not traverse the pool.
     #[test]
     fn zero_selection_does_not_poll_the_pool_iterator() {
         let entries = std::iter::from_fn(|| -> Option<&MempoolEntry> {

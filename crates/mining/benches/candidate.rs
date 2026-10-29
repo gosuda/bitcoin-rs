@@ -1,41 +1,3 @@
-//! End-to-end mining candidate benchmarks for package selection and coinbase finish.
-//!
-//! Each iteration selects from the pool's maintained chunk index and assembles
-//! the observable candidate result. Budgets stay unset until a measured p95
-//! plus run-to-run noise is recorded.
-//!
-//! Fixtures:
-//! - `end_to_end/{0,64,512,2048,20000,50000,100000}`: the historical pool —
-//!   every eighth transaction spends its immediate predecessor (two-member
-//!   clusters), the rest are independent roots; extending it to 100,000
-//!   entries answers the mature-pool scaling question.
-//! - `chains/depth-25`: 20,000 transactions as 800 explicit 25-deep chains, so
-//!   each 25-member cluster exercises the linearization solver below the
-//!   default 64 cluster limit.
-//!
-//! The `mining_snapshot_operation` rows are the operation baseline for
-//! `mining_snapshot` — the whole-pool copy mining takes per template cache
-//! miss. The timed span covers only the call: an `Instant` wraps it and the
-//! snapshot drops after the elapsed read, so neither the 100,000-entry
-//! teardown nor construction sits inside the reported time. `pool` is a
-//! direct `Mempool`, so the baseline names the copy operation, not a
-//! lock-acquisition claim. Step 19's indexed selection reports against the
-//! same call-only boundary.
-//!
-//! Counted rows (`--mrp-counted ROW_ID`, one warmup + ten measured samples,
-//! one second of accumulated measured whole-unit time per sample): every
-//! `mining_snapshot_operation/mining_snapshot/{64,512,2048,20000,50000,
-//! 100000,chains/depth-25}` row and `indexed_selection_read_guard/read_guard/
-//! 100000`. Snapshot rows keep pool construction and the untimed warm-up
-//! snapshot (with its size assertion) outside the measured units; each unit
-//! times only the `mining_snapshot` call. Residency assertions and the copy
-//! drop are untimed. The guard row keeps the `RwLock` pool and initial warmed
-//! selection outside the measured units; each unit acquires the guard
-//! untimed and times the selection plus the guard drop, with the body's
-//! `black_box` and drop outside.
-//!
-//! PERF: Criterion emits public harness items whose docs are irrelevant to the
-//! benchmark report.
 #![allow(missing_docs)]
 #![allow(clippy::expect_used)]
 
@@ -60,16 +22,8 @@ mod measured_samples;
 #[path = "../../../tools/benchmark-support/snapshot_order.rs"]
 mod snapshot_order;
 
-/// Independent-transaction pool sizes for the cache-miss scaling question.
-///
-/// 0, 64, 512, and 2,048 keep the historical pool sizes, but the methodology
-/// changed: assembly now reads the pool directly, with no per-iteration
-/// snapshot copy, so earlier timings are not comparable. 20,000, 50,000, and
-/// 100,000 pin the mature-pool medians the step 19 gate reads. Construction
-/// is untimed setup.
 const INDEPENDENT_POOL_SIZES: [usize; 7] = [0, 64, 512, 2_048, 20_000, 50_000, 100_000];
 
-/// The 25-deep-chain pool size: 800 chains of 25 transactions.
 const CHAIN_POOL_CHAINS: usize = 800;
 const CHAIN_DEPTH: usize = 25;
 
@@ -114,9 +68,6 @@ fn distinct_tx(seed: u64, parent: Option<Txid>) -> Tx {
     }
 }
 
-/// Builds a pool of `count` transactions where every eighth transaction spends
-/// its immediate predecessor (two-member clusters, the historical fixture) and
-/// the rest are independent roots.
 fn snapshot_with(count: usize) -> Mempool {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -139,10 +90,6 @@ fn snapshot_with(count: usize) -> Mempool {
     pool
 }
 
-/// Builds `chains` chains of `CHAIN_DEPTH` transactions each: a fresh root
-/// transaction, then 24 children each spending the previous txid, one
-/// 25-member cluster per chain — the historical fixture that exercises the
-/// solver.
 fn chained_snapshot() -> Mempool {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -165,10 +112,6 @@ fn chained_snapshot() -> Mempool {
     pool
 }
 
-/// Inserts one fixture transaction spending `parent` (or a distinct synthetic
-/// outpoint) with the historical entry fields, and returns the inserted
-/// transaction's txid — recomputing it later would be wrong, because the
-/// parent hash is folded into the txid.
 fn insert_fixture_tx(pool: &mut Mempool, seed: u64, parent: Option<Txid>) -> Txid {
     let tx = distinct_tx(seed, parent);
     let txid = tx.txid();
@@ -227,10 +170,6 @@ fn assemble_candidate_bench(c: &mut Criterion) {
     group.finish();
 }
 
-/// One counted read-guard unit: the guard is acquired untimed; the measured
-/// span covers the selection call plus the guard drop. The body's `black_box`
-/// and drop land outside the timer, so no coinbase, Merkle, or witness work
-/// runs under the guard.
 fn counted_guard_unit(
     pool: &parking_lot::RwLock<Mempool>,
     ctx: &CandidateContext,
@@ -247,11 +186,6 @@ fn counted_guard_unit(
     elapsed
 }
 
-/// Counted sampling for the read-guard row at the 100,000-entry pool: the
-/// `RwLock` pool and the untimed initial warmed selection stay outside the
-/// measured units; each unit acquires the guard untimed, times the selection
-/// plus the guard drop, and runs the body's `black_box` and drop outside, so
-/// no coinbase, Merkle, or witness work runs under the guard.
 fn indexed_selection_read_guard_counted() {
     let row = "indexed_selection_read_guard/read_guard/100000";
     let pool = parking_lot::RwLock::new(snapshot_with(100_000));
@@ -264,7 +198,6 @@ fn indexed_selection_read_guard_counted() {
     measured_samples::run(row, || counted_guard_unit(&pool, &ctx, &payout));
 }
 
-/// The counted rows this bench owns, for the shared CLI gate and dispatch.
 fn counted_rows_owned() -> Vec<&'static str> {
     vec![
         "mining_snapshot_operation/mining_snapshot/64",
@@ -278,22 +211,12 @@ fn counted_rows_owned() -> Vec<&'static str> {
     ]
 }
 
-/// The counted CLI action selected by one validated invocation.
 enum CountedAction {
-    /// `--mrp-list-counted`: print every owned row, no fixtures.
     List,
-    /// `--mrp-verify-counted`: each real unit once, no sample records.
     Verify,
-    /// `--mrp-counted ROW_ID`: run the one row through the counted sampler.
     Run(usize),
 }
 
-/// Counted CLI over the args collected once: `--mrp-counted ROW_ID` selects
-/// exactly one known row, `--mrp-list-counted` and `--mrp-verify-counted`
-/// take no rows, and once a counted flag occurs the args must be exactly
-/// that flag (plus its `ROW_ID`): duplicates, extra arguments, and mixed
-/// legacy flags are malformed. Returns the counted action when one was
-/// requested, or `None` for the default Criterion path.
 fn counted_cli_action(
     args: &[String],
     rows: &[&'static str],
@@ -326,11 +249,6 @@ fn counted_cli_action(
     ))
 }
 
-/// One counted snapshot unit over `pool`: the timed `mining_snapshot` call
-/// matches the old `iter_custom` body exactly — the elapsed read lands before
-/// any residency check, and the copy drops after. `pool` is a direct
-/// `Mempool`, so the baseline names the copy operation, not a
-/// lock-acquisition claim.
 fn counted_snapshot_unit(pool: &Mempool, unit_count: usize) -> Duration {
     let start = Instant::now();
     let snapshot = pool.mining_snapshot();
@@ -345,8 +263,6 @@ fn counted_snapshot_unit(pool: &Mempool, unit_count: usize) -> Duration {
     elapsed
 }
 
-/// Warmed independent-transaction fixture: pool construction plus the untimed
-/// warm-up snapshot with its size assertion. Returns the pool for the measured units.
 fn warmed_snapshot_fixture(count: usize) -> Mempool {
     let pool = snapshot_with(count);
     let warmed = pool.mining_snapshot();
@@ -359,8 +275,6 @@ fn warmed_snapshot_fixture(count: usize) -> Mempool {
     pool
 }
 
-/// Warmed 800×25 chained fixture: the same boundary over the chained pool.
-/// Returns the pool for the measured units.
 fn warmed_chained_fixture() -> Mempool {
     let pool = chained_snapshot();
     let warmed = pool.mining_snapshot();
@@ -373,15 +287,11 @@ fn warmed_chained_fixture() -> Mempool {
     pool
 }
 
-/// One counted snapshot row: pool construction and the untimed warm-up
-/// snapshot (with its size assertion) stay outside the measured units.
 fn snapshot_row(row: &str, unit_count: usize) {
     let pool = warmed_snapshot_fixture(unit_count);
     measured_samples::run(row, || counted_snapshot_unit(&pool, unit_count));
 }
 
-/// One counted chained snapshot row: the same boundary over the 800×25
-/// chained fixture.
 fn chained_snapshot_row(row: &str) {
     let pool = warmed_chained_fixture();
     measured_samples::run(row, || {
@@ -389,8 +299,6 @@ fn chained_snapshot_row(row: &str) {
     });
 }
 
-/// Counted sampling for every `mining_snapshot` row, replacing the former
-/// Criterion group; existing fixture assertions are preserved.
 fn snapshot_operation_counted(requested: &str) {
     if requested.ends_with("chains/depth-25") {
         chained_snapshot_row(requested);
@@ -440,15 +348,11 @@ fn main() {
     Criterion::default().configure_from_args().final_summary();
 }
 
-/// One untimed counted snapshot unit with its warm-up assertions; used by
-/// `--mrp-verify-counted` without campaign sample records.
 fn verify_snapshot_unit(count: usize) {
     let pool = warmed_snapshot_fixture(count);
     counted_snapshot_unit(&pool, count);
 }
 
-/// One untimed counted read-guard unit with its warmed selection; used by
-/// `--mrp-verify-counted` without campaign sample records.
 fn verify_guard_unit(ctx: &CandidateContext, payout: &[u8]) {
     let pool = parking_lot::RwLock::new(snapshot_with(100_000));
     let guarded = pool.read();
@@ -459,10 +363,6 @@ fn verify_guard_unit(ctx: &CandidateContext, payout: &[u8]) {
     counted_guard_unit(&pool, ctx, payout);
 }
 
-/// Untimed counted verification for `--mrp-verify-counted`: each converted
-/// real unit once over every snapshot shape plus the read guard, then the
-/// shared stopping-rule arithmetic — no campaign sample records, no timing
-/// output.
 fn mrp_verify_counted() {
     let ctx = context();
     let payout = [0x51_u8];
@@ -484,14 +384,11 @@ fn mrp_verify_counted() {
     println!("mrp_verify_counted stopping_rule pass");
 }
 
-/// One untimed counted chained snapshot unit with its warm-up assertions;
-/// used by `--mrp-verify-counted` without campaign sample records.
 fn verify_chained_snapshot_unit() {
     let pool = warmed_chained_fixture();
     counted_snapshot_unit(&pool, CHAIN_POOL_CHAINS * CHAIN_DEPTH);
 }
 
-/// Deterministic fingerprint of a selected body: transaction order and fees.
 fn body_fingerprint(body: &SelectedBody) -> u64 {
     let mut state = snapshot_order::FNV_OFFSET;
     for tx in &body.transactions {
@@ -501,8 +398,6 @@ fn body_fingerprint(body: &SelectedBody) -> u64 {
     state
 }
 
-/// Every selected transaction must be resident, and the pool snapshot must
-/// satisfy [`snapshot_order::assert_snapshot_topological`].
 fn assert_selection_sound(pool: &Mempool, body: &SelectedBody) {
     for tx in &body.transactions {
         assert!(
@@ -513,9 +408,6 @@ fn assert_selection_sound(pool: &Mempool, body: &SelectedBody) {
     snapshot_order::assert_snapshot_topological(pool);
 }
 
-/// First snapshot entry no pool transaction spends: removing it confirms
-/// exactly one entry, so a hand-built single-removal plan and the real
-/// block removal must agree entry for entry.
 fn childless_victim(pool: &Mempool) -> (Txid, Arc<Tx>) {
     let snapshot = pool.mining_snapshot();
     let mut spent: std::collections::HashSet<Txid> = std::collections::HashSet::new();
@@ -642,9 +534,6 @@ fn mrp_verify_removal_plan(ctx: &CandidateContext, payout: &[u8]) {
     );
 }
 
-/// Untimed MRP verification for `--mrp-verify`: the real historical and
-/// chained fixtures with residency, selection-soundness, chunk-order, and
-/// removal-plan assertions. Prints fingerprints only, never timing data.
 fn mrp_verify() {
     let ctx = context();
     let payout = [0x51_u8];

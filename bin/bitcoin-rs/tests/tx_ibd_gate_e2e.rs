@@ -1,18 +1,3 @@
-//! L1: transaction ingress is gated on initial block download, over the real
-//! P2P wire against a spawned bitcoin-rs daemon (regtest, fjall).
-//!
-//! Bitcoin Core requests no announced transaction and drops unsolicited `tx`
-//! bodies while in initial block download (net_processing.cpp:4401-4404,
-//! :4713-4716). This test pins the same behavior on the wire:
-//!
-//!  * phase 1: a fresh node reports `initialblockdownload == true`; an
-//!    announced transaction draws no `getdata`, and its body is neither
-//!    admitted nor relayed to a bystander peer.
-//!  * phase 2: a locally built, mature regtest chain is applied, the applied
-//!    tip becomes recent, and the node leaves initial block download.
-//!  * phase 3: the same announcement is now requested, the delivered body is
-//!    admitted, and the mempool grows to exactly one entry.
-
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -32,24 +17,16 @@ use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 mod wire_peer;
 use wire_peer::Peer;
 
-use serde_json::{Value, json};
+use sonic_rs::{JsonValueTrait as _, Value, json};
 
 const REGTEST_BITS: u32 = 0x207f_ffff;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bounded window during which an absence must persist: admission and relay
-/// run asynchronously behind the bounded ingress channel.
 const ABSENCE_WINDOW: Duration = Duration::from_millis(1_500);
-
-// ---------------------------------------------------------------------------
-// Minimal wire peer
-// ---------------------------------------------------------------------------
 
 struct GatePeer {
     wire: Peer,
-    /// Every decoded getdata frame, flattened to `(inv_type, hash)` pairs.
     getdata_seen: Vec<Vec<(u32, String)>>,
-    /// Transaction ids announced to us by the node (relay reachability).
     relayed_seen: Vec<String>,
 }
 
@@ -68,10 +45,6 @@ impl GatePeer {
         })
     }
 
-    /// Sends `inv` followed by a ping barrier and pumps until the pong
-    /// returns, recording every getdata frame seen on the way. The node
-    /// processes wire messages in order, so the pong proves the `inv` was
-    /// fully handled.
     fn announce_with_barrier(&mut self, items: Vec<Inventory>, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         self.wire.send(NetworkMessage::Inv(items), deadline)?;
@@ -79,7 +52,6 @@ impl GatePeer {
         self.pump_until_pong(nonce, deadline)
     }
 
-    /// Ping barrier without an announcement.
     fn bar(&mut self, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         self.wire.send(NetworkMessage::Ping(nonce), deadline)?;
@@ -95,8 +67,6 @@ impl GatePeer {
                 Ok(NetworkMessage::Pong(reply)) if reply == nonce => return Ok(()),
                 Ok(NetworkMessage::GetData(items)) => self.record_getdata(&items),
                 Ok(NetworkMessage::GetHeaders(_)) => {
-                    // Keep the wire quiet: an empty headers reply is always a
-                    // valid answer and never advances header sync.
                     let _ = self
                         .wire
                         .send(NetworkMessage::Headers(Vec::new()), deadline);
@@ -112,8 +82,6 @@ impl GatePeer {
         Err(Error::Protocol("peer dropped during barrier".to_owned()))
     }
 
-    /// Pumps for `dur`: answers pings and getheaders, records getdata and
-    /// relayed inv announcements.
     fn pump(&mut self, dur: Duration) {
         let end = Instant::now() + dur;
         while Instant::now() < end && !self.wire.dropped {
@@ -123,9 +91,6 @@ impl GatePeer {
                 }
                 Ok(NetworkMessage::Inv(items)) => {
                     for item in items {
-                        // The peer negotiated wtxid relay, so the node may
-                        // announce either encoding; both name the same
-                        // transaction for the purposes of this gate.
                         let announced = match item {
                             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                                 Some(txid.to_string())
@@ -180,8 +145,6 @@ impl GatePeer {
             .any(|(_, hash)| hash == txid)
     }
 
-    /// Whether `tx` was announced under either inventory encoding: its txid
-    /// for `Transaction`/`WitnessTransaction` or its wtxid for `WTx`.
     fn relayed(&self, tx: &Transaction) -> bool {
         let txid = tx.compute_txid().to_string();
         let wtxid = tx.compute_wtxid().to_string();
@@ -191,11 +154,6 @@ impl GatePeer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: the relayed transaction and the mature funding chain
-// ---------------------------------------------------------------------------
-
-/// UNIX seconds now, clamped into u32.
 fn now_unix() -> u32 {
     u32::try_from(
         SystemTime::now()
@@ -205,7 +163,6 @@ fn now_unix() -> u32 {
     .unwrap_or(u32::MAX)
 }
 
-/// Coinbase paying `value` sats to `OP_TRUE`, with the BIP34 height push.
 fn op_true_coinbase(height: u32, value: u64) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -223,7 +180,6 @@ fn op_true_coinbase(height: u32, value: u64) -> Transaction {
     }
 }
 
-/// Anyone-can-spend funding transaction paying `value` sats to `OP_TRUE`.
 fn funding_tx(previous_output: OutPoint, value: u64) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -241,7 +197,6 @@ fn funding_tx(previous_output: OutPoint, value: u64) -> Transaction {
     }
 }
 
-/// The relayed transaction: spends the funding output into one `OP_RETURN`.
 fn relayed_tx(funding: &Transaction, value: u64) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -259,8 +214,6 @@ fn relayed_tx(funding: &Transaction, value: u64) -> Transaction {
     }
 }
 
-/// Builds one block on `parent` at `time` carrying `txs`, ground to the
-/// declared regtest target.
 fn build_block(parent: &Block, time: u32, txs: Vec<Transaction>) -> Block {
     let mut block = Block {
         header: BlockHeader {
@@ -286,9 +239,6 @@ fn build_block(parent: &Block, time: u32, txs: Vec<Transaction>) -> Block {
     block
 }
 
-/// Builds the mature chain the relayed transaction spends from: coinbase-only
-/// blocks at heights 1..=100, then block 101 carrying the funding transaction
-/// that spends the height-1 coinbase (mature exactly at depth 100).
 fn build_funding_chain(base_time: u32) -> (Vec<Block>, Transaction) {
     let genesis = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
     let mut blocks: Vec<Block> = Vec::new();
@@ -326,10 +276,6 @@ fn hex_body(block: &Block) -> String {
     bitcoin::consensus::encode::serialize_hex(block)
 }
 
-// ---------------------------------------------------------------------------
-// RPC helpers
-// ---------------------------------------------------------------------------
-
 fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
     node.rpc(method, &json!([]))
 }
@@ -337,20 +283,19 @@ fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
 fn initial_block_download(node: &mut ProcessNode) -> bool {
     rpc(node, "getblockchaininfo")
         .ok()
-        .and_then(|info| info.get("initialblockdownload").and_then(Value::as_bool))
+        .and_then(|info| {
+            info.get("initialblockdownload")
+                .and_then(sonic_rs::JsonValueTrait::as_bool)
+        })
         .unwrap_or(true)
 }
 
-/// `None` on a transient RPC failure: callers decide whether absence of an
-/// answer proves anything.
 fn mempool_size(node: &mut ProcessNode) -> Option<u64> {
     rpc(node, "getmempoolinfo")
         .ok()
-        .and_then(|info| info.get("size").and_then(Value::as_u64))
+        .and_then(|info| info.get("size").and_then(sonic_rs::JsonValueTrait::as_u64))
 }
 
-/// Polls `check` until it holds or `dur` elapses, pumping `peer` between
-/// polls so the node keeps making progress.
 fn wait_with_pump(
     node: &mut ProcessNode,
     peer: &mut GatePeer,
@@ -369,17 +314,12 @@ fn wait_with_pump(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The L1 test
-// ---------------------------------------------------------------------------
-
 #[test]
 fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = GatePeer::connect(&node, "gate")?;
     let mut bystander = GatePeer::connect(&node, "bystander")?;
 
-    // Phase 1a: a fresh node is in initial block download.
     assert!(
         initial_block_download(&mut node),
         "a node with no applied tip must report initial block download"
@@ -389,14 +329,12 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
     let relayed = relayed_tx(&funding, 30_000);
     let txid = relayed.compute_txid();
 
-    // Phase 1b: an announced transaction draws no getdata while in IBD.
     peer.announce_with_barrier(vec![Inventory::Transaction(txid)], 7_001)?;
     assert!(
         !peer.txid_requested(&txid.to_string()),
         "the node requested a transaction while in initial block download"
     );
 
-    // Phase 1c: the delivered body is not admitted and not relayed.
     let deadline = Instant::now() + REQUEST_TIMEOUT;
     peer.wire
         .send(NetworkMessage::Tx(relayed.clone()), deadline)?;
@@ -416,8 +354,6 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
         );
     }
 
-    // Phase 2: apply the mature funding chain; the recent applied tip ends
-    // initial block download.
     let genesis = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
     node.rpc("submitblock", &json!([hex_body(&genesis)]))?;
     for block in &blocks {
@@ -434,7 +370,6 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
         "the node never left initial block download after applying a recent tip"
     );
 
-    // Phase 3: the same announcement is now requested and admitted.
     peer.announce_with_barrier(vec![Inventory::Transaction(txid)], 7_003)?;
     let request_deadline = Instant::now() + REQUEST_TIMEOUT;
     while !peer.txid_requested(&txid.to_string()) && Instant::now() < request_deadline {

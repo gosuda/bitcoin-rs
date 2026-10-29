@@ -4,11 +4,8 @@ use super::{
     IndexCapability, IndexProgress, TxQueryError, derived_index_status,
 };
 
-/// Progress reads that raced a tip or revision move before the status
-/// report gives up on a coherent answer for this snapshot.
 const PROGRESS_READ_ATTEMPTS: usize = 4;
 
-/// Worker-owned txindex facts for the RPC capability projection.
 pub struct DerivedIndexCapability {
     lifecycle: Option<Arc<ArcSwap<DerivedIndexLifecycle>>>,
     runtime: Option<Arc<DerivedIndexRuntime>>,
@@ -16,8 +13,6 @@ pub struct DerivedIndexCapability {
 }
 
 impl DerivedIndexCapability {
-    /// Builds transaction/script status over the shared worker publication cells.
-    /// Compact-filter readiness is exposed separately through its query adapter.
     #[must_use]
     pub fn new(
         lifecycle: Option<Arc<ArcSwap<DerivedIndexLifecycle>>>,
@@ -55,10 +50,6 @@ impl DerivedIndexCapability {
             IndexCapabilities::COMPACT_FILTERS,
             super::ReconcileLeg::Forward,
         );
-        // Read once. While the outage is set the ScriptLive leg is observed as
-        // Forward, so a stale ScriptLive rollback can never block servable
-        // capabilities. In reachable states the leg is already Forward, making
-        // this mask a no-op; it only guards against setter-side drift.
         let script_live_outage = runtime.script_live_failure.read().clone();
         let observed = if script_live_outage.is_some() {
             phase.with_leg(IndexCapabilities::SCRIPT_LIVE, super::ReconcileLeg::Forward)
@@ -71,9 +62,6 @@ impl DerivedIndexCapability {
                 to_height,
             };
         }
-        // Scoped ScriptLive outage: keep reporting TxLookup/ScriptHistory readiness
-        // over the servable set. Only when nothing servable remains is the row Failed.
-        // Global health, `publish_failed`, and the readiness latch are untouched.
         if let Some(reason) = script_live_outage {
             let servable = enabled.without(IndexCapability::ScriptLive);
             if servable.is_empty() {

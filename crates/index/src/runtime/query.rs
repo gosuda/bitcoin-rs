@@ -1,6 +1,4 @@
 //! One snapshot gate for transaction, history, and live-view queries.
-//! Resolution and script traversal stay in private child modules; all public
-//! entrypoints retain health, revision, watermark, and chain-transition checks.
 
 use super::{
     Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
@@ -18,17 +16,6 @@ mod filters;
 mod scripts;
 mod transactions;
 
-/// Aggregate work budget shared by every operation in one public query.
-///
-/// Also pins at most one query-scoped decoded block: consecutive full-block
-/// reads at the same `(height, hash)` identity reuse the retained block, while
-/// a read at any other identity evicts it before fetching and decoding the new
-/// block, so an evicted identity is re-read and re-charged on its next use.
-/// Positioned range reads do not use the memo. The memo lives and dies
-/// with the budget, so separate public queries never share entries. Every
-/// pinned body was first charged to `remaining_bytes`, so the pinned block's
-/// serialized body bytes never exceed `QUERY_SCAN_BYTE_LIMIT`; its decoded
-/// heap size is larger.
 pub(super) struct QueryBudget {
     remaining_rows: usize,
     remaining_bytes: usize,
@@ -131,11 +118,6 @@ impl QueryBudget {
         Ok(())
     }
 
-    /// Returns the decoded block retained for `(height, hash)`. A hit costs no
-    /// body budget: the reserve and the byte charge happened on the miss that
-    /// cached it. A miss evicts the previously retained block, if any, before
-    /// the caller fetches and decodes a new one, so a failed fetch or decode
-    /// leaves the memo empty instead of pinning a stale identity.
     pub(super) fn memoized_block(&mut self, height: u32, hash: Hash256) -> Option<Arc<Block>> {
         if let Some((memo_height, memo_hash, block)) = &self.block_memo {
             if *memo_height == height && *memo_hash == hash {
@@ -146,10 +128,6 @@ impl QueryBudget {
         None
     }
 
-    /// Pins a successfully verified block as the single retained entry,
-    /// replacing whatever the memo held, and returns the shared handle. Only
-    /// call this after verification: failures must leave the memo as the miss
-    /// left it (empty).
     pub(super) fn memoize_block(
         &mut self,
         height: u32,
@@ -161,31 +139,19 @@ impl QueryBudget {
     }
 }
 
-/// Authoritative Live query sources: capability selection, the UTXO set, and
-/// the chain-transition lock Live composition requires.
 pub(crate) struct QueryEngineLive {
-    /// Authoritative UTXO set for the compact live view.
     pub(crate) utxo: Option<bitcoin_rs_utxo::UtxoReader>,
-    /// Serializes live-view work against a chain transition.
     pub(crate) chain_transition: Option<bitcoin_rs_chain::StableRead>,
-    /// Capability set this engine serves.
     pub(crate) enabled: IndexCapabilities,
 }
 
-/// First covered height per history-derived capability, loaded from the
-/// snapshot's durable floor records. `0` means coverage from genesis; a
-/// positive value means the prefix below it was pruned, so a row's absence
-/// there is unproven and queries answer `Unavailable` instead of `None`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CapabilityFloors {
-    /// `TxLookup` first covered height.
     pub(crate) tx_lookup: u32,
-    /// `ScriptHistory` first covered height.
     pub(crate) script_history: u32,
 }
 
 impl CapabilityFloors {
-    /// Assigns `floor` to `capability`'s slot. `ScriptLive` has no coverage
     /// floor. It reseeds from an immutable artifact or retained history, so it stores nothing.
     pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
         match capability {
@@ -196,55 +162,25 @@ impl CapabilityFloors {
     }
 }
 
-/// Shared hop budget for one historical query's ancestry walks.
-///
-/// The budget is shared across every watermark join in one call, so a fleet
-/// of deep stale branches cannot each spend a full budget. Trusted
-/// active-prefix joins are free via the height index; only side-branch
-/// parent hops consume the budget. `256` covers organic reorgs (tens of
-/// blocks) with wide margin while still failing closed on deep stale
-/// branches instead of walking unbounded history.
 pub(super) const HISTORICAL_ANCESTRY_BUDGET: usize = 256;
 
-/// Which row-filtering and absence rule a [`ReadPrefix`] carries.
-///
-/// `ExactTip` preserves the strict exact-tip contract byte for byte: no
 /// above-anchor/below-floor skip, pruned-prefix refusals on positive floors.
-/// `AtMost` serves historical `[floor, anchor]` coverage on `chain(anchor)`:
-/// rows outside the range are skipped before body reads and scoped absence
-/// is `Ok(None)` (full history stays `HistoryUnproven` via the shared
-/// helper, never silent partial completeness).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PrefixBound {
-    /// Strict exact-tip read: anchor equals the published tip.
     ExactTip,
-    /// Historical covered-prefix read: rows prove `[floor, anchor]`.
     AtMost,
 }
 
-/// One stack-owned historical read descriptor.
-///
-/// Built on the stack per query from one immutable snapshot plus one bounded
-/// ancestry walk; it carries no heap, no cache, and no persistent state.
-/// `anchor_id` names the common covered ancestor in the live tree,
-/// `height`/`hash` its chain identity, `floor` the maximum consumed floor,
-/// and `bound` the filtering/absence rule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadPrefix {
-    /// Tree identity of the common covered ancestor.
     pub(super) anchor_id: NodeId,
-    /// Anchor height on `chain(anchor)`.
     pub(super) height: u32,
-    /// Full chain hash at the anchor height.
     pub(super) hash: Hash256,
-    /// Maximum consumed floor for the call.
     pub(super) floor: u32,
-    /// Filtering and absence rule.
     pub(super) bound: PrefixBound,
 }
 
 impl ReadPrefix {
-    /// Returns whether `height` is provable under this prefix.
     pub(super) fn covers(&self, height: u32) -> bool {
         match self.bound {
             PrefixBound::ExactTip => true,
@@ -263,12 +199,6 @@ pub(super) fn map_historical_error(error: TxQueryError) -> HistoricalQueryError 
     }
 }
 
-/// Node-owned, snapshot-gated transaction-index query engine.
-///
-/// Each query reads one typed point-in-time snapshot and checks worker health.
-/// Strict queries require an unchanged revision and applied tip. Historical
-/// queries retain a covered ancestor and require that ancestor to remain active.
-/// Both paths return typed `Retry` or `Unavailable` when the answer is unproven.
 #[derive(Clone)]
 pub struct DerivedIndexQueryEngine {
     runtime: Arc<DerivedIndexRuntime>,
@@ -289,7 +219,6 @@ impl core::fmt::Debug for DerivedIndexQueryEngine {
 }
 
 impl DerivedIndexQueryEngine {
-    /// Builds a query engine over the shared reader and authoritative block source.
     #[must_use]
     pub(crate) fn new(
         runtime: Arc<DerivedIndexRuntime>,
@@ -326,8 +255,6 @@ impl DerivedIndexQueryEngine {
     }
 
     fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
-        // INVARIANT: the refusal text is the first unmet capability's own,
-        // scanned in IndexCapability::ALL order.
         for capability in required.iter() {
             if !self.enabled.contains(capability) {
                 return Err(TxQueryError::Unavailable(
@@ -356,9 +283,6 @@ impl DerivedIndexQueryEngine {
                 TxUnavailableCause::CompactFilterFailed(reason),
             ));
         }
-        // Scoped ScriptLive outage: no watermark can prove the live view while the
-        // seed/replay failure flag is set, so answer Unavailable before taking the
-        // chain-transition lock. Other capabilities never inspect this flag.
         if required.contains(IndexCapability::ScriptLive)
             && let Some(reason) = self.runtime.script_live_failure.read().clone()
         {
@@ -367,11 +291,6 @@ impl DerivedIndexQueryEngine {
             ));
         }
 
-        // Live answers compose the index snapshot, the authoritative UTXO set,
-        // and the applied tip. Apply mutates UTXO before publishing that tip,
-        // so a before/after tip comparison cannot exclude that window. Hold
-        // chain-transition across watermark check, locator scan, and UTXO
-        // resolution. History and tx lookup never take it.
         let _chain_transition = if required.contains(IndexCapability::ScriptLive) {
             Some(
                 self.chain_transition
@@ -434,8 +353,6 @@ impl DerivedIndexQueryEngine {
                 TxUnavailableCause::CompactFilterFailed(reason),
             ));
         }
-        // A ScriptLive outage published mid-query must not surface as `Retry`:
-        // the missing-watermark path below is unproven, not raced.
         if required.contains(IndexCapability::ScriptLive)
             && let Some(reason) = self.runtime.script_live_failure.read().clone()
         {
@@ -514,10 +431,6 @@ impl DerivedIndexQueryEngine {
             let Some(watermark_id) = tree.lookup(hash) else {
                 return Err(HistoricalQueryError::Retry);
             };
-            // The watermark names a chain position, not just a hash: a node
-            // whose height disagrees with the watermark is a stale or torn
-            // view, so retry instead of joining a prefix the watermark never
-            // covered.
             let watermark_node = tree
                 .node(watermark_id)
                 .map_err(|_| HistoricalQueryError::Retry)?;
@@ -672,10 +585,6 @@ impl DerivedIndexQueryEngine {
         )
     }
 
-    /// Watermark progress of `required` capabilities against one applied
-    /// tip: `synced` when every one names that tip, `processed_height` the
-    /// lowest of their heights, `target_height` the tip they were measured
-    /// against. `Retry` when the tip or revision moved during the read.
     pub(crate) fn index_progress_for(
         &self,
         required: IndexCapabilities,
@@ -733,7 +642,6 @@ impl DerivedIndexQueryEngine {
     }
 }
 
-/// One coherent read of index progress against a single applied tip.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IndexProgress {
     pub synced: bool,
@@ -1079,7 +987,6 @@ mod tests {
         let (height, hash) = (node.height, node.hash);
         let engine = anchor_test_engine(tree);
 
-        // A watermark naming the node's own height joins at the node itself.
         let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
         let matching = IndexWatermark {
             height,
@@ -1095,8 +1002,6 @@ mod tests {
         assert_eq!(anchor_id, genesis_id);
         assert_eq!(anchor_height, height);
 
-        // The hash resolves but the height disagrees: a stale or torn view
-        // must retry, never join a prefix the watermark did not cover.
         let mut remaining = HISTORICAL_ANCESTRY_BUDGET;
         let mismatched = IndexWatermark {
             height: height.saturating_add(1),

@@ -93,7 +93,6 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-19
 #[test]
 fn proposal_without_coinbase_is_bad_cb_missing() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -115,7 +114,6 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-19
 #[test]
 fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -132,12 +130,7 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> Result<()> {
     Ok(())
 }
 
-/// A height-1 child of the signet genesis whose commitment carries no signet
-/// section: the witness commitment, BIP34 push, reserved nonce, and
-/// signet-difficulty proof of work all hold, so only BIP325 can refuse it.
 fn signet_child_without_signet_section() -> Result<Block> {
-    // One transaction, so the commitment root is the zeroed coinbase wtxid
-    // and the commitment is `H(root || reserved)` over 64 zero bytes.
     let commitment = bitcoin_rs_primitives::encode::double_sha256(&[0_u8; 64]).to_le_bytes();
     let mut commitment_script = WITNESS_COMMITMENT_PREFIX.to_vec();
     commitment_script.extend_from_slice(&commitment);
@@ -147,7 +140,6 @@ fn signet_child_without_signet_section() -> Result<Block> {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::null(),
-            // BIP34 height-1 push plus the extranonce byte.
             script_sig: Script::from_bytes(vec![0x51, 0x00]),
             sequence: Sequence::MAX,
             witness: Witness::from_stack(vec![WITNESS_RESERVED.to_vec()]),
@@ -179,7 +171,6 @@ fn signet_child_without_signet_section() -> Result<Block> {
     Ok(block)
 }
 
-// CONTRACT: API-19, BIP325
 #[test]
 fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> Result<()> {
     let fixture = open_at_genesis(Network::Signet)?;
@@ -187,13 +178,11 @@ fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> 
     mining.publish_generation();
     let block = signet_child_without_signet_section()?;
 
-    // A proposal skips the solution, as Core skips it without fCheckPOW.
     assert_eq!(
         propose_block(&mining, block.clone())?,
         BlockValidationResult::Accepted
     );
 
-    // The commit path checks the solution and reports the BIP22 reason.
     match mining.submit_block(BlockPayload::from_local(block))? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "bad-signet-blksig");
@@ -201,7 +190,6 @@ fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> 
         other => panic!("expected bad-signet-blksig, got {other:?}"),
     }
 
-    // A refused solution never moves the tip.
     let tip = fixture
         .chainstate()
         .applied_tip_snapshot()
@@ -217,7 +205,6 @@ fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> 
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -249,7 +236,6 @@ fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> Resu
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_witness_without_commitment_is_unexpected_witness() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -286,7 +272,6 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-21
 #[test]
 fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -342,11 +327,6 @@ fn truncated_payload_bytes_fail_construction_before_submit() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let block = mined_child(genesis.block_hash())?;
     let raw = consensus_bytes(&block);
-    // Malformed images never reach submit: both constructors refuse truncated
-    // and empty images with the decode failure before any submit path runs.
-    // This constructor gate replaces the removed split-pair bytes-gate
-    // `Rejected` branch; consensus-failure `Rejected` mapping on the submit
-    // path itself is proved by the high-hash and bad-prevblk tests below.
     let truncated = Bytes::from(raw[..raw.len() - 1].to_vec());
     assert!(matches!(
         BlockPayload::from_raw(truncated.clone()),
@@ -360,7 +340,6 @@ fn truncated_payload_bytes_fail_construction_before_submit() -> Result<()> {
         BlockPayload::from_raw(Bytes::new()),
         Err(DecodeError::EndOfData { .. })
     ));
-    // The exact image keeps its raw length and submits on its own merits.
     let payload = BlockPayload::from_raw(Bytes::from(raw.clone()))?;
     assert_eq!(payload.bytes().len(), raw.len());
     assert_eq!(payload.block(), &block);
@@ -380,9 +359,6 @@ fn foreign_valid_bytes_apply_as_their_own_block() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let other = mined_child_labeled(genesis.block_hash(), 2)?;
     let other_hash = Hash256::from(other.block_hash());
-    // Foreign-but-valid bytes decode to their own exact payload — a different
-    // block — and apply on their own merits, never as a mismatch against a
-    // separately supplied block.
     let foreign = BlockPayload::from_raw(Bytes::from(consensus_bytes(&other)))?;
     assert_eq!(foreign.block(), &other);
     assert_eq!(
@@ -455,14 +431,9 @@ fn submit_block_accepts_prefill_image_when_fill_applies() -> Result<()> {
         has_commitment,
         "assembled candidate must carry a BIP141 commitment"
     );
-    // Prefill image: the exact encoding of the stripped block. The coordinator
-    // runs its own read-only predicate and fill on this image and accepts; the
-    // test never fills, so only the coordinator's fill can complete the block.
     let image = Bytes::from(consensus_bytes(&block));
     let payload = BlockPayload::from_raw(image.clone())?;
     assert_eq!(payload.bytes(), &image);
-    // The fill restores only the witness nonce, so the applied tip carries the
-    // stripped block's own header hash.
     let block_hash = Hash256::from(block.block_hash());
     assert_eq!(
         mining.submit_block(payload)?,
@@ -625,8 +596,6 @@ fn submit_header_rejects_bad_version_after_bip34_activation() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let base_time = genesis.header.time;
     let mut prev = genesis.block_hash();
-    // Regtest enforces the BIP34 version floor from candidate height 500
-    // (Core `DeploymentActiveAfter`), so heights 1..=499 still carry version 1.
     for height in 1..=499_u32 {
         let header = mined_regtest_header(prev, base_time + height * 600, 1);
         mining.submit_header(header)?;
@@ -648,7 +617,6 @@ fn submit_header_rejects_bad_version_after_bip34_activation() -> Result<()> {
 fn rejection_mapping_for_bad_prev_hash() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
     let mut block = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
-    // Ensure PoW still valid for the mutated prev hash by remine.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
     block.header.nonce = 0;
@@ -772,7 +740,6 @@ fn duplicate_solved_submission_is_idempotent() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -785,7 +752,6 @@ fn proposal_of_an_applied_block_is_duplicate() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_an_invalid_header_is_duplicate_invalid() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -809,7 +775,6 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -833,7 +798,6 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -870,7 +834,6 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -895,7 +858,6 @@ fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
     Ok(())
 }
 
-// CONTRACT: API-18
 #[test]
 fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> Result<()> {
     let (state, mining) = regtest_mining()?;

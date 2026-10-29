@@ -1,8 +1,3 @@
-//! `bitcoin-rs` — node binary entry point.
-//!
-//! Starts the configured `bitcoin-rs` node with crash recovery, signal handling,
-//! metrics/tracing setup, and graceful shutdown.
-
 #![allow(clippy::print_stdout)]
 #![allow(clippy::print_stderr)]
 
@@ -27,10 +22,6 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    // Foreground offline import shares the timed `{corpus_path}` contract:
-    // one regular file, never the indexed `sources` directory. All three
-    // flags must appear together; a partial set is a caller error, not a
-    // daemon run.
     let import = (cli.corpus.clone(), cli.manifest.clone(), cli.state.clone());
     let result = config::resolve(cli, std::env::vars_os()).and_then(|config| match import {
         (Some(corpus), Some(manifest), Some(state)) => {
@@ -391,10 +382,6 @@ mod tests {
         }
     }
 
-    /// Startup failure for `validation.engine = "kernel"` on a
-    /// build without bitcoinkernel support. The engine selection is resolved
-    /// and checked during configuration — before the data directory, chain
-    /// state, or any worker is created — and must name the missing capability.
     #[test]
     #[cfg(not(feature = "kernel"))]
     fn validation_engine_kernel_is_rejected_without_kernel_support() {
@@ -528,7 +515,6 @@ hwm = 5000
         assert!(!config.p2p.dns_seeds_enabled);
     }
 
-    /// IDX-01: `--scriptindex` without a value means `full`.
     #[test]
     fn cli_scriptindex_flag_enables_full_index() {
         let config = resolved(&["bitcoin-rs", "--txindex=false", "--scriptindex"], &[]);
@@ -537,7 +523,6 @@ hwm = 5000
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
-    /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
         let config = resolved(

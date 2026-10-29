@@ -23,7 +23,6 @@ impl From<bitcoin_rs_script::PrevoutError> for ConsensusError {
     }
 }
 
-/// Kernel selection fails closed when the backend is not compiled.
 #[cfg(not(feature = "kernel"))]
 fn kernel_not_compiled() -> ConsensusError {
     ConsensusError::UnsupportedEngine {
@@ -91,7 +90,6 @@ mod kernel_backend {
             self.block.transaction_count()
         }
 
-        /// Retains the parsed transaction and resolved prevouts for parallel checks.
         pub(super) fn prepare_tx(
             &self,
             index: usize,
@@ -103,7 +101,6 @@ mod kernel_backend {
                 .into_iter()
                 .map(|(_, output)| output)
                 .collect();
-            // Collection may reuse tuple capacity; retain only the output set.
             spent_outputs.shrink_to_fit();
             Ok(super::PreparedTx::Kernel {
                 state,
@@ -153,8 +150,6 @@ mod kernel_backend {
             Some(amount),
             &prepared.kernel_tx,
             input_index,
-            // Fill implications before policy bits are stripped: CLEANSTACK
-            // still activates WITNESS and P2SH in the native driver and counter.
             Some(flags.filled().kernel_bits()),
             &prepared.precomputed,
         ) {
@@ -183,24 +178,17 @@ mod kernel_backend {
     }
 }
 
-/// A block parsed once by the selected engine.
 #[derive(Debug)]
 pub enum BlockParse {
-    /// Checked borrowed layout, available in every build.
     Native(crate::block_view::BlockFacts),
     #[cfg(feature = "kernel")]
-    /// Bitcoin Core's kernel parse.
     Kernel(kernel_backend::KernelBlock),
 }
 
 impl BlockParse {
-    /// Parses `raw_block` once under `engine`.
-    /// Native parse errors map to `Encoding`, kernel errors to `Kernel`.
-    /// Unavailable engines return `UnsupportedEngine`.
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
         match engine {
             ValidationEngine::Native => {
-                // Reject trailing bytes without materializing another tree.
                 let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
                     .map_err(|error| ConsensusError::Encoding(error.to_string()))?;
                 Ok(Self::Native(crate::block_view::BlockFacts::from_parsed(
@@ -220,9 +208,6 @@ impl BlockParse {
         }
     }
 
-    /// Consumes the parse, transferring facts and retaining only script backend state.
-    /// Callers must check the transaction count against `txs` before this handoff.
-    /// Kernel transaction-ID extraction errors retain their original mapping.
     pub fn into_parts(
         self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] txs: &[Tx],
@@ -239,20 +224,14 @@ impl BlockParse {
     }
 }
 
-/// Backend state retained after block facts move into the validation view.
-/// Native checks use the bound decoded transactions; kernel checks retain the parse.
 #[derive(Debug)]
 pub enum BlockScriptSource {
-    /// Native checks need no second owner for parsed block facts.
     Native,
     #[cfg(feature = "kernel")]
-    /// Kernel transactions borrow this independently parsed block.
     Kernel(kernel_backend::KernelBlock),
 }
 
 impl BlockScriptSource {
-    /// Prepares resolved prevouts for this block's engine.
-    /// `PrevoutCount`/`PrevoutMismatch` precede backend work; setup errors map to `Kernel`.
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
@@ -298,7 +277,6 @@ pub(crate) enum PreparedTx<'b> {
     },
 }
 
-/// Verifies an input under the engine and ordered prevouts retained at preparation.
 pub(crate) fn verify_prepared_input(
     prepared: &PreparedTx<'_>,
     input_index: usize,
@@ -324,13 +302,6 @@ pub(crate) fn verify_prepared_input(
     }
 }
 
-/// Verifies every input under `engine`, failing closed if unavailable.
-///
-/// `spent_outputs` must pair input outpoints and outputs in input order.
-/// `PrevoutCount`/`PrevoutMismatch` precede backend work; script/setup failures
-/// map to `Script`/`Kernel`. The native signature cache is admission-local;
-/// the kernel branch validates prevouts before dispatch as before and ignores
-/// it without bypassing validation.
 pub fn verify_tx_scripts(
     tx: &Tx,
     spent_outputs: &[(OutPoint, TxOut)],
@@ -429,8 +400,6 @@ mod tests {
             &[(tx.inputs[0].previous_output, prevout.clone())],
         )
         .unwrap_or_else(|error| panic!("prepare genesis tx: {error}"));
-        // Passing an out-of-bounds input index causes bitcoinkernel::verify to return
-        // KernelError::ScriptVerify(ScriptVerifyError::TxInputIndex), a kernel API/setup error.
         let err =
             kernel_backend::verify_prepared_input(&prepared, &prevout, 999, VerifyFlags::NONE);
         assert!(

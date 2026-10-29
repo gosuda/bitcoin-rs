@@ -1,8 +1,5 @@
 # Chain events contract
 
-The seam between the block-apply commit path and consumers that mirror the
-applied chain. The contract orders durable commit, mempool reconciliation,
-stable generation publication, and best-effort observer delivery.
 
 Owners:
 - Durable commit and stable publication:

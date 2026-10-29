@@ -68,10 +68,12 @@ fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::
 
 /// Regression coverage for the header-artifact wire contract in
 /// `crates/chainstate/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
-/// magic at bytes 0..8, version at 8..12, and count at 48..56; `read_headers`
-/// requires the encoded length to contain exactly the prefix, the 80-byte active
-/// headers, and the side section. Keep these offsets tied to that authoritative codec
-/// contract rather than treating them as incidental test fixture details.
+/// magic at bytes 0..8, version at 8..12, and count at 48..56; `read_headers` requires
+/// the encoded length to contain exactly the prefix, the 80-byte active headers, and
+/// the side section.
+///
+/// Keep these offsets tied to that authoritative codec contract rather than treating
+/// them as incidental test fixture details.
 #[test]
 fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let (tree, best_tip_id, applied) = chain_with_applied_height(1, 0)?;
@@ -243,20 +245,20 @@ fn semantic_utxo_trailing_byte_with_rebound_hashes_requires_resync()
 
     let root = dir.path().join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
-    let mut current: CurrentV1 = serde_json::from_slice(&fs::read(&current_path)?)?;
+    let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
     let generation = root.join(&current.directory);
     let manifest_path = generation.join(MANIFEST_FILE);
-    let mut manifest: CheckpointManifestV1 = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&fs::read(&manifest_path)?)?;
     let utxo_path = generation.join(UTXO_FILE);
     let mut utxo_bytes = fs::read(&utxo_path)?;
     utxo_bytes.push(0x5a);
     fs::write(&utxo_path, &utxo_bytes)?;
     manifest.utxo.bytes = u64::try_from(utxo_bytes.len())?;
     manifest.utxo.sha256 = super::super::hex_encode(&Sha256::digest(&utxo_bytes));
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     fs::write(&manifest_path, &manifest_bytes)?;
     current.manifest_sha256 = super::super::hex_encode(&Sha256::digest(&manifest_bytes));
-    fs::write(&current_path, serde_json::to_vec(&current)?)?;
+    fs::write(&current_path, sonic_rs::to_vec(&current)?)?;
 
     let Err(error) = load_checkpoint(dir.path(), config()) else {
         return Err("semantic UTXO corruption unexpectedly loaded".into());

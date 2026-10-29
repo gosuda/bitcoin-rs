@@ -1,7 +1,3 @@
-//! Shared pool job publication, submission, and deferred accounting.
-//!
-//! Lock order is book then published. Neither lock spans a socket operation,
-//! ledger call, or node call. Protocol sessions share the same `JobBook`.
 use super::{
     AcceptedShare, BlockReceipt, BlockStatus, ExtranonceLayout, FoundBlock, Installed, Job,
     JobBook, JobBookConfig, JobError, JobId, Session as BookSession, SessionId, ShareClass,
@@ -21,12 +17,9 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Who a share is credited to: the pool account and the rig under it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct WorkerIdentity {
-    /// Account that is paid.
     pub account: String,
-    /// Rig name under the account.
     pub worker: String,
 }
 
@@ -34,36 +27,23 @@ pub struct WorkerIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedgerUnavailable;
 
-/// Whether a share row was new.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordOutcome {
-    /// New row written.
     Recorded,
-    /// A row with this header hash already exists; nothing changed.
     AlreadyRecorded,
-    /// The ledger refused the share permanently (retired round, conflicting
-    /// credit, or claimed block): never retry and never buffer. Adapters
-    /// report a rejected share, not an unavailable ledger.
     Rejected,
 }
 
-/// Idempotent accounting boundary shared by pool submission and its host.
-///
 /// Implementations must be idempotent on `share.hash`: the adapter retries a
 /// failed call, and the common owner's duplicate set makes every first delivery
 /// unique.
 pub trait ShareLedger: Send + Sync {
-    /// Records one accepted share (`share.class` may be `Block`) credited to
-    /// `worker`. `share.hash` is the unique key; `share.work` is the work.
     fn record_share(
         &self,
         worker: &WorkerIdentity,
         share: &AcceptedShare,
     ) -> Result<RecordOutcome, LedgerUnavailable>;
 
-    /// Records what the node answered when `block` was submitted. `Err` or an
-    /// `Undetermined` receipt means the chain outcome is unknown: keep the
-    /// block pending and reconcile from chain observation.
     fn record_block(
         &self,
         worker: &WorkerIdentity,
@@ -72,26 +52,18 @@ pub trait ShareLedger: Send + Sync {
     ) -> Result<(), LedgerUnavailable>;
 }
 
-/// What the node answered to a block found by a share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockOutcome {
-    /// Accepted, or its body was already connected.
     Applied,
-    /// Rejected, or a duplicate of a known-invalid block.
     Rejected,
-    /// The node could not conclude; the ledger reconciles from the chain.
     Undetermined,
-    /// The submit call itself failed; chain outcome unknown.
     NodeError,
 }
 
 #[derive(Default)]
 struct Published {
-    /// Increments on every fresh job.
     seq: u64,
-    /// `seq` of the newest job that was installed with `clean_jobs`.
     clean_seq: u64,
-    /// Newest job while it is active; `None` after `invalidate_active`.
     job: Option<Arc<Job>>,
 }
 
@@ -101,7 +73,6 @@ pub(super) struct Latest {
     pub(super) job: Option<Arc<Job>>,
 }
 
-/// A session slot in the book, closed on drop.
 pub(super) struct Lease {
     pub(super) pool: Arc<PoolCore>,
     pub(super) session: BookSession,
@@ -133,7 +104,6 @@ pub(super) struct Completion {
     rejected: AtomicBool,
 }
 
-/// Debug shows only the outstanding count; a completion carries no secrets.
 impl fmt::Debug for Completion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -218,24 +188,10 @@ struct Outbox {
     reserved_bytes: usize,
 }
 
-/// Buffered cost of one accepted share record.
 const SHARE_RECORD_BYTES: usize = 256;
-/// Buffered cost of one block record without its block body.
 const BLOCK_RECORD_FRAMING_BYTES: usize = 512;
-/// Bounded worst-case block body retained in the outbox for ledger retry.
-/// Matches the node `MAX_BLOCK_RECORD_BYTES` and ledger `MAX_RAW_TX_BYTES`
-/// (4 MiB): a found block is never shed for size, but one in-flight submit
-/// reserves this bound before validation so the shared byte budget stays
-/// linearizable. Snapshot-isolated ledger commits stay idempotent on the
-/// share hash; delivery is at-least-once via inline plus outbox drain.
 const MAX_BLOCK_BYTES: usize = 4_000_000;
 
-/// Atomically holds outbox space for one in-flight submit: two item slots and
-/// the worst-case share plus block bytes (`MAX_BLOCK_BYTES`). The reservation
-/// is checked-and-held linearizably under the single outbox mutex before
-/// validation, so a second submit while full sheds with `OutboxFull` (shed
-/// load past capacity, no unbounded buffering). One in-flight submit never
-/// spends the whole pool byte budget beyond its worst-case bound.
 struct OutboxReservation<'a> {
     pool: &'a PoolCore,
     items: usize,
@@ -251,33 +207,14 @@ impl Drop for DrainGuard<'_> {
 }
 
 impl OutboxReservation<'_> {
-    /// Commits an item into the outbox by consuming part of this reservation.
-    /// Item slots are linearizable under the single outbox mutex, so the
-    /// pre-allocated slots are guaranteed. Returns `false` (sheds with
-    /// `OutboxFull`, no enqueue, no counter change beyond releasing this
-    /// claim) when the worst-case reservation cannot cover `cost` or the
-    /// shared byte limit would break: `cost <= reserved` and
-    /// `total + cost <= max_bytes` are the byte invariants. Valid blocks
-    /// (`raw <= MAX_BLOCK_BYTES`) always fit because the reservation holds
-    /// the full worst-case; oversize bodies shed instead of growing the outbox
-    /// unbounded. Snapshot-isolated ledger stays idempotent on the share hash;
-    /// at-least-once delivery via inline plus drain. Sheds past capacity with
-    /// bounded ledger retries, backoff and jitter, bulkheaded by the outbox.
     fn commit_reserved(&mut self, item: Pending) -> bool {
         let cost = item.bytes_cost();
-        // Worst-case reservation must cover valid costs; assert in debug to
-        // catch accounting drift without changing release behavior.
         debug_assert!(
             cost <= self.bytes,
             "outbox reservation underflow: cost {cost} exceeds {bytes}",
             bytes = self.bytes
         );
         let mut outbox = locked(&self.pool.outbox);
-        // Enforce the shared byte invariant under the single lock before
-        // mutating: never admit over `outbox_max_bytes`, even for blocks.
-        // Linearizable check-and-commit; exactly-once delivery does not exist,
-        // so shedding here converges via miner retry against the idempotent
-        // ledger consumer.
         if cost > self.bytes
             || outbox.reserved_items == 0
             || outbox.total_bytes.saturating_add(cost) > self.pool.outbox_max_bytes
@@ -313,13 +250,9 @@ pub(super) struct ShareRequest<'a> {
     pub(super) rolled: &'a [u8],
     pub(super) ntime: u32,
     pub(super) nonce: u32,
-    /// Canonical header version, normalized by the protocol edge before the
-    /// common submit owner runs.
     pub(super) version: u32,
 }
 
-/// The pool: one `JobBook`, the node control it submits blocks to, and the
-/// ledger it credits. Shared by every connection thread.
 pub struct PoolCore {
     book: Mutex<JobBook>,
     published: Mutex<Published>,
@@ -337,23 +270,16 @@ pub struct PoolCore {
     draining: AtomicBool,
 }
 
-/// A template fetched and installed by [`PoolCore::refresh`].
 #[derive(Debug)]
 pub struct Refreshed {
-    /// What `JobBook::install` did.
     pub installed: Installed,
-    /// Pass to the next [`PoolCore::refresh`] to long-poll for a newer template.
     pub long_poll_id: String,
-    /// The template's `submit_old`.
     pub submit_old: Option<bool>,
 }
 
-/// [`PoolCore::refresh`] failure.
 #[derive(Debug)]
 pub enum RefreshError {
-    /// The node would not give a template.
     Template(MiningControlError),
-    /// The job book would not project it.
     Install(JobError),
 }
 
@@ -369,8 +295,6 @@ impl fmt::Display for RefreshError {
 impl Error for RefreshError {}
 
 impl PoolCore {
-    /// Builds the pool over a fresh `JobBook`. Retries a failed ledger call
-    /// three times with a 5 ms base backoff; see [`Self::with_ledger_retry`].
     pub fn new(
         config: JobBookConfig,
         control: Arc<dyn MiningControl>,
@@ -398,9 +322,6 @@ impl PoolCore {
         })
     }
 
-    /// Sets the ledger retry budget: `attempts` calls (at least one) with a
-    /// sleep of `backoff * attempt` plus a per-share jitter of up to 2.5 ms
-    /// between them.
     #[must_use]
     pub fn with_ledger_retry(mut self, attempts: u32, backoff: Duration) -> Self {
         self.ledger_attempts = attempts.max(1);
@@ -408,15 +329,6 @@ impl PoolCore {
         self
     }
 
-    /// Sets the outbox bounds for queuing writes when the ledger is unavailable.
-    /// Preserves the exact configured `max_items`/`max_bytes` with no silent
-    /// raise: `reserve_outbox_space` requires the full worst-case submit
-    /// (`2` items, `SHARE + FRAMING + MAX_BLOCK_BYTES`) and sheds with
-    /// `OutboxFull` when the budget cannot hold it, including budgets below
-    /// worst-case. Linearizable capacity under the single outbox mutex;
-    /// snapshot-isolated ledger; at-least-once idempotent delivery on the
-    /// share hash. Sheds past capacity with backoff and jitter, bulkheaded by
-    /// the outbox bound, never unbounded buffering.
     #[must_use]
     pub fn with_outbox(mut self, max_items: usize, max_bytes: usize) -> Self {
         self.outbox_max_items = max_items;
@@ -424,57 +336,41 @@ impl PoolCore {
         self
     }
 
-    /// Number of writes currently waiting in the outbox.
     #[must_use]
     pub fn pending_ledger_writes(&self) -> usize {
         self.pending_count.load(Ordering::Acquire)
     }
 
-    /// Extranonce split every session uses (SV1 `extranonce2_size` is its
-    /// `rolled_len`).
     #[must_use]
     pub fn layout(&self) -> ExtranonceLayout {
         self.layout
     }
 
-    /// Version bits the pool lets miners roll (zero: no rolling).
     #[must_use]
     pub fn version_mask(&self) -> u32 {
         self.version_mask
     }
 
-    /// Open sessions in the book.
     #[must_use]
     pub fn session_count(&self) -> usize {
         locked(&self.book).session_count()
     }
 
-    /// Runs an owner-local validation operation under the sole authoritative
-    /// `JobBook` mutex. The callback must not re-enter `PoolCore`, install or
-    /// invalidate jobs, or perform node, ledger, or other external I/O while
-    /// this lock is held.
     pub fn with_job_book<R>(&self, operation: impl FnOnce(&mut JobBook) -> R) -> R {
         let mut book = locked(&self.book);
         operation(&mut book)
     }
 
-    /// Returns the active job from the same authoritative `JobBook` used by
-    /// SV1 validation and session allocation.
     #[must_use]
     pub fn current_job(&self) -> Option<Arc<Job>> {
         self.with_job_book(|book| book.current().cloned())
     }
 
-    /// Returns the latest installation metadata from the authoritative pool
-    /// owner. The value is absent before the first install or after explicit
-    /// invalidation.
     #[must_use]
     pub fn current_installed(&self) -> Option<Installed> {
         self.with_job_book(|book| book.current_installed().cloned())
     }
 
-    /// Installs `candidate` (with the pool's coinbase `extra_outputs`) and, when
-    /// it is a fresh job, publishes it to every session at its next poll.
     pub fn install(
         &self,
         candidate: Arc<Candidate>,
@@ -483,9 +379,6 @@ impl PoolCore {
         self.install_with(false, candidate, extra_outputs)
     }
 
-    /// Marks every active job stale. Sessions keep their last job until the
-    /// next install, whose `clean_jobs` is then true; shares on the stale jobs
-    /// are rejected by the book.
     pub fn invalidate_active(&self) -> Vec<JobId> {
         let mut book = locked(&self.book);
         let stale = book.invalidate_active();
@@ -494,8 +387,6 @@ impl PoolCore {
         stale
     }
 
-    /// Fetches one template from the node (long-polling on `long_poll_id`) and
-    /// installs it. `submit_old == Some(false)` first invalidates active jobs.
     pub fn refresh(
         &self,
         long_poll_id: Option<&str>,
@@ -572,13 +463,6 @@ impl PoolCore {
                     if receipt.status() != BlockStatus::Undetermined {
                         return Ok(receipt);
                     }
-                    // Inconclusive (journal backpressure or a header-only
-                    // duplicate) leaves the chain outcome unknown: retain
-                    // bounded recovery work and re-query authoritative node
-                    // state instead of exiting. A retry that observes an
-                    // applied duplicate converges to `Applied`; exhaustion
-                    // returns the last `Undetermined` receipt for the ledger
-                    // to reconcile from chain observation.
                     attempt += 1;
                     if attempt >= ATTEMPTS {
                         return Ok(receipt);
@@ -633,7 +517,6 @@ impl PoolCore {
         Err(LedgerUnavailable)
     }
 
-    /// Drains pending outbox items sequentially.
     pub fn drain_outbox(&self) {
         if self.pending_count.load(Ordering::Acquire) == 0 {
             return;
@@ -698,18 +581,8 @@ impl PoolCore {
         }
     }
 
-    /// Atomically reserves outbox space for one share (and potential block).
-    /// Returns `None` if the outbox has reached capacity.
-    /// The check-and-hold is linearizable under the single outbox mutex. A
-    /// second submit while the ledger is unavailable is shed with a retryable
-    /// accounting error, not buffered.
     fn reserve_outbox_space(&self) -> Option<OutboxReservation<'_>> {
         self.drain_outbox();
-        // Two item slots and the full worst-case share-plus-block bytes with no
-        // silent clamp: budgets below worst-case shed with `OutboxFull`.
-        // The check-and-hold is linearizable under the single outbox mutex.
-        // Sheds past capacity; ledger retries use bounded attempts with backoff
-        // and jitter plus a monotonic clock, never unbounded buffering.
         let reserve_items = 2_usize;
         let reserve_bytes = SHARE_RECORD_BYTES + BLOCK_RECORD_FRAMING_BYTES + MAX_BLOCK_BYTES;
         let mut outbox = locked(&self.outbox);
@@ -737,17 +610,12 @@ impl PoolCore {
         request: &ShareRequest<'_>,
         target: &ShareTarget,
     ) -> Result<Credited, SubmitFailure> {
-        // Atomically reserve space BEFORE validation. If the outbox is at
-        // capacity, fail with backpressure so the miner may retry and the hash
-        // is never burned in `JobBook`.
         let mut reservation = self
             .reserve_outbox_space()
             .ok_or(SubmitFailure::OutboxFull)?;
 
         let outcome = {
             let mut book = locked(&self.book);
-            // `request.version` is already canonical: the edge normalized the
-            // wire bits, so this common path holds no wire branching.
             let submission = ShareSubmission {
                 session: request.session,
                 job: request.job,
@@ -769,25 +637,12 @@ impl PoolCore {
                     share: *accepted,
                     completion: Arc::clone(&completion),
                 };
-                // Attempt inline delivery first; otherwise the completion waits on the outbox.
-                // Delivery is at-least-once (inline plus drain) against the
-                // idempotent ledger consumer, which is keyed on `share.hash`.
                 match self.deliver_inline(&item) {
                     Ok(RecordOutcome::Recorded) => completion.record(),
-                    // Already durable (crash restore or post-eviction replay)
-                    // or permanently refused (the ledger judged this work
-                    // first): answer the duplicate identity at once with no
-                    // retry and no buffering. The book already burned the
-                    // hash, so a miner retry converges to the same duplicate
-                    // verdict instead of spinning on an uncurable refusal.
                     Ok(RecordOutcome::AlreadyRecorded | RecordOutcome::Rejected) => {
                         return Err(SubmitFailure::Duplicate);
                     }
                     Err(LedgerUnavailable) => {
-                        // Shed past capacity instead of growing unbounded: the
-                        // book already burned the hash, so a retry converges to
-                        // `Duplicate` against the idempotent ledger consumer.
-                        // Linearizable capacity; snapshot-isolated ledger.
                         if !reservation.commit_reserved(item) {
                             return Err(SubmitFailure::OutboxFull);
                         }
@@ -801,7 +656,6 @@ impl PoolCore {
                 })
             }
             ShareOutcome::Block(found) => {
-                // Priority invariant: node submission runs before any ledger record.
                 let submission = self.submit_block_to_node(&found);
                 let block_outcome = match &submission {
                     Ok(receipt) => match receipt.status() {
@@ -827,13 +681,6 @@ impl PoolCore {
                     completion: Arc::clone(&completion),
                 };
 
-                // The share needs no further crediting when it is already
-                // durable (crash restore or post-eviction replay) or
-                // permanently refused (the ledger judged this work first).
-                // Either way the block record still needs delivery, so keep
-                // going and report the duplicate only after the block fate is
-                // known. No retry and no buffering on the settled path: a
-                // settled share can never become deliverable.
                 let mut share_settled = false;
                 match self.deliver_inline(&share_item) {
                     Ok(RecordOutcome::Recorded) => completion.record(),
@@ -842,23 +689,13 @@ impl PoolCore {
                         share_settled = true;
                     }
                     Err(LedgerUnavailable) => {
-                        // Shed past capacity with `OutboxFull`; the node already
-                        // holds the submitted block, and a retry converges to
-                        // `Duplicate` on the burned hash via the idempotent
-                        // ledger consumer. Linearizable outbox capacity;
-                        // snapshot-isolated ledger; bounded ledger retries with
-                        // backoff and jitter, bulkheaded by the outbox.
                         if !reservation.commit_reserved(share_item) {
                             return Err(SubmitFailure::OutboxFull);
                         }
                     }
                 }
 
-                // Deliver or buffer block record.
                 if self.deliver_inline(&block_item).is_err() {
-                    // Same shedding: valid `raw <= MAX_BLOCK_BYTES` always fits
-                    // the worst-case reservation, so `false` only fires on
-                    // oversize bodies instead of growing unbounded.
                     if !reservation.commit_reserved(block_item) {
                         return Err(SubmitFailure::OutboxFull);
                     }
@@ -874,9 +711,6 @@ impl PoolCore {
                 }
 
                 if share_settled {
-                    // The share earned no new credit, but the block round is
-                    // now durable: the replay keeps its duplicate identity,
-                    // exactly as a book-level duplicate would.
                     return Err(SubmitFailure::Duplicate);
                 }
 

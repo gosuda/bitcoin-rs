@@ -16,8 +16,6 @@ use crate::{
 const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
 const SNAPSHOT_WRITE_VERSION: u32 = 4;
 const MUHASH_TRAILER_LEN: usize = 384;
-/// Bounded read buffer for raw seed traversal: large enough to coalesce the
-/// decoder's per-field reads, small enough to stay flat in snapshot size.
 const SEED_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -49,41 +47,26 @@ struct SnapshotVoutHeader {
     script_len: u16,
 }
 
-/// Result of loading a UTXO snapshot.
 pub struct SnapshotLoad {
-    /// Rebuilt UTXO set.
     pub set: UtxoSet,
-    /// Snapshot tip hash.
     pub tip_hash: Hash256,
-    /// Snapshot chain height.
     pub height: u32,
-    /// `MuHash3072` trailer bytes.
     pub muhash_trailer: [u8; MUHASH_TRAILER_LEN],
 }
 
-/// A live coin borrowed while a snapshot is traversed.
 #[derive(Copy, Clone)]
 pub struct SnapshotCoin<'a> {
-    /// Transaction identifier that created this output.
     pub txid: Hash256,
-    /// Originating transaction output index.
     pub vout: u32,
-    /// Output value in satoshis.
     pub value: u64,
-    /// Borrowed scriptPubKey bytes.
     pub script_pubkey: &'a [u8],
-    /// Block height that created the output.
     pub height: u32,
-    /// Whether the originating transaction was coinbase.
     pub coinbase: bool,
 }
 
-/// Observes each live coin traversed by snapshot serialization or strict loading.
 pub trait SnapshotCoinObserver {
-    /// Observes one live coin.
     fn observe_coin(&mut self, coin: SnapshotCoin<'_>);
 
-    /// Selects the final snapshot trailer, defaulting to the supplied fallback.
     fn select_trailer(&mut self, fallback: [u8; MUHASH_TRAILER_LEN]) -> [u8; MUHASH_TRAILER_LEN] {
         fallback
     }
@@ -93,7 +76,6 @@ impl SnapshotCoinObserver for () {
     fn observe_coin(&mut self, _: SnapshotCoin<'_>) {}
 }
 
-/// Streams a native bitcoin-rs UTXO snapshot while observing every live coin.
 pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     set: &UtxoSet,
     tip_hash: &Hash256,
@@ -108,9 +90,6 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     })
 }
 
-/// Shared native-v4 encoding traversal: header, shard-ordered records, trailer.
-/// Runs under the caller's stable view; the witnessed writer mints only when
-/// the returned audit shows a complete stream with no empty record.
 fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
     view: &UtxoSetView<'_>,
     tip_hash: &Hash256,
@@ -193,8 +172,6 @@ fn write_snapshot_view<O: SnapshotCoinObserver, W: Write + ?Sized>(
     Ok((trailer, observer, audit))
 }
 
-/// Outcome of the witnessed encode audit: what the header declared versus
-/// what the traversal actually emitted.
 struct WriteAudit {
     declared_records: u64,
     emitted_records: u64,
@@ -202,13 +179,6 @@ struct WriteAudit {
     empty_record: bool,
 }
 
-/// Streams a native snapshot exactly like [`write_snapshot_observed`] while
-/// hashing every emitted byte, and mints a [`V4Witness`] binding those bytes
-/// to the accepted chainstate.
-///
-/// The witness is `None` (no mint) when the traversal observed an emitted
-/// count mismatch or an empty record; the bytes are still written exactly as
-/// the plain path writes them.
 pub fn write_snapshot_witnessed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     set: &UtxoSet,
     tip_hash: &Hash256,
@@ -235,7 +205,6 @@ pub fn write_snapshot_witnessed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     })
 }
 
-/// Counts and hashes every byte passing through to the wrapped writer.
 struct TeeWriter<'a, W: Write + ?Sized> {
     inner: &'a mut W,
     hasher: Sha256,
@@ -269,7 +238,6 @@ impl<W: Write + ?Sized> Write for TeeWriter<'_, W> {
     }
 }
 
-/// Adds one transfer length to a running byte count without lossy casts.
 fn count_bytes(len: u64, transfer: usize) -> std::io::Result<u64> {
     let count = u64::try_from(transfer)
         .map_err(|_| std::io::Error::other("snapshot byte count overflow"))?;
@@ -280,15 +248,12 @@ fn count_bytes(len: u64, transfer: usize) -> std::io::Result<u64> {
 /// Parsed native-v4 header identity; this does not validate the coin body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeSnapshotMetadata {
-    /// Snapshot base block identity.
     pub tip_hash: Hash256,
-    /// Snapshot base height.
     pub height: u32,
     /// Declared transaction-level records, not output count.
     pub record_count: u64,
 }
 
-/// Reads the fixed native-v4 header through the same parser as checkpoint load.
 /// Intended for bounded identification; callers must not treat it as full
 /// snapshot verification or as a trust anchor.
 pub fn read_snapshot_metadata_v4(
@@ -314,12 +279,10 @@ pub fn read_snapshot_metadata_v4(
     })
 }
 
-/// Strictly decodes a complete v4 snapshot for a chainstate checkpoint.
 pub fn read_snapshot_strict_v4(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> {
     read_snapshot_strict_v4_observed(reader, ()).map(|(snapshot, ())| snapshot)
 }
 
-/// Strictly decodes a complete v4 snapshot while observing each inserted coin.
 pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     reader: &mut impl Read,
     mut observer: O,
@@ -381,16 +344,6 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     ))
 }
 
-/// Strictly decodes a complete v4 snapshot while minting a byte-binding witness.
-///
-/// Behaves exactly like [`read_snapshot_strict_v4_observed`], additionally
-/// hashing every consumed byte (header, records, trailer) through the exact
-/// end-of-stream probe and minting a [`V4Witness`] bound to those bytes.
-///
-/// The caller keeps ownership of its reader throughout, so unwrapping the
-/// same adapter stack back to the underlying `File` and sealing that
-/// descriptor pins the accepted bytes to the sealed descriptor: no reopen
-/// by path.
 pub fn read_snapshot_strict_v4_witnessed<O: SnapshotCoinObserver>(
     reader: &mut impl Read,
     observer: O,
@@ -414,10 +367,6 @@ pub fn read_snapshot_strict_v4_witnessed<O: SnapshotCoinObserver>(
     Ok((load, observer, witness))
 }
 
-/// Reads one v4 record head: framing bytes, identity, and declared output
-/// count. Shared by the strict loader (which then reads the full record)
-/// and the raw seed stream (which then reads outputs one at a time), so the
-/// framing lives in exactly one place.
 fn read_snapshot_record_head(reader: &mut impl Read) -> Result<(Hash256, u32), UtxoError> {
     let record_header_bytes =
         read_array::<{ core::mem::size_of::<SnapshotRecordHeaderV4>() }>(reader)?;
@@ -451,7 +400,6 @@ fn read_snapshot_outputs(
     output_count: u32,
     seen_vouts: &mut HashSet<u32>,
 ) -> Result<Vec<OwnedUtxoOut>, UtxoError> {
-    // The declared count is untrusted; grow only after bytes for an output arrive.
     seen_vouts.clear();
     let mut outputs = Vec::new();
     for _ in 0..output_count {
@@ -489,13 +437,10 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
     Ok(OwnedUtxoOut::new(vout, value, script, coinbase, height))
 }
 
-/// Computes Bitcoin Core's `hash_serialized_3` UTXO-set commitment over a
-/// stable view.
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
     hash_serialized_3_stable_inner(view, None)
 }
 
-/// Commitment with the additional creation-height rule required by `AssumeUTXO`.
 pub(crate) fn hash_serialized_3_stable_at_height(
     view: &UtxoSetView<'_>,
     snapshot_height: u32,
@@ -536,9 +481,6 @@ fn hash_serialized_3_stable_inner(
     Ok(engine.finish())
 }
 
-/// The single per-coin serialization owner for Core's `HASH_SERIALIZED`
-/// commitment. Callers supply coins in raw-txid order with numeric vout
-/// order, matching Core's `std::map<uint32_t, Coin>` iteration.
 pub(crate) struct SerializedUtxoHasher(Sha256);
 
 impl SerializedUtxoHasher {
@@ -583,10 +525,6 @@ impl SerializedUtxoHasher {
 }
 
 impl UtxoSetView<'_> {
-    /// Invokes `f` once per live coin in the stable view. The script slice
-    /// borrows the record payload only for the duration of the call.
-    ///
-    /// On-demand scan helper (e.g. `gettxoutsetinfo`); not on any hot path.
     pub(crate) fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
     where
         F: FnMut(SnapshotCoin<'_>),
@@ -642,38 +580,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(out)
 }
 
-// ---------------------------------------------------------------------------
-// Witnessed snapshot artifacts and the worker-owned seed cell.
-// ---------------------------------------------------------------------------
-
 /// Proof that exactly these bytes passed strict v4 decode. Only `utxo` mints.
-///
-/// The witness binds the exact accepted byte stream: any substitution,
-/// truncation, or trailing-byte append between the accepted load and a later
-/// raw traversal fails the length/digest comparison in
-/// [`VerifiedSnapshotArtifact::for_each_coin_raw`].
-///
-/// Every field is private to this module, so no code outside `utxo::snapshot`
-/// can spell a struct literal: the witnessed codec paths are the sole
-/// constructors. The rejected literal below names every field with its real
-/// type, so making foreign construction possible (visible fields plus a
-/// nameable origin) is what turns this `compile_fail` assertion red. The
-/// fence is deliberately unpinned: the refusal must hold for any compiler
-/// diagnostic, and only successful compilation fails the test.
-///
-/// ```compile_fail
-/// // No public constructor and no visible fields: a witness cannot be
-/// // spelled outside `utxo::snapshot`.
-/// let _foreign = bitcoin_rs_utxo::V4Witness {
-///     len: 0,
-///     sha256: [0; 32],
-///     tip_hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&[0; 32]),
-///     height: 0,
-///     record_count: 0,
-///     output_count: 0,
-///     origin: loop {},
-/// };
-/// ```
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V4Witness {
@@ -686,9 +593,6 @@ pub struct V4Witness {
     origin: Origin,
 }
 
-/// Which direction minted the witness: strict decode of stored bytes, or
-/// encode of the live set. Private: callers observe the mint direction
-/// through [`V4Witness::is_decoded`], never the enumerant itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
     Decoded,
@@ -696,92 +600,60 @@ enum Origin {
 }
 
 impl V4Witness {
-    /// Exact byte length hashed (header, records, trailer).
     #[must_use]
     pub fn byte_len(&self) -> u64 {
         self.len
     }
 
-    /// SHA-256 over every consumed/emitted byte, including the trailer.
     #[must_use]
     pub fn sha256(&self) -> [u8; 32] {
         self.sha256
     }
 
-    /// Snapshot base block identity the witnessed bytes were accepted at.
     #[must_use]
     pub fn tip_hash(&self) -> Hash256 {
         self.tip_hash
     }
 
-    /// Snapshot base height the witnessed bytes were accepted at.
     #[must_use]
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Declared (and, on mint, actually emitted/decoded) transaction records.
     #[must_use]
     pub fn record_count(&self) -> u64 {
         self.record_count
     }
 
-    /// Total live outputs across all records.
     #[must_use]
     pub fn output_count(&self) -> u64 {
         self.output_count
     }
 
-    /// Whether this witness was minted by strict decode (as opposed to encode).
     #[must_use]
     pub fn is_decoded(&self) -> bool {
         self.origin == Origin::Decoded
     }
 }
 
-/// Diagnostic identity of the chainstate that accepted the sealed bytes.
-/// Carries no consensus meaning; the byte digest in [`V4Witness`] is the
-/// binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeedProvenance {
-    /// Bytes published by a checkpoint generation.
     Checkpoint(CheckpointReference),
-    /// Bytes staged by an `AssumeUTXO` activation for the given base block hash.
-    AssumeUtxoArchive {
-        /// Little-endian base block hash the archive was staged for.
-        base: [u8; 32],
-    },
+    AssumeUtxoArchive { base: [u8; 32] },
 }
 
-/// Failure of the raw seed traversal.
-///
-/// `Integrity` covers every byte-binding failure (parse, length, digest,
-/// truncation, trailing bytes); `Io` covers transport failures that a retry
-/// may heal; `Emit` forwards the caller's own abort; `Cancelled` reports a
-/// shutdown poll so the caller can keep its bundle for retry.
 #[derive(Debug, Error)]
 pub enum RawSeedError<E> {
-    /// The artifact bytes are not exactly the witnessed accepted state.
     #[error("seed artifact bytes do not match the witness")]
     Integrity,
-    /// Reading the artifact failed without impugning its bytes.
     #[error("seed artifact read failed: {0}")]
     Io(#[from] std::io::Error),
-    /// The caller's `emit` closure failed.
     #[error("seed emit failed: {0}")]
     Emit(E),
-    /// Shutdown was requested; the bundle is intact and the caller retries.
     #[error("seed traversal cancelled")]
     Cancelled,
 }
 
-/// One immutable native-v4 artifact whose bytes the authoritative chainstate
-/// accepted. Not `Clone`: descriptors are never duplicated (a cloned `File`
-/// would share its offset).
-///
-/// The file is the same descriptor the strict load consumed; raw traversal
-/// seeks it back to the start, so sealing must move—not reopen—the verified
-/// descriptor.
 pub struct VerifiedSnapshotArtifact {
     file: std::fs::File,
     witness: V4Witness,
@@ -789,11 +661,6 @@ pub struct VerifiedSnapshotArtifact {
 }
 
 impl VerifiedSnapshotArtifact {
-    /// Seals an accepted artifact.
-    ///
-    /// PRE: the caller accepted the decoded state as its chainstate at the
-    /// witness height and tip. Only constructible with a [`V4Witness`]
-    /// minted in this module, so the pairing is unforgeable.
     #[must_use]
     pub fn seal(file: std::fs::File, witness: V4Witness, provenance: SeedProvenance) -> Self {
         Self {
@@ -803,32 +670,16 @@ impl VerifiedSnapshotArtifact {
         }
     }
 
-    /// Base height and tip hash the sealed bytes were accepted at.
     #[must_use]
     pub fn tip(&self) -> (u32, Hash256) {
         (self.witness.height, self.witness.tip_hash)
     }
 
-    /// Diagnostic identity of the accepting chainstate.
     #[must_use]
     pub fn provenance(&self) -> SeedProvenance {
         self.provenance
     }
 
-    /// Replays every accepted coin in snapshot order through the caller's
-    /// `emit`, which must keep its effects invisible until its own commit.
-    ///
-    /// Seeks the sealed descriptor to the start and streams records with the
-    /// same parser as the strict loader, emitting `(outpoint, script_pubkey)`
-    /// per live output. Succeeds only when the streamed length, digest, tip,
-    /// height, and coin counts match the witness exactly; any parse, length,
-    /// digest, truncation, or trailing-byte failure returns
-    /// [`RawSeedError::Integrity`]. No second UTXO set is built: outputs
-    /// stream through one at a time, each bounded by the v4 output encoding
-    /// (19-byte header plus a script of at most 65,535 bytes). Reads are
-    /// capped at the witnessed length plus one probe byte, so a file that
-    /// grows concurrently cannot extend the traversal.
-    ///
     /// `cancelled` is polled at entry and every 4,096 emitted coins; a trip
     /// returns [`RawSeedError::Cancelled`] with the bundle intact so the
     /// caller can retry with the same artifact.
@@ -843,11 +694,6 @@ impl VerifiedSnapshotArtifact {
             .byte_len()
             .checked_add(1)
             .ok_or(RawSeedError::Integrity)?;
-        // Seeding issues one tiny read per output header and script, so the
-        // capped file reader is buffered in memory. The buffer sits below
-        // the tee on the consumed-byte side, so the witnessed length and
-        // digest still cover exactly what the parser reads while the file
-        // sees bulk reads; prefetch never reaches the hash.
         let capped = Read::by_ref(&mut self.file).take(limit);
         let mut buffered = BufReader::with_capacity(SEED_READ_BUFFER_BYTES, capped);
         let mut tee = TeeReader::new(&mut buffered);
@@ -866,19 +712,8 @@ impl VerifiedSnapshotArtifact {
     }
 }
 
-/// Shared handle to the worker-owned seed cell. Cloned (not rebuilt) across
-/// the publisher, control, and worker spec that belong to one process open,
-/// so offers land exactly where the worker takes from.
 pub type SeedOfferCell = std::sync::Arc<SeedSlot>;
 
-/// Worker-owned demand plus at most one queued artifact.
-///
-/// States: `(false, None)` dormant, `(true, None)` wanted, `(true, Some)`
-/// offered. `(false, Some)` never occurs: `take` clears demand with the
-/// artifact, and `offer` stores only under demand.
-///
-/// The mutex covers pointer moves only. No open, read, hash, or commit ever
-/// runs under it; descriptor closes happen after the lock is released.
 pub struct SeedSlot {
     inner: Mutex<SeedCell>,
 }
@@ -888,18 +723,13 @@ struct SeedCell {
     artifact: Option<VerifiedSnapshotArtifact>,
 }
 
-/// Whether an offered artifact was queued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfferOutcome {
-    /// Demand was set and the cell was empty; the artifact is now queued.
     Stored,
-    /// Demand was unset or the cell was occupied; the artifact was dropped
-    /// and its descriptor closed without storing or reading.
     Skipped,
 }
 
 impl SeedSlot {
-    /// Sole cross-crate constructor; starts empty with no demand.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -910,14 +740,12 @@ impl SeedSlot {
         }
     }
 
-    /// True iff demand is set and no artifact is queued.
     #[must_use]
     pub fn is_wanted(&self) -> bool {
         let cell = self.inner.lock();
         cell.demand && cell.artifact.is_none()
     }
 
-    /// Declares demand when the cell is empty and undemanded. No-op otherwise.
     pub fn want(&self) {
         let mut cell = self.inner.lock();
         if !cell.demand && cell.artifact.is_none() {
@@ -925,7 +753,6 @@ impl SeedSlot {
         }
     }
 
-    /// Clears demand and drops any queued artifact, closing its descriptor.
     pub fn rest(&self) {
         let dropped = {
             let mut cell = self.inner.lock();
@@ -935,9 +762,6 @@ impl SeedSlot {
         drop(dropped);
     }
 
-    /// Stores the artifact iff demand is set and the cell is empty; otherwise
-    /// drops it and closes its descriptor. Pure pointer move under one short
-    /// lock hold; the first stored tip wins.
     pub fn offer(&self, artifact: VerifiedSnapshotArtifact) -> OfferOutcome {
         {
             let mut cell = self.inner.lock();
@@ -950,8 +774,6 @@ impl SeedSlot {
         OfferOutcome::Skipped
     }
 
-    /// Takes the queued artifact, clearing demand with it. Returns `None`
-    /// unless an artifact is queued; demand is untouched in that case.
     pub fn take(&self) -> Option<VerifiedSnapshotArtifact> {
         let mut cell = self.inner.lock();
         if cell.artifact.is_some() {
@@ -969,7 +791,6 @@ impl Default for SeedSlot {
     }
 }
 
-/// Coins observed while streaming one raw artifact pass.
 struct RawStreamCounts {
     tip_hash: Hash256,
     height: u32,
@@ -977,14 +798,6 @@ struct RawStreamCounts {
     outputs: u64,
 }
 
-/// Streams one raw artifact pass with the strict record parser, emitting each
-/// live output through the caller's closure. Refuses empty records, which the
-/// accepted path also refuses (via its record-count agreement). Duplicate
-/// transaction ids cannot pair with a witness (the mint requires strict
-/// acceptance), so any duplication fails the terminal length/digest binding.
-///
-/// `cancelled` is polled at entry and every 4,096 emitted coins; a trip
-/// returns [`RawSeedError::Cancelled`] with no integrity verdict.
 fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Sized>(
     reader: &mut impl Read,
     emit: &mut F,
@@ -1001,12 +814,6 @@ fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Si
     } = read_snapshot_metadata_v4(reader).map_err(map_snapshot_error)?;
     let record_count_usize = usize::try_from(record_count).map_err(|_| RawSeedError::Integrity)?;
 
-    // Untrusted counts drive the loops, but every iteration consumes bytes
-    // through the capped tee: concurrently appended bytes cannot extend the
-    // work past the witnessed length plus the EOF probe. Each output is
-    // emitted then dropped; the only retained state is the running total,
-    // and each transient output is bounded by the v4 encoding (19-byte
-    // header plus a script of at most 65,535 bytes).
     let mut outputs = 0_u64;
     for _ in 0..record_count_usize {
         let (txid, output_count) = read_snapshot_record_head(reader).map_err(map_snapshot_error)?;
@@ -1044,9 +851,6 @@ fn read_raw_snapshot_stream<E, F: FnMut(&OutPoint, &[u8]) -> Result<(), E> + ?Si
     })
 }
 
-/// Maps accepted-path decode failures to the seed failure taxonomy: short or
-/// otherwise unreadable bytes impugn the artifact, while other transport
-/// failures stay retryable.
 fn map_snapshot_error<E>(error: UtxoError) -> RawSeedError<E> {
     match error {
         UtxoError::Io(error) => map_io_error(error),
@@ -1054,7 +858,6 @@ fn map_snapshot_error<E>(error: UtxoError) -> RawSeedError<E> {
     }
 }
 
-/// A short stream is truncation (integrity); any other transport failure is `Io`.
 fn map_io_error<E>(error: std::io::Error) -> RawSeedError<E> {
     if error.kind() == std::io::ErrorKind::UnexpectedEof {
         RawSeedError::Integrity
@@ -1063,7 +866,6 @@ fn map_io_error<E>(error: std::io::Error) -> RawSeedError<E> {
     }
 }
 
-/// Hashes and counts every byte read through to the strict decoder.
 struct TeeReader<'a, R: Read + ?Sized> {
     inner: &'a mut R,
     hasher: Sha256,
@@ -1093,17 +895,6 @@ impl<R: Read + ?Sized> Read for TeeReader<'_, R> {
     }
 }
 
-/// P1 acceptance row 5: malformed snapshots mint no witness.
-///
-/// Duplicate-txid and empty-record fixtures are rejected by both strict
-/// loaders, so [`read_snapshot_strict_v4_witnessed`] yields no [`V4Witness`]
-/// for them; a valid set mints through exactly one public path per direction
-/// (encode versus decode), pinned by [`V4Witness::is_decoded`].
-///
-/// Foreign construction (a struct literal outside `utxo::snapshot`) is barred
-/// by the private fields: the `compile_fail` doctest on [`V4Witness`] above
-/// asserts exactly that refusal, while this module asserts the runtime halves
-/// (rejection variants plus mint-direction provenance).
 #[cfg(test)]
 mod seed_no_token_tests {
     use super::{
@@ -1134,8 +925,6 @@ mod seed_no_token_tests {
         })
     }
 
-    /// Real two-record set through the public contract API: the positive
-    /// control every malformed fixture below is measured against.
     fn fixture_set() -> TestResult<(UtxoSet, Hash256, u32)> {
         let set = UtxoSet::new();
         let first = txid(7_001);
@@ -1166,7 +955,6 @@ mod seed_no_token_tests {
         Ok((set, txid(7_004), 103))
     }
 
-    /// Fixed 52-byte v4 header: magic, version 4, tip, height, record count.
     fn header(tip: Hash256, height: u32, record_count: u64) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(52);
         bytes.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
@@ -1177,8 +965,6 @@ mod seed_no_token_tests {
         bytes
     }
 
-    /// 45-byte record head with authoritative shard and prefix: the loader
-    /// must reach the semantic check, never an identity rejection.
     fn record_head(record_txid: Hash256, output_count: u32) -> Vec<u8> {
         let key = UtxoKey::from_txid(&Txid::from(record_txid));
         let mut bytes = Vec::with_capacity(45);
@@ -1189,7 +975,6 @@ mod seed_no_token_tests {
         bytes
     }
 
-    /// 19-byte vout header plus script, matching the strict output parser.
     fn output(vout: u32, height: u32, script: &[u8]) -> TestResult<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&vout.to_le_bytes());
@@ -1203,8 +988,6 @@ mod seed_no_token_tests {
 
     #[test]
     fn seed_no_token_from_bad_bytes_and_no_foreign_mint() -> TestResult {
-        // Positive control: a valid set mints exactly one witness per public
-        // path, and the direction bit records which path minted it.
         let (set, tip, height) = fixture_set()?;
         let mut good = Vec::new();
         let (_, (), encode_witness) = write_snapshot_witnessed(&set, &tip, height, &mut good, ())?;
@@ -1220,8 +1003,6 @@ mod seed_no_token_tests {
         assert_eq!(decode_witness.sha256(), encode_witness.sha256());
         assert_eq!(decode_witness.byte_len(), encode_witness.byte_len());
 
-        // Duplicate txid: both records parse, the second insert replaces the
-        // first, and the declared/actual count agreement fails. No witness.
         let duplicate = txid(11);
         let mut duplicate_bytes = header(tip, height, 2);
         for vout in [0_u32, 1] {
@@ -1244,8 +1025,6 @@ mod seed_no_token_tests {
             })
         ));
 
-        // Empty record: the insert skips zero-output records, so the stranded
-        // declaration fails the same agreement. No witness.
         let empty = txid(22);
         let mut empty_bytes = header(tip, height, 1);
         empty_bytes.extend_from_slice(&record_head(empty, 0));

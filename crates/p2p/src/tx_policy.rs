@@ -1,10 +1,5 @@
 //! Connection-bound transaction download policy. Mempool remains the authority
 //! for accepted, orphan and rejected bodies; this owner retains identities only.
-//!
-//! Core v31.1 node/txdownloadman_impl.cpp and p2p_tx_download.py define the
-//! reference cases. Different raw txid/wtxid hashes remain independent until
-//! a body supplies the mapping. Identical bytes share request ownership only;
-//! gateway knowledge and rejection remain scoped by inventory kind.
 
 mod ingress;
 mod relay;
@@ -30,7 +25,6 @@ use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
 
 pub(crate) const MAX_PEER_ANNOUNCEMENTS: usize = 5_000;
 pub(crate) const MAX_PEER_IN_FLIGHT: usize = 100;
-/// Extra global and per-raw-hash bounds, independent of connection count.
 const MAX_ANNOUNCEMENTS: usize = 100_000;
 const MAX_ALTERNATES: usize = 8;
 const REQUEST_LIFETIME: Duration = Duration::from_secs(60);
@@ -62,8 +56,6 @@ impl Identity {
         }
     }
 
-    /// Same download hash, different inventory kind. This shares request
-    /// ownership only; known/reject queries remain typed.
     fn same_hash_other_kind(self) -> Self {
         match self {
             Self::Txid(hash) => Self::Wtxid(hash),
@@ -98,25 +90,12 @@ fn eviction_key(key: Identity, candidate: &Announcement) -> EvictionKey {
     )
 }
 
-/// Where a package's `pkgtxns` body stands. The phase belongs to the claim, so
-/// a retired owner can never leave a phase behind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackagePhase {
-    /// `getpkgtxns` is sent and its answer is still outstanding. This phase
-    /// retires through the ordinary disconnect, expiry and `failed` paths.
     Awaiting,
-    /// The matching body was accepted for admission exactly once. The
-    /// disconnect, expiry and `failed` paths skip it and only
-    /// [`TxPolicy::release_package`] releases the owner: the body is already
-    /// queued and must be submitted whatever happens to its connection. The
-    /// request itself also ends, with its claim, through [`TxPolicy::forget`]
-    /// when the gateway accepts the transaction.
     Enqueued,
 }
 
-/// The package the owner of a request asked for, recorded from the exact
-/// sequence written into the sent `getpkgtxns` frame and never recomputed
-/// from a decoded body.
 #[derive(Debug, Eq, PartialEq)]
 struct PackageClaim {
     combined: [u8; 32],
@@ -128,34 +107,26 @@ struct PackageClaim {
 struct Request {
     candidates: Vec<Announcement>,
     owner: Option<(PeerSource, Instant)>,
-    /// INVARIANT: `Some` only while `owner` is `Some`; every path that clears
-    /// the owner clears this with it. The claim belongs to the owner's exact
-    /// [`PeerSource`], so a replacement connection at a reused socket address
-    /// can neither adopt nor release it.
+    /// INVARIANT: `Some` only while `owner` is `Some`; every path that clears the owner
+    /// clears this with it.
+    ///
+    /// The claim belongs to the owner's exact [`PeerSource`], so a replacement
+    /// connection at a reused socket address can neither adopt nor release it.
     package: Option<PackageClaim>,
-    /// `getdata(MSG_ANCPKGINFO)` was sent to `owner` and its `ancpkginfo` has
-    /// not arrived: the proof that an `ancpkginfo` is solicited. One reply
-    /// consumes it ([`TxPolicy::claim_package`]), so a repeat cannot claim.
-    /// INVARIANT: `true` only while `owner` is `Some` and `package` is `None`;
-    /// every path that clears the owner clears this with it. Such a request
-    /// is exempt from the known sweep like a claimed one, only while owned
-    /// and unexpired ([`TxPolicy::forget_known`]).
+    /// INVARIANT: `true` only while `owner` is `Some` and `package` is `None`; every
+    /// path that clears the owner clears this with it.
+    ///
+    /// Such a request is exempt from the known sweep like a claimed one, only while
+    /// owned and unexpired ([`TxPolicy::forget_known`]).
     package_info: bool,
-    /// Missing parents the ingress held when the solicitation above was made.
-    /// They ride the solicitation so its terminal outcomes (`notfound`,
-    /// expiry, disconnect) can fall back to legacy parent requests instead of
-    /// stranding them. They keep riding the [`TxPolicy::claim_package`]
-    /// claim that answers the solicitation, so a claim that dies (`notfound`,
-    /// expiry, disconnect, refused send, oversized or refused body) falls
     /// back to them too. INVARIANT: non-empty only while `package_info` is
     /// `true` or a package claim is held; every owner-clearing path clears
     /// them with it.
     package_parents: Vec<Txid>,
-    /// Marks a legacy parent request created or adopted by the package-info
-    /// fallback. Only marked requests get the sender's BIP144 witness flag
-    /// at the send boundary; ordinary requests keep their announced form.
-    /// Set when the fallback announces, never cleared: adaptation matches
-    /// the legacy parent path for every sender.
+    /// Marks a legacy parent request created or adopted by the package-info fallback.
+    ///
+    /// Only marked requests get the sender's BIP144 witness flag at the send boundary;
+    /// ordinary requests keep their announced form.
     fallback_parent: bool,
 }
 
@@ -173,16 +144,10 @@ pub(crate) struct TxPolicy {
     next_poll: Option<Instant>,
     known_cursor: Option<Identity>,
     ready_cursor: Option<Identity>,
-    /// Derived accounting, updated only by this owner.
     counts: HashMap<PeerSource, usize>,
     announcements: usize,
-    /// References to exactly the non-preferred candidates that are not owners.
-    /// Requests and candidate vectors remain the sole announcement authority.
     evictable: BTreeSet<EvictionKey>,
     relay: HashMap<PeerSource, relay::RelayPeer>,
-    /// Shared by remote network class and actual local bind endpoint, never
-    /// remote host or connection. Retained across disconnects for this owner's
-    /// lifetime so reconnecting cannot redraw an unexpired inbound clock.
     inbound_inv: HashMap<relay::InboundClockKey, Instant>,
 }
 
@@ -212,8 +177,6 @@ impl TxPolicy {
             if !announcement.preferred {
                 return false;
             }
-            // A full hash must free its own slot. The same removal also frees
-            // the global slot when both limits are reached; never evict twice.
             let victim = if raw_count >= MAX_ALTERNATES {
                 kinds
                     .into_iter()
@@ -240,7 +203,6 @@ impl TxPolicy {
             let Some(source) = self.eviction_source(victim) else {
                 return false;
             };
-            // All cap, identity, ownership and accounting checks precede removal.
             if !self.remove_candidate(victim.1, source) {
                 return false;
             }
@@ -258,9 +220,6 @@ impl TxPolicy {
         true
     }
 
-    /// Recheck one derived reference against at most eight authoritative rows.
-    /// An inconsistent projection refuses admission; it never scans or repairs
-    /// other entries opportunistically and cannot authorize owner eviction.
     fn eviction_source(&self, reference: EvictionKey) -> Option<PeerSource> {
         if !self.evictable.contains(&reference) || self.announcements == 0 {
             return None;
@@ -279,9 +238,6 @@ impl TxPolicy {
             .then_some(candidate.source)
     }
 
-    /// Orphan admission may expedite an existing source without allocating
-    /// another announcement or changing the current in-flight owner. Ordinary
-    /// duplicate inv still passes through `announce` and cannot bypass delays.
     fn request_parent(&mut self, announcement: Announcement) -> bool {
         let Some(key) = Identity::from_inventory(announcement.item) else {
             return false;
@@ -297,8 +253,6 @@ impl TxPolicy {
                 candidate.ready = candidate.ready.min(announcement.ready);
                 candidate.preferred = true;
                 candidate.priority = candidate.priority.min(announcement.priority);
-                // Upgrade TX witness serialization within its typed identity.
-                // An existing WTX hint retains its original wire identity.
                 if kind == key {
                     candidate.item = announcement.item;
                 }
@@ -316,22 +270,6 @@ impl TxPolicy {
         }
     }
 
-    /// Retires `key` because inventory reports it known, unless a package
-    /// solicitation or claim holds it. The gateway counts a resident orphan as
-    /// known, and a package's subject is such an orphan, so the known sweep
-    /// would otherwise destroy the solicitation or claim its reply must
-    /// match.
-    ///
-    /// The exemption is bounded by ownership: an `Awaiting` claim or an
-    /// unanswered solicitation is exempt only while its owner's deadline has
-    /// not passed, and an `Enqueued` claim until it is released, because its
-    /// body is already queued. Past its deadline the request is retired like
-    /// any other known one. The request otherwise ends through its own paths:
-    /// `failed`, expiry, disconnect, [`Self::release_package`], or
-    /// [`Self::forget`] on acceptance.
-    /// A dead solicitation for a known subject (typically a resident orphan)
-    /// dies here, not in [`Self::plan`]: its riding parents fall back to
-    /// legacy requests from their supplier now instead of stranding.
     fn forget_known(&mut self, key: Identity, now: Instant) {
         if self.requests.get(&key).is_some_and(|request| {
             request.package_enqueued()
@@ -347,7 +285,6 @@ impl TxPolicy {
         self.forget(key);
     }
 
-    /// Remove an unowned candidate without failure/expedition side effects.
     fn remove_candidate(&mut self, key: Identity, source: PeerSource) -> bool {
         let Some(request) = self.requests.get_mut(&key) else {
             return false;
@@ -382,18 +319,12 @@ impl TxPolicy {
         }
     }
 
-    /// Only the actual owner may release another source's opportunity. An
-    /// enqueued package is not a failure: its body is already queued and
-    /// [`Self::release_package`] alone retires it.
     fn failed(&mut self, key: Identity, source: PeerSource, now: Instant) -> bool {
         if self.requests.get(&key).is_none_or(|request| {
             request.owner.is_none_or(|(owner, _)| owner != source) || request.package_enqueued()
         }) {
             return false;
         }
-        // Core's ByPeer/ByTxHash group byte-identical TX/WTX announcements
-        // together. Retire only this failed source and expedite other sources,
-        // preserving typed known/reject state and unrelated raw hashes.
         for kind in [key, key.same_hash_other_kind()] {
             if let Some(request) = self.requests.get_mut(&kind)
                 && request.owner.is_some_and(|(owner, _)| owner == source)
@@ -413,20 +344,13 @@ impl TxPolicy {
         true
     }
 
-    /// Exact inverse of [`Self::claim`] for one key whose `getdata` the node's
-    /// aggregate outbound budget refused before anything was queued.
+    /// INVARIANT: a different owner, or no owner, is left alone, and so is an enqueued
+    /// package.
     ///
-    /// PRE: `source` owns `key` through a claim of this critical section.
-    /// POST: the owner is cleared and, for a non-preferred candidate, its
-    /// eviction reference is restored, so the request is exactly as it was
-    /// before the claim and the next plan selects it again. The candidates,
-    /// their readiness and the counts are untouched: nothing was sent, so
-    /// nothing failed, and no source is penalized.
-    /// INVARIANT: a different owner, or no owner, is left alone, and so is an
-    /// enqueued package. Only the claimed key is reversed: the same hash
-    /// under the other identity kind is excluded from the plan by
-    /// [`Self::in_flight`] while this key is owned, so it was never claimed
-    /// alongside it. An awaiting package claim made since goes with the owner.
+    /// Only the claimed key is reversed: the same hash under the other identity kind is
+    /// excluded from the plan by [`Self::in_flight`] while this key is owned, so it was
+    /// never claimed alongside it. An awaiting package claim made since goes with the
+    /// owner.
     fn unclaim(&mut self, key: Identity, source: PeerSource) {
         let Some(request) = self.requests.get_mut(&key) else {
             return;
@@ -447,19 +371,6 @@ impl TxPolicy {
         }
     }
 
-    /// Makes `source` the owner of the request for `subject` because the
-    /// caller is about to send it `getdata(MSG_ANCPKGINFO, subject)`.
-    ///
-    /// PRE (caller): `source` negotiated package relay with `PKG_RELAY_ANC`.
-    /// `parents` are the held missing parents of `subject`: they ride the
-    /// solicitation so its terminal outcomes (`notfound`, expiry, disconnect)
-    /// can fall back to legacy parent requests instead of stranding them.
-    /// POST: `source` has a candidate for `subject` and owns the request until
-    /// the usual deadline with `package_info` set and `parents` stored;
-    /// returns `true`. Returns `false`, with nothing changed, when the hash
-    /// already has an owner under either identity kind (one download per raw
-    /// hash), `source` is at [`MAX_PEER_IN_FLIGHT`] (shared with ordinary
-    /// requests), or the announcement bounds refuse the candidate.
     /// INVARIANT: this adds no state beyond what an ordinary announcement and
     /// claim add, so every existing bound and retirement path applies.
     fn solicit_package_info(
@@ -483,8 +394,6 @@ impl TxPolicy {
         if hash_owned || owned_by_source >= MAX_PEER_IN_FLIGHT {
             return false;
         }
-        // A duplicate announcement from `source` is refused but leaves its
-        // candidate in place, which is all that is required here.
         self.announce(Announcement {
             source,
             item: Inventory::WTx(bitcoin::Wtxid::from_byte_array(subject.0.to_le_bytes())),
@@ -509,7 +418,6 @@ impl TxPolicy {
         true
     }
 
-    /// Deduplicates `parents` preserving first-seen order.
     fn dedup_txids(parents: &[Txid]) -> Vec<Txid> {
         let mut seen = HashSet::new();
         parents
@@ -519,10 +427,6 @@ impl TxPolicy {
             .collect()
     }
 
-    /// Retires `source`'s unanswered `ancpkginfo` solicitation on `key`
-    /// (`notfound(MSG_ANCPKGINFO)`): exactly [`Self::failed`], but only for a
-    /// request that `source` owns with `package_info` set. `false`, with
-    /// nothing changed, otherwise.
     fn failed_package_info(&mut self, key: Identity, source: PeerSource, now: Instant) -> bool {
         if !self.requests.get(&key).is_some_and(|request| {
             request.package_info && request.owner.is_some_and(|(owner, _)| owner == source)
@@ -532,11 +436,6 @@ impl TxPolicy {
         self.failed(key, source, now)
     }
 
-    /// Returns the parents riding `source`'s `ancpkginfo` solicitation on
-    /// `key` or the package claim that answered it, or an empty vector when
-    /// `source` owns neither. The caller reads the parents before retiring the
-    /// request ([`Self::failed`] clears them) and then re-requests them
-    /// through [`Self::announce_parents`].
     fn package_parents_for(&self, key: Identity, source: PeerSource) -> Vec<Txid> {
         self.requests
             .get(&key)
@@ -548,9 +447,6 @@ impl TxPolicy {
             .unwrap_or_default()
     }
 
-    /// [`Self::failed`] for a package-path request, then the fallback of its
-    /// riding parents to `source`: the retired key followed by the plannable
-    /// parent keys, or empty when nothing was retired.
     fn failed_with_parents(
         &mut self,
         key: Identity,
@@ -566,12 +462,6 @@ impl TxPolicy {
         keys
     }
 
-    /// Announces `parents` as preferred parent requests from `source` for
-    /// immediate planning, upgrading existing candidates instead of
-    /// duplicating them, and returns the plannable keys. Announced parents
-    /// are marked for sender-side witness adaptation; ordinary requests are
-    /// never marked. An `announce` refusal (bounds) simply drops that
-    /// parent: the next announcement of it retries.
     fn announce_parents(
         &mut self,
         source: PeerSource,
@@ -600,9 +490,6 @@ impl TxPolicy {
         keys
     }
 
-    /// Returns the owner of the unexpired `ancpkginfo` solicitation on `key`,
-    /// if any. Dispatch consults this before falling back to parent requests
-    /// so a live package fetch is never raced by a duplicate parent fetch.
     fn package_info_owner(&self, key: Identity, now: Instant) -> Option<PeerSource> {
         self.requests.get(&key).and_then(|request| {
             let (owner, deadline) = request.owner?;
@@ -610,14 +497,6 @@ impl TxPolicy {
         })
     }
 
-    /// Retires every `Awaiting` package claim of `source` whose combined hash
-    /// is among `combined` (`notfound(MSG_PKGTXNS, combined)`, the one reply
-    /// to an unservable `getpkgtxns`), exactly as [`Self::failed`] does, and
-    /// returns the retired keys followed by the parent keys their riding
-    /// parents fall back to. A single pass builds one combined-to-key
-    /// index of `source`'s claims for the whole message; items are never
-    /// matched by scanning requests. An `Enqueued` claim, another source's
-    /// claim and an unknown hash are untouched.
     fn failed_package_claims(
         &mut self,
         source: PeerSource,
@@ -644,17 +523,6 @@ impl TxPolicy {
             .collect()
     }
 
-    /// Records `wtxids` as the package `source` is asking for on `subject`.
-    ///
-    /// PRE: `source` owns the request keyed by `subject`'s wtxid through an
-    /// unexpired `ancpkginfo` solicitation ([`Self::solicit_package_info`])
-    /// that holds no package, and `wtxids` is the exact sequence the caller is
-    /// about to write into one `getpkgtxns` frame. The solicitation is
-    /// consumed: it answers exactly one `ancpkginfo`.
-    /// POST: the request holds an `Awaiting` claim whose hash is the packages
-    /// owner's [`combined_package_hash`] of that sequence. Returns `false`,
-    /// with nothing changed, when a precondition fails or the sequence is
-    /// empty or longer than the frame permits.
     /// INVARIANT: owner, deadline and the shared per-peer in-flight count are
     /// untouched: the claim rides the existing request and adds no accounting.
     fn claim_package(
@@ -687,16 +555,6 @@ impl TxPolicy {
         true
     }
 
-    /// Accepts a decoded `pkgtxns` body for admission, once.
-    ///
-    /// The comparison precedes every effect: `source` must own the request
-    /// keyed by `subject` before its deadline, hold an `Awaiting` claim, and
-    /// the body must carry that claim's combined hash and exactly its
-    /// requested wtxid sequence, in order. Only then is the claim marked
-    /// `Enqueued`, so a duplicate, a replacement connection, an expired
-    /// response or a reordered or different set returns `false` with no
-    /// mutation. The claim's own `combined` and `wtxids` are never replaced
-    /// by the decoded values.
     fn begin_package_resolution(
         &mut self,
         source: PeerSource,
@@ -726,20 +584,6 @@ impl TxPolicy {
         true
     }
 
-    /// Retires `source`'s `Enqueued` claim on `subject`: the single release for
-    /// both ends of an enqueued body. Before admission (budget refusal, full
-    /// or closed channel, cancellation, send failure) and after it (`Ok` or
-    /// `Err` from the gateway) the body is finished with, so the owner is
-    /// released exactly as [`Self::failed`] releases it: the claim and owner
-    /// are cleared, this source's candidate is retired, and other sources of
-    /// the same hash are expedited.
-    ///
-    /// Returns `false`, with nothing changed, for any other state: no request,
-    /// another owner or connection, or a claim that is absent or still
-    /// `Awaiting` (which only `failed` retires). A second call is therefore a
-    /// no-op, and the queued body can be submitted at most once.
-    /// The riding parents fall back to `source`; after a successful
-    /// admission they are known and the next plan forgets them unsent.
     fn release_package(
         &mut self,
         source: PeerSource,
@@ -763,8 +607,6 @@ impl TxPolicy {
         keys
     }
 
-    /// Force-retires package requests during ingress teardown, including
-    /// enqueued bodies that ordinary failure paths intentionally preserve.
     fn teardown_package_claims(&mut self, now: Instant) -> usize {
         let keys: Vec<_> = self
             .requests
@@ -806,11 +648,6 @@ impl TxPolicy {
         cleared
     }
 
-    /// Retires every request involving `source` and returns the retired keys
-    /// plus parent follow-ups. An unanswered solicitation dies with its
-    /// connection: its riding parents fall back to the subject's remaining
-    /// announcers, since the dead owner cannot serve them. With no remaining
-    /// announcer the parents stay stranded: no live supplier is known.
     fn disconnected(&mut self, source: PeerSource, now: Instant) -> (Vec<Identity>, Vec<Identity>) {
         let keys: Vec<_> = self
             .requests
@@ -888,7 +725,6 @@ impl TxPolicy {
             .min_by_key(|(kind, candidate)| (!candidate.preferred, candidate.priority, *kind))
     }
 
-    /// Plan bounded inventory checks without reserving an unsent request.
     fn plan(&mut self, now: Instant, keys: Option<&[Identity]>) -> Vec<(Identity, Announcement)> {
         let expired: Vec<_> = self
             .requests
@@ -900,9 +736,6 @@ impl TxPolicy {
                     .map(|(source, _)| (*key, source))
             })
             .collect();
-        // An expired unanswered solicitation dies here without ever reaching
-        // dispatch again: its riding parents fall back to legacy requests from
-        // the expired owner now, instead of stranding.
         let mut expired_parents = Vec::new();
         for (key, source) in expired {
             let parents = self.package_parents_for(key, source);
@@ -961,8 +794,6 @@ impl TxPolicy {
         selected
     }
 
-    /// Recheck the plan after unlocked inventory reads, then reserve only the
-    /// unchanged eligible candidates. The caller holds this owner through send.
     fn claim(
         &mut self,
         now: Instant,
@@ -988,8 +819,6 @@ impl TxPolicy {
         selected
     }
 
-    /// Ordered owner keys provide a resumable bounded sweep. The derived
-    /// admission index is not used here; deletions never invalidate the cursor.
     fn known_batch(&mut self) -> Vec<Identity> {
         use std::ops::Bound::{Excluded, Unbounded};
         let mut keys: Vec<_> = if let Some(cursor) = self.known_cursor {
@@ -1036,8 +865,6 @@ fn ready_candidate(
 }
 
 impl PeerTable {
-    /// Retains missing transaction announcements under the current connection.
-    /// The mempool check happens before this call, outside policy/table locks.
     pub fn announce_transactions(&self, source: PeerSource, items: &[Inventory]) {
         use bitcoin::secp256k1::rand::{RngCore as _, SeedableRng as _};
         let sessions = self.usable_peers();
@@ -1053,8 +880,6 @@ impl PeerTable {
                 && peer.info.as_ref().is_some_and(|info| info.wtxid_relay)
         });
         let preferred = !session.lease.is_inbound();
-        // Seed outside the policy lock: the generator used inside cannot
-        // reseed from the OS during a state transition.
         let mut rng = bitcoin::secp256k1::rand::rngs::StdRng::from_entropy();
         let mut policy = self.tx_policy.lock();
         let overloaded = policy
@@ -1077,8 +902,6 @@ impl PeerTable {
         }
     }
 
-    /// Orphan-parent requests share download ownership and hard limits. They
-    /// preserve the existing immediate source retry, independently of inv delays.
     pub(crate) fn request_parent_transactions(
         &self,
         source: PeerSource,
@@ -1106,16 +929,12 @@ impl PeerTable {
         retained
     }
 
-    /// Retires both identities only after acceptance or confirmed knowledge.
     pub fn forget_known_transaction(&self, txid: Txid, wtxid: Wtxid) {
         let mut policy = self.tx_policy.lock();
         policy.forget(Identity::Txid(txid.0));
         policy.forget(Identity::Wtxid(wtxid.0));
     }
 
-    /// Completes only the delivering source's response after admission (or
-    /// ingress refusal). Alternate witnesses remain available until the
-    /// gateway's identity-scoped accepted/orphan/reject state retires them.
     pub fn transaction_response_completed(&self, source: PeerSource, txid: Txid, wtxid: Wtxid) {
         let now = Instant::now();
         let mut policy = self.tx_policy.lock();
@@ -1136,8 +955,6 @@ impl PeerTable {
             let mut packages = Vec::new();
             for item in items.iter().copied() {
                 match item {
-                    // The one reply to `getdata(MSG_ANCPKGINFO)` that carries
-                    // no package: only the soliciting owner may retire it.
                     Inventory::Unknown {
                         inv_type: MSG_ANCPKGINFO,
                         hash,
@@ -1146,13 +963,9 @@ impl PeerTable {
                         let parents = policy.package_parents_for(key, source);
                         if policy.failed_package_info(key, source, now) {
                             keys.push(key);
-                            // The negative answer ends the package path: fall
-                            // back to the riding parents from their supplier.
                             keys.extend(policy.announce_parents(source, &parents, now));
                         }
                     }
-                    // The one reply to an unservable `getpkgtxns`, named by
-                    // its combined hash; resolved once for the whole message.
                     Inventory::Unknown {
                         inv_type: MSG_PKGTXNS,
                         hash,
@@ -1171,8 +984,6 @@ impl PeerTable {
         }
     }
 
-    /// Promptly schedules alternatives for the two identities supplied by an
-    /// admission result. Known/rejected identity checks remain gateway-owned.
     pub fn poll_transaction_response(&self, inventory: &dyn TxInventory, txid: Txid, wtxid: Wtxid) {
         self.send_transaction_requests(
             Instant::now(),
@@ -1182,18 +993,6 @@ impl PeerTable {
         );
     }
 
-    /// Solicits `ancpkginfo` for `subject` from `source`: the owner of the
-    /// request gives it `getdata(MSG_ANCPKGINFO, subject)` and awaits one
-    /// `ancpkginfo` that [`Self::request_package_transactions`] then claims.
-    ///
-    /// PRE (caller): `source` negotiated package relay with `PKG_RELAY_ANC`.
-    /// `parents` are the held missing parents of `subject`: they ride the
-    /// solicitation so its terminal outcomes can fall back to them instead of
-    /// stranding them. `true` means the request is owned until its usual
-    /// deadline and the frame is queued. `false` leaves nothing owned: the
-    /// hash already has an owner, `source` is at its shared in-flight bound,
-    /// the announcement bounds refuse it, or the send was refused (the request
-    /// is retired as `failed` is, so an alternate source is offered it).
     pub fn request_package_info(
         &self,
         source: PeerSource,
@@ -1217,10 +1016,6 @@ impl PeerTable {
         true
     }
 
-    /// Whether `subject` has a live, unexpired `ancpkginfo` solicitation
-    /// whose owner is still connected. Dispatch consults this after a refused
-    /// solicitation: a live package fetch must not be raced by duplicate
-    /// parent requests, while a dead one must fall back to them.
     pub fn has_live_package_solicitation(&self, subject: Wtxid) -> bool {
         let owner = self
             .tx_policy
@@ -1229,13 +1024,6 @@ impl PeerTable {
         owner.is_some_and(|source| self.lease_source(source).is_some())
     }
 
-    /// Ends `source`'s answered solicitation for `subject` when its
-    /// `ancpkginfo` leaves nothing to request (every listed ancestor is
-    /// already known), so no `getpkgtxns` will consume it. Retires the
-    /// request as `failed` does and promptly offers it to alternate sources.
-    /// `false`, with nothing changed, unless `source` owns the request with
-    /// its solicitation still unanswered: a claimed package ends through
-    /// [`Self::release_package_claim`], never here.
     pub fn release_package_info(
         &self,
         source: PeerSource,
@@ -1251,20 +1039,6 @@ impl PeerTable {
         released
     }
 
-    /// Asks `source`, whose `ancpkginfo` for `subject` answers its
-    /// solicitation, for `wtxids` in one `getpkgtxns` frame, and records that
-    /// same sequence as its package claim.
-    ///
-    /// The claim and the frame are built from the one `wtxids` value inside one
-    /// policy critical section, so the recorded sequence is by construction the
-    /// sequence written. `true` means the frame is queued and the claim is
-    /// `Awaiting`. `false` leaves nothing claimed: the caller did not
-    /// solicit (see [`Self::request_package_info`]) or no longer owns an
-    /// unexpired request for `subject`, the solicitation was already
-    /// answered, the sequence is empty or over [`MAX_GETPKGTXNS`], or the send
-    /// was refused. A refused send retires the request as `failed` does,
-    /// because nothing will resend the `ancpkginfo`; an alternate source is
-    /// offered it.
     pub fn request_package_transactions(
         &self,
         source: PeerSource,
@@ -1291,13 +1065,6 @@ impl PeerTable {
         true
     }
 
-    /// Accepts the decoded `pkgtxns` body for admission, once: `true` only
-    /// when `source` holds the awaiting claim for `subject` before its
-    /// deadline and the body is exactly the requested wtxid sequence with the
-    /// claim's `combined` hash. Every mismatch (foreign or replacement
-    /// connection, duplicate, reordered or different set, expiry) returns
-    /// `false` with no mutation. A `true` result obliges the caller to end in
-    /// exactly one [`Self::release_package_claim`].
     pub fn begin_package_resolution(
         &self,
         source: PeerSource,
@@ -1314,12 +1081,6 @@ impl PeerTable {
         )
     }
 
-    /// The single release of an accepted body: called once when it never
-    /// reached admission (budget refusal, full or closed channel,
-    /// cancellation, send failure) or once after the gateway answered (`Ok`
-    /// and `Err` alike). Retires only `source`'s own enqueued claim, then
-    /// promptly offers the request to alternate sources. `false` for anything
-    /// else, so a repeated or foreign release changes nothing.
     pub fn release_package_claim(
         &self,
         source: PeerSource,
@@ -1348,8 +1109,6 @@ impl PeerTable {
         }
     }
 
-    /// Paced, bounded known-state maintenance. Relevant events have separate
-    /// scoped paths, so this cadence never delays an owner's failure fallback.
     pub fn poll_transaction_requests(&self, inventory: &dyn TxInventory) {
         self.poll_transaction_requests_at(inventory, Instant::now());
     }
@@ -1363,8 +1122,6 @@ impl PeerTable {
                 return;
             }
             policy.next_poll = Some(now + REQUEST_POLL_INTERVAL);
-            // Lock order is policy -> peer table. Fresh announcements cannot
-            // appear between this live census and its reconciliation.
             let live: HashSet<_> = self
                 .usable_peers()
                 .iter()
@@ -1377,9 +1134,6 @@ impl PeerTable {
                 .copied()
                 .collect();
             for source in gone {
-                // Parent follow-ups ride the same sweep below: they were
-                // announced ready, so the next plan picks them up within one
-                // paced cadence.
                 let _ = policy.disconnected(source, now);
             }
             policy.known_batch()
@@ -1405,9 +1159,6 @@ impl PeerTable {
         commit_clock: impl FnOnce() -> Instant,
     ) {
         let planned = self.tx_policy.lock().plan(now, keys);
-        // Never reserve ownership around user/gateway callbacks. A premature
-        // notfound cannot release a planned-but-unsent request. Every identity
-        // about to be sent is checked even when its background sweep is not due.
         let (known, checked): (Vec<_>, Vec<_>) = planned
             .into_iter()
             .partition(|(key, _)| inventory.is_some_and(|inventory| key.known(inventory)));
@@ -1415,10 +1166,6 @@ impl PeerTable {
         for (key, _) in known {
             policy.forget(key);
         }
-        // Revalidation, reservation, grouping and concrete nonblocking enqueue
-        // are one policy critical section: no unlocked owner/reservation ABA.
-        // Inventory callbacks and lock contention must not consume the peer's
-        // response lifetime. Sample at commit, preserving injected event time.
         let committed = now.max(commit_clock());
         let selected = policy.claim(committed, &checked);
         let mut batches: HashMap<PeerSource, Vec<(Identity, Inventory)>> = HashMap::new();
@@ -1429,8 +1176,6 @@ impl PeerTable {
                 .push((key, announcement.item));
         }
         for (source, batch) in batches {
-            // Only fallback parents are adapted: ordinary requests keep
-            // their announced wire form.
             let witness = self.transaction_witness(source);
             let items = batch
                 .iter()
@@ -1450,9 +1195,6 @@ impl PeerTable {
                 .collect();
             match self.send(source, Message::GetData(items)) {
                 Ok(()) => {}
-                // The node's aggregate budget is full while the source is
-                // healthy: nothing was sent, so the claim is reversed and the
-                // same opportunity is planned again by a later poll.
                 Err(crate::OutboundRefusal::Saturated(_)) => {
                     for (key, _) in batch {
                         policy.unclaim(key, source);
@@ -1679,7 +1421,6 @@ mod tests {
         assert_eq!(policy.announcements, MAX_ALTERNATES);
         assert_eq!(select(&mut policy, now), []);
         assert_eq!(select(&mut policy, now + SOURCE_DELAY).len(), 1);
-        // The global limit is independent of the per-peer and per-identity caps.
         policy = TxPolicy::default();
         for port in 1..=21 {
             let peer = source(port);
@@ -1787,8 +1528,6 @@ mod tests {
         let new_addr: crate::PeerEndpoint = ([127, 0, 0, 1], 8334).into();
         POLL_HOOK.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                // A new ready connection and its announcement both appear
-                // after poll entered but before policy reconciliation.
                 pending_table.register(new_addr, new_lease.clone());
                 pending_table.publish_info(
                     new_addr,
@@ -1810,7 +1549,6 @@ mod tests {
         poll_now += REQUEST_POLL_INTERVAL;
         table.poll_transaction_requests_at(&inventory, poll_now);
         assert_eq!(table.tx_policy.lock().announcements, 1);
-        // A following paced poll cannot duplicate the newly registered source's request.
         poll_now += REQUEST_POLL_INTERVAL;
         table.poll_transaction_requests_at(&inventory, poll_now);
         assert!(
@@ -1827,7 +1565,6 @@ mod tests {
         (source, receiver)
     }
 
-    /// Registers `lease` at `port` with a published outbound handshake.
     pub(super) fn register_ready(
         table: &PeerTable,
         port: u16,
@@ -2363,8 +2100,6 @@ mod tests {
         }
     }
 
-    /// `owner` has solicited `ancpkginfo` for the request on `n` and owns it;
-    /// `alternate` waits behind it.
     fn owned_request(
         policy: &mut TxPolicy,
         owner: PeerSource,
@@ -2378,8 +2113,6 @@ mod tests {
         (Identity::Wtxid(subject.0), subject)
     }
 
-    /// The typed state a refused call must leave alone: the request's owner,
-    /// deadline, claim, candidates, and the shared accounting.
     #[derive(Debug, Eq, PartialEq)]
     struct Observed {
         owner: Option<(PeerSource, Instant)>,
@@ -2489,7 +2222,6 @@ mod tests {
         let subject = wtxid(1);
         let key = Identity::Wtxid(subject.0);
 
-        // An ordinary request is not a solicitation: an ancpkginfo cannot claim it.
         let mut policy = TxPolicy::default();
         announce(&mut policy, a, 1, now, true);
         assert_eq!(select(&mut policy, now).len(), 1);
@@ -2499,7 +2231,6 @@ mod tests {
         assert!(!policy.solicit_package_info(b, subject, &[], now));
         assert_eq!(observe(&policy, key), ordinary);
 
-        // The other identity kind of the same hash is the same download.
         let mut policy = TxPolicy::default();
         policy.announce(Announcement {
             source: a,
@@ -2513,7 +2244,6 @@ mod tests {
         assert!(!policy.requests.contains_key(&key));
         assert_eq!(policy.announcements, 1);
 
-        // The per-peer in-flight bound is shared with ordinary requests.
         let mut policy = TxPolicy::default();
         let full = u32::try_from(MAX_PEER_IN_FLIGHT).unwrap();
         for n in 1..=full {
@@ -2526,7 +2256,6 @@ mod tests {
         assert_eq!(policy.announcements, announcements);
         assert!(policy.solicit_package_info(b, subject, &[], now));
 
-        // Expiry, disconnect and notfound retire it through the ordinary paths.
         for mode in ["expiry", "disconnect", "notfound"] {
             let mut policy = TxPolicy::default();
             let (key, subject) = owned_request(&mut policy, a, b, 1, now);
@@ -2552,7 +2281,6 @@ mod tests {
             assert_eq!(selected[0].1.source, b, "{mode}");
             assert!(!policy.requests[&key].package_info, "{mode}");
             assert!(!policy.counts.contains_key(&a), "{mode}");
-            // A late ancpkginfo from the retired source cannot claim.
             assert!(!policy.claim_package(a, subject, &[subject], at), "{mode}");
         }
     }
@@ -2657,8 +2385,7 @@ mod tests {
             );
             assert_eq!(package_state(&policy, key), None, "{mode}");
             assert!(!policy.counts.contains_key(&a), "{mode}");
-            // A late answer from the retired source, or from the alternate that
-            // never asked for a package, finds no claim and changes nothing.
+
             let settled = observe(&policy, key);
             for late in [a, b] {
                 assert!(
@@ -2767,7 +2494,6 @@ mod tests {
         assert!(!table.begin_package_resolution(a, subject, combined, &reordered));
         assert!(table.begin_package_resolution(a, subject, combined, &sequence));
 
-        // The connection ends with its body queued: nothing is re-requested.
         table.transaction_peer_disconnected(a, &inventory);
         assert!(b_rx.try_recv().is_err());
         let replacement = PeerSource::for_test(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
@@ -2776,7 +2502,6 @@ mod tests {
         assert!(!table.begin_package_resolution(a, subject, combined, &sequence));
         assert!(b_rx.try_recv().is_err());
 
-        // The consumer finishes the one queued body; only then does b get its turn.
         assert!(table.release_package_claim(a, subject, &inventory));
         assert!(matches!(b_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![item(1)]));
         assert!(!table.release_package_claim(a, subject, &inventory));
@@ -2793,15 +2518,12 @@ mod tests {
         let table = PeerTable::new();
         let gone = source(9);
         let subject = wtxid(1);
-        // The solicitation's own send is refused: nothing stays owned.
         assert!(!table.request_package_info(gone, subject, &[]));
         {
             let policy = table.tx_policy.lock();
             assert!(policy.requests.is_empty());
             assert!(policy.counts.is_empty());
         }
-        // The getpkgtxns send is refused after the claim was recorded: the
-        // claim goes with the owner.
         assert!(
             table
                 .tx_policy
@@ -2836,7 +2558,6 @@ mod tests {
         );
         assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
 
-        // b announced the same transaction and is the alternate.
         table.tx_policy.lock().announce(Announcement {
             source: b,
             item: item(1),
@@ -2866,7 +2587,6 @@ mod tests {
             sequences.push((key, subject, sequence));
         }
         let hash = |index: usize| combined_package_hash(&sequences[index].2);
-        // Request 1 is already queued for admission: it must survive.
         assert!(policy.begin_package_resolution(a, sequences[0].1, hash(0), &sequences[0].2, now));
 
         let retired = policy.failed_package_claims(a, &[hash(0), hash(1), hash(2), [9; 32]], now);
@@ -2954,7 +2674,6 @@ mod tests {
         assert!(matches!(b_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![item(1)]));
         assert!(!table.release_package_info(a, subject, &inventory));
 
-        // Once claimed, the package ends through its own release instead.
         let subject = wtxid(2);
         assert!(table.request_package_info(a, subject, &[]));
         assert!(matches!(a_rx.try_recv(), Ok(Message::GetData(_))));
@@ -3025,7 +2744,6 @@ mod tests {
         assert!(matches!(a_rx.try_recv(), Ok(Message::GetData(_))));
         let key = Identity::Wtxid(claimed.0);
 
-        // The gateway reports both known, as it does for a resident orphan.
         for subject in [claimed, unclaimed] {
             inventory
                 .known
@@ -3043,7 +2761,6 @@ mod tests {
             );
         }
 
-        // Its ancpkginfo arrives and is claimed: the claim survives too.
         let sequence = vec![wtxid(5), claimed];
         assert!(table.request_package_transactions(a, claimed, sequence.clone()));
         assert!(matches!(a_rx.try_recv(), Ok(Message::GetPkgTxns(_))));
@@ -3053,7 +2770,6 @@ mod tests {
             Some(PackagePhase::Awaiting)
         );
 
-        // The reply still matches, and the one release then retires the request.
         let combined = combined_package_hash(&sequence);
         assert!(table.begin_package_resolution(a, claimed, combined, &sequence));
         assert!(table.release_package_claim(a, claimed, &inventory));
@@ -3085,7 +2801,6 @@ mod tests {
         let key = Identity::Wtxid(subject.0);
         assert!(table.request_package_info(a, subject, &parents));
         assert!(matches!(a_rx.try_recv(), Ok(Message::GetData(_))));
-        // `b` announced the same subject and waits as the alternate.
         table.tx_policy.lock().announce(Announcement {
             source: b,
             item: item(1),
@@ -3095,8 +2810,6 @@ mod tests {
         });
         let inventory = CountingInventory::default();
         table.transaction_not_found(a, &[ancestor_info(subject)], &inventory);
-        // The subject is re-offered to the alternate, and the riding parents
-        // fall back to their supplier instead of stranding.
         assert!(matches!(b_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![item(1)]));
         assert!(
             matches!(a_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![parent_witness_item(11), parent_witness_item(12)])
@@ -3127,8 +2840,6 @@ mod tests {
         };
         let inventory = CountingInventory::default();
         table.transaction_not_found(a, &[notfound], &inventory);
-        // The claim that answered the solicitation dies, but the orphan's
-        // missing parents still fall back to their supplier.
         assert!(
             matches!(a_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![parent_witness_item(41), parent_witness_item(42)])
         );
@@ -3145,7 +2856,6 @@ mod tests {
         let parents = [parent_txid(21), parent_txid(22)];
         assert!(table.request_package_info(a, subject, &parents));
         assert!(matches!(a_rx.try_recv(), Ok(Message::GetData(_))));
-        // `b` announced the same subject and waits as the alternate.
         table.tx_policy.lock().announce(Announcement {
             source: b,
             item: item(1),
@@ -3155,8 +2865,6 @@ mod tests {
         });
         let inventory = CountingInventory::default();
         table.transaction_peer_disconnected(a, &inventory);
-        // The dead owner serves nothing more; the alternate gets the subject
-        // together with the riding parents in one frame.
         assert!(a_rx.try_recv().is_err());
         assert!(
             matches!(b_rx.try_recv(), Ok(Message::GetData(items)) if items == vec![item(1), parent_witness_item(21), parent_witness_item(22)])
@@ -3175,8 +2883,6 @@ mod tests {
         assert!(policy.solicit_package_info(a, subject, &parents, now));
         let at = now + REQUEST_LIFETIME;
         let selected = select(&mut policy, at);
-        // The subject is re-offered to the alternate while the riding parents
-        // fall back to the expired owner; nothing is dropped.
         let owners: Vec<(Identity, PeerSource)> = selected
             .iter()
             .map(|(key, candidate)| (*key, candidate.source))
@@ -3214,9 +2920,6 @@ mod tests {
         let mut policy = TxPolicy::default();
         let subject = wtxid(1);
         let parents = [parent_txid(41), parent_txid(42)];
-        // In production the subject is a resident orphan, so the gateway
-        // reports it known and the sweep (not `plan`) retires the dead
-        // solicitation.
         announce(&mut policy, b, 1, now, false);
         assert!(policy.solicit_package_info(a, subject, &parents, now));
         let key = Identity::Wtxid(subject.0);

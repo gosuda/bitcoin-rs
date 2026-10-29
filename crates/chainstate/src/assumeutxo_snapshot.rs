@@ -24,8 +24,6 @@ use crate::recovery::{InitialChainstate, ResumeSource};
 
 const DIRECTORY: &str = "assumeutxo";
 
-// Temporary names are only reservation candidates: exclusive creation owns
-// the inode, and collisions never authorize truncating an existing artifact.
 static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
 
 fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> Result<Dir> {
@@ -36,8 +34,6 @@ fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> R
             return Err(error);
         }
         let directory = parent.open_dir_nofollow(name)?;
-        // Retry also certifies an entry left by an earlier failed directory
-        // sync; existence alone is not evidence that its parent is durable.
         sync_dir(parent)?;
         Ok(directory)
     }
@@ -58,8 +54,6 @@ fn write_archive<T>(
         match create_file(directory, &temporary) {
             Ok(file) => {
                 let file = file.into_std();
-                // Recovery only reclaims a recognized reservation after taking
-                // this same exclusive lock. Acquire it before writing any bytes.
                 if let Err(error) = file.lock() {
                     drop(file);
                     let _ = directory.remove_file(&temporary);
@@ -83,16 +77,12 @@ fn write_archive<T>(
         let write_result = write(&mut writer)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
-        // Keep the reservation locked until it no longer has a temporary
-        // name; a concurrent recovery pass must not reclaim a live writer.
         directory.rename(&temporary, directory, name)?;
         sync_dir(directory)?;
         drop(writer);
         Ok(write_result)
     })();
     if result.is_err() {
-        // Only the exclusively reserved temporary can be removed. If rename
-        // succeeded, this is already absent and the published archive remains.
         let _ = directory.remove_file(&temporary);
     }
     result
@@ -104,9 +94,6 @@ enum ReservationKind {
     Headers,
 }
 
-// Match only the exact, canonical names emitted by write_archive. Unknown
-// files, older operator-visible names such as coins.tmp, and final archives
-// are outside this owner's reclamation surface.
 fn reservation_kind(name: &str) -> Option<ReservationKind> {
     let (kind, suffix) = name
         .strip_prefix(".coins.dat.")
@@ -148,7 +135,6 @@ fn recognized_reservation(
                 {
                     Err(error)
                 }
-                // Unknown formats and unidentifiable fragments are preserved.
                 Err(_) => Ok(false),
             }
         }
@@ -164,10 +150,6 @@ fn recognized_reservation(
     }
 }
 
-/// Reclaims identifiable, uncommitted archive reservations after a crash.
-/// Called before the manager is published; per-file exclusive lock probes
-/// additionally prove that no other live archive writer owns each inode.
-/// Only known network/base directories and native archive prefixes qualify.
 pub(super) fn cleanup_reservations(data_dir: &Path, network: Network) -> Result<()> {
     let data = open_data_dir(data_dir)?;
     let root = match data.open_dir_nofollow(DIRECTORY) {
@@ -203,7 +185,6 @@ pub(super) fn cleanup_reservations(data_dir: &Path, network: Network) -> Result<
     Ok(())
 }
 
-/// Reclaims one already-selected reservation, retaining its lock through unlink.
 fn reclaim_reservation(
     directory: &Dir,
     name: &str,
@@ -218,8 +199,6 @@ fn reclaim_reservation(
         .follow(FollowSymlinks::No)
         .nonblock(true);
     let mut file = directory.open_with(name, &options)?.into_std();
-    // Directory-entry type is only a precheck. Validate the opened inode
-    // before locking or reading; a substituted FIFO must never wait for data.
     if !file.metadata()?.is_file() {
         return Ok(false);
     }
@@ -235,11 +214,6 @@ fn reclaim_reservation(
     Ok(true)
 }
 
-/// Stage durable coins before the root can name them. Uncommitted files never
-/// establish an anchor. One activation is admitted per datadir.
-///
-/// Test-only: crash fixtures stage archives without a proof. Production
-/// activation seals through `write_coins_sealed`.
 #[cfg(test)]
 pub(super) fn write_coins(
     data_dir: &Path,
@@ -259,11 +233,6 @@ pub(super) fn write_coins(
     })
 }
 
-/// Observer that emits an already-proven trailer without refolding `MuHash`.
-///
-/// The coins are still walked once to write them; only the per-coin hashing
-/// and totals fold is skipped. Proofless fixtures without sealed statistics
-/// keep `write_coins` (test-only).
 struct SealedTrailer([u8; 384]);
 
 impl SnapshotCoinObserver for SealedTrailer {
@@ -273,25 +242,11 @@ impl SnapshotCoinObserver for SealedTrailer {
     }
 }
 
-/// Stage durable coins whose trailer is already sealed with the set.
-///
-/// Consumes the
-/// [`VerifiedSnapshotState`](bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState)
-/// proof and returns its parts for installation, so a mismatched
-/// set/statistics pair is unrepresentable at the call site: the proof was
-/// consumed to produce them, so no shared-reference holder
-/// (`UtxoSet::replace_from`, `contract::commit_block_changes`) could have
-/// mutated the set after sealing. The emitted trailer is
-/// `stats.muhash.finalize()`, the same bytes the recomputing `write_coins`
-/// would fold from the identical coins. Staging, locking, error propagation
-/// and call order relative to the durable commit are unchanged.
 pub(super) fn write_coins_sealed(
     data_dir: &Path,
     state: VerifiedSnapshotState,
     pinned: &AssumeUtxoData,
 ) -> Result<(UtxoSet, CoinStats, Option<bitcoin_rs_utxo::V4Witness>)> {
-    // The directory resolves before the proof is consumed, so a directory
-    // failure returns with `state` still owned by the caller for retry.
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     let (set, stats) = state.into_parts();
     let trailer = stats.muhash.finalize();
@@ -414,8 +369,6 @@ pub(super) fn load_verified(
         bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)
     })?;
     stats.tx_count = pinned.chain_tx_count;
-    // C3: seal the same descriptor the witnessed decode consumed; the pinned
-    // hash plus stats agreements above are the binding, so no new pass runs.
     let seed = VerifiedSnapshotArtifact::seal(
         coins.into_inner(),
         witness,
@@ -471,7 +424,6 @@ mod tests {
         )?;
         let entry = archive.entries()?.next().context("reservation entry")??;
         assert!(entry.file_type()?.is_file());
-        // Deterministically occupy the actual enumeration/open race boundary.
         archive.remove_file(name)?;
         let path = dir
             .path()
@@ -494,8 +446,6 @@ mod tests {
         });
         let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
         let rescue = if observed.is_err() {
-            // Unblock a regressed reader before reporting failure. O_RDWR plus
-            // NONBLOCK prevents this rescue from introducing another FIFO wait.
             let mut options = cap_std::fs::OpenOptions::new();
             options.read(true).write(true).follow(FollowSymlinks::No);
             cap_fs_ext::OpenOptionsSyncExt::nonblock(&mut options, true);
@@ -508,7 +458,6 @@ mod tests {
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("cleanup worker panicked"))?;
-        // Keep queued rescue bytes alive even if the worker started late.
         drop(rescue);
         assert!(!observed.context("cleanup blocked on substituted FIFO")??);
         assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());
@@ -576,9 +525,6 @@ mod tests {
         Ok(())
     }
 
-    /// The sealed writer must emit the exact bytes the recomputing writer
-    /// folds: header, records and `MuHash` trailer. The restart path rescans
-    /// and ignores the trailer, so only this comparison guards it.
     #[test]
     fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> Result<()> {
         let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
@@ -588,10 +534,8 @@ mod tests {
             bitcoin_rs_utxo::core_snapshot::SnapshotLimits::default(),
         )?;
         let pinned = bare.anchor;
-        // Oracle first: borrows the set, consumes nothing.
         let dir_old = tempfile::tempdir()?;
         write_coins(dir_old.path(), &bare.set, pinned)?;
-        // Then seal the SAME owned set: no clone, no caller-paired parts.
         let state =
             bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState::verify(bare.set, pinned)?;
         let dir_new = tempfile::tempdir()?;

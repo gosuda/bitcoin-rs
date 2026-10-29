@@ -1,5 +1,3 @@
-//! Wire representations for the Bitcoin Esplora HTTP API.
-
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]

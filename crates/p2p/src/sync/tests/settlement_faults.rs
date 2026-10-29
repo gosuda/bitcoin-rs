@@ -68,8 +68,6 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestRe
 
 #[test]
 fn apply_cache_miss_populates_and_then_hits() -> TestResult {
-    // 8 block bodies available as headers, but only the first three staged
-    // this round. A small pending budget caps the cached horizon at 5.
     let fixture = apply_cache_fixture(8, 0)?;
     install_budget(
         &fixture.sync,
@@ -148,9 +146,6 @@ fn apply_cache_miss_populates_and_then_hits() -> TestResult {
 
 #[test]
 fn apply_cache_horizon_capped_by_pending_budget() -> TestResult {
-    // 12 header-backed bodies available, pending budget capped at 4. Stage a
-    // single body: the populated horizon must not exceed the budget even
-    // though far more headers are available above the applied tip.
     let fixture = apply_cache_fixture(12, 0)?;
     let cap = 4;
     install_budget(
@@ -410,7 +405,6 @@ fn tick_bounded_request_peer_selection_preserves_equal_height_order() -> TestRes
     Ok(())
 }
 
-/// Delivers `headers` to `sync` as a wire answer from `source`.
 pub(crate) fn deliver_headers(
     tx: &crossbeam_channel::Sender<InboundHeaders>,
     headers: Vec<Header>,
@@ -424,8 +418,6 @@ pub(crate) fn deliver_headers(
     Ok(())
 }
 
-/// The `getheaders` locators a message carries, as raw consensus bytes, or
-/// `None` for another message.
 pub(crate) fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
     match message {
         Message::GetHeaders(request) => Some(
@@ -439,7 +431,6 @@ pub(crate) fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
     }
 }
 
-/// The first `getheaders` locator on `rx`, or `None` if none is queued.
 pub(crate) fn next_locator(rx: &crate::test_support::MessageReceiver) -> Option<Vec<[u8; 32]>> {
     rx.try_iter().find_map(|message| locator_of(&message))
 }

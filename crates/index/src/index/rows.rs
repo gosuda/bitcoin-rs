@@ -5,58 +5,32 @@ use crate::types::HashPrefixRow;
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily};
 use zerocopy::IntoBytes;
 
-/// One ordered live-view mutation produced by a block.
-///
-/// Order is semantic, unlike every other pending row family: a later block in
-/// the same committed batch may delete a key an earlier block inserted, so
-/// these are applied first-to-last with the last operation per key winning.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) enum LiveOp {
-    /// The block created this currently-unspent output.
     Insert(crate::types::ScriptLiveRow),
-    /// The block spent this previously-live output.
     Delete(crate::types::ScriptLiveRow),
 }
 
-/// Counts of rows written by a confirmed prepared commit.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexRowCounts {
-    /// Transaction-id index rows written to [`ColumnFamily::TxConfirmed`].
     pub txids: usize,
-    /// Script funding rows written to [`ColumnFamily::Funding`].
     pub funding: usize,
-    /// Previous-outpoint spending rows written to [`ColumnFamily::Spending`].
     pub spending: usize,
-    /// Header rows written to [`ColumnFamily::BlockHeaders`].
     pub headers: usize,
-    /// Live-output mutations applied to [`ColumnFamily::ScriptLive`].
     pub live: usize,
-    /// Basic-filter rows written to the optional index metadata namespace.
     pub filters: usize,
 }
 
-/// Encoded logical key and value bytes planned for index row families.
-///
-/// Represents pre-coalescing logical row bytes in a prepared batch. This accounts
-/// for planned row payloads before multi-block merging/coalescing and excludes
-/// engine write-ahead logs, metadata overhead, or host physical storage I/O.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct IndexRowBytes {
-    /// Planned transaction-id index row bytes for [`ColumnFamily::TxConfirmed`].
     pub(crate) tx_lookup: usize,
-    /// Planned script funding and spending row bytes for [`ColumnFamily::Funding`]
-    /// and [`ColumnFamily::Spending`].
     pub(crate) script_history: usize,
-    /// Planned live-view mutation bytes for [`ColumnFamily::ScriptLive`].
     pub(crate) script_live: usize,
-    /// Planned block header identity row bytes for [`ColumnFamily::BlockHeaders`].
     pub(crate) headers: usize,
-    /// Planned basic-filter row bytes for [`ColumnFamily::UtxoMeta`].
     pub(crate) filters: usize,
 }
 
 impl IndexRowBytes {
-    /// Zero encoded bytes across all families.
     pub(crate) const ZERO: Self = Self {
         tx_lookup: 0,
         script_history: 0,
@@ -65,7 +39,6 @@ impl IndexRowBytes {
         filters: 0,
     };
 
-    /// Returns the checked sum of all family bytes.
     pub(crate) fn total(&self) -> Result<usize, IndexError> {
         self.tx_lookup
             .checked_add(self.script_history)
@@ -75,7 +48,6 @@ impl IndexRowBytes {
             .ok_or(IndexError::MutationSizeOverflow)
     }
 
-    /// Adds another set of family byte counts with overflow checking.
     pub(crate) fn checked_add(&self, other: &Self) -> Result<Self, IndexError> {
         Ok(Self {
             tx_lookup: self
@@ -102,9 +74,6 @@ impl IndexRowBytes {
     }
 }
 
-/// One index row together with the transaction byte range that produced it.
-///
-/// Ordered by key first so a sorted slice groups by row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct PositionedRow {
     pub(super) row: HashPrefixRow,
@@ -117,28 +86,14 @@ pub(super) struct PendingRows {
     pub(super) funding_rows: Vec<PositionedRow>,
     pub(super) spending_rows: Vec<PositionedRow>,
     pub(super) header_rows: Vec<[u8; crate::types::HEADER_ROW_SIZE]>,
-    /// Ordered live-view mutations. Never sorted: unlike the append-only
-    /// families above, this one mixes puts and deletes, and a later block's
-    /// delete of an earlier block's insert must stay later.
     pub(super) live_ops: Vec<LiveOp>,
     pub(super) filter_rows: Vec<([u8; 32], super::filters::BasicFilter)>,
 }
 
-/// Counts distinct row keys in a sorted `PositionedRow` slice.
-///
-/// The reported count must stay "rows the store receives", not "positions
-/// collected": one key can carry several positions when a block funds the same
-/// script from more than one transaction, and those collapse into one row.
 fn distinct_row_count(rows: &[PositionedRow]) -> usize {
     rows.chunk_by(|left, right| left.row == right.row).count()
 }
 
-/// Calls `emit` once per row key in a sorted slice, with that key's positions.
-///
-/// Two blocks at one height that share a key merge their positions into one
-/// value. That is safe because the query engine bounds-checks every position and
-/// falls back to a full-block scan when a position it reads does not resolve to
-/// the requested transaction, so a merged value costs at most a scan. See
 /// [`crate::types::TxPositionValue`].
 fn for_each_row_group<F>(rows: &[PositionedRow], mut emit: F)
 where
@@ -268,14 +223,6 @@ impl PendingRows {
     }
 }
 
-/// Applies ordered live mutations to `batch`, last operation per key winning.
-///
-/// Coalescing in memory rather than relying on the backend's write-batch
-/// ordering keeps the semantics backend-independent: after this, each key
-/// appears in the batch at most once. `invert` swaps inserts and deletes,
-/// which is exactly a block's live rollback; inverted ops are applied in
-/// reverse order so the earliest forward operation determines each key's
-/// undo mutation.
 fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp], invert: bool) {
     let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], bool> =
         hashbrown::HashMap::new();
@@ -341,7 +288,6 @@ pub(super) fn delete_rows(
             batch.delete(cf, group[0].row.as_bytes());
         }
     }
-    // Rollback reverses the authoritative live transition, preserving op order.
     for (hash, _) in &rows.filter_rows {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
     }
@@ -363,7 +309,6 @@ mod tests {
     use super::*;
     use crate::types::{HashPrefixRow, ScriptHash, ScriptLiveRow, TxPosition};
 
-    /// Reads the target family of one recorded operation.
     fn op_cf(op: &BatchOp) -> ColumnFamily {
         match op {
             BatchOp::Put { cf, .. }
@@ -395,9 +340,11 @@ mod tests {
         ]
     }
 
-    // Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical bytes
-    // (rows 163-181), together with `crates/index/src/index/rows.rs`'s
-    // `for_each_row_group` contract: one stored key retains all numeric positions.
+    /// Byte contract (`docs/benchmarks/scriptindex-format.md` § Logical vs physical
+    /// bytes): `tx_lookup` 42 = 24 prefix + 18 pos; `script_history` 84; headers 80;
+    /// `script_live` 86; filters 101.
+    ///
+    /// Family total equals `encoded_bytes`; physical put bytes match the family total.
     #[test]
     fn family_bytes_accounting() -> Result<(), IndexError> {
         let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
@@ -424,24 +371,16 @@ mod tests {
         let family = rows.encoded_bytes_by_family()?;
         let total_bytes = rows.encoded_bytes()?;
 
-        // Total equivalence contract: family total must equal encoded_bytes.
         assert_eq!(family.total()?, total_bytes);
 
-        // Verify each family accounts for its exact logical bytes:
-        // tx_lookup: 2 distinct keys * 12 bytes prefix + 3 positions * 6 bytes = 24 + 18 = 42.
         assert_eq!(family.tx_lookup, 42);
-        // script_history: funding (24 prefix + 18 pos) + spending (24 prefix + 18 pos) = 84.
         assert_eq!(family.script_history, 84);
-        // headers: 1 header * 80 bytes = 80.
         assert_eq!(family.headers, 80);
-        // script_live: 2 distinct live ops * 43 bytes = 86.
         assert_eq!(family.script_live, 86);
-        // filters: 1 filter row * (34 key + 64 header/hash + 3 filter bytes) = 101.
         assert_eq!(family.filters, 101);
 
         assert_eq!(total_bytes, 42 + 84 + 80 + 86 + 101);
 
-        // Put rows into a write batch and verify physical put bytes match family total.
         let mut puts = BufferedWriteBatch::default();
         put_rows(&mut puts, &rows);
         let emitted_bytes: usize = puts
@@ -455,7 +394,6 @@ mod tests {
             .sum();
         assert_eq!(emitted_bytes, total_bytes);
 
-        // PreparedBatch accumulator preservation.
         let mut batch = super::super::prepared::PreparedBatch::new(
             super::super::prepared::PreparedBatchLimits {
                 max_rows: 100,
@@ -550,7 +488,6 @@ mod tests {
             Some(&vec![101.0])
         );
 
-        // Zero-size semantics: families with 0 bytes are not emitted.
         let partial_family = IndexRowBytes {
             tx_lookup: 100,
             script_history: 0,
@@ -677,11 +614,6 @@ mod tests {
         assert_eq!(empty_groups, 0);
     }
 
-    // Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical
-    // bytes (rows 163-181), and `crates/index/src/index/rows.rs`'s
-    // `PendingRows::encoded_bytes`/`delete_rows` contracts: emitted logical bytes
-    // match row accounting, and shared block-header identity is retained unless
-    // explicitly requested for deletion.
     #[test]
     fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(), IndexError> {
         let mut rows = PendingRows {
@@ -746,11 +678,6 @@ mod tests {
         Ok(())
     }
 
-    // Contract: `crates/index/src/index/rows.rs`, `LiveOp` and
-    // `apply_live_ops` documentation (lines 8-18 and 153-160): forward application
-    // is last-operation-wins, while rollback is the exact inverse using the
-    // first forward operation. This is the small-sequence regression for that
-    // forward/rollback coalescing requirement.
     #[test]
     fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0);

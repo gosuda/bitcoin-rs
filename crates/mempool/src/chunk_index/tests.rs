@@ -1,10 +1,3 @@
-//! Chunk key ordering and index maintenance pins.
-//!
-//! The comparator must keep an equal-rate parent before its child: the
-//! equal-feerate prefix weight breaks the tie, never the raw chunk weight.
-//! The maintenance tests prove that relinearize replaces and forget drops,
-//! so absorbed and freed components leave no stale keys behind.
-
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -16,7 +9,6 @@ use proptest::prelude::*;
 use super::{ChunkIndex, ChunkKey, MemberFacts};
 use crate::{EntryId, Mempool, MempoolEntry, MempoolLimits};
 
-/// Label-unique synthetic transaction for index tests.
 fn key_tx(label: u64) -> Tx {
     let mut seed = [0xB7_u8; 32];
     seed[..8].copy_from_slice(&label.to_le_bytes());
@@ -36,8 +28,6 @@ fn key_tx(label: u64) -> Tx {
     }
 }
 
-/// Entry whose policy weight is exactly `weight`: `weight` is a multiple of
-/// four and `vsize` its quarter, so no rounding or sigop adjustment applies.
 fn weighted_entry(label: u64, fee: u64, weight: u64) -> MempoolEntry {
     let vsize = u32::try_from(weight / 4).unwrap_or(u32::MAX);
     let mut entry = MempoolEntry::new(Arc::new(key_tx(label)), vsize, fee, label, 1, 0);
@@ -49,15 +39,12 @@ fn dummy_pool() -> Mempool {
     Mempool::new(MempoolLimits::default())
 }
 
-/// An equal-rate parent and child stay two chunks with the parent first.
 #[test]
 fn equal_rate_parent_precedes_child_by_prefix() {
     let pool = dummy_pool();
     let parent = weighted_entry(1, 2_000, 800);
     let child = weighted_entry(2, 1_000, 400);
     let child_parents = [7];
-    // Facts arrive child-first to prove the stored order is canonical, not
-    // input order.
     let facts = [
         MemberFacts {
             id: 9,
@@ -102,19 +89,14 @@ fn key(
     }
 }
 
-/// A higher feerate always wins, however the prefixes compare.
 #[test]
 fn rate_beats_prefix() {
-    // rich: 300_000 / 10_000 = 30 per WU, prefix 10_000.
-    // lean: 1_000 / 100 = 10 per WU, prefix 100.
     let rich = key(300_000, 10_000, 10_000, 0x01, 0, 0);
     let lean = key(1_000, 100, 100, 0x00, 1, 0);
     assert!(rich < lean);
     assert!(lean > rich);
 }
 
-/// Equal rates sort by ascending prefix weight, not by raw chunk weight: the
-/// lighter equal-rate child (prefix 1200) follows its parent (prefix 800).
 #[test]
 fn prefix_breaks_equal_rate_ties() {
     let parent = key(2_000, 800, 800, 0x01, 0, 0);
@@ -122,8 +104,6 @@ fn prefix_breaks_equal_rate_ties() {
     assert!(parent < child);
 }
 
-/// Equal rates and prefixes fall to the greatest member txid, Core's fallback
-/// order across distinct clusters.
 #[test]
 fn max_txid_breaks_cross_component_ties() {
     let lower = key(2_000, 800, 800, 0x01, 0, 0);
@@ -133,8 +113,6 @@ fn max_txid_breaks_cross_component_ties() {
 }
 
 proptest! {
-    /// The key order is a total order: antisymmetric and transitive over
-    /// random keys inside the comparison's arithmetic bounds.
     #[test]
     fn chunk_key_order_is_total(
         a in (0_i128..1_000_000_000, 1_u64..1_000_000, 1_u64..100_000_000, 0_u8..255, 0_u32..8, 0_u32..4),
@@ -153,8 +131,6 @@ proptest! {
     }
 }
 
-/// Relinearizing one component with a changed member set replaces its
-/// chunks: the old chunk is gone, not merged alongside the new one.
 #[test]
 fn relinearize_replaces_the_same_component() {
     let pool = dummy_pool();
@@ -185,7 +161,6 @@ fn relinearize_replaces_the_same_component() {
     assert_eq!(remaining, alloc::vec![alloc::vec![9]]);
 }
 
-/// Forgetting a component drops its chunks and leaves the others.
 #[test]
 fn forget_drops_only_its_component() {
     let pool = dummy_pool();
@@ -216,7 +191,6 @@ fn forget_drops_only_its_component() {
         .map(|chunk| chunk.members.to_vec())
         .collect();
     assert_eq!(remaining, alloc::vec![alloc::vec![9]]);
-    // An empty member list forgets the component too.
     index.relinearize(1, &[]);
     assert!(index.is_empty());
     assert!(index.chunks_descending(&pool).next().is_none());

@@ -1,5 +1,3 @@
-//! Contract tests for the dedicated redb transaction-index store.
-//!
 //! `ScriptLive` rows in these tests protect the `IDX-01` empty-valued
 //! `script-hash-prefix || full-outpoint` representation.
 
@@ -160,10 +158,8 @@ fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
         Some(Vec::new())
     );
 
-    // Non-empty values are rejected for the fixed-width ScriptLive table.
     assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
 
-    // Wrong key length is rejected before touching the database.
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
     assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
 
@@ -182,8 +178,6 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
         Some(Vec::new())
     );
 
-    // The generic store must reject the same invalid ScriptLive rows as the
-    // dedicated txindex store: non-empty values and wrong-width keys.
     assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
     assert_invalid(store.put(ColumnFamily::ScriptLive, &[0; 44], b""));
@@ -343,15 +337,12 @@ fn txindex_fixed_prefix_boundaries_12() -> TestResult<()> {
     let ff_keys: Vec<_> = prefix_ff.rows.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(ff_keys, vec![ff.to_vec(), ff_ff.to_vec()]);
 
-    // Adjacent prefixes are disjoint.
     assert!(zero_keys.iter().all(|k| !one_keys.contains(k)));
 
-    // Exact 12-byte prefix matches one row.
     let exact = store.scan_prefix_bounded(ColumnFamily::TxConfirmed, &zero, MAX_SCAN)?;
     assert!(exact.complete);
     assert_eq!(exact.rows.len(), 1);
 
-    // Prefix longer than the fixed key width is rejected.
     assert_invalid(store.iter_prefix(ColumnFamily::TxConfirmed, &[0x00; 13]));
     assert_invalid(store.scan_prefix_bounded(ColumnFamily::TxConfirmed, &[0x00; 13], MAX_SCAN));
 
@@ -396,15 +387,12 @@ fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
     let ff_keys: Vec<_> = prefix_ff.rows.iter().map(|(k, _)| k.clone()).collect();
     assert_eq!(ff_keys, vec![ff.to_vec(), ff_ff.to_vec()]);
 
-    // Adjacent prefixes are disjoint.
     assert!(zero_keys.iter().all(|k| !one_keys.contains(k)));
 
-    // Exact 80-byte prefix matches one row.
     let exact = store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &zero, MAX_SCAN)?;
     assert!(exact.complete);
     assert_eq!(exact.rows.len(), 1);
 
-    // Prefix longer than the fixed key width is rejected.
     assert_invalid(store.iter_prefix(ColumnFamily::BlockHeaders, &[0x00; 81]));
     assert_invalid(store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &[0x00; 81], MAX_SCAN));
 
@@ -455,7 +443,6 @@ fn txindex_bounded_scan_empty_values() -> TestResult<()> {
     assert_eq!(exact.rows.len(), 5);
     assert!(exact.complete);
 
-    // Every fixed-table value is synthesized as empty.
     for (_key, value) in exact.rows {
         assert_eq!(value, Vec::<u8>::new());
     }
@@ -463,12 +450,9 @@ fn txindex_bounded_scan_empty_values() -> TestResult<()> {
     Ok(())
 }
 
-/// One continuation scan: `(prefix, start, limit)`.
 type ContinuationScan<'a> =
     &'a dyn Fn(&[u8], &[u8], PrefixScanLimit) -> Result<PrefixScan, StorageError>;
 
-/// Three keys of `width` bytes under prefix `0x01` (low, mid, high) and one
-/// under `0x02`.
 fn fixed_width_keys(width: usize) -> [Vec<u8>; 4] {
     let key = |head: u8, fill: u8, last: u8| {
         let mut key = vec![fill; width];
@@ -513,40 +497,31 @@ fn assert_fixed_width_continuation(
     };
     let prefix: &[u8] = &[0x01];
 
-    // A seek before the prefix, short of the key width, or on the first key
-    // keeps every row of the prefix.
     let from_first: [&[u8]; 4] = [&[], &[0x00, 0xff], &[0x01, 0x00, 0x00], low];
     for start in from_first {
         check(prefix, start, usize::MAX, &[low, mid, high], true)?;
     }
 
-    // The seek is inclusive, including a seek longer than the key width.
     check(prefix, mid, usize::MAX, &[mid, high], true)?;
     check(prefix, &past_mid, usize::MAX, &[high], true)?;
     check(prefix, &[0x01, 0x80], usize::MAX, &[high], true)?;
 
-    // A seek past the last key of the prefix, or past the prefix, is exhausted.
     check(prefix, &past_high, usize::MAX, &[], true)?;
     check(prefix, &[0x02], usize::MAX, &[], true)?;
 
-    // A prefix as wide as the key matches one key and nothing after it.
     check(mid, &[], usize::MAX, &[mid], true)?;
     check(mid, &past_mid, usize::MAX, &[], true)?;
 
-    // Zero rows are incomplete only while rows remain.
     check(prefix, &[], 0, &[], false)?;
     check(prefix, &[0x02], 0, &[], true)?;
 
-    // Exactly exhausting the prefix is complete; stopping short is not.
     check(prefix, &[], 2, &[low, mid], false)?;
     check(prefix, &past_mid, 1, &[high], true)?;
 
-    // A prefix wider than the key is refused, not scanned as empty.
     assert_invalid(scan(&vec![0x01; width + 1][..], &[], MAX_SCAN));
     Ok(())
 }
 
-/// Resuming each page just after its last key visits every key once, in order.
 fn assert_fixed_width_pages(scan: ContinuationScan<'_>) -> Result<(), StorageError> {
     let all: Vec<Vec<u8>> = scan(&[], &[], MAX_SCAN)?
         .rows
@@ -659,7 +634,6 @@ fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
     let k3 = key_12(3);
     let k4 = key_12(4);
 
-    // Put, overwrite, delete, and put within one column family.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &k1, b"");
     batch.put(ColumnFamily::TxConfirmed, &k2, b"");
@@ -673,7 +647,6 @@ fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
     let keys: Vec<_> = confirmed.rows.into_iter().map(|(k, _)| k).collect();
     assert_eq!(keys, vec![k3.to_vec(), k4.to_vec()]);
 
-    // Interleave operations across TxConfirmed and Funding.
     let mut f1 = key_12(0);
     f1[0] = 0x10;
     let mut f2 = key_12(0);
@@ -700,7 +673,6 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    // Invalid key length aborts a batch that already has a valid op.
     let mut batch = store.new_batch();
     let valid = key_12(1);
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
@@ -708,7 +680,6 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
 
-    // Non-empty value on a unit-valued fixed-width table aborts the batch.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
     batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
@@ -730,14 +701,12 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
     assert!(store.get(ColumnFamily::BlockHeaders, &header)?.is_none());
 
-    // Delete with an invalid key length aborts the batch.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::Spending, &key_12(3), b"");
     batch.delete(ColumnFamily::Spending, &[0u8; 13]);
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::Spending, &key_12(3))?.is_none());
 
-    // Delete range with non-exact-width bounds aborts the batch.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::BlockHeaders, &header_80(1), b"");
     batch.delete_range(ColumnFamily::BlockHeaders, &[0u8; 79], &[0u8; 80]);
@@ -868,8 +837,6 @@ fn txindex_write_durable_if_roundtrip() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    // Paired fixed+value tables: mismatch preserves the authoritative row and
-    // its value twin, exact match removes both, repeat claims stay false.
     let confirmed = key_12(1);
     store.put(ColumnFamily::TxConfirmed, &confirmed, b"position")?;
     assert!(!store.write_durable_if(
@@ -924,7 +891,6 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    // Empty values are represented by absent entries in paired value tables.
     let funding = key_12(2);
     store.put(ColumnFamily::Funding, &funding, b"")?;
     assert!(!store.write_durable_if(
@@ -997,7 +963,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    // Byte-keyed metadata compares real values.
     let meta_key = b"cursor";
     store.put(ColumnFamily::UtxoMeta, meta_key, b"52-bytes-of-cursor")?;
     assert!(!store.write_durable_if(
@@ -1020,7 +985,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     )?);
     assert_eq!(store.get(ColumnFamily::UtxoMeta, meta_key)?, None);
 
-    // Absent claims work per family too.
     let absent = key_12(5);
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &absent, b"");
@@ -1036,7 +1000,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
         Some(Vec::new())
     );
 
-    // Wrong-width keys are rejected before any transaction begins.
     assert_invalid(store.write_durable_if(
         &[WriteCondition::Equals {
             cf: ColumnFamily::Spending,
@@ -1062,9 +1025,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
         store.new_batch(),
     ));
 
-    // Every condition is validated before the transaction begins, not only
-    // the first: a valid lead condition does not admit a bad-width follower,
-    // and the rejected batch touches nothing.
     let untouched = key_12(6);
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &untouched, b"touched");
@@ -1091,7 +1051,6 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
 fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
 
-    // Populate the generic RedbStore tables and metadata.
     {
         let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
         store.put(
@@ -1102,7 +1061,6 @@ fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
         store.put(ColumnFamily::UtxoMeta, b"old-meta-key", b"old-meta-value")?;
     }
 
-    // Open the TxIndex store on the same database and add index rows.
     {
         let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
         let k = key_12(9);
@@ -1114,7 +1072,6 @@ fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
         store.write(batch)?;
     }
 
-    // The legacy RedbStore still sees its original data and is unaffected.
     {
         let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
         assert_eq!(
@@ -1127,7 +1084,6 @@ fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
         );
     }
 
-    // The TxIndex store still sees its own data after the legacy store reopens.
     {
         let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
         assert!(store.get(ColumnFamily::TxConfirmed, &key_12(9))?.is_some());

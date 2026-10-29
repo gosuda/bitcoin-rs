@@ -1,44 +1,23 @@
 //! Synchronous Bitcoin Core-compatible JSON-RPC surface for `bitcoin-rs`.
-//!
-//! This node ships no wallet. RPCs that would fund, sign, or otherwise
-//! require private key material are not implemented and answer
-//! `method not found`. Descriptor utilities, `scantxoutset`, and PSBT
-//! combination/finalization remain for watch-only workflows driven by
-//! external signers without this process holding private key material.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
-/// HTTP Basic and cookie authentication.
 pub mod auth;
-/// Standard-alphabet Base64 encode/decode for auth headers and PSBTs.
 mod base64;
-/// BIP337 compressed-transaction codec shared by its two RPC adapters.
 pub(crate) mod compressed_tx;
-/// Dependency-injected RPC state.
 pub mod context;
-/// Native <-> rust-bitcoin conversions and typed wire serialization.
 pub(crate) mod convert;
-/// JSON-RPC error mapping.
 mod error;
-/// Esplora-compatible HTTP endpoints backed by node-owned indexes.
 pub mod esplora;
-/// Method dispatch and Core-compatible handlers.
 pub mod handlers;
-/// Declared compatibility surface versus Bitcoin Core 31.x.
 pub mod manifest;
-/// Unified registry: one row owns compat metadata plus dispatch arm.
 pub(crate) mod registry;
-/// Semantic Core projections without transport policy.
 mod render;
-/// Bitcoin Core-compatible REST endpoints.
 pub mod rest;
-/// Synchronous HTTP/1.1 JSON-RPC server.
 mod server;
-/// Transaction, block, and header rendering.
 mod tx_render;
-/// Bitcoin Core-compatible ZMQ notification protocol and transport.
 pub mod zmq;
 
 pub use auth::Auth;

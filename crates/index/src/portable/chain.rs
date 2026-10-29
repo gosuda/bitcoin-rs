@@ -1,12 +1,4 @@
 //! Chain identity capture and exact-identity transaction reads for bundles.
-//!
-//! Both export and restore resolve a recorded locator the same way: take the
-//! block hash at the row's height from the applied-tip ancestry, load the
-//! whole body, and require the recorded offset and length to equal one parsed
-//! top-level transaction span before comparing the full 32-byte transaction
-//! id. Bytes that merely decode to a transaction elsewhere in the block (an
-//! embedded serialization inside a script or witness) never resolve a
-//! locator. A prefix match alone never resolves a locator.
 
 use super::artifact::CANCEL_POLL_RECORDS;
 use super::{IndexBundleError, Withheld};
@@ -19,10 +11,6 @@ use bitcoin_rs_primitives::{
 };
 use std::collections::{HashMap, VecDeque};
 
-/// The applied-tip ancestry up to a bundle base, with the base's identity.
-///
-/// Holds one `NodeId` per height (4 bytes each), never the headers, so even
-/// a mainnet-height path is a few megabytes.
 pub(super) struct ChainBase {
     pub(super) height: u32,
     /// Base block hash, little-endian bytes.
@@ -30,46 +18,18 @@ pub(super) struct ChainBase {
     pub(super) chainwork: ChainWork,
     /// Genesis block hash, little-endian bytes.
     pub(super) genesis: [u8; 32],
-    /// Whether the base block is free of invalidation marks.
     pub(super) validated: bool,
-    /// The receiver's cumulative transaction count at the last node of
-    /// `above`, or at the base itself when `above` is empty.
     anchor_count: u64,
-    /// The blocks above the base, ascending, up to and including the nearest
-    /// one whose cumulative count the receiver holds. Empty when the base
-    /// itself is counted.
     above: Vec<NodeId>,
     nodes: Vec<NodeId>,
 }
 
-/// The receiver's cumulative transaction count at the base.
 pub(super) enum BaseCount {
-    /// Counted by the receiver, directly or through its own blocks above the
-    /// base.
     Known(u64),
-    /// Counting needs a block body above the base that this node cannot
-    /// serve. Absent or pruned bodies are not corruption.
     Withheld(Withheld),
 }
 
 impl ChainBase {
-    /// Captures the ancestry of `tip` for heights `0..=base_height` under one
-    /// short shared block-tree lock.
-    ///
-    /// Refuses a base above the tip, an ancestry that is not one contiguous
-    /// run of heights from genesis, and a chain whose cumulative transaction
-    /// count is unknown from the base up to the tip.
-    ///
-    /// A restart restores the cumulative count on the applied tip only, so a
-    /// base below the tip is usually uncounted in the tree. Capture then
-    /// remembers the blocks up to the nearest counted node;
-    /// [`Self::base_count`] derives the base's count from them.
-    ///
-    /// Polls `cancelled` before work and every [`CANCEL_POLL_RECORDS`]
-    /// heights during the ancestry walk and the nearest-counted scan, like
-    /// every other bundle loop. The callback only loads lock-free shutdown,
-    /// generation, and runtime latches, so invoking it under the shared
-    /// tree guard cannot form a lock-order cycle with a tree writer.
     pub(super) fn capture(
         tree: &BlockTreeReader,
         tip: &TipSnapshot,
@@ -126,8 +86,6 @@ impl ChainBase {
             .first()
             .and_then(|&id| guard.node(id).ok())
             .ok_or_else(|| identity("genesis is missing from the applied-tip ancestry"))?;
-        // The tree's own count first, then the count published with the tip
-        // for the tip node alone.
         let counted = |id: NodeId, count: ChainTxCount| {
             count.get().or_else(|| {
                 (id == tip.tip_id)
@@ -171,22 +129,10 @@ impl ChainBase {
         })
     }
 
-    /// The base's cumulative transaction count when the receiver holds it
-    /// directly, without reading any block. Always `Some` for a base that is
-    /// the applied tip itself.
     pub(super) fn counted_base(&self) -> Option<u64> {
         self.above.is_empty().then_some(self.anchor_count)
     }
 
-    /// The receiver's cumulative transaction count at the base.
-    ///
-    /// A counted base answers from the tree. Otherwise the count is the
-    /// nearest counted node's count minus the transactions of every block
-    /// between, each read through the existing body source: its metadata
-    /// when it has any, else the whole body. No count comes from the bundle,
-    /// an underflow refuses (it never clamps), and a body this node cannot
-    /// serve withholds. The cost is one body read per block between the base
-    /// and that node, polled for cancellation like every other bundle loop.
     pub(super) fn base_count(
         &self,
         tree: &BlockTreeReader,
@@ -231,7 +177,6 @@ impl ChainBase {
         Ok(BaseCount::Known(count))
     }
 
-    /// Block hash at `height` on the captured ancestry.
     pub(super) fn hash_at(&self, tree: &BlockTreeReader, height: u32) -> Option<Hash256> {
         let id = *self.nodes.get(usize::try_from(height).ok()?)?;
         tree.read().node(id).ok().map(|node| node.hash)
@@ -244,12 +189,6 @@ impl ChainBase {
     }
 }
 
-/// Transactions in the block `(height, hash)`, or `None` when the body is
-/// absent or pruned.
-///
-/// Metadata that answers `None` is ambiguous (unsupported, absent, or
-/// pruned), so it falls back to the whole body, which alone can tell them
-/// apart.
 fn block_tx_count(
     source: &dyn BlockBodySource,
     height: u32,
@@ -282,59 +221,28 @@ fn block_tx_count(
     Ok(Some(count))
 }
 
-/// How one recorded locator resolved.
 pub(super) enum Located {
-    /// The position equals the top-level span of this transaction.
     Found(Tx),
-    /// The block body is not available: absent or pruned, not corrupt.
     BodyMissing,
-    /// The body exists but the position is not a top-level transaction span.
     Mismatch,
 }
 
-/// Reports whether `position` equals the top-level transaction span
-/// `[start, start + len)`. Offsets inside a transaction (an embedded
-/// serialization in a script or witness) and overlapping or truncated spans
-/// never match, even when the bytes there decode to a transaction.
 pub(super) fn is_top_level_span(position: TxPosition, start: u32, len: u32) -> bool {
     position.offset() == start && position.byte_len() == len
 }
 
-/// Reads single transactions through the existing body source, with a small
-/// bounded LRU of parsed bodies keyed by block identity. The strict span rule
-/// needs the whole body, so each entry keeps the body together with its
-/// parsed top-level transaction spans: a block is read and parsed once per
-/// cache fill, and each lookup is a binary search plus one transaction
-/// decode.
-///
-/// Stored locator order is transaction-id order, so consecutive records
-/// usually name different heights and a one-body memo reloads and reparses a
-/// block per record. The window keeps recently used bodies resident across
-/// those interleaved lookups.
-///
-/// How many parsed block bodies are kept resident. The bound is on body
-/// count, not bytes: each body is at most `MAX_SERIALIZED_BLOCK_BYTES`
-/// (4 MiB), so eight bodies pin at most ~32 MiB transiently on the bundle
-/// worker.
 const BODY_CACHE_BLOCKS: usize = 8;
 
 pub(super) struct BodyReader<'a> {
     source: &'a dyn BlockBodySource,
-    /// Parsed bodies, most-recently-used first, capped at
-    /// [`BODY_CACHE_BLOCKS`] entries.
     bodies: VecDeque<HeldBody>,
-    /// Transaction counts observed per `(height, hash)`, retained after the
-    /// body itself is evicted so the completeness pass reuses the first
-    /// parse instead of re-reading the block.
     counts: HashMap<(u32, Hash256), u64>,
 }
 
-/// One memoized block body and its top-level transaction spans.
 struct HeldBody {
     height: u32,
     hash: Hash256,
     body: Vec<u8>,
-    /// `(start, len)` of every top-level transaction, ascending by start.
     spans: Vec<(u32, u32)>,
 }
 
@@ -347,12 +255,6 @@ impl<'a> BodyReader<'a> {
         }
     }
 
-    /// Resolves `position` to the top-level transaction at that exact span.
-    ///
-    /// A ranged read that merely decodes is not enough: the offset and length
-    /// must equal one parsed transaction span of the whole body. An
-    /// out-of-range position or bytes that decode away from any boundary
-    /// report `Mismatch`; an absent or pruned body reports `BodyMissing`.
     pub(super) fn transaction(
         &mut self,
         height: u32,
@@ -385,11 +287,6 @@ impl<'a> BodyReader<'a> {
             })
     }
 
-    /// Transactions the block `(height, hash)` holds, or `None` when the body
-    /// is absent or pruned. A count observed while resolving a locator is
-    /// reused without re-reading the block; otherwise metadata answers
-    /// without I/O when the source keeps it, else the cached spans give the
-    /// count.
     pub(super) fn block_tx_count(
         &mut self,
         height: u32,
@@ -419,11 +316,6 @@ impl<'a> BodyReader<'a> {
         Ok(count)
     }
 
-    /// Cached body and spans for `(height, hash)`, or `None` when the
-    /// source has no body. Hits move the entry to the front of the bounded
-    /// LRU; misses load, parse, count, and evict the least-recently-used
-    /// entry past [`BODY_CACHE_BLOCKS`]. A read or parse failure is
-    /// `BodyRead`, never `BodyMissing`.
     fn held_body(
         &mut self,
         height: u32,
@@ -601,11 +493,6 @@ mod tests {
         }
     }
 
-    /// An embedded transaction serialization must not resolve a locator, even
-    /// though its bytes decode to a valid transaction, while every exact
-    /// top-level span still resolves to its own transaction id. Export and
-    /// restore share this `BodyReader`, so one fixture proves the rule once
-    /// for both paths.
     #[test]
     fn strict_resolution_rejects_embedded_serialization() -> TestResult {
         use bitcoin::consensus::encode::serialize;

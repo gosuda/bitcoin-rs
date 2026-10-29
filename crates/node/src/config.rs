@@ -1,5 +1,3 @@
-//! Node configuration DTOs, resolution, and validation.
-
 use crate::options::{ChainstateJournalOverrides, UserConfig, check_index_bundle_path};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
@@ -19,50 +17,26 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// Node notification adapters, grouped below the node-level configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct NotificationConfig {
-    /// ZMQ PUB sockets, each owning its endpoint, topics, and optional HWM override.
     pub zmq: Vec<bitcoin_rs_rpc::zmq::ZmqEndpointConfig>,
 }
 
-/// How much of the derived `ScriptIndex` a node maintains.
-///
-/// `ScriptIndex` is rebuildable derived state, so the mode is a capability
-/// selection rather than a storage compatibility question: `full` adds
-/// historical funding/spending rows while still maintaining the live-output
-/// view.
-///
-/// The boolean spellings remain behaviorally compatible: `--scriptindex`,
-/// `--scriptindex=true`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
-/// [`Self::Full`], and `false` means [`Self::Disabled`].
-///
-/// [`Self::Utxo`] is the live-only selection; see `IDX-01`.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ScriptIndexMode {
-    /// No `ScriptIndex` capability is maintained.
     #[default]
     Disabled,
-    /// Compact live-output view only (`IDX-01`).
     Utxo,
-    /// Maintain both the live-output view and historical script activity.
     Full,
 }
 
 impl ScriptIndexMode {
-    /// Whether any `ScriptIndex` capability is enabled.
     #[must_use]
     pub const fn is_enabled(self) -> bool {
         !matches!(self, Self::Disabled)
     }
 
-    /// Derived-index capabilities this mode and txindex jointly enable.
-    ///
-    /// Full always includes `TxLookup` regardless of txindex (Esplora
-    /// prevout and fee rendering needs exact historical transactions); the
-    /// RPC-visible `derived_index_query` gate still requires an explicit
-    /// `--txindex`.
     #[must_use]
     pub const fn enabled_capabilities(self, txindex: bool) -> IndexCapabilities {
         match (txindex, self) {
@@ -74,17 +48,10 @@ impl ScriptIndexMode {
         }
     }
 
-    /// Parses a mode from a configuration value.
-    ///
-    /// Accepts the historical boolean spellings for compatibility: `true`
-    /// means `full` and `false` means disabled. Parsing is case-insensitive.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "utxo" => Some(Self::Utxo),
-            // `true` is the historical boolean spelling and must keep meaning
-            // `full`; it is a separate pattern for that readability, not a
-            // distinct outcome.
             "full" | "true" | "1" | "yes" => Some(Self::Full),
             "false" | "0" | "no" => Some(Self::Disabled),
             _ => None,
@@ -92,7 +59,6 @@ impl ScriptIndexMode {
     }
 }
 
-/// Applies one journal layer field by field onto the resolved settings.
 fn apply_journal_overrides(
     layer: &ChainstateJournalOverrides,
     config: &mut ChainstateJournalConfig,
@@ -124,50 +90,29 @@ const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::Fjall;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 
-/// Resolved noncustodial pool policy. No path is opened during resolution.
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
-    /// Dedicated ledger directory.
     pub datadir: PathBuf,
-    /// Explicit SV1 listener, if enabled.
     pub v1_bind: Option<SocketAddr>,
-    /// Explicit SV2 listener, if enabled.
     pub sv2_bind: Option<SocketAddr>,
-    /// Authority key path, validated only by the service.
     pub sv2_authority_key: Option<PathBuf>,
-    /// Operator consent to non-loopback listeners.
     pub allow_non_loopback: bool,
-    /// Shared connection limit.
     pub max_connections: u32,
-    /// Shared per-IP connection limit.
     pub max_connections_per_ip: u32,
-    /// Fixed exact decimal share difficulty.
     pub share_difficulty: String,
-    /// Target resolved by the authoritative share arithmetic owner.
     #[cfg(feature = "pool")]
     pub share_target: bitcoin_rs_mining::pool::ShareTarget,
-    /// Immutable PPLNS work window.
     pub window_work: u64,
-    /// Immutable fee basis points.
     pub fee_bps: u16,
-    /// Externally controlled reward scriptPubKey.
     pub reward_script: Vec<u8>,
-    /// Coinbase confirmation requirement.
     pub maturity: u32,
-    /// Payout confirmation requirement.
     pub payout_confirmations: u32,
-    /// Depth of reorg monitoring.
     pub reorg_watch_depth: u32,
-    /// Minimum payout in satoshis.
     pub min_payout_sat: u64,
-    /// Maximum outputs per payout batch.
     pub max_payout_outputs: u32,
 }
 
 impl PoolConfig {
-    /// Immutable ledger policy, shared by ledger creation and reopen validation.
-    /// Abandon depth stays fixed at the ledger's six-confirmation default;
-    /// dust stays at 546 satoshis and no signer change scripts are authorized.
     #[cfg(feature = "pool")]
     #[must_use]
     pub fn ledger_config(&self) -> pool_ledger::PoolConfig {
@@ -368,7 +313,6 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
     }))
 }
 
-/// Resolved storage configuration.
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
     pub backend: StorageBackend,
@@ -376,148 +320,84 @@ pub struct StorageConfig {
     pub prune_target_mb: u64,
 }
 
-/// Resolved P2P configuration.
 #[derive(Clone, Debug)]
 pub struct P2pConfig {
-    /// Opt-in Tor and IVNP I2P routing.
     pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
-    /// P2P message-start bytes.
     pub magic: [u8; 4],
-    /// P2P listener bind addresses.
     pub listen: Vec<SocketAddr>,
-    /// Whether DNS seeds are enabled.
     pub dns_seeds_enabled: bool,
-    /// Optional Bitcoin Core `ASMap` classifier file.
     pub asmap: Option<PathBuf>,
-    /// Operator subnets exempt from automatic discouragement.
     pub noban_subnets: Vec<bitcoin_rs_p2p::IpSubnet>,
-    /// Fixed outbound peer endpoints.
     pub connect: Vec<String>,
-    /// Whether fast sync (shallow, early fan-out over a larger outbound set) is enabled.
     pub fast_sync: bool,
-    /// Whether BIP324 v2 encrypted connections are attempted and accepted, and
-    /// `NODE_P2P_V2` is advertised. On by default, as Core's `-v2transport` is;
-    /// off keeps every connection on v1.
     pub v2_transport: bool,
-    /// The opt-in relay capabilities offered to peers. Every switch is off by
-    /// default and peers relay packages or stale tips only after both sides
-    /// negotiate them. BIP332 stale-tip relay is off by default on every
-    /// network; setting it on a test network is the explicit test override.
     pub relay_offers: bitcoin_rs_p2p::RelayOffers,
 }
 
-/// Resolved RPC configuration.
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub bind: SocketAddr,
-    /// Opt-in separate public REST/Esplora listener.
     pub public_bind: Option<SocketAddr>,
-    /// Connection budget of the shared or management listener.
     pub max_connections: usize,
-    /// Independent connection budget of the public listener.
     pub public_max_connections: usize,
     pub rest: bool,
-    /// Optional experimental keyless BIP352 read service, off by default.
     pub silent_payments: bool,
-    /// Optional BIP337 compressed-transaction RPCs, off by default.
     pub compressed_transactions: bool,
     pub auth: Auth,
 }
 
-/// Resolved index configuration.
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
     pub txindex: bool,
-    /// Optional basic compact-filter index; disabled by default.
     pub blockfilterindex: bool,
     pub script_index: ScriptIndexMode,
-    /// One-shot startup restore of a portable index bundle from this
-    /// directory. Never set by default; excludes [`Self::bundle_export`].
     pub bundle_import: Option<PathBuf>,
-    /// One-shot startup export of a portable index bundle into this
-    /// directory. Never set by default; excludes [`Self::bundle_import`].
     pub bundle_export: Option<PathBuf>,
 }
 
-/// Resolved observability configuration.
 #[derive(Clone, Debug)]
 pub struct ObservabilityConfig {
     pub log_level: String,
     pub metrics_bind: Option<SocketAddr>,
 }
 
-/// Resolved validation configuration.
 #[derive(Clone, Debug)]
 pub struct ValidationConfig {
-    /// Height through which script verification may be skipped.
     pub assume_valid_height: u32,
-    /// Which script verification the apply path may skip.
     pub mode: ValidationMode,
-    /// The one script-verification engine this run executes: resolved here
-    /// exactly once from defaults -> file -> environment -> CLI, checked
-    /// against this build's capability in [`NodeConfig::validate`], and passed
-    /// down to the consensus seams that dispatch between script backends.
     pub engine: ValidationEngine,
 }
 
-/// Resolved mining configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MiningConfig {
-    /// Coinbase `scriptPubKey` bytes. Empty means transport-only GBT assembly:
-    /// the coordinator does not own a miner payout.
     pub payout_script: Vec<u8>,
 }
 
-/// Fully resolved, validated node configuration consumed by the runtime.
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
-    /// Consensus network.
     pub network: Network,
-    /// Node data directory.
     pub data_dir: PathBuf,
-    /// Save and revalidate the optional mempool snapshot across clean restarts.
     pub persist_mempool: bool,
-    /// Maximum restart snapshot file size, including metadata and checksum.
     pub mempool_snapshot_max_bytes: u64,
-    /// Cooperative startup timeout for mempool snapshot revalidation.
     pub mempool_snapshot_restore_timeout_secs: u64,
-    /// Storage settings.
     pub storage: StorageConfig,
-    /// P2P settings.
     pub p2p: P2pConfig,
-    /// RPC settings.
     pub rpc: RpcConfig,
-    /// Index settings.
     pub indexes: IndexConfig,
-    /// Logging and metrics settings.
     pub observability: ObservabilityConfig,
-    /// External notification adapters.
     pub notifications: NotificationConfig,
-    /// Chainstate journal settings.
     pub chainstate_journal: ChainstateJournalConfig,
-    /// Validation settings.
     pub validation: ValidationConfig,
-    /// Mining settings.
     pub mining: MiningConfig,
-    /// Native keyless pool, disabled unless explicitly configured.
     pub pool: Option<PoolConfig>,
 }
 
 impl NodeConfig {
-    /// Returns resolved defaults for a network.
     #[must_use]
     pub fn default_for_network(network: Network) -> Self {
         Self::materialize(&UserConfig::default(), NetworkSelection::from(network))
     }
 
-    /// Materializes the resolved settings from one folded layer.
-    ///
-    /// PRE: `settings` is the overlay of every source layer and `selection`
-    /// is the network named by the highest-precedence layer that named one.
-    /// POST: every field holds the operator's value, or the winning
-    /// profile's value for a field no layer set.
-    /// INVARIANT: a network selection never overwrites a field an operator
-    /// set on any layer; it only fills the gaps (`ARCH-05`).
     #[expect(
         clippy::too_many_lines,
         reason = "One fold of every resolved field keeps precedence auditable in one place"
@@ -633,11 +513,6 @@ impl NodeConfig {
         }
     }
 
-    /// Validates backend availability and cross-field constraints.
-    ///
-    /// This is the fail-early gate for engine selection: an engine this build
-    /// cannot execute is rejected here — before the data directory opens,
-    /// chainstate exists, or any worker starts.
     pub fn validate(&self) -> Result<()> {
         if let Some(pool) = &self.pool {
             pool.validate()?;
@@ -685,10 +560,6 @@ impl NodeConfig {
         anyhow::ensure!(
             self.rpc.public_bind.is_none_or(|address| {
                 let management = self.rpc.bind;
-                // Port zero asks the OS for an unused port. Distinct
-                // concrete IPs may share a port; a same-family wildcard
-                // overlaps every concrete address on that port.
-                // Cross-family dual-stack conflicts remain OS-checked at bind.
                 address.port() == 0
                     || address.port() != management.port()
                     || (address.ip() != management.ip()
@@ -722,11 +593,6 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Validates chainstate journal retention bounds.
-    ///
-    /// PRE: none; this reads only resolved fields and opens no path.
-    /// POST: journal retention counters are internally consistent and positive
-    /// where rotation depends on them.
     fn validate_chainstate_journal(&self) -> Result<()> {
         let journal = &self.chainstate_journal;
         anyhow::ensure!(
@@ -756,13 +622,6 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Validates P2P network identity and overlay/privacy routing.
-    ///
-    /// Split out of [`NodeConfig::validate`] for the line budget only;
-    /// checks and errors moved verbatim: the overlay transport constraints
-    /// (routes for overlay targets, no local DNS under a privacy route),
-    /// then the magic-override requirements (mainnet, a `--connect` peer,
-    /// DNS seeds off).
     fn validate_p2p_network(&self) -> Result<()> {
         self.validate_overlay()?;
         if self.p2p.magic != self.network.magic() {
@@ -782,19 +641,6 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Validates cross-field overlay transport constraints.
-    ///
-    /// Overlay targets require their routes: an onion target without
-    /// an onion/general proxy, an I2P target without a SAM bridge, or
-    /// an onlynet naming an overlay without its route is refused
-    /// before any worker starts.
-    ///
-    /// A configured privacy route (general/onion proxy or I2P SAM bridge)
-    /// additionally forbids local DNS: DNS seeds resolve through the system
-    /// resolver and ordinary hostname `--connect` peers resolve via
-    /// `resolve()` on the dial path, so both would bypass the overlay.
-    /// They fail fast here instead of leaking or silently downgrading
-    /// privacy; typed IP, Tor, and I2P endpoints stay supported.
     fn validate_overlay(&self) -> Result<()> {
         let overlay = &self.p2p.overlay;
         let onion_route = overlay.onion_proxy.is_some() || overlay.proxy.is_some();
@@ -846,14 +692,6 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Validates the portable index bundle request.
-    ///
-    /// PRE: none; this reads only resolved fields and opens no path.
-    /// POST: at most one nonempty bundle directory is set, and it is set only
-    /// when the transaction index it moves is enabled.
-    /// INVARIANT: the bundle is an explicit one-shot operator request, so a
-    /// request this node cannot honor fails before any worker starts instead
-    /// of being dropped.
     fn validate_index_bundle(&self) -> Result<()> {
         let indexes = &self.indexes;
         anyhow::ensure!(
@@ -874,11 +712,6 @@ impl NodeConfig {
     }
 }
 
-/// Resolves layers from lowest to highest precedence.
-///
-/// The layers fold field-wise into one set of settings, the winning network
-/// selection fills the profile-owned fields no layer set, and the mining
-/// payout decodes once against that resolved network.
 pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     let mut settings = UserConfig::default();
     for layer in layers {
@@ -898,12 +731,6 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     Ok(config)
 }
 
-/// Resolves the RPC authentication mode from the folded auth group.
-///
-/// PRE: `UserConfig::overlay` kept the group coherent: a cookie path and
-/// basic credentials are never both set.
-/// POST: an explicit cookie wins; absent credentials select a fresh per-start
-/// cookie; Basic auth never receives a fixed password fallback.
 fn rpc_auth(settings: &UserConfig) -> Auth {
     if let Some(path) = &settings.rpc.cookie {
         return Auth::Cookie { path: path.clone() };
@@ -917,9 +744,6 @@ fn rpc_auth(settings: &UserConfig) -> Auth {
     }
 }
 
-/// The P2P bootstrap, RPC bind, and assume-valid values one network
-/// selection owns. A selection supplies these only for fields no operator
-/// layer set.
 struct NetworkProfile {
     magic: [u8; 4],
     listen: Vec<SocketAddr>,
@@ -982,29 +806,14 @@ fn decode_payout_script(network: Network, address: &str) -> Result<Vec<u8>> {
 
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
 
-/// RPC authentication configuration.
 #[derive(Clone, Eq, PartialEq)]
 pub enum Auth {
-    /// HTTP Basic credentials.
-    Basic {
-        /// RPC username.
-        user: String,
-        /// RPC password.
-        password: String,
-    },
-    /// Bitcoin Core cookie-auth file.
-    Cookie {
-        /// Operator-provided cookie file path.
-        path: PathBuf,
-    },
-    /// New private cookie at `<data_dir>/.cookie`, written when the RPC
-    /// listener starts so it always follows the final data directory.
-    /// The file contains `__cookie__:<password>` without a trailing newline.
+    Basic { user: String, password: String },
+    Cookie { path: PathBuf },
     GeneratedCookie,
 }
 
 impl Auth {
-    /// Constructs Basic authentication credentials.
     #[must_use]
     pub fn basic(user: impl Into<String>, password: impl Into<String>) -> Self {
         Self::Basic {
@@ -1013,8 +822,6 @@ impl Auth {
         }
     }
 
-    /// Converts this configuration into the RPC crate's runtime auth policy.
-    /// A generated cookie is written into `data_dir`.
     pub(crate) fn to_rpc_auth(&self, data_dir: &Path) -> Result<bitcoin_rs_rpc::Auth> {
         match self {
             Self::Basic { user, password } => {
@@ -1043,10 +850,6 @@ impl fmt::Debug for Auth {
     }
 }
 
-/// Replaces the previous run's cookie with a new 256-bit OS-random secret
-/// before the RPC socket is bound. A same-directory temporary file, named
-/// independently of the secret and created fresh, avoids following a stale
-/// symlink and is atomically renamed on Unix.
 fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
     use bitcoin::secp256k1::rand::{RngCore as _, rngs::OsRng};
     use std::fmt::Write as _;
@@ -1071,8 +874,6 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
     options.mode(0o600);
 
     let written = (|| -> std::io::Result<()> {
-        // A temporary file left by an interrupted start is discarded, so
-        // `create_new` never opens an existing file or symlink.
         match fs::remove_file(&temporary) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1081,8 +882,6 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
         let mut file = options.open(&temporary)?;
         write!(file, "__cookie__:{password}")?;
         file.sync_all()?;
-        // Windows rename cannot replace an existing file. Both operations
-        // occur before binding the listener, while the new secret is private.
         #[cfg(windows)]
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -1103,26 +902,18 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
 const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";
 const DRYNET4_P2P_MAGIC: [u8; 4] = [0xec, 0xa5, 0xd4, 0x04];
 
-/// A built-in node network and its associated P2P bootstrap profile.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkSelection {
-    /// Bitcoin mainnet.
     Mainnet,
-    /// Legacy Bitcoin testnet.
     Testnet3,
-    /// Bitcoin testnet4.
     Testnet4,
-    /// Bitcoin signet.
     Signet,
-    /// Local regression-test network.
     Regtest,
-    /// ecash drynet4: mainnet consensus history on a distinct P2P network.
     Drynet4,
 }
 
 impl NetworkSelection {
-    /// Parses the accepted network spellings.
     #[must_use]
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -1136,7 +927,6 @@ impl NetworkSelection {
         }
     }
 
-    /// Returns the consensus network selected by this profile.
     #[must_use]
     pub const fn consensus_network(self) -> Network {
         match self {
@@ -1169,24 +959,19 @@ impl From<Network> for NetworkSelection {
     }
 }
 
-/// Process and test dependencies that are not configuration.
 #[derive(Default)]
 pub struct RuntimeInputs {
-    /// Optional in-process shutdown notification receiver.
     pub shutdown: Option<Receiver<()>>,
-    /// Optional test-only mempool observer.
     pub mempool_observer: Option<Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,
 }
 
 impl RuntimeInputs {
-    /// Returns a copy with the given shutdown receiver.
     #[must_use]
     pub fn with_shutdown(mut self, rx: Receiver<()>) -> Self {
         self.shutdown = Some(rx);
         self
     }
 
-    /// Returns a copy with the given mempool observer.
     #[cfg(test)]
     #[must_use]
     pub fn with_mempool_observer(
@@ -1202,8 +987,6 @@ impl RuntimeInputs {
 #[path = "../tests/unit/config/tests.rs"]
 mod tests;
 
-/// Regression: the shared Bitcoin service port follows the winning network on
-/// every selection, so Tor and I2P can never diverge onto separate ports.
 #[cfg(test)]
 mod shared_service_port_tests {
     use super::*;

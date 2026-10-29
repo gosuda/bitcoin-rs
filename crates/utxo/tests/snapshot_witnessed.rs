@@ -1,9 +1,3 @@
-//! Independent coverage for the witnessed v4 snapshot codec, the sealed
-//! artifact raw traversal, and the worker-owned seed cell.
-//!
-//! Every test below exercises real bytes through the public codec: no mocks,
-//! no source-text assertions.
-
 use std::convert::Infallible;
 use std::io::{Cursor, Seek, Write};
 
@@ -112,7 +106,6 @@ fn file_with(bytes: &[u8]) -> Result<std::fs::File, Box<dyn std::error::Error>> 
     Ok(file)
 }
 
-/// One raw seed coin as emitted by traversal: identity plus script bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RawCoin {
     txid: [u8; 32],
@@ -126,7 +119,6 @@ fn raw_projection(
     let mut coins = Vec::new();
     artifact.for_each_coin_raw(
         &mut |outpoint: &OutPoint, script: &[u8]| {
-            // `OutPoint` is packed: copy it onto the stack before touching fields.
             let outpoint = *outpoint;
             coins.push(RawCoin {
                 txid: *outpoint.txid.as_bytes(),
@@ -186,8 +178,6 @@ fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins()
     assert_eq!(read_witness.record_count(), 2);
     assert_eq!(read_witness.output_count(), 3);
 
-    // Seal the SAME descriptor the strict load consumed (cursor sits at EOF);
-    // traversal seeks it back internally.
     let mut artifact = VerifiedSnapshotArtifact::seal(
         file,
         read_witness,
@@ -197,7 +187,6 @@ fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins()
     );
     assert_eq!(artifact.tip(), (height, tip));
 
-    // File order is encode order: compare without sorting.
     let expected: Vec<RawCoin> = writer_observer
         .coins
         .iter()
@@ -313,8 +302,6 @@ fn strict_loader_rejects_malformed_without_witness() -> Result<(), Box<dyn std::
 #[test]
 fn tampered_or_truncated_artifact_yields_integrity() -> Result<(), Box<dyn std::error::Error>> {
     let (bytes, witness) = encoded_witnessed()?;
-    // Record layout: 52-byte header, 45-byte record header, 19-byte vout
-    // header, then the first script byte.
     let first_script = 52 + 45 + 19;
 
     let mut header_tip = bytes.clone();
@@ -324,8 +311,6 @@ fn tampered_or_truncated_artifact_yields_integrity() -> Result<(), Box<dyn std::
     let mut trailer_byte = bytes.clone();
     let trailer_at = trailer_byte.len() - 10;
     trailer_byte[trailer_at] ^= 0x01;
-    // The script flip still parses (script bytes are opaque), proving the
-    // rejection below comes from the byte binding rather than the parser.
     assert!(
         read_snapshot_strict_v4(&mut Cursor::new(script_byte.clone())).is_ok(),
         "script-flip fixture must still parse so the binding does the work"
@@ -392,8 +377,6 @@ fn same_fd_pins_bytes_despite_path_replace() -> Result<(), Box<dyn std::error::E
         SeedProvenance::AssumeUtxoArchive { base: [9_u8; 32] },
     );
 
-    // Atomic replace (the publication-cleanup shape): the path now resolves to
-    // a new inode, while the sealed descriptor keeps reading the old bytes.
     let garbage = vec![0x5A_u8; bytes.len()];
     assert!(
         read_snapshot_strict_v4(&mut Cursor::new(garbage.clone())).is_err(),
@@ -420,8 +403,6 @@ fn grown_file_after_seal_yields_integrity() -> Result<(), Box<dyn std::error::Er
         SeedProvenance::AssumeUtxoArchive { base: [13_u8; 32] },
     );
 
-    // Concurrent growth through the path must neither extend the work nor
-    // validate: the capped traversal rejects the artifact.
     let mut grown = std::fs::OpenOptions::new().append(true).open(&path)?;
     grown.write_all(&[0xAA_u8; 1024])?;
     drop(grown);
@@ -566,7 +547,6 @@ fn first_offer_wins_take_clears_demand() -> Result<(), Box<dyn std::error::Error
         OfferOutcome::Skipped
     ));
 
-    // The winner survived the loser's close: its bytes still traverse.
     let mut count = 0_u64;
     taken.for_each_coin_raw(
         &mut |_: &OutPoint, _: &[u8]| {
@@ -612,8 +592,6 @@ fn cell_handles_are_thread_shareable() {
     assert_send::<VerifiedSnapshotArtifact>();
 }
 
-/// Cancellation is polled at entry and every 4,096 emitted coins; a trip
-/// returns `Cancelled` with the bundle intact so the caller can retry.
 #[test]
 fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn std::error::Error>> {
     let set = bitcoin_rs_utxo::UtxoSet::new();
@@ -643,7 +621,6 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn st
     );
     assert_eq!(witness.sha256(), read_witness.sha256());
 
-    // Immediate cancellation emits nothing.
     let mut count = 0_u64;
     let immediate = artifact.for_each_coin_raw(
         &mut |_: &OutPoint, _: &[u8]| {
@@ -658,8 +635,6 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn st
     );
     assert_eq!(count, 0, "a cancelled entry must not traverse");
 
-    // Mid-stream cancellation stops at the next 4,096 boundary with a
-    // partial traversal and no integrity verdict.
     let seen = std::cell::Cell::new(0_u64);
     let mut emitted = 0_u64;
     let mid = artifact.for_each_coin_raw(
@@ -679,7 +654,6 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn st
         "cancellation must stop at a poll boundary with partial work: {emitted}"
     );
 
-    // Without cancellation the same descriptor traverses every coin.
     let mut all = 0_u64;
     artifact.for_each_coin_raw(
         &mut |_: &OutPoint, _: &[u8]| {

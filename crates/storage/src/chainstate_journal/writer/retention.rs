@@ -1,5 +1,3 @@
-//! Lag backpressure, journal retention, checkpoint compaction, and writer resumption.
-
 use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;
@@ -11,7 +9,6 @@ use crate::KvStore;
 use std::time::Instant;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// Applies non-zero runtime batching, rotation, retention, and lag limits.
     pub fn configure(&mut self, policy: super::JournalPolicy) -> Result<(), JournalWriterError> {
         let super::JournalPolicy {
             batch_blocks,
@@ -45,8 +42,6 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    /// Applies time/lag/retention maintenance before the next block mutates
-    /// chainstate. A failed durability retry stops that apply before any write.
     pub(crate) fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
         if self.durability_retry_required {
@@ -76,10 +71,6 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    /// Cold initialization has no replayable journal suffix. A sticky
-    /// full-revalidation marker invalidates old generations, which may still
-    /// fill the retention budget before genesis creates an applied tip.
-    /// Retire only those segments, leaving the marker and active cursor intact.
     fn discard_invalidated_cold_segments(&self) -> Result<bool, JournalWriterError> {
         if self.base_generation != 0
             || self.base_height != 0
@@ -97,8 +88,6 @@ impl<S: KvStore> JournalWriter<S> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         }
-        // Finish traversal before unlinking: deleting entries can invalidate
-        // directory iteration and leave some invalidated generations behind.
         let mut invalidated_segments = Vec::new();
         for entry in self.dir.entries()? {
             let entry = entry?;
@@ -153,9 +142,6 @@ impl<S: KvStore> JournalWriter<S> {
             if parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_none() {
                 return Ok(total);
             }
-            // `DirEntry::metadata` reuses the stale size cached by directory
-            // enumeration on Windows; a fresh stat by name sees the live
-            // length without opening the segment.
             total
                 .checked_add(self.dir.metadata(entry.file_name())?.len())
                 .ok_or_else(|| {
@@ -168,8 +154,6 @@ impl<S: KvStore> JournalWriter<S> {
     /// last buffered record; publish the final head. Called by the publication
     /// primitive with admission already closed.
     pub(crate) fn freeze(&mut self) -> Result<(), JournalWriterError> {
-        // An invalidated generation is already frozen with nothing left to
-        // make durable; publication proceeds straight to compaction.
         if self.generation_invalidated {
             return Ok(());
         }
@@ -184,10 +168,6 @@ impl<S: KvStore> JournalWriter<S> {
         }
     }
 
-    /// §2.5 compact: rebase the empty post-publication journal on the newly
-    /// installed checkpoint and delete every superseded segment. A recovery
-    /// progress checkpoint preserves the full-revalidation marker; only a
-    /// completed or ordinary replacement checkpoint retires it.
     pub(crate) fn compact_to_checkpoint(
         &mut self,
         checkpoint_generation: u64,
@@ -209,8 +189,6 @@ impl<S: KvStore> JournalWriter<S> {
         if let Some(height) = self.append_gap_height {
             return Err(JournalWriterError::AppendGap { height });
         }
-        // Invalidation destroyed the durable head this checkpoint replaces,
-        // so the frozen-identity check has nothing left to compare.
         if !self.generation_invalidated
             && (self.durable.height != tip_height
                 || self.durable_block_hash != tip_hash
@@ -282,10 +260,7 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    /// §2.5 resume: reopen appends against the (possibly new) base.
     pub(crate) fn resume(&mut self) -> Result<(), JournalWriterError> {
-        // Without a completed compaction the only head available is the
-        // destroyed generation's stale cursor; refuse to republish it.
         if self.generation_invalidated {
             return Err(JournalWriterError::NotOpen {
                 state: "invalidated",

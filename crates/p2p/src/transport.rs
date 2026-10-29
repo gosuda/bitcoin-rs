@@ -15,10 +15,8 @@ use crate::wire::{
     FramedMessage, Message, PeerError, V1Receiver, decode_payload, encode_frame, message_payload,
 };
 
-/// The transport a connection negotiated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportProtocol {
-    /// Legacy v1 framing, unencrypted.
     V1,
     /// A BIP324 encrypted session.
     V2 {
@@ -34,8 +32,6 @@ pub enum TransportProtocol {
 #[error(transparent)]
 pub struct TransportFailure(Box<TransportError>);
 
-/// Maps a transport error onto the connection's error type. A poll timeout
-/// stays an I/O error, so the caller's retry loop keeps working.
 fn transport_error(error: TransportError) -> PeerError {
     match error {
         TransportError::Io(error) => PeerError::Io(error),
@@ -43,25 +39,20 @@ fn transport_error(error: TransportError) -> PeerError {
     }
 }
 
-/// The receive half of a connection's transport.
 #[derive(Debug)]
 pub(crate) enum RecvTransport {
-    /// v1 frames.
     V1(V1Receiver),
     /// BIP324 packets.
     V2(Box<PacketReader>),
 }
 
-/// The send half of a connection's transport.
 #[derive(Debug)]
 pub(crate) enum SendTransport {
-    /// v1 frames under the connection's magic.
     V1(Magic),
     /// BIP324 packets.
     V2(Box<SendCipher>),
 }
 
-/// Both halves of a negotiated transport.
 #[derive(Debug)]
 pub(crate) struct Negotiated {
     pub(crate) recv: RecvTransport,
@@ -81,11 +72,10 @@ impl Negotiated {
 }
 
 impl RecvTransport {
-    /// Reads at most one message: `Ok(None)` when the v2 transport carried a
-    /// decoy packet or a message of an empty or undefined type, which BIP324
-    /// peers drop. A v1 frame always carries a message and is never `None`.
+    /// Reads at most one message: `Ok(None)` when the v2 transport carried a decoy
+    /// packet or a message of an empty or undefined type, which BIP324 peers drop.
     ///
-    /// POST: a poll-timeout I/O error keeps any partial frame or packet.
+    /// A v1 frame always carries a message and is never `None`.
     pub(crate) fn read_message<R: Read>(
         &mut self,
         reader: &mut R,
@@ -128,12 +118,6 @@ impl SendTransport {
     }
 }
 
-/// Runs `handshake` over `stream` until it establishes a session or, for a
-/// responder, recognizes a v1 peer. Honors the connection's poll timeout, the
-/// handshake `deadline`, and `lease` cancellation.
-///
-/// POST: on failure, `handshake.received_any()` tells an initiator whether
-/// the peer answered at all.
 pub(crate) fn establish<S: Read + Write>(
     stream: &mut S,
     handshake: &mut Handshake,

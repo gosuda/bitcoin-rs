@@ -1,9 +1,5 @@
-//! P2P-05: canonical progress, not a scheduler cursor, owns the next body.
-
 use super::*;
 
-/// Returns the next `getheaders` from `rx`, skipping other traffic; fails
-/// when none is queued.
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
 ) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
@@ -254,9 +250,6 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick() -> TestResult {
     );
     let low = test_addr(9763, 0)?;
     let high = test_addr(9763, 1)?;
-    // Lowest address wins the probe's min_by_key(addr) rotation, but its
-    // channel is dead: dropping the receiver disconnects the crossbeam
-    // sender, so the lease's try_send fails and the lease cancels itself.
     let dead_rx = connect_peer(&peers, synthetic_peer(low, 1));
     drop(dead_rx);
     let high_rx = connect_peer(&peers, synthetic_peer(high, 5));
@@ -346,9 +339,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick() -> TestResult 
     );
     let dead = test_addr(9766, 0)?;
     let live = test_addr(9766, 1)?;
-    // Lowest address wins the probe's min_by_key(addr) rotation, but its
-    // channel is dead: dropping the receiver disconnects the crossbeam
-    // sender, so the lease's try_send fails and the lease cancels itself.
     let dead_rx = connect_peer(&peers, synthetic_peer(dead, 5));
     drop(dead_rx);
     let live_rx = connect_peer(&peers, synthetic_peer(live, 3));

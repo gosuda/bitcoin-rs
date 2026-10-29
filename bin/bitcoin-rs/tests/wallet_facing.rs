@@ -1,11 +1,3 @@
-//! Wallet-facing consumer: spawn the public `bitcoin-rs` binary and talk
-//! only HTTP (Esplora + JSON-RPC) using rust-bitcoin.
-//!
-//! This is the executable proof of `docs/contracts/wallet-facing.md`. It
-//! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! The named out-of-repo consumer is `gosuda/bitcoin-wallet`
-//! (`btcw -u`).
-
 use std::cell::RefCell;
 use std::error::Error;
 use std::io::{BufRead as _, BufReader, Read};
@@ -37,7 +29,7 @@ use bitcoin::{
     WPubkeyHash, Witness,
 };
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "wallet-facing-test";
@@ -48,7 +40,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-/// Lossy body text of a shared HTTP response, for diagnostics.
 trait BodyText {
     fn body_text(&self) -> String;
 }
@@ -105,8 +96,6 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "tip must have moved past genesis"
     );
 
-    // API-26: coinbase-only blocks leave the estimator with no observations,
-    // so targets are honestly omitted until real wallet traffic confirms.
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").is_none(),
@@ -141,20 +130,18 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         mempool_tx
             .get("status")
             .and_then(|status| status.get("confirmed"))
-            .and_then(Value::as_bool),
+            .and_then(sonic_rs::JsonValueTrait::as_bool),
         Some(false),
         "broadcast transaction must be visible as unconfirmed: {mempool_tx}"
     );
     let tx_status = client.esplora_json(&format!("/api/tx/{}/status", txid.trim()))?;
     assert_eq!(
-        tx_status.get("confirmed").and_then(Value::as_bool),
+        tx_status
+            .get("confirmed")
+            .and_then(sonic_rs::JsonValueTrait::as_bool),
         Some(false),
         "GET /api/tx/{{id}}/status must report unconfirmed: {tx_status}"
     );
-    // Confirming the first spend matures the height-2 coinbase, so a second
-    // spend confirms in the next block. API-26 needs more than a lone fresh
-    // observation (one sample decays below the minimum), and two
-    // confirmations at full success rate honestly qualify the estimate.
     client.mine(Coinbase::AnyoneCanSpend)?;
     wait_for_confirmation(&client, txid.trim())?;
     let second_hex = spend_anyone_can_spend(&client, 2, &p2wpkh)?;
@@ -167,9 +154,16 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     );
     client.mine(Coinbase::AnyoneCanSpend)?;
     wait_for_confirmation(&client, second_broadcast.body_text().trim())?;
+    assert_six_block_target_qualifies(&client)?;
+    Ok(())
+}
+
+fn assert_six_block_target_qualifies(client: &Client) -> TestResult {
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
-        fees.get("6").and_then(Value::as_f64).is_some(),
+        fees.get("6")
+            .and_then(sonic_rs::JsonValueTrait::as_f64)
+            .is_some(),
         "two confirmed spends must qualify the 6-block target wallets use: {fees}"
     );
     Ok(())
@@ -253,7 +247,6 @@ fn wait_until_dead(pid: u32) -> bool {
     }
 }
 
-/// Coinbase output the miner pays, besides the witness commitment.
 enum Coinbase<'a> {
     AnyoneCanSpend,
     P2wpkh(&'a ScriptBuf),
@@ -274,7 +267,6 @@ struct NodeProcess {
     child: Child,
 }
 
-/// Kills the daemon if startup fails before [`NodeProcess`] takes ownership.
 struct StartupChild {
     child: Option<Child>,
 }
@@ -413,9 +405,6 @@ fn locked_string(logs: &Mutex<String>) -> String {
 
 struct Client {
     logs: Arc<Mutex<String>>,
-    // The shared keep-alive transport from the harness crate: a request
-    // that reached the server is never resent, which matters because the
-    // POST /api/tx broadcast is not idempotent.
     conn: RefCell<Connection>,
 }
 
@@ -473,10 +462,6 @@ impl Client {
         Ok(response.json()?)
     }
 
-    /// Esplora surfaces 503 while the transaction index crosses a snapshot
-    /// boundary mid-query ("changed during query; retry"), which the daemon
-    /// answers asynchronously after each mined block: poll again inside the
-    /// same index deadline the scriptindex wait already allows.
     fn esplora_get(&self, path: &str) -> TestResult<HttpResponse> {
         let deadline = Instant::now() + INDEX_TIMEOUT;
         loop {
@@ -507,11 +492,12 @@ impl Client {
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             return Err(format!("{method} RPC error: {error}").into());
         }
-        Ok(value.get("result").cloned().unwrap_or(Value::Null))
+        Ok(value
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| sonic_rs::Value::from(())))
     }
 
-    /// Sends one unauthenticated request through the shared keep-alive
-    /// connection; wallet-facing surfaces never carry the RPC credentials.
     fn exchange(&self, method: &str, path: &str, body: &[u8]) -> TestResult<HttpResponse> {
         Ok(self.conn.borrow_mut().http(
             method,
@@ -565,8 +551,6 @@ fn assert_esplora_namespace(
         160,
         "GET /api/block/{{hash}}/header must return 80-byte header hex: {header}"
     );
-    // API-26 (see above): no confirmed wallet traffic exists yet at this
-    // point, so the 6-block target must still be omitted here.
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").is_none(),
@@ -669,11 +653,6 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
 }
 
 fn spend_anyone_can_spend(client: &Client, height: u32, payout: &ScriptBuf) -> TestResult<String> {
-    // The coinbase at `height` is anyone-can-spend (`OP_TRUE`) and must be
-    // mature under the current tip. The default binary's portable interpreter
-    // verifies that class; it does not verify P2WPKH, and the node holds no
-    // keys. A wallet would sign here. Broadcast still goes through the public
-    // `POST /api/tx` path, paying a standard P2WPKH so policy accepts the output.
     let block_hash = client.esplora_text(&format!("/api/block-height/{height}"))?;
     let txid_hex = client.esplora_text(&format!("/api/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;
@@ -694,16 +673,17 @@ fn spend_anyone_can_spend(client: &Client, height: u32, payout: &ScriptBuf) -> T
     Ok(serialize_hex(&spend))
 }
 
-/// Polls `/api/tx/{txid}/status` past the post-mine index settle (the
-/// endpoint answers 503 until the new tip is queryable) until the spend
-/// confirms or the index timeout expires.
 fn wait_for_confirmation(client: &Client, txid: &str) -> TestResult<()> {
     let deadline = Instant::now() + INDEX_TIMEOUT;
     loop {
         let response = client.esplora_get(&format!("/api/tx/{txid}/status"))?;
         if response.status == 200 {
             let status = response.json()?;
-            if status.get("confirmed").and_then(Value::as_bool) == Some(true) {
+            if status
+                .get("confirmed")
+                .and_then(sonic_rs::JsonValueTrait::as_bool)
+                == Some(true)
+            {
                 return Ok(());
             }
         }

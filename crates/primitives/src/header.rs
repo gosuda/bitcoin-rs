@@ -2,28 +2,20 @@
 
 use crate::{BlockHash, CompactTarget, Hash256, encode::double_sha256};
 
-/// A Bitcoin block header in native owned form.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Header {
-    /// Block version.
     pub version: i32,
-    /// Hash of the previous block.
     pub prev_blockhash: BlockHash,
-    /// Merkle root of the block's transaction ids.
     pub merkle_root: Hash256,
     /// Unix epoch seconds.
     pub time: u32,
-    /// Compact proof-of-work target.
     pub bits: CompactTarget,
-    /// Proof-of-work nonce.
     pub nonce: u32,
 }
 
 impl Header {
-    /// Consensus serialization length of a block header.
     pub const LEN: usize = 80;
 
-    /// Writes the 80-byte consensus serialization.
     #[must_use]
     pub fn to_bytes(self) -> [u8; Self::LEN] {
         let mut out = [0_u8; Self::LEN];
@@ -36,7 +28,6 @@ impl Header {
         out
     }
 
-    /// Reads an 80-byte consensus serialization.
     #[must_use]
     pub(crate) fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
         let mut version = [0_u8; 4];
@@ -61,7 +52,6 @@ impl Header {
         }
     }
 
-    /// Computes the block hash: double-SHA256 of the 80-byte consensus serialization.
     #[must_use]
     pub fn compute_hash(&self) -> BlockHash {
         BlockHash(double_sha256(&self.to_bytes()))

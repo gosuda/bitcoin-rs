@@ -1,26 +1,3 @@
-//! Metrics instrumentation and optional exposition.
-//!
-//! `MetricsServer` serves the Prometheus text scrape; the readiness sampler
-//! projects the txindex capability source into a gauge. `EvidenceIdentity`
-//! belongs to benchmark evidence and is deliberately not attached to operator
-//! series as high-cardinality labels.
-//!
-//! # Instrumentation boundary
-//!
-//! The metrics API is a small, stable set of operator-facing signals: rates,
-//! totals, backpressure/fallback counts, backlog gauges, and stable latency
-//! distributions. Names and semantics are an API; renaming or removing one is
-//! a breaking change. Per-event payloads, block/tx/peer identity, and any
-//! other high-cardinality label belong in `tracing::` events (diagnostics,
-//! explicitly not an API) or in the Core-compatible USDT probes of
-//! `bitcoin_rs_consensus::trace` (see `docs/tracing.md`), never here.
-//! Metric labels are limited to closed enumerations owned by the code.
-//! The measured product-stage histograms consumed by the hot-path ledger
-//! (`docs/contracts/hot-path-attribution.md`) are exempt, and only via that
-//! ledger's `histogram` keys. Before adding a call site, apply the decision
-//! table in `docs/observability.md` (OBS-01..OBS-05) and cite the clause in
-//! review.
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -33,15 +10,10 @@ use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
 
-/// A SHA-256 digest carried as 64 lowercase hex characters in evidence.
-///
-/// A digest is bytes, not a label: a placeholder such as "unmeasured" cannot
-/// parse, so an identity is either real or absent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sha256Hex(pub [u8; 32]);
 
 impl Sha256Hex {
-    /// Hashes `bytes` with SHA-256.
     #[must_use]
     pub fn digest(bytes: &[u8]) -> Self {
         use sha2::Digest as _;
@@ -91,41 +63,25 @@ impl<'de> serde::Deserialize<'de> for Sha256Hex {
     }
 }
 
-/// The corpus a measurement replayed.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusIdentity {
-    /// Corpus identifier from `docs/contracts/campaign-corpora.md`.
     pub id: String,
-    /// Digest of the corpus manifest.
     pub manifest_sha256: Sha256Hex,
 }
 
-/// Everything a measurement was taken under.
-///
-/// A number without this record is a rumor: it cannot be matched against a
-/// control cell or regenerated later.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceIdentity {
-    /// Digest of the executable that produced the sample.
     pub binary_sha256: Sha256Hex,
-    /// Crate version of that executable.
     pub version: String,
-    /// Digest of the fully resolved configuration.
     pub config_sha256: Sha256Hex,
-    /// Replayed corpus. A live node has none; a product cell always has one.
     pub corpus: Option<CorpusIdentity>,
-    /// Storage backend that held the state.
     pub backend: String,
-    /// Durability policy in force, for example `journal:500b/5s`.
     pub durability: String,
-    /// Hardware the sample ran on: CPU model and logical core count.
     pub hardware: String,
 }
 
-/// CPU model and core count, the two hardware facts a matched treatment
-/// must share before its numbers are comparable.
 fn hardware_identity() -> String {
     let model = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -141,11 +97,6 @@ fn hardware_identity() -> String {
 }
 
 impl EvidenceIdentity {
-    /// Identity for the running process under `config`.
-    ///
-    /// The digest covers the executable file on disk and the resolved
-    /// configuration's debug rendering, which is the one canonical form the
-    /// runtime already owns.
     pub fn of_process(config: &crate::config::NodeConfig) -> Result<Self> {
         let executable = std::env::current_exe()?;
         let binary_sha256 = Sha256Hex::digest(&std::fs::read(&executable)?);
@@ -278,8 +229,6 @@ fn describe_node_metrics() {
 
 static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> = Mutex::new(None);
 
-/// One process serves one evidence identity, but operator series do not carry
-/// that high-cardinality identity as labels.
 fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
     let mut slot = PROMETHEUS_HANDLE.lock();
     if let Some((installed, handle)) = slot.as_ref() {
@@ -296,7 +245,6 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
     Ok(handle)
 }
 
-/// Process-global Prometheus scrape listener bound by [`start_metrics`].
 pub(crate) struct MetricsServer {
     #[cfg(test)]
     local_addr: SocketAddr,
@@ -305,11 +253,6 @@ pub(crate) struct MetricsServer {
 }
 
 impl MetricsServer {
-    /// Binds `addr` before installing the recorder, then serves Prometheus text.
-    ///
-    /// Listener-first ordering keeps an occupied-address failure from consuming
-    /// the process-global recorder slot, so a later in-process retry cannot hit
-    /// `SetRecorderError`.
     pub(crate) fn bind(
         addr: SocketAddr,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
@@ -337,14 +280,12 @@ impl MetricsServer {
         })
     }
 
-    /// Address the scrape thread is listening on.
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    /// Signals the scrape thread and waits for it to exit.
     pub(crate) fn stop_and_join(&mut self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
@@ -364,9 +305,6 @@ impl Drop for MetricsServer {
     }
 }
 
-/// Starts the production scrape listener when `metrics_bind` is configured.
-///
-/// This is the entry `run` uses after [`crate::state::NodeState::open`].
 pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
@@ -416,18 +354,10 @@ fn serve_scrape(stream: &mut TcpStream, handle: &PrometheusHandle) {
     let _ = stream.flush();
 }
 
-/// Gauge name for the txindex readiness outcome.
 pub(crate) const TXINDEX_READINESS_GAUGE: &str = "node.capability.txindex_readiness";
 
-/// How often the sampler republishes the readiness gauge.
 const READINESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Publishes one readiness sample from the RPC capability source.
-///
-/// Outcome labels are the `getcapabilities` wire spellings and are set
-/// independently, so a scrape during a transition may observe zero or two
-/// active outcomes; the 1s sample interval bounds the window. Treat a single
-/// scrape as approximate and the RPC source as authoritative.
 pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySource) {
     let status = source.capability();
     let active = status.state.wire_name();
@@ -437,11 +367,6 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
     }
 }
 
-/// Spawns the one-hertz readiness sampler.
-///
-/// The thread owns clones of the shared status source and the shutdown flag;
-/// teardown joins it through `NodeServices` before `NodeState` closes, so it
-/// never touches closed storage.
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,

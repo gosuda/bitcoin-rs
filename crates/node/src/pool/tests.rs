@@ -153,7 +153,6 @@ fn exact_share_survives_reopen(open: OpenStore) -> TestResult {
         .share_by_hash(&credit.header_hash)?
         .ok_or("recorded share missing after reopen")?;
     assert_eq!(work, credit.work);
-    // Duplicate acceptance checks every persisted identity field, not merely the hash.
     assert_eq!(
         ledger.record_share(&credit)?,
         ShareReceipt::Duplicate { seq }
@@ -179,7 +178,6 @@ fn restart_epoch_separates_reused_wire_job(open: OpenStore) -> TestResult {
     assert!(second_epoch > first_epoch);
     let host = LedgerHost::new(Arc::clone(&ledger), second_epoch, payout_policy());
     let mut second = first.clone();
-    // The miner may reuse job/extranonce/nonce after restart; the new template changes its hash.
     second.header.time += 1;
     second.hash = second.header.compute_hash();
     assert_eq!(
@@ -268,8 +266,6 @@ fn sv2_permanent_share_conflict_is_rejected(open: OpenStore) -> TestResult {
             .unwrap_or_else(|_| panic!("first SV2 share record unavailable")),
         RecordOutcome::Recorded
     );
-    // Same header hash with a different nonce: an uncurable identity conflict,
-    // never an unavailable ledger.
     let mut same_hash = first.clone();
     same_hash.header.nonce = same_hash.header.nonce.wrapping_add(1);
     assert_eq!(
@@ -277,7 +273,6 @@ fn sv2_permanent_share_conflict_is_rejected(open: OpenStore) -> TestResult {
             .unwrap_or_else(|error| panic!("share conflict surfaced as unavailable: {error:?}")),
         RecordOutcome::Rejected
     );
-    // Same identity with a different header hash collides the other way.
     let mut same_identity = first.clone();
     same_identity.hash = BlockHash::from(Hash256::from_le_bytes(&[9; 32]));
     assert_eq!(
@@ -292,8 +287,6 @@ fn sv2_permanent_share_conflict_is_rejected(open: OpenStore) -> TestResult {
 fn sv2_non_conflict_ledger_error_is_unavailable(open: OpenStore) -> TestResult {
     let directory = tempfile::tempdir()?;
     let host = registered_host(open, directory.path(), EPOCH)?;
-    // Oversized extranonce fails ledger validation: not a permanent share
-    // conflict, so the SV2 seam must keep the infrastructure error.
     let mut bad = share()?;
     bad.extranonce = vec![0u8; pool_ledger::MAX_EXTRANONCE_LEN + 1];
     assert!(
@@ -341,12 +334,6 @@ fn block_record_reservations_are_bounded_and_released(open: OpenStore) -> TestRe
 }
 
 fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) -> TestResult {
-    // An `Undetermined` submission releases no capacity when its record is
-    // already durable: the full waiter stays charged to the shared
-    // `MAX_PENDING_BLOCK_RECORDS` budget until removed. Fill capacity with
-    // deferred charges, assert admission fails, drop one, and re-admit.
-    // Linearizable capacity; snapshot-isolated ledger; at-least-once delivery
-    // stays idempotent on the block hash.
     use super::ledger::{BlockRecordOutcome, DeferredCharge};
     use bitcoin_rs_mining::pool::BlockStatus;
 

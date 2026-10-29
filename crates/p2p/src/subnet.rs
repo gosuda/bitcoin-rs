@@ -4,58 +4,37 @@ use std::time::SystemTime;
 
 use thiserror::Error;
 
-/// Canonical IP subnet with host bits normalized out of the base address.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct IpSubnet {
     base: IpAddr,
     prefix: u8,
 }
 
-/// Manual ban entry for an IP subnet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BannedSubnet {
-    /// Subnet matched by this ban entry.
     pub subnet: IpSubnet,
-    /// Expiry time, or `None` for a permanent ban.
     pub banned_until: Option<SystemTime>,
-    /// Time at which the ban was created.
     pub ban_created: SystemTime,
-    /// Human-readable ban reason supplied by the caller.
     pub reason: String,
 }
 
-/// Error returned when parsing an IP subnet.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SubnetParseError {
-    /// The subnet string was empty.
     #[error("empty subnet")]
     Empty,
-    /// A prefix separator was present without a preceding IP address.
     #[error("missing subnet IP")]
     MissingIp,
-    /// The IP address portion was invalid.
     #[error("invalid subnet IP")]
     BadIp,
-    /// The prefix portion was invalid.
     #[error("invalid subnet prefix")]
     BadPrefix,
-    /// The prefix exceeded the width of the IP address family.
     #[error("subnet prefix {prefix} exceeds address width {width}")]
-    PrefixTooLarge {
-        /// Address-family width in bits.
-        width: u8,
-        /// Parsed prefix length.
-        prefix: u8,
-    },
-    /// Extra input followed an otherwise subnet-like value.
+    PrefixTooLarge { width: u8, prefix: u8 },
     #[error("unexpected subnet suffix")]
     TrailingJunk,
 }
 
 impl IpSubnet {
-    /// Constructs a subnet after canonicalizing an IPv4-mapped IPv6 base to
-    /// its IPv4 form (Core `CNetAddr` normalization), validating the prefix
-    /// against the canonical family, and zeroing host bits.
     pub fn new(base: IpAddr, prefix: u8) -> Result<Self, SubnetParseError> {
         let base = base.to_canonical();
         match base {
@@ -76,7 +55,6 @@ impl IpSubnet {
         }
     }
 
-    /// Constructs a single-address subnet for the IP address family.
     pub fn from_ip(ip: IpAddr) -> Self {
         let ip = ip.to_canonical();
         match ip {
@@ -91,18 +69,14 @@ impl IpSubnet {
         }
     }
 
-    /// Returns the normalized base address.
     pub fn base(&self) -> IpAddr {
         self.base
     }
 
-    /// Returns the CIDR prefix length.
     pub fn prefix(&self) -> u8 {
         self.prefix
     }
 
-    /// Returns whether `ip` is in this subnet; IPv4-mapped IPv6 queries are
-    /// canonicalized first.
     pub fn contains(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
         match (self.base, ip) {
@@ -152,7 +126,6 @@ impl fmt::Display for IpSubnet {
     }
 }
 
-/// Returns whether `ip` is covered by an active ban entry.
 pub fn is_banned(banned: &[BannedSubnet], ip: IpAddr, now: SystemTime) -> bool {
     banned.iter().any(|entry| {
         entry.subnet.contains(ip) && entry.banned_until.is_none_or(|until| until > now)

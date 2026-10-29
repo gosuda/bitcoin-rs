@@ -1,22 +1,16 @@
 # btc-mempool-explorer
 
 This Compose example runs the upstream `mempool/mempool` explorer against
-`bitcoin-rs`. The explorer backend uses bitcoin-rs' Esplora-compatible HTTP
-endpoints (`MEMPOOL_BACKEND=esplora`) and its Core-compatible JSON-RPC methods
-on the same node listener. It starts no Electrum or electrs service.
+`bitcoin-rs` (`MEMPOOL_BACKEND=esplora`). The backend uses bitcoin-rs'
+Esplora-compatible HTTP endpoints and Core-compatible JSON-RPC methods on the
+same node listener. It starts no Electrum or electrs service.
 
-The stock Mempool frontend proxies `/api/v1` to the Mempool backend and every
-other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to keep
-`/api/v1` on the Mempool backend and send every other `/api/` path to
-bitcoin-rs on `:8332/api/`. That prefix is public electrs (the wallet-facing
-tree; [contract WF-02](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues)). The Mempool backend uses `ESPLORA_REST_API_URL=http://node:8332/esplora`,
-the same electrs routes plus `/internal` and `/block-template`. JSON-RPC keeps
-the listener root. The public explorer port proxies `/api/` as-is; it does not
-need a denylist, because those helpers are not on `/api`.
-
-The Mempool project has a frontend, backend, and MariaDB dependency, so this
-stack contains those three services plus `bitcoin-rs`. The frontend is the only
-public explorer service; the backend and database stay on the Compose network.
+`nginx-mempool.conf` keeps `/api/v1` on the Mempool backend and sends every
+other `/api/` path to bitcoin-rs on `:8332/api/`, the public electrs surface
+([contract WF-02](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues)).
+The Mempool backend uses `ESPLORA_REST_API_URL=http://node:8332/esplora`;
+JSON-RPC keeps the listener root. The stack adds frontend, backend, and MariaDB
+services to `bitcoin-rs`; only the frontend is public.
 
 `txindex` and `scriptindex` are enabled so the Esplora backend can resolve
 historical transactions and address activity. Index backfill and initial chain

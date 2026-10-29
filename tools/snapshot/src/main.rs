@@ -28,28 +28,19 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Read header metadata only; this does not verify the snapshot contents.
     Inspect {
-        /// Existing Bitcoin Core dumptxoutset file (opened read-only).
         file: PathBuf,
-        /// Emit a machine-readable report.
         #[arg(long)]
         json: bool,
     },
-    /// Verify all coins against a compiled network anchor, without historical validation.
     Verify {
-        /// Existing Bitcoin Core dumptxoutset file (opened read-only).
         file: PathBuf,
-        /// Expected network; never inferred as a trust decision from the file.
         #[arg(long, value_enum)]
         network: NetworkArg,
-        /// Emit a machine-readable report.
         #[arg(long)]
         json: bool,
-        /// Override the shared decoder's input byte limit.
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         max_file_bytes: Option<u64>,
-        /// Override the shared decoder's coin-count limit (the set is held in memory).
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         max_coins: Option<u64>,
     },
@@ -95,7 +86,7 @@ enum Error {
     #[error("cannot write report: {0}")]
     Output(#[from] io::Error),
     #[error("cannot serialize report: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(#[from] sonic_rs::Error),
 }
 
 impl Error {
@@ -213,7 +204,6 @@ fn open_input(path: &Path) -> Result<(File, u64), Error> {
         path: path.to_path_buf(),
         source,
     };
-    // Reject directories/devices/pipes before opening; the held handle is checked again.
     if !fs::metadata(path).map_err(input_error)?.is_file() {
         return Err(Error::NotRegularFile(path.to_path_buf()));
     }
@@ -222,7 +212,6 @@ fn open_input(path: &Path) -> Result<(File, u64), Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // A path swapped to a FIFO must not block before the held-handle check.
         let flags = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
             .map_err(io::Error::other)
             .map_err(input_error)?;
@@ -274,7 +263,7 @@ fn run(command: Command) -> Result<(), Error> {
     };
     let mut out = io::stdout().lock();
     if json {
-        serde_json::to_writer_pretty(&mut out, &report)?;
+        out.write_all(&sonic_rs::to_vec_pretty(&report)?)?;
         writeln!(out)?;
     } else {
         report.write_text(&mut out)?;

@@ -1,9 +1,3 @@
-//! Ordered raw transactions use consensus costs with copied previous outputs.
-//!
-//! Core 31.1 `GetTransactionSigOpCost` owns the expected legacy/P2SH scaling
-//! and witness activation. rust-bitcoin independently checks active costs;
-//! these fixtures exercise accounting, not script validity or admission.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
@@ -30,7 +24,6 @@ struct RawCase {
     inactive_cost: u32,
 }
 
-/// An exact sigop budget accepts the raw entry; one unit less refuses the block.
 #[test]
 fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
     let pool = Mempool::new(MempoolLimits::default());
@@ -52,7 +45,6 @@ fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
                 segwit_active,
             )?;
             assert_eq!(snapshot.entries[0].sigop_cost, expected);
-            // The P2PKH coinbase contributes four more cost units.
             let mut context = CandidateContext {
                 segwit_active,
                 max_sigops: u64::from(expected) + 4,
@@ -77,7 +69,6 @@ fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
     Ok(())
 }
 
-/// Raw children can spend earlier raw, pool-id, or already-resolved pool entries.
 #[test]
 fn raw_children_resolve_only_earlier_selected_outputs() -> TestResult {
     for case in cases().into_iter().skip(1) {
@@ -98,8 +89,6 @@ fn raw_children_resolve_only_earlier_selected_outputs() -> TestResult {
             let snapshot = snapshot_for_selection(pool.mining_snapshot(), &selection, &[], true)?;
             assert_eq!(snapshot.entries[1].sigop_cost, case.active_cost);
         }
-        // Neither an unselected pool entry nor a later listed parent resolves
-        // the raw child's input. Missing-input rejection stays with validation.
         for items in [
             vec![GenerateTx::Raw(child.clone())],
             vec![GenerateTx::Raw(child.clone()), GenerateTx::Raw(parent)],
@@ -116,7 +105,6 @@ fn raw_children_resolve_only_earlier_selected_outputs() -> TestResult {
     Ok(())
 }
 
-/// Script-type fixtures distinguish legacy cost, accurate redeem cost and witness cost.
 fn cases() -> Vec<RawCase> {
     let redeem = vec![0x51, 0xae];
     let witness_script = vec![0xac];
@@ -155,7 +143,6 @@ fn cases() -> Vec<RawCase> {
     ]
 }
 
-/// Uses the independent rust-bitcoin consensus cost implementation with the same prevout.
 fn oracle_cost(tx: &Tx, prevout: &TxOut) -> Result<u32, Box<dyn Error>> {
     let oracle = oracle_transaction(tx)?;
     let prevout: bitcoin::TxOut = bitcoin::consensus::deserialize(&consensus_bytes(prevout))?;

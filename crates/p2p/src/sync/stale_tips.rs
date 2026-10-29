@@ -1,43 +1,4 @@
 //! Bounded retention of recent stale tips for BIP332 relay.
-//!
-//! A stale tip is the newest header of a branch that is neither on the active
-//! chain nor an extension of it. `BlockTree` keeps every header it has ever
-//! admitted, so side-branch headers are only reachable by scanning the whole
-//! tree; this module keeps the few that are worth announcing, as hashes.
-//!
-//! The tree stays the one authority over chain facts. The retainer stores a
-//! hash, the tip's chainwork (a ranking key, immutable per node), and the order
-//! it was learned in; height, status, ancestry, and the active chain are
-//! always read from the `&BlockTree` each call receives. It never validates a
-//! header, never admits one, and never mutates the tree: a retained tip is a
-//! hint that can only make a node announce something it already holds.
-//!
-//! # Invariants
-//!
-//! - At most [`MAX_RETAINED_STALE_TIPS`] tips are held.
-//! - Every call that receives a tree first drops tips that are no longer stale
-//!   candidates (active, on or above the active chain, invalid, unknown, or
-//!   more than [`STALETIP_RECENT_WINDOW`] blocks behind the active tip), so
-//!   what it then reports is current for that tree.
-//! - A tip and one of its ancestors are never both held: extending a retained
-//!   branch replaces its tip, and a header below a retained tip is not learned.
-//! - A peer is recorded as knowing a tip only while the tip is retained, so
-//!   the per-peer record is bounded by the retention cap and cleared with the
-//!   tip. "Knows" covers both directions: the peer announced the tip to us
-//!   (never echo it back) and we announced it to the peer (never repeat it).
-//! - Relay with a peer opens once ([`StaleTipRetainer::pending_for`]): the
-//!   first call offers at most [`MAX_ADVERTISED_STALETIPS`] of the tips already
-//!   held, every later call only tips learned after it plus the selected
-//!   earlier tips the peer has not acknowledged. A peer therefore
-//!   receives at most ten earlier tips however many are held, plus each tip
-//!   learned while it is connected, once.
-//!
-//! # Locking
-//!
-//! One internal mutex, a leaf lock: callers hold at most their `BlockTree`
-//! read guard when calling in, and no method calls back out except
-//! [`StaleTipRetainer::pending_for`], which releases the mutex before invoking
-//! its predicate.
 
 use std::cmp::Reverse;
 use std::collections::VecDeque;
@@ -62,20 +23,15 @@ pub(crate) const STALETIP_RECENT_WINDOW: u32 = 1000;
 /// begins (BIP332 `MAX_ADVERTISED_STALETIPS`).
 pub(crate) const MAX_ADVERTISED_STALETIPS: usize = 10;
 
-/// One retained stale tip.
 #[derive(Debug)]
 struct Retained {
     hash: Hash256,
-    /// Chainwork through the tip; the first ranking key.
     work: ChainWork,
-    /// Learn order, larger is newer; the tie-break among equal work.
     sequence: u64,
-    /// Peers that announced this tip to us or that we announced it to.
     known_by: Vec<PeerSource>,
 }
 
 impl Retained {
-    /// Greatest chainwork first, then the most recently learned (BIP332).
     fn rank(&self) -> (ChainWork, u64) {
         (self.work, self.sequence)
     }
@@ -87,18 +43,9 @@ impl Retained {
     }
 }
 
-/// Relay with one peer, opened by the first [`StaleTipRetainer::pending_for`]
-/// call for it.
 #[derive(Debug, Default)]
 struct Opening {
-    /// Learn sequence when relay opened: only tips learned at or after it
-    /// are offered again, plus [`Self::pending`].
     floor: u64,
-    /// Initial tips selected on opening that the peer has not acknowledged,
-    /// best first: the offered eligible plus the refused within the
-    /// remaining slots, at most [`MAX_ADVERTISED_STALETIPS`] in total.
-    /// Offering is not delivery — a saturated send marks nothing — so
-    /// entries leave only when marked known, retired, or forgotten.
     pending: Vec<Hash256>,
 }
 
@@ -106,17 +53,11 @@ struct Opening {
 struct State {
     tips: Vec<Retained>,
     next_sequence: u64,
-    /// Peers relay has been opened with.
     opened: HashMap<PeerSource, Opening>,
-    /// Announcements peers sent whose branch the sync loop has not yet
-    /// admitted, oldest first; at most [`MAX_RETAINED_STALE_TIPS`].
     heard: VecDeque<(Hash256, PeerSource)>,
 }
 
 impl State {
-    /// Drops every tip that is no longer a stale candidate in `tree`.
-    ///
-    /// POST: each remaining tip satisfies [`stale_fork`].
     fn prune(&mut self, tree: &BlockTree) {
         let tip = tree.tip();
         self.tips.retain(|retained| {
@@ -127,14 +68,12 @@ impl State {
         });
     }
 
-    /// The retained tips, best first.
     fn ranked(&self) -> Vec<&Retained> {
         let mut ranked: Vec<&Retained> = self.tips.iter().collect();
         ranked.sort_by_key(|retained| Reverse(retained.rank()));
         ranked
     }
 
-    /// Credits the peers that announced `hash` before it was admitted.
     fn absorb_heard(&mut self, hash: Hash256) {
         let Some(held) = self.tips.iter_mut().find(|held| held.hash == hash) else {
             return;
@@ -150,21 +89,11 @@ impl State {
     }
 }
 
-/// Whether `node` is eligible by its own facts: valid, and no more than
-/// [`STALETIP_RECENT_WINDOW`] blocks behind the active tip.
 fn in_scope(node: &BlockTreeNode, tip: &TipSnapshot) -> bool {
     node.status != NodeStatus::Invalid
         && tip.height.saturating_sub(node.height) <= STALETIP_RECENT_WINDOW
 }
 
-/// The block where the branch ending at `id` leaves the active chain, when
-/// `id` is a stale-tip candidate.
-///
-/// PRE: `tip` is `tree`'s active tip.
-/// POST: `Some(fork)` iff `id` is in scope and is neither an ancestor of the
-///   active tip (this covers the tip itself) nor a descendant of it; `fork` is
-///   then the highest block the branch shares with the active chain. The cost
-///   is the branch length when the tree's active-height index is trusted.
 fn stale_fork(tree: &BlockTree, tip: &TipSnapshot, id: NodeId) -> Option<NodeId> {
     let node = tree.node(id).ok()?;
     if !in_scope(node, tip) {
@@ -174,8 +103,6 @@ fn stale_fork(tree: &BlockTree, tip: &TipSnapshot, id: NodeId) -> Option<NodeId>
     (fork != id && fork != tip.tip_id).then_some(fork)
 }
 
-/// Whether `ancestor` (at `ancestor_height`) lies on the ancestry of the block
-/// hashed `descendant`, `ancestor` included.
 fn on_ancestry_of(
     tree: &BlockTree,
     ancestor: NodeId,
@@ -187,31 +114,18 @@ fn on_ancestry_of(
         == Some(ancestor)
 }
 
-/// The bounded set of recent stale tips and who already knows them.
-///
-/// Owned once per [`BlockSync`] and shared by `Arc` with the announcer and the
-/// chain query that serves stale-tip headers. Interior mutability is one
-/// mutex; see the module's locking note.
 #[derive(Debug, Default)]
 pub struct StaleTipRetainer {
     state: Mutex<State>,
 }
 
 impl StaleTipRetainer {
-    /// Builds the retained set from the leaves already in `tree` (startup, or
-    /// a restored branch store).
-    ///
-    /// POST: holds the best [`MAX_RETAINED_STALE_TIPS`] stale-candidate leaves
-    /// by chainwork, ties to the newer slab entry; empty without an active
-    /// tip. No peer knows any of them yet.
     pub(crate) fn seed(tree: &BlockTree) -> Self {
         let Some(tip) = tree.tip() else {
             return Self::default();
         };
         let mut next_sequence = 0_u64;
         let mut leaves = Vec::new();
-        // Leaves arrive in ascending slab order, which is insertion order:
-        // the position is the learn order.
         for (sequence, id) in (0_u64..).zip(tree.leaf_node_ids()) {
             next_sequence = sequence.saturating_add(1);
             let Ok(node) = tree.node(id) else {
@@ -249,24 +163,6 @@ impl StaleTipRetainer {
         }
     }
 
-    /// Records `hash`, a stale tip the caller just learned of, and returns
-    /// whether it newly entered the retained set.
-    ///
-    /// Callers: header admission (the last header of an accepted branch, and
-    /// the tip it displaced), a failed connect's displaced tip, and an
-    /// invalidation's displaced tip.
-    ///
-    /// PRE: `hash` names the newest header of its branch in `tree` at call
-    ///   time; `from` is the peer that announced it as a header chain, if one
-    ///   did (a `staletip` announcer arrives through [`Self::note_heard`]).
-    /// POST: `true` iff `hash` is a stale candidate in `tree` that was not
-    ///   already held, no retained tip descends from it, and it outranked the
-    ///   weakest tip when the set was full. Held ancestors of `hash` are
-    ///   removed, and `from` plus every peer that was heard announcing `hash`
-    ///   is recorded as knowing it. `false` for replays, active, invalid,
-    ///   unknown, out-of-window, superseded, and outranked tips; the announcers
-    ///   are still recorded when `hash` is already held, so a second announcer
-    ///   is not echoed either.
     pub(crate) fn learn(&self, tree: &BlockTree, hash: Hash256, from: Option<PeerSource>) -> bool {
         let mut state = self.state.lock();
         state.prune(tree);
@@ -284,7 +180,6 @@ impl StaleTipRetainer {
         let (Some(fork), Ok(node)) = (stale_fork(tree, &tip, id), tree.node(id)) else {
             return false;
         };
-        // A retained tip above `hash` already carries it.
         if state
             .tips
             .iter()
@@ -293,8 +188,6 @@ impl StaleTipRetainer {
             return false;
         }
 
-        // The branch grew past retained tips: they are superseded. The walk
-        // ends at the fork, so it is as long as the branch.
         let mut cursor = node.parent;
         for _ in 0..tree.len() {
             let Some(ancestor) = cursor.filter(|&ancestor| ancestor != fork) else {
@@ -333,10 +226,6 @@ impl StaleTipRetainer {
         true
     }
 
-    /// Notes that `peer` announced `hash` in a `staletip` whose branch the
-    /// sync loop has not admitted yet, so the tip is not echoed to it once
-    /// learned. Bounded: the oldest of [`MAX_RETAINED_STALE_TIPS`] unmatched
-    /// notes is dropped first.
     pub(crate) fn note_heard(&self, peer: PeerSource, hash: Hash256) {
         let mut state = self.state.lock();
         if state.heard.contains(&(hash, peer)) {
@@ -348,40 +237,15 @@ impl StaleTipRetainer {
         state.heard.push_back((hash, peer));
     }
 
-    /// Drops every tip that is no longer a stale candidate in `tree`.
     pub(crate) fn prune(&self, tree: &BlockTree) {
         self.state.lock().prune(tree);
     }
 
-    /// The retained tips to announce to `peer` now, best first.
-    ///
-    /// The first call for a peer opens relay with it: it offers at most
-    /// [`MAX_ADVERTISED_STALETIPS`] of the tips already held, greatest
-    /// chainwork first. Every later call offers only tips learned since plus
-    /// the selected earlier tips the peer has not acknowledged, so a peer is
-    /// never sent the backlog twice nor the part of it beyond the cap.
-    ///
-    /// PRE: call first for a peer once it has demonstrated a tip, so
-    ///   `relayable` can choose a fork point it knows; opening is one-shot.
-    /// POST: none of the returned tips is recorded as known by `peer`, and each
-    ///   was accepted by `relayable`. `relayable` runs in rank order, outside
-    ///   the mutex, and on opening only until the cap is met, so the work is
-    ///   bounded by the cap plus the tips it rejects. A tip `relayable`
-    ///   refuses stays offerable (a body still being fetched for a
-    ///   `prefers_blocks` peer, say) until it is marked known or retired,
-    ///   and so does a tip that was offered but never marked: the caller
-    ///   marks each tip with [`Self::mark_known`] after its send returned
-    ///   `Ok`, and a saturated send that breaks the batch marks nothing, so
-    ///   the next call offers the unacked tips again. Nothing is marked
-    ///   known here.
     pub(crate) fn pending_for(
         &self,
         peer: PeerSource,
         mut relayable: impl FnMut(Hash256) -> bool,
     ) -> Vec<Hash256> {
-        // Rank-ordered candidates snapshotted under the mutex: every unknown
-        // tip on opening, otherwise unknown tips learned since plus the
-        // selected initial tips still awaiting acknowledgement.
         let (opening, candidates) = {
             let mut state = self.state.lock();
             let opening = !state.opened.contains_key(&peer);
@@ -411,13 +275,6 @@ impl StaleTipRetainer {
             }
             (opening, candidates)
         };
-        // `relayable` runs outside the mutex. On opening the scan stops once
-        // the cap is met; refused tips met before that stay selected, so a
-        // tip refused for a still-fetching body is offered again once it
-        // arrives. Later refusals of new tips stay offerable through the
-        // unchanged floor, and unacked retries stay selected: offering is
-        // not delivery, so a merely offered tip is never dropped before its
-        // `mark_known`.
         let mut accepted: Vec<Hash256> = Vec::new();
         let mut seen: Vec<Hash256> = Vec::new();
         for hash in candidates {
@@ -433,20 +290,11 @@ impl StaleTipRetainer {
         }
         {
             let mut state = self.state.lock();
-            // A tip is offerable here when it is still retained and not
-            // known: a concurrent `mark_known` (a send that landed while
-            // `relayable` ran) drops it from the window instead. Takes the
-            // tips slice so the retain below can hold its `opened` entry
-            // (a disjoint field) while filtering.
             let offerable = |tips: &[Retained], hash: Hash256| {
                 tips.iter()
                     .any(|held| held.hash == hash && !held.known_by.contains(&peer))
             };
             if opening {
-                // The selected initial window, best first: every offered
-                // eligible tip plus the refused within the remaining slots,
-                // at most the cap in total, so no eleventh initial tip is
-                // ever offered even when some go unsent.
                 let budget = MAX_ADVERTISED_STALETIPS.saturating_sub(accepted.len());
                 let mut selected = Vec::new();
                 let mut refused_kept = 0;
@@ -464,10 +312,6 @@ impl StaleTipRetainer {
                     slot.pending = selected;
                 }
             } else {
-                // Only acknowledgement and retirement shrink the window: an
-                // offered-but-unsent tip (a saturated send that marked
-                // nothing) is offered again next call. Disjoint field
-                // borrows keep the retain in place with no extra allocation.
                 let State { tips, opened, .. } = &mut *state;
                 if let Some(slot) = opened.get_mut(&peer) {
                     slot.pending.retain(|hash| offerable(tips, *hash));
@@ -477,7 +321,6 @@ impl StaleTipRetainer {
         accepted
     }
 
-    /// Whether `peer` is recorded as knowing the retained tip `hash`.
     pub(crate) fn knows(&self, peer: PeerSource, hash: Hash256) -> bool {
         self.state
             .lock()
@@ -486,9 +329,6 @@ impl StaleTipRetainer {
             .any(|held| held.hash == hash && held.known_by.contains(&peer))
     }
 
-    /// Records that `peer` knows `hash`: call after a `staletip` for it was
-    /// sent to `peer` and `peers.send` returned `Ok`. Does nothing for a tip
-    /// that is not retained.
     pub(crate) fn mark_known(&self, peer: PeerSource, hash: Hash256) {
         if let Some(held) = self
             .state
@@ -501,8 +341,6 @@ impl StaleTipRetainer {
         }
     }
 
-    /// Forgets `peer` after its session ends, so connection churn cannot grow
-    /// the per-peer records.
     pub(crate) fn forget_peer(&self, peer: PeerSource) {
         let mut state = self.state.lock();
         for held in &mut state.tips {
@@ -514,33 +352,16 @@ impl StaleTipRetainer {
 }
 
 impl BlockSync {
-    /// The stale-tip retainer, to hand to the announcer and the chain query
-    /// that serve stale-tip relay. Seeded from the block tree at construction
-    /// and kept across [`BlockSync::install_budget`].
     #[must_use]
     pub fn stale_tips(&self) -> Arc<StaleTipRetainer> {
         Arc::clone(&self.stale_tips)
     }
 
-    /// Records a valid tip a chain transition displaced onto another branch,
-    /// so it can be relayed as a stale tip. Returns whether it newly entered
-    /// the retained set.
-    ///
-    /// For the transitions that report the displacement outside header
-    /// admission, such as an RPC `invalidateblock`
-    /// (`InvalidationOutcome::demoted_tip`): call after the invalid subtree is
-    /// purged and the chain-transition guard is released. An invalid tip is
-    /// never retained.
     pub fn record_demoted_tip(&self, hash: Hash256) -> bool {
         let tree = self.chain.block_tree();
         self.stale_tips.learn(&tree, hash, None)
     }
 
-    /// Records what one header admission reported: the tip it displaced and
-    /// the newest header it admitted, which is stale when its branch lost.
-    ///
-    /// `from` is the delivering connection of a headers message, so the
-    /// branch's announcer is not echoed its own tip.
     pub(super) fn record_admitted_tips(
         &self,
         demoted_tip: Option<Hash256>,
@@ -571,9 +392,6 @@ mod tests {
 
     type TestError = Box<dyn std::error::Error>;
 
-    /// A block tree grown with mined regtest headers. Every header carries a
-    /// unique time, so siblings under one parent are distinct blocks of equal
-    /// work.
     struct Fixture {
         tree: BlockTree,
         genesis: NodeId,
@@ -616,7 +434,6 @@ mod tests {
             self.child_with(parent, NodeStatus::HeaderValid)
         }
 
-        /// `len` headers in a row above `from`; the blocks, lowest first.
         fn branch(&mut self, from: NodeId, len: usize) -> Result<Vec<Block>, TestError> {
             let mut blocks = Vec::with_capacity(len);
             let mut parent = from;
@@ -628,8 +445,6 @@ mod tests {
             Ok(blocks)
         }
 
-        /// A main chain of `len` blocks above genesis; `chain[i]` has height
-        /// `i + 1`.
         fn main_chain(&mut self, len: usize) -> Result<Vec<Block>, TestError> {
             self.branch(self.genesis, len)
         }
@@ -643,7 +458,6 @@ mod tests {
         PeerSource::for_test(SocketAddr::from(([127, 0, 0, 1], port)))
     }
 
-    /// The retained tips in `tree`, best first.
     fn candidates(retainer: &StaleTipRetainer, tree: &BlockTree) -> Vec<Hash256> {
         let mut state = retainer.state.lock();
         state.prune(tree);
@@ -664,7 +478,6 @@ mod tests {
     fn seed_ranks_recent_side_leaves_and_skips_active_and_invalid() -> Result<(), TestError> {
         let mut fixture = Fixture::new()?;
         let main = fixture.main_chain(30)?;
-        // Height 25 -> 27 and height 10 -> 13: the first has more work.
         let near = fixture.branch(main[24].id, 2)?;
         let far = fixture.branch(main[9].id, 3)?;
         fixture.child_with(main[14].id, NodeStatus::Invalid)?;
@@ -689,8 +502,6 @@ mod tests {
     fn seed_applies_the_recent_window_at_its_boundary() -> Result<(), TestError> {
         let mut fixture = Fixture::new()?;
         let main = fixture.main_chain(1005)?;
-        // Active tip height 1005: a stale tip at height 5 is exactly 1000
-        // behind, one at height 4 is 1001 behind.
         let inside = fixture.child(main[3].id)?;
         let outside = fixture.child(main[2].id)?;
 
@@ -731,12 +542,9 @@ mod tests {
         assert!(retainer.learn(&fixture.tree, side[1].hash, None));
         assert_eq!(candidates(&retainer, &fixture.tree), vec![side[1].hash]);
 
-        // Replays of the held tip and of a header below it add nothing.
         assert!(!retainer.learn(&fixture.tree, side[1].hash, None));
         assert!(!retainer.learn(&fixture.tree, side[0].hash, None));
 
-        // One announcement carrying two more headers supersedes the held tip
-        // without the intermediate header ever being learned.
         assert!(retainer.learn(&fixture.tree, side[3].hash, None));
         assert_eq!(candidates(&retainer, &fixture.tree), vec![side[3].hash]);
         Ok(())
@@ -782,8 +590,6 @@ mod tests {
         let mut fixture = Fixture::new()?;
         let main = fixture.main_chain(20)?;
         let old_tip = main[19];
-        // Three blocks above height 18 reach height 21 and outweigh the old
-        // tip, which the tree demotes.
         let heavier = fixture.branch(main[17].id, 3)?;
         assert_eq!(
             fixture.tree.tip().map(|tip| tip.hash),
@@ -801,8 +607,6 @@ mod tests {
         assert!(live.learn(&fixture.tree, old_tip.hash, None));
         assert_eq!(candidates(&live, &fixture.tree), vec![old_tip.hash]);
 
-        // The old branch regains the lead: its tip is no longer stale and the
-        // overtaken tip takes its place once the caller reports the demotion.
         let regained = fixture.branch(old_tip.id, 2)?;
         assert_eq!(
             fixture.tree.tip().map(|tip| tip.hash),
@@ -833,7 +637,6 @@ mod tests {
     fn tips_leave_the_set_as_the_active_chain_moves_past_the_window() -> Result<(), TestError> {
         let mut fixture = Fixture::new()?;
         let mut main = fixture.main_chain(10)?;
-        // Height 9, so it stays while the active tip is at most 1009.
         let side = fixture.child(main[7].id)?;
         let retainer = StaleTipRetainer::default();
         assert!(retainer.learn(&fixture.tree, side.hash, None));
@@ -868,12 +671,10 @@ mod tests {
         assert_eq!(held.len(), MAX_RETAINED_STALE_TIPS);
         assert_eq!(held, expected, "the six oldest equal-work tips left");
 
-        // Less work than every held tip: refused, nothing displaced.
         let weaker = fixture.child(main[29].id)?;
         assert!(!retainer.learn(&fixture.tree, weaker.hash, None));
         assert_eq!(candidates(&retainer, &fixture.tree), expected);
 
-        // More work: ranks first and displaces the weakest, oldest tip.
         let stronger = fixture.child(main[59].id)?;
         assert!(retainer.learn(&fixture.tree, stronger.hash, None));
         let held = candidates(&retainer, &fixture.tree);
@@ -908,12 +709,9 @@ mod tests {
             "recorded once per peer"
         );
 
-        // A second announcer of a held tip learns nothing new but is recorded.
         assert!(!retainer.learn(&fixture.tree, side[0].hash, Some(c)));
         assert!(retainer.knows(c, side[0].hash));
 
-        // The branch grows: the longer tip is new to everyone, including the
-        // peers that knew its parent, which is gone from the set.
         assert!(retainer.learn(&fixture.tree, side[1].hash, Some(b)));
         assert!(retainer.knows(b, side[1].hash));
         assert!(!retainer.knows(a, side[1].hash));
@@ -969,8 +767,6 @@ mod tests {
         );
         assert!(!retainer.knows(peer, expected[0]), "offering marks nothing");
 
-        // Offering is not delivery: the selected backlog is offered again
-        // until the sends are acknowledged (a saturated send marks nothing).
         let retry = retainer.pending_for(peer, |_| true);
         assert_eq!(retry, expected, "unacked selected tips are offered again");
         for hash in &expected {
@@ -982,7 +778,6 @@ mod tests {
             "acked selected tips leave no extra old beyond the cap"
         );
 
-        // A tip learned afterwards is offered, exactly once it is marked.
         let fresh = fixture.child(main[49].id)?;
         assert!(retainer.learn(&fixture.tree, fresh.hash, None));
         retainer.prune(&fixture.tree);
@@ -995,7 +790,6 @@ mod tests {
         retainer.mark_known(peer, fresh.hash);
         assert_eq!(retainer.pending_for(peer, |_| true), []);
 
-        // A reconnecting peer is a new peer: it is opened again.
         retainer.forget_peer(peer);
         assert_eq!(
             retainer.pending_for(peer, |_| true).len(),

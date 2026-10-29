@@ -20,6 +20,9 @@ fn unavailable(message: &str) -> RpcError {
     RpcError::Misc(format!("Silent payments unavailable: {message}"))
 }
 
+/// Activation follows `consensus::verify_flags`, never the tip height; source
+/// rechecks certify the read, not the CPU/JSON projection it feeds, and the
+/// single-work slot bounds projection without waiting on validation or holding transition exclusion.
 pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let service = ctx
         .silent_payments
@@ -63,15 +66,11 @@ pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value
             "silent payment body hash differs from selection".to_owned(),
         ));
     }
-    // Use the same activation owner as consensus::verify_flags; never the tip's height.
     let taproot_active = ctx.chain.chain_network.is_taproot_active(height);
     let material = block_tweaks(&inputs, taproot_active).map_err(|error| read_error(&error))?;
     drop(inputs);
     drop(materialization);
-    // The single-work slot still bounds derived JSON projection and publication.
     let result = render(&material, height, tip, taproot_active);
-    // Source rechecks certify its read, not the subsequent CPU/JSON projection.
-    // Never wait behind validation, and never hold transition exclusion over work.
     let _stable = ctx
         .chain
         .chain_transition

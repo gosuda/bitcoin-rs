@@ -12,59 +12,29 @@ const FRAME_TRAILER_LEN: usize = core::mem::size_of::<u32>();
 pub(crate) const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
 const MAX_MUTATIONS: u32 = 4_000_000;
 
-/// A complete coin, including the fields required by `CoinStats`' `MuHash` preimage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coin {
-    /// Transaction output identifier.
     pub outpoint: OutPoint,
-    /// Value, script, and other output data.
     pub txout: TxOut,
-    /// Height at which the output was created.
     pub height: u32,
-    /// Whether the creating transaction is a coinbase transaction.
     pub coinbase: bool,
 }
 
-/// One ordered UTXO mutation in a committed journal record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mutation {
-    /// Add a newly created output.
-    Create {
-        /// Output created by the block.
-        coin: Coin,
-    },
-    /// Remove a spent output.
-    Spend {
-        /// Output spent by the block.
-        coin: Coin,
-    },
-    /// Replace a BIP30 duplicate-txid output.
-    Overwrite {
-        /// Prior output replaced by the duplicate transaction.
-        old_coin: Coin,
-        /// New output written by the duplicate transaction.
-        new_coin: Coin,
-    },
+    Create { coin: Coin },
+    Spend { coin: Coin },
+    Overwrite { old_coin: Coin, new_coin: Coin },
 }
 
-/// One block's authenticated chainstate changes and replay metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JournalRecord {
-    /// Block height represented by this record.
     pub height: u32,
-    /// Block hash in internal byte order.
     pub block_hash: [u8; 32],
-    /// Parent block hash in internal byte order.
     pub prev_hash: [u8; 32],
-    /// Number of transactions in the block.
     pub block_tx_count: u64,
-    /// Signed `CoinStats` height delta contributed by the block.
     pub coin_stats_height_delta: i64,
-    /// The block's full 80-byte consensus header. Boot replay rebuilds the
-    /// checkpoint→head header chain in the `BlockTree` from these, which is what
-    /// makes the post-replay `TipSnapshot` (`NodeId` + `chainwork`) reconstructible.
     pub raw_header: [u8; 80],
-    /// Mutations in exact commit order.
     pub mutations: Vec<Mutation>,
 }
 
@@ -388,7 +358,6 @@ mod tests {
         }
     }
 
-    /// Builds a deterministic 80-byte header whose hash equals the given hash.
     fn header_bytes(hash: [u8; 32]) -> [u8; 80] {
         let mut header = [0_u8; 80];
         header[0..4].copy_from_slice(&1_i32.to_le_bytes());

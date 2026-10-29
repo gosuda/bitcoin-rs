@@ -1,6 +1,6 @@
 //! Application driver for the unmodified, commit-pinned Kyoto consumer.
 use bip157::{Builder, ChainState, Event, HashCheckpoint, Network, ScriptBuf};
-use serde_json::json;
+use sonic_rs::json;
 use std::{
     net::{IpAddr, Ipv4Addr},
     time::Duration,
@@ -14,7 +14,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let port: u16 = args[1].parse()?;
     let height: u32 = args[2].parse()?;
-    // The regtest fixture creates an OP_2 output in its same-block child spend.
     let watched = ScriptBuf::from_bytes(vec![0x52]);
     let (node, mut client) = Builder::new(Network::Regtest)
         .chain_state(ChainState::Checkpoint(HashCheckpoint::from_genesis(

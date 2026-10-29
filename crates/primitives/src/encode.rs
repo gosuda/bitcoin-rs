@@ -1,15 +1,10 @@
 //! Consensus encoding, hashing, and byte presentation for native protocol types.
-//!
-//! Encoding writes into an infallible [`Sink`] — no `io::Write`, no encode-time
-//! `Result`. Decoding still yields a typed [`DecodeError`]. Segwit marker/flag
-//! handling and witness serialization follow BIP144.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
 
-/// Encodes bytes in their input order as lowercase hexadecimal without separators.
 #[must_use]
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -21,9 +16,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Byte sink used by consensus encoding. Writes cannot fail.
 pub trait Sink {
-    /// Appends `bytes` to the sink.
     fn write_all(&mut self, bytes: &[u8]);
 }
 
@@ -33,7 +26,6 @@ impl Sink for Vec<u8> {
     }
 }
 
-/// Sink that streams bytes into a SHA-256 engine without allocating.
 pub(crate) struct Sha256Sink<'a>(pub(crate) &'a mut Sha256);
 
 impl Sink for Sha256Sink<'_> {
@@ -42,16 +34,11 @@ impl Sink for Sha256Sink<'_> {
     }
 }
 
-/// Computes Bitcoin's double-SHA256 hash and returns the digest bytes as a little-endian hash.
 #[must_use]
 pub fn double_sha256(bytes: &[u8]) -> Hash256 {
     finalize_double_sha256(Sha256::new().chain_update(bytes))
 }
 
-/// Finishes a streamed double-SHA256 over everything written to the engine.
-///
-/// This is the canonical finalization path for callers that build a hash from
-/// borrowed or otherwise incrementally available byte ranges.
 #[must_use]
 pub fn finalize_double_sha256(engine: Sha256) -> Hash256 {
     let first = engine.finalize();
@@ -60,57 +47,32 @@ pub fn finalize_double_sha256(engine: Sha256) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-/// Errors returned while decoding consensus structures.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
-    /// The buffer ends before the structure is complete.
     #[error(
         "unexpected end of consensus data: needed {needed} more byte(s), {available} available"
     )]
-    EndOfData {
-        /// Additional bytes required.
-        needed: usize,
-        /// Bytes actually available.
-        available: usize,
-    },
-    /// A compact-size varint was truncated or non-canonical.
+    EndOfData { needed: usize, available: usize },
     #[error("invalid compact-size varint: {0}")]
     Varint(#[from] varint::VarintError),
-    /// The segwit marker was followed by a flag byte other than 0x01 (BIP144).
     #[error("invalid segwit marker flag byte: expected 0x01, got {got:#04x}")]
-    InvalidSegwitFlag {
-        /// The rejected flag byte.
-        got: u8,
-    },
-    /// The BIP144 marker/flag was used but every witness stack is empty, so the
-    /// encoding could not round-trip (the encoder emits no marker/flag without
-    /// witness data).
+    InvalidSegwitFlag { got: u8 },
     #[error("superfluous segwit encoding: witness flag set but no witnesses present")]
     SuperfluousWitness,
-    /// A decoded value did not consume the entire input buffer.
     #[error("{remaining} trailing byte(s) after decoded value")]
-    TrailingBytes {
-        /// Number of bytes left over.
-        remaining: usize,
-    },
+    TrailingBytes { remaining: usize },
 }
 
-/// Bitcoin consensus encoding for native protocol types.
 pub trait ConsensusEncode {
-    /// Writes the consensus serialization of `self` to the sink.
     fn consensus_encode(&self, sink: &mut impl Sink);
 
-    /// Consensus serialization length without allocating the encoded bytes.
     fn consensus_size(&self) -> usize;
 }
 
-/// Bitcoin consensus decoding for native protocol types.
 pub trait ConsensusDecode: Sized {
-    /// Reads the consensus serialization of `Self`, consuming exactly the value's bytes.
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError>;
 }
 
-/// Serializes a consensus-encodable value into a byte vector.
 #[must_use]
 pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(value.consensus_size());
@@ -171,8 +133,6 @@ pub(crate) fn write_compact(sink: &mut impl Sink, value: u64) {
     sink.write_all(varint::encode(value).as_slice());
 }
 
-/// Compact-size length of a `Vec` slice: a `Vec` is always shorter than
-/// `usize::MAX`, so the conversion cannot fail.
 pub(crate) fn compact_len(len: usize) -> u64 {
     u64::try_from(len).unwrap_or_else(|_| unreachable!("vec length fits u64"))
 }
@@ -346,8 +306,6 @@ impl ConsensusEncode for Tx {
 }
 
 impl ConsensusDecode for Tx {
-    /// Decodes through the checked borrowed layout ([`crate::layout`]), the
-    /// sole owner of transaction wire parsing.
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
         Ok(crate::layout::ParsedTransaction::parse(reader)?.materialize())
     }
@@ -375,8 +333,6 @@ impl ConsensusEncode for Block {
 }
 
 impl ConsensusDecode for Block {
-    /// Decodes through the checked borrowed layout ([`crate::layout`]), the
-    /// sole owner of block wire parsing.
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
         Ok(crate::layout::ParsedBlock::parse(reader)?.materialize())
     }
@@ -434,7 +390,6 @@ mod tests {
 
     #[test]
     fn non_canonical_varint_input_count_is_rejected() {
-        // version || non-canonical 0xfd prefix || count 0x0001
         let mut bytes = 1_i32.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0xfd, 0x01, 0x00]);
         let error =
@@ -489,7 +444,6 @@ mod tests {
             lock_time: crate::LockTime::from_consensus(7),
         };
         let bytes = crate::encode::consensus_bytes(&tx);
-        // No witness data: no marker/flag is emitted.
         assert_eq!(&bytes[4], &0x01);
         assert_eq!(deserialize::<Tx>(&bytes)?, tx);
         assert_eq!(tx.consensus_size(), bytes.len());
@@ -514,28 +468,20 @@ mod tests {
         let stripped = crate::encode::consensus_bytes(&tx);
         assert_eq!(&stripped[4], &0x01, "witness-free tx carries no marker");
 
-        // Splice the BIP144 marker/flag after the version bytes and append an
-        // all-empty witness section (a zero item-count per input) before the lock time.
         let (prefix, lock_time) = stripped.split_at(stripped.len() - 4);
         let mut marked = prefix.to_vec();
         marked.splice(4..4, [0x00_u8, 0x01]);
         marked.extend(std::iter::repeat_n(0x00_u8, tx.inputs.len()));
         marked.extend_from_slice(lock_time);
 
-        // Marker+flag with an all-empty witness section: Core rejects this as a
-        // superfluous witness record, and so do we.
         assert_eq!(
             deserialize::<Tx>(&marked),
             Err(DecodeError::SuperfluousWitness)
         );
 
-        // The witness-stripped encoding of the same tx is accepted and round-trips.
         assert_eq!(deserialize::<Tx>(&stripped)?, tx);
         assert_eq!(crate::encode::consensus_bytes(&tx), stripped);
 
-        // Degenerate zero-input marker+flag encoding: Core rejects it ("Superfluous
-        // witness record") and so do we, since the encoder could never reproduce the
-        // marker/flag on re-encode.
         let mut zero_input = 2_i32.to_le_bytes().to_vec();
         zero_input.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         assert_eq!(
@@ -545,7 +491,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP144 defines the marker/flag and witness serialization whose size is checked here.
     #[test]
     fn bip144_analytic_tx_size_matches_encoded_length_with_witness() {
         use crate::{OutPoint, Tx, TxIn, TxOut, Txid};

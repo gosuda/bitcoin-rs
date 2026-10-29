@@ -1,7 +1,5 @@
 use super::*;
 
-/// A branch switch must resolve every disconnect and connect body from the
-/// staged-body callback alone when no durable block-body store is installed.
 #[test]
 fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -14,8 +12,6 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
 
-    // Fork rooted one below the tip: three blocks of work outweigh the
-    // main chain's one-block lead.
     let fork_root_hash = main[99].block_hash();
     let mut fork_parent = handles
         .block_tree()
@@ -44,10 +40,6 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     let fork_tip = fork_parent;
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
 
-    // The staged-body callback is the only body source: every connect on
-    // both walks resolves from it. `connected_body` fires once per connect;
-    // like `BlockStager` entries, retired bodies stay readable so a later
-    // switch can still disconnect the blocks it just connected.
     let staged = &bodies;
     let mut retired = Vec::new();
     crate::reorg::switch_to_branch(
@@ -71,8 +63,6 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         "every connected body retires once, in connect order"
     );
 
-    // The reverse switch resolves all disconnect and connect bodies from
-    // the same bounded staging, without durable storage or fixture lookup.
     let main_target = handles
         .block_tree()
         .read()
@@ -100,9 +90,6 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     Ok(())
 }
 
-/// When a competing connect lands between a reorg plan and its transition,
-/// the switch must replan on the moved applied tip and still reach its
-/// target.
 #[test]
 fn branch_switch_replans_after_a_competing_connect_before_transition()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -151,8 +138,6 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         racing.header,
         NodeStatus::HeaderValid,
     )?;
-    // The competing connect's body must be resolvable when the replanned
-    // walk disconnects it.
     bodies.insert(
         Hash256::from_le_bytes(racing.block_hash().as_bytes()),
         BlockPayload::from_local(racing.clone()),

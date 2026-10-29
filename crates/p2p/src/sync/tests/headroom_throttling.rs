@@ -42,9 +42,6 @@ fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
 
 #[test]
 fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn() -> TestResult {
-    // The recorded live-collapse construction (scaled 8x down): the
-    // default one-minute timeouts never fire inside the test, so the only
-    // thing that can stop the second wave is the count clamp itself.
     let (sync, _peers, expected, rxs, _blocks_tx) =
         staged_count_wedge(wedge_budget(Duration::from_mins(1)))?;
 
@@ -301,11 +298,6 @@ fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix() -> TestRe
 
 #[test]
 fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
-    // No-blame guard at the sync layer: while the stager holds the next
-    // expected block (apply lag / failed-apply restore), the stall clock
-    // must not run — no disconnect fires even arbitrarily far past the
-    // threshold, and the busy interval is never charged to the peer.
-    // Time is injected through the detection entry point directly.
     let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(
         &sync,
@@ -394,16 +386,6 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
 #[test]
 #[expect(clippy::too_many_lines, reason = "Frontier escalation scenario")]
 fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
-    // Regression: a well-formed next-expected body staged but
-    // never applied used to hold `apply_side_busy` (and with it stall
-    // conviction, pending-timeout conviction, and the cold-front hedge)
-    // forever. The 60s staged-body prune does not rescue the window — it
-    // expires the body, the re-request re-delivers it, and the fresh insert
-    // re-stamps its received_at, re-arming the suppression. The bound must
-    // therefore key on the stuck frontier: past two received_timeouts the
-    // staged body is evicted for refetch, no peer is blamed, and with the
-    // body absent the unsuppressed stall path engages again. Time is
-    // injected through the detection entry point directly.
     let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(
         &sync,
@@ -598,8 +580,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> TestResult {
     Ok(())
 }
 
-/// Builds a regtest block whose serialized size is exactly `size` bytes by
-/// padding the coinbase-style transaction's output script.
 fn padded_block_exact(size: usize, seed: u8) -> Block {
     let mut block = regtest_fixture::mined_block_with_prev_hash(
         BlockHash(Hash256::from_le_bytes(&[seed; 32])),

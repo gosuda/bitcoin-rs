@@ -26,8 +26,6 @@ fn open_persistent(
     let mut active = if head
         .is_some_and(|head| !matches!(head.assumeutxo, AssumeUtxoDiskStatus::Uninitialized))
     {
-        // Only the test trust anchor is substituted. Production chooses the
-        // network pin before entering this same archive verifier.
         if head.is_some_and(|head| matches!(head.assumeutxo, AssumeUtxoDiskStatus::Failed { .. })) {
             return Err("persisted validation failure".into());
         }
@@ -92,9 +90,6 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
         Arc::get_mut(&mut fixture.active)
             .ok_or("shared fixture")?
             .durable_head = head.clone();
-        // The unequal-work header fixture intentionally bypasses regtest's
-        // contextual difficulty rule. Test the real durable commit/reopen
-        // boundary only; do not claim these headers pass node recovery.
         let manager = AssumeUtxoManager::open(
             Network::Regtest,
             fixture.active.clone(),
@@ -207,8 +202,6 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     ));
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
     active.begin_transition()?.disconnect(&child)?;
-    // Historical undo/body records entered the active archive atomically,
-    // so finalization really permits ordinary reorgs below the snapshot base.
     active.begin_transition()?.disconnect(&fixture.blocks[2])?;
     assert_eq!(
         active
@@ -237,8 +230,6 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
         AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
     assert!(manager.chainstates_summary()?.active_chainstate.validated);
     let recovered_stats = active.coin_stats.snapshot();
-    // Rollback and fresh replay can retain different MuHash fractions for
-    // the same set. Compare the canonical digest, not internal numerator/denominator.
     assert_eq!(
         recovered_stats.muhash.finalize(),
         rewound_stats.muhash.finalize()
@@ -318,9 +309,6 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         .ok_or("missing historical")?;
     let accepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
     let accepted_stats = historical.coin_stats.snapshot();
-    // Advance only the isolated validator, leaving the active durable head at
-    // height 1. Publishing this distinct height-2 state models a crash before
-    // its reference is accepted; following CURRENT must not pass this test.
     historical
         .lock_transition()?
         .into_transition()
@@ -333,7 +321,6 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         genesis: Network::Regtest.genesis_block_hash(),
     };
     for _ in 0..2 {
-        // Historical root never mints: drop the witness, keep publication.
         let _ = crate::checkpoint::write_checkpoint_from_dir_at(
             &data,
             config,
@@ -414,8 +401,6 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         "startup must retire publication residue"
     );
 
-    // The checkpoint restored blocks 0..1.  Only the remaining archived suffix
-    // is replayed before the historical role reaches the pinned base.
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     assert!(matches!(
         manager.status()?,
@@ -457,8 +442,6 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
         .find(|entry| entry.path().is_dir())
         .ok_or("missing historical generation")?
         .path();
-    // An unknown nested directory prevents removing the generation without
-    // relying on permissions (which differ for elevated users and platforms).
     let blocker = generation.join("operator-backup");
     std::fs::create_dir(&blocker)?;
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
@@ -474,8 +457,6 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     drop(manager);
     drop(active);
 
-    // Startup remains available while cleanup still fails, and retries after
-    // the obstruction is removed without another durable-head update.
     let active = open_persistent(dir.path(), &fixture.pinned)?;
     let manager =
         AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
@@ -568,14 +549,12 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
 
     let root = dir.path().join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
-    let mut current: CurrentV1 = serde_json::from_slice(&std::fs::read(&current_path)?)?;
+    let mut current: CurrentV1 = sonic_rs::from_slice(&std::fs::read(&current_path)?)?;
     let generation = root.join(&current.directory);
     let manifest_path = generation.join(MANIFEST_FILE);
-    let mut manifest: CheckpointManifestV1 =
-        serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&std::fs::read(&manifest_path)?)?;
     let utxo_path = generation.join(&manifest.utxo.file);
     let mut bytes = std::fs::read(&utxo_path)?;
-    // Snapshot header (52), transaction record header (45), vout height offset (12).
     let offset = 52 + 45 + 12;
     let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
     assert!(height <= fixture.pinned.height);
@@ -587,14 +566,12 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
         fixture.pinned.hash_serialized,
         "the high height bit must alias the commitment, not cause a hash rejection"
     );
-    // Reauthenticate the artifact so the test reaches semantic validation.
-    // MuHash and CoinStats also alias the high bit and remain unchanged.
     manifest.utxo.sha256 = hex_encode(&Sha256::digest(&bytes));
     std::fs::write(&utxo_path, &bytes)?;
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     current.manifest_sha256 = hex_encode(&Sha256::digest(&manifest_bytes));
     std::fs::write(manifest_path, manifest_bytes)?;
-    std::fs::write(current_path, serde_json::to_vec(&current)?)?;
+    std::fs::write(current_path, sonic_rs::to_vec(&current)?)?;
 
     let error = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)
         .err()
@@ -643,7 +620,6 @@ fn snapshot_recovery_rejects_coin_height_alias() -> TestResult {
 fn committed_snapshot_corruption_fails_closed_but_orphan_import_is_ignored() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
-    // Import bytes without committing a root cannot activate a chainstate.
     crate::events::initialize_data_dir(dir.path())?;
     let _ =
         crate::assumeutxo_snapshot::write_coins(dir.path(), &fixture.load()?.set, &fixture.pinned)?;
@@ -792,11 +768,8 @@ fn crash_writer() -> TestResult {
     for (height, block) in fixture.blocks.iter().enumerate() {
         manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
         if checkpoint_phase && height == 0 {
-            // Seed an accepted genesis checkpoint so the next production step
-            // replaces an existing head reference at the kill boundary.
             let historical = manager.historical_chainstate().ok_or("missing history")?;
             let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&dir)?;
-            // Historical root never mints: drop the witness, keep the reference.
             let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
                 &data,
                 crate::checkpoint::headers::HeaderCheckpointConfig {
@@ -896,8 +869,6 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
                     .height,
                 1
             );
-            // A second restart uses the same accepted reference regardless of
-            // the publication pointer left ahead by the interrupted writer.
             drop(manager);
             drop(active);
             let active = open_persistent(dir.path(), &fixture.pinned)?;
@@ -955,8 +926,6 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
     let stats = active.coin_stats.snapshot();
     drop(manager);
     drop(active);
-    // Remove the old locator, as prefix pruning does. A checkpoint at the
-    // durable tip must not need a genesis/base-to-tip replay of that body.
     let store = FjallStore::open(dir.path().join("chainstate"))?;
     let mut batch = store.new_batch();
     batch.delete(
@@ -1109,8 +1078,6 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
                 ..
             }
         ));
-        // The candidate's locator is invisible to derived consumers until
-        // successful validation publishes body, undo, and status together.
         assert!(
             active
                 .block_body_store
@@ -1147,20 +1114,8 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
     Ok(())
 }
 
-/// P1 acceptance row 10 (C3 plus the section 7 open-fd row): restart recovery
-/// mints the seed from the durable `Validating` archive through the witnessed
-/// decode; the sealed descriptor keeps traversing after finalization and
-/// archive removal. Activation failure stages no witness, so no token exists.
-///
-/// "Pause" here is the C3 mint/traversal separation: the sealed artifact is
-/// held un-traversed across convergence and archive removal. The traversal
-/// exercised is `for_each_coin_raw`, the exact seam the index worker's seed
-/// path calls; worker dispatch itself (`SeedSlot` take, lease, streaming
-/// commits, pause barriers) lives in the index harness rows, not this file.
 #[test]
 fn import_finalize_remove_archive_seed_completes() -> TestResult {
-    // Negative first, on an untouched manager: a refused activation stages no
-    // witness, so no token exists to seed from.
     let bad = Fixture::new()?;
     let bad_dir = tempfile::tempdir()?;
     let bad_manager = bad.manager(bad_dir.path())?;
@@ -1173,8 +1128,6 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
     ));
     assert!(bad_manager.take_pending_activation_witness().is_none());
 
-    // Positive: real activation commits the durable `Validating` root and its
-    // archive files.
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
@@ -1185,9 +1138,6 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
         .join(fixture.pinned.block_hash.to_string());
     assert!(archive.join("coins.dat").is_file());
 
-    // C3 restart mint: the witnessed decode seals the same descriptor it
-    // consumed. Hold it open (the pause) while the test converges the
-    // background chain and then removes the archive underneath it.
     let initial =
         crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned)?;
     assert!(matches!(
@@ -1207,7 +1157,6 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
     let _ = std::fs::remove_dir_all(&archive);
     assert!(!archive.exists(), "the seed must not need its path");
 
-    // The held descriptor still traverses every accepted coin.
     let expected = u64::try_from(initial.utxo.len())
         .map_err(|error| format!("coin count does not fit u64: {error}"))?;
     assert!(expected > 0, "the fixture must hold live coins");

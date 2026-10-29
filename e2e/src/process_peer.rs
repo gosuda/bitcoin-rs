@@ -1,7 +1,4 @@
 //! Bounded, recorded v1 wire peer for the public-process lane.
-//!
-//! Uses rust-bitcoin envelopes, never bitcoin-rs's listener or dispatcher,
-//! and journals every frame to the node's evidence directory.
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -15,16 +12,13 @@ use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Magic, ServiceFlags};
-use serde_json::json;
+use sonic_rs::json;
 
 use crate::error::{Error, Result};
 use crate::node::ProcessNode;
 use crate::rpc::remaining_time;
 
 const HEADER_BYTES: usize = 24;
-/// The protocol payload limit (`MAX_MESSAGE_PAYLOAD` in
-/// `crates/p2p/src/wire.rs`, Bitcoin Core's `MAX_PROTOCOL_MESSAGE_LENGTH`):
-/// a harness cap below it would reject blocks the node legitimately emits.
 const MAX_PAYLOAD_BYTES: usize = 4_000_000;
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MESSAGES: usize = 128;
@@ -33,7 +27,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 mod tests;
 
-/// A recorded wire peer connected to a spawned node's P2P listener.
 #[derive(Debug)]
 pub struct ProcessPeer {
     stream: TcpStream,
@@ -44,14 +37,10 @@ pub struct ProcessPeer {
 }
 
 impl ProcessPeer {
-    /// Handshake a v70016 WITNESS peer with the node and journal the session
-    /// into the node's evidence directory.
     pub fn connect(node: &ProcessNode) -> Result<Self> {
         let deadline = Instant::now() + TIMEOUT;
         let stream = connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
-        // One peer per process in this scenario; do not truncate evidence if a
-        // caller accidentally tries to replace it with a second session.
         let journal = File::options()
             .write(true)
             .create_new(true)
@@ -79,8 +68,6 @@ impl ProcessPeer {
             "/public-process-test:0.1/".to_owned(),
             0,
         );
-        // BIP339: rust-bitcoin's constructor still defaults to 70001;
-        // wtxidrelay requires the modern 70016 handshake used by this lane.
         version.version = 70016;
         peer.send(NetworkMessage::Version(version), deadline)?;
         let mut received_version = false;
@@ -106,7 +93,6 @@ impl ProcessPeer {
         )))
     }
 
-    /// Send a transaction and barrier on a pong so wire processing is ordered.
     pub fn send_transaction(&mut self, tx: &Transaction) -> Result<()> {
         let deadline = Instant::now() + TIMEOUT;
         self.send(NetworkMessage::Tx(tx.clone()), deadline)?;
@@ -115,7 +101,6 @@ impl ProcessPeer {
         self.wait_for_pong(nonce, deadline)
     }
 
-    /// Read until the matching pong arrives.
     pub fn wait_for_pong(&mut self, nonce: u64, deadline: Instant) -> Result<()> {
         for _ in 0..MAX_MESSAGES {
             match self.receive(deadline)? {
@@ -130,8 +115,6 @@ impl ProcessPeer {
     fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<()> {
         let result = (|| {
             let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-            // Check each frame before the peer sends it.
-            // Use the same size limit for sent and received frames.
             let decoded = decode_frame(&frame)?;
             self.record("sending", Some(&decoded), &frame)?;
             let mut pending = frame.as_slice();
@@ -190,9 +173,9 @@ impl ProcessPeer {
         }))
     }
 
-    fn append(&mut self, mut event: serde_json::Value) -> Result<()> {
+    fn append(&mut self, mut event: sonic_rs::Value) -> Result<()> {
         event["at_micros"] = json!(self.started.elapsed().as_micros());
-        let mut bytes = serde_json::to_vec(&event)?;
+        let mut bytes = sonic_rs::to_vec(&event)?;
         bytes.push(b'\n');
         let next = self
             .journal_bytes
@@ -207,7 +190,6 @@ impl ProcessPeer {
     }
 }
 
-/// Connect to a loopback address, tolerating a listener that is not up yet.
 pub fn connect_loopback(addr: SocketAddr, deadline: Instant) -> Result<TcpStream> {
     if !addr.ip().is_loopback() {
         return Err(Error::Protocol(
@@ -242,8 +224,6 @@ fn remaining(deadline: Instant) -> Result<Duration> {
     remaining_time(deadline, Instant::now(), "P2P operation deadline")
 }
 
-/// True when a frame-read failure is just "no data yet" (read timeout or
-/// deadline bookkeeping) rather than a dropped connection.
 pub fn is_soft_recv_error(error: &Error) -> bool {
     match error {
         Error::Io(io) => matches!(
@@ -255,12 +235,6 @@ pub fn is_soft_recv_error(error: &Error) -> bool {
     }
 }
 
-/// Partial bytes of an in-flight wire frame carried between calls.
-///
-/// A read interrupted by its deadline resumes here instead of leaving the
-/// socket mid-frame, so pump-slice deadlines can pause a frame without
-/// desyncing the stream. Cleared when the frame completes or the socket
-/// closes.
 #[derive(Debug, Default)]
 pub struct FrameBuffer {
     bytes: Vec<u8>,
@@ -280,11 +254,6 @@ fn payload_length(header: &[u8]) -> Result<usize> {
     Ok(length)
 }
 
-/// Read one complete wire frame (header plus payload) before the deadline.
-///
-/// `pending` carries an in-flight frame between calls: an interrupt leaves
-/// the consumed bytes there and the next call resumes them, so a retry
-/// never reads a desynced offset.
 pub fn read_frame(
     stream: &mut TcpStream,
     deadline: Instant,
@@ -294,11 +263,6 @@ pub fn read_frame(
         pending.want = HEADER_BYTES;
     }
     while pending.bytes.len() < pending.want {
-        // The deadline bounds every wait, with a floor for an already
-        // lapsed deadline. The timeout is set before the buffer grows so a
-        // setup failure cannot leave placeholder bytes behind; a frame that
-        // completes inside the floor still returns, while a lapsed deadline
-        // pauses a partially-read frame after the read below.
         let wait = remaining(deadline).unwrap_or(Duration::from_millis(1));
         stream.set_read_timeout(Some(wait))?;
         let want = (pending.want - pending.bytes.len()).min(64 * 1024);
@@ -336,7 +300,6 @@ pub fn read_frame(
     Ok(frame)
 }
 
-/// Decode a wire frame against the regtest magic.
 pub fn decode_frame(frame: &[u8]) -> Result<NetworkMessage> {
     let length = payload_length(frame)?;
     if frame.len() != HEADER_BYTES + length {

@@ -17,12 +17,10 @@ pub struct PrefixScanLimit {
     pub max_bytes: usize,
 }
 
-/// Result of a bounded prefix scan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrefixScan {
     /// Matching rows in key order.
     pub rows: Vec<KvPair>,
-    /// Whether all matching rows fit within the limits.
     pub complete: bool,
 }
 
@@ -38,7 +36,6 @@ pub enum WriteCondition<'a> {
     },
     /// Requires an exact value.
     Equals {
-        /// Column family containing the key.
         cf: ColumnFamily,
         /// Key whose value is compared.
         key: &'a [u8],
@@ -48,7 +45,6 @@ pub enum WriteCondition<'a> {
 }
 
 impl WriteCondition<'_> {
-    /// Returns the condition's column family and key.
     pub const fn location(&self) -> (ColumnFamily, &[u8]) {
         match self {
             Self::Absent { cf, key } | Self::Equals { cf, key, .. } => (*cf, key),
@@ -100,7 +96,6 @@ pub enum PersistFault {
 
 #[cfg(any(test, feature = "test-seam"))]
 impl PersistFault {
-    /// Returns the boundary at which this fault fires.
     pub(crate) const fn boundary(self) -> PersistBoundary {
         match self {
             Self::FailApply | Self::LostApply | Self::PartialApply => PersistBoundary::Apply,
@@ -109,7 +104,6 @@ impl PersistFault {
         }
     }
 
-    /// Builds the storage error surfaced by this injected fault.
     #[cfg_attr(
         not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
         allow(dead_code)
@@ -157,22 +151,17 @@ impl PersistFaultSlot {
 
 /// Backend-neutral key-value store over named column families.
 ///
-/// Every batch is atomic across all column families it touches. `write` and
-/// `write_deferred` need not survive a crash; `write_durable`,
-/// `write_durable_if`, and successful `flush` complete durability. Atomicity
-/// prevents partial batches, but an error from a durability API is not a
-/// rollback receipt: application may already have completed before the
-/// durability completion failed or was lost. Snapshots are coherent across
-/// families.
+/// Every batch is atomic across all column families it touches.
+///
+/// `write` and `write_deferred` need not survive a crash; `write_durable`,
+/// `write_durable_if`, and successful `flush` complete durability. Atomicity prevents
+/// partial batches, but an error from a durability API is not a rollback receipt:
+/// application may already have completed before the durability completion failed or
+/// was lost. Snapshots are coherent across families.
 pub trait KvStore: Send + Sync + 'static {
-    /// Returns the value for `key` in `cf`, if present.
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Copies a value only after its borrowed/pinned length fits `max_bytes`.
-    ///
-    /// This bounds the returned owned copy, not engine-internal page reads,
-    /// cache allocation, or decompression. Unsupported implementations must
-    /// refuse without calling unbounded `get`.
     fn get_bounded(
         &self,
         _cf: ColumnFamily,
@@ -201,19 +190,14 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Collects matching rows from the inclusive full-key seek point `start`.
     ///
-    /// PRE: none. A caller resuming after returned row `k` passes `k` followed
-    /// by one zero byte, the least key above `k`.
-    /// POST: rows are in key order, begin at the first key `>= max(start,
-    /// prefix)`, and end where keys stop beginning with `prefix`. A `start`
-    /// before the prefix begins at its first row; a `start` beyond every key
-    /// of the prefix yields an empty, complete scan. `complete` is true only
-    /// when the scan reached the end of the prefix with no row withheld by
-    /// `limit`; a row that does not fit `limit` makes it false.
-    ///
-    /// Implementations seek the engine to the start key and read at most one
-    /// row past the limit. They never collect the prefix and discard its head,
-    /// and a store that cannot serve the scan returns an error rather than an
-    /// empty or falsely complete one.
+    /// PRE: none. A caller resuming after returned row `k` passes `k` followed by one
+    /// zero byte, the least key above `k`. POST: rows are in key order, begin at the
+    /// first key `>= max(start, prefix)`, and end where keys stop beginning with
+    /// `prefix`. A `start` before the prefix begins at its first row; a `start` beyond
+    /// every key of the prefix yields an empty, complete scan. `complete` is true only
+    /// when the scan reached the end of the prefix with no row withheld by `limit`; a
+    /// row that does not fit `limit` makes it false. and a store that cannot serve the
+    /// scan returns an error rather than an empty or falsely complete one.
     fn scan_prefix_from_bounded(
         &self,
         cf: ColumnFamily,
@@ -223,19 +207,16 @@ pub trait KvStore: Send + Sync + 'static {
     ) -> Result<PrefixScan, StorageError>;
 
     /// Returns an empty buffered batch for this or any other store.
-    ///
     /// PRE: none. POST: the batch records operations but touches no engine
     /// state until one write method consumes it.
     fn new_batch(&self) -> BufferedWriteBatch;
 
-    /// Inserts or replaces one value through the regular write path.
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let mut batch = self.new_batch();
         batch.put(cf, key, value);
         self.write(batch)
     }
 
-    /// Inserts or replaces one owned value through the regular write path.
     fn put_value(&self, cf: ColumnFamily, key: &[u8], value: Bytes) -> Result<(), StorageError> {
         let mut batch = self.new_batch();
         batch.put_value(cf, key, value);
@@ -252,18 +233,12 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Atomically applies a batch and completes its durability before success.
     ///
-    /// `Ok(())` is the durability receipt. `Err` is not a rollback receipt:
-    /// the failure may occur before application, or after the whole atomic
-    /// batch became visible while durability completion failed or was lost.
-    /// [`StorageError`] does not classify that phase. A caller must therefore
-    /// not blindly retry a non-idempotent batch after `Err`; it must reconcile
-    /// through the state owner's recovery protocol, or independently prove
-    /// that the batch did not apply before retrying.
-    ///
-    /// The default implementation makes the ambiguous post-application case
-    /// explicit: it applies through [`Self::write_deferred`] and then calls
-    /// [`Self::flush`]. Backend overrides must preserve the same receipt and
-    /// error semantics even when they use one synchronous commit.
+    /// `Ok(())` is the durability receipt. `Err` is not a rollback receipt: the failure
+    /// may occur before application, or after the whole atomic batch became visible
+    /// while durability completion failed or was lost. [`StorageError`] does not
+    /// classify that phase. A caller must therefore not blindly retry a non-idempotent
+    /// batch after `Err`; it must reconcile through the state owner's recovery
+    /// protocol, or independently prove that the batch did not apply before retrying.
     fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
@@ -271,20 +246,12 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Durably commits `batch` iff every condition matches the pre-batch state.
     ///
-    /// Conditions and commit form one write boundary. `Ok(true)` means the
-    /// whole batch is durable; `Ok(false)` is the only result that proves the
-    /// conditions did not match and no operation applied. Lookup, backend, or
-    /// persistence failures return `Err` rather than a mismatch or false
-    /// durability confirmation. After conditions matched, an `Err` may occur
-    /// after the atomic batch applied but before durability was confirmed, so
-    /// it must not be treated as `Ok(false)` or as permission to blindly retry
-    /// a non-idempotent batch. The state owner must reconcile the outcome.
-    ///
-    /// On `Ok(true)`, every earlier completed deferred write on the same
-    /// store is durable alongside this batch, including when this batch
-    /// itself stages to empty. Later operations supersede earlier writes
-    /// to the same key, so recovery observes the accumulated state in
-    /// commit order.
+    /// Conditions and commit form one write boundary. `Ok(true)` means the whole batch
+    /// is durable; `Ok(false)` is the only result that proves the conditions did not
+    /// match and no operation applied. Lookup, backend, or persistence failures return
+    /// `Err` rather than a mismatch or false it must not be treated as `Ok(false)` or
+    /// as permission to blindly retry a non-idempotent batch. The state owner must
+    /// reconcile the outcome.
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
@@ -293,12 +260,9 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Makes every earlier completed write durable before success.
     ///
-    /// `Ok(())` is the receipt covering those writes. `Err` provides no such
-    /// receipt, but also does not prove that earlier writes were unapplied or
-    /// non-durable: synchronization can fail or its completion can be lost
-    /// after writes became visible. Callers that track pending durability must
-    /// retain that bookkeeping until a successful receipt or owner-specific
-    /// recovery establishes the durable state.
+    /// `Ok(())` is the receipt covering those writes. `Err` provides no such receipt,
+    /// but also does not prove that earlier writes were unapplied or non-durable:
+    /// synchronization can fail or its completion can be lost
     fn flush(&self) -> Result<(), StorageError>;
 
     /// Captures a coherent point-in-time view across column families.
@@ -310,16 +274,10 @@ pub trait KvStore: Send + Sync + 'static {
     fn arm_persist_fault(&self, fault: PersistFault);
 }
 
-/// Compile-time proof that [`KvStore`] stays object-safe: the trait carries
-/// no associated types or generic methods, so a store dispatches through
-/// `dyn KvStore`. The `&dyn KvStore` coercion fails to compile when the
-/// trait stops being object-safe; rustc never reports the guard as dead, so
-/// it carries no lint expectation.
 fn _kv_store_is_dyn_compatible(_: &dyn KvStore) {}
 
 /// Point-in-time read view over a [`KvStore`].
 pub trait KvSnapshot: Send + Sync {
-    /// Returns the snapshot value for `key` in `cf`, if present.
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Returns one value per strictly ascending input key.
@@ -344,10 +302,6 @@ pub trait KvSnapshot: Send + Sync {
     ) -> Result<KvIter<'a>, StorageError>;
 
     /// Returns the greatest snapshot row with the given prefix, if any.
-    ///
-    /// The default walks the forward iterator retaining one row and keeps no
-    /// result collection of its own. Backends override it with a native
-    /// reverse seek that reads a single row.
     fn last_prefix(&self, cf: ColumnFamily, prefix: &[u8]) -> Result<Option<KvPair>, StorageError> {
         let mut last = None;
         for item in self.iter_prefix(cf, prefix)? {
@@ -367,7 +321,6 @@ pub trait KvSnapshot: Send + Sync {
     }
 
     /// Collects matching snapshot rows from the inclusive full-key seek point
-    /// `start`, with the contract of [`KvStore::scan_prefix_from_bounded`].
     fn scan_prefix_from_bounded(
         &self,
         cf: ColumnFamily,
@@ -398,12 +351,11 @@ pub(crate) fn push_bounded_row(
     true
 }
 
-/// Collects ordered pairs under `limit`, ending at the first key outside
-/// `prefix`.
+/// Collects ordered pairs under `limit`, ending at the first key outside `prefix`.
 ///
-/// Rows are copied only once accepted, so the first row `limit` refuses and
-/// the first key past the prefix are read but never copied. `complete` is true
-/// only when the stream ended or left the prefix without a refused row.
+/// Rows are copied only once accepted, so the first row `limit` refuses and the first
+/// key past the prefix are read but never copied. `complete` is true only when the
+/// stream ended or left the prefix without a refused row.
 pub(crate) fn collect_bounded_prefix<K, V>(
     rows: impl Iterator<Item = Result<(K, V), StorageError>>,
     prefix: &[u8],

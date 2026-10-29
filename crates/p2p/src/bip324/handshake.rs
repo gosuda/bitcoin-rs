@@ -1,10 +1,4 @@
 //! The BIP324 handshake as a resumable state machine over a blocking stream.
-//!
-//! The driver alternates two calls: [`Handshake::take_outbound`] for bytes
-//! to send, and [`Handshake::advance`] to read. `advance` reads only the bytes
-//! the handshake needs: never past the peer's version packet, so the first
-//! application packet stays in the stream for the established reader. A poll
-//! timeout returns with all progress kept.
 
 use std::io::Read;
 
@@ -31,22 +25,14 @@ const V1_PREFIX_LEN: usize = 16;
 /// The command field of a v1 `version` header.
 const V1_VERSION_COMMAND: &[u8; 12] = b"version\0\0\0\0\0";
 
-/// What one call to [`Handshake::advance`] reached.
 #[derive(Debug)]
 pub(crate) enum Step {
-    /// Bytes are queued: send [`Handshake::take_outbound`], then advance again.
     Send,
-    /// The responder's peer speaks v1; these are the first bytes of its
-    /// `version` message.
     V1([u8; V1_PREFIX_LEN]),
-    /// A decoy packet was consumed while reading the version; the caller may
-    /// recheck its lease and deadline before the next advance.
     Yield,
-    /// The encrypted session is ready.
     Established(Box<Established>),
 }
 
-/// An established BIP324 session.
 #[derive(Debug)]
 pub(crate) struct Established {
     pub(crate) send: SendCipher,
@@ -54,7 +40,6 @@ pub(crate) struct Established {
     pub(crate) session_id: [u8; 32],
 }
 
-/// One side of a BIP324 handshake.
 #[derive(Debug)]
 pub(crate) struct Handshake {
     role: Role,
@@ -69,17 +54,14 @@ pub(crate) struct Handshake {
 
 #[derive(Debug)]
 enum State {
-    /// Responder: the first bytes decide between v1 and v2.
     DetectV1 {
         prefix: [u8; V1_PREFIX_LEN],
         filled: usize,
     },
-    /// The peer's `ElligatorSwift` key.
     ReadKey {
         key: [u8; ELLSWIFT_LEN],
         filled: usize,
     },
-    /// The peer's garbage, up to and including its garbage terminator.
     ScanTerminator {
         send: SendCipher,
         recv: RecvCipher,
@@ -87,19 +69,15 @@ enum State {
         session_id: [u8; 32],
         scanned: Vec<u8>,
     },
-    /// Decoys, then the peer's version packet.
     ReadVersion {
         send: SendCipher,
         recv: PacketReader,
         session_id: [u8; 32],
     },
-    /// The handshake ended, in a session, a v1 handoff, or an error.
     Finished,
 }
 
 impl Handshake {
-    /// Opens a handshake on an outbound connection; its key and garbage are
-    /// queued at once.
     pub(crate) fn initiator<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
         let mut handshake = Self::new(
             Role::Initiator,
@@ -146,7 +124,6 @@ impl Handshake {
         }
     }
 
-    /// Bytes to send before the next [`Self::advance`]; empty when none.
     pub(crate) fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
@@ -173,8 +150,6 @@ impl Handshake {
             let stepped = self.step(&mut counting);
             self.received_any |= received;
             match stepped {
-                // A decoy leaves the handshake running: only `Established` and
-                // the v1 handoff end it, so `advance` may resume after a yield.
                 Ok(Some(Step::Yield)) => return Ok(Step::Yield),
                 Ok(Some(step)) => {
                     self.state = State::Finished;
@@ -191,7 +166,6 @@ impl Handshake {
         }
     }
 
-    /// Completes the current state in place; `Some` once the handshake ends.
     fn step<R: Read>(&mut self, reader: &mut R) -> Result<Option<Step>, TransportError> {
         match &mut self.state {
             State::DetectV1 { prefix, filled } => {
@@ -226,7 +200,6 @@ impl Handshake {
                     if room == 0 {
                         return Err(TransportError::TerminatorNotFound);
                     }
-                    // Never read past the earliest point the terminator could end.
                     let window =
                         (GARBAGE_TERMINATOR_LEN - partial_match(scanned, terminator)).min(room);
                     read_up_to(reader, scanned, window)?;
@@ -249,9 +222,6 @@ impl Handshake {
                 };
             }
             State::ReadVersion { recv, .. } => {
-                // The version packet's contents are reserved; receivers ignore
-                // them. A decoy yields control one packet at a time so the
-                // driver rechecks its lease and deadline between packets.
                 if recv.read_contents(reader)?.is_none() {
                     return Ok(Some(Step::Yield));
                 }
@@ -306,17 +276,10 @@ impl Handshake {
     }
 }
 
-/// Encodes our public key for the wire.
-///
-/// `ElligatorSwift::new` in secp256k1 0.29 hands libsecp256k1 its
-/// no-precomputation context, which key generation rejects as an illegal
-/// argument; `from_seckey` takes a full context instead.
 fn encode_key(secret_key: SecretKey, aux: [u8; 32]) -> ElligatorSwift {
     ElligatorSwift::from_seckey(&Secp256k1::verification_only(), secret_key, Some(aux))
 }
 
-/// Length of the longest proper prefix of `terminator` that `scanned` ends
-/// with: a terminator ending in the future must start inside that suffix.
 fn partial_match(scanned: &[u8], terminator: &[u8; GARBAGE_TERMINATOR_LEN]) -> usize {
     (1..GARBAGE_TERMINATOR_LEN)
         .rev()
@@ -324,7 +287,6 @@ fn partial_match(scanned: &[u8], terminator: &[u8; GARBAGE_TERMINATOR_LEN]) -> u
         .unwrap_or(0)
 }
 
-/// Records whether any byte arrived through the wrapped reader.
 struct CountingReader<'a, R> {
     inner: &'a mut R,
     received: &'a mut bool,

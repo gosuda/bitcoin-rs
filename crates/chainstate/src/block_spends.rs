@@ -53,7 +53,6 @@ impl BlockUndoSource for Chainstate {
             };
             (head, height, lease, availability)
         };
-        // No write/transition lock spans body I/O, decoding or projection.
         let result = self.read_block_spends(hash, height, availability);
         self.recheck_undo_read(
             expected_applied_hash,
@@ -133,9 +132,6 @@ impl Chainstate {
         if block.block_hash().0 != hash {
             return Err(BlockSpendsError::Corrupt("block body hash differs"));
         }
-        // A missing body needs no deployment work. Once its header matches,
-        // use the bounded historical query on this ancestry, not validation's
-        // unbounded direct view or the current applied tip's activation.
         let segwit_active = {
             let tree = self.block_tree.read();
             let id = tree.lookup(hash).ok_or(BlockSpendsError::Corrupt(
@@ -162,9 +158,6 @@ impl Chainstate {
             BlockSpendsError::Corrupt("block body does not match its header commitments")
         })?;
         drop(bytes);
-        // Genesis has no spent inputs, but getblock still requires its real
-        // retained body. Only the REST spent-output adapter can answer its
-        // protocol-defined empty row without loading a body.
         if height == 0 && hash == self.network.genesis_block_hash() {
             return Ok(BlockSpends {
                 block,
@@ -184,9 +177,6 @@ impl Chainstate {
         let undo = decode_undo_record_for_block(&record, &block)
             .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
         drop(record);
-        // Counts derive from the authenticated body and bounded undo decode.
-        // Each spent script is copied once; response formatting belongs to
-        // the consumer, not this format-independent input source.
         let spent = block_spent_outputs(&block, height, &undo)?;
         Ok(BlockSpends {
             block,
@@ -218,8 +208,6 @@ fn certified(
     height: u32,
     hash: Hash256,
 ) -> Result<bool, BlockSpendsError> {
-    // Shared across current, archive and retained-disconnect anchors. This
-    // bounds time under the transition even when header sync selected a fork.
     let mut remaining = 4096;
     match head.assumeutxo {
         AssumeUtxoDiskStatus::Failed { .. } => return Err(BlockSpendsError::Closed),

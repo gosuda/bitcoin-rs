@@ -1,8 +1,3 @@
-//! Optional restart candidates, independent of Chainstate and estimator history.
-//!
-//! Persist only canonical transactions, admission times and operator fee deltas.
-//! Graphs, fees, admission stamps and sequences are reconstructed by the gateway.
-
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -16,16 +11,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{AdmissionChain, LocalOrigin, MempoolGateway, MutationResult};
 
-/// This artifact is optional and never participates in authoritative recovery.
 const FILE_NAME: &str = "mempool-snapshot.dat";
 const MAGIC: &[u8; 8] = b"BRSMPOOL";
 const VERSION: u32 = 2;
-/// Default byte budget; operators may raise it for full large-pool preservation.
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TX_BYTES: usize = 400_000;
-/// Candidates older than fourteen days are not reconsidered at startup.
 const MAX_AGE: u64 = 14 * 24 * 60 * 60;
-/// Every subset of an eight-member family fits this budget (2^8 - 1).
 const MAX_SUBSET_ATTEMPTS: usize = 256;
 
 struct SavedTransaction {
@@ -41,20 +32,13 @@ struct Snapshot {
     deltas: Vec<(Txid, i64)>,
 }
 
-/// Startup outcome after revalidation, including resource-budget exhaustion.
 #[derive(Debug)]
 pub struct RestoreReport {
-    /// Number of saved candidate transactions.
     pub candidates: usize,
-    /// Candidates still present after all admission/eviction decisions.
     pub restored: usize,
-    /// Candidates not present, including expired, confirmed and rejected entries.
     pub skipped: usize,
-    /// The cooperative deadline expired during restoration.
     pub timed_out: bool,
-    /// Candidates not restored because the bounded search could not complete.
     pub limited: usize,
-    /// Atomic gateway package attempts, including rejected subsets.
     pub package_attempts: u64,
 }
 
@@ -115,8 +99,6 @@ impl Snapshot {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "mempool snapshot read lock busy")
             })?;
-        // Preserve every operator overlay before allocating the remaining budget
-        // to optional transaction candidates. Never silently truncate priorities.
         let deltas = pool.fee_deltas();
         if 84_u64.saturating_add(
             u64::try_from(deltas.len())
@@ -131,8 +113,6 @@ impl Snapshot {
         let mut transactions = Vec::with_capacity(pool.len().min(max_records));
         for cluster in pool.iter_clusters() {
             check_deadline(deadline)?;
-            // Keep complete connected families: a parent-only prefix could
-            // discard its paying CPFP child and make the saved parent useless.
             let cluster_bytes: u64 = cluster.iter().map(|row| u64::from(row.size) + 17).sum();
             if transactions.len() + cluster.len() > max_records
                 || bytes.saturating_add(cluster_bytes) > max_bytes
@@ -321,7 +301,6 @@ impl Snapshot {
     }
 }
 
-/// A synced staging file. Dropping it abandons the save without publishing.
 pub struct PreparedSnapshot {
     file: tempfile::NamedTempFile,
     network: Network,
@@ -330,8 +309,6 @@ pub struct PreparedSnapshot {
 }
 
 impl PreparedSnapshot {
-    /// Publishes on the caller's thread. OS rename/fsync may exceed the
-    /// cooperative deadline, so this call must complete before teardown returns.
     pub fn publish(self) -> io::Result<()> {
         check_deadline(self.deadline)?;
         let data_dir = self
@@ -353,8 +330,6 @@ impl PreparedSnapshot {
                     && std::fs::symlink_metadata(&live)?.is_file() =>
             {
                 check_deadline(self.deadline)?;
-                // A fresh directory gives rename an unused destination without
-                // overwriting an earlier rejected artifact or copying a huge file.
                 let rejected = tempfile::Builder::new()
                     .prefix("mempool-snapshot-rejected-")
                     .tempdir_in(&data_dir)?;
@@ -375,8 +350,6 @@ impl PreparedSnapshot {
     }
 }
 
-/// Captures and syncs a bounded snapshot without touching the live artifact.
-/// A background worker may call this, but publication belongs to its caller.
 pub fn prepare(
     data_dir: &Path,
     gateway: &MempoolGateway,
@@ -392,8 +365,6 @@ pub fn prepare(
         usize::try_from(u32::MAX).unwrap_or(usize::MAX),
     )?;
     let bytes = snapshot.encode(network, max_bytes, deadline)?;
-    // Each writer owns a distinct staging inode. A concurrent save must never
-    // rename another writer's unfinished file into the live pathname.
     let mut file = tempfile::Builder::new()
         .prefix("mempool-snapshot-")
         .suffix(".tmp")
@@ -418,7 +389,6 @@ pub fn prepare(
     })
 }
 
-/// Saves on the calling thread; rejected ordinary files are quarantined intact.
 pub fn save(
     data_dir: &Path,
     gateway: &MempoolGateway,
@@ -429,8 +399,6 @@ pub fn save(
     prepare(data_dir, gateway, network, max_bytes, deadline)?.publish()
 }
 
-/// Revalidates candidates before services become ready.
-///
 /// No saved membership, base fee, height or admission token is trusted. A malformed artifact changes
 /// nothing; a budget-limited restore retains only successfully re-admitted rows.
 pub fn restore(
@@ -456,9 +424,6 @@ pub fn restore(
     restore_candidates(&snapshot, gateway, chain, now, deadline).map(Some)
 }
 
-// Saved input references fix one immutable family partition for this restore.
-// Current confirmation cannot erase a historical fee-sharing association;
-// the gateway alone decides whether each candidate subset remains admissible.
 struct RestoreGraph {
     neighbors: HashMap<Txid, Vec<Txid>>,
     confirmed: hashbrown::HashSet<Txid>,
@@ -505,7 +470,6 @@ fn build_restore_graph(
     Ok(graph)
 }
 
-// The extra member is an overflow sentinel. Never admit a truncated family.
 fn collect_saved_family(
     root: Txid,
     graph: &RestoreGraph,
@@ -534,9 +498,6 @@ enum FamilyRestore {
     Limited,
 }
 
-// Descending cardinality makes the first successful commit maximum-cardinality
-// for this complete family against the unchanged pool and Chainstate. Failed
-// atomic gateway attempts cannot consume a parent's fee contribution.
 fn restore_family(
     family: &[&SavedTransaction],
     gateway: &MempoolGateway,
@@ -567,7 +528,6 @@ fn restore_family(
                 chain,
             ) {
                 Ok(result) => return Ok(FamilyRestore::Accepted(result)),
-                // Changing fences do not establish rejection of this subset.
                 Err(crate::SubmitError::RetryExhausted) => return Ok(FamilyRestore::Limited),
                 Err(crate::SubmitError::Policy(_) | crate::SubmitError::Consensus) => {}
             }
@@ -609,8 +569,6 @@ fn restore_candidates(
             && now - row.time <= MAX_AGE
             && row.sigop_cost <= crate::standardness::MAX_STANDARD_TX_SIGOPS_COST
     };
-    // Operator state is restored completely before optional admission work.
-    // Decode rejects duplicate txids and startup requires an empty overlay.
     for (txid, delta) in &snapshot.deltas {
         gateway
             .prioritise(*txid, *delta)

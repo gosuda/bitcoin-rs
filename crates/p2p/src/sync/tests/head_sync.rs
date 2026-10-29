@@ -1,14 +1,7 @@
-//! Live head-sync: announcements learned inside bodies, and gaps between
-//! delivered headers and the tree, must still reach admission and become
-//! fetchable — a staged body can never apply while the tree does not know
-//! its hash, and a batch that cannot attach must not end the conversation.
-
 use super::*;
 
 use bitcoin_rs_primitives::BlockPayload;
 
-/// Returns the next `getheaders` from `rx`, skipping other traffic; fails
-/// when none is queued.
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
 ) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
@@ -22,12 +15,6 @@ fn next_getheaders(
 
 #[test]
 fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResult {
-    // A block body carries its own header. Bodies arriving via `inv`
-    // getdata, compact-block reconstruction, or an unsolicited push
-    // otherwise stage a body whose hash the tree does not know — it can
-    // never become the expected block, so it times out and is dropped
-    // while nothing re-requests it. The staged-header retry must admit
-    // the embedded header and let the apply drain catch up.
     let (tree, blocks) = mined_chain(1, 0)?;
     let SyncHarness {
         sync,
@@ -61,10 +48,6 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
 
 #[test]
 fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
-    // A body two blocks past the applied tip has an unannounced parent.
-    // Header admission fails MissingParent — sync must ask an eligible
-    // peer for the missing ancestry instead of retaining the body until
-    // its staged timeout drops it.
     let (tree, blocks) = mined_chain(1, 0)?;
     let SyncHarness {
         sync,
@@ -96,18 +79,11 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
         vec![regtest_fixture::coinbase(3)],
     )
     .or_fail("regtest fixture block");
-    // Only the tip-of-gap body arrives — its parent's header is unknown.
-    // Draining twice isolates the ancestry request: the first buffers the
-    // body, the second's staged-header retry must emit the only possible
-    // `getheaders` on this connection (a `tick` tail could also queue one
-    // via `request_headers_from_best_peer` and mask a regression).
     inbound_blocks_tx.send(crate::InboundBlock::from_local(block3.clone()))?;
     sync.drain_inbound_blocks();
     sync.drain_inbound_blocks();
     next_getheaders(&rx)?;
 
-    // The ancestry fill lands: the gap headers admit, both bodies stage,
-    // and the chain applies through the delivered tip.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![block2.header, block3.header],
         source: Some(current_source(&peers, peer)),
@@ -273,9 +249,6 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
 
 #[test]
 fn headers_batch_missing_parent_requests_ancestry() -> TestResult {
-    // An announce of a tip whose parent is unknown cannot attach. The
-    // announcer demonstrably has the gap, so sync asks it for the ancestry
-    // rather than dropping the batch and wedging the live tip.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -308,13 +281,6 @@ fn headers_batch_missing_parent_requests_ancestry() -> TestResult {
 
 #[test]
 fn body_carried_rejection_keeps_the_live_pending_gate() -> TestResult {
-    // A body-carried header that rejects `MissingParent` asks the
-    // delivering peer for the missing ancestry, but the ask must respect
-    // the pending gate: an unexpired `getheaders` to the same connection
-    // suppresses the identical re-request and keeps its original deadline,
-    // so a peer that never answers the wire request still rotates once the
-    // timeout elapses. Retiring a live gate on each body delivery let every
-    // rejection install a fresh `requested_at` and pin the slot forever.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -336,7 +302,6 @@ fn body_carried_rejection_keeps_the_live_pending_gate() -> TestResult {
         wire_response: false,
     };
 
-    // The first rejection installs the pending gate on this connection.
     inbound_headers_tx.send(batch())?;
     sync.drain_inbound_headers();
     next_getheaders(&rx)?;
@@ -370,9 +335,6 @@ fn body_carried_rejection_keeps_the_live_pending_gate() -> TestResult {
 
 #[test]
 fn known_header_batch_still_credits_the_announcer() -> TestResult {
-    // The all-known fast path must keep the announced-tip credit the
-    // admission path produced — the delivering peer's demonstrated height
-    // raises its best-known watermark.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -411,10 +373,6 @@ fn known_header_batch_still_credits_the_announcer() -> TestResult {
 
 #[test]
 fn headers_batch_too_far_ahead_does_not_replay_a_request() -> TestResult {
-    // A valid-PoW header beyond our two-hour clock window is a non-fault
-    // rejection: the announcer can only replay the same batch into the same
-    // rejection, so the drain must not re-request — the tip is relearned
-    // once the local clock catches up or the next announcement arrives.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -469,8 +427,6 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
     .or_fail("regtest fixture block");
     bad.header.bits = CompactTarget::from_consensus(0x1e0f_ff00);
     inbound_blocks_tx.send(crate::InboundBlock::from_local(bad))?;
-    // The body stages in the first drain; the staged-header retry runs
-    // before staging on the next and discards it.
     sync.tick();
     sync.tick();
 
@@ -484,12 +440,6 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
 
 #[test]
 fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult {
-    // A body may stage while its header is still unknown — a body slightly
-    // ahead of its in-flight header is legitimate. Once the header
-    // resolves, the body must face the same unrequested-admission clauses
-    // a resolved arrival faced: an off-branch body is dead inventory and
-    // is evicted at once, without releasing a concurrently pending
-    // requested body.
     let (tree, blocks) = mined_chain(2, 0)?;
     let SyncHarness {
         sync,
@@ -501,8 +451,6 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     let peer = test_addr(9709, 0)?;
     let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
-    // Put requested bodies in flight next to the unsolicited one: the
-    // getdata marks heights 1..=2 pending in the window.
     assert!(
         sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
             .sent,
@@ -510,10 +458,6 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     );
     assert_eq!(sync.scheduler.lock().window.pending_len(), 2);
 
-    // An unsolicited body whose header is not in the tree: it stages at
-    // arrival (the missing-header path), and its header extends the losing
-    // height-2 branch — once the header resolves it is off the active
-    // branch and inadmissible.
     let fork = regtest_fixture::mined_block_with_prev_hash(
         blocks[0].block_hash(),
         2,
@@ -540,11 +484,6 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
 
 #[test]
 fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult {
-    // A staged body gated on an unknown header must face the
-    // unrequested-admission clauses wherever the header lands — including
-    // the ordinary headers drain, which resolves most headers long before
-    // the staged-header retry reaches them. An off-branch body is dead
-    // inventory and is evicted the same drain its header attaches.
     let (tree, _blocks) = mined_chain(2, 0)?;
     let SyncHarness {
         sync,
@@ -573,9 +512,6 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
         "the body must stage while its header is unknown"
     );
 
-    // The headers drain resolves the body's header directly: the fork
-    // tops out at the incumbent tip's height and loses, so the body
-    // resolves inadmissible and the same drain evicts it.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![fork_root, orphan_body.header],
         source: None,
@@ -592,12 +528,6 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
 
 #[test]
 fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
-    // A compact-relayed body may stage while its header is still unknown;
-    // the peer already owns the fetch, so the mark is deferred without a
-    // tree height. When the header later admits, resolving the mark must
-    // lift the gate on the staged body — otherwise the recheck evicts a
-    // body the peer already fetches for us and the window would schedule
-    // a duplicate request.
     let (tree, _blocks) = mined_chain(2, 0)?;
     let SyncHarness {
         sync,
@@ -621,9 +551,6 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
     .or_fail("regtest fixture");
     let orphan_hash = Hash256::from(orphan_body.block_hash());
 
-    // The owned-fetch announcement arrives before the batch can attach:
-    // the tip is retained as a deferred mark, and the body stages
-    // gate-pending in the same tick.
     assert!(sync.enqueue_owned_body_fetch(source, orphan_hash, || true));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan_body.header],
@@ -633,9 +560,6 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
     inbound_blocks_tx.send(crate::InboundBlock::from_local(orphan_body.clone()))?;
     sync.tick();
 
-    // The fork admits through the ordinary drain; resolving the deferred
-    // mark settles the staged body's flag, so the recheck leaves it
-    // alone even though the fork is off the active branch.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![fork_root, orphan_body.header],
         source: None,
@@ -652,9 +576,6 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
 
 #[test]
 fn failed_enqueue_publishes_no_owned_body_fetch() -> TestResult {
-    // The send and the ownership publication are one transition: when the
-    // outbound enqueue fails, nothing may be marked, or the window would
-    // wait on a request that never left this node.
     let (tree, _blocks) = mined_chain(2, 0)?;
     let SyncHarness { sync, peers, .. } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
@@ -674,10 +595,6 @@ fn failed_enqueue_publishes_no_owned_body_fetch() -> TestResult {
 
 #[test]
 fn stale_source_never_reaches_the_enqueue_closure() -> TestResult {
-    // A same-address replacement invalidates the old connection identity.
-    // The exact-source guard is held across the send, so the stale
-    // source's closure must not even run: no frame leaves on the new
-    // connection and no mark is published under the old identity.
     let (tree, _blocks) = mined_chain(2, 0)?;
     let SyncHarness { sync, peers, .. } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
@@ -702,10 +619,6 @@ fn stale_source_never_reaches_the_enqueue_closure() -> TestResult {
 
 #[test]
 fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
-    // `max_received_blocks` is a window budget: at the cap an unrequested
-    // body is refused outright instead of evicting a staged entry to make
-    // room — the stager never holds more than the budget, and already
-    // staged bodies are never displaced.
     let (tree, blocks) = mined_chain(3, 0)?;
     let SyncHarness {
         sync,
@@ -755,10 +668,6 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
 
 #[test]
 fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
-    // A deferred owned-fetch mark belongs to a connection. If that
-    // connection dies before the header resolves, the dead fetch is no
-    // request evidence: resolving the mark must not settle the staged
-    // body's gate, and the ordinary recheck evicts the inadmissible body.
     let (tree, _blocks) = mined_chain(2, 0)?;
     let SyncHarness {
         sync,
@@ -782,7 +691,6 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
     .or_fail("regtest fixture");
     let orphan_hash = Hash256::from(orphan_body.block_hash());
 
-    // Defer the mark, stage the body, then drop the owning connection.
     assert!(sync.enqueue_owned_body_fetch(source, orphan_hash, || true));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan_body.header],
@@ -809,10 +717,6 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
 
 #[test]
 fn binding_failure_does_not_burn_the_last_staging_slot() -> TestResult {
-    // The staging-slot charge lands at insert time, not at the admission
-    // precheck: a body that fails body/header binding never occupies the
-    // slot it tentatively counted, so a later admissible unrequested body
-    // in the same chunk still stages.
     let (tree, blocks) = mined_chain(3, 0)?;
     let SyncHarness {
         sync,
@@ -852,11 +756,6 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> TestResult {
 
 #[test]
 fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
-    // During a header-first reorg the applied tip still sits on the losing
-    // branch until the switch completes — and the switch cannot complete
-    // while branch bodies are still missing. A gated body on the winning
-    // branch must keep its flag through that window: evicting it would
-    // force a re-download of ancestry the pending apply needs.
     let (tree, blocks) = mined_chain(3, 0)?;
     let SyncHarness {
         sync,
@@ -917,11 +816,6 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
 
 #[test]
 fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
-    // The listener forwards each delivered body's embedded header through
-    // the headers sink so its tip reaches admission — but that forward is
-    // not a response to `getheaders`. Letting it consume the pending slot
-    // would let every delivered block reset request pacing and emit
-    // duplicate requests; only a wire `headers` message may clear it.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -977,11 +871,6 @@ fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
 
 #[test]
 fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
-    // A body that arrives without a prior `headers` announcement admits
-    // its embedded header through the staged retry. The delivering peer
-    // still demonstrated that tip: the credit the headers drain would have
-    // paid must land here, or a body-only announcer never earns body
-    // capability (C22).
     let (tree, blocks) = mined_chain(1, 0)?;
     let SyncHarness {
         sync,
@@ -1023,11 +912,6 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
 
 #[test]
 fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
-    // A demonstrated tip that stays off the active chain still proves the
-    // deepest prefix it shares with it — the peer demonstrably holds that
-    // ancestry and can serve its bodies. Resolving fork evidence only
-    // against the active tip would read a losing branch as no capability
-    // at all and skip a perfectly usable body source (C27).
     let (tree, blocks) = mined_chain(3, 0)?;
     let SyncHarness {
         sync,
@@ -1039,9 +923,6 @@ fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
     let peer = test_addr(9707, 0)?;
     let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
-    // An equal-work fork rooted at height 1 stays off the active chain
-    // (first-seen wins a tie), so the batch's tip is retained as fork
-    // evidence while its shared ancestor — height 1 — still credits.
     let fork1 = regtest_fixture::mined_regtest_header(blocks[0].block_hash(), 2)
         .or_fail("regtest fixture header");
     let fork2 = regtest_fixture::mined_regtest_header(fork1.compute_hash(), 3)
@@ -1108,11 +989,6 @@ fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
 
 #[test]
 fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
-    // Unbounded fork evidence is a memory problem: a peer could announce
-    // an arbitrary number of distinct side chains and grow the retained
-    // tip vector without bound. The credit refresh keeps the maximal tip
-    // per branch — a kept descendant subsumes its ancestors — and caps the
-    // unresolved set outright (CR-2).
     let (tree, blocks) = mined_chain(10, 0)?;
     let SyncHarness {
         sync,
@@ -1125,8 +1001,6 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let source = current_source(&peers, peer);
 
-    // An ancestor and its descendant on the same fork branch: the retained
-    // set keeps only the descendant.
     let fork_base = regtest_fixture::mined_regtest_header(blocks[0].block_hash(), 2)
         .or_fail("regtest fixture header");
     let fork_tip = regtest_fixture::mined_regtest_header(fork_base.compute_hash(), 3)
@@ -1188,11 +1062,6 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
 
 #[test]
 fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult {
-    // Every delivered body's embedded header forwards through the headers
-    // sink (P2P-06) and pushes a demonstrated tip per block. The credit
-    // refresh compacts retained evidence to the max-resolving tip —
-    // resolved tips below it can never raise the watermark again — or the
-    // record would grow with every download.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1240,11 +1109,6 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult 
 
 #[test]
 fn compact_owned_body_fetch_marks_the_tip_pending() -> TestResult {
-    // A `cmpctblock` whose reconstruction pends has its body fetch in
-    // flight off-window (`getblocktxn`, or the fallback `getdata`). The
-    // forwarded header still admits, and the window records the tip hash
-    // pending under the announcing peer so normal scheduling does not
-    // issue a duplicate `getdata` for it.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1275,8 +1139,6 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> TestResult {
     Ok(())
 }
 
-/// The harness, its mined blocks, the connected peer's source, and that
-/// peer's outbound receiver, which keeps it connected.
 type CompactGateFixture = (
     SyncHarness,
     Vec<Block>,
@@ -1284,8 +1146,6 @@ type CompactGateFixture = (
     crate::test_support::MessageReceiver,
 );
 
-/// Genesis plus two mined blocks under one connected peer, with nothing
-/// applied yet; callers store the applied tip when a case needs it.
 fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::error::Error>> {
     let (tree, blocks) = mined_chain(2, 0)?;
     let harness = SyncHarness::new(tree);
@@ -1295,7 +1155,6 @@ fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::
     Ok((harness, blocks, source, rx))
 }
 
-/// A block-3 header on top of `tip`, distinct per `coinbase_height`.
 fn tip_child(
     tip: &Block,
     coinbase_height: u32,
@@ -1327,8 +1186,6 @@ fn compact_reconstruction_admission_follows_cores_header_gate() -> TestResult {
         sync.compact_reconstruction_admissible(source, &extending),
         "a mined child of the applied tip"
     );
-    // Valid proof of work for its own declared target, but not the target
-    // the chain requires after this parent.
     let mut wrong_target = extending;
     wrong_target.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
     regtest_fixture::mine_header_to_declared_target(&mut wrong_target)?;
@@ -1385,9 +1242,6 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
         Ok(())
     };
 
-    // Beyond the live future-drift ceiling, as an admitted header can be once
-    // the clock moves backwards: refused while unknown, not rechecked once
-    // admitted, as header admission treats it.
     let mut ahead = tip_child(tip, 43)?;
     ahead.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut ahead)?;
@@ -1417,9 +1271,6 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
 
 #[test]
 fn compact_reconstruction_admission_stays_near_the_applied_tip() -> TestResult {
-    // As in Core, an unrequested compact block earns the mempool scan only
-    // within two blocks of the applied tip; a header the tree already holds
-    // further ahead is only announced, unless this connection owns its fetch.
     let (tree, blocks) = mined_chain(6, 0)?;
     let applied = {
         let id = tree
@@ -1467,11 +1318,6 @@ fn compact_reconstruction_admission_stays_near_the_applied_tip() -> TestResult {
 
 #[test]
 fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
-    // A compact-owned tip announced ahead of its ancestry cannot be marked
-    // at delivery: the tree has no height for it yet. Dropping the mark
-    // would let normal scheduling issue a second fetch while the compact
-    // `getblocktxn` is still in flight, so the scheduler retains it and
-    // resolves it once the missing parent chain admits.
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1489,8 +1335,6 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
         .or_fail("regtest fixture header");
     let tip_hash = Hash256::from(tip.compute_hash());
 
-    // The tip arrives ahead of `mid`: admission reports MissingParent and
-    // the owned-fetch mark is retained rather than dropped.
     assert!(sync.enqueue_owned_body_fetch(current_source(&peers, peer), tip_hash, || true,));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip],
@@ -1503,7 +1347,6 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
         "an unattached tip cannot be window-pending yet"
     );
 
-    // The ancestry batch admits; the retained mark resolves to a pending.
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![mid, tip],
         source: Some(current_source(&peers, peer)),
@@ -1536,7 +1379,6 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
     );
 
     let peer = test_addr(9740, 0)?;
-    // The outbound receiver stays alive: dropping it would cancel the lease.
     let rx = connect_peer(&peers, synthetic_peer(peer, 3));
     let source = current_source(&peers, peer);
     let block2 = regtest_fixture::mined_block_with_prev_hash(
@@ -1565,8 +1407,6 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         "the window owns the body the direct fetch requested"
     );
 
-    // The same path rides the compact flavor for a peer that announced BIP152
-    // relay, because the fetch is the single near-tip request.
     peers.note_compact_relay(source);
     let block3 = regtest_fixture::mined_block_with_prev_hash(
         block2.block_hash(),

@@ -2,17 +2,12 @@ use crate::standardness::StandardnessPolicy;
 
 use thiserror::Error;
 
-/// Mempool cluster, replacement, and capacity limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolLimits {
     /// Maximum distinct clusters containing direct replacement conflicts.
     pub max_replacement_clusters: u32,
-    /// Maximum total mempool size in vbytes. The selected limit is 300,000,000;
-    /// Core limits allocator usage rather than this virtual-size sum.
     /// Set to 0 to disable size-bound eviction.
     pub max_total_bytes: u64,
-    /// Minimum relay fee rate in sat/kvB. Transactions with lower `fee_rate` are
-    /// not relayed. Selected default: 1000 sat/kvB = 1 sat/vB.
     pub min_relay_fee_sat_per_kvb: u64,
     /// Maximum number of transactions in one cluster, including the candidate.
     pub cluster_count: u32,
@@ -32,7 +27,6 @@ impl Default for MempoolLimits {
     }
 }
 
-/// Policy rejection reason for non-consensus mempool limits.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
     /// The caller supplied no positive policy size.
@@ -44,43 +38,23 @@ pub enum PolicyError {
     /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
     BelowMinRelayFee { tx_rate: u64, min_rate: u64 },
-    /// The transaction would join a cluster holding too many transactions.
     #[error("too many transactions in cluster")]
     ClusterCountLimit,
-    /// The transaction would join a cluster exceeding the virtual size limit.
     #[error("cluster is too large")]
     ClusterSizeLimit,
 }
 
-/// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
-/// in sat/kvB. The selected rate is 1,000 sat/kvB; Core 31.1's default is 100.
 pub(crate) const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
-/// Half-life of the rolling minimum fee's exponential decay, in seconds (Core
-/// `ROLLING_FEE_HALFLIFE`, `txmempool.h:213`).
 pub(crate) const ROLLING_FEE_HALFLIFE_SECS: u64 = 12 * 60 * 60;
 
-/// Maximum resident age before expiry also removes an entry's descendants.
 pub(crate) const MEMPOOL_EXPIRY_SECS: u64 = 336 * 60 * 60;
 
-/// Typed snapshot of the mempool relay-policy surface the RPC `getmempoolinfo`
-/// response projects, built from the policy the pool actually enforces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolPolicySnapshot {
-    /// Standardness settings admission enforces through `is_standard_tx`:
-    /// the dust relay rate and the aggregate nulldata byte budget.
     pub standardness: StandardnessPolicy,
-    /// Bare multisig outputs pass `is_standard_tx` (the standardness check
-    /// accepts up to 3-key bare multisig and has no opt-out), so the v31
-    /// `permitbaremultisig` field reports the enforced `true`.
     pub permit_bare_multisig: bool,
-    /// Enforced cluster count bound (`PolicyError::ClusterCountLimit`).
     pub cluster_count: u32,
-    /// Enforced cluster virtual-size bound in vbytes
-    /// (`PolicyError::ClusterSizeLimit`). The v31 `limitclustersize` field
-    /// projects this.
     pub cluster_size_vbytes: u64,
-    /// Fee-rate increment the eviction-floor projection and BIP125 rule 4
-    /// (`RbfError::Rule4InsufficientIncrementalFee`) quote, in sat/kvB.
     pub incremental_relay_fee_sat_per_kvb: u64,
     /// Replacements do not require BIP125 signaling, so this is always `true`.
     pub full_rbf: bool,
@@ -89,8 +63,6 @@ pub struct MempoolPolicySnapshot {
 }
 
 impl MempoolPolicySnapshot {
-    /// Builds the snapshot from the policy a pool enforces: its configured
-    /// [`MempoolLimits`] and the enforced [`StandardnessPolicy`].
     #[must_use]
     pub(crate) fn from_enforced(limits: MempoolLimits, standardness: StandardnessPolicy) -> Self {
         Self {
@@ -104,10 +76,6 @@ impl MempoolPolicySnapshot {
         }
     }
 
-    /// The v31 `maxdatacarriersize` projection: the enforced aggregate
-    /// nulldata byte budget. A disabled nulldata policy permits zero bytes,
-    /// so it projects as `0` rather than pretending the default budget is
-    /// still in force.
     #[must_use]
     pub fn max_data_carrier_size(&self) -> u64 {
         self.standardness

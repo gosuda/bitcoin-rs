@@ -11,118 +11,75 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use serde_json::{Value, json};
+use sonic_rs::{JsonValueTrait as _, Value, json};
 use tempfile::TempDir;
 
 use crate::error::{Error, Result};
 use crate::rpc::Connection;
 
-/// Cold storage initialization needs more time than a single loopback request.
 pub const START_TIMEOUT: Duration = Duration::from_mins(1);
-/// Graceful shutdown budget before the harness reaps the child.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-/// Single request deadline.
-/// Default RPC request budget, also available for a single polling deadline.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// Bound on retained child output.
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
-/// Bound on the journaled RPC and HTTP transcript.
 const MAX_TRANSCRIPT: u64 = 64 * 1024 * 1024;
-/// Fixed test credentials; both node kinds share them.
 const AUTH_USER: &str = "parity";
 const AUTH_PASSWORD: &str = "parity";
 
-/// Mock clock for Core regtest nodes.
-///
-/// Runs ~24h behind the host clock so generated blocks are valid under
-/// the node's unmocked wall time; a pinned epoch would future-date
-/// blocks on any host clocked earlier than it.
 pub fn mock_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(1_700_000_000, |d| d.as_secs().saturating_sub(86_400))
 }
-/// Spawn retries for when a reserved port is stolen before the child binds.
 const MAX_SPAWN_ATTEMPTS: u32 = 3;
 
-/// Which binary a [`ProcessNode`] wraps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
-    /// The `bitcoin-rs` daemon under test.
     BitcoinRs,
-    /// The pinned Bitcoin Core reference node.
     Core,
 }
 
-/// The clock a spawned node's blocks are stamped with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClockControl {
-    /// Core runs under `-mocktime` pinned to this epoch second.
     Mock(u64),
-    /// The daemon clocks blocks from the host wall clock; its CLI exposes
-    /// no mock-time input.
     None,
 }
 
-/// Options applied on top of the default launch profile.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions<'a> {
-    /// Extra command-line arguments appended after the harness defaults.
     pub extra_args: &'a [&'a str],
-    /// Extra TOML lines appended to `node.toml` (bitcoin-rs only).
     pub toml_extra: &'a str,
-    /// Full replacement for `node.toml` contents (bitcoin-rs only).
-    /// When set, the default regtest profile is not written.
     pub toml_override: Option<&'a str>,
-    /// Readiness deadline; defaults to [`START_TIMEOUT`].
     pub timeout: Option<Duration>,
-    /// Replacement `--rpc-bind` address (bitcoin-rs only); overrides the
-    /// reserved loopback port so bind-failure scenarios exercise a real
-    /// `bind()` error rather than a duplicate CLI flag.
     pub rpc_bind: Option<SocketAddr>,
-    /// Exact binary to launch (bitcoin-rs only). Tests living in the binary
-    /// package pass `env!("CARGO_BIN_EXE_bitcoin-rs")` so cargo's build pins
-    /// the artifact instead of the newest-file heuristic.
     pub binary: Option<&'a Path>,
 }
 
-/// A decoded HTTP response from the node's RPC/REST/Esplora listener.
 #[derive(Debug)]
 pub struct HttpResponse {
-    /// Numeric status code.
     pub status: u16,
-    /// Response headers (lower-cased names).
     pub headers: Vec<(String, String)>,
-    /// Raw body bytes.
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
-    /// Parse the body as JSON.
     pub fn json(&self) -> Result<Value> {
-        serde_json::from_slice(&self.body).map_err(Error::Json)
+        sonic_rs::from_slice(&self.body).map_err(Error::Json)
     }
 
-    /// Interpret the body as UTF-8 text.
     pub fn text(&self) -> Result<String> {
         String::from_utf8(self.body.clone())
             .map_err(|e| Error::Assertion(format!("response is not utf-8: {e}")))
     }
 }
 
-/// A spawned node process with its RPC endpoint and evidence files.
 #[derive(Debug)]
 pub struct ProcessNode {
     kind: Kind,
     child: Child,
     datadir: Option<TempDir>,
-    /// RPC/HTTP loopback address the child is bound to.
     pub rpc_addr: SocketAddr,
-    /// P2P loopback address the child is bound to.
     pub p2p_addr: SocketAddr,
-    /// The clock this node's blocks are stamped with.
     pub clock: ClockControl,
-    /// Directory that receives launch.json, stdout.log, stderr.log, transcript.
     pub evidence: PathBuf,
     journal: File,
     journal_bytes: u64,
@@ -131,7 +88,6 @@ pub struct ProcessNode {
     conn: Connection,
 }
 
-/// Workspace root, derived from this crate's manifest location.
 #[must_use]
 pub fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -139,15 +95,6 @@ pub fn workspace() -> PathBuf {
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
-/// Resolve the `bitcoin-rs` binary under test.
-///
-/// `BITCOIN_RS_NODE` wins when set. Otherwise the candidates are the `debug`
-/// and `release` profiles under `CARGO_TARGET_DIR` (falling back to the
-/// workspace `target/` when it is unset or relative to elsewhere), and the
-/// *newest* existing artifact is chosen — a fixed debug-first order would
-/// silently test a stale daemon while a freshly built one sits next to it.
-/// The suite has no Cargo dependency edge to the binary package, so callers
-/// must build it themselves (`cargo build --bin bitcoin-rs`).
 pub fn bitcoin_rs_binary() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("BITCOIN_RS_NODE") {
         return Ok(PathBuf::from(path));
@@ -181,8 +128,6 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
     })
 }
 
-/// The pinned bitcoind is hashed once per process; later Core spawns
-/// reuse the verified path instead of re-reading hundreds of megabytes.
 static VERIFIED_CORE: OnceLock<PathBuf> = OnceLock::new();
 
 fn core_binary() -> PathBuf {
@@ -206,8 +151,6 @@ fn core_binary() -> PathBuf {
         .join(&binary_name)
 }
 
-/// Verify the resolved bitcoind matches the pinned digest in the compiled
-/// `core-compat.toml` manifest. Returns the binary path on success.
 fn verified_core_binary() -> Result<PathBuf> {
     if let Some(path) = VERIFIED_CORE.get() {
         return Ok(path.clone());
@@ -229,9 +172,6 @@ fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The host platform's release-archive suffix, mirroring the uname mapping in
-/// `scripts/install-bitcoind.sh`. `None` on platforms no pinned artifact can
-/// execute on.
 fn current_platform_target() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("x86_64-linux-gnu"),
@@ -243,10 +183,6 @@ fn current_platform_target() -> Option<&'static str> {
     }
 }
 
-/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins
-/// for the platform this suite runs on: the canonical artifact when its
-/// target matches, else the matching `[[reference.release.platforms]]` row —
-/// and a typed failure when the manifest carries no artifact for this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
     let target = current_platform_target().ok_or_else(|| {
         Error::Assertion(format!(
@@ -284,7 +220,6 @@ pub(crate) fn manifest_reference_sha256() -> Result<String> {
     )))
 }
 
-/// Hash one file with SHA256; callers shape the error vocabulary.
 pub(crate) fn file_sha256(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let mut engine = sha256::Hash::engine();
@@ -292,7 +227,6 @@ pub(crate) fn file_sha256(path: &Path) -> std::io::Result<String> {
     Ok(sha256::Hash::from_engine(engine).to_string())
 }
 
-/// Reserve two loopback ports; callers drop the listeners right before spawn.
 fn loopback_addresses() -> Result<(SocketAddr, SocketAddr, TcpListener, TcpListener)> {
     let rpc = TcpListener::bind("127.0.0.1:0")?;
     let p2p = TcpListener::bind("127.0.0.1:0")?;
@@ -311,7 +245,6 @@ fn launch_command(
         (Kind::BitcoinRs, None) => Command::new(bitcoin_rs_binary()?),
         (Kind::Core, _) => Command::new(verified_core_binary()?),
     };
-    // Host configuration must not leak into the isolated regtest profile.
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("BITCOIN_RS_") {
             command.env_remove(key);
@@ -335,13 +268,6 @@ fn launch_command(
                 .arg(format!("-datadir={}", datadir.display()))
                 .arg(format!("-bind={p2p_addr}"))
                 .arg(format!("-rpcport={}", rpc_addr.port()))
-                // Pin the RPC listener to the exact probed endpoint. Core
-                // ignores -rpcbind unless -rpcallowip is also set, and
-                // without the pin a stolen IPv4 port leaves a half-alive
-                // node bound only on ::1: readiness probes 127.0.0.1 and
-                // hangs to the deadline instead of failing fast. Pinned, a
-                // stolen port is a fatal "Unable to start HTTP server"
-                // child exit, which the bounded spawn retry already owns.
                 .arg(format!("-rpcbind={rpc_addr}"))
                 .arg(format!("-rpcallowip={}", rpc_addr.ip()))
                 .arg(format!("-mocktime={mock}"));
@@ -384,19 +310,12 @@ fn launch_command(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     {
-        // Give the child its own console process group so
-        // GenerateConsoleCtrlEvent can deliver a graceful stop to it
-        // specifically; group 0 delivery would hit every test process
-        // sharing this console.
         use std::os::windows::process::CommandExt as _;
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
     }
     Ok((command, clock))
 }
 
-/// Whether a dead child's stderr reports losing the port-bind race (either
-/// daemon's phrasing), and nothing else — any other startup failure returns
-/// its `ChildExit` untouched.
 fn exited_on_busy_port(evidence: &Path) -> bool {
     let Ok(stderr) = fs::read_to_string(evidence.join("stderr.log")) else {
         return false;
@@ -405,17 +324,10 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 98")
         || stderr.contains("Unable to bind")
         || stderr.contains("Failed to bind")
-        // Windows: WSAEADDRINUSE and WSAEACCES (excluded/blocked port).
         || stderr.contains("Only one usage of each socket address")
         || stderr.contains("os error 10048")
         || stderr.contains("An attempt was made to access a socket")
         || stderr.contains("os error 10013")
-        // Pinned Core RPC bind loss: the fatal "Unable to start HTTP
-        // server" reaches stderr while the per-endpoint "Binding RPC on
-        // address ... failed" cause stays in stdout. The pair keeps the
-        // retry scoped to the port race: a lookup failure ("Address lookup
-        // failed") or an allow-list error never prints that warning line,
-        // so non-port startup failures still surface untouched.
         || (stderr.contains("Unable to start HTTP server")
             && fs::read_to_string(evidence.join("stdout.log")).is_ok_and(|stdout| {
                 stdout
@@ -424,23 +336,9 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
             }))
 }
 
-/// Whether the child's own logs prove it bound the probed RPC endpoint: a
-/// readiness probe may have been answered by whoever stole the port in the
-/// reserve-release window (every harness node shares credentials), so a
-/// reply alone never identifies our child. Core requires its attempt line
-/// for our endpoint plus the post-bind `Starting HTTP server` record with
-/// no `failed` line (the attempt alone also exists just before a fatal
-/// exit); bitcoin-rs logs `rpc listener bound` with the address on
-/// stderr. No bind proof yet means keep polling, never adopt.
 fn rpc_bind_evidence_ready(kind: Kind, rpc_addr: SocketAddr, evidence: &Path) -> bool {
     match kind {
         Kind::Core => {
-            // Positive proof only: the attempt line alone also exists while
-            // the child is still alive just before its fatal exit, so its
-            // absence of `failed` proves nothing. `Starting HTTP server`
-            // runs strictly after the bind phase succeeds (31.1 order:
-            // attempts, then start), and the pin leaves exactly one
-            // endpoint, so this line means our address bound.
             let attempt = format!(
                 "Binding RPC on address {} port {}",
                 rpc_addr.ip(),
@@ -469,23 +367,15 @@ fn rpc_bind_evidence_ready(kind: Kind, rpc_addr: SocketAddr, evidence: &Path) ->
 }
 
 impl ProcessNode {
-    /// Spawn a node with the default launch profile.
     pub fn spawn(kind: Kind) -> Result<Self> {
         Self::spawn_with(kind, &SpawnOptions::default())
     }
 
-    /// Spawn a node with extra arguments / config lines.
     pub fn spawn_with(kind: Kind, options: &SpawnOptions<'_>) -> Result<Self> {
         let datadir = tempfile::tempdir()?;
         Self::spawn_in_datadir(kind, options, datadir)
     }
 
-    /// Spawn over an existing datadir (restart scenarios).
-    ///
-    /// Launches are retried only on the reserve-release port race: the
-    /// loopback port bound for selection can be grabbed by a parallel
-    /// runner in the release-to-bind window, which fd-less spawning
-    /// cannot close. Any other immediate child exit surfaces untouched.
     pub fn spawn_in_datadir(
         kind: Kind,
         options: &SpawnOptions<'_>,
@@ -514,7 +404,6 @@ impl ProcessNode {
         Err(last_error.unwrap_or_else(|| Error::Assertion("spawn attempts exhausted".into())))
     }
 
-    /// One spawn attempt over `datadir`.
     fn spawn_in_datadir_once(
         kind: Kind,
         options: &SpawnOptions<'_>,
@@ -540,7 +429,7 @@ impl ProcessNode {
         };
         fs::write(
             evidence.join("launch.json"),
-            serde_json::to_vec_pretty(&json!({
+            sonic_rs::to_vec_pretty(&json!({
                 "binary": format!("{kind:?}"),
                 "executable": executable,
                 "executable_sha256": digest,
@@ -593,13 +482,11 @@ impl ProcessNode {
         Ok(node)
     }
 
-    /// Child process id.
     #[must_use]
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
 
-    /// Move datadir custody out for a restart.
     pub fn take_datadir(&mut self) -> Result<TempDir> {
         self.datadir
             .take()
@@ -622,13 +509,6 @@ impl ProcessNode {
                 deadline.min(Instant::now() + REQUEST_TIMEOUT),
             ) {
                 Ok(_) => {
-                    // A successful probe is not proof our child answered:
-                    // whoever stole the port in the reserve-release window
-                    // may have, and every harness node shares the same
-                    // credentials. Trust the probe only while our child is
-                    // still alive; a dead child means the reply came from
-                    // elsewhere, so surface the exit for the bounded retry
-                    // instead of adopting a foreign node.
                     if let Some(status) = self.child.try_wait()? {
                         return Err(Error::ChildExit {
                             pid: self.pid(),
@@ -636,10 +516,6 @@ impl ProcessNode {
                             evidence: self.evidence.clone(),
                         });
                     }
-                    // Liveness is not identity: our child may still be alive
-                    // but not yet bound while the thief answers. Adopt the
-                    // probe only once our child's own logs prove it bound
-                    // the probed endpoint; until then keep polling.
                     if !rpc_bind_evidence_ready(self.kind, self.rpc_addr, &self.evidence) {
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
@@ -659,15 +535,10 @@ impl ProcessNode {
         }
     }
 
-    /// JSON-RPC call; the reply's `result` is returned, an `error` becomes
-    /// [`Error::Rpc`].
     pub fn rpc(&mut self, method: &str, params: &Value) -> Result<Value> {
         self.rpc_until(method, params, Instant::now() + REQUEST_TIMEOUT)
     }
 
-    /// JSON-RPC call bounded by `deadline`: the transport obeys the same
-    /// deadline as the polling loop, so a startup wait cannot be renewed
-    /// by a per-request budget.
     pub fn rpc_until(&mut self, method: &str, params: &Value, deadline: Instant) -> Result<Value> {
         let request = json!({"jsonrpc": "1.0", "id": "e2e", "method": method, "params": params});
         let response = self
@@ -701,16 +572,11 @@ impl ProcessNode {
             .ok_or_else(|| Error::Protocol("missing RPC result".into()))
     }
 
-    /// Low-level JSON-RPC call returning the full parsed envelope (or the
-    /// parsed error reply); never converts a structured error into
-    /// [`Error::Rpc`].
     pub fn rpc_raw(&mut self, request: &Value) -> Result<Value> {
-        let response = self.http("POST", "/", serde_json::to_vec(request)?.as_slice(), true)?;
+        let response = self.http("POST", "/", sonic_rs::to_vec(request)?.as_slice(), true)?;
         response.json()
     }
 
-    /// HTTP request against the node's listener; `auth` toggles the
-    /// parity:parity Basic header.
     pub fn http(
         &mut self,
         method: &str,
@@ -730,9 +596,6 @@ impl ProcessNode {
         )
     }
 
-    /// HTTP request with explicit Basic-auth credentials (or none),
-    /// journaled like [`ProcessNode::http`]. Lets negative-auth tests send
-    /// credentials other than the harness pair.
     pub fn http_auth(
         &mut self,
         method: &str,
@@ -770,12 +633,10 @@ impl ProcessNode {
         response
     }
 
-    /// GET helper for REST/Esplora surfaces.
     pub fn http_get(&mut self, path: &str) -> Result<HttpResponse> {
         self.http("GET", path, &[], false)
     }
 
-    /// GET one `/api/` explorer path and return its parsed JSON body.
     pub fn http_get_json(&mut self, path: &str) -> Result<Value> {
         if !path.starts_with("/api/") || path.bytes().any(|byte| byte <= b' ' || byte == 127) {
             return Err(Error::Protocol("invalid explorer HTTP path".into()));
@@ -787,14 +648,12 @@ impl ProcessNode {
         response.json()
     }
 
-    /// Common monotonic clock for RPC and P2P evidence.
     pub(crate) const fn evidence_clock(&self) -> Instant {
         self.started
     }
 
-    /// Journal one request/reply pair against the shared monotonic clock.
     fn record(&mut self, request: &Value, reply: &Value) -> Result<()> {
-        let encoded = serde_json::to_vec(&json!({
+        let encoded = sonic_rs::to_vec(&json!({
             "request": request,
             "reply": reply,
             "at_micros": self.started.elapsed().as_micros(),
@@ -815,7 +674,6 @@ impl ProcessNode {
         Ok(())
     }
 
-    /// Poll `condition` until it returns `Some` or the deadline passes.
     pub fn wait_for<T>(
         &mut self,
         operation: &'static str,
@@ -842,7 +700,6 @@ impl ProcessNode {
         }
     }
 
-    /// Wait until `getblockcount` reports at least `height`.
     pub fn wait_block_count(&mut self, height: u64, timeout: Duration) -> Result<u64> {
         self.wait_for("block count", timeout, move |node| {
             let count = node
@@ -853,16 +710,12 @@ impl ProcessNode {
         })
     }
 
-    /// Graceful stop: `stop` RPC for Core, SIGTERM for bitcoin-rs.
     pub fn stop(mut self) -> Result<()> {
         self.stop_process()?;
         self.finish_output();
         Ok(())
     }
 
-    /// Graceful stop that keeps the datadir alive for a restart: the node
-    /// exits first (no shared storage), then custody of the `TempDir` moves
-    /// to the caller.
     pub fn stop_keep_datadir(mut self) -> Result<TempDir> {
         self.stop_process()?;
         self.finish_output();
@@ -890,29 +743,16 @@ impl ProcessNode {
         Ok(())
     }
 
-    /// Send SIGTERM to the child.
     #[cfg(unix)]
     fn send_sigterm(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-TERM", pid.as_str()]).status();
     }
 
-    /// Deliver the Windows equivalent of a graceful stop: `CTRL_BREAK_EVENT`
-    /// is the only console event another process can aim at a specific
-    /// process group, and the node maps it through its CRT SIGBREAK
-    /// registration onto the shared shutdown flag. The child was spawned
-    /// with `CREATE_NEW_PROCESS_GROUP` so the group id is its pid.
-    ///
-    /// The event only reaches a child sharing this console; when the
-    /// harness has none (a service or a windowless parent) delivery fails
-    /// and there is no graceful stop to wait for, so the failure escalates
-    /// to a forced terminate immediately rather than stalling the stop
-    /// timeout.
     #[cfg(windows)]
     fn send_sigterm(&mut self) {
         use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
         // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
-        // group id; a stale pid simply makes the call a no-op.
         let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid()) };
         if delivered == 0 {
             eprintln!(
@@ -924,17 +764,12 @@ impl ProcessNode {
         }
     }
 
-    /// Send SIGKILL to the child.
     #[cfg(unix)]
     pub fn send_sigkill(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-KILL", pid.as_str()]).status();
     }
 
-    /// Forcibly terminate the child, the Windows counterpart of SIGKILL.
-    /// `Child::kill` acts on the process handle owned by `self.child`, so
-    /// a pid recycled after the child exits can never redirect the kill at
-    /// an unrelated process the way an `OpenProcess(pid)` lookup could.
     #[cfg(windows)]
     pub fn send_sigkill(&mut self) {
         let _ = self.child.kill();
@@ -957,10 +792,6 @@ impl Drop for ProcessNode {
     }
 }
 
-/// Retains the newest `MAX_OUTPUT` bytes of a child's stream — the tail is
-/// where a late crash or error loop actually shows up; the head is least
-/// diagnostic. The tail is mirrored to `file` as it is captured so evidence
-/// readers see output while the child is still running.
 fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let path = file;
@@ -969,8 +800,6 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
         };
         let mut tail: VecDeque<u8> = VecDeque::new();
         let limit = usize::try_from(MAX_OUTPUT).unwrap_or(usize::MAX);
-        // File bytes already dropped from `tail`; once they reach `limit` the
-        // file (stale head + live tail) is compacted back to the tail.
         let mut stale = 0_usize;
         let mut buffer = [0_u8; 8192];
         loop {
@@ -985,8 +814,6 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
                         stale += excess;
                     }
                     if stale >= limit && publish_tail(&path, tail.make_contiguous()).is_ok() {
-                        // The rename orphaned `file` onto the old inode — reopen
-                        // the published path to keep appending to it.
                         if let Ok(fresh) = OpenOptions::new().append(true).open(&path) {
                             file = fresh;
                         }
@@ -996,7 +823,6 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
                 }
             }
         }
-        // Rest state: file is exactly the retained tail, honoring MAX_OUTPUT.
         if stale > 0 {
             let _ = publish_tail(&path, tail.make_contiguous());
         }
@@ -1004,9 +830,6 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
     })
 }
 
-/// Writes `bytes` to a side file, then atomically renames it over `path`: a
-/// concurrent reader of the log always sees one complete generation — never
-/// a truncation window between `set_len(0)` and a rewrite.
 fn publish_tail(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let side = path.with_extension("tmp");
     {
@@ -1021,7 +844,6 @@ fn publish_tail(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// Evidence runs that recorded this invalid startup flag as their argv.
     fn invalid_flag_runs() -> usize {
         let root = workspace().join("target/process-harness/e2e");
         let Ok(entries) = fs::read_dir(&root) else {
@@ -1031,17 +853,12 @@ mod tests {
             .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
             .filter(|entry| {
-                // A marker distinct from the flag the sibling test binary uses,
-                // so concurrent harness binaries never collide on this count.
                 fs::read_to_string(entry.path().join("launch.json"))
                     .is_ok_and(|text| text.contains("--process-harness-invalid-option-retry-audit"))
             })
             .count()
     }
 
-    /// The spawn retry exists for the reserve-release port race only: a
-    /// child that died for any other reason must surface after exactly one
-    /// attempt, not after the whole bounded budget.
     #[test]
     fn spawn_retry_does_not_fire_on_a_non_port_bind_startup_failure() -> Result<()> {
         let datadir = tempfile::tempdir()?;
@@ -1070,10 +887,6 @@ mod tests {
         Ok(())
     }
 
-    /// The pinned Core RPC-steal pair must match the port-race evidence and
-    /// nothing else: the fatal stderr line plus the per-endpoint stdout
-    /// warning retries, while a lookup failure or an unrelated exit never
-    /// does, so the bounded retry cannot fire on the wrong cause.
     #[test]
     fn busy_port_detector_matches_only_the_core_rpc_steal_pair() -> Result<()> {
         fn evidence_with(stdout: &str, stderr: &str) -> Result<(tempfile::TempDir, PathBuf)> {
@@ -1110,9 +923,6 @@ mod tests {
         Ok(())
     }
 
-    /// Readiness adopts a probe only with the child's own bind proof: a
-    /// same-credential thief can answer while our child is still alive but
-    /// unbound, so the reply alone never identifies our node.
     #[test]
     fn readiness_requires_the_child_own_bind_evidence() -> Result<()> {
         fn evidence_with(stdout: &str, stderr: &str) -> Result<(tempfile::TempDir, PathBuf)> {

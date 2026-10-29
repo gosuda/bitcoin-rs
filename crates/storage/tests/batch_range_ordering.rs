@@ -1,5 +1,3 @@
-//! Ordered range-deletion laws shared by the portable storage backends.
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use std::path::Path;

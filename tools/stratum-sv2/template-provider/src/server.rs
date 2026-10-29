@@ -72,8 +72,6 @@ pub async fn run(
         }
     };
     session_stop.send_replace(true);
-    // Sessions cancel incomplete reads by closing the connection, but finish
-    // awaited blocking calls before dropping their Node borrows.
     while sessions.join_next().await.is_some() {}
     outcome
 }
@@ -92,8 +90,6 @@ async fn wait_after_accept_error(
     ) {
         return Err(error.to_string());
     }
-    // Aborted connections and temporary resource exhaustion need not kill Node.
-    // Back off even for OS-specific errors to avoid spinning on a busy listener.
     warn!(%error, "TDP accept failed; retrying after 100ms");
     if *stop.borrow() {
         return Ok(());
@@ -113,29 +109,16 @@ struct Session {
     cert_validity_secs: u64,
 }
 
-/// What one connection knows about its jobs. It lives exactly as long as the
-/// connection, so closing it releases the pin and nothing else tracks it.
 #[derive(Default)]
 struct Jobs {
-    /// The pool's latest `CoinbaseOutputConstraints`. No job is sent before it.
     budget: Option<CoinbaseBudget>,
-    /// A fresh candidate is owed: the constraints or the generation changed.
     due: bool,
-    /// When the last request lost a race and may run again. It is one pending
-    /// request per connection at a fixed delay, so churn cannot multiply load.
     retry: Option<tokio::time::Instant>,
-    /// At most one candidate request runs for this connection.
     refresh: Option<Refresh>,
-    /// The job last delivered in full. The shared history is bounded and other
-    /// sessions fill it, so it must not decide whether the pool's current job
-    /// can still be answered or solved.
     current: Option<Arc<TemplateState>>,
 }
 
 impl Jobs {
-    /// Resolves exactly `id`: this connection's current job first, then the
-    /// shared history of superseded jobs. An unknown id never resolves to a
-    /// newer job, whose body would differ from the one the pool solved.
     fn resolve(&self, hub: &Hub, id: u64) -> Option<Arc<TemplateState>> {
         match &self.current {
             Some(current) if current.id == id => Some(Arc::clone(current)),
@@ -144,7 +127,6 @@ impl Jobs {
     }
 }
 
-/// A blocking request to the mining owner, tagged with the budget it asked for.
 struct Refresh {
     budget: CoinbaseBudget,
     task: JoinHandle<Result<Option<Arc<Candidate>>, String>>,
@@ -160,11 +142,6 @@ impl Refresh {
     }
 }
 
-/// Asks the mining owner for the candidate that leaves `budget` room in the
-/// coinbase. It never long-polls, so the owner's own bounds end the call even if
-/// its session is gone. `None` means the owner reported a transient race: the
-/// generation moved during assembly, or another budgeted assembly held the
-/// owner's single slot for its whole bounded wait.
 fn candidate_for(node: &Node, budget: CoinbaseBudget) -> Result<Option<Arc<Candidate>>, String> {
     let mining = node.mining_control().map_err(|e| e.to_string())?;
     match mining.get_block_template(BlockTemplateRequest {
@@ -181,8 +158,6 @@ fn candidate_for(node: &Node, budget: CoinbaseBudget) -> Result<Option<Arc<Candi
     }
 }
 
-/// Resolves when the running request ends and clears it; pends while none runs.
-/// Dropping this future between polls loses nothing: the handle stays in place.
 async fn refreshed(
     refresh: &mut Option<Refresh>,
 ) -> (CoinbaseBudget, Result<Option<Arc<Candidate>>, String>) {
@@ -198,7 +173,6 @@ async fn refreshed(
     (budget, outcome)
 }
 
-/// Resolves at `at`; pends when there is no retry to wait for.
 async fn retry_due(at: Option<tokio::time::Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -210,9 +184,6 @@ impl Session {
     async fn serve(mut self, stream: TcpStream) -> Result<(), String> {
         let mut jobs = Jobs::default();
         let outcome = self.run(stream, &mut jobs).await;
-        // A blocking call cannot be cancelled and holds a Node borrow. Await it
-        // on every exit, whether shutdown, error or disconnect; the owner's
-        // bounds make that finite.
         if let Some(refresh) = jobs.refresh.take() {
             let _ = refresh.task.await;
         }
@@ -266,8 +237,6 @@ impl Session {
             if *self.stop.borrow() {
                 return Ok(());
             }
-            // Keep this exact future alive across template refreshes. The SRI
-            // Noise reader is NOT cancellation-safe after a partial record.
             let read = reader.read_frame();
             tokio::pin!(read);
             let message = loop {
@@ -301,8 +270,6 @@ impl Session {
             };
             match message {
                 TemplateDistributionOwned::CoinbaseOutputConstraints(c) => {
-                    // Jobs already delivered keep the meaning they were sent
-                    // with; only the next one is built for the new budget.
                     jobs.budget = Some(CoinbaseBudget {
                         additional_size: c.coinbase_output_max_additional_size,
                         additional_sigops: c.coinbase_output_max_additional_sigops,
@@ -342,8 +309,6 @@ impl Session {
                 }
                 TemplateDistributionOwned::SubmitSolution(solution) => {
                     let Some(template) = jobs.resolve(&self.hub, solution.template_id) else {
-                        // TDP has no reply to a solution. Only a superseded job
-                        // can be missing here: the current one is pinned.
                         warn!(
                             template_id = solution.template_id,
                             "solution names a template no longer retained; not submitted"
@@ -375,8 +340,6 @@ impl Session {
         }
     }
 
-    /// Turns a finished candidate request into a job for the pool, unless the
-    /// pool asked for a different budget meanwhile or already holds that job.
     async fn deliver(
         &self,
         writer: &mut NoiseTcpWriteHalf,
@@ -390,12 +353,8 @@ impl Session {
             return Ok(());
         };
         if jobs.budget != Some(asked) {
-            // The constraints changed while this ran, which already owes a new request.
             return Ok(());
         }
-        // Compare owner identities, not retained ids: other sessions may have
-        // evicted the pinned job from the history, and issuing it again would
-        // hand the pool the same job under a new id.
         if jobs
             .current
             .as_ref()
@@ -403,7 +362,6 @@ impl Session {
         {
             return Ok(());
         }
-        // Retaining hashes the candidate's merkle branch: keep that off the runtime.
         let hub = self.hub.clone();
         let state = tokio::task::spawn_blocking(move || hub.issue(candidate))
             .await
@@ -412,16 +370,12 @@ impl Session {
     }
 }
 
-/// Writes one job, then pins it. The previous pin stays until both messages are
-/// written, so a failed write leaves the job the pool already holds resolvable.
 async fn push_template(
     writer: &mut NoiseTcpWriteHalf,
     pin: &mut Option<Arc<TemplateState>>,
     state: Arc<TemplateState>,
     budget: CoinbaseBudget,
 ) -> Result<(), String> {
-    // The mining owner built this candidate for `budget`. A miss is its contract
-    // violation: close the session rather than hand the pool an oversized job.
     state
         .candidate
         .admits(budget)
@@ -450,7 +404,6 @@ async fn push_template(
     Ok(())
 }
 
-/// Decodes a frame as an owned common message, `None` on failure.
 fn parse_common(frame: &mut InboundFrame) -> Option<CommonMessagesOwned> {
     stratum_apps::stratum_core::parsers_sv2::CommonMessages::try_from((
         frame.header().msg_type(),
@@ -460,7 +413,6 @@ fn parse_common(frame: &mut InboundFrame) -> Option<CommonMessagesOwned> {
     .map(|m| m.into_owned())
 }
 
-/// Encodes and writes one SV2 message.
 async fn send(writer: &mut NoiseTcpWriteHalf, message: AnyMessageOwned) -> Result<(), String> {
     let frame = OutboundFrame::from_message(message).map_err(|e| format!("frame encode: {e}"))?;
     tokio::time::timeout(Duration::from_secs(10), writer.write_frame(frame))

@@ -42,7 +42,6 @@ impl TemplateState {
 
     pub fn new_template_msg(&self) -> Result<NewTemplateOwned, String> {
         let c = &self.candidate;
-        // The mining owner constructs payout first, followed by required outputs.
         let outputs = c
             .coinbase
             .outputs

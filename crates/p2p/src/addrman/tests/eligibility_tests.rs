@@ -2,8 +2,6 @@ use super::*;
 
 #[test]
 fn ordinary_selection_uses_existing_service_contract_for_new_and_tried() {
-    // Core ordinary-service policy is separate from FEELER Good and address-DB
-    // service policy: NETWORK|WITNESS, or LIMITED|WITNESS below depth144.
     for tried in [false, true] {
         for (services, depth, expected) in [
             (0, 143, false),

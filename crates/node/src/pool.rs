@@ -1,5 +1,3 @@
-//! Node-owned native pool lifecycle. No wallet or signing capability enters this module.
-
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -24,7 +22,6 @@ mod sv2;
 #[cfg(test)]
 mod tests;
 
-/// Constructed before RPC; listeners are started only after RPC binds successfully.
 pub(crate) struct PoolService {
     config: crate::config::PoolConfig,
     host: Arc<ledger::LedgerHost>,
@@ -59,14 +56,6 @@ impl crate::storage_backend::StoreConsumer for LedgerComposer {
     }
 }
 
-/// Composition-time bounds for the single shared pool core.
-///
-/// Every protocol listener shares one [`PoolCore`]: at most 64 retained jobs,
-/// one session slot per configured connection plus a spare set for reconnects
-/// (twice the connection cap), 65,536 duplicate-tracked shares per job, and a
-/// deferred share-ledger outbox of 1024 records / 8 MiB. Owner sessions are
-/// not live TCP connections; the aggregate TCP caps live in the shared
-/// [`ConnectionLimiter`](bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter).
 struct ComposedCore {
     book: JobBookConfig,
     outbox_items: usize,
@@ -158,7 +147,6 @@ impl PoolService {
     }
 
     pub(crate) fn start(&mut self) -> Result<()> {
-        // Never acknowledge work before there is a durably opened ledger and a template.
         self.core
             .refresh(None, Vec::new())
             .context("initial pool template")?;
@@ -205,7 +193,6 @@ impl PoolService {
                 .name("pool-reconcile".into())
                 .spawn(move || {
                     while !cancel.load(Ordering::Acquire) {
-                        // No long-poll: shutdown never waits for a future mining generation.
                         if let Err(error) = core.refresh(None, Vec::new()) {
                             core.invalidate_active();
                             tracing::warn!(%error, "pool template refresh unavailable");
@@ -294,7 +281,6 @@ impl Drop for PoolService {
         if let Err(error) = self.shutdown(Instant::now() + Duration::from_secs(10)) {
             tracing::error!(%error, "pool shutdown failed");
         }
-        // A failed deadline is not permission to detach a durable writer.
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
             if worker.join().is_err() {

@@ -1,10 +1,3 @@
-//! Bitcoin Core-compatible ZMQ notification protocol and transport.
-//!
-//! Bitcoin Core publishes "hashblock", "hashtx", "rawblock", and "rawtx" events
-//! via ZMQ for client subscribers. The node decides when committed transitions
-//! are published; this module owns how those notifications are represented and
-//! transported.
-
 #[cfg(feature = "zmq")]
 use anyhow::Context as _;
 use anyhow::{Result, ensure};
@@ -21,7 +14,6 @@ use std::collections::HashSet as StdHashSet;
 #[cfg(feature = "zmq")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// ZMQ PUB notification topic.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ZmqTopic {
@@ -32,31 +24,24 @@ pub enum ZmqTopic {
     Sequence,
 }
 
-/// Default outbound queue limit for one ZMQ PUB endpoint.
 const DEFAULT_ZMQ_HWM: u32 = 1_000;
 
-/// Configuration for one ZMQ PUB socket.
-///
-/// Topics sharing an endpoint necessarily share its socket-level HWM.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ZmqEndpointConfig {
     pub endpoint: String,
     pub topics: Vec<ZmqTopic>,
-    /// Maximum queued outbound messages, in `1..=i32::MAX`; zero is unbounded in libzmq.
     #[serde(default)]
     pub hwm: Option<u32>,
 }
 
 impl ZmqEndpointConfig {
-    /// Returns the socket HWM after applying the publisher default.
     #[must_use]
     pub fn effective_hwm(&self) -> u32 {
         self.hwm.unwrap_or(DEFAULT_ZMQ_HWM)
     }
 }
 
-/// Validates grouped ZMQ configuration before it reaches a runtime boundary.
 pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<()> {
     let mut endpoints = StdHashSet::new();
     for config in configs {
@@ -96,7 +81,6 @@ pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<()> {
 }
 
 impl ZmqTopic {
-    /// Returns the Core topic string.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -108,7 +92,6 @@ impl ZmqTopic {
         }
     }
 
-    /// Returns the Core notifier name reported by `getzmqnotifications`.
     #[must_use]
     pub const fn notifier_type(self) -> &'static str {
         match self {
@@ -132,20 +115,11 @@ impl ZmqTopic {
     }
 }
 
-/// Event published on Core's unified `sequence` topic.
 #[derive(Debug, Eq, PartialEq)]
 pub enum SequenceEvent {
-    /// A block was connected.
     Connected(Hash256),
-    /// A block was disconnected.
     Disconnected(Hash256),
-    /// A transaction was admitted to the mempool, with the mempool sequence
-    /// assigned to the admission.
     Added(Txid, u64),
-    /// A transaction left the mempool, with the mempool sequence assigned to
-    /// the removal. Block-inclusion removals never publish this event: Core
-    /// suppresses `R` when the block's own `C` event already covers the
-    /// departure.
     Removed(Txid, u64),
 }
 
@@ -161,13 +135,6 @@ impl SequenceEvent {
     }
 }
 
-/// One live bound notifier, the fact Core's `getzmqnotifications` reports per
-/// active notifier.
-///
-/// Core enumerates `CZMQNotificationInterface::GetActiveNotifiers()` at call
-/// time, each carrying its type, address, and high-water mark. The projection
-/// layer owns the JSON rendering: `topic` maps to the `pub…` type string and
-/// `endpoint` to the `address` key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ZmqNotifier {
     pub topic: ZmqTopic,
@@ -175,67 +142,34 @@ pub struct ZmqNotifier {
     pub hwm: u32,
 }
 
-/// Publishes block + transaction notification events.
-///
-/// Implementations should be best-effort — publish failures must NOT propagate
-/// into the apply pipeline. Use interior mutability + atomics if state is
-/// needed; the trait is `&self`-only.
 pub trait ZmqPublisher: Send + Sync + core::fmt::Debug {
-    /// Returns whether any ZMQ notification emitted by the apply path is observable.
-    ///
-    /// The default is conservative for external implementations: keep invoking
-    /// publisher methods unless an implementation proves the whole publisher is
-    /// a no-op.
     fn wants_notifications(&self) -> bool {
         true
     }
 
-    /// Returns whether the publisher can consume per-transaction raw bytes.
-    ///
-    /// The default is conservative for external implementations: keep producing
-    /// rawtx payloads unless an implementation proves they are unobservable.
     fn wants_rawtx(&self) -> bool {
         true
     }
 
-    /// Returns whether the publisher can consume full serialized block bytes.
-    ///
-    /// The default is conservative for external implementations: keep producing
-    /// rawblock payloads unless an implementation proves they are unobservable.
     fn wants_rawblock(&self) -> bool {
         true
     }
 
-    /// Returns the notifiers this publisher has live-bound, enumerated at
-    /// call time.
-    ///
-    /// The default reports none: publishers without enumerable bound
-    /// endpoints (the no-op and tracing publishers) have no live notifier,
-    /// matching Core's empty result when the ZMQ notification interface is
-    /// absent.
     fn active_notifiers(&self) -> Vec<ZmqNotifier> {
         Vec::new()
     }
 
-    /// Publish a `hashblock` notification (block hash big-endian display bytes).
     fn publish_hashblock(&self, hash: Hash256);
 
-    /// Publish a `hashtx` notification (transaction id big-endian display bytes).
     fn publish_hashtx(&self, txid: Txid);
 
-    /// Publish a `rawblock` notification with the serialized block bytes.
     fn publish_rawblock(&self, bytes: &[u8]);
 
-    /// Publish a `rawtx` notification with the serialized transaction bytes.
     fn publish_rawtx(&self, bytes: &[u8]);
 
-    /// Publish a block event on Core's unified `sequence` topic.
     fn publish_sequence(&self, _event: SequenceEvent) {}
 }
 
-/// Default no-op implementation. All methods discard their input silently.
-///
-/// Use this when ZMQ notifications are not configured.
 #[derive(Debug)]
 pub struct NoOpZmqPublisher;
 
@@ -261,13 +195,6 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawtx(&self, _bytes: &[u8]) {}
 }
 
-/// Publish one `hashtx` notification per newly admitted transaction id.
-///
-/// The sole caller is [`MempoolSequenceObserver`]'s `Accepted` arm, which
-/// passes each committed `Accepted` change's txid in mutation order.
-/// Rejected submissions, already-known (duplicate) admissions, and removals
-/// never reach this helper: duplicates and refusals commit nothing, and
-/// block-inclusion removals publish nothing.
 pub fn publish_admitted_hashtx(
     publisher: &dyn ZmqPublisher,
     txids: impl IntoIterator<Item = Txid>,
@@ -283,7 +210,6 @@ struct EndpointSocket {
     socket: Mutex<zmq::Socket>,
 }
 
-/// Socket-backed ZMQ PUB publisher.
 #[cfg(feature = "zmq")]
 pub struct SocketZmqPublisher {
     _context: zmq::Context,
@@ -309,11 +235,6 @@ impl fmt::Debug for SocketZmqPublisher {
 
 #[cfg(feature = "zmq")]
 impl SocketZmqPublisher {
-    /// Binds one PUB socket per endpoint group.
-    ///
-    /// Duplicate endpoint groups are rejected because one endpoint identifies
-    /// one owned socket and one HWM. Duplicate topics inside a group are
-    /// recorded once.
     pub fn bind(endpoint_configs: &[ZmqEndpointConfig]) -> Result<Self> {
         let deduped_configs: Vec<ZmqEndpointConfig> = endpoint_configs
             .iter()
@@ -467,18 +388,12 @@ impl ZmqPublisher for SocketZmqPublisher {
     }
 }
 
-/// Body frame for a `hashblock`/`hashtx`/`sequence` event: the hash or txid's
-/// natural byte order reversed for the wire.
 #[cfg(any(feature = "zmq", test))]
 fn reversed_hash_body(mut bytes: [u8; 32]) -> [u8; 32] {
     bytes.reverse();
     bytes
 }
 
-/// Body frame for a `sequence` topic event: the reversed hash/txid bytes and
-/// the label byte, plus — for mempool `A`/`R` events — the mempool sequence
-/// as a little-endian u64. The transport's own 4-byte counter stays in its
-/// separate trailing frame.
 #[cfg(any(feature = "zmq", test))]
 fn sequence_payload(event: SequenceEvent) -> Vec<u8> {
     match event {
@@ -515,11 +430,6 @@ fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
     host.contains(':') && tail.starts_with(':') && tail.len() > 1
 }
 
-/// Publishes committed admissions as `hashtx`, `rawtx`, and Core `sequence`
-/// `A` events, and removals as `sequence` `R` events.
-///
-/// Install on the [`bitcoin_rs_mempool::MempoolGateway`] observer slot when
-/// ZMQ notifications are configured. Raw bodies are retained only for `rawtx`.
 pub struct MempoolSequenceObserver {
     publisher: std::sync::Arc<dyn ZmqPublisher>,
 }
@@ -533,7 +443,6 @@ impl core::fmt::Debug for MempoolSequenceObserver {
 }
 
 impl MempoolSequenceObserver {
-    /// Observes on behalf of `publisher`.
     #[must_use]
     pub fn new(publisher: std::sync::Arc<dyn ZmqPublisher>) -> Self {
         Self { publisher }
@@ -551,8 +460,6 @@ impl bitcoin_rs_mempool::MempoolObserver for MempoolSequenceObserver {
             let txid = Txid(change.txid);
             match change.outcome {
                 bitcoin_rs_mempool::MutationOutcome::Accepted => {
-                    // Core's `TransactionAddedToMempool` notifies `hashtx`
-                    // and `rawtx` for every admission, then `sequence` `A`.
                     self.publisher.publish_hashtx(txid);
                     if self.publisher.wants_rawtx()
                         && let Some((_, tx)) = envelope
@@ -838,8 +745,6 @@ mod tests {
             endpoint(dedicated.clone(), vec![ZmqTopic::Sequence], 9),
         ])?;
 
-        // Read through the trait object — the path RPC consumers take — so the
-        // enumeration is proven to live on the `dyn ZmqPublisher` surface.
         let publisher: Arc<dyn ZmqPublisher> = Arc::new(publisher);
         assert_eq!(
             publisher.active_notifiers(),
@@ -923,16 +828,6 @@ mod tests {
 mod manifest_tests {
     use super::*;
 
-    /// Every topic this publisher publishes carries a compatibility claim,
-    /// and every claimed topic is one this publisher can put on the wire.
-    ///
-    /// The registry's ZMQ rows are the declared surface; the names here are
-    /// the ones that go on the wire, so a topic added without a declared row
-    /// is an undeclared surface — which is exactly what the table exists to
-    /// make impossible. The comparison is feature-independent: the rows and
-    /// this topic enum both exist in every build, and the `zmq` feature
-    /// gating of the publisher itself is pinned by the handler and coverage
-    /// gates.
     #[test]
     fn zmq_topic_names_match_the_compatibility_manifest() {
         let published: std::collections::BTreeSet<&str> = [
@@ -954,9 +849,6 @@ mod manifest_tests {
             "published ZMQ topics and the declared ZMQ rows must name the same set"
         );
 
-        // getzmqnotifications names each topic `pub<topic>`; the manifest
-        // row is keyed by the bare topic, so the wire-visible notifier
-        // name must derive from it exactly.
         for topic in [
             ZmqTopic::HashBlock,
             ZmqTopic::HashTx,
@@ -1091,7 +983,6 @@ mod manifest_tests {
         subscriber.set_subscribe(b"")?;
         subscriber.set_rcvtimeo(3_000)?;
         subscriber.connect(&address)?;
-        // A block sequence probe establishes the subscription before admission.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
             publisher.publish_sequence(SequenceEvent::Connected(Hash256::from_le_bytes(&[0; 32])));
@@ -1130,10 +1021,6 @@ mod manifest_tests {
         let raw = subscriber.recv_multipart(0)?;
         assert_eq!(raw[0].as_slice(), b"rawtx");
         assert_eq!(raw[1], expected);
-        // Per-topic transport counters (`ZmqTopic::index`): the warm-up loop above
-        // publishes `SequenceEvent::Connected`, which advances only the `Sequence`
-        // counter (index 4). This is the first `rawtx` publish, so the `RawTx`
-        // counter (index 3) is still 0 here.
         assert_eq!(raw[2], 0_u32.to_le_bytes());
         let added = subscriber.recv_multipart(0)?;
         assert_eq!(added[0].as_slice(), b"sequence");
@@ -1174,9 +1061,6 @@ mod manifest_tests {
         let observer = std::sync::Arc::new(MempoolSequenceObserver::new(publisher));
         let capture = std::sync::Arc::new(CaptureCheck::default());
         let composite = bitcoin_rs_mempool::CompositeObserver::new();
-        // Rawtx disabled: neither leg registers body interest, so the commit
-        // retains nothing even though the sequence leg would publish rawtx
-        // had a subscriber been present at delivery.
         composite.add_leg("zmq", observer, bitcoin_rs_mempool::BodyInterest::Metadata);
         composite.add_leg(
             "capture",
@@ -1371,8 +1255,6 @@ mod manifest_tests {
     }
 
     #[test]
-    // End-to-end fan-out coverage in one readable sequence; splitting
-    // would scatter the arrange-act-assert across helpers with no reuse.
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
             AdmissionOrigin, BodyInterest, CompositeObserver, Mempool, MempoolGateway,

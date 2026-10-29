@@ -50,7 +50,6 @@ pub use assumeutxo::{
 mod checkpoint;
 use checkpoint::CheckpointError;
 mod assumeutxo_snapshot;
-/// Typed chainstate mutation failures.
 mod error;
 pub mod events;
 mod journal;
@@ -59,19 +58,14 @@ pub mod recovery;
 pub mod reorg;
 pub mod verify;
 
-/// Historical script-verification policy owned by authoritative chainstate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationMode {
-    /// Every script executes; assume-valid settings are ignored.
     Full,
-    /// Skip scripts through a pinned assume-valid anchor.
     AssumeValid,
-    /// Skip scripts below the best header tip.
     Fast,
 }
 
 impl ValidationMode {
-    /// Parses a configuration spelling, case-insensitively.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -83,7 +77,6 @@ impl ValidationMode {
     }
 }
 
-/// Chainstate journal durability and retention policy.
 #[derive(Clone, Copy, Debug)]
 pub struct ChainstateJournalConfig {
     pub enabled: bool,
@@ -110,29 +103,24 @@ impl Default for ChainstateJournalConfig {
     }
 }
 
-/// Inputs required to open a chainstate journal writer.
 pub struct JournalBootstrap {
     pub open_existing: bool,
-    /// Full-checkpoint generation the journal extends.
     pub base_generation: u64,
     pub height: u32,
     pub block_hash: [u8; 32],
     pub prev_hash: [u8; 32],
-    /// Cumulative transaction count through the durable base.
     pub chain_tx_count: u64,
     pub config: ChainstateJournalConfig,
 }
 
 type SameBlockSpentSet = hashbrown::HashSet<OutPoint>;
 
-/// The transaction-count delta contributed by one block.
 fn tx_count_delta_for(block: &Block) -> u64 {
     u64::try_from(block.txs.len()).unwrap_or(u64::MAX)
 }
 
 const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
-/// Admission barrier shared by every cloned apply handle.
 pub(crate) struct ApplyAdmission {
     closed: Arc<AtomicBool>,
     barrier: RwLock<()>,
@@ -168,18 +156,15 @@ impl ApplyAdmission {
         self.barrier.write()
     }
 
-    /// Temporarily pauses new chain transitions while the returned guard lives.
     pub(crate) fn pause(&self) -> RwLockWriteGuard<'_, ()> {
         self.barrier.write()
     }
 
-    /// Closes admission without taking the barrier.
     pub(crate) fn close_permanently(&self) {
         self.closed.store(true, Ordering::Release);
     }
 }
 
-/// Admission plus the chain-transition lock.
 struct TransitionGuard<'a> {
     _transition: TransitionAuthorityGuard<'a>,
     _admission: RwLockReadGuard<'a, ()>,
@@ -212,14 +197,12 @@ fn begin_chain_transition<'a>(
     })
 }
 
-/// Proof that this chainstate's admission and transition lock are both held.
 pub struct TransitionLock<'a> {
     chainstate: &'a Chainstate,
     guard: TransitionGuard<'a>,
 }
 
 impl<'a> TransitionLock<'a> {
-    /// Promotes this owner-bound lock into the authoritative mutation capability.
     #[must_use]
     pub fn into_transition(self) -> ChainTransition<'a> {
         ChainTransition {
@@ -229,7 +212,6 @@ impl<'a> TransitionLock<'a> {
     }
 }
 
-/// Chain-mutation authority required by destructive block-body pruning.
 pub struct PruneAuthority {
     admission: Arc<ApplyAdmission>,
     chain_transition: TransitionAuthority,
@@ -238,12 +220,8 @@ pub struct PruneAuthority {
 }
 
 impl PruneAuthority {
-    /// Acquires exclusive chain-mutation authority for one pruning pass.
     pub fn begin(&self) -> core::result::Result<PruneGuard<'_>, ApplyError> {
         let transition = begin_chain_transition(&self.admission, &self.chain_transition)?;
-        // Pruning removes a prefix, so a requested height above the snapshot
-        // base still removes the history needed to validate that base. Check
-        // under the same transition lock that publishes role changes.
         let role = *self.role.read();
         if let Some(base_height) = role.base_height() {
             return Err(ApplyError::PruneDuringHistoricalValidation { base_height });
@@ -255,7 +233,6 @@ impl PruneAuthority {
     }
 }
 
-/// Proof that pruning owns chain mutation and may read the authoritative tip.
 pub struct PruneGuard<'a> {
     _transition: TransitionGuard<'a>,
     applied_tip: &'a ArcSwapOption<TipSnapshot>,
@@ -263,24 +240,18 @@ pub struct PruneGuard<'a> {
 
 impl PruneGuard<'_> {
     #[must_use]
-    /// Returns the authoritative applied-tip height while pruning owns the transition.
     pub fn applied_tip_height(&self) -> Option<u32> {
         self.applied_tip.load().as_ref().map(|tip| tip.height)
     }
 }
 
-/// Hash-pinned assume-valid trust gate (Bitcoin Core `-assumevalid` semantics).
 pub(crate) struct AssumeValidGate {
-    /// Pinned `(height, hash)` anchor, or `None` when no pin applies.
     anchor: Option<(u32, Hash256)>,
-    /// Whether the active chain is currently verified to contain the anchor.
     trusted: AtomicBool,
-    /// Whether the diverged-chain warning has already been emitted.
     warned: AtomicBool,
 }
 
 impl AssumeValidGate {
-    /// Builds the gate for `network` gated on `configured_height`.
     #[must_use]
     fn new(network: Network, configured_height: u32) -> Self {
         let anchor = network
@@ -293,7 +264,6 @@ impl AssumeValidGate {
         }
     }
 
-    /// Builds a gate directly from an optional pinned anchor.
     #[cfg(test)]
     #[must_use]
     fn with_anchor(anchor: Option<(u32, Hash256)>) -> Self {
@@ -304,13 +274,11 @@ impl AssumeValidGate {
         }
     }
 
-    /// Returns whether historical script verification may currently be skipped.
     #[must_use]
     fn trusted(&self) -> bool {
         self.trusted.load(Ordering::Relaxed)
     }
 
-    /// Re-evaluates trust against `tree`'s active chain.
     fn evaluate(&self, tree: &BlockTree) {
         let Some((pinned_height, pinned_hash)) = self.anchor else {
             return;
@@ -337,135 +305,67 @@ impl AssumeValidGate {
     }
 }
 
-/// Where a block being applied came from. Decides whether its scripts execute.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BlockProvenance {
-    /// Untrusted input (peer delivery, submitblock, file import): scripts run
-    /// unless the assume-valid gate covers the height.
     Network,
-    /// A body this node validated and persisted under its recovery marker
-    /// before the crash; its scripts already ran here.
     LocalReplay,
 }
 
-/// Committed connect. Derived consumers read this after the tip is published.
 #[derive(Clone, Debug)]
 pub struct ConnectOutcome {
-    /// New applied tip.
     pub tip: TipSnapshot,
-    /// The durable-head commit id that certified this block before it
-    /// published. Windows share one id across a committed group prefix.
     pub commit_id: u64,
-    /// Height of the connected block.
     pub height: u32,
-    /// Hash of the connected block.
     pub hash: Hash256,
     /// Transaction ids in block order.
     pub txids: Vec<Txid>,
-    /// Canonical block bytes when a derived consumer asked for them, else empty.
     pub block_bytes: bytes::Bytes,
-    /// Per-transaction wire bytes when a derived consumer asked for `rawtx`.
     pub raw_txs: Option<Vec<Vec<u8>>>,
 }
 
-/// Committed disconnect. Derived consumers read this after the tip is published.
 #[derive(Debug)]
 pub struct DisconnectOutcome {
-    /// Hash of the disconnected block.
     pub hash: Hash256,
-    /// Creating txids of coins the undo restored, for orphan re-evaluation.
     pub restored_parents: Vec<Txid>,
 }
 
-/// Connect intent. See `ARCH-07` in `docs/contracts/architecture.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplyIntent {
     Commit,
-    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Propose,
 }
 
-/// Outcome of [`apply_block_admitted`] once intent is known.
 enum ApplyFinish {
-    /// Commit path: the new applied tip, already published.
     Committed(Box<ConnectOutcome>),
-    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Proposed,
 }
 
-/// Coherent read of the applied tip and its transaction count.
 #[derive(Debug)]
 pub struct ChainstateSnapshot {
-    /// Authoritative applied tip, if any block has committed.
     pub applied: Option<TipSnapshot>,
-    /// Cumulative transaction count of the applied chain.
     pub chain_tx_count: ChainTxCount,
 }
 
-/// Facts returned after Chainstate admits one contiguous header batch.
 #[derive(Debug)]
 pub struct HeaderAdmissionOutcome {
-    /// Number of accepted inputs, including idempotent duplicates.
     pub accepted: usize,
-    /// Hash of the final input header, when the batch was non-empty.
     pub announced_tip: Option<Hash256>,
-    /// Height of `announced_tip` on the active header chain, when resolvable.
     pub active_height: Option<i32>,
-    /// The active header tip this batch moved onto another branch, when it did:
-    /// the tip that was active before the batch, now a stale side-branch tip.
-    /// `None` for ordinary extension. A batch rejected after a valid prefix
-    /// moved the tip returns [`HeaderAdmissionError::Rejected`] and reports no
-    /// displaced tip.
     pub demoted_tip: Option<Hash256>,
 }
 
-/// Failure to admit a batch at the authoritative header-tree boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum HeaderAdmissionError {
-    /// Mutation admission was closed before header validation began.
     #[error("header admission refused: {0}")]
     Refused(ApplyError),
-    /// Header validation rejected the batch.
     #[error(transparent)]
     Rejected(ChainError),
 }
 
-/// Early-announce hook for a commit-intent child of the published tip.
-///
-/// The hook runs after block rules pass, on the connecting thread.
-/// The transition lock is held, so the hook must not reenter
-/// chainstate mutation: it only reads the published tip and hands the block
-/// to P2P, which announces without publishing a tip or advancing mining.
 pub type PowValidBlockHook = Arc<dyn Fn(&Block, Hash256, u32) + Send + Sync>;
 
-/// Staged-tip hook for speculative template preparation.
-///
-/// The hook fires after a block's in-memory staging (UTXO commit and
-/// bookkeeping) and before its durable sync, on the connecting thread with the
-/// chain-transition reservation held. No domain write lock (block tree, UTXO
-/// set, journal) is held across the call; the hook must not take one either,
-/// and must never reenter chainstate mutation.
-///
-/// The staged tip is speculative, never the published tip: a later sync or
-/// durable-head failure abandons it without publication, so the callback must
-/// treat the tip as uncertified (reconstructed chain-transaction count,
-/// commit id 0) and must never publish or certify it, advance the mining
-/// generation, install a candidate, or alter error propagation or durability
-/// order. Replay of an already-committed gap never fires this hook.
-///
-/// The callback must enqueue only: gate out ineligible work (initial block
-/// download), clone the block into an owned handle for the preparation worker
-/// (a bounded slot where a newer tip replaces an unstarted older one), and
-/// return at once. The block is borrowed from the caller's apply batch and is
-/// valid only for the call, so chainstate itself never clones it — ownership
-/// crosses threads only for eligible work, inside the callback. The callback
-/// must not wait for preparation, join the worker, or block on pool locks —
-/// stalling the connecting thread stalls publication of the very tip being
-/// prepared, and a delayed worker that starts after removal must observe the
-/// install receipt rather than hold the commit path.
 pub type TipStagedHook = Arc<dyn Fn(&TipSnapshot, &Block) + Send + Sync>;
 
-/// In-process facade for authoritative applied-chain mutation.
 #[derive(Clone)]
 pub struct Chainstate {
     pub(crate) network: Network,
@@ -484,106 +384,52 @@ pub struct Chainstate {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) tip_notification: Arc<tip_wait::TipNotification>,
-    /// Serializes whole chain transitions against each other.
     pub(crate) chain_transition: TransitionAuthority,
     pub(crate) assume_valid_height: u32,
     pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
     pub(crate) validation_mode: ValidationMode,
-    /// The one resolved script-verification engine selection. Owned by node
-    /// configuration (`validation.engine`); this handle passes it to the
-    /// engine-specific seams of the shared block/tx validation pipeline.
     pub(crate) validation_engine: bitcoin_rs_consensus::ValidationEngine,
-    /// Node-owned script-execution cache consulted on commit connects.
-    /// `Some` only when the validation engine is native; `None` under the
-    /// kernel engine, so the kernel oracle stays authoritative.
     pub(crate) script_cache: Option<Arc<ScriptExecutionCache>>,
-    /// Early compact-block announce hook, installed once by node composition
-    /// after the block announcer exists. `OnceLock` because connect reads it
-    /// on every commit while only the node installer ever writes, a single
-    /// time. The cell is shared across clones, so an install through any
-    /// handle is visible through all of them. Unset preserves the
-    /// pre-early-announce behavior.
     pub(crate) pow_valid_block: std::sync::Arc<std::sync::OnceLock<PowValidBlockHook>>,
-    /// Speculative template-preparation hook, installed once by node
-    /// composition after the mining coordinator exists. `OnceLock` because
-    /// connect reads it on every commit while only the node installer ever
-    /// writes, a single time. The cell is shared across clones, so an install
-    /// through any handle is visible through all of them. Unset preserves the
-    /// pre-staging behavior.
     pub(crate) tip_staged: std::sync::Arc<std::sync::OnceLock<TipStagedHook>>,
-    /// Chainstate-journal writer, when the journal is enabled (issue #230).
     pub(crate) journal:
         Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
-    /// Publishes checkpoints to settle rolled-back disconnect debt after a
-    /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
-    /// Capture per-transaction wire bytes for a derived `rawtx` consumer.
     pub(crate) capture_rawtx: bool,
-    /// Serialize the full block for a derived consumer (body store, index, rawblock).
     pub(crate) capture_block_bytes: bool,
-    /// Retention authority shared with the pruning pass: chain transitions
-    /// and required readers pin old-branch bodies here so pruning cannot
-    /// delete data an active transition still re-reads (`RCV-08`).
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
-    /// Optional history reads share storage's registry and bounded lease policy.
     pub(crate) history: bitcoin_rs_storage::pruning::HistoryAccess,
-    /// Process-wide initial-block-download latch owned by the chainstate.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-    /// Operational role of this chainstate instance.
     pub(crate) role: Arc<RwLock<ChainstateRole>>,
 }
 
-/// Construction inputs for one authoritative chainstate service.
 pub struct ChainstateParts {
-    /// Consensus network.
     pub network: Network,
-    /// Shared header/block tree, transferred by value to the owning chainstate.
     pub block_tree: BlockTree,
-    /// Restored applied-tip snapshot, if any.
     pub restored_applied_tip: Option<TipSnapshot>,
-    /// Authoritative UTXO set.
     pub utxo: Arc<UtxoSet>,
-    /// Coin-statistics listener attached to the UTXO set.
     pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    /// Applied-chain event publisher.
     pub chain_events: Arc<crate::events::ChainEventPublisher>,
-    /// Durable canonical block-body store, when configured.
     pub block_body_store: Option<Arc<dyn BlockBodyStore>>,
-    /// Durable undo store.
     pub undo_store: Arc<dyn UndoStore>,
-    /// Durable applied-head store.
     pub durable_head: Arc<dyn DurableHeadStore>,
-    /// The mutation role over the transition domain composition minted.
     pub chain_transition: TransitionAuthority,
-    /// Highest assume-valid height.
     pub assume_valid_height: u32,
-    /// Historical script-verification policy.
     pub validation_mode: ValidationMode,
-    /// The one resolved script-verification engine selection.
     pub validation_engine: bitcoin_rs_consensus::ValidationEngine,
-    /// Node-owned script-execution cache consulted on commit connects.
-    /// `Some` only when the validation engine is native.
     pub script_cache: Option<Arc<ScriptExecutionCache>>,
-    /// Chainstate journal writer, when journal recovery is enabled.
     pub journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
-    /// Whether connects retain raw transaction bytes for node-owned consumers.
     pub capture_rawtx: bool,
-    /// Whether connects retain canonical block bytes for node-owned consumers.
     pub capture_block_bytes: bool,
-    /// The mandatory retained-history capability storage/pruning granted.
     pub retention: bitcoin_rs_storage::MandatoryRetention,
-    /// Read role from the same storage retention registry as `retention`.
     pub history: bitcoin_rs_storage::pruning::HistoryAccess,
-    /// Operational role of this chainstate instance.
     pub role: ChainstateRole,
 }
 
-/// Held while new chain mutations are blocked.
 pub struct AdmissionGuard<'a> {
     _guard: RwLockWriteGuard<'a, ()>,
 }
 
-/// One admitted chain mutation.
 pub struct ChainTransition<'a> {
     chainstate: &'a Chainstate,
     _lock: TransitionGuard<'a>,
@@ -603,12 +449,6 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    /// Connects `payload` as the next applied tip.
-    ///
-    /// Exactness is owned by the [`BlockPayload`] constructor: raw ingress
-    /// claims decode once via `from_raw`, locally assembled blocks encode
-    /// once via `from_local`, and the Core-compatible RPC boundary uses the
-    /// codec-owned `from_prefix`. There is no re-encode fallback here.
     pub fn connect(
         &self,
         payload: &BlockPayload,
@@ -622,7 +462,6 @@ impl<'a> ChainTransition<'a> {
         ))
     }
 
-    /// Disconnects `block`, which must be the current applied tip.
     pub fn disconnect(
         &self,
         block: &Block,
@@ -637,11 +476,6 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    /// Applies consecutive payloads under this one transition.
-    ///
-    /// A single slice has one length: the parallel-length mismatch is
-    /// unrepresentable. An empty window still proves nothing and falls
-    /// through to the existing per-block path.
     #[expect(clippy::result_large_err)]
     pub fn connect_window(
         &self,
@@ -658,14 +492,12 @@ impl<'a> ChainTransition<'a> {
         result
     }
 
-    /// Returns the chainstate service owning this transition.
     pub fn chainstate(&self) -> &'a Chainstate {
         self.chainstate
     }
 }
 
 impl Chainstate {
-    /// Publishes one applied tip and records the chain event that names it.
     fn publish_applied(&self, tip: &TipSnapshot, kind: crate::events::HintKind) {
         {
             let _gate = self.tip_notification.gate.lock();
@@ -675,7 +507,6 @@ impl Chainstate {
         self.chain_events.record(kind, tip.height, tip.hash);
     }
 
-    /// Creates the production service from lower-layer capabilities.
     #[must_use]
     pub fn from_parts(mut parts: ChainstateParts) -> Self {
         let chain_tip = parts.block_tree.tip_handle();
@@ -724,25 +555,16 @@ impl Chainstate {
         }
     }
 
-    /// Returns the operational role of this chainstate instance.
     #[must_use]
     pub fn role(&self) -> ChainstateRole {
         *self.role.read()
     }
 
-    /// Sets the operational role of this chainstate instance.
     pub(crate) fn set_role(&self, role: ChainstateRole) {
         let _transition = self.chain_transition.lock();
         *self.role.write() = role;
     }
 
-    /// Installs a verified UTXO snapshot and initializes the applied tip and chain tx count
-    /// at the snapshot base height and block hash.
-    ///
-    /// # Errors
-    ///
-    /// Refuses missing, invalid, inconsistent or off-best-chain base headers,
-    /// closed admission, or a lifecycle record that cannot be persisted.
     fn install_snapshot(
         &self,
         snapshot_set: bitcoin_rs_utxo::UtxoSet,
@@ -773,29 +595,19 @@ impl Chainstate {
                 applied_tip,
             });
         }
-        // Height cannot order unequal-difficulty forks. Require strictly
-        // greater base work; unlike Core's comparator this does not admit
-        // an equal-work alternative using block-arrival tie breakers.
         if applied
             .as_ref()
             .is_some_and(|tip| tip_snapshot.chainwork <= tip.chainwork)
         {
             return Err(AssumeUtxoError::ActivationBehindTip);
         }
-        // All refusals precede publication. The transition stays held across the
-        // lifecycle record and the whole coin/statistics/tip installation.
         persist(&tree, &tip_snapshot, prior.as_ref()).inspect_err(|error| {
             if !matches!(error, AssumeUtxoError::FullRevalidationRequired) {
                 self.fail_closed_for_recovery();
             }
         })?;
-        // The transition reservation excludes authoritative tree changes,
-        // and the retained read guard kept the captured base stable through
-        // the durable callback. Only publication needs a write guard.
         drop(tree);
         let mut tree = self.block_tree.write();
-        // This journal extends the old checkpoint, not the new snapshot root.
-        // Snapshot recovery uses its immutable anchor and the certified suffix.
         *self.journal.write() = None;
         tree.restore_chain_tx_count(tip_snapshot.tip_id, tip_snapshot.chain_tx_count)
             .map_err(ApplyError::from)
@@ -812,7 +624,6 @@ impl Chainstate {
         Ok(())
     }
 
-    /// Resolves the pinned candidate against the header tree held by snapshot admission.
     fn snapshot_base_tip(
         tree: &BlockTree,
         pinned: &bitcoin_rs_primitives::AssumeUtxoData,
@@ -835,9 +646,6 @@ impl Chainstate {
                 found: node.height,
             });
         }
-        // Core 31.1 ActivateSnapshot requires the base to belong to the
-        // best-work header ancestry. Recheck at the final commit boundary:
-        // header selection may have changed while the snapshot was verified.
         let best_header = tree.tip();
         if best_header
             .as_ref()
@@ -859,10 +667,6 @@ impl Chainstate {
         })
     }
 
-    /// Constructs an isolated historical chainstate, optionally from a validated
-    /// checkpoint. The active header tree remains the single header authority.
-    /// Historical coins, statistics, tip, undo/head stores and detached events
-    /// are independent, with no body writer, active journal or follower effects.
     fn create_historical_counterpart(
         &self,
         base_height: u32,
@@ -903,8 +707,6 @@ impl Chainstate {
             BlockTreeReader::new(Arc::clone(&self.block_tree)),
         ));
 
-        // Sharing the mutable header tree stays inside its chainstate owner;
-        // production composition transfers an owned tree through ChainstateParts.
         let historical = Self {
             network: self.network,
             chain_tip,
@@ -944,39 +746,32 @@ impl Chainstate {
         Ok(Arc::new(historical))
     }
 
-    /// Returns a read-only capability to observe the process shutdown signal.
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
         bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
     }
 
-    /// Requests process shutdown across the node.
     pub fn request_shutdown(&self) {
         let _gate = self.tip_notification.gate.lock();
         self.shutdown.store(true, Ordering::Release);
         self.tip_notification.changed.notify_all();
     }
 
-    /// Permanently closes chain mutation and asks the process to shut down.
     pub fn fail_closed_for_recovery(&self) {
         self.admission.close_permanently();
         self.request_shutdown();
     }
 
-    /// Reports whether chain mutation admission is closed.
     #[must_use]
     pub fn is_closed_for_recovery(&self) -> bool {
         self.admission.closed.load(Ordering::Acquire)
     }
 
-    /// Shares the admission-closed latch with the read-only surfaces (RPC
-    /// and P2P), so every surface answers from one owner.
     #[must_use]
     pub fn closed_for_recovery_reader(&self) -> bitcoin_rs_chain::LatchReader {
         bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.admission.closed))
     }
 
-    /// Permanently closes mutation admission and waits for in-flight mutations.
     #[must_use]
     pub fn close(&self) -> AdmissionGuard<'_> {
         self.request_shutdown();
@@ -985,79 +780,61 @@ impl Chainstate {
         }
     }
 
-    /// Returns the consensus network.
     #[must_use]
     pub const fn network(&self) -> Network {
         self.network
     }
 
-    /// Returns a read-only best-work header-tip capability.
     #[must_use]
     pub fn header_tip_reader(&self) -> TipReader {
         TipReader::new(Arc::clone(&self.chain_tip))
     }
 
-    /// Returns a read-only authoritative applied-tip capability.
     #[must_use]
     pub fn applied_tip_reader(&self) -> TipReader {
         TipReader::new(Arc::clone(&self.applied_tip))
     }
 
-    /// Publishes the genesis connect outcome as the best-work header tip.
     pub fn publish_genesis_tip(&self, tip: TipSnapshot) {
         let tip = Arc::new(tip);
         self.chain_tip
             .rcu(|current| current.clone().or_else(|| Some(Arc::clone(&tip))));
     }
 
-    /// Loads the current best-work header tip.
     #[must_use]
     pub fn header_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.chain_tip.load_full()
     }
 
-    /// Loads the current authoritative applied tip.
     #[must_use]
     pub fn applied_tip_snapshot(&self) -> Option<Arc<TipSnapshot>> {
         self.applied_tip.load_full()
     }
 
-    /// Installs the early compact-block announce hook. Node composition calls
-    /// this once, after the block announcer exists; a second install is
-    /// refused so two owners can never race for the hook.
     pub fn set_pow_valid_block(&self, hook: PowValidBlockHook) -> Result<(), PowValidBlockHook> {
         self.pow_valid_block.set(hook)
     }
 
-    /// Installs the staged-tip preparation hook. Node composition calls this
-    /// once, after the mining coordinator exists; a second install is refused
-    /// so two owners can never race for the hook. The hook must enqueue only
-    /// and return at once; see [`TipStagedHook`].
     pub fn set_tip_staged(&self, hook: TipStagedHook) -> Result<(), TipStagedHook> {
         self.tip_staged.set(hook)
     }
 
-    /// Returns a cloneable read-only block-tree capability.
     #[must_use]
     pub fn block_tree_reader(&self) -> BlockTreeReader {
         BlockTreeReader::new(Arc::clone(&self.block_tree))
     }
 
-    /// Fixture-only block-tree Arc clone. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn block_tree_handle(&self) -> Arc<RwLock<BlockTree>> {
         Arc::clone(&self.block_tree)
     }
 
-    /// Returns the chainstate-owned initial-block-download latch.
     #[must_use]
     pub fn ibd_latch(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
         Arc::clone(&self.ibd)
     }
 
-    /// Returns the chainstate-owned synchronization progress, over this
-    /// chainstate's tips, block tree, and initial-block-download latch.
     #[must_use]
     pub fn chain_progress_reader(&self) -> bitcoin_rs_chain::ChainProgressReader {
         bitcoin_rs_chain::ChainProgressReader::new(
@@ -1068,86 +845,71 @@ impl Chainstate {
         )
     }
 
-    /// Fixture-only writable header-tip cell. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn chain_tip(&self) -> &ArcSwapOption<TipSnapshot> {
         &self.chain_tip
     }
 
-    /// Fixture-only writable applied-tip cell. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn applied_tip(&self) -> &ArcSwapOption<TipSnapshot> {
         &self.applied_tip
     }
 
-    /// Fixture-only writable block tree. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn block_tree(&self) -> &RwLock<BlockTree> {
         &self.block_tree
     }
 
-    /// Fixture-only access to the authoritative UTXO set. Not present in
-    /// production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn utxo(&self) -> &UtxoSet {
         &self.utxo
     }
 
-    /// Fixture-only writable UTXO handle. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn utxo_handle(&self) -> Arc<UtxoSet> {
         Arc::clone(&self.utxo)
     }
 
-    /// Returns the UTXO owner's read-only lookup capability.
     #[must_use]
     pub fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
         bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&self.utxo))
     }
 
-    /// Clones the coin-statistics listener handle.
     #[must_use]
     pub fn coin_stats_handle(&self) -> Arc<bitcoin_rs_utxo::stats::CoinStatsListener> {
         Arc::clone(&self.coin_stats)
     }
 
-    /// Clones the authoritative chain-event publisher.
     pub fn chain_events_handle(&self) -> Arc<crate::events::ChainEventPublisher> {
         Arc::clone(&self.chain_events)
     }
 
-    /// Returns the current coherent applied-chain event snapshot.
     #[must_use]
     pub fn chain_snapshot(&self) -> crate::events::ChainSnapshot {
         self.chain_events.snapshot()
     }
 
-    /// Returns the durable block-body store when configured.
     #[must_use]
     pub fn block_body_store(&self) -> Option<&Arc<dyn BlockBodyStore>> {
         self.block_body_store.as_ref()
     }
 
-    /// Clones the durable block-body store when configured.
     #[must_use]
     pub fn block_body_store_handle(&self) -> Option<Arc<dyn BlockBodyStore>> {
         self.block_body_store.clone()
     }
 
-    /// Clones the process shutdown signal for testing.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown)
     }
 
-    /// Admits headers and publishes the best-work header tip under Chainstate's
-    /// transition authority.
     pub fn admit_headers(
         &self,
         headers: &[Header],
@@ -1163,8 +925,6 @@ impl Chainstate {
             bitcoin_rs_chain::current_unix_seconds(),
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
         );
-        // A rejected batch can still have inserted a valid prefix and moved
-        // the tip; the gate follows whatever active chain exists now.
         self.assume_valid_gate.evaluate(&tree);
         let bitcoin_rs_chain::AcceptHeaders { ids, demoted_tip } =
             acceptance.map_err(HeaderAdmissionError::Rejected)?;
@@ -1187,36 +947,24 @@ impl Chainstate {
         })
     }
 
-    /// Sets which committed wire payloads must be retained for node-owned followers.
     pub fn set_capture_flags(&mut self, rawtx: bool, block_bytes: bool) {
         self.capture_rawtx = rawtx;
         self.capture_block_bytes = block_bytes;
     }
 
-    /// Re-evaluates the assume-valid anchor against the current active header chain.
     pub fn reevaluate_assume_valid(&self) {
         self.assume_valid_gate.evaluate(&self.block_tree.read());
     }
 
-    /// Re-evaluates the assume-valid anchor against an already locked tree.
     pub(crate) fn reevaluate_assume_valid_with(&self, tree: &BlockTree) {
         self.assume_valid_gate.evaluate(tree);
     }
 
-    /// Publishes `tip` as the chain tip and re-evaluates the assume-valid
-    /// anchor against the already locked `tree`, keeping the two tree-derived
-    /// facts in step.
     pub(crate) fn publish_chain_tip(&self, tip: Option<Arc<TipSnapshot>>, tree: &BlockTree) {
         self.chain_tip.store(tip);
         self.reevaluate_assume_valid_with(tree);
     }
 
-    /// `Fast` trusts a block only when it is the node at `height` on the
-    /// best header tip's own chain, so a block on a competing branch never
-    /// borrows that trust. The tip is read from the tree under the same read
-    /// guard as the ancestry walk, and every header-tip writer holds the
-    /// chain-transition lock, so the answer stays true through the caller's
-    /// commit.
     pub(crate) fn scripts_verified_upstream(
         &self,
         provenance: BlockProvenance,
@@ -1246,7 +994,6 @@ impl Chainstate {
         }
     }
 
-    /// Returns pruning authority coupled to this chainstate's transition role.
     pub fn prune_authority(&self) -> PruneAuthority {
         PruneAuthority {
             admission: Arc::clone(&self.admission),
@@ -1256,7 +1003,6 @@ impl Chainstate {
         }
     }
 
-    /// Admission plus the exclusive transition lock, without mempool generation.
     pub fn lock_transition(&self) -> core::result::Result<TransitionLock<'_>, ApplyError> {
         let guard = begin_chain_transition(&self.admission, &self.chain_transition)?;
         Ok(TransitionLock {
@@ -1265,12 +1011,10 @@ impl Chainstate {
         })
     }
 
-    /// Begins an admitted authoritative-chain mutation.
     pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
         Ok(self.lock_transition()?.into_transition())
     }
 
-    /// Builds a synthetic, in-memory chainstate for fixtures.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn new(
@@ -1327,7 +1071,6 @@ impl Chainstate {
         }
     }
 
-    /// Copies the published applied tip and its transaction count.
     #[must_use]
     pub fn snapshot(&self) -> ChainstateSnapshot {
         let applied = self.applied_tip.load_full().as_deref().cloned();
@@ -1340,7 +1083,6 @@ impl Chainstate {
         }
     }
 
-    /// Publishes a checkpoint to settle rolled-back disconnect debt.
     pub fn settle_disconnect_debt(&self) -> core::result::Result<bool, CheckpointError> {
         match &self.checkpoint_publisher {
             Some(publisher) => publisher.settle_disconnect_debt(),
@@ -1348,12 +1090,6 @@ impl Chainstate {
         }
     }
 
-    /// Installs the checkpoint publisher used by maintenance and disconnect settlement.
-    ///
-    /// `seed_offer` is the shared worker-owned `ScriptLive` seed cell (`None`
-    /// when `ScriptLive` is disabled at composition time). The cell itself is
-    /// worker-owned demand; this handle never mints, only the publisher
-    /// offers into it after a gated publication.
     pub fn configure_checkpointing(
         &mut self,
         data_dir: &std::path::Path,
@@ -1389,7 +1125,6 @@ impl Chainstate {
         Ok(())
     }
 
-    /// Publishes one full maintenance checkpoint.
     pub fn publish_checkpoint(&self) -> core::result::Result<Option<u64>, CheckpointError> {
         let Some(publisher) = &self.checkpoint_publisher else {
             return Ok(None);
@@ -1402,8 +1137,6 @@ impl Chainstate {
         }
     }
 
-    /// Publishes the recovery checkpoint of the disconnect-marker recovery
-    /// transaction.
     pub(crate) fn publish_recovery_checkpoint(&self) -> core::result::Result<(), CheckpointError> {
         let invalid = |reason: &str| {
             CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
@@ -1423,12 +1156,6 @@ impl Chainstate {
         }
     }
 
-    /// Publishes a marker-preserving checkpoint to relieve journal pressure
-    /// while boot replay is still below the durable head.
-    ///
-    /// The caller must release its transition first because publication takes
-    /// the exclusive apply-admission barrier. Success compacts the journal but
-    /// deliberately leaves recovery markers armed.
     pub(crate) fn publish_recovery_progress_checkpoint(
         &self,
     ) -> core::result::Result<(), CheckpointError> {
@@ -1450,7 +1177,6 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `payload`, then releases the transition lock.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
@@ -1462,9 +1188,6 @@ impl Chainstate {
         result
     }
 
-    /// Admits a transition, disconnects `block`, then releases the transition
-    /// lock. Refusal and fatal-recovery semantics are defined by
-    /// [`ChainTransition::disconnect`].
     #[cfg(any(test, feature = "test-seam"))]
     pub fn disconnect_block(
         &self,
@@ -1478,13 +1201,6 @@ impl Chainstate {
         result
     }
 
-    /// Admits a transition, applies consecutive payloads, then releases the
-    /// transition lock. Persistence matches [`ChainTransition::connect_window`].
-    ///
-    /// A single slice has one length: the parallel-length mismatch is
-    /// unrepresentable and its `Operational` source is gone with the second
-    /// slice. An empty window still falls through to the existing per-block
-    /// path.
     #[expect(clippy::result_large_err)]
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_window(
@@ -1503,13 +1219,6 @@ impl Chainstate {
         result
     }
 
-    /// See `ARCH-07` in `docs/contracts/architecture.md`.
-    ///
-    /// Takes a borrowed payload to avoid cloning template blocks on the hot
-    /// path. The borrowed slice preserves the exact-serialization invariant;
-    /// no payload bytes are copied. Callers with owned blocks create one
-    /// payload via `BlockPayload::from_local` (moves, no clone) and reuse the
-    /// borrow for validation and application.
     pub fn validate_block(&self, payload: &BlockPayload) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
         match apply_block_admitted(
@@ -1528,11 +1237,8 @@ impl Chainstate {
     }
 }
 
-/// Everything a disconnect can refuse, decided before anything is mutated.
 #[derive(Debug)]
 struct DisconnectPlan {
-    /// Parent tip with the cumulative count its tree node carries, which the
-    /// disconnect commits and publishes unchanged.
     parent_tip: TipSnapshot,
     parent_prev_hash: Hash256,
     undo: bitcoin_rs_utxo::contract::UndoBatch,
@@ -1540,13 +1246,10 @@ struct DisconnectPlan {
     tx_count_delta: u64,
 }
 
-/// How many consecutive blocks share one script-verification dispatch.
 const SCRIPT_BATCH_WINDOW: usize = 1024;
 
-/// How many bytes of block data one window may hold.
 const SCRIPT_BATCH_MAX_BYTES: usize = 64 << 20;
 
-/// Returns how many of `sizes` fit in one window.
 pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
     let mut count = 0_usize;
     let mut bytes = 0_usize;
@@ -1564,27 +1267,12 @@ pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
     count
 }
 
-/// A window that failed partway, and how many of its blocks committed first.
 #[derive(Debug)]
 pub struct WindowApplyError {
-    /// Blocks that committed before the failure.
     pub applied: usize,
-    /// Outcomes for the committed prefix, in apply order.
     pub committed: Vec<ConnectOutcome>,
-    /// What stopped the block at index `applied`.
     pub source: ApplyError,
-    /// How the caller must treat this failure: `Permanent` failures poisoned
-    /// the failed block's header subtree while the chain transition was still
-    /// held, and the published tip and assume-valid gate were re-synchronized
-    /// with the mutated tree; `BodyMutated` discards only the delivered body;
-    /// `Operational` failures poisoned nothing; `Fatal` means mutation or
-    /// durable-head state may be torn, so recovery must run before another
-    /// mutation.
     pub disposition: WindowApplyDisposition,
-    /// Hashes marked invalid under the held transition when `disposition` is
-    /// [`WindowApplyDisposition::Permanent`]: the failed block and every
-    /// descendant, in deterministic slab order. Empty otherwise, including a
-    /// header that was never in the tree.
     pub invalidated: Box<[Hash256]>,
 }
 
@@ -1604,33 +1292,14 @@ impl std::error::Error for WindowApplyError {
     }
 }
 
-/// Whether a window failure invalidates the header branch, only its delivered
-/// body, or neither.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowApplyDisposition {
-    /// The failed block and its descendants can never be valid. Their header
-    /// subtrees were invalidated under the window's chain transition, the
-    /// best valid tip was republished from the mutated tree, and the
-    /// assume-valid gate was re-evaluated; purge every returned hash from
-    /// staged/download state without retrying.
     Permanent,
-    /// The delivered body is mutated or not bound to its header. Discard this
-    /// body and retry the same header/hash from another source; do not poison
-    /// the header or its descendants.
     BodyMutated,
-    /// Transient failure (storage, UTXO commit, shutdown). Nothing was
-    /// invalidated; the failed block and its tail stay retryable.
     Operational,
-    /// Mutation or durable-head state may already have changed without a
-    /// reliable commit receipt. Do not retry in-process; recovery must
-    /// re-establish authoritative chainstate first. Nothing about the blocks
-    /// is necessarily invalid, so no header subtree is purged — except a
-    /// permanent failure whose subtree could not be marked, which escalates
-    /// here because the tree may be partially marked.
     Fatal,
 }
 
-/// Chain context that determines the ordered transaction checks for one block.
 #[derive(Eq, PartialEq)]
 struct BlockValidationContext {
     hash: Hash256,
@@ -1640,9 +1309,6 @@ struct BlockValidationContext {
     locktime_cutoff: u32,
 }
 
-/// Chain facts BIP68 evaluates against: the validation context fixing the
-/// block's height, the parent median-time-past, the softfork state at
-/// connect, and the applied tip the prevout ancestry hangs from.
 #[derive(Clone, Copy)]
 struct Bip68Context<'a> {
     validation: &'a BlockValidationContext,
@@ -1651,32 +1317,23 @@ struct Bip68Context<'a> {
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
 }
 
-/// Evidence that every ordered transaction pre-check, input script, and
-/// transaction post-check passed for this exact prepared block state.
 struct BlockValidationProof<'b> {
     prepared: PreparedApply<'b>,
     context: BlockValidationContext,
 }
 
-/// Prepared state returned by a successful window attempt.
 enum ProvenApply<'b> {
     Proven(BlockValidationProof<'b>),
     AssumeValidSkipped(PreparedApply<'b>),
 }
 
-/// Everything a block's application needs that depends only on the block and
-/// the outputs it spends, not on the chain state the commit will mutate.
 struct PreparedApply<'b> {
     script_source: bitcoin_rs_consensus::kernel::BlockScriptSource,
-    /// Parse-once transaction state: identities computed once in
-    /// [`parse_block_for_apply`], witness IDs on demand, and the prevout
-    /// matrix installed once right before script verification.
     view: bitcoin_rs_consensus::BlockView<'b>,
     tx_plan: BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
 }
 
-/// Parses a block and resolves the outputs it spends.
 struct ByteEquality<'a> {
     expected: &'a [u8],
     offset: usize,
@@ -1712,7 +1369,6 @@ struct BlockTxPlan {
 }
 
 impl BlockTxPlan {
-    /// Outpoints this block both creates and spends, empty when it has none.
     fn same_block_spent_set(&self) -> &SameBlockSpentSet {
         static NONE: std::sync::LazyLock<SameBlockSpentSet> =
             std::sync::LazyLock::new(SameBlockSpentSet::new);
@@ -1720,8 +1376,6 @@ impl BlockTxPlan {
     }
 }
 
-/// Creation metadata of a spent prevout: what maturity and sequence-lock
-/// checks read, without materializing the output payload.
 struct PrevoutMeta {
     coinbase: bool,
     height: u32,
@@ -1736,15 +1390,11 @@ impl PrevoutMeta {
     }
 }
 
-/// All external (already-committed) prevouts for one block, resolved in a single
-/// parallel pass so `script_verify`, `coinbase_maturity`, and `bip68` reuse one
-/// lookup table instead of hitting the `UtxoSet` repeatedly.
 struct ResolvedUtxoView {
     external: HashMap<OutPoint, UtxoCoin>,
 }
 
 impl ResolvedUtxoView {
-    /// Resolves a block's external prevouts from any source of live outputs.
     fn resolve<S: bitcoin_rs_utxo::contract::OutputSource + ?Sized>(
         utxo: &S,
         block: &Block,
@@ -1758,8 +1408,6 @@ impl ResolvedUtxoView {
             .flat_map(|tx| &tx.inputs)
             .filter(|input| same_block.is_none_or(|set| !set.contains(&input.previous_output)))
             .map(|input| input.previous_output);
-        // Serial on purpose. A UTXO lookup is a sharded hashmap hit of order
-        // 500 ns, so a rayon fan-out costs more than the work it distributes.
         Self {
             external: candidates
                 .filter_map(|outpoint| utxo.get_entry(&outpoint).map(|entry| (outpoint, entry)))
@@ -1770,7 +1418,6 @@ impl ResolvedUtxoView {
         self.external.get(outpoint).map(|entry| entry.txout.clone())
     }
 
-    /// Full resolved entry for a spent outpoint, including creation metadata.
     fn entry(&self, outpoint: &OutPoint) -> Option<&UtxoCoin> {
         self.external.get(outpoint)
     }

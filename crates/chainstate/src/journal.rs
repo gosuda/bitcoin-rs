@@ -12,18 +12,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum JournalDeltaError {
-    /// A spend has no full-coin undo preimage.
     #[error("journal spend {0:?} has no undo coin")]
     MissingSpend(bitcoin_rs_primitives::OutPoint),
-    /// More than one undo restore named the same outpoint.
     #[error("journal undo restores duplicate outpoint {0:?}")]
     DuplicateRestore(bitcoin_rs_primitives::OutPoint),
-    /// An undo restore matched neither an add nor a spend.
     #[error("journal undo restore {0:?} matches no block mutation")]
     UnmatchedRestore(bitcoin_rs_primitives::OutPoint),
 }
 
-/// Extracts the ordered journal mutations for one fully applied block.
 pub(crate) fn mutations_for_block(
     changes: &BlockChanges<&'_ bitcoin_rs_primitives::TxOut>,
     undo_coins: impl IntoIterator<Item = Coin>,
@@ -60,7 +56,6 @@ pub(crate) fn mutations_for_block(
     Ok(mutations)
 }
 
-/// State reconstructed by a successful replay.
 pub(crate) struct ReplayedState {
     pub tree: BlockTree,
     pub utxo: UtxoSet,
@@ -107,13 +102,11 @@ fn validate_replayed_head(
     Ok(())
 }
 
-/// Applies ordered records above a restored checkpoint state.
 struct ReplayAccumulator {
     tree: BlockTree,
     utxo: UtxoSet,
     coin_stats: bitcoin_rs_utxo::stats::CoinStatsListener,
     applied_tip: bitcoin_rs_chain::TipSnapshot,
-    /// The base carries an unknown count: zero at a non-genesis height.
     unknown_base: bool,
 }
 
@@ -150,9 +143,6 @@ impl ReplayAccumulator {
     }
 
     fn apply(&mut self, record: &JournalRecord) -> Result<(), JournalReplayError> {
-        // An unknown base stays unknown: adding the suffix would fabricate
-        // a chain total, while the tip, UTXO set, and coin stats still
-        // advance per record.
         let mut chain_tx_count = self.applied_tip.chain_tx_count.to_wire();
         if !self.unknown_base {
             chain_tx_count = chain_tx_count
@@ -227,10 +217,6 @@ fn insert_replayed_header(
                 bitcoin_rs_primitives::encode::hex_encode(&record.prev_hash)
             ))
         })?;
-    // The checkpoint tree may already hold this header: on the best-header
-    // ancestry above the applied tip, or on a retained side branch a later
-    // reorg activated. The hash binds the header and its parent, so the
-    // existing node is the same block; reuse it as block connection does.
     let node_id = match tree.lookup(Hash256::from_le_bytes(&record.block_hash)) {
         Some(existing) => {
             let node = tree.node(existing).map_err(|error| {

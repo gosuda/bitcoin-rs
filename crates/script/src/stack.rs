@@ -2,12 +2,9 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
-/// One stack item.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ScriptItem {
-    /// A minimally encoded script integer.
     Num(i64),
-    /// A byte vector kept inline for common small pushes.
     Bytes(SmallVec<[u8; 32]>),
 }
 
@@ -17,16 +14,12 @@ impl Default for ScriptItem {
     }
 }
 
-/// Bounded script stack with Core's 1000-item maximum depth.
-///
-/// Depth indices are 0-based from the top of the stack (`0` is the top item).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Stack {
     items: ArrayVec<[ScriptItem; Self::MAX_DEPTH]>,
 }
 
 impl Stack {
-    /// Maximum stack depth permitted by consensus script evaluation.
     pub(crate) const MAX_DEPTH: usize = 1000;
 
     #[must_use]
@@ -120,13 +113,10 @@ impl Stack {
     }
 }
 
-/// Errors returned by bounded stack operations.
 #[derive(Debug, Error, PartialEq)]
 pub(crate) enum StackError {
-    /// Pushing would exceed the 1000-item consensus maximum.
     #[error("script stack overflow")]
     Overflow,
-    /// Popping or peeking an empty stack was requested.
     #[error("script stack underflow")]
     Underflow,
 }

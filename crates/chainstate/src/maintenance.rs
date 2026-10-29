@@ -6,12 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::checkpoint::publisher::CheckpointPublisher;
 use crate::checkpoint::{CheckpointError, CheckpointWrite};
-/// Poll interval for the maintenance loop. Short enough to flush soon after
-/// a journal boundary passes and to drain retention pressure soon after it
-/// appears; long enough to avoid busy-waiting.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Spawns the chainstate maintenance worker thread.
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
     shutdown: bitcoin_rs_chain::LatchReader,
@@ -56,9 +52,6 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &bitcoin_rs_chain
     }
 }
 
-/// Idle journal durability and retention inspection: flushes records whose
-/// batch boundary has passed and reports whether segment retention
-/// requires compaction.
 fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
     let Some(journal) = publisher.journal.read().clone() else {
         return false;
@@ -78,8 +71,6 @@ fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
     }
 }
 
-/// Sleeps for `duration` unless `shutdown` is set, returning `true` if the
-/// worker should exit.
 fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, duration: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < duration {
@@ -95,7 +86,6 @@ fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, duration: Duratio
 }
 
 impl crate::Chainstate {
-    /// Spawns chainstate journal and retention maintenance.
     pub fn start_maintenance(&self) -> anyhow::Result<JoinHandle<()>> {
         let publisher = self
             .checkpoint_publisher

@@ -1,73 +1,20 @@
 # bitcoin-rs-p2p
 
-The Bitcoin peer-to-peer network surface: the wire codec, peer lifecycle and
-handshaking, inbound dispatch, connection management, and block-download
-policy (`DownloadWindow` and `BlockStager`).
+The Bitcoin peer-to-peer surface: wire codec, peer lifecycle and handshaking, inbound dispatch, connection management, and block-download policy (`DownloadWindow` and `BlockStager`).
 
-Each `Peer` owns one connection's stream and handshake state. Live connections are
-identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked with
-ready metadata by the shared `PeerTable`. Inbound accept and outbound connect
-share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`,
-blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the
-session store. `BlockSync` owns the only production download window; the service
-does not hold a second copy. The node supplies chain queries and coordinates
-chain application. A connection
-negotiates version/verack in `handshake`, then runs the peer finite-state machine
-in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready
-burst of control messages into `write_ready_burst`'s vectored write pass; blocks and transactions
-stay one frame. Inbound traffic reaches the host through
-`dispatch_inbound_full`, which streams getdata responses behind the outbound
-budget's pre-load production headroom gate and reads the active chain through the
-`ChainQuery` trait. Every queued message is a `QueuedFrame` that carries its own
-charge against the connection's budget and the node's strict 64 MiB aggregate of
-queued outbound bytes, and returns it when the frame drops. The aggregate's
-refusal is backpressure: it defers requests and parks unserved work but never
-cancels a lease (see [P2P compatibility](../../docs/policies/p2p-compatibility.md)).
-Served block bodies are the stored consensus bytes
-(`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
-`InboundBlock` and `InboundHeaders` with their wire bytes preserved. Manual bans exclude
-whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memory.
-`wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
+Each `Peer` owns one connection's stream and handshake state. Live connections carry a `ConnectionId`, clean up through a `PeerLease`, and publish ready metadata in the shared `PeerTable`. Accept and connect share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`, blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the session store; `BlockSync` owns the only production download window. The node supplies chain queries and coordinates chain application. Connections negotiate version/verack in `handshake`, then run the peer machine in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready burst through `write_ready_burst`'s vectored write pass; blocks and transactions stay one frame. Inbound traffic reaches the host through `dispatch_inbound_full`, which streams getdata responses behind the outbound budget's pre-load production headroom gate and reads the chain through the `ChainQuery` trait. Every queued message is a `QueuedFrame` carrying its own charge against the connection budget and the strict 64 MiB aggregate of queued outbound bytes, returned when the frame drops. Aggregate refusal is backpressure: it defers requests and parks unserved work but never cancels a lease (see [P2P compatibility](../../docs/policies/p2p-compatibility.md)). Served block bodies are the stored consensus bytes (`Message::BlockPayload`), never decoded and re-encoded. `inbound` hands over `InboundBlock` and `InboundHeaders` with wire bytes preserved. Manual bans exclude whole subnets as an in-memory `BannedSubnet` built from an `IpSubnet`. `wire` decodes BIP155 `addrv2` messages; BIP339 wtxid-relay state lives in `wtxid`.
 
-`PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
-connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`).
-A connected TCP stream enters that world only through `CountingStream::from_connected`,
-which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays
-one `writev` on the socket. It enforces key invariants across the node:
-- **Single connection per address**: Exactly one live session per remote `SocketAddr`.
-- **Atomic predecessor cancellation**: Registering a new lease at an existing address
-  atomically cancels and replaces the predecessor.
-- **Identity-checked removal**: Removal operations (`remove_current`, `disconnect_source`,
-  `disconnect_connection`) verify `ConnectionId` so a stale handle cannot evict or
-  cancel a newer session.
-- **Identity-bound metadata**: Post-handshake `PeerInfo` publication succeeds only if
-  the publishing connection remains the active session for that address.
+`PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`), connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`). A connected TCP stream enters only through `CountingStream::from_connected`, which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays one `writev` on the socket. Invariants:
 
-All consumers — the inbound TCP `listener`, outbound connection threads, the block
-download scheduler, outbound transaction relay, and RPC methods (`getpeerinfo`,
-`getnetworkinfo`, `disconnectnode`) — observe and mutate live connections exclusively
-through `PeerTable`.
+- One live session per remote `SocketAddr`.
+- Registering a new lease at an existing address atomically cancels and replaces the predecessor.
+- Removal (`remove_current`, `disconnect_source`, `disconnect_connection`) verifies `ConnectionId`, so a stale handle cannot evict or cancel a newer session.
+- Post-handshake `PeerInfo` publication succeeds only if the publishing connection remains the active session for that address.
 
-Transaction inventory, parent requests, and outbound relay are P2P consumers of the
-shared transaction lifecycle. The authoritative cross-crate ownership split is
-[ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary);
-peer-visible inventory and relay behavior are defined in
-[P2P compatibility](../../docs/policies/p2p-compatibility.md).
+All consumers (inbound `listener`, outbound connection threads, block-download scheduler, outbound transaction relay, RPC `getpeerinfo`, `getnetworkinfo`, `disconnectnode`) observe and mutate live connections exclusively through `PeerTable`.
 
-`P2pService` owns DNS seed configuration and bootstraps outbound addresses in
-its bootstrap worker. The `listener` module has one entry point per role: `bind_listener`
-binds a local address, `serve` runs the accept loop on that bound listener until
-shutdown, and `spawn_outbound_connection` dials one peer. `serve` and
-`spawn_outbound_connection` read one cloneable `ConnectionShared` wiring value
-per start epoch, which also owns the header, block, and transaction sinks.
-`wire` decodes `Message` values and reports `PeerError`. `dispatch_inbound_full`
-also filters transaction inventory through the `TxInventory` trait and receives
-the chain-owned initial-block-download gate that the `listener` supplies to it
-through its `tx_relay_open` callback: while the gate is closed, transaction-typed
-`inv` vectors are never requested and `tx` bodies are dropped before ingress
-(Core 31.1 `net_processing.cpp:4401-4404`, `:4713-4716`); `inbound` hands over
-`InboundBlock`, `InboundHeaders`, and `InboundTx` with their delivering peer
-stamped.
+Transaction inventory, parent requests, and outbound relay consume the shared transaction lifecycle. The ownership split is [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary); peer-visible inventory and relay behavior are defined in [P2P compatibility](../../docs/policies/p2p-compatibility.md).
 
-Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
-project vocabulary.
+`P2pService` owns DNS seed configuration and bootstraps outbound addresses in its bootstrap worker. The `listener` module has one entry point per role: `bind_listener` binds a local address, `serve` runs the accept loop until shutdown, and `spawn_outbound_connection` dials one peer. `serve` and `spawn_outbound_connection` read one cloneable `ConnectionShared` wiring value per start epoch, which also owns the header, block, and transaction sinks. `wire` decodes `Message` values and reports `PeerError`. `dispatch_inbound_full` filters transaction inventory through the `TxInventory` trait and receives the chain-owned initial-block-download gate that the `listener` supplies through its `tx_relay_open` callback: while the gate is closed, transaction-typed `inv` vectors are never requested and `tx` bodies are dropped before ingress (Core 31.1 `net_processing.cpp:4401-4404`, `:4713-4716`); `inbound` hands over `InboundBlock`, `InboundHeaders`, and `InboundTx` with their delivering peer stamped.
+
+Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the project vocabulary.

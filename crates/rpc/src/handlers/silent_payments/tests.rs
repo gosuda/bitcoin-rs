@@ -26,7 +26,6 @@ fn fixture() -> Result<(Context, Block)> {
     });
     ctx.chain.chain_network = Network::Regtest;
     let mut block = Network::Regtest.genesis_block();
-    // Synthetic source: chainstate authentication is tested by its owning suite.
     block.header.time = u32::try_from(bitcoin_rs_primitives::unix_time_secs())?;
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
@@ -153,7 +152,6 @@ fn shared_materialization_budget_and_transition_never_queue_tweak_work() -> Resu
     let held = ctx.silent_payments.as_ref().ok_or("service")?.lock();
     assert!(getblocktweaks(&ctx, &json!([0])).is_err());
     drop(held);
-    // Consecutive requests need no timer once the previous work releases its slot.
     getblocktweaks(&ctx, &json!([0]))?;
     getblocktweaks(&ctx, &json!([0]))?;
     let first = ctx.try_acquire_block_render().ok_or("permit")?;

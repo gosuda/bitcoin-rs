@@ -1,35 +1,10 @@
 //! BIP331 ancestor package relay: message codec and combined package hash.
 //!
-//! BIP331 adds four messages, all negotiated before `verack` through
-//! `sendpackages`:
-//!
-//! | command        | payload                                                      |
-//! |----------------|--------------------------------------------------------------|
-//! | `sendpackages` | `versions`: one little-endian `u64` bit field                |
-//! | `ancpkginfo`   | `CompactSize` count, then that many 32-byte wtxids, subject last |
-//! | `getpkgtxns`   | `CompactSize` count, then that many 32-byte wtxids           |
-//! | `pkgtxns`      | `CompactSize` count, then that many witness-serialized `tx`s |
-//!
-//! Two inventory types ride the existing messages: `getdata(MSG_ANCPKGINFO)`
-//! requests an `ancpkginfo`, and `notfound(MSG_PKGTXNS)` carries a
-//! [`combined_package_hash`] answering one `getpkgtxns`. `inv(MSG_ANCPKGINFO)`,
-//! `inv(MSG_PKGTXNS)` and `getdata(MSG_PKGTXNS)` are never valid.
-//!
-//! Every decoder consumes its payload exactly and reads `CompactSize` minimally.
-//! A list's count is checked against [`MAX_GETPKGTXNS`] from the prefix alone,
-//! before the body is inspected or any vector is reserved, so the largest list a
-//! peer can make us allocate for is fixed. [`PkgTxns`] additionally bounds the
-//! payload by the transport frame ([`crate::wire::MAX_MESSAGE_PAYLOAD`]) and
-//! delegates each transaction to the node's single [`Tx`] decoder, so
-//! transaction bytes, witness handling, and per-transaction allocation bounds
-//! are the ones the `tx` message already has.
-//!
-//! The wire bound is the protocol maximum, not mempool admission policy: mempool
-//! package acceptance is stricter (`MAX_PACKAGE_COUNT`) and is applied by the
-//! caller before it reserves any budget for a decoded package.
-//!
+//! BIP331 adds four messages, all negotiated before `verack` through `sendpackages`:
 //! Sources: BIP331 at bitcoin/bips `c0c5aea41e6a334d34db4ca87ae53bbfd7f268d1` and
-//! Bitcoin Core's merged `GetPackageHash` at `092c978a42e8f4a02291b994713505ba8aac8b28`.
+//! Bitcoin Core's merged `GetPackageHash` at
+//! `092c978a42e8f4a02291b994713505ba8aac8b28`.
+//!
 //! BIP331 publishes no test-vector section.
 
 use bitcoin_rs_primitives::{
@@ -39,25 +14,17 @@ use sha2::{Digest, Sha256};
 
 use crate::wire::MAX_MESSAGE_PAYLOAD;
 
-/// `sendpackages` version bit for batched transaction download
-/// (`getpkgtxns`, `pkgtxns`, `MSG_PKGTXNS`).
 pub const PKG_RELAY_PKGTXNS: u64 = 1 << 0;
 
-/// `sendpackages` version bit for ancestor package information
-/// (`ancpkginfo`, `MSG_ANCPKGINFO`).
 pub const PKG_RELAY_ANC: u64 = 1 << 1;
 
 /// Largest list any BIP331 list message carries on the wire.
-///
 /// BIP331 bounds `getpkgtxns` at 100 wtxids; `ancpkginfo` feeds `getpkgtxns`
 /// and `pkgtxns` answers it, so all three share the bound.
 pub const MAX_GETPKGTXNS: usize = 100;
 
-/// Inventory type of `getdata` requests for an `ancpkginfo`. Never valid in `inv`.
 pub const MSG_ANCPKGINFO: u32 = 0x7;
 
-/// Inventory type of the `notfound` that answers an unservable `getpkgtxns`.
-/// Never valid in `inv` or `getdata`.
 pub const MSG_PKGTXNS: u32 = 0x6;
 
 const WTXID_LEN: usize = 32;
@@ -65,55 +32,36 @@ const WTXID_LEN: usize = 32;
 /// Errors from encoding or decoding a BIP331 message payload.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PackageError {
-    /// The payload ended before the message was complete.
     #[error("truncated package payload")]
     Truncated,
-    /// A `CompactSize` used a wider encoding than its value needs.
     #[error("non-canonical compact size")]
     NonCanonical,
-    /// A list message carried no entries.
     #[error("package list is empty")]
     Empty,
-    /// A list message declared or held more entries than the wire bound.
     #[error("package list count {count} exceeds bound {max}")]
-    TooMany {
-        /// The declared (decode) or supplied (encode) entry count.
-        count: u64,
-        /// The bound, [`MAX_GETPKGTXNS`].
-        max: usize,
-    },
+    TooMany { count: u64, max: usize },
     /// An `ancpkginfo` repeated a wtxid, which BIP331 defines as malformed.
     #[error("ancpkginfo repeats a wtxid")]
     DuplicateWtxid,
-    /// Bytes remained after the message was complete.
     #[error("trailing {0} bytes after package payload")]
     Trailing(usize),
-    /// The payload exceeds the transport frame bound.
     #[error("package payload length {0} exceeds the frame bound")]
     PayloadTooLarge(usize),
-    /// A transaction inside `pkgtxns` failed the node's transaction decoder.
     #[error("package transaction: {0}")]
     Transaction(#[from] DecodeError),
 }
 
-/// `sendpackages`: the package relay versions the sender supports.
-///
-/// The codec carries the bit field verbatim, including `0` and bits this node
-/// does not know; negotiation ignores those, the codec does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SendPackages {
-    /// Bit field of supported versions; see [`PKG_RELAY_PKGTXNS`] and [`PKG_RELAY_ANC`].
     pub versions: u64,
 }
 
 impl SendPackages {
-    /// The payload: `versions` as a little-endian `u64`.
     #[must_use]
     pub const fn encode(self) -> [u8; 8] {
         self.versions.to_le_bytes()
     }
 
-    /// Decodes a payload of exactly eight bytes.
     pub fn decode(payload: &[u8]) -> Result<Self, PackageError> {
         let (versions, rest) = payload
             .split_first_chunk::<8>()
@@ -127,24 +75,17 @@ impl SendPackages {
     }
 }
 
-/// `ancpkginfo`: the unconfirmed ancestor package of one transaction.
-///
-/// The last wtxid is the subject the message answers; the others are its
-/// ancestors in no enforced order. An empty list has no subject and is malformed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AncPkgInfo {
-    /// The package's wtxids, subject last, without repeats.
     pub wtxids: Vec<Wtxid>,
 }
 
 impl AncPkgInfo {
-    /// The wtxid this message describes: the last entry.
     #[must_use]
     pub fn subject(&self) -> Option<Wtxid> {
         self.wtxids.last().copied()
     }
 
-    /// Encodes the list; rejects an empty, oversized, or repeating list.
     pub fn encode(&self) -> Result<Vec<u8>, PackageError> {
         check_count(len_u64(self.wtxids.len()))?;
         if has_duplicates(&self.wtxids) {
@@ -153,8 +94,6 @@ impl AncPkgInfo {
         Ok(write_wtxids(&self.wtxids))
     }
 
-    /// Decodes a list, rejecting an empty, oversized, repeating, truncated, or
-    /// over-long payload.
     pub fn decode(payload: &[u8]) -> Result<Self, PackageError> {
         let wtxids = read_wtxids(payload)?;
         if has_duplicates(&wtxids) {
@@ -164,25 +103,17 @@ impl AncPkgInfo {
     }
 }
 
-/// `getpkgtxns`: a request for all of the listed transactions or none.
-///
-/// The sequence is the request identity: a reply must list the same wtxids in
-/// the same order, and the `notfound` answer names [`combined_package_hash`] of
-/// them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GetPkgTxns {
-    /// The requested wtxids, in request order.
     pub wtxids: Vec<Wtxid>,
 }
 
 impl GetPkgTxns {
-    /// Encodes the list; rejects an empty or oversized list.
     pub fn encode(&self) -> Result<Vec<u8>, PackageError> {
         check_count(len_u64(self.wtxids.len()))?;
         Ok(write_wtxids(&self.wtxids))
     }
 
-    /// Decodes a list, rejecting an empty, oversized, truncated, or over-long payload.
     pub fn decode(payload: &[u8]) -> Result<Self, PackageError> {
         Ok(Self {
             wtxids: read_wtxids(payload)?,
@@ -190,18 +121,12 @@ impl GetPkgTxns {
     }
 }
 
-/// `pkgtxns`: the transactions of one `getpkgtxns`, in request order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PkgTxns {
-    /// The transactions, in the order the request listed their wtxids.
     pub txs: Vec<Tx>,
 }
 
 impl PkgTxns {
-    /// Encodes the list with each transaction in the `tx` message's serialization.
-    ///
-    /// Rejects an empty or oversized list and a payload above the frame bound,
-    /// computed before anything is serialized.
     pub fn encode(&self) -> Result<Vec<u8>, PackageError> {
         let count = len_u64(self.txs.len());
         check_count(count)?;
@@ -220,8 +145,6 @@ impl PkgTxns {
         Ok(payload)
     }
 
-    /// Decodes a list of transactions, rejecting an empty, oversized, or
-    /// over-long payload and any transaction the `tx` decoder rejects.
     pub fn decode(payload: &[u8]) -> Result<Self, PackageError> {
         if payload.len() > MAX_MESSAGE_PAYLOAD {
             return Err(PackageError::PayloadTooLarge(payload.len()));
@@ -238,14 +161,6 @@ impl PkgTxns {
     }
 }
 
-/// The canonical identifier of a package: a single SHA-256 over its wtxids.
-///
-/// The wtxids are sorted by their conventional displayed hex, which is
-/// lexicographic order over the bytes read in reverse, then each wtxid's 32
-/// internal bytes are concatenated without a count prefix and hashed once.
-/// The result is independent of input order and keeps repeated wtxids. This is
-/// Bitcoin Core's `GetPackageHash`; neither `Wtxid`'s derived `Ord` (internal
-/// byte order), a tagged hash, nor a count prefix produces it.
 #[must_use]
 pub fn combined_package_hash(wtxids: &[Wtxid]) -> [u8; 32] {
     let mut ordered: Vec<&[u8; WTXID_LEN]> = wtxids.iter().map(Wtxid::as_bytes).collect();
@@ -261,7 +176,6 @@ fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
-/// Validates a list count: `1..=MAX_GETPKGTXNS`.
 fn check_count(count: u64) -> Result<usize, PackageError> {
     if count == 0 {
         return Err(PackageError::Empty);
@@ -275,13 +189,8 @@ fn check_count(count: u64) -> Result<usize, PackageError> {
     }
 }
 
-/// Reads and bounds a list message's leading `CompactSize` count, returning the
-/// count and the bytes after the prefix.
-///
 /// The one reader for every BIP331 list payload: minimal encoding and a count
 /// from `1` through [`MAX_GETPKGTXNS`] are decided here from the prefix alone.
-/// Callers that inspect a `pkgtxns` frame before decoding it (the ingress
-/// charge plan) use it so the prefix rules are not restated.
 pub fn read_count(payload: &[u8]) -> Result<(usize, &[u8]), PackageError> {
     let (count, consumed) = varint::decode(payload).map_err(|err| match err {
         varint::VarintError::Truncated { .. } => PackageError::Truncated,
@@ -290,7 +199,6 @@ pub fn read_count(payload: &[u8]) -> Result<(usize, &[u8]), PackageError> {
     Ok((check_count(count)?, &payload[consumed..]))
 }
 
-/// Decodes a count-prefixed wtxid list that fills the payload exactly.
 fn read_wtxids(payload: &[u8]) -> Result<Vec<Wtxid>, PackageError> {
     let (count, body) = read_count(payload)?;
     let needed = count * WTXID_LEN;
@@ -307,7 +215,6 @@ fn read_wtxids(payload: &[u8]) -> Result<Vec<Wtxid>, PackageError> {
         .collect())
 }
 
-/// Serializes a wtxid list already known to satisfy [`check_count`].
 fn write_wtxids(wtxids: &[Wtxid]) -> Vec<u8> {
     let count = len_u64(wtxids.len());
     let mut payload = Vec::with_capacity(varint::encoded_len(count) + wtxids.len() * WTXID_LEN);
@@ -318,8 +225,6 @@ fn write_wtxids(wtxids: &[Wtxid]) -> Vec<u8> {
     payload
 }
 
-/// Whether any wtxid appears twice; allocation-free over a list of at most
-/// [`MAX_GETPKGTXNS`] entries.
 fn has_duplicates(wtxids: &[Wtxid]) -> bool {
     wtxids
         .iter()
@@ -329,14 +234,6 @@ fn has_duplicates(wtxids: &[Wtxid]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Fixtures are the three real transactions of Bitcoin Core's
-    //! `package_hash_tests` (`src/test/txpackage_tests.cpp`, merged with
-    //! `GetPackageHash` in `092c978a42e8f4a02291b994713505ba8aac8b28`) and the
-    //! txids and wtxids that test names for them. Expected wire bytes are built
-    //! from the BIP331 definition (a minimal `CompactSize` count followed by the
-    //! items) with string concatenation, and expected package hashes from Core's
-    //! definition restated over displayed hex strings with a direct SHA-256;
-    //! neither reuses this module's comparator, framing, or hash code.
 
     use super::*;
     use bitcoin_rs_primitives::{Script, TxOut, deserialize};
@@ -349,27 +246,21 @@ mod tests {
 
     const TXS: [&str; 3] = [TX_1, TX_2, TX_3];
 
-    /// Displayed (big-endian) wtxids, ascending in displayed order as Core's test asserts.
     const WTXIDS: [&str; 3] = [
         "85cd1a31eb38f74ed5742ec9cb546712ab5aaf747de28a9168b53e846cbda17f",
         "b4749f017444b051c44dfd2720e88f314ff94f3dd6d56d40ef65854fcd7fff6b",
         "e065bac15f62bb4e761d761db928ddee65a47296b2b776785abb912cdec474e3",
     ];
 
-    /// Displayed txids; Core asserts these order differently from the wtxids.
     const TXIDS: [&str; 3] = [
         "bd0f71c1d5e50589063e134fad22053cdae5ab2320db5bf5e540198b0b5a4e69",
         "b4749f017444b051c44dfd2720e88f314ff94f3dd6d56d40ef65854fcd7fff6b",
         "ee707be5201160e32c4fc715bec227d1aeea5940fb4295605e7373edce3b1a93",
     ];
 
-    /// SHA-256 of the three wtxids' internal bytes in displayed order, computed
-    /// outside this crate (Python `hashlib`) from Core's definition.
     const COMBINED_ALL: &str = "0f076ece34c184294c64badd99a4444bb0140d0812f3c76baf466180db2e4fb0";
-    /// The same definition over wtxids 1 and 2 only.
     const COMBINED_FIRST_TWO: &str =
         "10c5067764b8619bba5d55181233d54ba1742b0bcdd4a4416975888a50414e25";
-    /// The same definition over wtxid 1 alone.
     const COMBINED_FIRST: &str = "28e9c3a89feb2c9ecbd6d0c0abd7076bb0714ae3b627591effca0a3b1e24b959";
 
     fn unhex(hex: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
@@ -379,7 +270,6 @@ mod tests {
             .collect()
     }
 
-    /// Internal (little-endian) byte hex of a displayed hash.
     fn internal_hex(displayed: &str) -> String {
         (0..displayed.len())
             .step_by(2)
@@ -431,8 +321,6 @@ mod tests {
             .collect()
     }
 
-    /// Core's `GetPackageHash` over displayed hex: sort the strings, concatenate
-    /// each hash's internal bytes, hash once.
     fn oracle(displayed: &[&str]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
         let mut sorted = displayed.to_vec();
         sorted.sort_unstable();
@@ -451,7 +339,6 @@ mod tests {
         engine.finalize().into()
     }
 
-    /// Expected list wire bytes: one-byte count, then each hash's internal bytes.
     fn list_wire(displayed: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut hex = format!("{:02x}", displayed.len());
         for hash in displayed {
@@ -482,7 +369,6 @@ mod tests {
         assert_eq!(high.encode().as_slice(), unhex("0100000000000080")?);
         assert_eq!(SendPackages::decode(&high.encode())?, high);
 
-        // Zero and unknown bits are data here; negotiation, not the codec, ignores them.
         assert_eq!(SendPackages::decode(&[0; 8])?, SendPackages { versions: 0 });
         Ok(())
     }
@@ -530,8 +416,6 @@ mod tests {
         let wtxids = wtxids_of(&WTXIDS)?;
         let [first, second, third] = [wtxids[0], wtxids[1], wtxids[2]];
 
-        // Displayed order and `Wtxid`'s integer order disagree on (1, 2) and agree on (2, 3),
-        // the two pairs Core's test pins.
         assert!(WTXIDS[0] < WTXIDS[1] && WTXIDS[1] < WTXIDS[2]);
         assert!(second < first);
         assert!(second < third);
@@ -544,7 +428,6 @@ mod tests {
         let integer_order = sha256_of(&internal(&[second, first, third]));
         assert_ne!(combined, integer_order);
 
-        // Core's `hash_if_use_txid`: the txids in their own displayed order.
         assert_ne!(combined, oracle(&TXIDS)?);
 
         let mut prefixed = vec![vec![3_u8]];
@@ -576,7 +459,6 @@ mod tests {
             combined_package_hash(&pair)
         );
 
-        // Repeated members are hashed as repeated members, as Core's test requires.
         assert_ne!(
             combined_package_hash(&[wtxids[0], wtxids[0]]),
             combined_package_hash(&wtxids[..1])
@@ -593,7 +475,6 @@ mod tests {
             .collect();
         let displayed: Vec<&str> = displayed.iter().map(String::as_str).collect();
 
-        // The synthetic set must exercise the difference between the two orders.
         let mut by_integer = ascending.clone();
         by_integer.sort_unstable();
         let mut by_display = ascending.clone();
@@ -611,7 +492,6 @@ mod tests {
 
     #[test]
     fn ancpkginfo_wire_is_count_then_wtxids_with_subject_last() -> TestResult {
-        // Request order, deliberately neither displayed nor integer sorted.
         let order = [WTXIDS[2], WTXIDS[0], WTXIDS[1]];
         let wire = list_wire(&order)?;
         assert_eq!(wire[0], 3);
@@ -631,7 +511,6 @@ mod tests {
         let request = GetPkgTxns::decode(&wire)?;
         assert_eq!(request.wtxids, wtxids_of(&order)?);
         assert_eq!(request.encode()?, wire);
-        // The answer to an unservable request names the same set however it was ordered.
         assert_eq!(
             combined_package_hash(&request.wtxids).as_slice(),
             unhex(COMBINED_ALL)?
@@ -661,7 +540,6 @@ mod tests {
 
     #[test]
     fn pkgtxns_wire_is_count_then_witness_serialized_transactions_in_request_order() -> TestResult {
-        // tx_3, tx_1, tx_2: sorted by neither wtxid nor txid, mixing segwit and legacy.
         let order = [2, 0, 1];
         let wire = pkgtxns_wire(&order)?;
 
@@ -671,7 +549,6 @@ mod tests {
         assert_eq!(package.txs, expected);
         let wtxids: Vec<Wtxid> = package.txs.iter().map(Tx::wtxid).collect();
         assert_eq!(wtxids, wtxids_of(&[WTXIDS[2], WTXIDS[0], WTXIDS[1]])?);
-        // Witness data survives: the segwit members re-encode to Core's bytes.
         assert_eq!(package.encode()?, wire);
         Ok(())
     }
@@ -715,8 +592,6 @@ mod tests {
 
     #[test]
     fn a_declared_count_over_the_bound_fails_before_the_body_is_read() {
-        // Prefix-only payloads: the bound is decided by the count alone, so a
-        // missing body reports the count, not truncation.
         for count in [101_u64, 253, 65_536, 0x1_0000_0000, u64::MAX] {
             let prefix = varint::encode(count);
             assert_eq!(AncPkgInfo::decode(&prefix), Err(too_many(count)));
@@ -744,7 +619,6 @@ mod tests {
     #[test]
     fn compact_size_must_be_minimal() -> TestResult {
         let body = list_wire(&WTXIDS)?[1..].to_vec();
-        // The count 3 widened to three bytes is non-canonical for every list message.
         let mut widened = vec![0xfd, 0x03, 0x00];
         widened.extend_from_slice(&body);
         assert_eq!(
@@ -761,7 +635,6 @@ mod tests {
         widest.extend_from_slice(&body);
         assert_eq!(GetPkgTxns::decode(&widest), Err(PackageError::NonCanonical));
 
-        // A cut prefix is truncation, not a count.
         assert_eq!(GetPkgTxns::decode(&[]), Err(PackageError::Truncated));
         assert_eq!(GetPkgTxns::decode(&[0xfd]), Err(PackageError::Truncated));
         assert_eq!(
@@ -798,7 +671,6 @@ mod tests {
         long.push(0);
         assert_eq!(PkgTxns::decode(&long), Err(PackageError::Trailing(1)));
 
-        // A count above the transactions present, and a transaction cut short.
         let mut missing = wire.clone();
         missing[0] = 4;
         assert!(matches!(

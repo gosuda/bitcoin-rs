@@ -1,21 +1,4 @@
 //! Asynchronous, durable, node-owned transaction index runtime.
-//!
-//! The node creates and owns exactly one `DerivedIndexRuntime` when Core txindex or
-//! `ScriptIndex` enables an index capability.
-//!
-//! The runtime holds a process-local revision counter and a bounded
-//! nonblocking wake channel; `Chainstate` clones it and wakes the worker
-//! after every committed `applied_tip.store`. The worker is a process-local
-//! reconciliation loop; storage-level CAS conditions on exact reset state,
-//! optional revision, and all capability watermarks linearize every ordinary mutation
-//! across coexisting current-process and cross-process writers. A lost CAS
-//! with an unchanged reset is transient (`StaleIndexState`): the worker
-//! discards pending derived work and re-derives from durable state. Exact
-//! query gating refuses that temporary lag and the next worker pass repairs
-//! it. Independent durable capability watermarks let aligned row families
-//! share one parse and commit while divergent families backfill separately.
-//! A snapshot-gated query engine serves `crate::query_api::DerivedIndexQuery`
-//! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
 use arc_swap::ArcSwap;
 
@@ -87,8 +70,6 @@ pub use query::DerivedIndexQueryEngine;
 pub(crate) use query::QueryEngineLive;
 use query::{IndexProgress, map_historical_error};
 
-/// Shared wake/revision/health state owned by `NodeState` and referenced by
-/// `Chainstate`, the worker thread, and the query engine.
 #[derive(Debug)]
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
@@ -102,7 +83,6 @@ pub struct DerivedIndexRuntime {
 }
 
 impl DerivedIndexRuntime {
-    /// Creates shared runtime state.
     #[must_use]
     pub fn new(wake_tx: Sender<()>) -> Self {
         Self {
@@ -117,42 +97,31 @@ impl DerivedIndexRuntime {
         }
     }
 
-    /// Publishes the reconciliation phase. Only the worker thread writes it.
     pub(crate) fn publish_phase(&self, phase: ReconcilePhase) {
         if **self.phase.load() != phase {
             self.phase.store(Arc::new(phase));
         }
     }
 
-    /// Publishes `leg` for `capabilities`, leaving the other legs as they are.
     pub(crate) fn publish_leg(&self, capabilities: IndexCapabilities, leg: ReconcileLeg) {
         self.publish_phase(self.phase().with_leg(capabilities, leg));
     }
 
-    /// Reads the published reconciliation phase.
     #[must_use]
     pub(crate) fn phase(&self) -> ReconcilePhase {
         **self.phase.load()
     }
 
-    /// Called immediately after a committed `applied_tip.store`.
-    ///
-    /// Increments the revision with `Release` ordering and `try_send`s one
-    /// wake.  Coalesced or lost wakes are harmless: the worker reconciles
-    /// against current authoritative state each loop.
     pub fn wake(&self) {
         self.revision.fetch_add(1, Ordering::Release);
         let _ = self.wake_tx.try_send(());
     }
 
-    /// Marks the worker as failed with an explanatory message.
     pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
         *self.failure_message.write() = Some(message.into());
         self.failed.store(true, Ordering::Release);
     }
 
-    /// Unavailable filter history disables only that capability for this run.
-    /// Preserve its durable rows so a restart can retry after history is restored.
     pub(crate) fn fail_compact_filters(&self, error: &DerivedIndexWorkerError) {
         tracing::error!(%error, "compact filter index unavailable; other indexes continue");
         *self.compact_filter_failure.write() = Some(error.to_string().into());
@@ -160,10 +129,6 @@ impl DerivedIndexRuntime {
         self.wake();
     }
 
-    /// Scoped `ScriptLive` outage: history the seed or replay needs is gone.
-    /// The worker keeps running and every other capability keeps serving;
-    /// only `ScriptLive` queries answer `Unavailable`. Never publishes global
-    /// failure. Mirrors `fail_compact_filters`.
     pub(crate) fn fail_script_live(&self, error: &DerivedIndexWorkerError) {
         tracing::error!(%error, "ScriptLive index unavailable; other indexes continue");
         *self.script_live_failure.write() = Some(error.to_string().into());
@@ -171,39 +136,31 @@ impl DerivedIndexRuntime {
         self.wake();
     }
 
-    /// Clears a scoped `ScriptLive` outage: a usable seed artifact arrived,
-    /// a seed committed its watermark, or forward replay made durable
-    /// progress. A fresh `Pruned` refusal sets the flag again.
     pub(crate) fn clear_script_live(&self) {
         self.script_live_failure.write().take();
     }
 
-    /// Reads the scoped `ScriptLive` outage message, if set.
     #[cfg(all(test, feature = "fjall"))]
     #[must_use]
     pub(crate) fn script_live_failure(&self) -> Option<CompactString> {
         self.script_live_failure.read().clone()
     }
 
-    /// Reads the wake revision.
     #[must_use]
     pub(crate) fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// Reports whether shutdown or failure was published.
     #[must_use]
     pub(crate) fn should_stop(&self) -> bool {
         self.shutdown.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire)
     }
 
-    /// Initiates graceful shutdown.
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
         let _ = self.wake_tx.try_send(());
     }
 
-    /// Reads the published failure message.
     #[must_use]
     pub(crate) fn failure_message(&self) -> Option<CompactString> {
         self.failure_message.read().clone()
@@ -287,8 +244,6 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
     }
 }
 
-/// Bounded scan limits used by the query engine.
-///
 /// These are query-side safety limits, not the writer batch limits.
 const QUERY_SCAN_ROW_LIMIT: usize = 1_000_000;
 
@@ -300,61 +255,36 @@ const QUERY_BODY_READ_LIMIT: usize = 4_096;
 
 pub(crate) const MAX_SERIALIZED_BLOCK_BYTES: usize = crate::types::MAX_POSITION_END_BYTES;
 
-/// Writer-side batch limits.
-///
-/// Capped by actual retained row count and encoded bytes to keep each forward
-/// commit bounded.
 const BATCH_BYTE_LIMIT: usize = 256 << 20;
 
-/// Writer-side batch limits for the default (fjall) backend.
 pub const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-/// Writer-side batch limits for the redb backend.
 pub const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 16_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-/// Default fork depth at which a stale txindex watermark routes to a
 /// selective reset + rebuild instead of a per-block rewind.
-///
 /// Grounded in three measured runs of per-block forward-ingest versus rollback
-/// cost (see `docs/benchmarks/index-rollback-rebuild-cutover.md`): the default
-/// routes the 834k-block stale-branch incident shape to a rebuild while organic
-/// reorgs (tens of blocks) keep rewinding block by block.
 pub const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
 
-/// In-memory parallel-prepare cap owned by this worker. 256 matches the IBD
-/// download window so a filled staging set can prepare in one pass when bodies
-/// are small; catch-up also prepares already-stored bodies, so this is not
-/// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
 const PREPARE_CHUNK_BLOCKS: usize = 256;
 
-/// Serialized-body budget for one parallel prepare step. Loading stops once
-/// the total reaches this bound; the body that reaches it is kept, so a step
-/// holds at most this budget plus one body. Stops a 1 MiB-class window from
-/// holding 256 bodies in RAM while still packing early-chain blocks up to the
-/// count cap.
 const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
-/// Upper bound on waiting for backend recovery. Timeout isolates the index
-/// failure from the node; it does not prove recovery stopped making progress.
-/// The backend open thread cannot be cancelled, so abandonment poisons its namespace.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
 
-/// Monotonic publication token. Each worker holds one; a revoked token makes
-/// `rcu` publication a no-op so a late worker cannot publish after abandonment.
 #[derive(Clone, Debug)]
 pub struct Generation {
     id: u64,
@@ -362,7 +292,6 @@ pub struct Generation {
 }
 
 impl Generation {
-    /// Creates a publication token for one worker generation.
     #[must_use]
     pub fn new(id: u64) -> Self {
         Self {
@@ -371,66 +300,40 @@ impl Generation {
         }
     }
 
-    /// Reads the generation identifier.
     #[must_use]
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
-    /// Revokes the token; late publication becomes a no-op.
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
     }
 
-    /// Reports whether this generation was revoked.
     #[must_use]
     pub(crate) fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
     }
 }
 
-/// One immutable lifecycle snapshot published atomically behind `ArcSwap`.
-///
-/// Only `Serving` carries a query payload — the complete existing
-/// `DerivedIndexQueryEngine`, never a raw reader. Readiness is not a lifecycle
-/// state: the engine proves it per query from the durable watermarks
-/// (`IDX-03`), and the worker reports its reconciliation leg through
-/// `DerivedIndexRuntime::phase`. `Opening`, `Failed`, and `ShutdownAbandoned`
-/// carry no payload; the adapter returns typed `Unavailable` for them.
 #[derive(Clone)]
 pub enum DerivedIndexLifecycle {
-    /// The worker is still opening its store.
     Opening,
-    /// The complete query engine is published.
     Serving(Arc<DerivedIndexQueryEngine>),
-    /// The worker failed; the string is a bounded diagnostic.
     Failed(CompactString),
-    /// The worker was abandoned at shutdown before its store opened.
     ShutdownAbandoned,
 }
 
-/// Stable outer query adapter constructed before backend open and before RPC
-/// context construction.
-///
-/// Each method loads exactly one `ArcSwap` snapshot,
-/// holds that `Arc` for the complete request, and delegates to the captured
-/// query engine if a payload exists. It never reads lifecycle state and query
-/// payload from separate loads.
 #[derive(Clone)]
 pub struct DerivedIndexQueryAdapter {
     lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
 }
 
 impl DerivedIndexQueryAdapter {
-    /// Constructs the stable adapter over the lifecycle publication cell.
     #[must_use]
     pub fn new(lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>) -> Self {
         Self { lifecycle }
     }
 
-    /// Serves one historical transaction lookup against a server-selected covered prefix.
-    ///
-    /// Loads exactly one engine handle and delegates the bounded work to it.
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
@@ -439,9 +342,6 @@ impl DerivedIndexQueryAdapter {
         engine.transaction_at_prefix(txid)
     }
 
-    /// Serves one historical script-history lookup against a server-selected covered prefix.
-    ///
-    /// Loads exactly one engine handle and delegates the bounded work to it.
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
@@ -450,9 +350,6 @@ impl DerivedIndexQueryAdapter {
         engine.script_history_at_prefix(script)
     }
 
-    /// Serves one historical spender lookup against a server-selected covered prefix.
-    ///
-    /// Loads exactly one engine handle and delegates the bounded work to it.
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
@@ -478,83 +375,40 @@ impl DerivedIndexQueryAdapter {
     }
 }
 
-/// Immutable specification for worker-owned store open. Constructed
-/// synchronously in `NodeState::open`; consumed on the worker thread.
 pub struct DerivedIndexOpenSpec {
-    /// Data directory the `txindex` namespace lives under.
     pub data_dir: PathBuf,
-    /// Namespace subdirectory name.
     pub namespace: &'static str,
-    /// Backend label retained for open-time logging; the concrete backend is
-    /// constructed by `open_store`, which node owns.
     pub storage_backend: bitcoin_rs_storage::StorageBackend,
-    /// Process epoch stamped into new writer state.
     pub epoch: u64,
-    /// Capability set the worker maintains.
     pub enabled: IndexCapabilities,
-    /// Fork depth routing stale watermarks to reset+rebuild.
     pub rollback_rebuild_cutover: u32,
-    /// Canonicalized data root used for namespace exclusion.
     pub canonical_data_root: PathBuf,
-    /// Opens the durable store inside `dir`. Concrete backend construction
-    /// stays with the node's storage composition; the runtime only calls the
-    /// closure on its worker thread.
     #[expect(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
-    /// Worker-owned seed cell shared with the checkpoint publisher and the
-    /// post-start activation control. `None` when `ScriptLive` is disabled or
-    /// in tests that never offer a snapshot artifact; the seed dispatch then
-    /// falls back to genesis replay. The cell holds demand plus at most one
-    /// queued artifact and performs no I/O.
     pub seed_slot: Option<SeedOfferCell>,
-    /// Authoritative UTXO set used to seed and resolve the compact live view.
     /// Test-only open specs may leave this unset; live queries then fail closed.
     pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
-    /// Serializes a live-view query or seed against a chain transition.
-    ///
-    /// Production node composition passes the read role over the same
-    /// [`bitcoin_rs_chain::TransitionDomain`] as chainstate's mutation role.
-    /// Callers constructing this spec can also supply an unrelated domain, so
-    /// matching provenance is required for live queries.
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
-    /// One-shot portable index bundle request, run by the worker after the
-    /// writer and reader exist and before the first reconcile pass.
-    /// [`crate::portable::IndexBundleDirective::None`] does nothing.
     pub bundle: crate::portable::IndexBundleDirective,
 }
 
-/// Handle used to spawn and join the supervised reconciliation worker.
 pub struct DerivedIndexWorker {
     runtime: Arc<DerivedIndexRuntime>,
     join_handle: Option<JoinHandle<()>>,
-    /// Publication token; revoked on abandonment.
     pub generation: Generation,
-    /// Canonical namespace key for poisoning on abandonment.
     namespace_key: Option<PathBuf>,
-    /// Set by `finish_worker` when this worker abandoned its backend open;
-    /// worker-local so a stale process-global poison from an earlier worker
-    /// is not misattributed to this one.
     open_abandoned: Arc<AtomicBool>,
 }
 
-/// Result of opening the txindex store: writer, reader, and batch limits.
 pub struct OpenDerivedIndex {
-    /// Fenced durable writer.
     pub(crate) writer: Arc<dyn TxIndexWriter>,
-    /// Snapshot-capable reader for the query engine.
     pub(crate) reader: Arc<dyn crate::IndexReader>,
-    /// Batch limits selected by the composing backend.
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
 /// Sink for index-ahead rollback evidence.
-///
-/// When a durable watermark sits above the restored applied tip, the worker
-/// reports it through this seam; node owns the concrete evidence (the
-/// `chain-rollback-event` marker plus the `getblockchaininfo` warning).
 pub trait IndexAheadSink: Send + Sync {
-    /// Records that `capability`'s durable index sits ahead of the restored tip.
     fn report_index_ahead(
         &self,
         capability: &str,
@@ -567,11 +421,6 @@ pub trait IndexAheadSink: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Exact spent-coin script anchor decoded from one block's undo record.
-///
-/// The undo restores are precisely the external coins spent by the block and
-/// carry their full `script_pubkey`. Intra-block spends are absent because
-/// those outputs never entered the committed UTXO set.
 pub(crate) struct UndoScripts {
     scripts: hashbrown::HashMap<([u8; 32], u32), Vec<u8>>,
 }
@@ -599,7 +448,6 @@ impl crate::SpentCoinScripts for UndoScripts {
     }
 }
 
-/// Test cursor source anchored at an empty tip for worker construction.
 #[cfg(all(test, feature = "fjall"))]
 pub(crate) struct TestChainCursor;
 
@@ -615,19 +463,14 @@ impl crate::reconcile::ChainCursorSource for TestChainCursor {
     }
 }
 
-/// Test double standing in for node's `RecoveryReporter`; construction returns
-/// the sink handle plus the recording the test asserts against.
 #[cfg(all(test, feature = "fjall"))]
 pub(crate) struct RecordedIndexAhead {
-    /// One entry per call: `(capability, index_height, tip_height,
-    /// tip_hash_be, index_hash_be, depth, unix_secs)`.
     #[expect(clippy::type_complexity)]
     pub(crate) calls: Mutex<Vec<(String, u32, u32, String, String, u32, u64)>>,
 }
 
 #[cfg(all(test, feature = "fjall"))]
 impl RecordedIndexAhead {
-    /// An empty recording sink.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
@@ -666,54 +509,26 @@ struct Worker {
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
     body_store: Option<Arc<dyn BlockBodyStore>>,
-    /// The pruning authority's narrow history capability, paired with the
-    /// budget the operator configured for this consumer. The worker asks it
-    /// whether history is available and reacts to the typed answer; it never
-    /// derives permanence from a prune height or from a bare `None`.
     history: HistoryAccess,
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
     /// Sink for the index-ahead rollback evidence (`chain-rollback-event`
-    /// marker plus `getblockchaininfo` warning).
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
     wake_rx: Receiver<()>,
     quiet_period: Duration,
     batch_delay: Duration,
-    /// Fork depth at which a stale watermark routes to a selective reset
     /// and rebuild instead of a per-block rewind. `u32::MAX` means rewind
-    /// at any depth (pre-cutover behavior).
     rollback_rebuild_cutover: u32,
-    /// NOTE: the worker no longer holds the live UTXO view or the chain
-    /// transition handle. Seeding replays one immutable snapshot artifact
-    /// through `seed_script_live_stream`; live queries use the query
-    /// engine's own handles. There is no live-UTXO seed fallback.
-    /// Worker-owned seed cell cloned from the open spec. The worker takes,
-    /// wants, and rests demand here; publishers offer at most one queued
-    /// artifact. The cell lock covers pointer moves only, never I/O.
     seed_slot: Option<SeedOfferCell>,
-    /// The one worker-owned active seed: an accepted snapshot artifact plus
-    /// the history pin covering its suffix. At most one bundle lives here
-    /// besides at most one queued cell artifact. Behind a mutex only so
-    /// `&self` worker methods can move it; the worker thread is the sole
-    /// accessor and the guard is never held across I/O.
     seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
 }
 
-/// One worker-owned active seed: the exact accepted bytes plus the history
-/// pin, held locally across passes until committed, poisoned, discarded, or
-/// shut down.
-///
-/// `artifact` is `Some` while the seed has not yet committed its watermark;
-/// the outer `Ok` clears it (dropping the descriptor) and keeps `lease` for
-/// the first catch-up leg. `lease` is `None` until the worker requests it at
-/// take time, and while a stall waits on a deferred grant.
 pub(crate) struct SeedBundle {
     pub(crate) artifact: Option<VerifiedSnapshotArtifact>,
     pub(crate) lease: Option<HistoryLease>,
 }
 
-/// Uncommitted contiguous rows based on one unchanged durable watermark.
 struct PendingForward {
     fence: IndexWriteFence,
     watermarks: IndexWatermarks,
@@ -731,7 +546,6 @@ impl PendingForward {
         watermark
     }
 
-    /// Transfers retained rows without changing their fence or flush deadline.
     fn take(&mut self, limits: PreparedBatchLimits) -> Self {
         let replacement = Self {
             fence: self.fence,
@@ -745,7 +559,6 @@ impl PendingForward {
     }
 }
 
-/// Identity of one block on the active chain, captured under a short tree lock.
 #[derive(Clone, Copy, Debug)]
 struct BlockIdentity {
     height: u32,
@@ -753,25 +566,15 @@ struct BlockIdentity {
     parent_hash: [u8; 32],
 }
 
-/// Outcome of one sub-chunk prepare-and-admit step.
 enum ChunkAction {
     Continue,
-    /// Shutdown, a revoked history pin, a rejected or stale commit, or an
-    /// anchor-class reset: the pass must end, never move to another group.
     Stalled,
     Progressed,
-    /// A body in the next window is absent. Only this outcome lets the
-    /// forward pass look at another capability group.
     MissingBody,
 }
 
-/// How one forward catch-up leg ended.
 enum ForwardLeg {
-    /// The leg ended with a scheduler answer.
     Settled(ReconcileAction),
-    /// The leg's next body is absent and the leg retained no rows, so the
-    /// pass may try the next capability group with the same fence and
-    /// watermarks: nothing was written.
     BodyAbsent,
 }
 
@@ -789,76 +592,40 @@ enum ReconcileAction {
     Stalled,
 }
 
-/// Errors the derived-index worker can surface.
 #[derive(Debug, thiserror::Error)]
 pub enum DerivedIndexWorkerError {
-    /// The worker was stopped before it could finish the requested step.
     #[error("txindex worker stopped")]
     Stopped,
-    /// A shutdown request abandoned a store open still in flight.
     #[error("txindex store open abandoned on shutdown")]
     OpenStopped,
-    /// The durable watermark changed while a forward batch was pending.
     #[error("txindex durable watermark changed while a forward batch was pending")]
     PendingDurableChanged,
-    /// A durable store operation failed.
     #[error("txindex storage error: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
-    /// The store did not open within the bounded wait.
     #[error(
         "txindex store open timed out after {secs}s — the storage engine recovery may be stuck"
     )]
-    OpenTimeout {
-        /// Seconds waited before abandoning the open.
-        secs: u64,
-    },
-    /// The index writer or reader reported a failure.
+    OpenTimeout { secs: u64 },
     #[error("txindex index error: {0}")]
     Index(#[from] IndexError),
-    /// A block body the pruning authority confirmed as retained was absent.
-    /// The owner decided the history is not gone, so the defined reaction is
-    /// to wait and retry, never to rebuild.
     #[error("txindex worker: retained history unavailable: {0}")]
     HistoryUnavailable(#[from] HistoryUnavailable),
-    /// A block body needed for indexing or rollback is permanently gone: the
-    /// pruning authority reported the height outside retained history. The
-    /// defined recovery is a rebuild from what remains.
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
-    MissingBody {
-        /// Block height whose body is missing.
-        height: u32,
-        /// Active-chain hash of the missing body.
-        hash: Hash256,
-    },
-    /// A capability requiring bodies was enabled without a body store.
+    MissingBody { height: u32, hash: Hash256 },
     #[error("txindex worker: body store missing")]
     NoBodyStore,
-    /// The `ScriptLive` history the seed or replay needs is pruned. Scoped
-    /// outage only: the worker keeps running, the flag marks the capability
-    /// unavailable, and every other capability keeps serving.
     #[error("txindex worker: ScriptLive history pruned; seed or replay unavailable")]
     ScriptLiveHistoryPruned,
-    /// A rewind needed an undo record that is missing or unreadable.
     #[error("txindex worker: undo record missing or unreadable at height {height}, hash {hash}")]
-    UndoUnavailable {
-        /// Block height whose undo record is unavailable.
-        height: u32,
-        /// Block hash whose undo record is unavailable.
-        hash: Hash256,
-    },
-    /// The rollback plan referenced a chain node not present in the tree.
+    UndoUnavailable { height: u32, hash: Hash256 },
     #[error("txindex worker: target chain node missing at height {height}")]
-    MissingTargetChain {
-        /// Height whose chain node is missing.
-        height: u32,
-    },
+    MissingTargetChain { height: u32 },
     /// The rollback evidence sink failed to publish the index-ahead event.
     #[error("txindex worker: rollback evidence marker not written: {0}")]
     RollbackEvidence(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl DerivedIndexWorkerError {
-    /// The backend open thread may still hold or acquire the store after this error.
     fn abandoned_open(&self) -> bool {
         matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })
     }

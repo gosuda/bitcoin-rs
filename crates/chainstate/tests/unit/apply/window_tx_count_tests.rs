@@ -1,20 +1,3 @@
-//! Grouped-window publication contract for the cumulative chain tx count.
-//!
-//! A staged block's outcome tip carries that block's own cumulative count —
-//! never the group-final count unless the block is the final one — while one
-//! durable batch certifies only the final count of the committed prefix
-//! (`docs/contracts/recovery.md`, `RCV-02`; the `WindowGroup` docs in
-//! `src/window.rs` state the same rule for the staged tips).
-//!
-//! PRE: a regtest genesis applied with count 1 and committed as the
-//! durable head — the state a header-first sync that already applied
-//! genesis leaves before a body window — plus three one-transaction
-//! children whose headers are already in the tree.
-//! POST: one `ChainTransition::connect_window` call drains one
-//! outcome per block in order; outcome `n` carries `1 + n` transactions;
-//! every prefix published (the event sequence advanced once per block);
-//! the applied cell and the durable head name the final count.
-
 use std::sync::Arc;
 
 use bitcoin_rs_chain::ChainTxCount;
@@ -32,8 +15,6 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
-    // A real header-first sync that applied genesis also committed its
-    // durable head; seed it so the window's lineage fence actually runs.
     handles.durable_head.commit(
         None,
         &DurableHead {
@@ -82,9 +63,6 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
         );
     }
 
-    // Publication happened per block, in order, not once per group: the
-    // event sequence advanced once per staged block. Publishing only the
-    // final tip would leave the sequence at 1.
     let events = handles.chain_events.snapshot();
     assert_eq!(events.sequence, 3);
     assert_eq!(events.tip_height, 3);
@@ -116,11 +94,6 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     Ok(())
 }
 
-/// A fully successful group hands exactly its newest block to the staged-tip
-/// hook, before the group's durable sync: the published tip observed inside
-/// the hook is still the pre-window tip, so no consumer could have seen the
-/// staged tip early. A hook that fired per staged block, or after publish,
-/// fails this test.
 #[test]
 fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -194,13 +167,6 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
     Ok(())
 }
 
-/// Corrupted delivered bytes fail payload construction before any window runs.
-///
-/// A stream that no longer decodes (truncated tail, trailing garbage) never reaches
-/// counting: `from_raw` rejects it at construction, so nothing stages and the applied tip
-/// stays put. The coinbase-only fixtures carry no witness section, so the corruption
-/// targets the stream shape itself; a witness change that still decodes is a different
-/// exact payload, rejected downstream and never passed on count alone.
 #[test]
 fn corrupted_window_bytes_fail_payload_construction() -> Result<(), Box<dyn std::error::Error>> {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
@@ -232,16 +198,6 @@ fn corrupted_window_bytes_fail_payload_construction() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// A witness-only mutation fails payload construction when it breaks the stream.
-///
-/// Setting a witness stack on the coinbase input leaves the txid unchanged (witness data
-/// is outside the txid), so the only difference between the two encodings is witness
-/// bytes. Raising the witness item-count byte then claims a second item the stream cannot
-/// back: past the first item only the four lock-time bytes remain, while the decoder
-/// still needs an item length, its data, and the lock time itself. The stream always
-/// exhausts first, so `from_raw` rejects it at construction and no count is consulted.
-/// (A witness change that still decodes is a different exact payload, rejected
-/// downstream and covered in `connect/tests.rs`.)
 #[test]
 fn witness_only_mutation_fails_payload_construction() -> Result<(), Box<dyn std::error::Error>> {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
@@ -257,7 +213,6 @@ fn witness_only_mutation_fails_payload_construction() -> Result<(), Box<dyn std:
     );
 
     let raw = BlockPayload::from_local(changed).bytes().to_vec();
-    // Tail layout: item-count (1) + item length (1) + item (32) + lock time (4).
     let count_at = raw.len() - 38;
     assert_eq!(raw[count_at], 0x01, "witness item-count site");
     let mut broken = raw;

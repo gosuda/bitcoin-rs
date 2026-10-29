@@ -1,7 +1,3 @@
-//! REF-02/REF-03/REF-07: reference identities fail closed when malformed,
-//! unbound to their artifacts, or confused with a different reference.
-//! The manifest owns pin values; these tests mutate its parsed fields.
-
 #![expect(clippy::expect_used, reason = "reference identity rejection tests")]
 
 #[expect(
@@ -32,7 +28,6 @@ fn edit_reference(section: Option<&str>, edit: impl FnOnce(&mut toml::Table)) ->
     toml::to_string(&manifest).expect("edited manifest")
 }
 
-/// REF-03: the oracle package checksum must belong to the locked package.
 #[test]
 fn kernel_package_custody_matches_the_lockfile() {
     let set = reference_set().expect("complete reference set");
@@ -52,7 +47,6 @@ fn kernel_package_custody_matches_the_lockfile() {
     assert_eq!(kernel["checksum"].as_str(), Some(checksum.as_str()));
 }
 
-/// REF-02/REF-03: labels, missing fields and malformed revisions are not pins.
 #[test]
 fn source_revisions_require_immutable_complete_identities() {
     let malformed = "g".repeat(40);
@@ -85,7 +79,6 @@ fn source_revisions_require_immutable_complete_identities() {
     }
 }
 
-/// REF-02/REF-03: syntactically valid replacements still need artifact custody.
 #[test]
 fn unbound_source_and_artifact_identities_are_rejected() {
     for (section, field, width, identity) in [
@@ -107,8 +100,6 @@ fn unbound_source_and_artifact_identities_are_rejected() {
     }
 }
 
-/// REF-02: every artifact row joins the custody tuple, and duplicate targets
-/// are ambiguous rather than extra coverage.
 #[test]
 fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
     let edit_platform_target = |target: &str| {
@@ -122,14 +113,12 @@ fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
                 .insert("target".to_owned(), target.into());
         })
     };
-    // Renaming the platform row's target detaches it from its binding.
     assert_eq!(
         load_reference_set(&edit_platform_target("x86_64-apple-darwin")),
         Err(ReferenceError::CustodyMismatch {
             identity: "reference.release",
         })
     );
-    // A row claiming the canonical target is ambiguous, not extra coverage.
     assert_eq!(
         load_reference_set(&edit_platform_target("x86_64-linux-gnu")),
         Err(ReferenceError::DuplicateArtifactTarget {
@@ -138,7 +127,6 @@ fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
     );
 }
 
-/// REF-02: missing, short and non-hex digests retain their typed refusal.
 #[test]
 fn malformed_release_digests_are_rejected() {
     for digest in [None, Some("1".repeat(63)), Some("g".repeat(64))] {
@@ -162,7 +150,6 @@ fn malformed_release_digests_are_rejected() {
     }
 }
 
-/// REF-02: the kernel oracle is not the released product comparator.
 #[test]
 fn the_kernel_tree_written_as_the_release_is_identity_confusion() {
     let set = reference_set().expect("reference set");
@@ -175,7 +162,6 @@ fn the_kernel_tree_written_as_the_release_is_identity_confusion() {
     );
 }
 
-/// REF-04: absent corpora are named; absent export pins mean blocked custody.
 #[test]
 fn corpus_custody_distinguishes_missing_unpinned_and_pinned() {
     let set = reference_set().expect("reference set");
@@ -222,7 +208,6 @@ fn corpus_custody_distinguishes_missing_unpinned_and_pinned() {
     }
 }
 
-/// REF-07: a declared public deviation must explain its different behavior.
 #[test]
 fn every_deviation_entry_states_its_deviation() {
     let mut deviations = 0_usize;

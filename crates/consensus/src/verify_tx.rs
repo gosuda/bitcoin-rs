@@ -21,9 +21,7 @@ const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 pub(crate) const COINBASE_MATURITY: u32 = 100;
 
-/// Maximum width of the script-verification pool.
 const MAX_SCRIPT_VERIFY_THREADS: usize = 32;
-/// Minimum check count before dispatching to the parallel verification pool.
 const MIN_PARALLEL_SCRIPT_CHECKS: usize = 32;
 static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -34,7 +32,6 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
         .unwrap_or_else(|error| panic!("failed to build script verification pool: {error}"))
 });
 
-/// Tests finality against the block height or caller's timestamp cutoff.
 #[must_use]
 pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
     let lock_time = tx.lock_time.to_consensus();
@@ -56,7 +53,6 @@ pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
         .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
-/// Checks coinbase scriptSig consensus bounds.
 pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
     if let Some(input) = tx.inputs.first().filter(|_| tx.is_coinbase()) {
         let len = input.script_sig.len();
@@ -67,7 +63,6 @@ pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-/// Checks whether a transaction may spend a coinbase output at `spend_height`.
 pub fn check_coinbase_maturity(
     coinbase: bool,
     created_height: u32,
@@ -85,7 +80,6 @@ pub fn check_coinbase_maturity(
     Ok(())
 }
 
-/// Verifies structural, contextual and script transaction rules.
 pub fn verify_transaction(
     tx: &Tx,
     prevouts: &impl UtxoView,
@@ -106,7 +100,6 @@ pub fn verify_transaction(
     )
 }
 
-/// Verifies non-script rules with the caller's timestamp cutoff.
 pub fn verify_transaction_non_script(
     tx: &Tx,
     prevouts: &impl UtxoView,
@@ -134,7 +127,6 @@ fn verify_transaction_with_locktime_cutoff(
     engine: Option<ValidationEngine>,
     signature_cache: Option<&bitcoin_rs_script::SignatureCache>,
 ) -> Result<(), ConsensusError> {
-    // A coinbase skips dispatch, so selection must be checked before preparation.
     if let Some(engine) = engine
         && !engine.is_supported()
     {
@@ -160,7 +152,6 @@ struct TxPrep {
     output_value: u64,
 }
 
-/// Rejects null or repeated input outpoints outside coinbase transactions.
 pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
     if tx.is_coinbase() {
         return Ok(());
@@ -177,8 +168,6 @@ pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError>
     Ok(())
 }
 
-/// Checks transaction shape and output totals without consulting chain context.
-/// The caller owns the enclosing block/transaction serialized-size bound.
 pub(crate) fn verify_transaction_structure(tx: &Tx) -> Result<u64, ConsensusError> {
     if tx.inputs.is_empty() {
         return Err(ConsensusError::EmptyInputs);
@@ -286,22 +275,12 @@ struct InputCheck {
     input_index: usize,
 }
 
-/// Preparation and execution durations, in seconds.
 #[derive(Clone, Copy, Default)]
 pub struct ScriptStageTimings {
-    /// Serial preparation.
     pub prepare_seconds: f64,
-    /// Script execution, excluding the ordered error scan.
     pub parallel_seconds: f64,
 }
 
-/// Verifies every input script across a block in one flat, block-ordered pass.
-///
-/// When `script_cache` is present, a transaction whose `(wtxid, flags)` entry
-/// the mempool filled skips its script re-execution; its pre-checks (finality,
-/// prevout amounts), post-checks (value balance, sigops), and ordering are
-/// unchanged. `None` under the kernel engine, so the kernel oracle stays
-/// authoritative.
 pub fn verify_block_input_scripts<'tx, 'checks>(
     view: &mut BlockView<'tx>,
     height: u32,
@@ -315,8 +294,6 @@ where
     'tx: 'checks,
 {
     let prepare_started = Instant::now();
-    // The single-block path keeps direct-take semantics: its outcomes commit
-    // or fail as one block, so takes stay consumed either way.
     let mut takes = script_cache.map(crate::script_cache::WindowCacheTakes::new);
     let unit = prepare_block_script_checks(
         view,
@@ -335,28 +312,18 @@ where
     first_unit_failure(unit_slice, &results).map_err(|failure| failure.error)
 }
 
-/// One block's script checks, prepared but not executed.
 pub struct BlockScriptChecks<'b> {
     prepared: Vec<PreparedTx<'b>>,
     checks: Vec<InputCheck>,
     flags: VerifyFlags,
 }
 
-/// Unit index and transaction verdict of the first batch failure.
 #[derive(Debug)]
 pub struct BatchScriptFailure {
-    /// Position of the failing unit.
     pub unit: usize,
-    /// Same verdict as the single-block path.
     pub error: ConsensusError,
 }
 
-/// Resolves one block's order-sensitive transaction state without executing any
-/// script.
-///
-/// `script_cache` is consulted with the block's precomputed witness ids,
-/// the derived ids when the facts carry witness but no precomputed ids, or
-/// the txid when the block carries no witness.
 pub fn prepare_block_script_checks<'tx, 'checks>(
     view: &mut BlockView<'tx>,
     height: u32,
@@ -368,11 +335,6 @@ pub fn prepare_block_script_checks<'tx, 'checks>(
 where
     'tx: 'checks,
 {
-    // The key vector exists only to serve cache takes; cache-free paths
-    // (kernel engine, window proposals, unit tests) allocate nothing here.
-    // The txid fallback is sound only for witness-free bodies, where the
-    // two coincide: a witness-bearing view without precomputed ids derives
-    // the real witness ids instead of keying witness checks by txid.
     let wtxids: Vec<Wtxid> = if takes.is_some() {
         match view.facts().wtxids().map(<[Wtxid]>::to_vec) {
             Some(wtxids) => wtxids,
@@ -412,7 +374,6 @@ where
     })
 }
 
-/// Returns checks in flattened unit order, using the pool above the threshold.
 fn run_prepared_checks(units: &[BlockScriptChecks<'_>]) -> Vec<Result<(), ConsensusError>> {
     let run = |(unit_index, check): &(usize, &InputCheck)| check_input(&units[*unit_index], check);
     let flat: Vec<(usize, &InputCheck)> = units
@@ -427,7 +388,6 @@ fn run_prepared_checks(units: &[BlockScriptChecks<'_>]) -> Vec<Result<(), Consen
     }
 }
 
-/// Scans fixed-offset result slices in unit order, failing closed on malformed layouts.
 fn first_unit_failure(
     units: &[BlockScriptChecks<'_>],
     results: &[Result<(), ConsensusError>],
@@ -464,13 +424,11 @@ fn first_unit_failure(
     Ok(())
 }
 
-/// Executes prepared script checks and reports the first failure in unit order.
 pub fn verify_prepared_units(units: &[BlockScriptChecks<'_>]) -> Result<(), BatchScriptFailure> {
     let results = run_prepared_checks(units);
     first_unit_failure(units, &results)
 }
 
-/// Reports an internal prepared-check layout mismatch.
 fn layout_failure(unit: usize) -> BatchScriptFailure {
     BatchScriptFailure {
         unit,
@@ -480,7 +438,6 @@ fn layout_failure(unit: usize) -> BatchScriptFailure {
     }
 }
 
-/// First transaction failure, with `pre < script < post` precedence.
 fn first_prepared_error(
     prepared: &[PreparedTx<'_>],
     results: &[Result<(), ConsensusError>],
@@ -507,11 +464,6 @@ fn first_prepared_error(
     Ok(None)
 }
 
-/// Resolves order-sensitive transaction state before script checks fan out.
-///
-/// A cache hit for the transaction's `(wtxid, flags)` records its pre- and
-/// post-checks but contributes no [`InputCheck`]: the mempool already executed
-/// those scripts under exactly these flags.
 fn prepare_block_input_checks<'b>(
     txs: &'b [Tx],
     resolved: &mut [Vec<Option<TxOut>>],
@@ -552,9 +504,6 @@ fn prepare_block_input_checks<'b>(
             }
         };
 
-        // A mempool-verified entry skips script re-execution but keeps every
-        // other check: pre-errors already ran above, and the value-balance
-        // and sigop post-checks run here with zero script checks attached.
         if takes
             .as_mut()
             .is_some_and(|takes| takes.take(wtxids[tx_index], flags))
@@ -568,16 +517,12 @@ fn prepare_block_input_checks<'b>(
                 checks_len: 0,
                 script_state: None,
             });
-            // Its scripts outrank this post-error, which outranks all later transactions.
             if stop_after_tx {
                 break;
             }
             continue;
         }
 
-        // Compute, but do not publish, the post-script verdict before moving
-        // prevouts into the backend. Setup errors still win here, and the
-        // ordered result scan still reports scripts before this post-error.
         let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let script_state = match script_source.prepare_tx(tx_index, tx, prep.prevouts) {
             Ok(state) => state,
@@ -611,7 +556,6 @@ fn prepare_block_input_checks<'b>(
             checks_len,
             script_state: Some(script_state),
         });
-        // Its scripts outrank this post-error, which outranks all later transactions.
         if stop_after_tx {
             break;
         }
@@ -619,7 +563,6 @@ fn prepare_block_input_checks<'b>(
     (prepared, checks)
 }
 
-/// Dispatches an input to its retained backend state.
 fn check_input(unit: &BlockScriptChecks<'_>, check: &InputCheck) -> Result<(), ConsensusError> {
     let prep = &unit.prepared[check.prepared_index];
     let script_state = prep.script_state.as_ref().ok_or_else(|| {
@@ -704,9 +647,6 @@ mod tests {
         }
     }
 
-    // Activation contract: BIP141, "Sigops" (https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops),
-    // as implemented by Bitcoin Core v31.1 in src/validation.cpp:
-    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp
     #[test]
     fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -733,7 +673,6 @@ mod tests {
                 script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![1; 32]].concat()),
             },
         )]);
-        // Skipping execution still accounts sigops with the active flags.
         assert_eq!(
             super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::P2SH),
             Ok(()),
@@ -745,7 +684,6 @@ mod tests {
                 max: crate::MAX_BLOCK_SIGOPS_COST
             }),
         );
-        // Preparation binds the execution flags for its cached post-error.
         let txs = vec![tx];
         let block = test_block_parse(&txs);
         let resolved = vec![vec![prevouts.get(&outpoint).cloned()]];
@@ -861,7 +799,6 @@ mod tests {
             let secret =
                 SecretKey::from_slice(&[seed; 32]).unwrap_or_else(|_| panic!("secret key"));
             let keypair = Keypair::from_secret_key(&secp, &secret);
-            // BIP341 key-only tweak: t = TaggedHash("TapTweak", x_only_pubkey || [0u8; 32])
             let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
             let tag = {
                 let mut h = Sha256::new();
@@ -872,7 +809,7 @@ mod tests {
             tweak_hash.update(tag);
             tweak_hash.update(tag);
             tweak_hash.update(xonly.serialize());
-            tweak_hash.update([0u8; 32]); // empty merkle root
+            tweak_hash.update([0u8; 32]);
             let tweak_arr: [u8; 32] = tweak_hash.finalize().into();
             let tweak = Scalar::from_be_bytes(tweak_arr).unwrap_or_else(|_| panic!("tweak scalar"));
             let tweaked_keypair = keypair
@@ -885,8 +822,8 @@ mod tests {
             };
             outpoints.push(outpoint);
             let mut script_pubkey = Vec::with_capacity(34);
-            script_pubkey.push(0x51); // OP_1
-            script_pubkey.push(0x20); // push 32 bytes
+            script_pubkey.push(0x51);
+            script_pubkey.push(0x20);
             script_pubkey.extend_from_slice(&output_key.serialize());
             prevouts.push(TxOut {
                 value: Amount::from_sat(50_000),
@@ -977,7 +914,6 @@ mod tests {
     #[test]
     fn locktime_finality_uses_the_height_and_the_caller_supplied_cutoff() {
         const TIMESTAMP: u32 = 500_000_100;
-        // (locktime, height, cutoff, final)
         let cases: [(u32, u32, u32, bool); 8] = [
             (0, 0, 0, true),
             (200, 100, 0, false),
@@ -986,7 +922,6 @@ mod tests {
             (TIMESTAMP, 1, TIMESTAMP - 1, false),
             (TIMESTAMP, 1, TIMESTAMP, false),
             (TIMESTAMP, 1, TIMESTAMP + 1, true),
-            // A height cutoff cannot retire a timestamp locktime.
             (TIMESTAMP, u32::MAX, 0, false),
         ];
         let utxos = hashbrown::HashMap::new();
@@ -1019,7 +954,6 @@ mod tests {
                 );
             }
 
-            // A final sequence on every input overrides the locktime.
             tx.inputs[0].sequence = Sequence::MAX;
             assert!(is_final_tx(&tx, height, cutoff), "{label} final sequence");
         }
@@ -1226,10 +1160,6 @@ mod tests {
         }
     }
 
-    /// A block whose spend carries an invalid signature connects when the
-    /// cache holds its exact `(wtxid, flags)` entry (scripts skipped, pre-
-    /// and post-checks still run), fails again once the hit consumed the
-    /// entry, and fails when the entry sits under different flags.
     #[test]
     fn script_cache_hit_skips_scripts_for_exact_flags_only()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1252,8 +1182,6 @@ mod tests {
         cache.insert(wtxid, flags);
         let parsed = test_block_parse(&txs);
         let mut view = block_view_for(&txs, resolved.clone());
-        // Populate precomputed witness ids so the hit exercises the
-        // facts-wtxids key source (identical keys for witness-free bodies).
         let _ = view.witness_ids();
         let mut takes = WindowCacheTakes::new(&cache);
         let hit =
@@ -1283,11 +1211,8 @@ mod tests {
         Ok(())
     }
 
-    /// A transaction's stored post-verdict fires even though its prevouts
-    /// moved into the prepared state; the balanced control still passes.
     #[test]
     fn prepared_error_selection_keeps_pre_script_post_order() {
-        // OP_1 prevout: the script passes and the stored post-verdict decides.
         let resolved = vec![vec![], vec![Some(op1_txout(50))]];
         let balanced_txs = vec![
             coinbase_transaction_with_script_sig_len(2),
@@ -1304,8 +1229,6 @@ mod tests {
             super::prepare_block_script_checks(&mut view, 0, 0, VerifyFlags::NONE, &parsed, None)
                 .unwrap_or_else(|error| panic!("fixture prevouts resolve: {error}"));
         assert!(overdraft.prepared[1].script_state.is_some());
-        // One unit spans the block; the stored post-verdict of the second
-        // transaction is reported once its scripts pass.
         let verdict = super::verify_prepared_units(core::slice::from_ref(&overdraft));
         assert!(
             matches!(
@@ -1337,8 +1260,6 @@ mod tests {
         }
     }
 
-    /// A witness-bearing variant: the script still mismatches, but the
-    /// wtxid no longer equals the txid, so a txid fallback misses the cache.
     fn witnessed_mismatch_input(outpoint: OutPoint) -> TxIn {
         TxIn {
             witness: Witness::from_stack(vec![vec![0x51]]),
@@ -1346,9 +1267,6 @@ mod tests {
         }
     }
 
-    /// A witness-bearing body keyed from `from_txids` facts hits the cache
-    /// under its real wtxid: the prepare derives witness ids instead of
-    /// falling back to the txid.
     #[test]
     fn script_cache_hit_uses_derived_witness_ids_for_witness_bearing_bodies()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1398,7 +1316,6 @@ mod tests {
 
     enum Expect {
         Accepted,
-        // Backend reason text differs; both must report input zero.
         ScriptAtFirstInput,
         Exact(ConsensusError),
     }
@@ -1577,7 +1494,7 @@ mod tests {
 
     fn load_taproot_scriptpath_fixture() -> TaprootScriptPathFixture {
         let json = include_str!("../tests/vectors/scripts/taproot_scriptpath_spend.json");
-        let file: TaprootScriptPathFile = serde_json::from_str(json)
+        let file: TaprootScriptPathFile = sonic_rs::from_str(json)
             .unwrap_or_else(|error| panic!("taproot scriptpath fixture parses: {error}"));
         let tx: Tx = deserialize(&decode_hex(&file.tx_hex))
             .unwrap_or_else(|error| panic!("taproot scriptpath tx hex decodes: {error}"));

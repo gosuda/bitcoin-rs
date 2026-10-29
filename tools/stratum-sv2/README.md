@@ -1,7 +1,7 @@
 # Embedded bitcoin-rs behind the SRI Stratum V2 stack
 
 This regtest example runs the production `bitcoin_rs_node::Node` and its SV2
-Template Distribution adapter in one process. The unchanged pinned SRI pool,
+Template Distribution adapter in one process. The pinned SRI pool,
 translator and two mining devices remain external. The adapter borrows the
 existing `MiningControl`, retains `Arc<Candidate>` jobs, and submits native
 blocks through canonical validation and publication. There is no internal
@@ -29,12 +29,11 @@ The provider builds from the repository root with Rust 1.99 and the standalone
 lockfile. It uses native validation and Fjall, and stores its regtest node in
 the existing `bitcoin-rs-data` volume. Do not run the previous separate node
 against that volume concurrently. No volume is reset by startup or shutdown.
-The optional SV1 translator still listens on host loopback port 3333. Pool
+The optional SV1 translator listens on host loopback port 3333. Pool
 monitoring remains on loopback port 9090. Device core counts are deliberately
 small; increase them only for the test host's capacity.
 
-The default Noise key is example material, unchanged from the previous
-example. `config/pool.toml` pins its public key:
+The default Noise key is example material. `config/pool.toml` pins its public key:
 `9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW`.
 If `TP_PRIVATE_KEY_HEX` is overridden, update that pin from the provider's
 startup log before reconnecting the pool. External SRI image and source pins

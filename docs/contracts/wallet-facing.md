@@ -1,169 +1,23 @@
 # Wallet-facing public surface
 
-Target contract for the surface an external wallet consumes. The node
-exposes public transports only. Wallet keys, coin selection, and signing
-stay in the external process.
+Target contract for the surface an external wallet consumes. The node exposes public transports only. Wallet keys, coin selection, and signing stay in the external process.
 
 ## Clauses
 
 ### `WF-01`: Public transports only
-
-- An external wallet talks to a running node through native Esplora HTTP
-  at `/api` and the wallet-free JSON-RPC methods declared in `MANIFEST`
-  (`crates/rpc/src/manifest.rs`). The embeddable `Node` API
-  (`crates/node/src/embed.rs`) is the in-process equivalent of the same
-  facts, not a second surface.
-- The consumer does not import `NodeState`, `UtxoSet`, index types, or
-  other crate-internal handles, and it gets no datadir access. The
-  key-free helpers `getdescriptorinfo`, `deriveaddresses`, `decodescript`, `scantxoutset`,
-  `combinepsbt`, `finalizepsbt`, and `sendrawtransaction` remain node
-  RPCs because they need no key custody.
-- Privileged access fails by design. Import, datadir, and internal-state
-  probes have no endpoint and return the declared unsupported or
-  not-found response of their dialect. A successful privileged probe is a
-  contract violation, not a feature.
-- Key material never crosses to the node. Signing happens inside the
-  consumer process.
-- Owners: Esplora router `crates/rpc/src/esplora.rs`; JSON-RPC dispatch
-  `crates/rpc/src/handlers.rs`; embedding `crates/node/src/embed.rs`.
-
+An external wallet talks to a running node through native Esplora HTTP at `/api` and the wallet-free JSON-RPC methods declared in `MANIFEST` (`crates/rpc/src/manifest.rs`); the embeddable `Node` API (`crates/node/src/embed.rs`) is the in-process equivalent of the same facts, not a second surface. The consumer gets no datadir access and imports no `NodeState`, `UtxoSet`, index types, or other crate-internal handles. The key-free helpers `getdescriptorinfo`, `deriveaddresses`, `decodescript`, `scantxoutset`, `combinepsbt`, `finalizepsbt`, and `sendrawtransaction` stay node RPCs because they need no key custody. Privileged access fails by design: import, datadir, and internal-state probes have no endpoint and return the declared unsupported or not-found response of their dialect; a successful privileged probe is a contract violation, not a feature. Key material never crosses to the node; signing happens inside the consumer process. Owners: Esplora router `crates/rpc/src/esplora.rs`; JSON-RPC dispatch `crates/rpc/src/handlers.rs`; embedding `crates/node/src/embed.rs`.
 ### `WF-02`: Operations a wallet actually issues
-
-By default, Esplora lives at `/api` on the JSON-RPC listener. That directory
-is the electrs/mempool.space base URL; relative routes below are appended to it.
-With the opt-in
-`public_bind`, REST (if enabled), `/api`, and `/esplora` move to that separate
-public listener, and `rpc_bind` serves authenticated JSON-RPC only. The public
-listener refuses JSON-RPC, including the legacy unknown-POST fallback, with
-404 and closes before authentication or body upload. Both bindings share the
-same Context and authoritative services; routing, capability gates, broadcast
-origins and CORS inside the public namespaces are unchanged. Each binding
-owns its connection budget, dispatcher cancellation latch and blocking quota
-(API-34). Proof:
-`rpc::server::tests::listeners::split_listener_routes_are_closed_before_authentication_and_body_upload`,
-`rpc::server::tests::listeners::public_saturation_preserves_management_and_recovers`,
-and node lifecycle tests
-`split_rpc_listeners_start_and_join_through_node_services` and
-`public_bind_failure_rolls_back_management_binding_and_node_state`.
-
-Every read captures the applied-tip publication and answers from one coherent view. A
-moved chain generation returns the declared unavailable response, never a
-mixed-tip page.
-
-Transaction rendering resolves a distinct parent at most once per response
-or bounded backend batch, retaining only referenced outputs until that
-batch finishes. Backend mempool GETs render at most 25 selected transactions
-at a time without limiting the response count. The ordered selection and its
-borrowed parent lookup retain the captured transaction Arcs across batches;
-only the prevout working set is bounded by the inputs of one batch. Backend
-POST transaction requests render at most 25 requested
-IDs at a time and share duplicate bodies within each batch; completed batches
-retain only response rows. Request size, row ordering, duplicates and omitted
-missing IDs keep their existing semantics. Transactions
-already selected through the mempool or verified index queries may supply
-those outputs. A decoded block may supply them only when its header identity
-matches the requested record, its transactions pass the existing merkle-root,
-mutation and witness-commitment checks using activation at that block's ancestry,
-it belongs to the applied chain, and the transaction
-index is healthy and caught up. The readiness snapshot is consulted once only
-when the batch can reuse an in-block parent; ordinary parent queries otherwise
-enforce their own readiness checks. Losing
-branch bodies do not substitute for authoritative parent history. Missing,
-pruned, unavailable and corrupt required data retain their explicit errors.
-Read-only backend POST batches use the same applied-tip publication fence
-as GET responses.
-
-Proof: `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows`
-checks multi-batch counts, ordering, cursor/limit behavior, distinct prevout
-values and one external-parent lookup per batch.
-`esplora::tests::backend_mempool_get_keeps_captured_parents_across_batches`
-checks that a selected parent removed during rendering still supplies a later
-batch without an index readiness check or another parent query.
-
-Proof: `crates/rpc/src/esplora.rs` tests
-`history_resolves_shared_parents_once_per_page`,
-`batch_reuses_selected_transactions_and_mempool_parents`,
-`block_page_reuses_parent_outside_the_selected_page`,
-`block_transactions_reject_corrupt_witness_commitments`,
-`block_witness_binding_observes_activation`,
-`block_parent_reuse_checks_readiness_only_when_needed`,
-`backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`, and
-`parent_query_errors_and_republication_never_yield_a_cached_success`
-exercise parent reuse, response fields/order, explicit data errors and
-the applied-tip fence across GET and read-only POST requests.
-
-- Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.
-- Checkpoint hashes: `GET /block-height/{h}` (BDK walks this while
-  building its chain).
-- Headers: `GET /block/{hash}/header` (80-byte header as hex).
-- Scan by scripthash: `GET /scripthash/{hash}`, `/utxo`, `/txs`, and the
-  `/address/{addr}` twins. BDK syncs through scripthash, not address.
-  These routes follow `--scriptindex`; they return HTTP 503 until that
-  index covers the applied tip.
-- UTXO and history lookup with pagination: the `.../txs/chain[/{last}]`
-  cursors keep public Esplora cursor semantics.
-- Fee estimates: `GET /fee-estimates`, plus `estimatesmartfee` and
-  `estimaterawfee` over JSON-RPC. Insufficient data returns the declared
-  insufficient-data shape, never a fabricated rate.
-- Build and sign outside the node: `combinepsbt`, `finalizepsbt`, and the
-  descriptor helpers are key-free. The consumer signs.
-- Broadcast: `POST /tx` (hex body) reaches the shared `MempoolGateway` with
-  `AdmissionOrigin::Esplora` and its own fixed 10,000,000 sat/kvB request
-  ceiling (`API-10`). Rejections return HTTP 400 with the rejection reason;
-  success returns the transaction id as plain text.
-- Confirmation tracking, replacement observation, disconnect and reorg
-  observation, and rescan all run over the same public reads.
-- Public `/api` responses, including errors, allow cross-origin reads with
-  `Access-Control-Allow-Origin: *` and expose `X-Total-Results`. `OPTIONS`
-  requests under `/api` return a 204 preflight response permitting `GET`,
-  `POST`, and the `Content-Type` request header. The mempool backend
-  `/esplora` namespace, JSON-RPC, and Core REST do not inherit this policy.
-- `/api` is a closed electrs namespace: a request in it never falls
-  through to JSON-RPC. Unprefixed electrs paths on this listener 404 so
-  JSON-RPC keeps `/`. `/api/v1` is Mempool's API on the explorer port,
-  not an Esplora alias here.
-- `/api` does not serve mempool-backend helpers. `/internal/*` and
-  `/block-template` live under `/esplora`, the electrs superset
-  `mempool/backend` uses as `ESPLORA_REST_API_URL`.
-- Only GET and POST exist on `/api` and `/esplora`. Other methods, and
-  GET outside `/rest/`, `/api`, and `/esplora`, 404 at the listener demux
-  and never become JSON-RPC.
-
+By default Esplora lives at `/api` on the JSON-RPC listener (the electrs and mempool.space base URL; relative routes append to it). With opt-in `public_bind`, REST (if enabled), `/api`, and `/esplora` move to that separate public listener while `rpc_bind` serves authenticated JSON-RPC only; the public listener refuses JSON-RPC, including the legacy unknown-POST fallback, with 404 and closes before authentication or body upload. Both bindings share the same Context and authoritative services, so routing, capability gates, broadcast origins, and CORS inside the public namespaces are unchanged; each binding owns its connection budget, dispatcher cancellation latch, and blocking quota (API-34). Proof: `rpc::server::tests::listeners::split_listener_routes_are_closed_before_authentication_and_body_upload`, `rpc::server::tests::listeners::public_saturation_preserves_management_and_recovers`, and node lifecycle tests `split_rpc_listeners_start_and_join_through_node_services` and `public_bind_failure_rolls_back_management_binding_and_node_state`.
+Every read captures the applied-tip publication and answers from one coherent view; a moved chain generation returns the declared unavailable response, never a mixed-tip page. Transaction rendering resolves a distinct parent at most once per response or bounded backend batch, retaining only referenced outputs until that batch finishes: backend mempool GETs render at most 25 selected transactions at a time without limiting the response count, the ordered selection and its borrowed parent lookup retain the captured transaction Arcs across batches while only the prevout working set is bounded by one batch's inputs, and backend POST transaction requests render at most 25 requested IDs at a time and share duplicate bodies within each batch while completed batches retain only response rows. Request size, row ordering, duplicates, and omitted missing IDs keep existing semantics. Transactions already selected through the mempool or verified index queries may supply those outputs; a decoded block may supply them only when its header identity matches the requested record, its transactions pass the existing merkle-root, mutation, and witness-commitment checks using activation at that block's ancestry, it belongs to the applied chain, and the transaction index is healthy and caught up. The readiness snapshot is consulted once only when the batch can reuse an in-block parent; ordinary parent queries enforce their own readiness checks. Losing branch bodies never substitute for authoritative parent history. Missing, pruned, unavailable, and corrupt required data keep their explicit errors; read-only backend POST batches use the same applied-tip publication fence as GET responses. Proof: `esplora::tests::backend_mempool_get_bounds_prevouts_without_limiting_rows` and `backend_mempool_get_keeps_captured_parents_across_batches`, plus `crates/rpc/src/esplora.rs` tests `history_resolves_shared_parents_once_per_page`, `batch_reuses_selected_transactions_and_mempool_parents`, `block_page_reuses_parent_outside_the_selected_page`, `block_transactions_reject_corrupt_witness_commitments`, `block_witness_binding_observes_activation`, `block_parent_reuse_checks_readiness_only_when_needed`, `backend_transaction_batches_share_duplicate_bodies_and_preserve_rows`, and `parent_query_errors_and_republication_never_yield_a_cached_success`.
+Routes: chain tip `GET /blocks/tip/height`, `GET /blocks/tip/hash`; checkpoint hashes `GET /block-height/{h}` (BDK walks this while building its chain); headers `GET /block/{hash}/header` (80-byte header as hex); scan by scripthash `GET /scripthash/{hash}`, `/utxo`, `/txs`, and the `/address/{addr}` twins (BDK syncs through scripthash, not address; these routes follow `--scriptindex` and return HTTP 503 until that index covers the applied tip); UTXO and history lookup with pagination (the `.../txs/chain[/{last}]` cursors keep public Esplora cursor semantics); fee estimates `GET /fee-estimates` plus `estimatesmartfee` and `estimaterawfee` over JSON-RPC (insufficient data returns the declared insufficient-data shape, never a fabricated rate); build and sign outside the node (`combinepsbt`, `finalizepsbt`, descriptor helpers are key-free; the consumer signs); broadcast `POST /tx` (hex body) reaching the shared `MempoolGateway` with `AdmissionOrigin::Esplora` and its own fixed 10,000,000 sat/kvB request ceiling (API-10), where rejections return HTTP 400 with the reason and success returns the transaction id as plain text; confirmation tracking, replacement observation, disconnect and reorg observation, and rescan over the same public reads. Public `/api` responses, including errors, allow cross-origin reads with `Access-Control-Allow-Origin: *` and expose `X-Total-Results`; `OPTIONS` under `/api` returns a 204 preflight permitting `GET`, `POST`, and the `Content-Type` request header (the mempool backend `/esplora` namespace, JSON-RPC, and Core REST do not inherit this policy). `/api` is a closed electrs namespace: a request in it never falls through to JSON-RPC, unprefixed electrs paths on this listener 404 so JSON-RPC keeps `/`, and `/api/v1` is Mempool's API on the explorer port, not an Esplora alias here. `/api` serves no mempool-backend helpers; `/internal/*` and `/block-template` live under `/esplora`, the electrs superset `mempool/backend` uses as `ESPLORA_REST_API_URL`. Only GET and POST exist on `/api` and `/esplora`; other methods, and GET outside `/rest/`, `/api/`, and `/esplora`, 404 at the listener demux and never become JSON-RPC.
 ### Acceptance criteria and execution evidence
-
-- **WF-02 routing:** `HEAD /api/tx` and `PUT /` return 404, while
-  `POST /api/tx` remains the broadcast route; neither unsupported request
-  reaches JSON-RPC. Evidence: the running-node assertions in
-  `external_wallet_can_scan_estimate_and_broadcast` (the `HEAD /api/tx` and
-  `PUT /` exchanges) and the
-  corresponding CI test log.
-- **Closed namespaces:** `/api` and `/esplora` accept only their documented
-  GET/POST routes, and unprefixed explorer paths remain 404. Evidence: the
-  same integration test plus `listener_directory_table_is_closed_over_http`;
-  run with `cargo test -p bitcoin-rs --test wallet_facing`.
-- **Consumer boundary:** the proof uses only HTTP against a spawned node.
-  Evidence: the imports of that test target.
-
+`WF-02` routing: `HEAD /api/tx` and `PUT /` return 404 while `POST /api/tx` stays the broadcast route, and neither unsupported request reaches JSON-RPC. Evidence: the running-node assertions in `external_wallet_can_scan_estimate_and_broadcast` (the `HEAD /api/tx` and `PUT /` exchanges) and the corresponding CI test log. Closed namespaces: `/api` and `/esplora` accept only their documented GET and POST routes, and unprefixed explorer paths stay 404. Evidence: the same integration test plus `listener_directory_table_is_closed_over_http`; run with `cargo test -p bitcoin-rs --test wallet_facing`. Consumer boundary: the proof uses only HTTP against a spawned node. Evidence: the imports of that test target.
 ### `WF-03`: Proof is a public-process consumer
-
-- `bin/bitcoin-rs/tests/wallet_facing.rs` (existing) lives in the binary
-  package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`; the package is a pure
-  binary crate and its `bitcoin.conf` process-input adapters are binary
-  modules. The test depends on
-  rust-bitcoin and speaks only HTTP. It funds a regtest chain through
-  `getblocktemplate` and `submitblock`, then issues the
-  BDK/esplora-client dialect against `/api`: tip, block height, headers,
-  scripthash UTXOs and history, fee estimates, and `POST /api/tx`.
-- Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>/api`
-  against a node started with `--network regtest --scriptindex`. Failures
-  of that run are public-interface defects, not reasons to patch a wallet
-  into this repository.
+`bin/bitcoin-rs/tests/wallet_facing.rs` lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`; the package is a pure binary crate and its `bitcoin.conf` process-input adapters are binary modules. The test depends on rust-bitcoin and speaks only HTTP: it funds a regtest chain through `getblocktemplate` and `submitblock`, then issues the BDK and esplora-client dialect against `/api` (tip, block height, headers, scripthash UTXOs and history, fee estimates, `POST /api/tx`). Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>/api` against a node started with `--network regtest --scriptindex`; failures of that run are public-interface defects, not reasons to patch a wallet into this repository.
 
 ## Proven by
 
-- `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
-- `crates/rpc/src/server.rs` tests `wf_02_classify_splits_rest_esplora_and_json_rpc` (existing)
-- `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
+- `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`; `crates/rpc/src/server.rs` tests `wf_02_classify_splits_rest_esplora_and_json_rpc`; `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset`.
 
 ## Vocabulary
 

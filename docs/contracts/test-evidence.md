@@ -1,22 +1,8 @@
 # Test evidence ownership
-
-Tests protect an observable contract or an independently checked result.
-A test that only restates a constructor, field layout, historical task plan,
-lookup count, or private call order is not a permanent compatibility rule.
-Performance claims require measured evidence, not a source-shape assertion.
-
-The [source and test organization policy](../policies/source-organization.md)
-owns placement, naming, fixture scope, and exceptions. This contract owns the
-proof boundary and retained guarantees; moving a test does not change them.
-
+Tests protect an observable contract or an independently checked result. A test that only restates a constructor, field layout, historical task plan, lookup count, or private call order is not a permanent compatibility rule. Performance claims require measured evidence, not a source-shape assertion.
+The [source and test organization policy](../policies/source-organization.md) owns placement, naming, fixture scope, and exceptions. This contract owns the proof boundary and retained guarantees; moving a test does not change them.
 ## Retained proof owners
-
-The current suite is classified by owner family below. Every surviving test
-belongs to one of these current-contract or externally anchored evidence
-families. Tests may move with their owner without preserving an old module
-layout; a new test that does not fit one of these families needs a contract or
-regression invariant before it is retained.
-
+Every surviving test belongs to one current-contract or externally anchored evidence family below; a new test that does not fit one of these families needs a contract or regression invariant before it is retained.
 | Owner | Contract and failure boundary | Disposition |
 | --- | --- | --- |
 | Primitives parsing, encoding, layout, arithmetic | Bitcoin wire identities, canonical bytes, malformed and truncated input; `P2P-01`, `VAL-02` | Keep independent golden/rust-bitcoin comparisons and rejection boundaries. Internal layout is not a public contract. |
@@ -25,7 +11,7 @@ regression invariant before it is retained.
 | Storage and index | `IDX-01`..`IDX-10`, `FP-01`..`FP-04`, recovery; backend persistence, capability errors, cursor/reorg recovery | Keep. Backend and restart tests cannot be replaced by in-memory mocks. |
 | Mempool | `MPL-01`..`MPL-04`, `POL-01`..`POL-06`; admission, replacement, dependencies, sequence, fencing and bounded orphans | Keep mutation and concurrency scenarios; reorg admission must use the same current-chain evaluator. |
 | P2P | `P2P-01`..`P2P-05`; independent wire envelopes, live peer identity, budgets, body attribution, stalled requests and branch recovery | Keep. Assert peer-visible requests and eventual application, not incidental message ordering. |
-| Cross-crate synchronization | `SYNC-01`..`SYNC-07`; [clauses, change-class review guidance and proof gaps](synchronization.md) | Reuse the P2P recovery, node application/publication, chainstate, storage/index and process families in this table. Keep representative tests that cross real domain boundaries; a local `TestChain` scheduling fixture does not establish durable application, and a finite scenario does not prove unconditional progress. |
+| Cross-crate synchronization | `SYNC-01`..`SYNC-07`; [clauses, change-class review guidance and proof gaps](synchronization.md) | Reuse the P2P, node application/publication, chainstate, storage/index and process families in this table. Keep representative tests that cross real domain boundaries; a local `TestChain` scheduling fixture does not establish durable application, and a finite scenario does not prove unconditional progress. |
 | Mining | External miner/API clauses, coherent template generations and invalid candidates | Keep independently valid blocks and public submission behavior. |
 | RPC | `API-*`, `WF-*`, `MRPC-*`; requests, errors, values, capability refusal and coherent views | Keep public-boundary and pinned Core comparisons. A method inventory is not a successful call. |
 | Node and binary | `EMB-*`, `EVT-*`, recovery; public process startup, shutdown, persistence, reorg and observer ordering | Keep process and durability scenarios. A successful `--help` exit does not prove lifecycle behavior. |
@@ -33,14 +19,8 @@ regression invariant before it is retained.
 | Reference custody | `REF-*`, `CORP-*`, `QAC-01`; artifact identity and unavailable inputs | Keep typed refusal cases and real process/corpus custody. Mutate parsed fields rather than matching historical TOML text. |
 | Benchmark evidence | `HPA-*`; identities, overlap and repeated samples | Run evidence-tool tests with `--bench evidence`; measured campaigns remain separate. No frozen path/cell inventory in normal Cargo tests. |
 | Formal models | [Formal verification contract](formal-verification.md) | Run `scripts/check_models.py` in the manual lane. Custody checks and runner regressions are not model proofs. |
-
-This table is the contract → proof matrix at suite-family granularity. Exact
-test names are intentionally not normative: the executable evidence may be
-consolidated or rewritten as long as the row's independent reference,
-failure-path coverage, and named contracts remain proved.
-
+Exact test names are intentionally not normative: the executable evidence may be consolidated or rewritten as long as the row's independent reference, failure-path coverage, and named contracts remain proved.
 ## Reviewed deletion and replacement
-
 | Former test | Decision and replacement |
 | --- | --- |
 | `test_comp_lanes.py` and its fixture-only `comp_lanes.py` runner | Retire the wrapper as a whole. Direct P2P, offline-validation, and MuHash comparator suites own their CLI, custody, and error behavior. Historical fixture measurements remain archived; no live-product evidence is removed. |
@@ -66,20 +46,6 @@ failure-path coverage, and named contracts remain proved.
 | Mempool lookup getter and simple fee-floor unit tests | Delete individual insert/absent checks for `contains`, entry/transaction lookup, txid iteration and the two-row minimum example. Admission, mutation, replacement, removal, estimator and eviction suites exercise those indexes and fee aggregates across meaningful state changes; corruption and atomicity tests remain. |
 | Storage `into_ops`, deployment-view adapter and mining-signal forwarding unit tests | Delete direct wrapper/delegation assertions. Backend commit tests own batch ordering, BIP9 activation tests exercise the deployment view, and node mining/ZMQ suites retain observable wake sequencing and lock-safety evidence. |
 | Chain differential PoW oracle imported as an integration-test module | Move the helper below `tests/support` so its self-check runs once as its own target rather than once per importing test binary. Header-sync and deep-reorg tests retain the independent `bitcoin`-crate oracle. |
-
-The sync recovery cut also replaces four fake-application fixture paths
-with delivered blocks through the ordinary binding/apply path. The old
-`DownloadWindow::mark_applied` shortcut was removed with it; no such API
-remains.
-
 ## Reset completion rule
-
-The contract-first reset is complete when all retained suites fit the proof
-matrix above, the full dependency/feature/process/recovery lanes pass, and no
-production API remains solely because a deleted test called it. Future tests
-follow the same rule: current contract proof or promoted real regression.
-
-A formal runner test uses a synthetic executable and cannot establish a
-model property. A successful evidence-parser test cannot establish a
-performance improvement. Missing Core binaries, corpora, model completions
-or measured comparisons remain unavailable evidence, never implied passes.
+The contract-first reset is complete when all retained suites fit the proof matrix above, the full dependency/feature/process/recovery lanes pass, and no production API remains solely because a deleted test called it. Future tests follow the same rule: current contract proof or promoted real regression.
+A formal runner test using a synthetic executable cannot establish a model property. A successful evidence-parser test cannot establish a performance improvement. Missing Core binaries, corpora, model completions or measured comparisons remain unavailable evidence, never implied passes.

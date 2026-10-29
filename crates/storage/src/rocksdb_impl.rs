@@ -14,7 +14,6 @@ pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
 
-/// `RocksDB`-backed key-value store.
 pub struct RocksDbStore {
     db: rust_rocksdb::DB,
     write_lock: parking_lot::Mutex<()>,
@@ -27,8 +26,8 @@ pub struct RocksDbStore {
 impl RocksDbStore {
     /// Keeps `guard` alive until this store's database handle is closed.
     ///
-    /// Panics when a guard is already installed: replacing it would release
-    /// the first guard while the database handle it protects is still open.
+    /// Panics when a guard is already installed: replacing it would release the first
+    /// guard while the database handle it protects is still open.
     #[must_use]
     pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
         assert!(
@@ -41,19 +40,11 @@ impl RocksDbStore {
         }
     }
 
-    /// Opens or creates a `RocksDB` store at `path` with all column families.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, ROCKSDB_DEFAULT_CACHE_BYTES)
     }
 
     /// Opens or creates a `RocksDB` store with an explicit block-cache capacity.
-    ///
-    /// `cache_bytes` replaces the historical hardcoded 256 MiB `ROCKSDB_DEFAULT_CACHE_BYTES`
-    /// as the shared LRU block cache (index and filter blocks included through
-    /// `set_cache_index_and_filter_blocks`) and is configured exactly: a
-    /// budgeted share is never raised above its allocation. Zero selects the
-    /// engine default for unbudgeted opens. The write-buffer size stays its own
-    /// fixed setting.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             ROCKSDB_DEFAULT_CACHE_BYTES
@@ -395,10 +386,6 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
     ) -> Result<Option<crate::KvPair>, StorageError> {
         let handle = self.db.cf_handle(cf)?;
         let prefix = prefix.to_vec();
-        // The iterate range holds exactly the prefixed rows (`PrefixRange`
-        // maps empty and all-`0xFF` prefixes to unbounded sides), so one
-        // `seek_to_last` lands directly on the tail. The prefix check below
-        // only guards against bound-enforcement subtleties.
         let mut read_opts = ReadOptions::default();
         read_opts.set_iterate_range(PrefixRange(prefix.as_slice()));
         let mut iterator = self

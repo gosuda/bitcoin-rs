@@ -12,13 +12,10 @@ use super::{
 };
 use crate::connection::PeerSource;
 
-/// A stager whose budget mirrors `window`'s, so window-side backpressure
-/// reads see the same bytes/counts a real sync pair would.
 fn test_stager(window: &DownloadWindow) -> BlockStager {
     BlockStager::new(window.budget)
 }
 
-/// A 256-header regtest chain: the height-`n` header hashes to `hash(n)`.
 static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_primitives::Header>> =
     std::sync::LazyLock::new(|| {
         let genesis = Network::Regtest.genesis_block().header;
@@ -37,8 +34,6 @@ static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_primitives::Header>> =
         .collect()
     });
 
-/// The [`TEST_CHAIN`] tree: every test hash resolves to the height its
-/// byte names.
 fn test_tree() -> bitcoin_rs_chain::BlockTree {
     let mut tree = bitcoin_rs_chain::BlockTree::new();
     let mut parent = None;
@@ -49,11 +44,8 @@ fn test_tree() -> bitcoin_rs_chain::BlockTree {
     tree
 }
 
-/// The serialized size of the smallest padded test block: an empty
-/// coinbase script.
 const SMALL_BODY: usize = 141;
 
-/// A one-coinbase block whose serialized size is exactly `total_bytes`.
 fn padded_regtest_block(total_bytes: usize) -> Block {
     let wanted = total_bytes.saturating_sub(padded_regtest_block_with_script(0).total_size());
     let script_len = match wanted {
@@ -86,7 +78,6 @@ fn padded_regtest_block_with_script(script_len: usize) -> Block {
     }
 }
 
-/// Stages one `total_bytes`-long body into `stager`.
 fn stage_body(
     stager: &mut BlockStager,
     hash: Hash256,
@@ -101,9 +92,6 @@ fn stage_body(
     }
 }
 
-/// Test replacement for the deleted `mark_received` shorthand: stages the
-/// body (the wire path's only staged store) and records the delivery,
-/// attributed to the pending owner when one exists.
 fn receive_staged(
     window: &mut DownloadWindow,
     stager: &mut BlockStager,
@@ -118,7 +106,6 @@ fn receive_staged(
         .is_none()
 }
 
-/// Retires one staged body the way an applied commit does.
 fn apply_staged(stager: &mut BlockStager, hash: &Hash256) {
     stager.retire_applied(hash);
 }
@@ -315,10 +302,6 @@ fn pending_timeout_apply_busy_clears_suspicion_without_blame() {
     );
 }
 
-/// A retry delivery releases the observed hash without the owner: the
-/// second tick must re-verify the suspicion against the live window
-/// and blame nobody, because a conviction here would outlive the
-/// queue age it measured.
 #[test]
 fn retry_delivery_resolves_original_peer_timeout_without_blame() {
     let mut window =
@@ -342,7 +325,6 @@ fn retry_delivery_resolves_original_peer_timeout_without_blame() {
         .owner_downloading_since
         .insert(original_owner, requested_at);
 
-    // First idle tick arms the suspicion on the original owner.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_some());
 
@@ -357,9 +339,6 @@ fn retry_delivery_resolves_original_peer_timeout_without_blame() {
     );
 }
 
-/// One batched `mark_requested` stamps every entry with one `requested_at`:
-/// removing a non-front entry ties with the surviving front's stamp, so the
-/// queue start must stay at the batch origin.
 #[test]
 fn batched_non_front_deliveries_do_not_postpone_the_owner_timeout() {
     let mut window = DownloadWindow::new(test_budget());
@@ -417,9 +396,6 @@ fn batched_non_front_deliveries_do_not_postpone_the_owner_timeout() {
     );
 }
 
-/// A batch sibling removed after the clock already restarted must not drag
-/// the clock back to its older batch stamp — the rewind would postpone
-/// `owner_download_expired` for a queue the peer is actively draining.
 #[test]
 fn tied_removal_never_rewinds_the_owner_queue_clock() {
     let mut window = DownloadWindow::new(test_budget());
@@ -474,9 +450,6 @@ fn tied_removal_never_rewinds_the_owner_queue_clock() {
     assert_eq!(window.owner_downloading_since.get(&owner), Some(&t9));
 }
 
-/// The retarget path releases a pending without a delivery; a
-/// suspicion armed on its owner must clear instead of convicting when
-/// the second tick finds the observed hash no longer pending-owned.
 #[test]
 fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
     let mut window =
@@ -493,7 +466,6 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
         requested_at,
     );
 
-    // First idle tick arms the suspicion.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_some());
 
@@ -501,7 +473,6 @@ fn requeue_of_the_observed_block_clears_the_suspicion_without_blame() {
     assert_eq!(window.pending_owner(&block_hash), None);
     assert_eq!(window.owner_queue_start_for_test(owner), None);
 
-    // The second tick clears the suspicion without blame.
     assert_eq!(timeout_owner(&mut window, false, observed_at), None);
     assert!(window.pending_timeout_observation.is_none());
     assert!(
@@ -624,9 +595,6 @@ fn receiving_the_oldest_pending_resets_the_owner_queue_start() {
     assert!(window.pending_timeout_observation.is_some());
 }
 
-/// BLK-05: the block-download budget is Core's per-owner queue-age rule —
-/// one target spacing plus half a spacing per other active owner
-/// (`net_processing.cpp:153-168`) — not a fixed 60 seconds.
 #[test]
 fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
     let spacing = Duration::from_secs(10);
@@ -703,8 +671,6 @@ fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
     );
 }
 
-/// The override is a test-only escape hatch and wins over the derived
-/// budget, keeping deterministic tests independent of spacing math.
 #[test]
 fn pending_timeout_override_wins_over_spacing_policy() {
     let mut window = DownloadWindow::new(
@@ -944,9 +910,6 @@ fn fanout_engagement_has_one_peer_hysteresis() {
     assert!(window.fanout_active());
 }
 
-/// Budget for the stall state-machine tests: a 4-slot window whose count
-/// clamp saturates with three staged successors plus the pending front,
-/// unbounded bytes, and short injectable stall thresholds.
 fn stall_budget() -> SyncBudget {
     SyncBudget {
         max_pending_blocks: 4,
@@ -981,10 +944,6 @@ fn insert_pending(
     owner
 }
 
-/// Seeds the front-cadence EWMA through the real delivery path: heights 1
-/// and 2 arrive from `peer` `gap` apart (must be >= `EWMA_MIN_SAMPLE_MS` or
-/// the second advance is skipped as a batch artifact) and apply
-/// immediately.
 fn seed_front_cadence(
     window: &mut DownloadWindow,
     peer: crate::PeerEndpoint,
@@ -1002,13 +961,6 @@ fn seed_front_cadence(
     t1
 }
 
-/// A fully window-blocked construction with a seeded front-cadence EWMA:
-/// heights 1-2 first seed the EWMA at a 100ms cadence (the decay floor
-/// stays clamped at the static `stall_timeout_initial`, so the fire
-/// arithmetic matches a fast network while the cold-start suppression is
-/// disarmed), then the front (height 3) is in flight to `staller` while
-/// `healthy` delivered heights 4..=6, leaving zero staged-count headroom —
-/// every stall-predicate term holds.
 fn window_blocked_on_staller(
     staller: crate::PeerEndpoint,
     healthy: crate::PeerEndpoint,
@@ -1154,13 +1106,9 @@ fn staged_backlog_fraction_arms_with_request_capacity_open() {
         "the construction must keep request capacity open: arming no longer reads it"
     );
 
-    // U7 no-blame guard, under the new arming term: while the apply
-    // side is busy the armed-shaped window must not start an episode.
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
     assert!(window.stalling_peer().is_none());
 
-    // Apply idle: the staged fraction arms, and the unchanged
-    // conviction clock fires at the unchanged threshold.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1303,7 +1251,6 @@ fn stall_fires_after_threshold_and_starts_cooldown() {
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // Episode starts on first observation; no fire before the threshold.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1353,7 +1300,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     let tree = test_tree();
     assert_eq!(window.stall_timeout(), Duration::from_secs(2));
 
-    // Fire 1 at +2s: threshold doubles to 4s.
     stall_owner(&mut window, &stager, &tree, 3, false, now);
     let mut at = now + Duration::from_secs(2);
     assert_eq!(
@@ -1362,10 +1308,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(4));
 
-    // The window state still satisfies the predicate (the disconnect and
-    // re-queue are the sync layer's job), so a fresh episode starts and
-    // must now survive the doubled threshold: fire 2 doubles to the 8s
-    // cap, fire 3 stays capped.
     stall_owner(&mut window, &stager, &tree, 3, false, at);
     at += Duration::from_secs(4);
     assert_eq!(
@@ -1381,15 +1323,6 @@ fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
     );
     assert_eq!(window.stall_timeout(), Duration::from_secs(8));
 
-    // Progress: the front block arrives — any running episode ends, and
-    // the threshold must not snap back to the 2s floor: that snap is
-    // what let the anti-cascade doubling be discarded across a peer
-    // rotation (the self-eclipse blocker). The 14s front gap is a real
-    // (non-batch) sample, so it lifts the EWMA from the 100ms seed to
-    // 100 + (14000-100)/4 = 3575ms and the adaptive floor to 7150ms —
-    // above the bare x0.85 decay (8s x0.85 = 6.8s), so the floor binds.
-    // (The bare decay arithmetic in isolation is pinned by
-    // `stall_timeout_decays_across_rotation_and_shields_slow_honest_peer`.)
     stall_owner(&mut window, &stager, &tree, 3, false, at);
     receive_staged(&mut window, &mut stager, hash(0x03), SMALL_BODY, at);
     assert_eq!(window.front_interval_ewma_ms(), Some(3575));
@@ -1452,8 +1385,6 @@ fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // With the apply side busy the clock never runs, no matter how long
-    // the state persists.
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
     assert!(window.stalling_peer().is_none());
     let later = now + Duration::from_mins(1);
@@ -1463,8 +1394,6 @@ fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
     );
     assert!(window.stalling_peer().is_none());
 
-    // Once the apply side drains, blame starts from scratch — the busy
-    // interval is never retroactively charged to the peer.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, later),
         None
@@ -1494,9 +1423,6 @@ fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
     );
 }
 
-/// Counter-only local metrics recorder for the stall-episode
-/// observability tests: counters keyed `name{label=value}`, gauges and
-/// histograms discarded.
 #[derive(Clone, Default)]
 struct CounterRecorder {
     counts: std::sync::Arc<parking_lot::Mutex<hashbrown::HashMap<String, u64>>>,
@@ -1597,9 +1523,6 @@ impl metrics::Recorder for CounterRecorder {
     }
 }
 
-/// Phase 0 taxonomy exhaustiveness: every path that zeroes the episode
-/// clock tags exactly one cleared reason, and every episode start
-/// increments `stall_episodes_started`.
 #[test]
 fn stall_episode_counters_cover_every_clear_path() {
     let recorder = CounterRecorder::default();
@@ -1608,7 +1531,6 @@ fn stall_episode_counters_cover_every_clear_path() {
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
         let tree = test_tree();
 
-        // No running episode: the guard paths must not count a clear.
         assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 4, false, now),
@@ -1618,7 +1540,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         assert_eq!(recorder.cleared("predicate"), 0);
         assert_eq!(recorder.started(), 0);
 
-        // apply_busy: a running episode cleared by the no-blame guard.
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1627,8 +1548,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert_eq!(recorder.cleared("apply_busy"), 1);
 
-        // predicate: re-arm, then a predicate term goes false (the
-        // frontier moves past the pending front, so term 1 fails).
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1640,9 +1559,6 @@ fn stall_episode_counters_cover_every_clear_path() {
         );
         assert_eq!(recorder.cleared("predicate"), 1);
 
-        // front_moved: re-arm, then re-key the front to another peer at
-        // the same frontier while every predicate term still holds — the
-        // old episode clears as front_moved and a new one starts.
         assert_eq!(
             stall_owner(&mut window, &stager, &tree, 3, false, now),
             None
@@ -1699,21 +1615,16 @@ fn stall_episode_counters_cover_every_clear_path() {
     });
 }
 
-/// The stored episode's one-shot log latch, if an episode is running.
 fn info_logged(window: &DownloadWindow) -> Option<bool> {
     window.stall.map(|episode| episode.info_logged)
 }
 
-/// Phase 0 observability: an episode surviving `STALL_EPISODE_LOG_AGE`
-/// emits the INFO line exactly once — not per tick — and a subsequent
-/// episode gets its own line.
 #[test]
 fn stall_episode_logs_info_once_per_episode_after_one_second() {
     let (mut window, stager, now) =
         window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
     let tree = test_tree();
 
-    // Below the 1s log age: episode running, nothing emitted.
     assert_eq!(
         stall_owner(&mut window, &stager, &tree, 3, false, now),
         None
@@ -1806,9 +1717,6 @@ fn stall_episode_logs_info_once_per_episode_after_one_second() {
     assert_eq!(info_logged(&window), Some(true));
 }
 
-/// An unseeded front-cadence EWMA (cold start) is not a conviction
-/// exemption: the fire threshold is the stored adaptive value, whose floor
-/// is `stall_timeout_initial` — Core's `BLOCK_STALLING_TIMEOUT_DEFAULT`.
 #[test]
 fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
     let now = Instant::now();
@@ -1833,7 +1741,6 @@ fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
         None
     );
     assert_eq!(info_logged(&window), Some(false));
-    // The INFO latch flips at 1s; the initial floor has not elapsed.
     assert_eq!(
         stall_owner(
             &mut window,
@@ -1846,8 +1753,6 @@ fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
         None
     );
     assert_eq!(info_logged(&window), Some(true));
-    // Past the 2s initial floor the exact owner convicts with no EWMA
-    // sample: an unproven cadence never exempts a proven-slow front.
     assert_eq!(
         stall_owner(
             &mut window,
@@ -1861,9 +1766,6 @@ fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
     );
 }
 
-/// The unified entry returns at most one action per tick and blame outranks
-/// the hedge: a tick where the cold-front timer and the stall predicate
-/// both mature convicts the staller and sends no duplicate request.
 #[test]
 fn at_most_one_action_per_tick_blame_outranks_hedge() {
     let now = Instant::now();
@@ -1945,7 +1847,6 @@ fn uniform_slow_streaming_saturated_fanout_never_fires() {
             );
         }
     }
-    // Nothing staged yet: download-bound, no episode regardless of time.
     assert_eq!(stall_owner(&mut window, &stager, &tree, 3, false, t1), None);
 
     for round in 0..3u8 {
@@ -2229,10 +2130,6 @@ fn adaptive_floor_still_convicts_true_staller_after_limit_cycle() {
     assert!(!window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(healthy_addr()), end));
 }
 
-/// Builds the window state reached after the first stall conviction in the
-/// ADV-DRIP-1 limit-cycle scenario: EWMA seeded at 3s cadence, one fire
-/// and release, four more 3s front advances with the decay clamped at the
-/// adaptive floor. Returns `(window, stager, front_height, now, silent_peer)`.
 #[expect(clippy::too_many_lines)]
 fn limit_cycle_window_state() -> (
     DownloadWindow,
@@ -2560,10 +2457,6 @@ fn prefix_probe_respects_estimated_byte_cutoff() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Direct window-boundary test for the bounded prefix-race-before-fanout
-/// handoff: fanout cancels the probe at exactly `stall_timeout_initial`,
-/// neither before nor after.
-
 #[test]
 fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::error::Error>> {
     let now = Instant::now();
@@ -2594,10 +2487,6 @@ fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// A fanout threshold transition during a fresh prefix probe retains the
-/// probe and keeps fanout inactive: the bounded deferral holds engagement
-/// while the one-shot race (age < `stall_timeout_initial`) is still in
-/// flight, instead of cancelling it.
 #[test]
 fn fanout_threshold_during_fresh_probe_defers_engagement() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -2630,8 +2519,6 @@ fn fanout_threshold_during_fresh_probe_defers_engagement() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// A probe cancellation before the deferral deadline lets fanout engage
-/// immediately on the next evaluation, with no leftover deferral state.
 #[test]
 fn probe_resolution_before_deadline_allows_fanout_immediately()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -2868,9 +2755,6 @@ fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate()
 
 #[test]
 fn anonymous_staller_cools_down_per_connection_not_globally() {
-    // Inbound Tor sessions are unidentified: their stallers must be
-    // tracked (per connection), never silently skipped and never
-    // collapsed into one shared anonymous key.
     let mut window = DownloadWindow::new(test_budget());
     let now = Instant::now();
     let first = PeerSource::for_test_unidentified();
@@ -2898,10 +2782,6 @@ fn release_of_a_dead_connection_clears_state_but_preserves_cooldown() {
     assert!(window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(peer_addr), now));
 }
 
-/// A malformed body releases the pending request only when its deliverer is
-/// the pending owner, and then lowers the request cursor so the block is
-/// re-requestable. Another peer, a local injection, or a body with no pending
-/// request cannot prove ownership and leaves the window untouched.
 #[test]
 fn reject_delivery_releases_only_the_owners_pending() {
     let owner = test_source(peer_addr(1));
@@ -2958,8 +2838,6 @@ fn reject_delivery_releases_only_the_owners_pending() {
     }
 }
 
-/// Rejecting the observed owner's response proves it was responsive, so a
-/// stale first-tick timeout observation must not convict it later.
 #[test]
 fn reject_delivery_from_owner_clears_timeout_observation() {
     let now = Instant::now();
@@ -2982,8 +2860,6 @@ fn reject_delivery_from_owner_clears_timeout_observation() {
     assert!(!window.peer_in_staller_cooldown(owner, now));
 }
 
-/// Either participant's malformed response terminates a cold-front race
-/// without electing a winner.
 #[test]
 fn reject_delivery_cleans_cold_front_race_participants() {
     let now = Instant::now();
@@ -3027,8 +2903,6 @@ fn reject_delivery_cleans_cold_front_race_participants() {
     assert!(!window.contains_pending(&block_hash));
 }
 
-/// An unrelated malformed delivery cannot cancel another peer's timeout
-/// observation or cold-front race.
 #[test]
 fn reject_delivery_from_unrelated_peer_preserves_observations() {
     let now = Instant::now();
@@ -3061,8 +2935,6 @@ fn reject_delivery_from_unrelated_peer_preserves_observations() {
     assert!(window.contains_pending(&block_hash));
 }
 
-/// `start + (bound - secs)`, expressed without `Instant - Duration` or
-/// `unwrap` so the pedantic lints stay clean in tests.
 fn just_below(start: Instant, bound: Duration, secs: u64) -> Instant {
     let Some(delta) = bound.checked_sub(Duration::from_secs(secs)) else {
         unreachable!("test bounds always exceed the shaved amount");
@@ -3319,7 +3191,6 @@ fn test_budget() -> SyncBudget {
     .with_pending_timeout_override(Duration::from_secs(30))
 }
 
-/// The hash of the height-`byte` header of [`TEST_CHAIN`].
 fn hash(byte: u8) -> Hash256 {
     Hash256::from(TEST_CHAIN[usize::from(byte)].compute_hash())
 }

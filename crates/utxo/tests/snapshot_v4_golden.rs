@@ -1,9 +1,3 @@
-//! Fixed compatibility coverage for the supported v4 snapshot format.
-//!
-//! The fixture was written by an earlier build and is checked only in the load
-//! direction; current writers are not required to preserve internal byte order.
-// A golden-vector test that cannot read its own fixture has failed; panicking
-// names the step that broke.
 #![allow(clippy::expect_used)]
 
 use std::io::Cursor;
@@ -12,10 +6,8 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::encode::hex_encode;
 use bitcoin_rs_utxo::read_snapshot_strict_v4;
 
-/// A fixed v4 snapshot captured from an earlier build.
 const GOLDEN: &[u8] = include_bytes!("fixtures/utxo-v4-golden.dat");
 
-/// `hash_serialized_3` of that set, as the v4 build computed it.
 const GOLDEN_HASH_HEX: &str = "020e5a59271f9db60e11102c4262702747676e868e80e7837b6e6d5fb05213ff";
 
 const GOLDEN_OUTPUTS: usize = 433;
@@ -30,7 +22,6 @@ fn txid(seed: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-/// The load direction: v4 bytes must still decode to the same consensus values.
 #[test]
 fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {
     let loaded = read_snapshot_strict_v4(&mut Cursor::new(GOLDEN)).expect("v4 snapshot loads");

@@ -1,7 +1,5 @@
 use super::*;
 
-/// A two-branch retarget fixture: the header tip starts on a two-block losing
-/// branch, and one peer has been sent getdata for both of its blocks.
 struct TwoBranches {
     sync: BlockSync,
     rx: crate::test_support::MessageReceiver,

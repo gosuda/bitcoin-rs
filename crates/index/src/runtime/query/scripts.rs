@@ -273,9 +273,6 @@ impl DerivedIndexQueryEngine {
             for row in rows {
                 let outpoint = row.outpoint();
                 let Some(entry) = view.get_entry(&outpoint) else {
-                    // A ready live watermark naming an unresolvable locator is
-                    // corruption or a failed transition. Returning an empty
-                    // result would turn that into a false negative.
                     return Err(TxQueryError::Unavailable(
                         TxUnavailableCause::MissingAuthority(
                             "ScriptLive locator is absent from authoritative UTXO",
@@ -283,9 +280,6 @@ impl DerivedIndexQueryEngine {
                     ));
                 };
                 if ScriptHash::new(&entry.txout.script_pubkey) != scripthash {
-                    // The locator is keyed by a compact hash prefix. A
-                    // prefix collision is expected to be filtered by this
-                    // exact script check.
                     continue;
                 }
                 records.push(ScriptIndexRecord {

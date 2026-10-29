@@ -36,7 +36,6 @@ pub(crate) struct Peer {
     journal: File,
     pending: FrameBuffer,
     t0: Instant,
-    /// The peer socket died: the node disconnected, or the transport failed.
     pub(crate) dropped: bool,
 }
 
@@ -124,7 +123,6 @@ impl Peer {
             Ok(())
         })();
         if let Err(error) = result {
-            // A partial frame cannot be retried on this connection.
             self.dropped = true;
             self.log("send-error", &format!("{cmd}: {error}"));
             return Err(error);
@@ -152,7 +150,7 @@ impl Peer {
 
     pub(crate) fn log(&mut self, direction: &str, detail: &str) {
         let at_ms = u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let line = serde_json::json!({"at_ms": at_ms, "dir": direction, "detail": detail});
+        let line = sonic_rs::json!({"at_ms": at_ms, "dir": direction, "detail": detail});
         let _ = writeln!(self.journal, "{line}");
         let _ = self.journal.flush();
         eprintln!("[E2E {at_ms:>6}ms {direction}] {detail}");

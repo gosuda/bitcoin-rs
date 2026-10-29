@@ -1,6 +1,3 @@
-//! Core mandatory-flag transaction vectors against the production kernel seam.
-//! BADTX and policy-only rows are excluded; omitted pre-segwit amounts are zero.
-
 #![cfg(feature = "kernel")]
 
 use std::error::Error;
@@ -39,7 +36,6 @@ fn kernel_verdict(
     }
 }
 
-/// Core ASM: literal hex bytes, named opcodes and minimally pushed integers.
 fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
     let mut script = Vec::new();
     for token in asm.split_whitespace() {
@@ -67,7 +63,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
     use bitcoin_rs_script::opcode::*;
     let bare = name.strip_prefix("OP_").unwrap_or(name);
     Some(match bare {
-        // Push opcodes
         "0" | "EMPTY" => OP_0,
         "PUSHDATA1" => 0x4c,
         "PUSHDATA2" => 0x4d,
@@ -89,7 +84,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "14" | "PUSHNUM_14" => 0x5e,
         "15" | "PUSHNUM_15" => 0x5f,
         "16" | "PUSHNUM_16" => OP_PUSHNUM_16,
-        // Control flow
         "NOP" => 0x61,
         "VER" => 0x62,
         "IF" => 0x63,
@@ -100,7 +94,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "ENDIF" => 0x68,
         "VERIFY" => 0x69,
         "RETURN" => OP_RETURN,
-        // Stack
         "TOALTSTACK" => 0x6b,
         "FROMALTSTACK" => 0x6c,
         "2DROP" => 0x6d,
@@ -120,12 +113,10 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "ROT" => 0x7b,
         "SWAP" => 0x7c,
         "TUCK" => 0x7d,
-        // Splice
         "CAT" => 0x7e,
         "SUBSTR" => 0x7f,
         "LEFT" => 0x80,
         "RIGHT" => 0x81,
-        // Bitwise
         "SIZE" => 0x82,
         "INVERT" => 0x83,
         "AND" => 0x84,
@@ -133,7 +124,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "XOR" => 0x86,
         "EQUAL" => OP_EQUAL,
         "EQUALVERIFY" => OP_EQUALVERIFY,
-        // Arithmetic
         "1ADD" => 0x8b,
         "1SUB" => 0x8c,
         "2MUL" => 0x8d,
@@ -161,7 +151,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "MIN" => 0xa3,
         "MAX" => 0xa4,
         "WITHIN" => 0xa5,
-        // Crypto
         "RIPEMD160" => 0xa6,
         "SHA1" => 0xa7,
         "SHA256" => 0xa8,
@@ -172,10 +161,8 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "CHECKSIGVERIFY" => 0xad,
         "CHECKMULTISIG" => OP_CHECKMULTISIG,
         "CHECKMULTISIGVERIFY" => 0xaf,
-        // Locktime/sequence
         "CHECKLOCKTIMEVERIFY" => 0xb1,
         "CHECKSEQUENCEVERIFY" => 0xb2,
-        // Witness
         "CHECKSIGADD" => 0xba,
         _ => return None,
     })
@@ -193,8 +180,6 @@ struct VectorRow {
     row_index: usize,
 }
 
-// A row is policy-only if it rejects only because of policy flags, but passes
-// under mandatory consensus flags alone. The kernel only enforces mandatory flags.
 fn is_policy_only_tx(row: &VectorRow) -> bool {
     if row.expected == Verdict::Accept {
         return false;
@@ -221,8 +206,6 @@ const FULL_FLAGS: VerifyFlags = VerifyFlags::STANDARD
     .union(VerifyFlags::CONST_SCRIPTCODE)
     .union(VerifyFlags::MINIMALIF);
 
-/// `tx_valid.json` names the flags Core turns OFF: it verifies with the
-/// complement (`transaction_tests.cpp:224`).
 fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
     let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
     let effective = VerifyFlags::from_bits_retain(FULL_FLAGS.bits() & !parsed.bits());
@@ -234,9 +217,6 @@ fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
     Ok(effective)
 }
 
-/// `tx_invalid.json` names the flags Core turns ON, unfilled and unedited, so
-/// an invalid combination is detected rather than repaired
-/// (`transaction_tests.cpp:310-315`).
 fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, String> {
     let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
     if parsed != parsed.filled() {
@@ -247,7 +227,6 @@ fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, String> {
     Ok(parsed)
 }
 
-/// Malformed transactions are skipped only for invalid vectors.
 fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn Error>> {
     let path = Path::new("tests/vectors").join(name);
     let text = std::fs::read_to_string(&path)
@@ -258,7 +237,7 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
     let mut rows = Vec::new();
     for (index, row) in root.iter().enumerate() {
         let Some(arr) = row.as_array() else {
-            continue; // comment row
+            continue;
         };
         if arr.len() < 3 || !arr[0].is_array() || arr[1].as_str().is_none() {
             continue;
@@ -266,7 +245,7 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
 
         let flags_str = arr[2].as_str().unwrap_or("NONE");
         if flags_str.contains("BADTX") {
-            continue; // fails CheckTransaction, not script verification
+            continue;
         }
 
         let tx_hex = arr[1]
@@ -296,8 +275,6 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
             let vout_signed = spec[1]
                 .as_i64()
                 .ok_or_else(|| format!("row {index}: bad prevout vout"))?;
-            // Core writes the null prevout index as -1 in these vectors, the
-            // signed reading of COutPoint's 0xffffffff sentinel.
             let vout = if vout_signed == -1 {
                 u32::MAX
             } else {
@@ -328,8 +305,6 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
             ));
         }
 
-        // Core's transaction_tests.cpp populates a map of UTXOs from arr[0].
-        // Transaction verification resolves them in input order.
         let mut prevouts = Vec::with_capacity(tx.inputs.len());
         for input in &tx.inputs {
             let Some((_, spent)) = available_prevouts
@@ -405,7 +380,6 @@ fn require_non_empty(rows: &[VectorRow], name: &str) -> Result<(), Box<dyn Error
 
 #[test]
 fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
-    // 1. Positive baseline: valid transaction is accepted.
     let valid_rows = load_vectors("tx_valid.json", Verdict::Accept)?;
     require_non_empty(&valid_rows, "tx_valid.json")?;
     let valid_row = &valid_rows[0];
@@ -417,8 +391,6 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         "tx_valid row must be accepted"
     );
 
-    // 2. Negative control (fault injection): mutating the valid transaction's scriptSig
-    // must make the kernel reject it with a genuine Script rejection.
     let mut tampered_tx = valid_row.tx.clone();
     tampered_tx.inputs[0].script_sig = bitcoin_rs_primitives::Script::from_bytes(vec![0x00]);
     let tampered_verdict = kernel_verdict(&tampered_tx, &valid_row.prevouts, valid_row.flags)
@@ -429,7 +401,6 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         "tampered transaction must be rejected by kernel oracle"
     );
 
-    // 3. Baseline invalid: mandatory-invalid transaction is rejected.
     let invalid_rows = load_vectors("tx_invalid.json", Verdict::Reject)?;
     require_non_empty(&invalid_rows, "tx_invalid.json")?;
     let invalid_row = invalid_rows
@@ -456,7 +427,6 @@ fn kernel_infrastructure_error_fails_closed() -> TestResult {
         .find(|row| !is_policy_only_tx(row))
         .ok_or("no runnable invalid rows found")?;
 
-    // Case 1: Supplying empty prevouts causes ConsensusError::PrevoutCount rather than a script rejection.
     let empty_prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
     let verdict_result = kernel_verdict(&row.tx, &empty_prevouts, row.flags);
     assert!(
@@ -469,8 +439,6 @@ fn kernel_infrastructure_error_fails_closed() -> TestResult {
         "infrastructure error must never masquerade as expected consensus Reject"
     );
 
-    // Case 2: Out of bounds input index causes bitcoinkernel::verify to return
-    // ScriptVerifyError::TxInputIndex, proving real kernel API errors are not Script rejections.
     let tx_bytes = consensus_bytes(&row.tx);
     let kernel_tx =
         bitcoinkernel::Transaction::new(&tx_bytes).map_err(|e| format!("kernel_tx new: {e}"))?;
@@ -495,7 +463,7 @@ fn kernel_infrastructure_error_fails_closed() -> TestResult {
         &script,
         Some(amount),
         &kernel_tx,
-        999, // out-of-bounds input index
+        999,
         Some(bitcoinkernel::VERIFY_ALL),
         &precomputed,
     );

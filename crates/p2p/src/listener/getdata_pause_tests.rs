@@ -1,7 +1,3 @@
-//! A saturated outbound queue parks a `getdata` tail instead of disconnecting
-//! the peer: the session reads nothing until the writer drains, answers in
-//! request order, and ends when the writer dies or the lease is cancelled.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -35,12 +31,8 @@ pub(super) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 pub(super) const MAGIC: Magic = Magic::BITCOIN;
 
-/// Longest any test waits for an event that must happen.
 pub(super) const FAILSAFE: Duration = Duration::from_secs(20);
 
-/// Serves the blocks it holds behind the production gate; every other
-/// inventory vector is missing. A block's payload is whatever bytes the
-/// test stored, so a flood test can share one large buffer.
 pub(super) struct ScriptedChain {
     pub(super) blocks: Vec<([u8; 32], bytes::Bytes)>,
 }
@@ -102,7 +94,6 @@ impl ChainQuery for ScriptedChain {
     }
 }
 
-/// A block that differs from its siblings only by header nonce.
 pub(super) fn block(nonce: u32) -> Block {
     let mut block = Block::default();
     block.header.nonce = nonce;
@@ -128,7 +119,6 @@ pub(super) fn wire_len_of(message: &Message) -> Result<usize, PeerError> {
     crate::wire::wire_len(message)
 }
 
-/// Serves the transactions it holds; every other transaction is missing.
 struct ScriptedTxs {
     txs: Vec<Tx>,
 }
@@ -168,7 +158,6 @@ impl TxInventory for ScriptedTxs {
     }
 }
 
-/// A transaction as small as the codec allows, distinct per `byte`.
 fn tiny_tx(byte: u8) -> Tx {
     Tx {
         version: 2,
@@ -197,7 +186,6 @@ pub(super) fn shared_with(chain: ScriptedChain) -> ConnectionShared {
     shared_with_query(chain)
 }
 
-/// Wiring whose chain view is `chain`.
 pub(super) fn shared_with_query(chain: impl ChainQuery + 'static) -> ConnectionShared {
     let mut shared = test_shared(
         Arc::new(PeerTable::new()),
@@ -214,10 +202,6 @@ fn shared_with_txs(chain: ScriptedChain, txs: ScriptedTxs) -> ConnectionShared {
     shared
 }
 
-/// A socket writer whose writes wait for the gate: the budget stays charged
-/// for whatever the writer has been handed while the gate is shut, as it is
-/// behind a peer that has stopped draining. Dropping the gate's sender
-/// opens it for good.
 struct GatedSocketWriter {
     socket: TcpStream,
     gate: Receiver<()>,
@@ -234,20 +218,11 @@ impl Write for GatedSocketWriter {
     }
 }
 
-/// Which writer drains the connection's queue.
 pub(super) enum WriterKind {
-    /// `run_writer_loop` over a [`GatedSocketWriter`].
     Gated,
-    /// The production `spawn_connection_writer` over the socket, whose
-    /// blocking writes time out after `write_timeout`.
     Production { write_timeout: Duration },
 }
 
-/// One served connection: the session loop and the writer on their own
-/// threads over loopback sockets, and the client end of the socket.
-///
-/// Dropping it opens the gate, cancels the lease, closes the client, and
-/// joins both threads, so every exit path cleans up.
 pub(super) struct Served {
     pub(super) client: Peer<TcpStream>,
     pub(super) lease: PeerLease,
@@ -259,10 +234,6 @@ pub(super) struct Served {
 }
 
 impl Served {
-    /// Starts a session over `shared` whose lease uses `budget`.
-    ///
-    /// Every fallible step precedes the first spawned thread, so a failure
-    /// leaves nothing running.
     pub(super) fn start(
         shared: ConnectionShared,
         budget: OutboundBudget,
@@ -271,7 +242,6 @@ impl Served {
         Self::start_on(shared, budget, None, writer)
     }
 
-    /// [`Served::start`] with the lease also charging the node `aggregate`.
     pub(super) fn start_on(
         shared: ConnectionShared,
         budget: OutboundBudget,
@@ -290,7 +260,6 @@ impl Served {
         if let WriterKind::Production { write_timeout } = writer {
             server_stream.set_write_timeout(Some(*write_timeout))?;
         }
-        // Windows clones retain the timeout present at duplication time.
         let writer_socket = server_stream.try_clone()?;
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
@@ -306,8 +275,6 @@ impl Served {
                 let (gate_tx, gate_rx) = crossbeam_channel::bounded::<()>(0);
                 let writer_budget = Arc::clone(&handle);
                 let thread = std::thread::spawn(move || {
-                    // The production writer's exit guard: marks the budget
-                    // dead and drops every frame still queued.
                     let _exit = WriterExit {
                         budget: writer_budget,
                         outbound_rx: &outbound_rx,
@@ -363,12 +330,10 @@ impl Served {
         })
     }
 
-    /// Lets the gated writer write, now and for good.
     pub(super) fn open_gate(&mut self) {
         drop(self.gate.take());
     }
 
-    /// Waits up to `within` for the session loop to return.
     pub(super) fn session_outcome(
         &self,
         within: Duration,
@@ -404,7 +369,6 @@ pub(super) fn wait_until(what: &str, mut condition: impl FnMut() -> bool) -> Tes
     Ok(())
 }
 
-/// Reads `count` messages from the client end, skipping v1 poll timeouts.
 pub(super) fn read_messages(
     client: &mut Peer<TcpStream>,
     count: usize,
@@ -429,12 +393,6 @@ pub(super) fn read_messages(
     Ok(received)
 }
 
-/// Regression for the saturation disconnect: the second block does not fit
-/// behind the first, so the tail parks. The queue is out of room for a
-/// worst-case block but still admits a short message, so the miss that
-/// preceded the halt goes out at once, as Core's does. The peer's next
-/// request stays unread while parked, and once the writer drains the tail
-/// follows the miss and the request that waited is answered last.
 #[test]
 fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let (block_a, block_b) = (block(1), block(2));
@@ -442,9 +400,6 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let unknown_tx = Inventory::Transaction(bitcoin::Txid::from_byte_array([7; 32]));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
     let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
-    // One queued block leaves no room for a second worst-case block (the
-    // reserve is one block): a second load needs `2 * block_len`, one byte
-    // more than the cap. A `notfound` and a `pong` still fit under it.
     let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
@@ -458,8 +413,6 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     ]))?;
     served.client.send(&Message::Ping(7))?;
 
-    // Block A and the miss's `notfound` wait behind the shut gate; block B
-    // halts at the production gate and the ping is not read.
     let parked = (2, block_len + notfound_len);
     wait_until("block A and the notfound to be queued", || {
         served.budget.pending() == parked
@@ -495,18 +448,11 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     Ok(())
 }
 
-/// A peer that stops reading stalls the writer's blocking socket write; the
-/// short write timeout ends it, and the session parked on the full queue
-/// wakes and returns instead of waiting out the tail's lifetime.
 #[test]
 fn paused_peer_that_never_reads_ends_on_write_timeout() -> TestResult {
     let flood = block(3);
-    // One shared buffer stands for 256 distinct blocks; the client never
-    // reads it, so it is never decoded. 256 MiB exceeds any loopback buffer
-    // the kernel will grant a peer that does not read.
     let payload = bytes::Bytes::from(vec![0_u8; 1 << 20]);
     let block_len = wire_len_of(&Message::BlockPayload(payload.clone()))?;
-    // Room to queue two blocks behind the one the writer is stuck on.
     let budget = OutboundBudget::with_block_reserve(100_000, 3 * block_len, block_len);
     let chain = ScriptedChain {
         blocks: vec![(hash_of(&flood), payload)],
@@ -535,8 +481,6 @@ fn paused_peer_that_never_reads_ends_on_write_timeout() -> TestResult {
     Ok(())
 }
 
-/// Cancelling the lease while a tail is parked and the writer is stuck ends
-/// the session at its next bounded wake, with no help from the writer.
 #[test]
 fn lease_cancel_ends_a_parked_session() -> TestResult {
     let (block_a, block_b) = (block(4), block(5));
@@ -568,13 +512,6 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
     Ok(())
 }
 
-/// The item cap, not the byte cap, saturates the queue: tiny transactions
-/// fill three slots of a megabyte of byte budget. The request parks at the
-/// cap with nothing sent for the miss (the full queue cannot admit even a
-/// short message), and the drain resumes the miss's `notfound` before the
-/// remaining transactions. The ping that follows is sent only once the queue
-/// is empty again: with a three-slot queue the pong has no spare slot while
-/// the tail is still draining, and the session answers it without a gate.
 #[test]
 fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
     let txs: Vec<Tx> = (1..=5).map(tiny_tx).collect();
@@ -591,7 +528,6 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
 
     served.client.send(&Message::GetData(items))?;
 
-    // Three transactions fill the item cap; the fourth load halts.
     let full = (3, 3 * tx_len);
     wait_until("three transactions to be queued", || {
         served.budget.pending() == full
@@ -638,11 +574,6 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
     Ok(())
 }
 
-/// The boundary the live smoke found: the request's last served item takes the
-/// queue's last slot, so the trailing `notfound` has nowhere to go, and the
-/// peer's next request is already waiting. Neither may cancel a reader that is
-/// draining: the `notfound` stays parked until the queue can admit it, and the
-/// `ping` behind it is not read until the queue can admit its `pong`.
 #[test]
 fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_pong() -> TestResult
 {
@@ -656,8 +587,6 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     let mut served = Served::start(shared, budget, &WriterKind::Gated)?;
     let unknown = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([9; 32]));
 
-    // Three transactions take the three slots; the miss between them leaves
-    // the trailing `notfound` with no slot, and the ping follows at once.
     served.client.send(&Message::GetData(vec![
         tx_inventory_of(&txs[0]),
         tx_inventory_of(&txs[1]),
@@ -702,8 +631,6 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     Ok(())
 }
 
-/// An answered `getdata` leaves the session holding reads while the queue
-/// cannot admit one message, and releases them once it can.
 #[test]
 fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResult {
     let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
@@ -751,8 +678,6 @@ fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResul
     Ok(())
 }
 
-/// The production writer, not only the test's gated one, marks the budget
-/// dead when a write fails: a peer that has gone away fails the second write.
 #[test]
 fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
     let listener = TcpListener::bind(
@@ -775,20 +700,15 @@ fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
         None,
     )?;
 
-    // The first write after the peer closed may be accepted; a later one
-    // fails, the writer returns, and the budget learns it.
     let died = wait_until("the writer to die", || {
         let _ = lease.send(Message::Ping(1));
         lease.budget_handle().writer_dead()
     });
-    // Unconditional cleanup: end and join the writer whether or not it died.
     lease.cancel();
     let _ = writer.join();
     died
 }
 
-/// A queue that is full cannot admit even a `notfound`, so the misses stay
-/// parked, nothing is sent, and the lease stays live; the tail is untouched.
 #[test]
 fn a_full_queue_keeps_the_misses_and_sends_nothing() -> TestResult {
     let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
@@ -903,15 +823,12 @@ fn a_tail_expires_only_after_the_timeout_interval() {
     ));
 }
 
-/// With headroom the step sends the deferred `notfound` first, then serves
-/// the tail; a gate that closes again leaves exactly the unserved items.
 #[test]
 fn an_open_queue_resumes_notfound_first_and_reparks_what_the_gate_stops() -> TestResult {
     let (block_a, block_b) = (block(6), block(7));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
     let (outbound_tx, outbound_rx) = crate::test_support::message_channel();
-    // Room for the `notfound` and one block, not for a second block.
     let lease = PeerLease::new_with_budget(
         outbound_tx,
         true,

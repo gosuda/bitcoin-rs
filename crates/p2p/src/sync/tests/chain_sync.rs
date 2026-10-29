@@ -1,7 +1,3 @@
-//! Chain-sync eviction: the twenty-minute timeout, the one probe that ends
-//! it, the two-minute response window, and the protection that spares the
-//! first four outbound connections to reach the tip.
-
 use std::time::Duration;
 
 use super::*;
@@ -13,7 +9,6 @@ use crate::sync::peers::{
     ChainSyncAction, ChainSyncState, HEADERS_RESPONSE_TIME, chain_sync_subject, consider_eviction,
 };
 
-/// An outbound connection that demonstrated `height`.
 fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
     let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -31,24 +26,18 @@ fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
     }
 }
 
-/// An inbound connection at `height`: we did not choose it, so the timer must
-/// not judge it.
 fn inbound(port: u16, height: u32, at: Instant) -> UsablePeer {
     let mut peer = outbound(port, height, PeerRole::FullRelay, at);
     peer.info.inbound = true;
     peer
 }
 
-/// An outbound connection that only CLAIMED `height` in its handshake and
-/// has handed us no headers: Core's `pindexBestKnownBlock` is still null.
 fn claiming(port: u16, height: u32, at: Instant) -> UsablePeer {
     let mut peer = outbound(port, height, PeerRole::FullRelay, at);
     peer.demonstrated_tips.clear();
     peer
 }
 
-/// An outbound connection to an address the operator named, which Core marks
-/// `MANUAL` (`net_processing.cpp:5502`).
 fn pinned(port: u16, height: u32, at: Instant) -> UsablePeer {
     let mut peer = outbound(port, height, PeerRole::FullRelay, at);
     peer.manual = true;

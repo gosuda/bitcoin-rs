@@ -24,48 +24,24 @@ use crate::config::PoolConfig;
 const CERTIFICATE_VALIDITY: Duration = Duration::new(86_400, 0);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// A peer that never completes `SetupConnection` holds a job-book slot and a
-/// socket; drop it rather than waiting on `cancel` forever.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Drop a connection that shows no read, event, or transmit progress. Job
-/// announcements count as progress, so an idle-but-live miner waiting for
-/// work is not closed while templates keep flowing.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// A block whose `SubmitShares.Success` is withheld until both its ledger
-/// round is durable and authoritative node state has been re-queried.
-/// `pending` retains the candidate for bounded re-submission when the first
-/// verdict was `Undetermined` (journal backpressure); `attempts` bounds the
-/// recovery work so one slow dependency cannot stall the connection.
 struct DeferredBlock {
     hash: BlockHash,
     pending: PendingBlock,
     submission: BlockSubmission,
     attempts: u32,
-    /// Reservation kept charged to the shared block-record capacity until this
-    /// waiter is removed. `Permit` transfers the `Durable` slot; `Queued`
-    /// shares the compact queue slot via per-entry `SeqCst` state with
-    /// exactly-once release. Every retained waiter carries a charge, so the
-    /// `MAX_PENDING_BLOCK_RECORDS` bound caps deferred recovery; dropping
-    /// (connection close, settle, error) releases via RAII so eight slots
-    /// cannot strand. Linearizable capacity; snapshot-isolated ledger;
-    /// at-least-once delivery against the idempotent block-hash consumer.
     charge: DeferredCharge,
 }
 
-/// Bounded re-submissions retained per deferred block before the ledger
-/// convergence path takes over.
 const DEFERRED_RESUBMIT_ATTEMPTS: u32 = 5;
 
-/// Block-record reservation and deferred success queue, which travel together
-/// through event handling.
 struct BlockPipeline<'a> {
     permit: &'a mut Option<BlockRecordPermit>,
     deferred: &'a mut Vec<DeferredBlock>,
 }
 
-/// Settles one deferred block. Returns the waiter when it must stay pending;
-/// otherwise emits its verdict and returns `None`.
 fn settle_one_deferred(
     mut entry: DeferredBlock,
     ledger: &LedgerHost,
@@ -107,7 +83,6 @@ fn settle_one_deferred(
     Some(entry)
 }
 
-/// Owned SV2 listener and connection threads.
 pub(crate) struct Sv2Service {
     cancel: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -116,12 +91,10 @@ pub(crate) struct Sv2Service {
 }
 
 impl Sv2Service {
-    /// Stops admission and asks every connection to drain and release its owner sessions.
     pub(crate) fn stop(&self) {
         self.cancel.store(true, Ordering::Release);
     }
 
-    /// Stops admission and joins every runtime thread before `deadline`.
     pub(crate) fn stop_join(&mut self, deadline: Instant) -> Result<()> {
         self.stop();
         wait_until_finished(self.listener.as_ref(), deadline, "SV2 listener")?;
@@ -312,33 +285,18 @@ fn serve_connection(
     let mut accounts = HashMap::new();
     let mut input = vec![0; MAX_FEED_LEN];
     let mut buffered_input = None;
-    // Success acknowledgements held until a retained block record is durable
-    // and an `Undetermined` node verdict has had bounded recovery work.
-    // Each entry holds one consumed permit's queue slot, so the
-    // `MAX_PENDING_BLOCK_RECORDS` bound caps this queue; the reconcile worker
-    // normally drains entries within one 250ms pass.
     let mut deferred: Vec<DeferredBlock> = Vec::new();
     let mut transmit = PendingTransmit::default();
     let start = Instant::now();
     let mut last_progress = start;
     let result = (|| -> Result<()> {
         while !cancel.load(Ordering::Acquire) && !connection.is_closing() {
-            // A silent peer must not pin a connection thread past shutdown:
-            // without `SetupConnection` there is no channel, no event, and
-            // no transmit progress to observe.
             if !connection.session().is_open() && start.elapsed() >= HANDSHAKE_TIMEOUT {
                 return Err(anyhow!("SV2 handshake timed out"));
             }
             if last_progress.elapsed() >= IDLE_TIMEOUT {
                 return Err(anyhow!("SV2 connection idle timed out"));
             }
-            // Confirm blocks whose retained records became durable even when
-            // the miner sends no more bytes; a silent socket must not delay
-            // `SubmitShares.Success` until the next frame. An `Undetermined`
-            // verdict (journal backpressure) is never confirmed on ledger
-            // durability alone: it stays pending for bounded authoritative
-            // recovery (one re-submission per poll) instead of producing a
-            // false success while the block is still unapplied.
             let deferred_before = deferred.len();
             let mut still_deferred = Vec::with_capacity(deferred.len());
             for entry in std::mem::take(&mut deferred) {
@@ -383,10 +341,6 @@ fn serve_connection(
                 }
             }
 
-            // Reserve only after a frame is buffered. A quiet socket must not
-            // hold one of the bounded block-record slots while it sleeps, and
-            // a solved block must not be fed without a reservation: dropping
-            // either would strand capacity or lose the block.
             let Some(block_permit) = ledger.try_reserve_block_slot() else {
                 thread::sleep(SOCKET_POLL_INTERVAL);
                 continue;
@@ -408,11 +362,6 @@ fn serve_connection(
                     deferred: &mut deferred,
                 },
             )?;
-            // Shed tickets the host never acknowledged: a stuck ledger or a
-            // silent miner must not pin the bounded pending-ack budget and
-            // head-of-line-block later shares. Expiry releases the burned
-            // duplicate keys, so a retry validates fresh; the idempotent
-            // ledger stays the convergence point.
             let expired = core.with_job_book(|book| {
                 connection
                     .session_mut()
@@ -421,9 +370,6 @@ fn serve_connection(
             if !expired.is_empty() {
                 tracing::debug!(count = expired.len(), "SV2 pending tickets expired");
             }
-            // Any consumed event or newly queued reply is progress: an idle
-            // miner that keeps submitting (or being announced to) never trips
-            // the idle deadline on a quiet socket alone.
             if events_before != connection.session().pending_acks() || !expired.is_empty() {
                 last_progress = Instant::now();
             }
@@ -446,10 +392,6 @@ fn serve_connection(
 }
 
 fn announce_current_job(connection: &mut Connection, core: &PoolCore) -> Result<()> {
-    // The session tracks per-connection delivery (missing jobs plus parents
-    // whose `SetNewPrevHash` never landed), so the owner's `fresh` flag is
-    // passed through untouched: a late channel still converges on the current
-    // parent context without rebroadcasting to channels that already hold it.
     if let Some(installed) = core.current_installed() {
         connection.announce(&installed)?;
     }
@@ -485,10 +427,6 @@ fn handle_events(
                 accounts.remove(&channel_id);
             }
             Event::ShareAccepted(event) => {
-                // Only credited shares confirm: a permanent ledger conflict
-                // (`RecordOutcome::Rejected`) rejects like any unavailable
-                // ledger, keeping the seam's rejected-vs-unavailable
-                // distinction while the wire keeps refusing the share.
                 let recorded = accounts
                     .get(&event.channel_id)
                     .copied()
@@ -501,11 +439,6 @@ fn handle_events(
                 if recorded {
                     connection.confirm_share(event.ticket)?;
                 } else if connection.reject_share(event.ticket, ERROR_CODE_SHARE_NOT_RECORDED)? {
-                    // The ticket is gone and the share was never recorded:
-                    // release the burned duplicate key so a retry validates
-                    // fresh instead of sticking at `Duplicate`. A queued
-                    // refusal failure leaves the ticket in place, so no
-                    // release happens on `Err`.
                     core.with_job_book(|book| {
                         let _ = book.unburn(&event.outcome.hash);
                     });
@@ -520,8 +453,6 @@ fn handle_events(
                     .ok_or_else(|| anyhow!("SV2 block event has no host record reservation"))?;
                 let found = pending.found_block();
                 let submission = pending.submit(control);
-                // The node's Applied verdict is authoritative: retire the job
-                // before any ledger or socket step below can return early.
                 if let Ok(submitted) = &submission
                     && submitted.receipt().status() == BlockStatus::Applied
                 {
@@ -531,18 +462,6 @@ fn handle_events(
                     .as_ref()
                     .map(|submitted| submitted.receipt().clone())
                     .map_err(Clone::clone);
-                // A queued record is retained with its reservation and the
-                // reconcile worker drains it about every 250ms. Hold
-                // `SubmitShares.Success` until the round is durable — the
-                // session contract and SV1 both withhold success until then —
-                // but keep the connection open while the ledger catches up
-                // instead of closing it under load. An `Undetermined`
-                // verdict is always deferred, even when the record is already
-                // durable: journal backpressure leaves the block unapplied,
-                // so immediate success would be false. The deferred waiter
-                // retains the candidate for bounded re-submission instead of
-                // dropping it. Only success is deferred; node rejections
-                // answer immediately below.
                 match permit.record_or_enqueue(account, found, &receipt) {
                     (BlockRecordOutcome::Durable, charge) => {
                         if matches!(
@@ -554,9 +473,6 @@ fn handle_events(
                                 return Err(anyhow!("SV2 block lost its submission"));
                             };
                             let hash = found.share.hash;
-                            // `Durable`+`Undetermined` transfers its slot via
-                            // `charge`; dropping the waiter releases it. Shed
-                            // past capacity instead of growing unbounded.
                             let Some(charge) = charge else {
                                 return Err(anyhow!("SV2 durable recovery has no reservation"));
                             };
@@ -580,15 +496,10 @@ fn handle_events(
                                     BlockStatus::Applied | BlockStatus::Undetermined
                                 )
                         ) {
-                            // The guard above ensures `submission` is `Ok`;
-                            // a mismatch falls through to the verdict below.
                             let Ok(submitted) = submission else {
                                 return Err(anyhow!("SV2 block lost its submission"));
                             };
                             let hash = found.share.hash;
-                            // `Queued` shares its compact slot via per-entry
-                            // state; dropping the waiter releases exactly once.
-                            // Shed past capacity instead of retaining uncharged.
                             let Some(charge) = charge else {
                                 return Err(anyhow!("SV2 queued recovery has no reservation"));
                             };
@@ -614,13 +525,6 @@ fn handle_events(
                         connection.confirm_block(&submission)?;
                     }
                     BlockStatus::Undetermined => {
-                        // Every `Undetermined` is deferred above with a charge
-                        // before `continue`; reaching here means the permit
-                        // was consumed without retention, which would leave a
-                        // full `PendingBlock` uncharged. Fail closed instead of
-                        // growing unbounded: never confirm an unapplied block.
-                        // Linearizable capacity; at-least-once delivery stays
-                        // idempotent on retry.
                         return Err(anyhow!("SV2 Undetermined block lost its reservation"));
                     }
                     BlockStatus::Rejected if submission.receipt().is_stale_parent() => {
@@ -628,9 +532,6 @@ fn handle_events(
                             .reject_block(&submission, ERROR_CODE_SUBMIT_SHARES_STALE_SHARE)?;
                     }
                     BlockStatus::Rejected => {
-                        // A rejected node verdict remains a pending accounting
-                        // round until chain reconciliation. Do not send a
-                        // success acknowledgement for the rejected submission.
                         return Err(anyhow!("node rejected submitted SV2 block"));
                     }
                 }
@@ -643,8 +544,6 @@ fn handle_events(
             Event::SetupCompleted { .. } => {}
         }
     }
-    // A feed can validate at most one block under the configured adapter
-    // limits. Release an unconsumed reservation after this feed/event drain.
     drop(block_permit.take());
     Ok(())
 }
@@ -751,10 +650,6 @@ fn wait_until_finished(
     Ok(())
 }
 
-/// Host-path regression: a real `Connection` is driven through the node's own
-/// `announce_current_job` / `handle_events` against a real `PoolCore`,
-/// `LedgerHost`, and a recording `MiningControl`. Nothing here calls
-/// `invalidate_active`; only the host's `Applied` handling may retire the job.
 #[cfg(all(test, any(feature = "fjall", feature = "redb")))]
 mod tests {
     use std::collections::HashMap;
@@ -805,7 +700,6 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn Error>>;
 
-    /// Failure of the miner-side fixture itself, never of the host under test.
     #[derive(Debug, thiserror::Error)]
     enum FixtureError {
         #[error("SV2 {stage} failed: {detail}")]
@@ -833,8 +727,6 @@ mod tests {
     const LOGIN: &str = "42.rig";
     const PAYOUT: &[u8] = &[0x51];
     const EPOCH: u32 = 17;
-
-    // ---- host fixtures: the node's real composition, minus sockets ----------
 
     fn ledger_host(path: &Path) -> Result<Arc<LedgerHost>, Box<dyn Error>> {
         let store: Arc<dyn KvStore> = Arc::new(Store::open(path)?);
@@ -893,7 +785,6 @@ mod tests {
         Ok(PoolCore::new(config, control, ledger)?)
     }
 
-    /// The connection configuration `start` builds for every accepted socket.
     fn server_config(ledger: &Arc<LedgerHost>) -> Result<ServerConfig, Box<dyn Error>> {
         let mut config = ServerConfig::new(ShareTarget::from_le_bytes([0xff; 32])?);
         config.limits = Limits {
@@ -917,7 +808,6 @@ mod tests {
         Ok(config)
     }
 
-    /// A fixed, disposable authority key pair; never a real key.
     fn authority() -> Result<AuthorityKeypair, Box<dyn Error>> {
         let secp = Secp256k1::new();
         let pair = Keypair::from_seckey_slice(&secp, &[0x11; 32])?;
@@ -926,8 +816,6 @@ mod tests {
             Zeroizing::new(pair.secret_bytes()),
         ))
     }
-
-    // ---- the miner side: a real Noise initiator over the same SRI crates ----
 
     struct Frame {
         msg_type: u8,
@@ -1048,7 +936,6 @@ mod tests {
         }
     }
 
-    /// Runs the miner's half of `Noise_NX` against the pinned authority.
     fn handshake(
         connection: &mut Connection,
         core: &PoolCore,
@@ -1097,8 +984,6 @@ mod tests {
         })
     }
 
-    // ---- deterministic work -------------------------------------------------
-
     fn header_hash(job: &Job, prefix: &[u8], nonce: u32) -> Result<BlockHash, FixtureError> {
         let (session, rolled) = prefix.split_at(job.extranonce_layout().session_len());
         job.header(
@@ -1111,20 +996,16 @@ mod tests {
         .map_err(sv2("header"))
     }
 
-    /// The first `count` nonces whose header meets the network target.
     fn block_nonces(job: &Job, prefix: &[u8], count: usize) -> Result<Vec<u32>, FixtureError> {
         nonces(job, prefix, true, count)
     }
 
-    /// The first nonce whose header misses the network target: a plain share.
     fn share_nonce(job: &Job, prefix: &[u8]) -> Result<u32, FixtureError> {
         nonces(job, prefix, false, 1)?
             .pop()
             .ok_or(FixtureError::NonceSpace(1))
     }
 
-    /// Scans upward from zero over the whole `u32` space. The job fixes every
-    /// other header field, so the answer is fixed: no clock, no randomness.
     fn nonces(
         job: &Job,
         prefix: &[u8],
@@ -1156,15 +1037,12 @@ mod tests {
         frames.iter().any(|frame| frame.msg_type == msg_type)
     }
 
-    /// `(sequence_number, error_code)` of the one `SubmitShares.Error` in `frames`.
     fn share_error(frames: &mut Vec<Frame>) -> Result<(u32, String), FixtureError> {
         let mut frame = take(frames, MESSAGE_TYPE_SUBMIT_SHARES_ERROR)?;
         let error: SubmitSharesError =
             binary_sv2::from_bytes(&mut frame.payload).map_err(sv2("share error decode"))?;
         Ok((error.sequence_number, error.error_code.as_utf8_or_hex()))
     }
-
-    // ---- the host under test ------------------------------------------------
 
     struct Host {
         core: PoolCore,
@@ -1204,8 +1082,6 @@ mod tests {
             })
         }
 
-        /// One `serve_connection` iteration: announce, reserve the block
-        /// record permit, feed, then the node's own `handle_events`.
         fn deliver(&mut self, wire: &[u8]) -> Result<Vec<Frame>, Box<dyn Error>> {
             announce_current_job(&mut self.connection, &self.core)?;
             let permit = self
@@ -1270,7 +1146,6 @@ mod tests {
         }
     }
 
-    /// After the retirement the same connection carries work on a new parent.
     fn new_parent_work_is_accepted(host: &mut Host, channel: &Channel) -> TestResult {
         let next = host.core.install(candidate(101, 0xcd)?, Vec::new())?.job;
         let nonce = share_nonce(&next, &channel.prefix)?;
@@ -1291,8 +1166,6 @@ mod tests {
             return Err("two winning nonces exist".into());
         };
 
-        // The node applies the first winner; the host acknowledges it only
-        // after the durable found-block record.
         let applied = host.submit(&channel, 1, &job, first)?;
         assert!(has(&applied, MESSAGE_TYPE_SUBMIT_SHARES_SUCCESS));
         assert_eq!(host.node_submissions(), 1);
@@ -1300,8 +1173,6 @@ mod tests {
         assert!(host.ledger.found_block_recorded(first_hash)?);
         assert_eq!(host.credited_shares()?, 1);
 
-        // A distinct winner on the same job is stale: the host's `Applied`
-        // handling is the only thing that retired the job.
         let sibling = host.submit(&channel, 2, &job, second);
         assert_eq!(
             host.node_submissions(),
@@ -1314,7 +1185,6 @@ mod tests {
         assert!(!host.ledger.found_block_recorded(second_hash)?);
         assert_eq!(host.credited_shares()?, 1);
 
-        // The exact accepted replay keeps its duplicate identity.
         let mut frames = host.submit(&channel, 3, &job, first)?;
         assert_eq!(share_error(&mut frames)?, (3, "duplicate-share".to_owned()));
         assert_eq!(host.node_submissions(), 1);
@@ -1332,8 +1202,6 @@ mod tests {
             .pop()
             .ok_or("a winning nonce exists")?;
 
-        // Journal backpressure leaves the chain outcome unknown: the host must
-        // retain the submission instead of confirming an unapplied block.
         *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Inconclusive;
         let pending = host.submit(&channel, 1, &job, winner)?;
         assert!(
@@ -1345,8 +1213,6 @@ mod tests {
         assert_eq!(host.deferred.len(), 1, "Undetermined work is retained");
         assert_eq!(host.node_submissions(), 1);
 
-        // Authoritative recovery applies the block: the retained waiter retries
-        // once and then confirms instead of producing a false success.
         *host.control.submit.lock() = bitcoin_rs_mining::BlockValidationResult::Accepted;
         let entry = host.deferred.pop().ok_or("retained waiter missing")?;
         let waiter = super::settle_one_deferred(
@@ -1376,9 +1242,6 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         use std::time::Instant;
 
-        // A listener-loop reap must not discard the panic: the service flag
-        // retains it so shutdown still fails after joining the rest, matching
-        // SV1's `sessions_panicked`.
         let connections: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let worker_panicked = Arc::new(AtomicBool::new(false));

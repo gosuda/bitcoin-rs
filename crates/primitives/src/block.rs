@@ -7,23 +7,18 @@ use crate::{
     encode::{ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, deserialize},
 };
 
-/// A Bitcoin block in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Block {
-    /// The block header.
     pub header: Header,
-    /// Transactions in consensus order; the first entry is the coinbase.
     pub txs: Vec<Tx>,
 }
 
 impl Block {
-    /// Computes the block hash from the block header.
     #[must_use]
     pub fn block_hash(&self) -> BlockHash {
         self.header.compute_hash()
     }
 
-    /// Computes all transaction ids in block order.
     #[must_use]
     pub fn txids(&self) -> Vec<Txid> {
         self.txs.iter().map(Tx::txid).collect()
@@ -35,11 +30,6 @@ impl Block {
         self.consensus_size()
     }
 
-    /// Consensus serialization length without BIP144 witness sections.
-    ///
-    /// Matches Core's `GetSerializeSize(TX_NO_WITNESS(*this))`: the header,
-    /// the transaction-count compact size, and each transaction's base
-    /// (txid-layout) size.
     #[must_use]
     pub fn stripped_size(&self) -> usize {
         Header::LEN
@@ -50,10 +40,6 @@ impl Block {
     }
 
     /// BIP141 block weight: `stripped_size * 3 + total_size` weight units.
-    ///
-    /// Matches Core's `GetBlockWeight`. Both sizes include the header and the
-    /// transaction-count compact size; they are not a sum of per-transaction
-    /// weights.
     #[must_use]
     pub fn weight(&self) -> u64 {
         u64::try_from(self.stripped_size())
@@ -64,9 +50,6 @@ impl Block {
 
     /// Returns the total heap bytes allocated for this block's transaction vector,
     /// transactions, inputs, outputs, scripts, and witness stacks, including spare capacity.
-    ///
-    /// Excludes the inline `Block` struct itself, any separate serialized raw byte buffer,
-    /// and allocator metadata or size-class rounding.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self
@@ -80,15 +63,6 @@ impl Block {
     }
 }
 
-/// Exact wire/storage block payload: one decoded [`Block`] plus the exact bytes it carries.
-///
-/// `BlockPayload` owns one decoded [`Block`] plus the exact bytes it carries. Raw ingress
-/// claims decode once via [`BlockPayload::from_raw`]; locally assembled blocks encode once
-/// via [`BlockPayload::from_local`]; the Core-compatible RPC submit path keeps its
-/// ignore-trailing-bytes semantics via [`BlockPayload::from_prefix`]. It introduces no
-/// unchecked pair constructor, no generic buffer, no new parser, and no shared-pointer
-/// wrapper. Cloning is by value: the `Block` is cloned and the `Bytes` handle is shared
-/// by reference count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockPayload {
     block: Block,
@@ -96,32 +70,16 @@ pub struct BlockPayload {
 }
 
 impl BlockPayload {
-    /// Decodes `raw` once through the existing consensus decode and retains the input bytes.
-    ///
-    /// Trailing bytes are rejected with [`DecodeError::TrailingBytes`]. No re-encode
-    /// comparison is performed; canonicality is inherited from the existing
-    /// `ParsedBlock`/`deserialize` contract as it stands today.
     pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
         let block = deserialize::<Block>(&raw)?;
         Ok(Self { block, bytes: raw })
     }
 
-    /// Encodes `block` once through the existing consensus encoder and retains that encoding.
     pub fn from_local(block: Block) -> Self {
         let bytes = Bytes::from(consensus_bytes(&block));
         Self { block, bytes }
     }
 
-    /// Decodes one block from the front of `raw`, retaining only the consumed prefix bytes.
-    ///
-    /// Runs the one existing decode shared with [`BlockPayload::from_raw`] through a
-    /// borrow of `raw`, copies the consumed prefix into an exact-sized buffer, and
-    /// returns the consumed length. The ignored `submitblock` suffix allocation is
-    /// released rather than retained behind the prefix, and nothing is
-    /// re-encoded. This exists only for the Core-compatible RPC `submitblock` boundary,
-    /// which ignores
-    /// bytes after the block; every other boundary uses [`BlockPayload::from_raw`] or
-    /// [`BlockPayload::from_local`].
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Owning raw releases the ignored submitblock suffix after copying the consumed prefix"
@@ -134,34 +92,25 @@ impl BlockPayload {
         Ok((Self { block, bytes }, consumed))
     }
 
-    /// Borrows the decoded block.
     #[must_use]
     pub fn block(&self) -> &Block {
         &self.block
     }
 
-    /// Borrows the exact retained bytes.
     #[must_use]
     pub fn bytes(&self) -> &Bytes {
         &self.bytes
     }
 
-    /// Consumes the payload, returning the decoded block and discarding the retained bytes.
-    ///
-    /// Exists for the block-template proposal path, which dry-validates the decoded block
-    /// and never persists bytes.
     #[must_use]
     pub fn into_block(self) -> Block {
         self.block
     }
 }
 
-/// Block payload facts available without materializing a full block body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockBodyMetadata {
-    /// Serialized block byte length.
     pub body_size: usize,
-    /// Number of transactions encoded in the block.
     pub tx_count: usize,
 }
 
@@ -274,9 +223,7 @@ mod tests {
             stripped < total,
             "the witness discount must be visible: {stripped} vs {total}"
         );
-        let manual: usize = 80
-            + 1 // compact size for one transaction
-            + block.txs.iter().map(Tx::base_size).sum::<usize>();
+        let manual: usize = 80 + 1 + block.txs.iter().map(Tx::base_size).sum::<usize>();
         assert_eq!(stripped, manual);
     }
 
@@ -326,7 +273,6 @@ mod tests {
         let bytes = read_test_fixture("0.bin")?;
         let block = deserialize::<Block>(&bytes)?;
 
-        // Independently derive expected value directly from vector capacities.
         let independent = block.txs.capacity() * core::mem::size_of::<Tx>()
             + block
                 .txs
@@ -354,7 +300,6 @@ mod tests {
 
         assert_eq!(block.retained_heap_bytes(), independent);
 
-        // Genesis fixture has 1 tx, 1 input (77-byte script_sig), 1 output (67-byte script_pubkey).
         let expected_literal = core::mem::size_of::<Tx>()
             + core::mem::size_of::<TxIn>()
             + core::mem::size_of::<TxOut>()
@@ -396,9 +341,6 @@ mod tests {
 
         assert_eq!(block.retained_heap_bytes(), independent);
 
-        // 363731 has 1883 txs, 3748 inputs (431,845 scriptSig bytes), 4265 outputs (106,226 scriptPubKey bytes).
-        // On 64-bit systems with size_of::<usize>() == 8:
-        // 1883 * 56 + 3748 * 88 + 4265 * 32 + 431,845 + 106,226 = 1,109,823 bytes.
         if core::mem::size_of::<usize>() == 8 {
             assert_eq!(block.retained_heap_bytes(), 1_109_823);
         }
@@ -483,7 +425,6 @@ mod tests {
         assert_eq!(block.txs[0].retained_heap_bytes(), expected_tx);
         assert_eq!(block.retained_heap_bytes(), expected_block);
 
-        // Verifying spare capacity accounting when reserving extra capacity in txs:
         block.txs.reserve_exact(7);
         let extra_txs_cap = block.txs.capacity() - 3;
         let expected_after_reserve = expected_block + extra_txs_cap * core::mem::size_of::<Tx>();
@@ -497,7 +438,6 @@ mod tests {
         let bytes = read_test_fixture("363731.bin")?;
         let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes.clone()))?;
 
-        // Full decoded-block equality and byte-exact retention, never hash-only.
         assert_eq!(payload.bytes().as_ref(), bytes.as_slice());
         assert_eq!(payload.block(), &deserialize::<Block>(&bytes)?);
         assert_eq!(crate::encode::consensus_bytes(payload.block()), bytes);
@@ -552,14 +492,11 @@ mod tests {
 
         let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(bytes.clone()))?;
 
-        // Consumed length is exactly the block; retained bytes exclude the remainder.
         assert_eq!(consumed, bytes.len() - 3);
         assert_eq!(payload.bytes().as_ref(), &bytes[..consumed]);
         assert_eq!(payload.block(), &deserialize::<Block>(&bytes[..consumed])?);
         assert_eq!(payload.bytes().len(), consumed);
 
-        // A large ignored submitblock suffix is released: only the consumed
-        // prefix is retained, byte for byte.
         let mut padded = read_test_fixture("0.bin")?;
         padded.extend_from_slice(&vec![0xA5; 1 << 20]);
         let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(padded.clone()))?;
@@ -567,7 +504,6 @@ mod tests {
         assert_eq!(payload.bytes().len(), consumed);
         assert_eq!(payload.bytes().as_ref(), &padded[..consumed]);
 
-        // Exact input with no remainder consumes everything.
         let exact = read_test_fixture("363731.bin")?;
         let exact_len = exact.len();
         let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(exact.clone()))?;
@@ -588,12 +524,10 @@ mod tests {
         let expected = crate::encode::consensus_bytes(&block);
         assert_eq!(payload.bytes().as_ref(), expected.as_slice());
         assert_eq!(payload.block(), &block);
-        // Witness material is byte-identical in the retained encoding.
         assert!(
             payload.bytes().windows(64).any(|w| w == [0x21_u8; 64]),
             "retained bytes must carry the full witness item"
         );
-        // Strict re-decode of the retained bytes reproduces the full block value.
         let roundtrip = BlockPayload::from_raw(payload.bytes().clone())?;
         assert_eq!(roundtrip.block(), &block);
         assert_eq!(roundtrip.bytes(), payload.bytes());
@@ -604,8 +538,6 @@ mod tests {
     fn payload_witness_identity_is_byte_exact_not_txid_only() {
         use super::BlockPayload;
 
-        // Same base transaction with different witness items: identical txids but
-        // different consensus bytes. Identity must come from bytes, not txid.
         let left = block_with_tx(witness_tx(vec![vec![0x11_u8; 32]].into()));
         let right = block_with_tx(witness_tx(vec![vec![0x22_u8; 32]].into()));
         assert_eq!(left.txs[0].txid(), right.txs[0].txid());

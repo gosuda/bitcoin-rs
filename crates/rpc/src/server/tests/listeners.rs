@@ -109,8 +109,6 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     ));
     assert!(!Arc::ptr_eq(&public.handler, &management.handler));
 
-    // An answered public keep-alive and an unclassified, incomplete head
-    // consume both public permits, even though neither uses JSON-RPC auth.
     let mut idle = public.connect()?;
     idle.write_all(
         b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
@@ -134,8 +132,6 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     let unauthorized = management.request(&json_rpc_head(None, 0))?;
     assert_eq!(unauthorized, CORE_UNAUTHORIZED);
 
-    // EOF releases admission; retry is bounded, without assuming a worker
-    // scheduling delay. The incomplete head keeps the other public slot.
     drop(idle);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -144,8 +140,6 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
             b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )?;
         let response = read_response(&mut recovered)?;
-        // Context::new has no applied tip, so the route itself can also
-        // return 503; CORS distinguishes a routed response from busy.
         if response.contains("Access-Control-Allow-Origin: *") {
             break;
         }
@@ -160,7 +154,6 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
             .request(&management_request())?
             .contains("\"result\":0")
     );
-    // Management has its own finite pre-authentication bound too.
     let _management_idle = management.connect()?;
     let _management_slow = management.connect()?;
     let busy = read_response(&mut management.connect()?)?;
@@ -177,8 +170,6 @@ fn split_listener_routes_are_closed_before_authentication_and_body_upload() -> i
     let public = RunningServer::start(&context, RpcSurface::Public, 8)?;
     let management = RunningServer::start(&context, RpcSurface::Management, 8)?;
     for path in ["/", "/tx", "/unknown"] {
-        // Neither credentials nor an unuploaded body can reach JSON-RPC on
-        // the public listener. Legacy unknown POST fallback is closed too.
         let request = format!(
             "POST {path} HTTP/1.1\r\nAuthorization: Basic {GOOD_TOKEN}\r\nContent-Length: 4096\r\n\r\n"
         );

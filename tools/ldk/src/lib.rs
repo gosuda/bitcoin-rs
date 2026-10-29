@@ -1,10 +1,4 @@
 //! Experimental LDK adapter over the production public Node surface.
-//!
-//! Run the consumer on an application-owned blocking thread, without node
-//! locks held. Node's async storage/admission operations currently perform
-//! synchronous work when polled; these futures do not offload that work.
-//! This adapter neither owns a runtime nor spawns a second node service graph.
-//! See the README for integration limits and runtime requirements.
 
 use bitcoin::{BlockHash, Transaction, consensus, hashes::Hash};
 use bitcoin_rs_node::{Node, NodeError};
@@ -16,7 +10,6 @@ use lightning_block_sync::{
     AsyncBlockSourceResult, BlockData, BlockHeaderData, BlockSource, BlockSourceError,
 };
 
-/// Refusals at the experimental adapter edge, before or during canonical admission.
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     #[error("transaction conversion failed: {0}")]
@@ -25,17 +18,12 @@ pub enum AdapterError {
     Node(#[from] NodeError),
 }
 
-/// Borrowed adapter; the application retains the one owned Node lifecycle.
-///
-/// Channel state and persistence remain owned by the external LDK application.
 pub struct NativeBackend<'a> {
     node: &'a Node,
     fallback_sat_per_kw: u32,
 }
 
 impl<'a> NativeBackend<'a> {
-    /// `fallback_sat_per_kw` is explicit application policy for missing history,
-    /// clamped to LDK's floor. It is not an estimate from the node.
     pub fn new(node: &'a Node, fallback_sat_per_kw: u32) -> Self {
         Self {
             node,
@@ -43,11 +31,6 @@ impl<'a> NativeBackend<'a> {
         }
     }
 
-    /// Synchronous submission for callers that need to observe admission errors.
-    ///
-    /// Call only on the application's blocking thread, outside a runtime task or
-    /// any node locks. Multi-transaction submissions use one gateway package
-    /// operation, never individual submissions in a loop.
     pub fn try_broadcast_transactions(&self, txs: &[&Transaction]) -> Result<(), AdapterError> {
         if txs.is_empty() {
             return Ok(());
@@ -67,8 +50,6 @@ impl<'a> NativeBackend<'a> {
 
 impl BroadcasterInterface for NativeBackend<'_> {
     fn broadcast_transactions(&self, txs: &[&Transaction]) {
-        // LDK's callback cannot return admission errors. Expose them to the
-        // application's tracing subscriber and keep no parallel retry state.
         if let Err(error) = self.try_broadcast_transactions(txs) {
             tracing::error!(%error, "experimental LDK broadcast refused");
         }
@@ -77,8 +58,6 @@ impl BroadcasterInterface for NativeBackend<'_> {
 
 impl FeeEstimator for NativeBackend<'_> {
     fn get_est_sat_per_1000_weight(&self, target: ConfirmationTarget) -> u32 {
-        // Illustrative consumer policy, bounded to the node estimator's 25-block
-        // horizon. There is no separate estimator or cache in this spike.
         let blocks = match target {
             ConfirmationTarget::MaximumFeeEstimate => 1,
             ConfirmationTarget::UrgentOnChainSweep | ConfirmationTarget::NonAnchorChannelFee => 6,
@@ -125,8 +104,6 @@ impl BlockSource for NativeBackend<'_> {
                 .node
                 .block_by_hash(native_hash)
                 .await
-                // A known block's pruned, corrupt or mismatched body needs
-                // data recovery; retrying this source cannot repair it.
                 .map_err(BlockSourceError::persistent)?
                 .ok_or_else(|| BlockSourceError::transient("block is not known to Node"))?;
             let bytes = bitcoin_rs_primitives::consensus_bytes(&block);
@@ -150,7 +127,6 @@ impl BlockSource for NativeBackend<'_> {
 }
 
 fn sat_per_kvb_to_kw(rate: u64) -> u32 {
-    // Round upward before narrowing, including values near u64::MAX.
     u32::try_from(rate.div_ceil(4))
         .unwrap_or(u32::MAX)
         .max(FEERATE_FLOOR_SATS_PER_KW)

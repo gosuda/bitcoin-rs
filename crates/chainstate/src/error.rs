@@ -1,6 +1,3 @@
-//! Typed authoritative chainstate mutation failures.
-
-/// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     #[error("block apply rejected because clean shutdown has begun")]
@@ -106,7 +103,6 @@ pub enum ApplyError {
     },
 }
 
-/// The outcome of a refused or failed block disconnect.
 #[derive(Debug, thiserror::Error)]
 pub enum DisconnectError {
     #[error("disconnect refused: {0}")]

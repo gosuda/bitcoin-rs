@@ -23,4 +23,4 @@ tinyvec.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+sonic-rs.workspace = true

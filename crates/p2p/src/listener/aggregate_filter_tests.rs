@@ -1,10 +1,3 @@
-//! A compact-filter request parked behind the node's aggregate outbound budget
-//! over a real session. The aggregate's refusal is another connection's
-//! traffic, so it is never charged to the request's five-second allowance; a
-//! wait on the index, or on the connection's own queue, still is. The
-//! listener decides which by recording why each pass stopped
-//! (`ParkedFilter::last`), which only a session can show.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
 use std::sync::Arc;
@@ -29,16 +22,10 @@ use crate::{
     PeerLease, PeerState,
 };
 
-/// The block-production reserve of the test connections, in bytes.
 const RESERVE: usize = 1_000;
 
-/// Serves one `cfilter` behind the send-headroom gate once its range is
-/// "published"; until then, and while the gate is closed, the request stays
-/// pending and unchanged.
 struct FilterChain {
     published: Arc<AtomicBool>,
-    /// Closes this lease right after the gate refused, so a loop that read
-    /// the request ends before its retry pass runs.
     cancel_after_refusal: Option<PeerLease>,
 }
 
@@ -121,8 +108,6 @@ fn get_cfilters() -> Message {
     })
 }
 
-/// An aggregate that refuses one production reservation once
-/// [`refuse_reservations`] holds bytes in it.
 fn small_aggregate() -> Arc<SharedOutboundBudget> {
     Arc::new(SharedOutboundBudget::with_limits(4 * RESERVE, 0))
 }
@@ -131,17 +116,10 @@ fn local_budget() -> OutboundBudget {
     OutboundBudget::with_block_reserve(100, 1 << 20, RESERVE)
 }
 
-/// Fills the aggregate the way other connections' queued frames do, so that
-/// one more reservation of [`RESERVE`] bytes is refused as `Shared`.
 fn refuse_reservations(aggregate: &Arc<SharedOutboundBudget>) -> crate::connection::OutboundCredit {
     hog(aggregate, 3 * RESERVE + RESERVE / 2)
 }
 
-/// An aggregate refusal that outlasts the filter allowance is not charged:
-/// the request keeps waiting, then is served once there is room.
-///
-/// Uses the real clock: the allowance is a constant of the request and the
-/// session reads the monotonic clock itself, so no shorter wait can show it.
 #[test]
 fn a_filter_request_waits_out_an_aggregate_refusal_longer_than_its_allowance() -> TestResult {
     let aggregate = small_aggregate();
@@ -180,10 +158,6 @@ fn a_filter_request_waits_out_an_aggregate_refusal_longer_than_its_allowance() -
     Ok(())
 }
 
-/// After an aggregate refusal the request is charged again for a wait that is
-/// not the aggregate's: here the index never publishes, so the five-second
-/// allowance still ends the request. A request that kept the last refusal's
-/// kind forever would wait for the index without limit.
 #[test]
 fn a_filter_request_waiting_on_the_index_after_an_aggregate_refusal_still_times_out() -> TestResult
 {
@@ -198,7 +172,6 @@ fn a_filter_request_waiting_on_the_index_after_an_aggregate_refusal_still_times_
     served.open_gate();
 
     served.client.send(&get_cfilters())?;
-    // At least two retry passes (one per socket poll) see the refusal.
     std::thread::sleep(Duration::from_millis(2_500));
     if let Ok(ended) = served.session_outcome(Duration::from_millis(50)) {
         return Err(format!("the session ended while the aggregate refused it: {ended:?}").into());
@@ -214,10 +187,6 @@ fn a_filter_request_waiting_on_the_index_after_an_aggregate_refusal_still_times_
     Ok(())
 }
 
-/// The pass that first parks the request records why it stopped, so even the
-/// first interval is not charged when the aggregate refused it. The chain
-/// closes the lease right after the refusal, which ends the loop before any
-/// retry pass could record it instead.
 #[test]
 fn the_first_filter_pass_records_an_aggregate_refusal() -> TestResult {
     let aggregate = small_aggregate();

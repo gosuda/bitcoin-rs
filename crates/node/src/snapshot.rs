@@ -1,6 +1,3 @@
-//! Node-owned bounded snapshot import, coherent export, and fenced consumer
-//! reconciliation.
-
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -28,18 +25,10 @@ use parking_lot::Mutex;
 
 use crate::chain_effects::ChainFollowers;
 
-/// Bytes buffered between the encoder and the output file.
 const EXPORT_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Process-wide counter distinguishing staged exports within one process.
 static EXPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Builds a per-attempt staged file name.
-///
-/// The name embeds the process id, a wall-clock timestamp and a process-wide
-/// counter, so a SIGKILL orphan (`*.incomplete`) can never collide with a
-/// later export even after PID reuse. Creation still uses `create_new`, and no
-/// caller unlinks another process's staged file.
 fn staged_temp_name(name: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,22 +40,14 @@ fn staged_temp_name(name: &str) -> String {
     )
 }
 
-/// The import budget and activation effects shared by embedding and RPC.
 pub(crate) struct SnapshotControl {
     pub(crate) manager: Arc<AssumeUtxoManager>,
     chainstate: Arc<Chainstate>,
     followers: ChainFollowers,
     data_dir: PathBuf,
     network: Network,
-    // Post-start ScriptLive seed demand. `None` when ScriptLive is disabled at
-    // composition time; the cell itself is worker-owned demand shared with the
-    // publisher and the worker spec. This handle never mints, only offers.
     seed_offer: Option<SeedOfferCell>,
-    // One imported UTXO set may be materialized at a time. This is a resource
-    // permit, not a second lifecycle state. No chain write lock spans decoding.
     import: Mutex<()>,
-    // One export may wait for chain-transition exclusion and hold it while it
-    // encodes. A second request is refused rather than queued behind it.
     export: Mutex<()>,
 }
 
@@ -126,7 +107,6 @@ impl From<SnapshotExportError> for SnapshotControlError {
     }
 }
 
-/// A resolved output: the capability for its directory and the names in it.
 struct ExportTarget {
     dir: cap_std::fs::Dir,
     name: String,
@@ -134,8 +114,6 @@ struct ExportTarget {
     path: PathBuf,
 }
 
-/// Removes the staged file unless it was published, so every error,
-/// interruption and panic path leaves no partial snapshot behind.
 struct StagedFile<'a> {
     dir: &'a cap_std::fs::Dir,
     name: String,
@@ -174,7 +152,6 @@ impl Drop for StagedFile<'_> {
     }
 }
 
-/// What one locked encode certifies about the snapshot it wrote.
 struct Encoded {
     report: CoreV2WriteReport,
     base_hash: Hash256,
@@ -237,8 +214,6 @@ impl From<SnapshotImportError> for SnapshotControlError {
     }
 }
 
-/// Validate the held descriptor. `O_NONBLOCK` prevents a FIFO path replacement
-/// from hanging between the path metadata check and opening the input.
 fn open_regular_input(path: &Path) -> Result<File, SnapshotImportError> {
     #[cfg(not(unix))]
     if !path.metadata()?.is_file() {
@@ -281,11 +256,6 @@ impl SnapshotControl {
         }
     }
 
-    /// Writes the UTXO set at the applied tip as a Core v2 snapshot.
-    ///
-    /// The request latch or the chainstate shutdown latch stops the encode
-    /// within the writer's polling interval; either answers
-    /// [`SnapshotExportError::Interrupted`] and leaves no file.
     pub(crate) fn export(
         &self,
         output: &Path,
@@ -302,9 +272,6 @@ impl SnapshotControl {
         output: &Path,
         stop: &dyn Fn() -> bool,
     ) -> Result<SnapshotExport, SnapshotExportError> {
-        // Refuse before any lock or byte: publication needs the no-replace
-        // rename, and discovering its absence after the encode would have
-        // blocked block commits for nothing.
         if !HAS_ATOMIC_NOREPLACE_RENAME {
             return Err(SnapshotExportError::NoAtomicPublish);
         }
@@ -351,8 +318,6 @@ impl SnapshotControl {
         if stop() {
             return Err(SnapshotExportError::Interrupted);
         }
-        // A prior existence check cannot exclude another creator of the
-        // destination, so publication is the filesystem's no-replace rename.
         match rename_noreplace(&target.dir, &target.temp, &target.name) {
             Ok(()) => staged.published(),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -367,16 +332,12 @@ impl SnapshotControl {
             coins_written: encoded.report.coins,
             base_hash: encoded.base_hash.to_string_be(),
             base_height: encoded.base_height,
-            // JSON cannot serialize arbitrary filesystem bytes; only this
-            // display replaces them, never the path that was written.
             path: target.path.to_string_lossy().into_owned(),
             txoutset_hash: encoded.report.txoutset_hash.to_string_be(),
             nchaintx: encoded.nchaintx,
         })
     }
 
-    /// Resolves `output` below the data directory when relative, refusing an
-    /// existing entry and the node's snapshot recovery namespace.
     fn resolve_output(&self, output: &Path) -> Result<ExportTarget, SnapshotExportError> {
         let joined = if output.is_absolute() {
             output.to_path_buf()
@@ -393,8 +354,6 @@ impl SnapshotControl {
             .ok_or(SnapshotExportError::OutputName)?
             .canonicalize()
             .map_err(SnapshotExportError::Output)?;
-        // Activation publishes native recovery files in this namespace and may
-        // replace entries there, so an exported snapshot cannot live in it.
         let recovery = self
             .data_dir
             .canonicalize()
@@ -422,13 +381,6 @@ impl SnapshotControl {
         })
     }
 
-    /// Encodes the applied tip's UTXO set into `sink`.
-    ///
-    /// The transition lock is taken before the stable view, matching block
-    /// apply, and both are held across the whole encode because the set has no
-    /// immutable capture: no commit can interleave between the tip read, the
-    /// coin count and the last coin. Commit-blocking time, from the permit
-    /// to its release, is logged for every outcome.
     fn encode_at_applied_tip<W: Write>(
         &self,
         sink: &mut W,
@@ -480,8 +432,6 @@ impl SnapshotControl {
         })
     }
 
-    // Both input formats claim the same resource permit and refuse a second
-    // activation before resolving a path, reading input or reconstructing coins.
     fn claim_import(&self) -> Result<parking_lot::MutexGuard<'_, ()>, SnapshotImportError> {
         let permit = self
             .import
@@ -504,16 +454,11 @@ impl SnapshotControl {
         if !path.metadata()?.is_file() {
             return Err(SnapshotImportError::NotRegular);
         }
-        // Activation publishes native recovery files only in this namespace.
-        // A portable source there must not be overwritten by that publication.
         let recovery = self.data_dir.canonicalize()?.join("assumeutxo");
         if path.starts_with(recovery) {
             return Err(SnapshotImportError::RecoveryInput);
         }
         let mut file = BufReader::new(open_regular_input(&path)?);
-        // The reader seals the set with the commitment and statistics folded
-        // from its authenticated records; activation consumes that proof and
-        // does not traverse the set again.
         let read_started = Instant::now();
         let snapshot = read_verified(&mut file, self.network, SnapshotLimits::default())?;
         let read_verify = read_started.elapsed();
@@ -521,9 +466,6 @@ impl SnapshotControl {
             coins_loaded: snapshot.metadata.coins_count,
             tip_hash: snapshot.anchor.block_hash.to_string_be(),
             base_height: snapshot.anchor.height,
-            // JSON cannot serialize arbitrary filesystem bytes. Render before
-            // committing so a valid symlink target cannot turn success into a
-            // post-commit response error.
             path: path.to_string_lossy().into_owned(),
         };
         let file_bytes = snapshot.bytes_read;
@@ -533,8 +475,6 @@ impl SnapshotControl {
         self.activate(base_hash, |manager| {
             manager.activate_verified_snapshot(state)
         })?;
-        // One structured record per successful import: the e2e resource proof
-        // reads these phases from the node's stderr JSON. No other consumer.
         tracing::info!(
             target: "bitcoin_rs::snapshot_import",
             coins = result.coins_loaded,
@@ -547,13 +487,10 @@ impl SnapshotControl {
         Ok(result)
     }
 
-    /// Existing embedding contract: native v4 input and caller-relative paths.
-    /// This entry shares the same resource permit and activation effects with RPC.
     pub(crate) fn import_native(&self, path: &Path) -> Result<(), SnapshotImportError> {
         let _permit = self.claim_import()?;
         let mut file = BufReader::new(open_regular_input(path)?);
         let snapshot = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
-        // Native v4 input carries no proof; the manager verifies it once.
         let base_hash = snapshot.tip_hash;
         self.activate(base_hash, |manager| {
             manager.activate_snapshot_state(snapshot.set, snapshot.tip_hash, snapshot.height)
@@ -565,8 +502,6 @@ impl SnapshotControl {
         base_hash: Hash256,
         activation: impl FnOnce(&AssumeUtxoManager) -> Result<(), AssumeUtxoError>,
     ) -> Result<(), SnapshotImportError> {
-        // Take-and-drop on this early exit too: every return from `activate`
-        // leaves no staged witness behind, so none can pair with a later call.
         let change = match self.followers.begin_mempool_change() {
             Ok(change) => change,
             Err(error) => {
@@ -574,15 +509,11 @@ impl SnapshotControl {
                 return Err(SnapshotImportError::Admission(error));
             }
         };
-        // The generation fence serializes with in-flight admission and prevents
-        // new commits. Drop the pool read guard before costly activation work.
         if self
             .followers
             .mempool_gateway()
             .is_some_and(|gateway| !gateway.read().is_empty())
         {
-            // A guard's Drop intentionally leaves admission closed. This is an
-            // operational refusal, so settle without invoking any consumers.
             if let Some(change) = change
                 && let Err(error) = change.finish()
             {
@@ -602,8 +533,6 @@ impl SnapshotControl {
             && let Err(settlement) = change.finish()
         {
             self.chainstate.fail_closed_for_recovery();
-            // Settlement failed after (or without) manager success: nothing may
-            // be offered, and no staged witness may survive to a later call.
             self.drop_activation_witness();
             return match result {
                 Err(activation) => Err(SnapshotImportError::ActivationAndSettlement {
@@ -617,26 +546,15 @@ impl SnapshotControl {
             self.drop_activation_witness();
             Err(SnapshotImportError::Activation(activation))
         } else {
-            // Full success only: manager activation plus followers plus
-            // settlement. A later restart mints from the durable Validating
-            // state instead, so nothing is offered on any other path.
             self.offer_activation_seed(base_hash);
             Ok(())
         }
     }
 
-    /// Takes and drops any staged activation witness. Every activation error,
-    /// settlement, abort, and interruption path calls this so a stale witness
-    /// can never pair with a later activation call.
     fn drop_activation_witness(&self) {
         let _ = self.manager.take_pending_activation_witness();
     }
 
-    /// C4 offer: after full activation success, seals the committed archive
-    /// `coins.dat` for `base_hash` with the staged witness and offers it into
-    /// the shared seed cell. Skips without any file I/O when no cell is
-    /// installed or the cell is not wanted; a length mismatch or I/O error
-    /// drops the opened file and leaves the cell untouched.
     fn offer_activation_seed(&self, base_hash: bitcoin_rs_primitives::Hash256) {
         let Some(witness) = self.manager.take_pending_activation_witness() else {
             return;
@@ -649,8 +567,6 @@ impl SnapshotControl {
         );
     }
 
-    /// Shared pre-check/open/check/seal/offer step. Pure pointer moves happen
-    /// inside the cell; no lock is held across open, reads, or sealing.
     fn offer_witness_file(
         seed_offer: Option<&SeedOfferCell>,
         data_dir: &Path,
@@ -667,9 +583,6 @@ impl SnapshotControl {
             .join("assumeutxo")
             .join(base_hash.to_string())
             .join("coins.dat");
-        // Same hardened opener as snapshot inputs: O_NONBLOCK plus a
-        // regular-file check, so a planted FIFO can neither hang activation
-        // nor be seeded. Rejection drops the witness with the cell untouched.
         let file = match open_regular_input(&path) {
             Ok(file) => file,
             Err(_) => return,
@@ -734,9 +647,6 @@ fn micros(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
 }
 
-// Core v31.1 keeps m_from_snapshot_blockhash after marking the snapshot
-// validated (validation.cpp:6104-6111). A failure likewise does not erase an
-// active assumed role's origin merely because the disk status is Failed.
 fn active_snapshot_base(
     role: ChainstateRole,
     status: &AssumeUtxoDiskStatus,
@@ -789,11 +699,6 @@ mod tests {
         );
     }
 
-    // `rustix::fs::mkfifoat` is not available on Apple platforms, so the
-    // macOS test hosts gate this fixture the same way the epoch-lock FIFO
-    // test in `tests/unit/state/tests/events.rs` does. The code under test
-    // (`open_regular_input`) keeps its platform-independent coverage
-    // elsewhere.
     #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn input_fifo_is_rejected_without_waiting_for_a_writer() -> anyhow::Result<()> {
@@ -830,7 +735,7 @@ mod tests {
     }
 
     fn core_headers() -> anyhow::Result<Vec<bitcoin_rs_primitives::Header>> {
-        let raw: Vec<String> = serde_json::from_str(include_str!(
+        let raw: Vec<String> = sonic_rs::from_str(include_str!(
             "../../utxo/tests/fixtures/core-v2/blocks200.json"
         ))?;
         raw.iter()
@@ -886,7 +791,6 @@ mod tests {
                 Err(SnapshotImportError::ImportInProgress)
             ));
         }
-        // The established embedding call still selects native v4 explicitly.
         assert!(state.activate_assumeutxo_snapshot_file(&core_path).is_err());
         state.activate_assumeutxo_snapshot_file(&native_path)?;
         assert!(matches!(
@@ -911,8 +815,6 @@ mod tests {
         use bitcoin_rs_mempool::PrioritisedTransaction;
         use bitcoin_rs_primitives::{Hash256, Txid};
 
-        // Core 31.1 AddChainstate transfers the existing empty CTxMemPool;
-        // its mapDeltas entries for absent transactions survive that transfer.
         for native in [false, true] {
             let dir = tempfile::tempdir()?;
             let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
@@ -977,8 +879,6 @@ mod tests {
             }],
             lock_time: LockTime::ZERO,
         });
-        // Stage membership through the existing test seam. The independent
-        // process case covers admission of a real spend on both implementations.
         gateway.insert_entry(
             AdmissionOrigin::Rpc,
             MempoolEntry::new(Arc::clone(&transaction), 100, 1_000, 0, 0, 0),
@@ -1077,8 +977,6 @@ mod tests {
         );
         assert_eq!(entry_names(&out)?, ["export.dat"]);
 
-        // The published file and an operator's file both survive a second
-        // export, and no temporary file is left beside them.
         assert!(matches!(
             state.snapshots.export(&output, &never),
             Err(SnapshotExportError::Exists(_))
@@ -1093,7 +991,6 @@ mod tests {
         assert_eq!(std::fs::read(&output)?, core_bytes);
         assert_eq!(entry_names(&out)?, ["export.dat", "operator.dat"]);
 
-        // A relative path resolves below the data directory.
         let relative = state.snapshots.export(Path::new("relative.dat"), &never)?;
         assert_eq!(
             std::fs::read(dir.path().join("node/relative.dat"))?,
@@ -1107,8 +1004,6 @@ mod tests {
                 .to_string_lossy()
         );
 
-        // Activation may replace entries in the recovery namespace, so an
-        // export cannot be placed there.
         let recovery = dir.path().join("node/assumeutxo/export.dat");
         assert!(matches!(
             state.snapshots.export(&recovery, &never),
@@ -1134,8 +1029,6 @@ mod tests {
         ));
         assert_eq!(entry_names(&out)?, Vec::<String>::new());
 
-        // The second poll is the encoder's own, after the staged file exists
-        // and the chain locks are held.
         let polls = std::cell::Cell::new(0_u32);
         let stop = || {
             polls.set(polls.get() + 1);
@@ -1156,13 +1049,11 @@ mod tests {
         ));
         assert_eq!(entry_names(&out)?, Vec::<String>::new());
 
-        // The locks were released: a later export succeeds.
         state
             .snapshots
             .export(&output, &LatchReader::fixture_never())?;
         assert_eq!(entry_names(&out)?, ["interrupted.dat"]);
 
-        // Node shutdown interrupts like the request latch does.
         state.chainstate().request_shutdown();
         assert!(matches!(
             state
@@ -1181,8 +1072,6 @@ mod tests {
         state.snapshots.import(&core_path)?;
         let out = dir.path().join("out");
         std::fs::create_dir(&out)?;
-        // A SIGKILL orphan from the previous fixed-pattern name with our pid.
-        // It must be left alone (never unlinked) yet never block the retry.
         let stale = out.join(format!("export.dat.{}.incomplete", std::process::id()));
         std::fs::write(&stale, b"stale")?;
         let output = out.join("export.dat");
@@ -1281,11 +1170,6 @@ mod tests {
             .map(|tip| (tip.height, tip.hash))
     }
 
-    // Activation is one linearizable writer: the lifecycle mutex plus the
-    // durable-head compare-and-swap. The sealed state needs no further
-    // consistency model because it has exactly one owner and no shared handle.
-    // Both entries must install byte-identical statistics, and the restarted
-    // node (which recomputes them from the archive) must agree.
     #[test]
     fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
     -> anyhow::Result<()> {
@@ -1388,9 +1272,6 @@ mod tests {
         Ok(())
     }
 
-    // A set without proof is mutable through shared access (`replace_from`);
-    // the sealed type exists to forbid exactly that. The proofless entry must
-    // therefore recompute and refuse, leaving the node reusable.
     #[test]
     fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> anyhow::Result<()> {
         let pinned = regtest_pin()?;
@@ -1431,10 +1312,6 @@ mod tests {
         Ok(())
     }
 
-    // A directory at the final headers name makes archive publication fail
-    // after coins.dat was published and before any durable head names either
-    // file. The durable head is the sole authority, so the restarted node is
-    // Uninitialized again and a retry overwrites the orphan coin archive.
     #[cfg(unix)]
     #[test]
     fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> anyhow::Result<()> {

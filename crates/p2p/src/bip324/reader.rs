@@ -1,9 +1,4 @@
 //! Resumable reads of BIP324 packets from a blocking stream.
-//!
-//! Peer sockets poll with a short read timeout. A `TimedOut` or `WouldBlock`
-//! read error leaves every byte already consumed in the reader, so the caller
-//! retries and the same packet continues. Every other error is fatal for the
-//! connection.
 
 use std::io::Read;
 
@@ -20,8 +15,6 @@ use crate::wire::MAX_MESSAGE_PAYLOAD;
 /// accepts.
 pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 
-/// Reads one direction's packets: the receiving ciphers, the AAD owed by the
-/// first packet, and any partially received packet.
 #[derive(Debug)]
 pub(crate) struct PacketReader {
     cipher: RecvCipher,
@@ -31,7 +24,6 @@ pub(crate) struct PacketReader {
     body: Option<PendingBody>,
 }
 
-/// A packet whose length is decrypted and whose body is still arriving.
 #[derive(Debug)]
 struct PendingBody {
     len: usize,
@@ -51,13 +43,11 @@ impl PacketReader {
         }
     }
 
-    /// Reads at most one packet and returns its contents: `None` for a decoy.
+    /// A contents length above [`MAX_RECV_CONTENTS_LEN`] is refused before any byte of
+    /// its body is read.
     ///
-    /// A contents length above [`MAX_RECV_CONTENTS_LEN`] is refused before
-    /// any byte of its body is read.
-    ///
-    /// POST: on `Ok(None)` every packet byte is consumed and its cipher
-    /// advanced; the next call reads a fresh packet.
+    /// POST: on `Ok(None)` every packet byte is consumed and its cipher advanced; the
+    /// next call reads a fresh packet.
     pub(crate) fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
@@ -102,7 +92,6 @@ impl PacketReader {
     }
 }
 
-/// The socket's poll interval elapsed; the rest of the packet may still arrive.
 pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
@@ -118,7 +107,6 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// Serves queued bytes, then reads as a poll timeout.
     struct Dribble(VecDeque<u8>);
 
     impl Read for Dribble {
@@ -159,8 +147,6 @@ mod tests {
         Ok(())
     }
 
-    /// A decoy yields `None` for exactly one packet; the next packet still
-    /// arrives, and a stalled decoy keeps its body for the retry.
     #[test]
     fn a_decoy_packet_yields_none_and_the_next_packet_still_arrives() -> TestResult {
         let (mut sender, mut reader) = pair();
@@ -182,7 +168,6 @@ mod tests {
         Ok(())
     }
 
-    /// Three decoys then one packet: `None, None, None, Some(..)`.
     #[test]
     fn three_decoys_then_one_packet() -> TestResult {
         let (mut sender, mut reader) = pair();

@@ -1,13 +1,5 @@
-//! Regression coverage for issue #1153:
-//! Frontier liveness after serving peers miss the block-request timeout:
-//! the peers this node holds must carry the frontier.
-
 use super::*;
 
-/// Answers every request `rx` carried, as an honest peer does: its own headers
-/// for a `getheaders`, and the bodies it holds for a `getdata`.
-/// `wire_response` is true for a reply to the node's request and false for
-/// headers forwarded from a delivery; the header gate distinguishes them.
 fn answer_requests(
     rx: &crate::test_support::MessageReceiver,
     source: PeerSource,
@@ -44,9 +36,6 @@ fn answer_requests(
 #[test]
 #[expect(clippy::too_many_lines)]
 fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
-    // Header tip at 6, bodies for 1..=6; the public tip sits at 8, two
-    // blocks past the header tip, so the replacements have headers to bring
-    // as well as bodies.
     let (tree, mut blocks) = mined_chain(6, 0)?;
     let mut prev = blocks[5].block_hash();
     for height in 7..=8_u32 {
@@ -81,7 +70,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
         },
     );
 
-    // Apply block 1 so the apply frontier needs block 2's body.
     inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
 
     let s1 = test_addr(9821, 0)?;
@@ -98,9 +86,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     }
 
     sync.tick();
-    // Neither server answers, so each owns a request that ages past the
-    // block-request timeout and is convicted — the incident's staggered
-    // double loss.
     for _ in 0..24 {
         std::thread::sleep(Duration::from_millis(250));
         sync.tick();
@@ -162,8 +147,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
 
 #[test]
 fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestResult {
-    // Active branch X: genesis plus six mined blocks, block 1 applied, so
-    // the frontier needs block 2's body.
     let (tree, blocks) = mined_chain(6, 0)?;
     let bodies: HashMap<Hash256, Block> = blocks
         .iter()
@@ -201,10 +184,6 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
     })?;
     sync.tick();
 
-    // The defect, named: proving a tip on a branch this node no longer
-    // follows used to revoke the height the connection was asked at,
-    // pinning its capability at the fork point. Branch evidence may raise
-    // what a peer may serve, never lower it below the credit it carries.
     let frontier = sync.observe_frontier(sync.observe_chain_frontier(), Instant::now());
     let capability = frontier
         .usable_peers

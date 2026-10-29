@@ -13,7 +13,6 @@ use stratum_apps::stratum_core::{bitcoin, template_distribution_sv2::SubmitSolut
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-/// An empty candidate on the parent `parent`; distinct parents have distinct identities.
 pub(super) fn empty_candidate(parent: u8) -> Arc<Candidate> {
     use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
     Arc::new(
@@ -59,8 +58,6 @@ fn candidate(node: &Node) -> Arc<Candidate> {
     template.candidate
 }
 
-/// Waits for the worker's next wake, then does what a session does: asks the
-/// mining owner for its own candidate and retains it.
 async fn next(hub: &Hub, wakes: &mut watch::Receiver<u64>, node: &Node) -> Arc<TemplateState> {
     tokio::time::timeout(Duration::from_secs(5), wakes.changed())
         .await
@@ -110,8 +107,6 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
                 if let Some(started) = retry_started.take() {
                     assert!(started.elapsed() >= TEMPLATE_RETRY_DELAY);
                 }
-                // Race once before the initial job and once during refresh.
-                // Both must recover without losing the last published identity.
                 if calls == 1 || calls == 3 {
                     retry_started = Some(Instant::now());
                     return Err(MiningControlError::Unavailable(
@@ -225,8 +220,6 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
     let after = candidate(&node);
     assert_eq!(before.previous_block_hash, after.previous_block_hash);
     assert_ne!(before.template_id, after.template_id);
-    // The worker wakes once per generation; the template a session would be
-    // given for the generation that admitted the transaction carries it.
     let with_tx = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let state = next(&hub, &mut updates, &node).await;
@@ -270,7 +263,6 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
         consensus_bytes(&projected),
         consensus_bytes(&solved_with_tx)
     );
-    // The superseded same-tip empty job is still valid after mempool admission.
     let mut old_job = before.into_unsolved_block()?;
     solve_block(&mut old_job, 1_000_000)?;
     assert_eq!(
@@ -278,7 +270,6 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
             .submit_block(BlockPayload::from_local(old_job))?,
         BlockValidationResult::Accepted
     );
-    // Its competitor must now be rejected by normal chainstate admission.
     assert!(matches!(
         node.mining_control()?
             .submit_block(BlockPayload::from_local(projected))?,
@@ -302,7 +293,6 @@ async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -
 fn equal_candidate_identities_share_one_job_and_history_stays_bounded() {
     let hub = Hub::new();
     let first = hub.issue(empty_candidate(1));
-    // A second session given the same owner identity gets the same job.
     assert!(Arc::ptr_eq(&hub.issue(empty_candidate(1)), &first));
     assert!(Arc::ptr_eq(&hub.lookup(first.id).unwrap(), &first));
     for parent in (2..).take(RETAINED_TEMPLATES) {
@@ -310,7 +300,6 @@ fn equal_candidate_identities_share_one_job_and_history_stays_bounded() {
     }
     assert_eq!(hub.issued.lock().unwrap().len(), RETAINED_TEMPLATES);
     assert!(hub.lookup(first.id).is_none());
-    // Only a retained state deduplicates: an evicted identity is issued afresh.
     assert_ne!(hub.issue(empty_candidate(1)).id, first.id);
 }
 
@@ -321,7 +310,6 @@ fn worker_wake_reaches_every_subscriber_without_carrying_a_job() {
     assert!(!a.has_changed().unwrap());
     hub.wake();
     hub.wake();
-    // Wakes coalesce: sessions refresh from the owner's live generation.
     assert!(a.has_changed().unwrap() && b.has_changed().unwrap());
     assert_eq!((*a.borrow_and_update(), *b.borrow_and_update()), (2, 2));
     assert!(hub.issued.lock().unwrap().is_empty());
@@ -363,7 +351,6 @@ fn shutdown_during_generation_retry_is_terminal() {
                 1 => Err(MiningControlError::Unavailable(
                     "generation key changed during candidate assembly".into(),
                 )),
-                // The owner observes its shutdown latch on the next acquisition.
                 2 => Err(MiningControlError::Unavailable(
                     "node is shutting down".into(),
                 )),

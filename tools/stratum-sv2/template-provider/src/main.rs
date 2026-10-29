@@ -72,9 +72,6 @@ fn config_from_env() -> Result<(Config, NodeConfig), String> {
     ))
 }
 
-/// Shared by every session: a generation counter that wakes them, and the
-/// bounded history of jobs they issued. A session pins its own current job, so
-/// this history only has to answer for superseded ones.
 #[derive(Clone)]
 pub struct Hub {
     generation: watch::Sender<u64>,
@@ -93,22 +90,16 @@ impl Hub {
     fn subscribe(&self) -> watch::Receiver<u64> {
         self.generation.subscribe()
     }
-    /// Tells every session the mining owner's generation moved. It carries no
-    /// candidate: each session asks the owner for one fitting its own budget.
     fn wake(&self) {
         self.generation.send_modify(|count| *count += 1);
     }
     pub fn lookup(&self, id: u64) -> Option<Arc<TemplateState>> {
         self.issued.lock().unwrap().get(&id).cloned()
     }
-    /// Returns the retained job for `candidate`'s owner identity, or retains a
-    /// new one. Sessions given equal identities share one id and one state.
     fn issue(&self, candidate: Arc<Candidate>) -> Arc<TemplateState> {
         if let Some(state) = retained(&self.issued.lock().unwrap(), &candidate.template_id) {
             return state;
         }
-        // Built before taking the lock again: hashing the merkle branch is
-        // linear in the transaction count.
         let state = Arc::new(TemplateState::new(
             self.next_id.fetch_add(1, Ordering::Relaxed),
             candidate,
@@ -135,9 +126,6 @@ fn retained(
         .map(Arc::clone)
 }
 
-// A dedicated OS worker owns the synchronous long poll. It holds no Node lock
-// between calls, and the injected normal shutdown signal cancels the wait. Its
-// unconstrained template is never sent to a pool: it only wakes the sessions.
 fn template_loop(
     mut get_template: impl FnMut(
         BlockTemplateRequest,
@@ -157,8 +145,6 @@ fn template_loop(
             Ok(result) => result,
             Err(error) if error.is_template_generation_race() => {
                 warn!(%error, "template generation raced; retrying");
-                // The next acquisition rechecks the node shutdown latch;
-                // this delay bounds both retry load and added shutdown latency.
                 std::thread::sleep(TEMPLATE_RETRY_DELAY);
                 continue;
             }
@@ -219,7 +205,6 @@ async fn main() -> Result<(), String> {
         result = &mut ended_rx => (result.map_err(|e| e.to_string()).and_then(|r| r), false),
     };
     stop_tx.send_replace(true);
-    // Drain sessions and their blocking submission calls before stopping Node.
     let listener_outcome = if listener_joined {
         Ok(())
     } else {

@@ -17,7 +17,7 @@ fn backups(directory: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn asmap_placement_matches_224_actual_core_vectors() {
-    let data: serde_json::Value = serde_json::from_str(include_str!(
+    let data: sonic_rs::Value = sonic_rs::from_str(include_str!(
         "../../../tests/data/core-addrman-asmap-v31.1.json"
     ))
     .expect("Core reference");
@@ -35,7 +35,7 @@ fn asmap_placement_matches_224_actual_core_vectors() {
                 .to_lower_hex_string(),
             info["sha256"].as_str().expect("digest")
         );
-        classifiers.insert(name.as_str(), groups);
+        classifiers.insert(name, groups);
     }
     assert_eq!(data["rows"].as_array().expect("rows").len(), 224);
     for row in data["rows"].as_array().expect("rows") {
@@ -129,7 +129,6 @@ fn incoming_source_asn_controls_corroboration_without_rewriting_primary_source()
     );
     let entry = &manager.stored.records[manager.by_addr[&addr]];
     assert_eq!(entry.source, primary);
-    // Direct linked-Core reference: same ASN sources use53; the independent ASN602.
     assert_eq!(entry.new_buckets, vec![53, 602]);
     assert_indexes(&manager);
 }

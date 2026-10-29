@@ -24,12 +24,10 @@ External pool/device pins are unchanged in Compose and `device/Dockerfile`.
   Pool and provider exited with status 0. The test project was removed without
   deleting its data volume.
 
-The adapter test separately exercises a matured witness spend and same-tip
-mempool refresh, independent rust-bitcoin block-merkle/transaction decoding,
-transaction-data bytes, duplicates, a valid superseded job, stale-parent
-rejection, retained-job eviction and long-poll cancellation. The Compose run
-uses coinbase-only blocks; it does not independently demonstrate those mempool
-cases over a live SRI connection. Translator interoperability was not exercised.
+Adapter test coverage is listed in the [example README](../README.md). The
+Compose run uses coinbase-only blocks; it does not independently demonstrate
+those mempool cases over a live SRI connection. Translator interoperability
+was not exercised.
 
 ## Commands and captured outputs
 

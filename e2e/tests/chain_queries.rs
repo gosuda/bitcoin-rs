@@ -1,5 +1,4 @@
 //! Chain-state query E2E: block/height lookups, chain tips, UTXO set
-//! statistics, proofs, and index/introspection surfaces.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -9,9 +8,8 @@ use bitcoin_rs_e2e::helpers::{
     coinbase_at, funding_address, funding_output, genesis_block, mine_bare_blocks, submit_genesis,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
-/// Height/hash lookups agree with each other once blocks exist.
 #[test]
 fn height_and_hash_queries() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -33,7 +31,6 @@ fn height_and_hash_queries() -> Result<()> {
         "height 0 is genesis"
     );
 
-    // Core answers out-of-range heights with -8 RPC_INVALID_PARAMETER.
     for height in [99_i64, -1] {
         let beyond = node.rpc_raw(&json!({
             "jsonrpc": "2.0", "id": 1, "method": "getblockhash", "params": [height]
@@ -43,8 +40,6 @@ fn height_and_hash_queries() -> Result<()> {
     node.stop()
 }
 
-/// `getblock` verbosities 0/1/2, `getblockheader`, and `getblockstats`
-/// report one consistent view of a block.
 #[test]
 fn block_views_agree() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -81,7 +76,6 @@ fn block_views_agree() -> Result<()> {
     );
 
     let header = node.rpc("getblockheader", &json!([hash]))?;
-    // The header view must agree field-for-field with the verbose block.
     for field in ["hash", "height", "time", "mediantime", "bits", "nonce"] {
         assert_eq!(
             header.field(field)?,
@@ -98,8 +92,6 @@ fn block_views_agree() -> Result<()> {
     node.stop()
 }
 
-/// `getchaintips` reports the single active tip and `getchaintxstats` the
-/// cumulative transaction count.
 #[test]
 fn chain_tips_and_tx_stats() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -122,7 +114,6 @@ fn chain_tips_and_tx_stats() -> Result<()> {
     node.stop()
 }
 
-/// `gettxoutsetinfo` counts every UTXO and the total supply.
 #[test]
 fn txoutset_info_counts_utxos() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -131,8 +122,6 @@ fn txoutset_info_counts_utxos() -> Result<()> {
 
     let info = node.rpc("gettxoutsetinfo", &json!([]))?;
     assert_eq!(info.u64_field("height")?, 7);
-    // The unspendable genesis coinbase is excluded, as is each block's
-    // provably-unspendable OP_RETURN witness-commitment output.
     assert_eq!(info.u64_field("transactions")?, 7);
     assert_eq!(info.u64_field("txouts")?, 7);
     let total = info
@@ -143,8 +132,6 @@ fn txoutset_info_counts_utxos() -> Result<()> {
     node.stop()
 }
 
-/// `gettxout` resolves a live outpoint and a spent/unknown one;
-/// `gettxoutproof`/`verifytxoutproof` round-trip a merkle proof.
 #[test]
 fn txout_lookup_and_proof() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -189,8 +176,6 @@ fn txout_lookup_and_proof() -> Result<()> {
     node.stop()
 }
 
-/// `scantxoutset` with an `addr()` descriptor finds the outputs paid to
-/// that address by `generatetoaddress`.
 #[test]
 fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -198,7 +183,7 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
     let address = funding_address()?.to_string();
     let result = node.rpc("generatetoaddress", &json!([5, address]))?;
     assert_eq!(
-        result.as_array().map(Vec::len),
+        result.as_array().map(sonic_rs::Array::len),
         Some(5),
         "generatetoaddress must report 5 hashes: {result}"
     );
@@ -212,7 +197,6 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
         Some(true),
         "scan must succeed: {scan}"
     );
-    // Only address-matched outputs count; the OP_RETURN commitment does not.
     assert_eq!(scan.u64_field("txouts")?, 5);
     let unspents = scan
         .get("unspents")
@@ -222,9 +206,6 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
     node.stop()
 }
 
-/// Node-introspection and util queries on one node: chain verification, the
-/// empty index inventory, pruning refusal, address/descriptor validation,
-/// and `uptime` measuring process time rather than call time.
 #[test]
 fn node_introspection_and_util_queries() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -232,10 +213,8 @@ fn node_introspection_and_util_queries() -> Result<()> {
     let _ = mine_bare_blocks(&mut node, 3)?;
 
     assert_eq!(node.rpc("verifychain", &json!([]))?, json!(true));
-    // No indexes configured: the manifest reports an empty object.
     assert_eq!(node.rpc("getindexinfo", &json!([]))?, json!({}));
 
-    // Pruning is disabled, so the request is refused rather than honoured.
     let prune = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "pruneblockchain", "params": [1000]
     }))?;
@@ -247,7 +226,6 @@ fn node_introspection_and_util_queries() -> Result<()> {
     assert_eq!(bogus.get("isvalid"), Some(&json!(false)));
 
     let desc = node.rpc("getdescriptorinfo", &json!(["raw(51)"]))?;
-    // The descriptor echo carries the `#checksum` suffix, like Core.
     assert!(
         desc.str_field("descriptor")?.starts_with("raw(51)#"),
         "descriptor: {desc}"
@@ -266,8 +244,6 @@ fn node_introspection_and_util_queries() -> Result<()> {
     node.stop()
 }
 
-/// A fresh datadir keeps the coinbase immature: spends of a coinbase
-/// under `COINBASE_MATURITY` are refused by mempool admission.
 #[test]
 fn immature_coinbase_spend_rejected() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -281,7 +257,6 @@ fn immature_coinbase_spend_rejected() -> Result<()> {
     let reply = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "sendrawtransaction", "params": [hex]
     }))?;
-    // Core's mempool rejection code for a policy/consensus failure.
     assert_eq!(
         reply["error"]["code"],
         json!(-26),

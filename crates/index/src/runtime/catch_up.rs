@@ -29,14 +29,9 @@ use rayon::prelude::*;
 use std::ops::ControlFlow;
 use std::time::Instant;
 
-/// One block's preparation. The outer `Err` is a spent-script anchor failure,
-/// which is read before any block is admitted; the inner result is the
-/// writer's preparation outcome, which surfaces in height order at admission.
 type AnchoredPreparation = Result<Result<PreparedBlock, IndexError>, DerivedIndexWorkerError>;
 
 impl Worker {
-    /// Copies one bounded chunk of active-chain identities under one short
-    /// read lock.
     pub(super) fn collect_target_chain(
         &self,
         target: &TipSnapshot,
@@ -75,15 +70,6 @@ impl Worker {
         Ok(identities)
     }
 
-    /// Runs one forward leg for `capabilities` from their shared `watermark`.
-    ///
-    /// Only an absent body with nothing retained answers
-    /// [`ForwardLeg::BodyAbsent`], which is the one answer that lets the
-    /// caller look at a different capability group. Retained rows keep their
-    /// fence and flush deadline, so an absent body behind them answers
-    /// `Buffered`: the rows commit at the deadline, and only the next pass,
-    /// with `pending` empty and a fresh fence and watermark capture, may reach
-    /// another group.
     #[expect(clippy::too_many_lines, reason = "Leg scheduling stays in one owner")]
     pub(super) fn catch_up_to(
         &self,
@@ -114,11 +100,6 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
-        // Seed handoff is gated on a durable ScriptLive seed: only a live
-        // covering pin is consumed directly. Lower history-only legs leave
-        // the seed pin parked for the live leg and run under a transient
-        // grant that is dropped, so empty `BodyAbsent` legs never fold the
-        // reserve line and subsumed plants drain.
         let seed_covering = seed_lease
             .as_ref()
             .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= start_height));
@@ -175,11 +156,6 @@ impl Worker {
                 .prefetch_positions(&requests)
                 .map_err(DerivedIndexWorkerError::Storage)?;
 
-            // Sub-chunk: load bodies serially until the count or byte cap
-            // (preserving the reader's prefetch state), prepare blocks in
-            // parallel across the rayon pool, then push prepared blocks into
-            // the batch in height order. The single-writer commit and
-            // watermark publish remain the only ordering points.
             let mut remaining = identities;
             while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(
@@ -203,8 +179,6 @@ impl Worker {
                         return Ok(ForwardLeg::BodyAbsent);
                     }
                     ChunkAction::MissingBody => {
-                        // The prepared prefix keeps its fence and deadline and
-                        // commits when the scheduler's deadline wait expires.
                         *pending = Some(state);
                         Self::park_unused_seed_lease(seed_lease, from_seed, pass_history);
                         return Ok(ForwardLeg::Settled(ReconcileAction::Buffered));
@@ -214,11 +188,6 @@ impl Worker {
         }
 
         let action = self.finish_catch_up(state, chunk_end, target, &pass_history, pending)?;
-        // Only a commit-backed advance releases the pin: any retained
-        // `pending` rows keep their history cover, whether the pass stalled,
-        // buffered, or progressed after the target tip moved past the batch
-        // endpoint. A short `chunk_end` is one such retained case; a moved
-        // tip at equal height is another.
         if !matches!(
             action,
             ReconcileAction::Progressed | ReconcileAction::CaughtUp
@@ -230,9 +199,6 @@ impl Worker {
         Ok(ForwardLeg::Settled(action))
     }
 
-    /// Parks a consumed seed pin back when the leg made no durable progress.
-    /// Progress paths drop it (release is exact: advance-then-drop on durable
-    /// progress); a lapsed pin drops too instead of parking dead weight.
     fn park_unused_seed_lease(
         seed_lease: &mut Option<HistoryLease>,
         from_seed: bool,
@@ -243,19 +209,6 @@ impl Worker {
         }
     }
 
-    /// Asks the authority to hold this leg's history from `start_height`.
-    ///
-    /// While the grant lives no row at or above `start_height` is deleted, so
-    /// a body that reads back absent is transient absence rather than lost
-    /// history, and the pass never has to re-derive a prune line. A refusal is
-    /// the owner's typed answer: `Pruned` disables filters (their header chain
-    /// needs the full prefix); other indexes rebuild from what remains.
-    /// `Reserved` and the transient answers only wait: a reservation can
-    /// abort and release its range, and a missing row can still arrive.
-    ///
-    /// `Continue` carries the granted lease. `Break` is the leg's settled
-    /// answer to a refusal. A refusal never answers `BodyAbsent`, so it never
-    /// lets the caller look at another capability group.
     fn grant_leg_history(
         &self,
         start_height: u32,
@@ -265,13 +218,6 @@ impl Worker {
         pending: &mut Option<PendingForward>,
         seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
-        // History-only legs never consume the seed pin: the live seed stays
-        // parked for its covering leg while the lower leg runs under a
-        // transient grant that is dropped. Empty `BodyAbsent` legs therefore
-        // never install a floor-0 pin that folds the reserve line, and
-        // retained `Buffered` prefixes keep their rows without taking seed
-        // ownership. Only legs containing ScriptLive participate in the
-        // single-holder handoff below.
         if !capabilities.contains(IndexCapability::ScriptLive) {
             let action = match self.history.request_history(start_height) {
                 Ok(lease) => return Ok(ControlFlow::Continue(lease)),
@@ -303,15 +249,6 @@ impl Worker {
             };
             return Ok(ControlFlow::Break(ForwardLeg::Settled(action)));
         }
-        // Single-holder rule for ScriptLive legs: a live seed pin covering
-        // this start is consumed directly with no second `request_history`.
-        // Any other seed pin is held aside during the fresh request — a dead
-        // pin is superseded, and a live higher pin is subsumed once the lower
-        // grant lands — so only the fresh pin stays live after success. A
-        // refusal restores the held pin, so a transient `Reserved`, `Missing`,
-        // `Shutdown`, or `Pruned` never loses the seed and never re-requests.
-        // With no durable ScriptLive watermark (subsumed plant), the covering
-        // check fails and both pins drain, leaving no parked seed behind.
         let mut parked = None;
         if let Some(lease) = seed_lease.take() {
             if lease.floor().is_some_and(|floor| floor <= start_height) {
@@ -323,11 +260,6 @@ impl Worker {
         }
         let action = match self.history.request_history(start_height) {
             Ok(lease) => {
-                // The lower fresh grant lands first, so the parked higher
-                // seed pin is subsumed (it pins a subset while the committed
-                // seed watermark already covers that height). Drop it here so
-                // only the fresh pin stays live; a refusal below restores it
-                // instead of re-requesting.
                 drop(parked);
                 return Ok(ControlFlow::Continue(lease));
             }
@@ -338,8 +270,6 @@ impl Worker {
                     start_height,
                     "derived index needs history the pruning authority deleted"
                 );
-                // Prepared rows belong to the pre-reset position: the rebuild
-                // re-derives from the frontier, so they cannot be carried.
                 *pending = None;
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(
@@ -349,13 +279,6 @@ impl Worker {
                     );
                     ReconcileAction::Progressed
                 } else if capabilities.contains(IndexCapability::ScriptLive) {
-                    // D1: scoped terminal for `ScriptLive`. No
-                    // `rebuild_from_pruned` (it would loop back into seeding)
-                    // and no global worker failure. Demand stays wanted so a
-                    // future token retries the seed without a history spin;
-                    // other families keep their rows and settle next passes
-                    // with selection skipping the failed capability. A fresh
-                    // `Pruned` sets the flag again after any clear.
                     self.runtime
                         .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
                     if let Some(slot) = self.seed_slot.as_ref() {
@@ -368,9 +291,6 @@ impl Worker {
             }
             Err(error) => {
                 *seed_lease = parked;
-                // The grant is deferred, not denied: keep the prepared rows
-                // so the retry continues where this pass left off instead of
-                // re-deriving them.
                 if !state.batch.is_empty() {
                     *pending = Some(state.take(self.batch_limits));
                 }
@@ -381,20 +301,6 @@ impl Worker {
         Ok(ControlFlow::Break(ForwardLeg::Settled(action)))
     }
 
-    /// Loads bodies serially until the count or byte cap, prepares that prefix
-    /// in parallel across the rayon pool, then admits them into the batch in
-    /// height order on the single writer thread. Advances `identities` past
-    /// the loaded prefix.
-    ///
-    /// Returns `MissingBody` if a body is absent (the caller owns whether rows
-    /// are retained), `Stalled` if shutdown was requested, the history pin was
-    /// revoked, a commit was rejected, or an anchor failure reset a
-    /// capability, `Progressed` if the batch filled and was committed or
-    /// filters were disabled, or `Continue` to keep processing.
-    ///
-    /// Each block's spent-script anchor lives only inside its own preparation
-    /// task. Before any block is admitted, the lowest-height anchor failure of
-    /// the window is handled, so it outranks every preparation failure.
     #[allow(
         clippy::too_many_lines,
         reason = "Keep bounded preparation, capability failure and batch admission in one owner"
@@ -411,11 +317,6 @@ impl Worker {
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
-        // A held optional pin can still expire under a concurrent prune pass
-        // (`floor()` answers `None` once revoked). Reading past it mislabels
-        // deleted rows as transient absence and stalls this pass anyway, so
-        // stop now and let the next `request_history` route the `Pruned`
-        // refusal into the rebuild.
         if history.floor().is_none() {
             if !state.batch.is_empty() {
                 *pending = Some(state.take(self.batch_limits));
@@ -438,15 +339,6 @@ impl Worker {
         let needs_anchor = capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
 
-        // Prepare blocks in parallel. A task decodes its block's anchor before
-        // the writer's shared read lock is taken, so only the CPU-bound row
-        // build runs under it, and drops the anchor when that block is
-        // prepared. Anchors alive at once are therefore bounded by the tasks
-        // in flight, not by the window. Without `ScriptLive` or
-        // `CompactFilters` no undo record is read.
-        //
-        // `collect` into a plain `Vec` keeps index (height) order; rayon's own
-        // `Result` collection would surface an arbitrary failure.
         let outcomes: Vec<AnchoredPreparation> = sub_chunk
             .par_iter()
             .zip(bodies.par_iter())
@@ -469,15 +361,9 @@ impl Worker {
             .collect();
         drop(bodies);
 
-        // Read the outcomes in height order for an anchor failure before any
-        // block is admitted. The sequential `Result` collection stops at the
-        // first failure, which is the lowest height. Preparation failures are
-        // not examined here: they surface in order at admission below, after
-        // the blocks before them have been admitted.
         let prepared = match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
             Ok(prepared) => prepared,
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
-                // Prepared rows belong to the pre-reset position.
                 *pending = None;
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(&error);
@@ -501,8 +387,6 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Push prepared blocks into the batch in height order on the single
-        // writer thread.
         for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
             let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
@@ -574,12 +458,6 @@ impl Worker {
         }
     }
 
-    /// Commits one forward batch and moves the history pin to the position
-    /// that batch made durable.
-    ///
-    /// POST: the authority may then prune the history this consumer has
-    /// already indexed, so a long catch-up costs a bounded window instead of
-    /// every row above its starting watermark.
     fn commit_forward(
         &self,
         state: PendingForward,
@@ -597,10 +475,6 @@ impl Worker {
         Ok(durable)
     }
 
-    /// The permanent `Pruned` answer: reset `capabilities` and anchor their
-    /// durable watermarks at the frontier so the rebuild starts at the first
-    /// surviving height instead of asking for deleted history forever.
-    ///
     /// `ScriptLive` needs no anchor: it reseeds from an immutable artifact or
     /// retained history, so the reset alone sends it through that path.
     fn rebuild_from_pruned(
@@ -609,19 +483,11 @@ impl Worker {
         below: u32,
         target: &TipSnapshot,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        // `below` is at least 1: a refusal requires `floor < below` and no
-        // floor is negative.
         let anchor_height = below - 1;
         if anchor_height > target.height {
-            // The frontier has already passed the applied tip, so no
-            // surviving row is indexable: the consumer keeps its derived
-            // rows and waits rather than churning a reset every pass.
             return Ok(ReconcileAction::Stalled);
         }
         let anchored = capabilities.without(IndexCapability::ScriptLive);
-        // Resolve the anchor identity before the durable reset: it is a pure
-        // read — the block tree keeps headers for pruned heights — so a
-        // missing node fails before any derived row is erased, not after.
         let identity = if anchored.is_empty() {
             None
         } else {
@@ -651,14 +517,6 @@ impl Worker {
         Ok(ReconcileAction::Progressed)
     }
 
-    /// Loads bodies for a prefix of `identities` in order, stopping once
-    /// `PREPARE_CHUNK_BLOCKS` bodies are held or the serialized total reaches
-    /// `PREPARE_CHUNK_BYTES`. Every body the reader hands out is retained, so the
-    /// returned prefix is exactly the set of prefetched positions the reader
-    /// consumed; the body that reaches the byte cap may carry the total past it.
-    /// Stops early, keeping what was loaded, on shutdown. `Ok(None)` when a
-    /// body is unavailable. Returns the loaded prefix and whether a successor
-    /// was absent, so callers can retain the prefix instead of discarding it.
     fn load_body_prefix(
         &self,
         reader: &mut dyn BlockBodyReader,
@@ -702,7 +560,6 @@ impl Worker {
         }
     }
 
-    /// Waits for a wake hint or the pending batch's original deadline.
     pub(super) fn wait_for_batch_deadline(&self, deadline: Instant) -> BatchWait {
         if self.runtime.should_stop() {
             return BatchWait::Stopped;

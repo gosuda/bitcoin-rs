@@ -1,4 +1,3 @@
-// Shared cases run unchanged against both real storage engines.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -28,9 +27,6 @@ impl<T> FixtureValue<T> for Option<T> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------------------------
 
 fn hash(tag: u8) -> Hash32 {
     [tag; 32]
@@ -139,9 +135,6 @@ fn miner_amounts(list: &[(u64, u64)]) -> Vec<(MinerId, u64)> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------------------------
-// Fake chain observer
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Default)]
 struct ChainState {
@@ -250,9 +243,6 @@ impl ChainView for FakeChain {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Transaction builder and signer
-// ---------------------------------------------------------------------------------------------
 
 fn varint(value: u64) -> Vec<u8> {
     match value {
@@ -374,9 +364,6 @@ impl ExternalSigner for TestSigner {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Funded scenario: window 100 split 50/30/20 across accounts 1/2/3, block at height 100
-// ---------------------------------------------------------------------------------------------
 
 struct Fund {
     _dir: TempDir,
@@ -406,7 +393,6 @@ fn ledger_path(dir: &TempDir) -> PathBuf {
     dir.path().join("pool.redb")
 }
 
-/// Shares and a Pending round exist; the chain does not show the block yet (tip 99).
 fn staged_at(
     path: &Path,
     fee_bps: u16,
@@ -484,9 +470,6 @@ fn confirm_tx(fund: &Fund, txid: Hash32, block_tag: u8, height: u32, tip: u32) {
     fund.chain.set_tip(tip);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Exact integer accounting
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn equal_height_fork_reverses_matured_credits() {
@@ -741,9 +724,6 @@ fn share_work_converts_exactly_from_le_bytes() {
     ));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Transaction parsing
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn legacy_and_segwit_serializations_share_one_txid() {
@@ -816,9 +796,6 @@ fn parser_rejects_malformed_encodings() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
-// Canonical request / receipt codecs
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn payout_request_and_receipt_round_trip_and_reject_corruption() {
@@ -882,7 +859,6 @@ fn payout_request_encode_rejects_invalid_change_scripts_before_emitting_bytes() 
         }
     }
 
-    // Valid scripts (and the empty allow-list decode accepts) round-trip.
     let valid = request(vec![change_script(), script(0xD0)]);
     let encoded = valid.encode().fixture("encode valid change scripts");
     assert_eq!(PayoutRequest::decode(&encoded).fixture("decode"), valid);
@@ -893,32 +869,25 @@ fn payout_request_encode_rejects_invalid_change_scripts_before_emitting_bytes() 
         empty_list
     );
 
-    // Over-count.
     let too_many = request(vec![change_script(); MAX_CHANGE_SCRIPTS + 1]);
     assert!(matches!(
         too_many.encode(),
         Err(LedgerError::InvalidInput(_))
     ));
-    // Empty entry.
     assert!(matches!(
         request(vec![Vec::new()]).encode(),
         Err(LedgerError::InvalidInput(_))
     ));
-    // Oversized entry.
     assert!(matches!(
         request(vec![vec![0x51; MAX_SCRIPT_LEN + 1]]).encode(),
         Err(LedgerError::InvalidInput(_))
     ));
-    // OP_RETURN-leading entry.
     assert!(matches!(
         request(vec![vec![0x6a, 0x01]]).encode(),
         Err(LedgerError::InvalidInput(_))
     ));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Lifecycle, configuration, storage
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn create_refuses_existing_paths_and_open_demands_the_same_config() {
@@ -993,9 +962,6 @@ fn config_validation_rejects_every_unsafe_value() {
     ));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Shares and the PPLNS window
-// ---------------------------------------------------------------------------------------------
 
 fn plain_ledger(window: u128) -> (TempDir, Ledger) {
     let dir = tempfile::tempdir().fixture("tempdir");
@@ -1148,12 +1114,10 @@ fn the_window_slides_across_blocks_and_snapshots_are_frozen() {
 #[test]
 fn pruning_streams_bounded_batches() {
     let (_dir, ledger) = plain_ledger(100);
-    // 1200 unit-work shares force two delete batches at 1024.
     for nonce in 0..1200u32 {
         ledger.record_share(&share(1, 1, nonce, 1)).fixture("share");
     }
     assert_eq!(ledger.share_count().fixture("count"), 1200);
-    // Keep the newest 100 work units: 1100 pruned in 1024 + 76.
     assert_eq!(ledger.prune_shares(100).fixture("prune"), 1100);
     assert_eq!(ledger.share_count().fixture("count"), 100);
     assert_eq!(
@@ -1166,10 +1130,6 @@ fn pruning_streams_bounded_batches() {
 #[test]
 fn pruning_many_batches_applies_the_limit_before_materialization() {
     let (_dir, ledger) = plain_ledger(100);
-    // 3500 unit-work shares: keeping the newest 100 dooms 3400, which needs
-    // three full 1024 batches plus a 328 partial. A range that materialized
-    // the whole doomed prefix before `take` would buffer all 3400 keys on the
-    // first commit; bounded sequence lookups commit at most 1024 per batch.
     for nonce in 0..3500u32 {
         ledger.record_share(&share(1, 1, nonce, 1)).fixture("share");
     }
@@ -1204,10 +1164,8 @@ fn share_count_comes_from_sequence_metadata_not_a_table_scan() {
         ledger.record_share(&share(1, 1, nonce, 1)).fixture("share");
     }
     assert_eq!(ledger.share_count().fixture("ten"), 10);
-    // Retiring the job bounds the secondary index but keeps the shares.
     assert_eq!(ledger.retire_job(1).fixture("retire"), 10);
     assert_eq!(ledger.share_count().fixture("retire keeps shares"), 10);
-    // Pruning advances the floor; the count is the live suffix.
     assert_eq!(ledger.prune_shares(5).fixture("prune"), 5);
     assert_eq!(ledger.share_count().fixture("five left"), 5);
     ledger.check_invariants().fixture("invariants");
@@ -1279,21 +1237,18 @@ fn version_and_ntime_rolls_are_distinct_shares_not_conflicts() {
         ledger.record_share(&base).fixture("base"),
         ShareReceipt::Credited { seq: 0 }
     );
-    // A version roll (BIP320-style) with the same nonce and extranonce is a new share.
     let rolled_version = share_vnt(1, 1, 7, 0x20000001, 1_700_000_000, 10);
     assert_ne!(rolled_version.header_hash, base.header_hash);
     assert_eq!(
         ledger.record_share(&rolled_version).fixture("version roll"),
         ShareReceipt::Credited { seq: 1 }
     );
-    // A time roll with the same nonce and extranonce is a new share too.
     let rolled_time = share_vnt(1, 1, 7, 0x20000000, 1_700_000_001, 10);
     assert_ne!(rolled_time.header_hash, base.header_hash);
     assert_eq!(
         ledger.record_share(&rolled_time).fixture("ntime roll"),
         ShareReceipt::Credited { seq: 2 }
     );
-    // The old identity (without version/ntime) would have rejected both as conflicts.
     assert_eq!(ledger.share_count().fixture("count"), 3);
     ledger.check_invariants().fixture("invariants");
 }
@@ -1307,12 +1262,10 @@ fn a_retired_header_hash_is_never_credited_again() {
         ShareReceipt::Credited { seq: 0 }
     );
     assert_eq!(ledger.retire_job(7).fixture("retire"), 1);
-    // Same job replay is refused as retired.
     assert!(matches!(
         ledger.record_share(&old).err(),
         Some(LedgerError::JobRetired(7))
     ));
-    // Same header hash under a live job is a permanent conflict, never a new credit.
     let mut cross_job = old.clone();
     cross_job.job = 8;
     assert!(matches!(
@@ -1360,9 +1313,6 @@ fn config_encode_validates_change_scripts_before_encoding() {
     ));
 }
 
-// ---------------------------------------------------------------------------------------------
-// Rounds: reward, maturity, reorg
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn a_found_block_is_recorded_once_and_pays_nothing_until_the_chain_shows_it() {
@@ -1606,9 +1556,6 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
             .state,
         RoundState::Matured
     );
-    // A lower-height higher-work reorg retains the rewarded block at height
-    // 100 but shortens the tip from 102 to 101, dropping depth from 3 to 2
-    // below the configured maturity of 3. The round must not stay payable.
     fund.chain.set_tip(101);
     let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("shorter tip");
     assert_eq!(report.transitions.len(), 1);
@@ -1632,7 +1579,6 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
         .check_invariants()
         .fixture("invariants after demotion");
 
-    // A deeper tip matures the same round again with the same allocations.
     fund.chain.set_tip(102);
     let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("deeper tip");
     assert_eq!(report.transitions.len(), 1);
@@ -1846,9 +1792,6 @@ fn an_unavailable_observer_changes_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------------------------
-// Payout batches
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn payout_scripts_are_validated_and_batches_skip_accounts_without_one() {
@@ -2462,9 +2405,6 @@ fn a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent
 
 #[test]
 fn a_mid_reconcile_chain_transition_defers_a_permanent_fail() {
-    // A reorg between observation and commit must not permanently fail a
-    // payout on a torn view: the checked reconcile validates the generation
-    // inside the write transaction and commits nothing when it moved.
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let first = pay_tx(
@@ -2496,7 +2436,6 @@ fn a_mid_reconcile_chain_transition_defers_a_permanent_fail() {
         );
     }
     fund.chain.set_tip(105);
-    // Simulate a chain transition after observation: defer, commit nothing.
     assert_eq!(
         fund.ledger
             .reconcile_payouts_checked(&fund.chain, &|| true)
@@ -2505,7 +2444,6 @@ fn a_mid_reconcile_chain_transition_defers_a_permanent_fail() {
     );
     let still = fund.ledger.batch(&batch.id).fixture("batch").fixture("exists");
     assert_eq!(still.state, BatchState::ExternallySigned);
-    // Same observations without a transition fail exactly once.
     let transitions = fund
         .ledger
         .reconcile_payouts_checked(&fund.chain, &|| false)
@@ -2602,9 +2540,6 @@ fn the_external_signer_seam_signs_the_canonical_request_and_failures_change_noth
     fund.ledger.check_invariants().fixture("invariants");
 }
 
-// ---------------------------------------------------------------------------------------------
-// Durability: restart, interrupted commits, process death
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn state_survives_a_restart_byte_for_byte() {
@@ -2934,7 +2869,6 @@ mod process_death {
         chain
     }
 
-    /// Entry point executed inside the child process. It is a no-op in a normal test run.
     #[test]
     fn crash_child_entry() {
         let Ok(dir) = std::env::var("POOL_CRASH_DIR") else {
@@ -2968,7 +2902,6 @@ mod process_death {
             }
             other => panic!("unknown crash mode {other}"),
         }
-        // The plan did not abort the process: make that visible to the parent.
         std::process::exit(3);
     }
 
@@ -3079,9 +3012,6 @@ mod process_death {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Audit trail
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn the_audit_chain_is_deterministic_and_detects_tampering() {
@@ -3163,8 +3093,6 @@ fn the_audit_chain_is_deterministic_and_detects_tampering() {
 
 #[test]
 fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
-    // Rounds: one open round fits in limit 1 but not limit 0, proving the work
-    // is bounded per commit.
     let fund = staged(0, 1_000_001);
     let second = found(share(1, 4, 1, 20), 101, 1_000_001);
     fund.ledger.record_found_block(&second).fixture("second block");
@@ -3188,7 +3116,6 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
         .fixture("rounds second page");
     assert!(!more_second, "cursor reaches the tail");
 
-    // Rounds: a generation change aborts instead of applying a torn view.
     fund.chain.set_tip(100);
     let (aborted, _, _) = fund
         .ledger
@@ -3202,7 +3129,6 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
         .fixture("exists");
     assert_eq!(pending.state, RoundState::Pending);
 
-    // Payouts: one observable batch fits in limit 1 but not limit 0.
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let tx = pay_tx(&batch, &[outpoint(0xA1, 0)], Some(50_000));
@@ -3221,7 +3147,6 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
         .fixture("payouts limit 1");
     assert!(!more_one, "single observable batch fits in limit 1");
 
-    // Payouts: a generation change aborts a confirming commit.
     fund.chain.set_tx(tx.txid, TxStatus::InMempool);
     fund.ledger
         .record_broadcast(&batch.id, &tx.txid, &fund.chain)
@@ -3239,12 +3164,6 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
 
 #[test]
 fn bounded_pages_advance_via_cursor_without_rescanning_head() {
-    // Cursor pagination bounds each page: one `page_after` seek (`limit + 1`
-    // rows) plus `limit` point gets, never the whole tables. Collect five open
-    // rounds with `limit = 2` via cursors: cursors strictly increase, no id
-    // repeats (no head re-scan), pages hold at most `limit` rows, and the tail
-    // reports no more. Linearizable seeks; snapshot isolation per commit;
-    // idempotent retry from cursors.
     let fund = staged(0, 1_000_001);
     let mut hashes = vec![fund.block.share.header_hash];
     for tag in [7u8, 8, 9, 10] {
@@ -3273,15 +3192,10 @@ fn bounded_pages_advance_via_cursor_without_rescanning_head() {
             .ledger
             .reconcile_rounds_checked_limit(&fund.chain, &|| false, 2, after)
             .fixture("page");
-        // Pages never materialize the whole table: at most `limit` observations
-        // per commit (transitions may be fewer when chain is Unknown).
         assert!(
             report.transitions.len() <= 2 && report.anomalies.is_empty(),
             "each page bounds work"
         );
-        // Cursor must advance past the raw page; no head re-scan means `next`
-        // strictly increases, so repeats are impossible. Track cursors to
-        // prove pages never re-observe the head.
         if let Some(cursor) = next {
             if let Some(previous) = after {
                 assert!(cursor > previous, "cursor must advance");
@@ -3296,9 +3210,6 @@ fn bounded_pages_advance_via_cursor_without_rescanning_head() {
         }
         after = next;
     }
-    // Five rows with `limit = 2` paginate as `[ids[0], ids[1]]`, `[ids[2],
-    // ids[3]]`, `[ids[4]]`: cursors are the last raw seq per page, `[ids[1],
-    // ids[3], ids[4]]`, strictly increasing with no repeats or head re-scan.
     assert_eq!(seen.len(), 3, "three pages advance cursors without rescan");
     assert_eq!(
         seen,
@@ -3361,9 +3272,6 @@ fn payout_lifecycle_events_are_audited_in_order() {
 
 #[test]
 fn confirmed_payout_with_shallow_depth_reverts_and_restores_reservation() {
-    // A retained payout block whose depth falls below `payout_confirmations`
-    // must not stay Confirmed and paid: the shallow-but-canonical observation
-    // reverts to Broadcast and restores the reservation via `Decision::Revert`.
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let total = batch.total_sat;
@@ -3375,7 +3283,6 @@ fn confirmed_payout_with_shallow_depth_reverts_and_restores_reservation() {
     fund.ledger
         .record_broadcast(&batch.id, &tx.txid, &fund.chain)
         .fixture("broadcast");
-    // Depth 2 meets `payout_confirmations = 2`: Confirmed and paid.
     confirm_tx(&fund, tx.txid, 0xB1, 102, 103);
     let confirmed = fund.ledger.reconcile_payouts(&fund.chain).fixture("confirm");
     assert_eq!(confirmed.len(), 1);
@@ -3384,9 +3291,6 @@ fn confirmed_payout_with_shallow_depth_reverts_and_restores_reservation() {
     assert_eq!(after_confirm.state, BatchState::Confirmed);
     assert!(after_confirm.confirmation.is_some());
 
-    // Lower the tip so the same canonical block is only depth 1: the retained
-    // block no longer meets confirmations and must revert, restoring the
-    // reservation instead of staying paid.
     fund.chain.set_tip(102);
     let reverted = fund.ledger.reconcile_payouts(&fund.chain).fixture("shallow");
     assert_eq!(reverted.len(), 1, "shallow Confirmed must transition");
@@ -3408,9 +3312,6 @@ fn confirmed_payout_with_shallow_depth_reverts_and_restores_reservation() {
     fund.ledger.check_invariants().fixture("conservation");
 }
 
-/// A chain observer with a transaction index but no script index: transaction
-/// positions answer, spend lookups fail. Mirrors the node observer when
-/// `txindex` is enabled without the spend index.
 struct TxOnlyChain<'a> {
     inner: &'a FakeChain,
 }
@@ -3447,11 +3348,6 @@ impl ChainView for TxOnlyChain<'_> {
 
 #[test]
 fn confirmed_replacement_confirms_without_spend_index() {
-    // With txindex but no script index, a confirmed replacement payout must not
-    // abort reconciliation: the original transaction has left the mempool
-    // (`Unknown`), so its spend lookup would fail, but the replacement's
-    // conclusive confirmation is authoritative on its own. Spend observations
-    // are only required when no batch transaction conclusively confirms.
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let first = pay_tx(
@@ -3474,7 +3370,6 @@ fn confirmed_replacement_confirms_without_spend_index() {
     fund.ledger
         .record_broadcast(&batch.id, &replacement.txid, &fund.chain)
         .fixture("broadcast replacement");
-    // Depth 2 meets `payout_confirmations = 2`; the original is `Unknown`.
     confirm_tx(&fund, replacement.txid, 0xB2, 102, 103);
     let tx_only = TxOnlyChain { inner: &fund.chain };
     let transitions = fund.ledger.reconcile_payouts(&tx_only).fixture("confirm");
@@ -3502,10 +3397,6 @@ fn confirmed_replacement_confirms_without_spend_index() {
 
 #[test]
 fn prepare_caps_outputs_by_serialized_weight_before_count() {
-    // The count cap alone admits 2,500 P2TR/P2WSH outputs (~430,000 WU) before
-    // funding inputs and signatures, exceeding the 400,000-WU standard limit.
-    // The serialized-output weight budget (with funding headroom) must truncate
-    // the batch first.
     assert_eq!(
         payout_output_weight_wu(34),
         172,

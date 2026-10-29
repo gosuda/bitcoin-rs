@@ -1,7 +1,3 @@
-//! Backend metric contracts: one logical write is counted exactly once per
-//! durability path, and explicit budgeted cache sizes are configured verbatim
-//! (no backend floor may raise a share above its allocation).
-
 #![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use hashbrown::HashMap;
@@ -16,15 +12,12 @@ use metrics::{
     SharedString, Unit,
 };
 
-/// The txindex share of the minimum 16 MiB budget, so configuring it verbatim
-/// keeps the backend from silently raising an allocated namespace budget.
 fn txindex_share() -> u64 {
     let share = split_cache_budget(MIN_DBCACHE_BYTES, true)[1].bytes;
     assert_eq!(share, 3_355_443, "txindex keeps a floored 20% of 16 MiB");
     share
 }
 
-/// Records labeled metric values keyed `name{label="value",...}`.
 #[derive(Clone, Debug, Default)]
 struct LabeledRecorder {
     counters: Arc<Mutex<HashMap<String, u64>>>,
@@ -149,9 +142,6 @@ fn put_one_row(store: &impl KvStore) -> Result<(), bitcoin_rs_storage::StorageEr
     Ok(())
 }
 
-/// Asserts a gauge equals the expected byte count. The values are small
-/// integers (< 2^24) that f64 represents exactly, so a direct equality
-/// check is safe — but `clippy::float_cmp` requires an explicit tolerance.
 #[expect(
     clippy::cast_precision_loss,
     reason = "byte counts < 2^24, lossless in f64"
@@ -288,8 +278,6 @@ fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::e
             panic!("rocksdb durable write failed")
         };
     });
-    // Each durability path counts exactly once: write_deferred must not leak a
-    // second increment through the default write path it delegates to.
     assert_eq!(recorder.counter(&writes_total("rocksdb", "default")), 1);
     assert_eq!(recorder.counter(&writes_total("rocksdb", "deferred")), 1);
     assert_eq!(recorder.counter(&writes_total("rocksdb", "durable")), 1);

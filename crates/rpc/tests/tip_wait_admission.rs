@@ -1,7 +1,3 @@
-//! Worker admission and RPC-only cancellation HTTP integration tests.
-//!
-//! CONTRACT: docs/contracts/external-api.md#API-34 — Active-tip waits
-
 #![expect(clippy::expect_used)]
 
 use std::io::{Read, Write};
@@ -106,7 +102,6 @@ fn send(address: SocketAddr, body: &Value) -> TcpStream {
 }
 
 fn read(mut stream: TcpStream) -> (String, Value) {
-    // Blocking calls close keep-alive on success and quota refusal.
     let mut wire = String::new();
     stream
         .read_to_string(&mut wire)
@@ -120,12 +115,9 @@ fn read(mut stream: TcpStream) -> (String, Value) {
     (head.to_owned(), value)
 }
 
-// EOF can precede ConnectionPermit::drop. Retry only the observable 503
-
-// admission refusal; an RPC/JSON/transport error is never treated as busy.
-fn ordinary_rpc(address: SocketAddr) -> serde_json::Value {
+fn ordinary_rpc(address: SocketAddr) -> Value {
     let deadline = Instant::now() + Duration::from_secs(2);
-    let body = serde_json::to_vec(&serde_json::json!({
+    let body = sonic_rs::to_vec(&json!({
         "id":2, "method":"getblockcount", "params":[],
     }))
     .expect("request JSON");
@@ -175,7 +167,7 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     assert!(head.contains("Connection: close"));
     assert_eq!(denied["error"]["code"].as_i64(), Some(-1));
     let ordinary = ordinary_rpc(address);
-    assert_eq!(ordinary["result"], serde_json::json!(0));
+    assert_eq!(ordinary["result"], json!(0));
     shutdown.store(true, Ordering::Release);
     server_thread
         .join()
@@ -189,9 +181,6 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     );
 }
 
-/// A template long-poll holds a blocking worker: with the one slot held it
-/// is refused like any other wait, while the same call without a longpoll
-/// id waits on nothing and is admitted.
 #[test]
 fn gbt_long_poll_counts_toward_the_blocking_quota() {
     fn send_close(address: SocketAddr, body: &Value) -> TcpStream {
@@ -235,11 +224,6 @@ fn gbt_long_poll_counts_toward_the_blocking_quota() {
     ));
     assert!(head.contains("Connection: close"));
     assert_eq!(denied["error"]["code"].as_i64(), Some(-1));
-    // No mining control is attached here, so the admitted call answers
-    // method-not-found: anything but the quota error proves admission. The
-    // denied long-poll's EOF can precede its permit release, so a plain call
-    // racing the release is refused with 503: retry the refusal exactly like
-    // `ordinary_rpc` instead of asserting the first answer.
     let deadline = Instant::now() + Duration::from_secs(2);
     let (plain_head, plain) = loop {
         let mut stream = send_close(
@@ -308,12 +292,12 @@ fn mixed_batch_and_notification_waits_share_admission_and_cancellation() {
         observable.wait_for_waiters(1);
         let ordinary = bitcoin_rs_e2e::rpc::Connection::new(address)
             .rpc(
-                &serde_json::json!({"id":3,"method":"getblockcount","params":[]}),
+                &json!({"id":3,"method":"getblockcount","params":[]}),
                 ("parity", "parity"),
                 Instant::now() + Duration::from_secs(1),
             )
             .expect("ordinary RPC");
-        assert_eq!(ordinary["result"], serde_json::json!(0));
+        assert_eq!(ordinary["result"], json!(0));
         shutdown.store(true, Ordering::Release);
         server_thread.join().expect("server thread").expect("exit");
         let (head, answer) = read(waiting);
@@ -351,7 +335,6 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
     );
     observable.wait_for_waiters(1);
 
-    // Bind/start the replacement BEFORE the old server's stop guard runs.
     let new = RpcServer::bind(
         "127.0.0.1:0",
         Arc::new(Auth::basic("parity", "parity")),
@@ -385,12 +368,12 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
         .expect("restore deadline");
     let ordinary = bitcoin_rs_e2e::rpc::Connection::new(new_addr)
         .rpc(
-            &serde_json::json!({"id":3,"method":"getblockcount","params":[]}),
+            &json!({"id":3,"method":"getblockcount","params":[]}),
             ("parity", "parity"),
             Instant::now() + Duration::from_secs(1),
         )
         .expect("replacement ordinary RPC");
-    assert_eq!(ordinary["result"], serde_json::json!(0));
+    assert_eq!(ordinary["result"], json!(0));
     new_shutdown.store(true, Ordering::Release);
     new_thread.join().expect("new server").expect("new exit");
     assert_eq!(read(new_wait).1["result"]["height"].as_u64(), Some(0));
@@ -408,8 +391,6 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
         false,
     )
     .expect("bind");
-    // The public connection setting can change after bind; serve must enforce
-    // its actual value, including a server assembled through public fields.
     server.max_connections = 1;
     let address = server.local_addr().expect("address");
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -422,7 +403,7 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
     assert!(head.contains("Connection: close"));
     assert_eq!(answer["error"]["code"].as_i64(), Some(-1));
     let ordinary = ordinary_rpc(address);
-    assert_eq!(ordinary["result"], serde_json::json!(0));
+    assert_eq!(ordinary["result"], json!(0));
     shutdown.store(true, Ordering::Release);
     task.join().expect("server").expect("exit");
 }

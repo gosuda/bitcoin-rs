@@ -1,11 +1,3 @@
-//! BIP341 signature-message and interpreter input-boundary regressions.
-//!
-//! rust-bitcoin constructs and signs the transactions independently of the
-//! native interpreter. Every negative case first verifies its positive control;
-//! fixture construction failures panic rather than silently skipping coverage.
-//! These tests protect the restored verifier API without reintroducing the
-//! removed shared-cache entry point or changing validation defaults.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
@@ -92,7 +84,6 @@ fn verify(tx: &Tx, prevouts: &[TxOut], index: usize) -> Result<bool, ScriptError
     )
 }
 
-/// BIP341 commits to all ordered spent outputs, including the other input.
 #[test]
 fn bip341_binds_all_prevouts_and_the_transaction() {
     let (tx, prevouts) = signed_spend();
@@ -107,7 +98,6 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
 
     let mut reordered_prevouts = prevouts.clone();
     reordered_prevouts.swap(0, 1);
-    // Keep the spent script fixed: only the ordered sighash inputs change.
     let input = &tx.inputs[0];
     assert!(
         Interpreter
@@ -122,7 +112,6 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
             )
             .is_err()
     );
-    // Exercise legacy evaluation so Taproot's own guard cannot mask the fallback.
     assert_eq!(
         Interpreter.execute_with_prevouts(
             &[0x51],
@@ -142,9 +131,6 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
 
-/// The replacement-byte contract is documented by [`Interpreter::execute_with_prevouts`]
-/// in `crates/script/src/interpreter.rs`: supplied witness bytes are verified without
-/// changing the caller's transaction.
 #[test]
 fn supplied_witness_is_verified_without_mutating_the_transaction() {
     let (tx, prevouts) = signed_spend();
@@ -169,9 +155,6 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
     assert_eq!(corrupted_tx, unchanged_tx);
 }
 
-/// The [`ScriptError::InputIndexOutOfRange`] contract in
-/// `crates/script/src/interpreter.rs` requires [`Interpreter::execute_with_prevouts`]
-/// to return the typed error before indexing prevouts.
 #[test]
 fn invalid_input_index_is_a_typed_error() {
     let (tx, prevouts) = signed_spend();

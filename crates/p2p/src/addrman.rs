@@ -1,5 +1,4 @@
-//! P2P's single bounded AddrMan owner, following Core31.1 placement and selection.
-//! Membership is persisted with each endpoint; lookup tables are derived indexes.
+//! P2P's single bounded `AddrMan` owner, following Core31.1 placement and selection.
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -28,9 +27,6 @@ const MAX_DNS_RESULTS: usize = 64;
 const MAX_GOSSIP: usize = 32;
 const GOSSIP_CACHE_TTL: Duration = Duration::from_hours(24);
 const MAX_TEMP_ATTEMPTS: usize = 8;
-// Frozen until the first official release; pre-release layouts are not migrated.
-// The canonical v1 record shape is owned here; PR #1684 must adopt this same
-// shape (FORMAT plus SCHEMA_VERSION) before its merge.
 const SCHEMA_VERSION: u32 = 1;
 const FORMAT: &str = "bitcoin-rs-addrman";
 const MAX_COLLISIONS: usize = 10;
@@ -38,7 +34,6 @@ const REPLACEMENT_WINDOW: u64 = 4 * 60 * 60;
 const COLLISION_TEST_WINDOW: u64 = 40 * 60;
 const MAX_ANCHORS: usize = 2;
 const ANCHOR_AGE: u64 = 7 * 24 * 60 * 60;
-// min GetChance=.01*.66^8; at zero-based proposal44 its product with1.2^44>1.
 const MAX_SELECTION_PROPOSALS: usize = 45;
 
 fn serialize_endpoint<S: serde::Serializer>(
@@ -194,10 +189,6 @@ struct Manager {
     saved_revision: u64,
     published: bool,
     gossip_cursor: usize,
-    /// Shared gossip selection backing both wire projections: the raw
-    /// rows picked on the last rotation, cached until `GOSSIP_CACHE_TTL`.
-    /// [`AddressBook::gossip`] projects IP rows as legacy `addr`;
-    /// [`AddressBook::gossip_addrv2`] projects enabled transports as `addrv2`.
     gossip_cache: Option<(Instant, Vec<GossipRow>)>,
     addrv2_cursor: usize,
     addrv2_cache: Option<(
@@ -210,9 +201,6 @@ struct Manager {
     collisions: Vec<PeerEndpoint>,
 }
 
-/// One transport-neutral gossip row: the shared selection both wire
-/// projections filter. Raw endpoint identity is kept so each reply can
-/// project without re-rotating the cursor.
 #[derive(Clone, Copy, Debug)]
 struct GossipRow {
     endpoint: PeerEndpoint,
@@ -223,8 +211,6 @@ struct GossipRow {
 pub(crate) struct AddressBook {
     state: Mutex<Manager>,
     publication: Mutex<()>,
-    /// Which overlay transports `addrv2` gossip may carry, wired from
-    /// resolved config at service start: `[tor_enabled, i2p_enabled]`.
     addrv2_gossip: [std::sync::atomic::AtomicBool; 2],
 }
 
@@ -235,7 +221,6 @@ pub(crate) fn now() -> u64 {
         .as_secs()
 }
 
-// Core HashWriter framing. These vectors are all shorter than253 bytes.
 fn vector(bytes: &[u8], output: &mut Vec<u8>) {
     output.push(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
     output.extend_from_slice(bytes);
@@ -393,8 +378,6 @@ impl Manager {
             self.remove_identity(index);
         }
     }
-    // Core MakeTried, with the local pending-identity guard checked before any
-    // reference is changed. Indices are reloaded after ClearNew can swap_remove.
     fn promote(&mut self, addr: PeerEndpoint) -> bool {
         let Some(&index) = self.by_addr.get(&addr) else {
             return false;
@@ -517,8 +500,6 @@ impl Manager {
         if test_before_evict && self.tried[slot] != EMPTY_SLOT {
             if self.collisions.len() < MAX_COLLISIONS && !self.collisions.contains(&addr) {
                 self.collisions.push(addr);
-                // Core's set is ordered by lifetime-stable creation ID, not
-                // Good/enqueue order or the mutable swap_remove index.
                 self.collisions.sort_by_key(|endpoint| {
                     self.stored.records[self.by_addr[endpoint]].creation_id
                 });
@@ -537,7 +518,6 @@ impl Manager {
         allowed: &HashSet<PeerEndpoint>,
         now: u64,
     ) {
-        // At most ten entries; snapshot endpoint identities, never Vec indices.
         for addr in self.collisions.clone() {
             let Some(&index) = self.by_addr.get(&addr) else {
                 self.collisions.retain(|candidate| *candidate != addr);
@@ -571,8 +551,6 @@ impl Manager {
                 }
             };
             if replace && allowed.contains(&addr) && !self.promotion_blocked(addr) {
-                // Good(false) is part of Core's resolution, including health and
-                // global failure epoch updates, not just table movement.
                 if self.good(addr, false, now) {
                     self.collisions.retain(|candidate| *candidate != addr);
                 }
@@ -619,7 +597,6 @@ impl Manager {
             if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
                 entry.last_seen = seen.saturating_sub(time_penalty);
             }
-            // Zero-bit gossip adds no service knowledge to an unknown DNS record.
             if let Some(services) = services.filter(|bits| *bits != 0 || entry.services.is_some()) {
                 entry.services = Some(entry.services.unwrap_or(0) | services);
             }
@@ -653,7 +630,6 @@ impl Manager {
                 return false;
             }
         }
-        // Slot geometry bounds identities without a competing global/source quota.
         if existing.is_none() && self.stored.records.len() == MAX_RECORDS && occupant == EMPTY_SLOT
         {
             return false;
@@ -848,8 +824,6 @@ impl AddressBook {
                     {
                         manager.stored = stored;
                         manager.published = scoped_source;
-                        // Rebucketing here is a current-format runtime invariant
-                        // (ASMap change), never a historical schema migration.
                         let rebucket = manager.stored.asmap_id != manager.groups.identity();
                         if rebucket {
                             manager.rebucket();
@@ -858,8 +832,6 @@ impl AddressBook {
                         } else {
                             manager.install_indexes();
                         }
-                        // Collision state is empty on restart, so persisted record
-                        // order establishes fresh runtime IDs without a disk field.
                         for (index, entry) in manager.stored.records.iter_mut().enumerate() {
                             entry.creation_id = u64::try_from(index).unwrap_or(u64::MAX);
                         }
@@ -876,7 +848,6 @@ impl AddressBook {
                     match preserve_incompatible(&source_path, &loaded.bytes) {
                         Ok(backup) => {
                             tracing::warn!(path=%source_path.display(), backup=%backup.display(), "pre-release address book preserved; starting fresh discovery without migration");
-                            // Keep the old scoped file until atomic publication succeeds.
                             manager.published = scoped_source;
                             manager.revision = 1;
                         }
@@ -898,21 +869,11 @@ impl AddressBook {
         })
     }
 
-    /// Wire which overlay transports `addrv2` gossip may carry.
     pub(crate) fn set_addrv2_gossip(&self, tor_enabled: bool, i2p_enabled: bool) {
         self.addrv2_gossip[0].store(tor_enabled, std::sync::atomic::Ordering::Release);
         self.addrv2_gossip[1].store(i2p_enabled, std::sync::atomic::Ordering::Release);
     }
 
-    /// One `addrv2` gossip round: every non-terrible record whose
-    /// transport is enabled, as BIP155 rows. IP is always carried;
-    /// overlay endpoints only when their transport is configured.
-    /// Rotation and caching mirror [`AddressBook::gossip`]: successive
-    /// rounds continue from the `addrv2` cursor instead of replaying the
-    /// first insertion-order records, and the wire reply is stable until
-    /// its TTL expires. The overlay flags are read fresh on every call
-    /// and key the cache, so a reconfigured transport is applied on the
-    /// next reply rather than served stale.
     pub(crate) fn gossip_addrv2(&self, now: u64) -> Vec<bitcoin::p2p::address::AddrV2Message> {
         self.gossip_addrv2_at(now, Instant::now())
     }
@@ -982,9 +943,6 @@ impl AddressBook {
         addresses: &[(PeerEndpoint, u64, u64)],
         now: u64,
     ) {
-        // Anonymous Tor inbound has no dialable address: its loopback
-        // forwarder/proxy socket is never a source. Return early so no
-        // proxy/loopback IP enters `Source` or the bucket groups.
         let source = match source {
             crate::PeerRemote::AnonymousTor(_) => return,
             crate::PeerRemote::Endpoint(endpoint) => endpoint.address(),
@@ -1004,8 +962,6 @@ impl AddressBook {
             );
         }
     }
-    /// Exact endpoint exclusion includes inbound; diversity excludes only outbound
-    /// and currently pending work. Policy callbacks run outside the state lock.
     pub(crate) fn select(
         &self,
         connected: &[PeerEndpoint],
@@ -1029,8 +985,6 @@ impl AddressBook {
             .filter(|addr| allowed(*addr))
             .collect();
         let mut manager = self.state.lock();
-        // Membership, health and pending state may have changed during callback
-        // evaluation. Only the pure per-address policy decisions were captured.
         let groups: HashSet<_> = grouped
             .iter()
             .chain(
@@ -1055,8 +1009,6 @@ impl AddressBook {
             .collect();
         manager.select(&eligible, now)
     }
-    /// Ordinary admission rejects only currently known insufficient services.
-    /// Missing metadata remains permissive for non-book connection consumers.
     pub(crate) fn ordinary_services_eligible(
         &self,
         addr: PeerEndpoint,
@@ -1068,8 +1020,6 @@ impl AddressBook {
         })
     }
 
-    /// Whether `addr`'s last known service claim includes every flag in
-    /// `services`. An unknown address or service claim answers `false`.
     pub(crate) fn advertises(
         &self,
         addr: PeerEndpoint,
@@ -1083,9 +1033,6 @@ impl AddressBook {
         })
     }
 
-    /// Applies Core's failure-count connectivity threshold to the caller's
-    /// persistent outbound TCP snapshot using this book's configured classifier.
-    /// Connection roles and leases remain owned by the caller.
     pub(crate) fn count_failure(&self, outbound: &[PeerEndpoint], maximum: usize) -> bool {
         let threshold = maximum.saturating_sub(1).min(2);
         let manager = self.state.lock();
@@ -1152,9 +1099,6 @@ impl AddressBook {
             *claim = PendingClaim::AnchorReservation(anchor.clone());
         }
     }
-    /// At-most-once dispatch: acceptance by the outbound worker consumes the
-    /// reservation even if spawning/connect subsequently fails. Health Attempt
-    /// remains at actual TCP completion and is independent of this boundary.
     pub(crate) fn anchor_dispatched(&self, addr: PeerEndpoint) -> bool {
         if let Some(claim) = self.state.lock().pending.get_mut(&canonical(addr))
             && matches!(claim, PendingClaim::AnchorQueued(_))
@@ -1188,8 +1132,6 @@ impl AddressBook {
                 })
         })
     }
-    /// Queue rejection releases only the attempted purpose, never a reservation
-    /// or a probe that won concurrent admission for the same canonical endpoint.
     pub(crate) fn reject_queued(&self, addr: PeerEndpoint, feeler: bool) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
@@ -1231,13 +1173,9 @@ impl AddressBook {
             }
         }
     }
-    /// Record an accepted VERSION's current service claim (peer handshake version,
-    /// unrelated to the on-disk schema) without certifying
-    /// success, promoting membership or changing any health timestamp.
     pub(crate) fn set_services(&self, addr: PeerEndpoint, services: u64) {
         self.state.lock().set_services(canonical(addr), services);
     }
-    /// The netgroup of `ip` under this book's classifier, `ASMap` or IP prefix.
     pub(crate) fn netgroup(&self, ip: impl Into<crate::PeerAddress>) -> Vec<u8> {
         self.state.lock().groups.group(ip)
     }
@@ -1284,8 +1222,6 @@ impl AddressBook {
         now: u64,
         mut allowed: impl FnMut(PeerEndpoint) -> bool,
     ) -> Option<PeerEndpoint> {
-        // Core AlreadyConnectedToAddress takes CNetAddr: TCP presence at the
-        // same canonical IP is sufficient even at a different port.
         let connected: HashSet<_> = connected
             .iter()
             .map(|addr| canonical(*addr).address())
@@ -1299,7 +1235,7 @@ impl AddressBook {
                 .iter()
                 .map(|entry| entry.endpoint)
                 .collect()
-        }; // Release the state lock before invoking policy callbacks.
+        };
         let allowed: HashSet<_> = addresses
             .into_iter()
             .filter(|addr| allowed(*addr))
@@ -1393,8 +1329,6 @@ impl AddressBook {
         }
     }
 
-    /// Consume before dialing; if publication fails, ordinary selection remains
-    /// available but no restart anchor is reused without durable consumption.
     pub(crate) fn take_restart_anchors(&self, now: u64) -> Vec<PeerEndpoint> {
         let (reserved, revision, persistent) = {
             let mut manager = self.state.lock();
@@ -1422,7 +1356,6 @@ impl AddressBook {
                     reserved.push(anchor);
                     changed = true;
                 } else {
-                    // Other work owns this claim; preserve undispatched metadata.
                     manager.stored.anchors.push(anchor);
                 }
             }
@@ -1441,7 +1374,6 @@ impl AddressBook {
                     manager.pending.remove(&anchor.endpoint);
                 }
             }
-            // Failed consumption never transfers or discards original metadata.
             manager.restore_anchors(reserved, now);
             return Vec::new();
         }
@@ -1455,8 +1387,6 @@ impl AddressBook {
             .collect()
     }
 
-    /// A skipped reservation returns immediately rather than retaining group
-    /// exclusion until shutdown. An already dispatched Dial cannot be returned.
     pub(crate) fn return_restart_anchor(&self, addr: PeerEndpoint, now: u64) {
         {
             let addr = canonical(addr);
@@ -1475,8 +1405,6 @@ impl AddressBook {
         self.save();
     }
 
-    /// Return only reservations that never crossed `anchor_dispatched`. The one
-    /// pending owner retains their original confirmation time until that point.
     pub(crate) fn return_restart_anchors(&self, now: u64) {
         {
             let mut manager = self.state.lock();
@@ -1513,9 +1441,6 @@ impl AddressBook {
             })
             .collect()
     }
-    /// Single rotating selection backing both wire projections. The cursor
-    /// advances only on a cache miss; cache hits project the stored rows
-    /// without touching rotation. Holds one state lock; callers project.
     fn shared_rows(manager: &mut Manager, now: u64, tick: Instant) -> Vec<GossipRow> {
         if let Some((expires, rows)) = &manager.gossip_cache {
             if tick < *expires {
@@ -1576,8 +1501,6 @@ impl AddressBook {
     }
 }
 
-// Keep the supplied basename as the legacy path and add a magic suffix to
-// its stem without interpreting an existing suffix or requiring UTF-8 names.
 fn network_path(base: &Path, magic: [u8; 4]) -> PathBuf {
     let mut name = base.file_stem().unwrap_or_default().to_os_string();
     name.push(format!(
@@ -1737,8 +1660,6 @@ fn validate_current(
             if tried_count > TRIED_BUCKETS * BUCKET_SIZE {
                 return Err(invalid("Tried count exceeds table"));
             }
-            // A changed map cannot reproduce the old Tried slots. Validate all
-            // map-independent structure, then rebucket at open.
             if let Some(groups) = groups {
                 let bucket = tried_bucket(&stored.secret, entry.endpoint, groups);
                 let position = bucket_position(&stored.secret, entry.endpoint, false, bucket);
@@ -1813,11 +1734,7 @@ fn read_book(
     if Sha256::digest(&bytes[..payload_len])[..] != bytes[payload_len..] {
         return Err(invalid("address book checksum"));
     }
-    let header: Header = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
-    // Only the checked envelope identifies disposable development snapshots.
-    // Their records are never decoded or converted into the current schema.
-    // Identification runs before scope: a cross-network pre-release file is
-    // preserved and superseded, never misreported as a network refusal.
+    let header: Header = sonic_rs::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
     if matches!(header.format, FormatMarker::Absent) && (1..=9).contains(&header.version) {
         return Ok(Some(Loaded {
             stored: None,
@@ -1834,7 +1751,7 @@ fn read_book(
     {
         return Err(invalid("unsupported address book format/version"));
     }
-    let stored: Stored = serde_json::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+    let stored: Stored = sonic_rs::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
     let prefix = NetGroups::default();
     let classifier = if stored.asmap_id.is_none() {
         Some(&prefix)
@@ -1852,9 +1769,6 @@ fn read_book(
     }))
 }
 
-// Preserve rejected bytes before allowing replacement. Exclusive atomic
-// publication cannot clobber an existing backup, including an unsafe file type.
-// An interrupted first save can reuse only a byte-identical, flushed backup.
 fn preserve_incompatible(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     use bitcoin::hex::DisplayHex as _;
     let digest = Sha256::digest(bytes);
@@ -1965,7 +1879,7 @@ fn publish_book_with_nonce(
     replace: &mut bool,
     nonce: impl FnMut() -> u64,
 ) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(stored).map_err(io::Error::other)?;
+    let mut bytes = sonic_rs::to_vec(stored).map_err(io::Error::other)?;
     let checksum = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
@@ -2000,8 +1914,6 @@ fn publish_bytes_with_nonce(
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
-        // Close before publication for Windows. Initial publication must not
-        // clobber an operator file created since open observed absence.
         drop(file);
         if *replace {
             fs::rename(&tmp, path)?;
@@ -2021,7 +1933,6 @@ fn publish_bytes_with_nonce(
         bitcoin_rs_storage::checkpoint::fs::sync_dir(&dir)?;
         Ok(())
     })();
-    // Once installation vacates the name, it no longer identifies our file.
     if result.is_err() && temp_present {
         let _ = fs::remove_file(&tmp);
     }

@@ -12,9 +12,6 @@ independent upstream component:
 | Phase A (`ENG-83`) | In-process LDK Server daemon hosting | [`lightningdevkit/ldk-server`](https://github.com/lightningdevkit/ldk-server/tree/c17dc11dde38f88c53457039ddf30c6b90a63ba2) at `c17dc11` |
 | Phase B (`ENG-96`) | Direct in-memory LDK Node chain backend | [`lightningdevkit/ldk-node`](https://github.com/lightningdevkit/ldk-node/tree/179b4b263762155a7ff515ddad7e757a80807fd5) at `179b4b2` and `v0.7.1` (peeled commit `edc8916`, annotated tag `3534a3d`) |
 
-Neither phase can be satisfied by scaffolds, copied gRPC code, loopback HTTP
-proxies, or patched Cargo dependencies.
-
 ---
 
 ## 1. Scope and system boundaries

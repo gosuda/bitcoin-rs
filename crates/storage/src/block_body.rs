@@ -22,7 +22,6 @@ fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
 /// A body-read session supporting batched position lookups.
 pub trait BlockBodyReader {
     /// Prefetches body positions in the order that they will be loaded.
-    ///
     /// Implementations must not prefetch body bytes.
     fn prefetch_positions(
         &mut self,
@@ -45,7 +44,6 @@ struct DirectBlockBodyReader<'a, S: BlockBodyStore + ?Sized> {
 }
 
 impl<S: BlockBodyStore + ?Sized> BlockBodyReader for DirectBlockBodyReader<'_, S> {
-    /// Loads a complete body, or `None` when unavailable.
     fn load_block_body(
         &mut self,
         height: u32,
@@ -78,7 +76,6 @@ pub trait BlockBodyStore: Send + Sync {
             "isolated body staging is unsupported",
         ))
     }
-    /// Persists an exact block body.
     fn persist_block_body(
         &self,
         height: u32,
@@ -86,7 +83,6 @@ pub trait BlockBodyStore: Send + Sync {
         body: &[u8],
     ) -> Result<(), StorageError>;
 
-    /// Persists an owned body, allowing a backend to reuse its allocation.
     fn persist_block_body_value(
         &self,
         height: u32,
@@ -96,16 +92,17 @@ pub trait BlockBodyStore: Send + Sync {
         self.persist_block_body(height, hash, &body)
     }
 
-    /// Loads a complete body, or `None` when unavailable.
     fn load_block_body(
         &self,
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError>;
 
-    /// Reads for integrity verification. Backends with framed bodies preserve
-    /// malformed or truncated referenced frames as `StorageError::CorruptBlockFrame`.
-    /// Missing locators/files remain `None`; ordinary read failures remain errors.
+    /// Reads for integrity verification.
+    ///
+    /// Backends with framed bodies preserve malformed or truncated referenced frames as
+    /// `StorageError::CorruptBlockFrame`. Missing locators/files remain `None`;
+    /// ordinary read failures remain errors.
     fn load_block_body_for_verification(
         &self,
         height: u32,
@@ -113,11 +110,6 @@ pub trait BlockBodyStore: Send + Sync {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.load_block_body(height, hash)
     }
-    /// Bounded read for integrity verification: the pre-allocation bound of
-    /// `load_block_body_bounded` with the corruption evidence of
-    /// `load_block_body_for_verification`. The default delegates to the
-    /// bounded read and loses corruption evidence: framed backends override
-    /// both bounded paths and keep it.
     fn load_block_body_for_verification_bounded(
         &self,
         height: u32,
@@ -127,8 +119,9 @@ pub trait BlockBodyStore: Send + Sync {
         self.load_block_body_bounded(height, hash, max_bytes)
     }
     /// Reads a body only after its stored length fits the owned-copy bound.
-    /// Unsupported implementations refuse without calling metadata or the
-    /// unbounded body reader. Backend-internal reads are not an owned-copy bound.
+    ///
+    /// Unsupported implementations refuse without calling metadata or the unbounded
+    /// body reader. Backend-internal reads are not an owned-copy bound.
     fn load_block_body_bounded(
         &self,
         _height: u32,
@@ -138,18 +131,12 @@ pub trait BlockBodyStore: Send + Sync {
         Err(crate::BoundedReadError::Unsupported)
     }
 
-    /// Starts a body-read session.
     fn reader(&self) -> Result<Box<dyn BlockBodyReader + '_>, StorageError> {
         Ok(Box::new(DirectBlockBodyReader { store: self }))
     }
 
     /// The persisted undo record for `height`/`hash`, when this store can
     /// reach one.
-    ///
-    /// The default answers nothing: only stores backed by the chainstate
-    /// key-value index hold undo rows, and a `ScriptLive`-selecting worker
-    /// step fails closed on `None` rather than indexing without its spent-coin
-    /// anchor.
     fn undo_record(
         &self,
         height: u32,
@@ -173,7 +160,6 @@ pub trait BlockBodyStore: Send + Sync {
         Ok(None)
     }
 
-    /// Reads encoded body size and transaction count.
     fn block_body_metadata(
         &self,
         height: u32,
@@ -191,12 +177,12 @@ pub trait BlockBodyStore: Send + Sync {
         }))
     }
 
-    /// The append cursor of the backing block files, when the store is
-    /// file-backed: block files up to `file_no` hold every frame written so
-    /// far, and `offset` is the first byte not yet written in that file.
+    /// The append cursor of the backing block files, when the store is file-backed:
+    /// block files up to `file_no` hold every frame written so far, and `offset` is the
+    /// first byte not yet written in that file.
     ///
-    /// A durable head names this cursor as its `body_extent`; `None` means
-    /// the store cannot address ranges, so the head names no extent.
+    /// A durable head names this cursor as its `body_extent`; `None` means the store
+    /// cannot address ranges, so the head names no extent.
     fn append_cursor(&self) -> Option<BodyExtent> {
         None
     }
@@ -301,7 +287,6 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
         Ok(())
     }
 
-    /// Loads a complete body, or `None` when unavailable.
     fn load_block_body(
         &mut self,
         height: u32,
@@ -341,16 +326,13 @@ impl<S: KvStore> IndexedBlockBodyStore<S> {
     pub fn new(index: Arc<S>, files: Arc<FlatFileBlockStore>) -> Self {
         Self { index, files }
     }
-    /// Resolves the flat-file position of a block body, or `None` when the
-    /// block is unknown. An index row that is not a decodable 16-byte
-    /// flat-file position is `IncompatibleData`, never a silent `None`: the
-    /// row's presence means the body must exist, so treating a decode failure
-    /// as absence would hide a schema mismatch behind a missing-block answer.
+    /// Resolves the flat-file position of a block body, or `None` when the block is
+    /// unknown.
     ///
-    /// Every read path starts here, so it is written once rather than three
-    /// times: divergence between the whole-body, ranged, and metadata lookups
-    /// would surface as one of them silently disagreeing about which blocks
-    /// exist.
+    /// An index row that is not a decodable 16-byte flat-file position is
+    /// `IncompatibleData`, never a silent `None`: the row's presence means the body
+    /// must exist, so treating a decode failure as absence would hide a schema mismatch
+    /// behind a missing-block answer.
     fn body_position(
         &self,
         height: u32,
@@ -389,8 +371,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
                 limit: max_bytes,
             });
         }
-        // The flat-file reader validates the frame's length against this
-        // checked position before allocating the body buffer.
         self.files
             .load(position, height, *hash.as_byte_array())
             .map_err(Into::into)
@@ -418,8 +398,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
                 limit: max_bytes,
             });
         }
-        // The flat-file verification reader preserves corrupt referenced
-        // frames as errors instead of mapping them to `None`.
         self.files
             .load_for_verification(position, height, *hash.as_byte_array())
             .map_err(Into::into)
@@ -463,7 +441,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         Some(self.files.disk_usage())
     }
 
-    /// Persists an exact block body.
     fn persist_block_body(
         &self,
         height: u32,
@@ -501,7 +478,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         self.index.write_deferred(batch)
     }
 
-    /// Starts a body-read session.
     fn reader(&self) -> Result<Box<dyn BlockBodyReader + '_>, StorageError> {
         Ok(Box::new(IndexedBlockBodyReader {
             index: self.index.snapshot()?,
@@ -510,7 +486,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         }))
     }
 
-    /// Loads a complete body, or `None` when unavailable.
     fn load_block_body(
         &self,
         height: u32,
@@ -548,7 +523,6 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
             .load_range(position, height, *hash.as_byte_array(), offset, len)
     }
 
-    /// Reads encoded body size and transaction count.
     fn block_body_metadata(
         &self,
         height: u32,
@@ -620,8 +594,6 @@ mod body_position_prefetch_tests {
             None
         );
         store.persist_block_body(1, hash, b"body")?;
-        // A body longer than the requested bound is refused with the
-        // established bounded-read error, before any frame is read.
         assert!(matches!(
             store.load_block_body_for_verification_bounded(1, hash, 3),
             Err(BoundedReadError::Limit { size: 4, limit: 3 })
@@ -633,7 +605,6 @@ mod body_position_prefetch_tests {
             Some(b"body".as_slice())
         );
 
-        // Each frame-header field, then a short header and a short body.
         let mut damaged = Vec::new();
         for offset in [0, 4, 8, 12] {
             let mut bytes = original.clone();
@@ -648,15 +619,12 @@ mod body_position_prefetch_tests {
                 store.load_block_body_for_verification(1, hash),
                 Err(StorageError::CorruptBlockFrame(_))
             ));
-            // The bounded verification read keeps the same corruption
-            // evidence, wrapped as the underlying bounded-read failure.
             assert!(matches!(
                 store.load_block_body_for_verification_bounded(1, hash, 16),
                 Err(BoundedReadError::Storage(StorageError::CorruptBlockFrame(
                     _
                 )))
             ));
-            // Existing availability-only reads retain their public contract.
             assert_eq!(store.load_block_body(1, hash)?, None);
             assert_eq!(store.load_block_body_range(1, hash, 0, 1)?, None);
             assert_eq!(store.block_body_metadata(1, hash)?, None);

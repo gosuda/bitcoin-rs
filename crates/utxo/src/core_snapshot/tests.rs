@@ -1,4 +1,3 @@
-//! Independent Core encodings and fail-closed resource contracts.
 #![allow(clippy::expect_used)]
 
 use std::io::{self, Cursor, Read};
@@ -25,7 +24,6 @@ fn hex(value: &str) -> Vec<u8> {
         .collect()
 }
 
-// Used only to build corruption cases, never the independent positive fixtures.
 fn core_varint(mut value: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     loop {
@@ -66,7 +64,6 @@ fn group(txid: u8, indices: &[u64]) -> Vec<u8> {
     );
     for index in indices {
         bytes.extend_from_slice(varint::encode(*index).as_slice());
-        // Core Coin: height 1 + coinbase; compressed 50 BTC; raw OP_TRUE.
         bytes.extend_from_slice(&[3, 50, 7, 0x51]);
     }
     bytes
@@ -103,7 +100,6 @@ fn genuine_core_dump_matches_compiled_anchor_and_full_state() {
         loaded.hash_serialized.to_string(),
         "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a"
     );
-    // Core reports 8725 BTC for the 149*50 + 51*25 regtest subsidy outputs.
     let total = loaded.set.with_stable_view(|view| {
         let mut total = 0_u64;
         view.for_each_all(|outpoint, _| {
@@ -139,7 +135,6 @@ fn inspection_reads_only_fixed_header_without_claiming_trust() {
 
 #[test]
 fn core_varint_reference_boundaries_are_not_record_leb128() {
-    // Core serialize.h's subtract-one MSB encoding, including its width transitions.
     for (bytes, expected) in [
         (vec![0], 0),
         (vec![0x7f], 127),
@@ -165,7 +160,6 @@ fn core_varint_reference_boundaries_are_not_record_leb128() {
 
 #[test]
 fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
-    // Core compressor.cpp / compress_tests.cpp: six special script encodings.
     let payload = vec![0x11; 20];
     for (code, prefix, suffix) in [
         (0, vec![0x76, 0xa9, 0x14], vec![0x88, 0xac]),
@@ -180,7 +174,7 @@ fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
     }
     for code in [2, 3] {
         let mut encoded = vec![code];
-        encoded.extend_from_slice(&[0xff; 32]); // Not a curve point; Core preserves these bytes.
+        encoded.extend_from_slice(&[0xff; 32]);
         let mut expected = vec![0x21, code];
         expected.extend_from_slice(&[0xff; 32]);
         expected.push(0xac);
@@ -189,7 +183,6 @@ fn all_core_script_encodings_and_invalid_compressed_pubkeys_preserve_bytes() {
             expected
         );
     }
-    // secp256k1 generator and its negation, fixed independent SEC encodings.
     let x = hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
     for (code, y) in [
         (
@@ -484,9 +477,6 @@ fn short_reads_interrupts_and_io_failures_keep_their_meaning() {
     );
 }
 
-/// Forged txids must not reach the identity-hashed UTXO table before the
-/// compiled commitment matches. Exercise both identical full hashes and
-/// distinct hashes sharing the low bucket and high tag bits.
 #[test]
 fn forged_collision_families_never_enter_the_utxo_hash_table() {
     const RECORDS: u32 = 4096;
@@ -498,7 +488,6 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             if same_full_hash {
                 record[8..12].copy_from_slice(&index.to_be_bytes());
             } else {
-                // Distinct eight-byte keys, with low 32 and high 8 bits zero.
                 record[4..7].copy_from_slice(&index.to_be_bytes()[1..]);
             }
             bytes.extend(record);
@@ -517,7 +506,6 @@ fn forged_collision_families_never_enter_the_utxo_hash_table() {
             before
         );
     }
-    // The instrumentation observes the real successful insertion boundary.
     let before = crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
     assert!(
         read_and_verify(
@@ -601,7 +589,6 @@ fn writer_emits_byte_identical_core200_snapshot_and_roundtrips_read_and_verify()
     assert_eq!(written.len(), CORE.len());
     assert_eq!(written, CORE);
 
-    // Round-trip through read_and_verify
     let reloaded = read_and_verify(
         &mut Cursor::new(&written),
         Network::Regtest,
@@ -632,7 +619,7 @@ fn writer_script_compression_encodes_odd_even_y_and_offcurve_fallback() {
     p2pk_odd.push(0xac);
 
     let mut p2pk_offcurve = p2pk_even.clone();
-    p2pk_offcurve[2..34].fill(0xff); // Not on curve
+    p2pk_offcurve[2..34].fill(0xff);
 
     let mut p2pk_comp = vec![0x21, 0x02];
     p2pk_comp.extend_from_slice(&gx);
@@ -674,7 +661,6 @@ fn writer_script_compression_encodes_odd_even_y_and_offcurve_fallback() {
         .expect("write succeeds");
     assert_eq!(report.coins, 6);
 
-    // Decode through Decoder and check each script matches original
     let mut cursor = Cursor::new(&written);
     let mut decoder = Decoder::new(&mut cursor, u64::try_from(written.len()).expect("fit"));
     let meta = decoder.metadata().expect("meta");
@@ -699,7 +685,6 @@ fn writer_cancellation_polls_every_5000_coins() {
     )
     .expect("fixture");
 
-    // Immediate stop returns Interrupted before writing anything
     let mut written = Vec::new();
     let res = loaded.set.with_stable_view(|view| {
         write_core_v2(
@@ -714,7 +699,6 @@ fn writer_cancellation_polls_every_5000_coins() {
     });
     assert!(matches!(res, Err(SnapshotError::Interrupted)));
 
-    // Set with > 5000 coins to verify 5000-coin polling
     let large_set = crate::UtxoSet::new();
     for i in 0..5_005_u32 {
         let mut txid_bytes = [0_u8; 32];
@@ -737,7 +721,6 @@ fn writer_cancellation_polls_every_5000_coins() {
             5005,
             &mut written_large,
             &|| {
-                // Return false on first check (initial poll), true on subsequent check
                 if poll_called.get() {
                     true
                 } else {
@@ -760,7 +743,6 @@ fn writer_declared_coin_count_mismatch_fails_closed() {
     )
     .expect("fixture");
 
-    // Declaring fewer coins than actual (e.g. 100 declared, 200 actual)
     let mut written = Vec::new();
     let res_low = loaded.set.with_stable_view(|view| {
         write_core_v2(
@@ -781,7 +763,6 @@ fn writer_declared_coin_count_mismatch_fails_closed() {
         })
     ));
 
-    // Declaring more coins than actual (e.g. 300 declared, 200 actual)
     written.clear();
     let res_high = loaded.set.with_stable_view(|view| {
         write_core_v2(
@@ -833,7 +814,6 @@ fn writer_io_failure_propagates_as_snapshot_error() {
     )
     .expect("fixture");
 
-    // Fail during header
     let mut failing = FailingWriter {
         fail_after: 20,
         written: 0,
@@ -851,7 +831,6 @@ fn writer_io_failure_propagates_as_snapshot_error() {
     });
     assert!(matches!(res, Err(SnapshotError::Io(_))));
 
-    // Fail during coin streaming
     let mut failing_coins = FailingWriter {
         fail_after: 100,
         written: 0,
@@ -904,8 +883,6 @@ fn writer_rejects_output_with_max_vout_as_invalid_outpoint() {
 
 #[test]
 fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
-    // Packed height/coinbase limit: height <= 0x7fff_ffff allows code <= u32::MAX.
-    // At height 0x7fff_ffff, coinbase=false yields 0xffff_fffe and coinbase=true yields 0xffff_ffff.
     let max_height: u32 = 0x7fff_ffff;
     let base_hash = Hash256::from_le_bytes(&[0x33; 32]);
 
@@ -935,7 +912,6 @@ fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
         assert_eq!(report.coins, 1);
         assert!(report.bytes > 51);
 
-        // Verify that the written stream decodes successfully and roundtrips the height and coinbase.
         let (records, hash_serialized) = Decoder::new(&mut Cursor::new(&written[51..]), 1_000_000)
             .coins(1, max_height, SnapshotLimits::default())
             .expect("Decoder must accept snapshot written with max encodable height");
@@ -951,11 +927,6 @@ fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
 
 #[test]
 fn writer_rejects_next_height_as_varint_overflow_for_both_coinbase_variants() {
-    // If bit 31 of height is set (height >= 0x8000_0000), (height << 1) exceeds u32::MAX
-    // for both coinbase=false (0x1_0000_0000) and coinbase=true (0x1_0000_0001).
-    // In Rust, the bit shift by 1 does not panic, but shifts out the high bit causing
-    // high-bit loss during commitment hashing, and creates an incompatible 64-bit Core VARINT.
-    // The writer must fail closed with VarIntOverflow.
     let overflow_height: u32 = 0x8000_0000;
     let base_hash = Hash256::from_le_bytes(&[0x44; 32]);
 
@@ -991,8 +962,6 @@ fn writer_rejects_next_height_as_varint_overflow_for_both_coinbase_variants() {
 
 #[test]
 fn writer_preserves_invalid_height_precedence_over_varint_overflow() {
-    // When output height exceeds base_height, InvalidHeight must take precedence
-    // over VarIntOverflow even when height >= 0x8000_0000.
     let overflow_height: u32 = 0x8000_0000;
     let base_height: u32 = 100;
     let base_hash = Hash256::from_le_bytes(&[0x55; 32]);
@@ -1036,19 +1005,15 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
     use crate::compress::cmp_core_varint_key;
     use crate::snapshot::SerializedUtxoHasher;
 
-    // Width boundaries of Core's subtract-one MSB VARINT.
     assert_eq!(core_varint(16_511), vec![0xFF, 0x7F]);
     assert_eq!(core_varint(16_512), vec![0x80, 0x80, 0x00]);
-    // Bytewise cursor order inverts numeric order across the transition.
     assert_eq!(cmp_core_varint_key(16_512, 16_511), Ordering::Less);
     assert_eq!(cmp_core_varint_key(16_511, 16_512), Ordering::Greater);
-    // Within one width numeric and key order agree.
     assert_eq!(cmp_core_varint_key(0, 127), Ordering::Less);
     assert_eq!(cmp_core_varint_key(128, 16_511), Ordering::Less);
     assert_eq!(cmp_core_varint_key(16_512, 16_513), Ordering::Less);
     assert_eq!(cmp_core_varint_key(5, 5), Ordering::Equal);
 
-    // The decoder stages records in numeric vout order and commits there.
     let bytes = group(7, &[16_511, 16_512]);
     let (records, hash) = Decoder::new(&mut Cursor::new(bytes), 100_000)
         .coins(2, 200, SnapshotLimits::default())
@@ -1081,7 +1046,6 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
         "the transition must distinguish cursor order from numeric order"
     );
 
-    // Writer emits cursor order; the decoder normalizes to numeric order.
     let set = crate::UtxoSet::new();
     let txid = Hash256::from_le_bytes(&[7; 32]);
     let low = OwnedUtxoOut::new(16_511, 5_000_000_000, vec![0x51], true, 1);
@@ -1103,7 +1067,6 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
             )
         })
         .expect("write succeeds");
-    // First emitted vout is 16,512 in CompactSize (FD 80 40), not 16,511.
     assert_eq!(written[84..87], [0xFD, 0x80, 0x40]);
     let mut cursor = Cursor::new(&written);
     let mut decoder = Decoder::new(&mut cursor, u64::try_from(written.len()).expect("fit"));
@@ -1125,7 +1088,6 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
         assert_eq!(view.hash_serialized_3().expect("stable-view hash"), hash);
     });
 
-    // Duplicate detection survives the numeric hash order in both positions.
     assert!(matches!(
         body(&group(7, &[16_511, 16_511]), 2),
         Err(SnapshotError::DuplicateOutpoint { vout: 16_511 })

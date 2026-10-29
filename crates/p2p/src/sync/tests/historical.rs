@@ -89,8 +89,6 @@ fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order() -> TestR
         assert!(rx.try_recv().is_err());
     }
     assert_eq!(harness.sync.historical.lock().window.pending_len(), 32);
-    // All later bodies arrive before the frontier. They must neither apply
-    // out of order nor free slots for an unbounded tail of downloads.
     for block in blocks[1..32].iter().rev() {
         let source = harness
             .sync
@@ -169,7 +167,6 @@ fn historical_archive_replay_retires_overtaken_downloads() -> TestResult {
     harness.sync.advance_historical();
     let source = current_source(&harness.peers, addr);
     deliver(&harness.sync, &blocks[1], source);
-    // Model the manager replaying a newly available archived prefix.
     for _ in 0..3 {
         chain.historical.lock().pop_front();
     }
@@ -215,8 +212,6 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
 
     for competing_headers in [false, true] {
         if competing_headers {
-            // The fast applied-ancestry filter cannot run when the best header
-            // tip is another branch. The unrequested-body work gate still must.
             let mut tree = harness.block_tree.write();
             let mut parent = tree
                 .lookup(Network::Regtest.genesis_block().block_hash().0)
@@ -362,7 +357,6 @@ fn historical_notfound_releases_the_exact_owner_and_the_alternate_serves_it_once
     );
     assert!(initial[owner].contains(&first));
 
-    // A connection that does not own the request cannot release it.
     assert!(
         !harness
             .sync
@@ -373,9 +367,6 @@ fn historical_notfound_releases_the_exact_owner_and_the_alternate_serves_it_once
         Some(owner_source)
     );
 
-    // The exact owner answers notfound: the historical request is released
-    // and the standard historical pass hands it to the alternate, once; the
-    // owner is not asked for it again.
     assert!(
         harness
             .sync
@@ -406,7 +397,6 @@ fn historical_notfound_releases_the_exact_owner_and_the_alternate_serves_it_once
         "a peer that lacks a body is not punished"
     );
 
-    // Everything is delivered by its current owner and replay completes.
     for block in &blocks {
         let source =
             historical_owner(&harness.sync, block).ok_or("every body must still be pending")?;
@@ -442,7 +432,6 @@ fn historical_notfound_only_peer_is_not_polled_and_is_retried_after_the_interval
     );
     assert_eq!(historical_owner(&harness.sync, &blocks[0]), None);
 
-    // Nobody else can serve it: nothing is sent and the peer stays connected.
     for _ in 0..4 {
         harness.sync.advance_historical();
     }
@@ -452,7 +441,6 @@ fn historical_notfound_only_peer_is_not_polled_and_is_retried_after_the_interval
     );
     assert!(harness.peers.is_connected(addr));
 
-    // Once the interval has passed the peer is asked exactly once more.
     let aged = Instant::now()
         .checked_sub(BODY_UNAVAILABLE_RETRY + Duration::from_secs(1))
         .ok_or("monotonic clock is younger than the retry interval")?;
@@ -473,7 +461,6 @@ fn historical_notfound_only_peer_is_not_polled_and_is_retried_after_the_interval
     harness.sync.advance_historical();
     assert_eq!(drain_getdata_items(&rx), Vec::<Inventory>::new());
 
-    // The record belongs to the connection: it leaves with it.
     assert!(
         harness
             .sync
@@ -519,7 +506,6 @@ fn historical_delivery_ends_the_notfound_record() -> TestResult {
             .refuses(source, hash, Instant::now())
     );
 
-    // The peer delivers the body it was answered notfound for.
     deliver(&harness.sync, &blocks[0], source);
     assert!(
         !harness

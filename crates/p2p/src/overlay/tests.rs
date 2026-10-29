@@ -30,6 +30,33 @@ fn until(predicate: impl Fn() -> bool) {
     }
 }
 
+/// Reads one SAM line, waiting through idle read timeouts.
+///
+/// Returns false at end of stream or after the test stops the fixture. An idle
+/// read is not a client that went away, and a listener on a reused port can
+/// accept a stray connection from another test, so the fixture decides what a
+/// line means instead of panicking on the first one it does not expect.
+fn read_sam_line(reader: &mut impl std::io::BufRead, line: &mut String, stop: &AtomicBool) -> bool {
+    loop {
+        line.clear();
+        match reader.read_line(line) {
+            Ok(0) => return false,
+            Ok(_) => return true,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if stop.load(Ordering::Acquire) {
+                    return false;
+                }
+            }
+            Err(error) => panic!("SAM fixture read: {error}"),
+        }
+    }
+}
+
 #[test]
 fn socks_routes_onion_as_a_domain_and_preserves_stream_bytes() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("proxy");
@@ -50,7 +77,6 @@ fn socks_routes_onion_as_a_domain_and_preserves_stream_bytes() {
         let mut port = [0; 2];
         stream.read_exact(&mut port).expect("port");
         assert_eq!(u16::from_be_bytes(port), 8333);
-        // Fragmenting the reply must not lose framing; bound IP is transport metadata only.
         for byte in [5, 0, 0, 1, 127, 0, 0, 1, 0, 0] {
             stream.write_all(&[byte]).expect("reply");
         }
@@ -290,7 +316,7 @@ fn sam_invalid_id_revokes_stream_epoch_and_reconnects_while_control_responds() {
 fn sam_session_recovery(invalid_id: bool) {
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};
-    use std::io::{BufRead as _, BufReader};
+    use std::io::BufReader;
     use std::sync::atomic::AtomicUsize;
     let listener = TcpListener::bind("127.0.0.1:0").expect("SAM fixture");
     listener.set_nonblocking(true).expect("nonblocking");
@@ -328,16 +354,17 @@ fn sam_session_recovery(invalid_id: bool) {
                                 .expect("timeout");
                             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
                             let mut line = String::new();
-                            reader.read_line(&mut line).expect("hello");
-
-                            assert_eq!(line, "HELLO VERSION MIN=3.1 MAX=3.3\n");
+                            if !read_sam_line(&mut reader, &mut line, &stop)
+                                || line != "HELLO VERSION MIN=3.1 MAX=3.3\n"
+                            {
+                                return;
+                            }
                             stream
                                 .write_all(b"HELLO REPLY RESULT=OK VERSION=3.3\n")
                                 .expect("hello reply");
                             let mut epoch = 0;
                             while !stop.load(Ordering::Acquire) {
-                                line.clear();
-                                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                if !read_sam_line(&mut reader, &mut line, &stop) {
                                     break;
                                 }
 
@@ -410,8 +437,6 @@ fn sam_session_recovery(invalid_id: bool) {
     let lease = crate::PeerLease::new(tx).with_transport_alive(connected.alive.clone());
     shared.peer_table.register(endpoint, lease.clone());
     assert!(!lease.is_cancelled());
-    // A shared network label is not epoch ownership. This lease carries a
-    // different marker and must survive both old-session recovery and shutdown.
     let (other_tx, _other_rx) = crossbeam_channel::unbounded();
     let independent =
         crate::PeerLease::new(other_tx).with_transport_alive(Some(Arc::new(AtomicBool::new(true))));

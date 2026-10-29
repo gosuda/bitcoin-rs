@@ -1,5 +1,4 @@
 //! HTTP-surface E2E: RPC auth and protocol errors, batch semantics,
-//! REST toggle, the unauthenticated Esplora surface, and ZMQ gating.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -8,9 +7,8 @@ use bitcoin_rs_e2e::helpers::{
     genesis_block, mature_funding, mine_bare_blocks, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
-/// The JSON-RPC listener requires Basic auth.
 #[test]
 fn rpc_requires_auth() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -24,8 +22,6 @@ fn rpc_requires_auth() -> Result<()> {
     assert_eq!(unauth.status, 401, "missing auth must be 401");
 
     let body = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getblockcount\",\"params\":[]}";
-    // A wrong password is likewise a 401; the server must not hand a
-    // 403/500 or accept it.
     let bad = node.http_auth("POST", "/", body, Some(("parity", "wrong")))?;
     assert_eq!(bad.status, 401, "wrong password must be 401");
 
@@ -36,7 +32,6 @@ fn rpc_requires_auth() -> Result<()> {
     node.stop()
 }
 
-/// JSON-RPC protocol errors carry their frozen codes.
 #[test]
 fn rpc_protocol_error_codes() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -46,20 +41,16 @@ fn rpc_protocol_error_codes() -> Result<()> {
     }))?;
     assert_eq!(unknown["error"]["code"], json!(-32601));
 
-    // Wallet methods are not exposed by this wallet-free node.
     let unimplemented = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 2, "method": "getwalletinfo", "params": []
     }))?;
     assert_eq!(unimplemented["error"]["code"], json!(-32601));
 
-    // API-34: waitforblock is implemented; missing its required hash returns
-    // Core's usage error rather than method-not-found (and does not wait).
     let missing_hash = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 4, "method": "waitforblock", "params": []
     }))?;
     assert_eq!(missing_hash["error"]["code"], json!(-1));
 
-    // A JSON parse failure maps to HTTP 500 plus a -32700 body, as in Core.
     let malformed = node.http("POST", "/", b"{not json", true)?;
     assert_eq!(malformed.status, 500);
     let parsed = malformed.json()?;
@@ -75,7 +66,6 @@ fn rpc_protocol_error_codes() -> Result<()> {
     node.stop()
 }
 
-/// Batches answer every member; notifications get the spec-compliant 204.
 #[test]
 fn batch_and_notification() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -107,7 +97,6 @@ fn batch_and_notification() -> Result<()> {
     node.stop()
 }
 
-/// The REST gateway is off by default and opt-in via `--rest`.
 #[test]
 fn rest_toggle() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -139,7 +128,6 @@ fn rest_toggle() -> Result<()> {
     node.stop()
 }
 
-/// The Esplora-compatible `/api` surface answers without auth.
 #[test]
 fn esplora_public_surface() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -184,9 +172,6 @@ fn esplora_public_surface() -> Result<()> {
     node.stop()
 }
 
-/// Esplora `POST /tx` broadcasts a raw transaction, and `GET /api/tx`
-/// either projects it in full or reports the missing-index capability,
-/// depending on whether `--txindex` is on.
 #[test]
 fn esplora_tx_broadcast_and_projection() -> Result<()> {
     for txindex in [false, true] {
@@ -212,17 +197,12 @@ fn esplora_tx_broadcast_and_projection() -> Result<()> {
         )?;
 
         if !txindex {
-            // Without txindex the full projection cannot resolve the spend's
-            // confirmed prevout, so the capability contract answers 503
-            // rather than an empty success.
             let fetched = node.http_get(&format!("/api/tx/{txid}"))?;
             assert_eq!(fetched.status, 503, "no txindex -> 503");
             node.stop()?;
             continue;
         }
 
-        // With txindex, 503 also means "index changed during query; retry"
-        // while the index crosses a snapshot boundary.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let fetched = loop {
             let response = node.http_get(&format!("/api/tx/{txid}"))?;
@@ -261,7 +241,7 @@ fn zmq_notifications_feature_gated() -> Result<()> {
     if reply["error"]["code"] != json!(-32601) {
         assert_eq!(reply.get("result"), Some(&json!([])), "{reply}");
         assert!(
-            reply.get("error").is_none_or(serde_json::Value::is_null),
+            reply.get("error").is_none_or(sonic_rs::Value::is_null),
             "{reply}"
         );
     }

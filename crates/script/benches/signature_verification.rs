@@ -1,67 +1,3 @@
-//! ECDSA/Schnorr script-verification workload for the Step 8.2 signature-cache campaign.
-//!
-//! Purpose: give the parent a single runnable harness that measures real script
-//! verification (secp256k1 ECDSA via P2WPKH/BIP143 and Schnorr via P2TR key-path/BIP341)
-//! through the consensus prepared-input API (`PreparedTransaction::verify_input`) with a
-//! real admission-local `SignatureCache`. Hit arms warm one cache outside timing and run
-//! every timed call as a cache hit; miss arms build a fresh `SignatureCache::new()` per
-//! iteration in the untimed `iter_batched` setup and run every timed call as a cold miss.
-//!
-//! Arms (four benchmark ids under the `signature_verification` group):
-//! - `ecdsa/hit`: one P2WPKH input verified `INNER_REPS` times, alternating
-//!   `STANDARD` / `MANDATORY` per repetition (admission pass 1 under policy flags, pass 2
-//!   under next-block flags).
-//! - `ecdsa/miss`: `INNER_REPS` distinct P2WPKH inputs (distinct keys, outpoints, and
-//!   digests), each verified once with the same alternating flag sequence.
-//! - `schnorr/hit`, `schnorr/miss`: same shape for P2TR key-path spends.
-//!
-//! Flags: `STANDARD` is the mempool admission policy set. `MANDATORY` is the consensus
-//! subset that `consensus::verify_block::verify_flags` yields at full activation
-//! (P2SH | DERSIG | NULLDUMMY | CLTV | CSV | WITNESS | TAPROOT); the bench does not
-//! duplicate the height/network derivation, which stays owned by consensus. A signature
-//! valid under `STANDARD` is valid under `MANDATORY`, matching the admission fill-then-
-//! consult direction whose cost Step 4 exposed.
-//!
-//! MRP config: `SAMPLE_SIZE` measured samples per arm with `SamplingMode::Flat`, one
-//! second of warm-up, twenty seconds of measurement per arm, `INNER_REPS`
-//! verifications per iteration. Setup (key generation, sighash digests, signing,
-//! transaction assembly, positive and negative assertions) runs once before timing;
-//! the timer covers only `verify_input` calls plus the per-iteration flag alternation.
-//! No signing runs under the timer. Miss-arm fresh caches are built in the untimed
-//! `iter_batched` setup, never under the timer; no fixed batch counts are guessed.
-//!
-//! Construction reuses established in-repo patterns only: the ECDSA arm mirrors
-//! `tests/segwit_v0_sighash_edges.rs` (native `SighashCache` BIP143 digest, secp256k1
-//! sign with low-S normalization, P2WPKH program/script-code split); the Schnorr arm
-//! mirrors `tests/verifier_boundaries.rs` (rust-bitcoin oracle tap-tweak, key-spend
-//! sighash, `sign_schnorr_no_aux_rand`, native decode of the oracle bytes). No large
-//! fixture is copied; constants are minimal single-spend shapes.
-//!
-//! Negative controls (asserted once in setup, untimed): an ECDSA witness carrying a
-//! low-S-normalized valid-DER signature from a different key over the same digest fails
-//! with `EvalFalse` under `MANDATORY` and `SigNullFail` under `STANDARD` (NULLFAIL
-//! policy); a Schnorr witness with one flipped signature byte fails with `SchnorrSig`
-//! under both flag sets.
-//!
-//! Commands (parent owns every execution):
-//! - benchmarks (identical for baseline and candidate):
-//!   `cargo bench --locked -p bitcoin-rs-script --bench signature_verification`
-//! - untimed verification (no Criterion, no timing output; prints `mrp-verify`
-//!   assertion lines and exits nonzero on any mismatch):
-//!   `cargo bench --locked -p bitcoin-rs-script --bench signature_verification -- --mrp-verify`
-//!
-//! Limitations: single-input spends only; P2WPKH `SIGHASH_ALL` and P2TR key-path
-//! `Default` only (no P2WSH, multisig, tapscript, or other sighash types); serial
-//! latency only (one check per call, below the consensus rayon dispatch threshold, so
-//! no parallel-pool behaviour is measured); the miss arm pays one-time sighash
-//! aggregate hashing per distinct input through its cold `SighashCache` while the hit
-//! arm reuses aggregates via its retained `PreparedTransaction` (the secp operation the
-//! cache targets is recomputed in both); native engine only, no kernel-oracle path; no
-//! mempool admission, block connect, or fee/finality checks. Raw numbers only: no
-//! speedup claim is made here; the parent gate decides.
-//!
-//! PERF: Criterion emits public harness items whose docs are irrelevant to the
-//! benchmark report.
 #![allow(missing_docs)]
 #![allow(clippy::expect_used, reason = "frozen bench fixtures")]
 
@@ -80,34 +16,19 @@ use criterion::measurement::WallTime;
 use criterion::{BatchSize, BenchmarkGroup, Criterion, SamplingMode, criterion_group};
 use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
 
-/// Verifications per timed iteration; identical for hit and miss arms.
 const INNER_REPS: usize = 64;
-/// MRP Criterion sample count per arm (matches the `insert_fill` bench convention).
 const SAMPLE_SIZE: usize = 10;
-/// MRP warm-up budget per arm.
 const WARM_UP_SECS: u64 = 1;
-/// MRP measurement budget per arm (twenty seconds; see module docs).
 const MEASURE_SECS: u64 = 20;
-/// Extra ECDSA seed beyond the miss range (`ECDSA_FIRST_SEED..=74`): a distinct key,
-/// outpoint, and digest exercising the over-capacity path in `--mrp-verify`.
 const ECDSA_EXTRA_SEED: u8 = 75;
-/// Extra Schnorr seed beyond the miss range (`SCHNORR_FIRST_SEED..=164`).
 const SCHNORR_EXTRA_SEED: u8 = 165;
-/// First ECDSA seed byte; the miss arm consumes the `INNER_REPS` seed bytes
-/// starting there, so the miss range includes the hit seed.
 const ECDSA_FIRST_SEED: u8 = 11;
-/// First Schnorr seed byte; disjoint from the ECDSA range by construction.
 const SCHNORR_FIRST_SEED: u8 = 101;
-/// P2WPKH prevout value committed by the BIP143 digest (satoshis).
 const ECDSA_VALUE_SAT: u64 = 100_000;
-/// P2WPKH spending output value; script verification does not check balance.
 const ECDSA_OUT_SAT: u64 = 90_000;
-/// P2TR prevout value committed by the BIP341 digest (satoshis).
 const SCHNORR_VALUE_SAT: u64 = 100_000;
-/// P2TR spending output value; script verification does not check balance.
 const SCHNORR_OUT_SAT: u64 = 90_000;
 
-/// One owned spend and its ordered prevout row for `PreparedTransaction::new`.
 struct Case {
     tx: Tx,
     rows: Vec<(OutPoint, TxOut)>,
@@ -117,7 +38,6 @@ fn ecdsa_secret(seed_byte: u8) -> SecretKey {
     SecretKey::from_slice(&[seed_byte; 32]).expect("fixed ecdsa secret")
 }
 
-/// P2WPKH output program (`OP_0 <20>`) and its BIP143 script code (P2PKH template).
 fn p2wpkh_program_and_code(pubkey_compressed: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let hash20 = hash160::Hash::hash(pubkey_compressed);
     let digest = hash20.as_byte_array();
@@ -135,10 +55,6 @@ fn p2wpkh_program_and_code(pubkey_compressed: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (program, code)
 }
 
-/// Single-input P2WPKH spend. `tx_seed` selects the outpoint and prevout key;
-/// `sig_seed` selects the signing key (equal for a valid spend, different for the
-/// wrong-key negative control). The test signature is low-S normalized so encoding
-/// checks pass under `STANDARD` and any failure is the cryptographic verdict.
 fn ecdsa_case(tx_seed: u8, sig_seed: u8) -> Case {
     let key = ecdsa_secret(tx_seed);
     let pubkey = PublicKey::from_secret_key(SECP256K1, &key)
@@ -182,11 +98,6 @@ fn ecdsa_case(tx_seed: u8, sig_seed: u8) -> Case {
     Case { tx, rows }
 }
 
-/// Single-input P2TR key-path spend, signed by the rust-bitcoin oracle exactly as
-/// `tests/verifier_boundaries.rs` does (tap-tweak, key-spend sighash, deterministic
-/// Schnorr signature), then decoded into the native transaction type the timed path
-/// verifies. Distinct seeds give distinct keys, tweaked output keys, outpoints, and
-/// digests for the miss arm.
 fn schnorr_case(seed_byte: u8) -> Case {
     use bitcoin::secp256k1::{Keypair, Message as OracleMessage, Secp256k1};
     use bitcoin::sighash::{Prevouts, SighashCache as OracleCache, TapSighashType};
@@ -239,8 +150,6 @@ fn schnorr_case(seed_byte: u8) -> Case {
     Case { tx, rows }
 }
 
-/// Alternating admission flags per repetition: even repetitions run the `STANDARD`
-/// policy pass, odd repetitions the `MANDATORY` next-block representative.
 fn repetition_flags(repetition: usize) -> VerifyFlags {
     if repetition.is_multiple_of(2) {
         VerifyFlags::STANDARD
@@ -262,22 +171,16 @@ fn assert_valid(prepared: &PreparedTransaction<'_>, label: &str) {
     );
 }
 
-/// Owned ECDSA fixtures: the repeated hit spend and the `INNER_REPS` miss spends.
-/// The wrong-key negative control is asserted inside `ecdsa_fixtures` and dropped.
 struct EcdsaFixtures {
     hit: Case,
     miss: Vec<Case>,
 }
 
-/// Owned Schnorr fixtures: the repeated hit spend and the `INNER_REPS` miss spends.
-/// The flipped-byte negative control is asserted inside `schnorr_fixtures` and dropped.
 struct SchnorrFixtures {
     hit: Case,
     miss: Vec<Case>,
 }
 
-/// Builds every ECDSA spend and asserts the positive and negative controls.
-/// Untimed setup: every signature here is created before the timer starts.
 fn ecdsa_fixtures() -> EcdsaFixtures {
     let hit = ecdsa_case(ECDSA_FIRST_SEED, ECDSA_FIRST_SEED);
     let hit_prepared = PreparedTransaction::new(&hit.tx, &hit.rows).expect("ecdsa hit prevouts");
@@ -322,8 +225,6 @@ fn ecdsa_fixtures() -> EcdsaFixtures {
     EcdsaFixtures { hit, miss }
 }
 
-/// Builds every Schnorr spend and asserts the positive and negative controls.
-/// Untimed setup: every signature here is created before the timer starts.
 fn schnorr_fixtures() -> SchnorrFixtures {
     let hit = schnorr_case(SCHNORR_FIRST_SEED);
     let hit_prepared = PreparedTransaction::new(&hit.tx, &hit.rows).expect("schnorr hit prevouts");
@@ -355,11 +256,6 @@ fn schnorr_fixtures() -> SchnorrFixtures {
     SchnorrFixtures { hit, miss }
 }
 
-/// Registers the `ecdsa/hit` and `ecdsa/miss` arms. Preparation here is untimed
-/// setup; the timer covers only the `verify_input` calls. The hit arm warms one
-/// real cache outside timing so every timed call is a hit; the miss arm builds a
-/// fresh `SignatureCache::new()` per iteration in the untimed `iter_batched` setup
-/// and consumes it in the timed body so every timed call is a cold miss.
 fn register_ecdsa(group: &mut BenchmarkGroup<WallTime>, fixtures: &EcdsaFixtures) {
     let hit_prepared =
         PreparedTransaction::new(&fixtures.hit.tx, &fixtures.hit.rows).expect("ecdsa hit prevouts");
@@ -368,9 +264,6 @@ fn register_ecdsa(group: &mut BenchmarkGroup<WallTime>, fixtures: &EcdsaFixtures
         .iter()
         .map(|case| PreparedTransaction::new(&case.tx, &case.rows).expect("ecdsa miss prevouts"))
         .collect();
-    // Warm the hit cache outside timing, one verification per flag pass as an
-    // admission's first pass fills and its second pass consults. The cache key
-    // omits flags, so the second warmup is already a hit.
     let hit_cache = SignatureCache::new();
     assert_eq!(
         hit_prepared.verify_input(0, VerifyFlags::STANDARD, Some(&hit_cache)),
@@ -416,11 +309,6 @@ fn register_ecdsa(group: &mut BenchmarkGroup<WallTime>, fixtures: &EcdsaFixtures
     });
 }
 
-/// Registers the `schnorr/hit` and `schnorr/miss` arms. Preparation here is untimed
-/// setup; the timer covers only the `verify_input` calls. The hit arm warms one
-/// real cache outside timing so every timed call is a hit; the miss arm builds a
-/// fresh `SignatureCache::new()` per iteration in the untimed `iter_batched` setup
-/// and consumes it in the timed body so every timed call is a cold miss.
 fn register_schnorr(group: &mut BenchmarkGroup<WallTime>, fixtures: &SchnorrFixtures) {
     let hit_prepared = PreparedTransaction::new(&fixtures.hit.tx, &fixtures.hit.rows)
         .expect("schnorr hit prevouts");
@@ -429,9 +317,6 @@ fn register_schnorr(group: &mut BenchmarkGroup<WallTime>, fixtures: &SchnorrFixt
         .iter()
         .map(|case| PreparedTransaction::new(&case.tx, &case.rows).expect("schnorr miss prevouts"))
         .collect();
-    // Warm the hit cache outside timing, one verification per flag pass as an
-    // admission's first pass fills and its second pass consults. The cache key
-    // omits flags, so the second warmup is already a hit.
     let hit_cache = SignatureCache::new();
     assert_eq!(
         hit_prepared.verify_input(0, VerifyFlags::STANDARD, Some(&hit_cache)),
@@ -478,8 +363,6 @@ fn register_schnorr(group: &mut BenchmarkGroup<WallTime>, fixtures: &SchnorrFixt
 }
 
 fn signature_verification(c: &mut Criterion) {
-    // Untimed setup lives in `ecdsa_fixtures`/`schnorr_fixtures`; the timer covers
-    // only `verify_input` calls made by the registered arms.
     let ecdsa = ecdsa_fixtures();
     let schnorr = schnorr_fixtures();
     let mut group = c.benchmark_group("signature_verification");
@@ -493,7 +376,6 @@ fn signature_verification(c: &mut Criterion) {
     group.finish();
 }
 
-/// Flipped-byte Schnorr negative rebuilt from the hit spend.
 fn schnorr_negative_case(hit: &Case) -> Case {
     let mut bad_tx = hit.tx.clone();
     bad_tx.inputs[0].witness[0][0] ^= 0x01;
@@ -503,7 +385,6 @@ fn schnorr_negative_case(hit: &Case) -> Case {
     }
 }
 
-/// Checks one valid spend returns `Ok(true)` uncached and identical cached.
 fn assert_valid_equivalence(
     prepared: &PreparedTransaction<'_>,
     label: &str,
@@ -520,7 +401,6 @@ fn assert_valid_equivalence(
     }
 }
 
-/// Checks one negative returns the expected `Err` uncached and identical cached.
 fn assert_invalid_equivalence(
     prepared: &PreparedTransaction<'_>,
     flags: VerifyFlags,
@@ -543,12 +423,6 @@ fn assert_invalid_equivalence(
     );
 }
 
-/// Untimed `--mrp-verify` entrypoint (its `println!` lines are this binary's
-/// CLI output). Runs the real fixtures and checks cached/no-cache verdict
-/// agreement plus verdict equivalence under capacity pressure through one
-/// shared cache. Actual bound/refusal behavior is proven by the crate-private
-/// `at_capacity_existing_hits_work_and_new_entries_refused` test, not here.
-/// No Criterion, no timing output. Panics (nonzero exit) on any mismatch.
 fn mrp_verify() {
     let ecdsa = ecdsa_fixtures();
     let schnorr = schnorr_fixtures();
@@ -556,7 +430,6 @@ fn mrp_verify() {
     assert_eq!(schnorr.miss.len(), INNER_REPS, "schnorr miss count");
     println!("mrp-verify: fixtures ok ({INNER_REPS} ecdsa miss, {INNER_REPS} schnorr miss)");
 
-    // One shared cache for the whole path.
     let cache = SignatureCache::new();
 
     let bad_ecdsa = ecdsa_case(ECDSA_FIRST_SEED, 0xFE);
@@ -629,11 +502,6 @@ fn mrp_verify() {
     println!("mrp-verify: PASS");
 }
 
-/// Runs the `--mrp-verify` capacity-pressure and refutation phases through the
-/// shared `cache`: over-capacity extras re-verified alongside the earlier
-/// verified fixtures, then every negative repeated against the same cache to
-/// catch a cached false success. Its `println!` lines are this binary's CLI
-/// output.
 fn verify_capacity_pressure_and_refutation(
     ecdsa_hit: &PreparedTransaction<'_>,
     schnorr_hit: &PreparedTransaction<'_>,
@@ -658,7 +526,6 @@ fn verify_capacity_pressure_and_refutation(
     println!(
         "mrp-verify: verdict equivalence under capacity pressure ok (132 spends through one shared cache, early hits re-verified)"
     );
-    // Repeat the negatives through the same cache: catches a cached false success.
     assert_invalid_equivalence(
         bad_ecdsa,
         VerifyFlags::MANDATORY,
@@ -694,8 +561,6 @@ fn verify_capacity_pressure_and_refutation(
 
 criterion_group!(benches, signature_verification);
 
-/// Binary entrypoint: `--mrp-verify` runs untimed verification (no Criterion,
-/// no timing output); anything else runs the Criterion benchmarks.
 fn main() {
     if std::env::args().any(|arg| arg == "--mrp-verify") {
         mrp_verify();

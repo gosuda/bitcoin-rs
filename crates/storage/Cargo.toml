@@ -24,7 +24,7 @@ arc-swap.workspace = true
 bitcoin-rs-primitives.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
-serde_json.workspace = true
+sonic-rs.workspace = true
 sha2.workspace = true
 bytes.workspace = true
 hashbrown.workspace = true
@@ -44,6 +44,5 @@ rustix.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
-libc = ">=0.2.189, <0.3"
 proptest.workspace = true
 tempfile.workspace = true

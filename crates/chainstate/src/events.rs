@@ -8,45 +8,29 @@ use std::io;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A coherent, non-torn view of the applied chain tip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChainSnapshot {
-    /// Persisted process epoch, strictly monotonic per data dir.
     pub epoch: u64,
-    /// Commit counter; starts at `1` on the first `record` of a run.
     pub sequence: u64,
-    /// Applied tip block hash (genesis hash before the first commit).
     pub tip_hash: Hash256,
-    /// Applied tip height (`0` at genesis).
     pub tip_height: u32,
 }
 
-/// Which committed chain event a [`ChainEventHint`] describes.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HintKind {
-    /// A block was committed onto the tip.
     Connected,
-    /// The tip moved back to its parent during a disconnect/reorg.
     Disconnected,
 }
 
-/// One committed chain event as sequenced by
-/// [`ChainEventPublisher::record`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct ChainEventHint {
-    /// Whether the block was added to or removed from the tip.
     pub kind: HintKind,
-    /// Height of the block the event committed.
     pub height: u32,
-    /// Hash of the block the event committed.
     pub hash: Hash256,
-    /// Process epoch the event belongs to.
     pub epoch: u64,
-    /// Commit-counter value assigned to this event.
     pub sequence: u64,
 }
 
-/// Single write path for chain events.
 pub struct ChainEventPublisher {
     epoch: u64,
     sequence: AtomicU64,
@@ -54,7 +38,6 @@ pub struct ChainEventPublisher {
 }
 
 impl ChainEventPublisher {
-    /// Creates a publisher that continues the supplied process-epoch snapshot.
     pub fn new(initial: ChainSnapshot) -> Self {
         Self {
             epoch: initial.epoch,
@@ -63,7 +46,6 @@ impl ChainEventPublisher {
         }
     }
 
-    /// Publisher detached from any node, for test handle composition only.
     #[must_use]
     pub fn detached(epoch: u64) -> Self {
         Self::new(ChainSnapshot {
@@ -74,19 +56,16 @@ impl ChainEventPublisher {
         })
     }
 
-    /// Returns the process epoch this publisher stamps events with.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
-    /// Returns the current snapshot without changing any state.
     #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
         *self.snapshot.read()
     }
 
-    /// Records one committed connect or disconnect.
     pub fn record(&self, kind: HintKind, height: u32, hash: Hash256) -> ChainEventHint {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         *self.snapshot.write() = ChainSnapshot {
@@ -111,10 +90,8 @@ const PROCESS_EPOCH_LOCK_FILE: &str = ".process-epoch.lock";
 
 const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
 
-// A u64 in decimal is at most 20 digits; the trailing newline makes 21.
 const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
 
-/// Reads the persisted process epoch; `0` when the data dir has none yet.
 fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     let bytes = match bitcoin_rs_storage::checkpoint::fs::read_file(
         dir,
@@ -134,7 +111,6 @@ fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     })
 }
 
-/// Allocates the next process epoch, durably, before first use.
 pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     use cap_fs_ext::FollowSymlinks;
     use cap_fs_ext::OpenOptionsFollowExt as _;
@@ -147,14 +123,6 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
         .create(true)
         .follow(FollowSymlinks::No)
         .nonblock(true);
-    // Create-on-first-use races: when several processes open the absent lock
-    // at once, one creator's entry can disappear behind another's rename on
-    // this platform (reproduced with cap-std 4.0.3) and the loser's create
-    // reports NotFound. A loser's retry is itself still a create of the
-    // absent path until some creator's file lands, so a bounded settle loop
-    // (at most two extra attempts) waits out overlapping in-flight creates
-    // — 8-way startups cluster the losers — without weakening the
-    // `follow`/`nonblock` posture.
     let lock = {
         let mut retries = 0;
         loop {
@@ -211,13 +179,10 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     }
     allocation?;
 
-    // `lock` intentionally remains live until after the directory durability
-    // barrier above. Dropping it here releases the cross-process transaction.
     drop(lock);
     Ok(epoch)
 }
 
-/// Validates the chainstate data-directory schema and allocates this process epoch.
 pub fn initialize_data_dir(path: &std::path::Path) -> Result<u64> {
     let dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(path)
         .with_context(|| format!("open data_dir {}", path.display()))?;

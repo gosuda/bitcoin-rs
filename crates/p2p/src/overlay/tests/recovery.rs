@@ -1,4 +1,3 @@
-//! Publication failures must not rotate identities or leave blocked workers behind.
 use super::*;
 use base64::Engine as _;
 use std::io::{BufRead as _, BufReader};
@@ -40,8 +39,6 @@ fn reply(stream: &mut BufReader<TcpStream>, response: &str) {
 }
 
 fn with_owner<T>(config: OverlayConfig, fixture: impl FnOnce(&Arc<OverlayTransport>) -> T) {
-    // Signal shutdown even if a fixture assertion unwinds; the scoped worker
-    // must finish before the caller drops its temporary identity directory.
     struct StopOnDrop(Arc<AtomicBool>);
     impl Drop for StopOnDrop {
         fn drop(&mut self) {
@@ -74,8 +71,6 @@ fn with_owner<T>(config: OverlayConfig, fixture: impl FnOnce(&Arc<OverlayTranspo
 fn tor_publication_failure_reuses_key_and_shutdown_cancels_blocked_heartbeat() {
     let directory = tempfile::tempdir().expect("directory");
     let path = directory.path().join("onion.key");
-    // A directory at the key path causes publication to fail without relying
-    // on permission bits (which privileged CI users can bypass).
     std::fs::create_dir(&path).expect("publication obstruction");
     let listener = TcpListener::bind("127.0.0.1:0").expect("control");
     let address = listener.local_addr().expect("address");
@@ -124,8 +119,6 @@ fn tor_publication_failure_reuses_key_and_shutdown_cancels_blocked_heartbeat() {
                 Some(key.clone())
             );
             assert!(owner.local_onion.read().is_some());
-            // Leave GETINFO unanswered. Shutdown must interrupt its blocking read.
-            // Keep the socket open until with_owner signals cancellation.
             control
         },
     );
@@ -187,7 +180,6 @@ fn sam_publication_failure_reuses_key_and_shutdown_cancels_blocked_accept() {
             reply(&mut inbound, "HELLO REPLY RESULT=OK VERSION=3.3\n");
             assert!(line(&mut inbound).starts_with("STREAM ACCEPT ID="));
             assert!(owner.sam.read().is_some());
-            // Neither a remote circuit nor a STATUS arrives before cancellation.
             (control, inbound)
         },
     );

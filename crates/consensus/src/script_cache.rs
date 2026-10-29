@@ -1,27 +1,4 @@
 //! Bounded script-execution cache for natively verified transactions.
-//!
-//! The mempool fills this cache after admitting a transaction under the next
-//! block's script flags, and block connect consults it before building a
-//! transaction's script checks: a hit skips re-execution of scripts the
-//! admission path already verified. This mirrors Core's script-execution
-//! cache (filling in `CheckInputsFromMempoolAndCache`, consulting in
-//! `ConnectBlock`, `validation.cpp`), keyed by witness transaction id and
-//! the exact flag bits.
-//!
-//! Soundness rests on two properties. First, script execution is a pure
-//! function of the transaction, its prevouts, and the flags: an outpoint's
-//! script and value are immutable once created, so a reorg can change which
-//! outpoints are spendable but never what they contain; finality, amounts,
-//! BIP68 locks, and sigop limits are NOT cached and always re-run. Second,
-//! the key carries the exact flag bits, so any flag divergence between fill
-//! and connect is a miss, never an unsound skip.
-//!
-//! Memory bound: at most [`SCRIPT_EXECUTION_CACHE_ENTRIES`] live keys in the
-//! map, and the FIFO queue never exceeds twice that (a compaction retains
-//! only live entries whenever the queue reaches the bound). Taken keys leave
-//! one stale queue node each; the stale nodes are skipped during eviction and
-//! reclaimed by compaction, so repeated insert/take/reinsert cycles cannot
-//! grow either structure without bound.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -32,32 +9,21 @@ use parking_lot::Mutex;
 /// Maximum live `(wtxid, flag-bits)` entries retained.
 pub const SCRIPT_EXECUTION_CACHE_ENTRIES: usize = 1 << 18;
 
-/// Queue length that triggers a live-only compaction (twice the live bound).
 const QUEUE_COMPACT_LEN: usize = 2 * SCRIPT_EXECUTION_CACHE_ENTRIES;
 
 type CacheKey = (Wtxid, u32);
 
 struct Inner {
-    /// Live keys mapped to their queue generation. Every live key owns
-    /// exactly one queue node carrying the same generation; queue nodes
-    /// whose generation disagrees are stale (taken or evicted) and skipped.
     live: HashMap<CacheKey, u64>,
     queue: VecDeque<(CacheKey, u64)>,
     next_generation: u64,
 }
 
-/// Bounded, shared script-execution result cache for the native engine.
-///
-/// `Send + Sync` so one instance is shared by the mempool gateway (fill) and
-/// the chainstate connect path (consult). There is intentionally no signature
-/// cache here: only full script executions verified under explicit flags are
-/// recorded.
 pub struct ScriptExecutionCache {
     inner: Mutex<Inner>,
 }
 
 impl ScriptExecutionCache {
-    /// Creates an empty cache.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -69,11 +35,6 @@ impl ScriptExecutionCache {
         }
     }
 
-    /// Records a successful script execution of `wtxid` under `flags`.
-    ///
-    /// Re-inserting a live key is a no-op (no duplicate queue node), so the
-    /// one-live-key-one-queue-node invariant — and with it the memory bound —
-    /// holds under reinsertion pressure.
     pub fn insert(&self, wtxid: Wtxid, flags: VerifyFlags) {
         let key = (wtxid, flags.bits());
         let mut inner = self.inner.lock();
@@ -83,8 +44,6 @@ impl ScriptExecutionCache {
         if inner.live.len() >= SCRIPT_EXECUTION_CACHE_ENTRIES {
             evict_oldest_live(&mut inner);
         }
-        // Disjoint field borrows through the guard: the queue compacts
-        // against the live map without cloning either structure.
         if inner.queue.len() >= QUEUE_COMPACT_LEN {
             let Inner { live, queue, .. } = &mut *inner;
             queue.retain(|(key, generation)| live.get(key) == Some(generation));
@@ -95,11 +54,6 @@ impl ScriptExecutionCache {
         inner.queue.push_back((key, generation));
     }
 
-    /// Removes `(wtxid, flags)` and reports whether it was present.
-    ///
-    /// Core erases a cache entry on block use; a hit fires exactly once and a
-    /// second use re-verifies. The stale queue node is reclaimed by eviction
-    /// or compaction.
     pub fn take(&self, wtxid: Wtxid, flags: VerifyFlags) -> bool {
         self.inner
             .lock()
@@ -109,24 +63,12 @@ impl ScriptExecutionCache {
     }
 }
 
-/// Transaction-bound ownership of the script-cache entries one pre-proof
-/// window took.
-///
-/// A window pre-proof takes entries as it skips already-verified scripts,
-/// but a window that later fails its proof or is refused at admission never
-/// commits those blocks. Dropping without [`Self::rollback`] keeps the takes
-/// consumed, exactly like a direct [`ScriptExecutionCache::take`]; rolling
-/// back restores every taken entry, so the failed or refused window's
-/// positives stay reusable and a retry never re-verifies them. Only exact
-/// takes are ever restored: an entry that was never present is never
-/// inserted.
 pub struct WindowCacheTakes<'a> {
     cache: &'a ScriptExecutionCache,
     taken: Vec<(Wtxid, VerifyFlags)>,
 }
 
 impl<'a> WindowCacheTakes<'a> {
-    /// Opens one window's take log over `cache`.
     pub fn new(cache: &'a ScriptExecutionCache) -> Self {
         Self {
             cache,
@@ -134,8 +76,6 @@ impl<'a> WindowCacheTakes<'a> {
         }
     }
 
-    /// Removes `(wtxid, flags)` through the shared cache, logging the exact
-    /// hits a later [`Self::rollback`] restores.
     pub fn take(&mut self, wtxid: Wtxid, flags: VerifyFlags) -> bool {
         let hit = self.cache.take(wtxid, flags);
         if hit {
@@ -144,21 +84,14 @@ impl<'a> WindowCacheTakes<'a> {
         hit
     }
 
-    /// Restores every entry this window took, in take order.
     pub fn rollback(self) {
         self.rollback_to(0);
     }
 
-    /// Marks the current end of the take log; a later
-    /// [`Self::rollback_to`] with this mark restores only later takes.
     pub fn checkpoint(&self) -> usize {
         self.taken.len()
     }
 
-    /// Restores every entry taken at or after `pos`, in take order. A past
-    /// mark restores the takes of blocks that never committed while the
-    /// committed prefix stays consumed; a mark past the end restores
-    /// nothing.
     pub fn rollback_to(self, pos: usize) {
         for (wtxid, flags) in self.taken.into_iter().skip(pos) {
             self.cache.insert(wtxid, flags);
@@ -166,10 +99,6 @@ impl<'a> WindowCacheTakes<'a> {
     }
 }
 
-/// Pops FIFO nodes until the oldest live entry is removed. Stale nodes left
-/// behind by [`ScriptExecutionCache::take`] are skipped, so a taken key is
-/// never counted toward eviction. Always terminates: every live key owns one
-/// matching queue node, and the caller only evicts while a live key exists.
 fn evict_oldest_live(inner: &mut Inner) {
     while let Some((old_key, old_generation)) = inner.queue.pop_front() {
         if inner.live.get(&old_key) == Some(&old_generation) {
@@ -198,9 +127,6 @@ mod tests {
     use super::*;
     use bitcoin_rs_primitives::Hash256;
 
-    /// Distinct cache keys for `0 <= i < SCRIPT_EXECUTION_CACHE_ENTRIES + 2`.
-    /// The low four little-endian bytes are unique below 2^32 without any
-    /// fallible conversion.
     fn key(i: usize) -> Wtxid {
         let mut bytes = [0u8; 32];
         bytes[..4].copy_from_slice(&i.to_le_bytes()[..4]);
@@ -262,10 +188,6 @@ mod tests {
         for i in 0..SCRIPT_EXECUTION_CACHE_ENTRIES {
             cache.insert(key(i), VerifyFlags::MANDATORY);
         }
-        // Take the oldest: the freed slot absorbs the next insert with no
-        // eviction. One further insert crosses live capacity, and its
-        // eviction must skip the taken key's stale queue node, dropping the
-        // next-oldest live key instead.
         assert!(cache.take(key(0), VerifyFlags::MANDATORY));
         cache.insert(key(SCRIPT_EXECUTION_CACHE_ENTRIES), VerifyFlags::MANDATORY);
         assert_eq!(live_len(&cache), SCRIPT_EXECUTION_CACHE_ENTRIES);
@@ -287,8 +209,6 @@ mod tests {
     #[test]
     fn insert_take_reinsert_cycles_keep_both_structures_bounded() {
         let cache = ScriptExecutionCache::new();
-        // Three full-capacity rounds flattened into one loop: takes interleave
-        // with inserts and every key is reinserted under alternating flags.
         let rounds = 3;
         for n in 0..rounds * SCRIPT_EXECUTION_CACHE_ENTRIES {
             let i = n % (SCRIPT_EXECUTION_CACHE_ENTRIES + 1);

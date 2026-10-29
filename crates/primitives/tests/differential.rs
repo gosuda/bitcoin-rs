@@ -1,16 +1,5 @@
 //! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
 //! `sighash.json` vectors, and fuzz-corpus self-consistency.
-//!
-//! Fuzz-corpus gates read `BITCOIN_RS_FUZZ_CORPUS/<target>` first (the
-//! `corpus/` directory of a gosuda/bitcoin-rs-fuzz-corpus checkout, the
-//! canonical seed home) and fall back to a local `fuzz/corpus/<target>/`
-//! overlay; they loud-skip (with a stderr note) only when neither exists. A
-//! present-but-empty corpus fails. When the corpus root carries
-//! `verdicts.json`, every seed is checked against its pinned verdict
-//! (accepted seeds re-encode byte-identically; rejected seeds keep their
-//! typed `DecodeError` kind) so a decoder change cannot silently flip a
-//! verdict — `QAC-05`, docs/contracts/qa-corpus.md. Without the file the
-//! gate degrades to checking that each seed yields a well-formed verdict.
 
 #![expect(
     clippy::expect_used,
@@ -26,6 +15,7 @@ use bitcoin_rs_primitives::{
 };
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -57,22 +47,11 @@ fn fixture_blocks() -> Vec<(String, Vec<u8>)> {
     blocks
 }
 
-/// Root directory that holds per-target corpus directories.
-///
-/// `BITCOIN_RS_FUZZ_CORPUS` points at the `corpus/` directory of a
-/// gosuda/bitcoin-rs-fuzz-corpus checkout (`<dir>/<target>`) and is
-/// authoritative when set; a local `fuzz/corpus/` overlay is consulted when
-/// the variable is unset.
 fn corpus_root() -> PathBuf {
     std::env::var_os("BITCOIN_RS_FUZZ_CORPUS")
         .map_or_else(|| repo_root().join("fuzz/corpus"), PathBuf::from)
 }
 
-/// Reads fuzz seeds for `target`.
-///
-/// Returns `None` only when the selected directory does not exist (the
-/// corpus lives in another repository and may not be checked out);
-/// `Some` — possibly empty — when it does.
 fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let dir = corpus_root().join(target);
     let entries = match std::fs::read_dir(&dir) {
@@ -102,10 +81,6 @@ fn assert_tx_roundtrip(serialized: &[u8], expected_wtxid: &str, context: &str) {
         32,
         "{context}: txid width"
     );
-    // Golden wtxid derived independently of this codec (BIP141: double
-    // SHA-256 of the full serialization; equal to the txid without witness
-    // data). The tests/testdata/<height>.wtxids.txt goldens were derived
-    // once offline and are checked in.
     let expected = Wtxid::from_str(expected_wtxid)
         .unwrap_or_else(|error| panic!("{context}: golden wtxid hex: {error}"));
     assert_eq!(native.wtxid(), expected, "{context}: golden wtxid");
@@ -144,27 +119,8 @@ fn fixture_blocks_roundtrip_byte_identically() {
     }
 }
 
-/// Expected decoder verdicts for every corpus seed, pinned in
-/// `verdicts.json` at the corpus root (`QAC-05`, docs/contracts/qa-corpus.md).
-///
-/// Accepted seeds must decode and re-encode byte-identically; rejected seeds
-/// must still be rejected with the pinned error kind, so a decoder change
-/// that silently flips a verdict fails here instead of drifting. Rejections
-/// are dominated by Core's "Superfluous witness record" rule
-/// (`superfluous_witness`): a BIP144 marker/flag with an all-empty witness
-/// section can never re-encode byte-identically, so the codec rejects it
-/// before the lock time, matching Bitcoin Core's check position.
-///
-/// `CORPUS_VERDICTS_WRITE=1` regenerates `verdicts.json` from observed
-/// verdicts (test-local write path, the documented maintenance route; the
-/// publish-corpus job runs it after applying campaign output). When
-/// `verdicts.json` is absent — a local overlay, or a corpus checkout from
-/// before the file existed — the gate degrades to the verdict-shape check
-/// alone and says so.
 fn enforce_corpus_verdicts(target: &str) {
     let Some(seeds) = corpus_seeds(target) else {
-        // Test-binary runner output (allowed exception: not a library path):
-        // an absent corpus must skip loudly, not pass silently.
         eprintln!(
             "SKIP {target}: no corpus directory \
              (set BITCOIN_RS_FUZZ_CORPUS to a bitcoin-rs-fuzz-corpus checkout)"
@@ -193,32 +149,26 @@ fn enforce_corpus_verdicts(target: &str) {
 
     let manifest_path = corpus_root().join("verdicts.json");
     if std::env::var_os("CORPUS_VERDICTS_WRITE").is_some() {
-        // Read-modify-write so per-target invocations merge into one file.
         let mut root = std::fs::read_to_string(&manifest_path)
             .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|text| sonic_rs::from_str::<Value>(&text).ok())
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default();
         root.insert(
-            "_contract".to_owned(),
-            serde_json::Value::String(
+            "_contract",
+            Value::from(
                 "QAC-05 (docs/contracts/qa-corpus.md): expected decoder verdict per seed; \
                  regenerate with BITCOIN_RS_FUZZ_CORPUS=<corpus> \
-                 CORPUS_VERDICTS_WRITE=1 cargo test -p bitcoin-rs-primitives"
-                    .to_owned(),
+                 CORPUS_VERDICTS_WRITE=1 cargo test -p bitcoin-rs-primitives",
             ),
         );
-        root.insert(
-            target.to_owned(),
-            serde_json::Value::Object(
-                observed
-                    .into_iter()
-                    .map(|(name, verdict)| (name, serde_json::Value::String(verdict)))
-                    .collect(),
-            ),
-        );
-        let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(root))
-            .expect("verdicts.json renders");
+        let mut section = sonic_rs::Object::with_capacity(observed.len());
+        for (name, verdict) in observed {
+            section.insert(name.as_str(), Value::from(verdict.as_str()));
+        }
+        root.insert(target, Value::from(section));
+        let rendered =
+            sonic_rs::to_string_pretty(&Value::from(root)).expect("verdicts.json renders");
         std::fs::write(&manifest_path, rendered + "\n")
             .unwrap_or_else(|error| panic!("writing {}: {error}", manifest_path.display()));
         eprintln!(
@@ -236,7 +186,7 @@ fn enforce_corpus_verdicts(target: &str) {
         );
         return;
     };
-    let manifest = serde_json::from_str::<serde_json::Value>(&manifest_text)
+    let manifest = sonic_rs::from_str::<Value>(&manifest_text)
         .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
     let expected = manifest
         .get(target)
@@ -262,7 +212,7 @@ fn enforce_corpus_verdicts(target: &str) {
             }
         }
     }
-    for name in expected.keys() {
+    for (name, _) in expected {
         assert!(
             observed.contains_key(name),
             "{target}: verdicts.json lists {name} but the corpus no longer has it; \
@@ -271,8 +221,6 @@ fn enforce_corpus_verdicts(target: &str) {
     }
 }
 
-/// Classifies one seed: `accepted` when it decodes and re-encodes
-/// byte-identically, otherwise `rejected:<error-kind>`.
 fn decode_verdict<T: ConsensusDecode + ConsensusEncode>(bytes: &[u8]) -> String {
     match deserialize::<T>(bytes) {
         Ok(value) => {
@@ -287,7 +235,6 @@ fn decode_verdict<T: ConsensusDecode + ConsensusEncode>(bytes: &[u8]) -> String 
     }
 }
 
-/// Stable short name for a decode error, the rejected-verdict suffix.
 fn error_kind(error: &DecodeError) -> String {
     match error {
         DecodeError::EndOfData { .. } => "end_of_data".to_owned(),
@@ -298,9 +245,6 @@ fn error_kind(error: &DecodeError) -> String {
     }
 }
 
-// Both corpus gates enforce the QAC-05 round-trip contract
-// (docs/contracts/qa-corpus.md): every seed decodes to a typed verdict and
-// accepted seeds re-encode byte-identically.
 #[test]
 fn corpus_seeds_decode_with_typed_verdicts() {
     for target in ["tx_validate", "block_validate"] {
@@ -371,7 +315,7 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
     let path = repo_root().join("crates/consensus/tests/vectors/sighash.json");
     let data = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
-    let vectors = serde_json::from_str::<serde_json::Value>(&data)?
+    let vectors = sonic_rs::from_str::<Value>(&data)?
         .as_array()
         .expect("sighash.json is an array")
         .clone();
@@ -383,11 +327,11 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
         let script_hex = vector.get(1).and_then(|v| v.as_str()).unwrap_or("");
         let input_index = vector
             .get(2)
-            .and_then(serde_json::Value::as_u64)
+            .and_then(JsonValueTrait::as_u64)
             .expect("input index");
         let hash_type = vector
             .get(3)
-            .and_then(serde_json::Value::as_i64)
+            .and_then(JsonValueTrait::as_i64)
             .expect("hash type");
         let expected = vector
             .get(4)
@@ -412,10 +356,6 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
             .legacy_signature_hash(input_index, &script, flag)
             .unwrap_or_else(|error| panic!("vector {expected}: native sighash failed: {error}"));
 
-        // Core's sighash.json contains OP_CODESEPARATOR vectors whose expected hash
-        // assumes the interpreter-level codesep strip; this crate hashes the script
-        // as-is (the interpreter strips codeseps before signing), so those entries
-        // are skipped here.
         if script.contains(&0xab) {
             skipped_codeseparator = skipped_codeseparator.saturating_add(1);
             continue;

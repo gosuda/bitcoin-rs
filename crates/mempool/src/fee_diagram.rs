@@ -1,16 +1,9 @@
-//! Fee curves over the mempool owner's graph projection.
-//!
-//! A maximum-weight closure chooses a dependency-closed set at a given fee
-//! rate. Parametric min-cuts find the highest-rate set without enumerating
-//! subsets. This module owns no transactions or mutable mempool state.
-
 use core::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-/// Failure to construct or compare a checked dependency fee diagram.
 pub enum FeeDiagramError {
     /// The fee or accumulated weight exceeds the checked representation.
     #[error("fee diagram arithmetic overflow")]
@@ -23,8 +16,6 @@ pub enum FeeDiagramError {
     Dependencies,
 }
 
-/// Fee over sigop-adjusted weight. Core's graph uses weight before rounding
-/// to virtual bytes; using rounded vsize changes comparisons for witnesses.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct FeeWeight {
     pub fee: i128,
@@ -44,21 +35,18 @@ impl FeeWeight {
             .fee
             .checked_add(other.fee)
             .ok_or(FeeDiagramError::Arithmetic)?;
-        // Bound cross-products so rate sorting can multiply infallibly.
         fee.checked_mul(i128::from(i32::MAX))
             .ok_or(FeeDiagramError::Arithmetic)?;
         Ok(Self { fee, weight })
     }
 
     pub(crate) fn rate_cmp(self, other: Self) -> Ordering {
-        // validate/checked_add establish the product bound before sorting.
         (self.fee * i128::from(other.weight)).cmp(&(other.fee * i128::from(self.weight)))
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Chunk {
-    /// Positions in the supplied graph, in dependency order.
     pub members: Vec<usize>,
     pub total: FeeWeight,
 }
@@ -162,8 +150,6 @@ fn validate(fees: &[FeeWeight], parents: &[Vec<usize>]) -> Result<(), FeeDiagram
     Ok(())
 }
 
-/// Stable topological order, preferring the supplied order among ready nodes.
-/// Shared by linearization and mutation publication; no quadratic rescanning.
 pub(crate) fn topological(
     parents: &[Vec<usize>],
     members: &[usize],
@@ -208,8 +194,6 @@ pub(crate) fn topological(
     Ok(ordered)
 }
 
-/// Compute decreasing-rate, dependency-closed chunks. All graph indices are
-/// local to this immutable input. Work is bounded by its node and edge counts.
 pub(crate) fn linearize(
     fees: &[FeeWeight],
     parents: &[Vec<usize>],
@@ -460,8 +444,6 @@ fn value_at(points: &[FeeWeight], at: u32) -> Result<(i128, i128), FeeDiagramErr
     Ok((fee, span))
 }
 
-/// Pointwise comparison, including horizontal tails. Crossing curves are
-/// incomparable; equal total fees alone never establish an improvement.
 pub(crate) fn compare(
     left: &[FeeWeight],
     right: &[FeeWeight],

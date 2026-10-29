@@ -1,39 +1,18 @@
 //! Bitcoin Core `net:*` tracepoint payload mapping.
-//!
-//! [`inbound_message`] fires per checksum-valid wire message in the connection read
-//! loop and during the handshake; [`outbound_message`] fires per write
-//! attempt by the connection writer and during the handshake. Argument
-//! positions and types follow Bitcoin Core's published ABI — see
-//! `docs/tracing.md` and `bitcoin_rs_consensus`'s `probes.d` table. Every
-//! emitter no-ops unless the connection carries a [`NetTrace`], which only
-//! the live inbound-accept and outbound-dial roots attach, and payload
-//! preparation runs only while a consumer (bpftrace, BCC, DTrace) holds
-//! the probe's semaphore, so an untraced or unattached run pays nothing.
 
 use crate::PeerRemote;
 
 use crate::peer_info::PeerRole;
 use crate::wire::Message;
 
-/// Per-connection identity for the `net:*` probe payloads.
-///
-/// Captured once where the connection direction and remote address are
-/// known — the inbound accept path and the outbound dial — and carried by
-/// the connection's [`crate::peer::Peer`] and writer thread. Probe-free
-/// connections (tests, in-memory streams) carry none, keeping the probes
-/// out of their binaries.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NetTrace {
-    /// Process-unique connection id (Core argument 1, `peerid`).
     node_id: u64,
-    /// Remote address and port (Core argument 2).
     peer: PeerRemote,
-    /// Core `ConnectionTypeAsString` label (Core argument 3).
     connection_type: &'static str,
 }
 
 impl NetTrace {
-    /// Context for an accepted inbound connection.
     pub(crate) fn inbound(node_id: u64, peer: PeerRemote) -> Self {
         Self {
             node_id,
@@ -42,8 +21,6 @@ impl NetTrace {
         }
     }
 
-    /// Context for a dialed connection, labelled per Core's
-    /// `ConnectionTypeAsString` for the dial kind and role.
     pub(crate) fn outbound(node_id: u64, peer: PeerRemote, role: PeerRole, manual: bool) -> Self {
         let connection_type = if manual {
             "manual"
@@ -61,18 +38,12 @@ impl NetTrace {
     }
 }
 
-/// Fires `net:inbound_message` for one checksum-valid wire message.
-///
-/// `payload` is the checksum-validated wire payload as read; it must
-/// outlive this call, which the wire reader's buffer satisfies. A malformed
-/// typed payload is still observable before decoding fails.
 pub(crate) fn inbound_message(trace: Option<&NetTrace>, command: &str, payload: &[u8]) {
     if let Some(trace) = trace {
         bitcoin_rs_consensus::trace::inbound_message(|| message_args(trace, command, payload));
     }
 }
 
-/// Fires `net:outbound_message` for one write attempt.
 pub(crate) fn outbound_message(trace: Option<&NetTrace>, message: &Message, payload: &[u8]) {
     if let Some(trace) = trace {
         bitcoin_rs_consensus::trace::outbound_message(|| {
@@ -82,7 +53,6 @@ pub(crate) fn outbound_message(trace: Option<&NetTrace>, message: &Message, payl
     }
 }
 
-/// Assembles Core's six-argument payload tuple for one message.
 fn message_args(
     trace: &NetTrace,
     command: &str,
@@ -94,8 +64,6 @@ fn message_args(
         trace.connection_type.to_owned(),
         command.to_owned(),
         payload_len_u64(payload.len()),
-        // A zero-length payload has no addressable bytes; hand the tracer a
-        // null pointer rather than a dangling non-null one.
         if payload.is_empty() {
             std::ptr::null()
         } else {
@@ -104,13 +72,10 @@ fn message_args(
     )
 }
 
-/// Node ids are `u64`; the ABI publishes Core's `int64` position, so ids
-/// above `i64::MAX` clamp rather than wrap negative.
 fn node_id_i64(node_id: u64) -> i64 {
     i64::try_from(node_id).unwrap_or(i64::MAX)
 }
 
-/// Payload lengths are `usize`; the ABI publishes `uint64`.
 fn payload_len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
@@ -145,10 +110,6 @@ mod tests {
         assert_eq!(size, u64::try_from(payload.len()).unwrap_or(u64::MAX));
         assert_eq!(pointer, payload.as_ptr());
         // SAFETY: `pointer` is `payload.as_ptr()` built above, so it carries
-        // the payload borrow's provenance; `size` is the payload length, so
-        // the range is in bounds; `u8` needs no alignment; the payload is
-        // initialized and borrowed immutably for the whole read, so no
-        // mutable alias exists while the shared slice below is alive.
         let seen = unsafe {
             std::slice::from_raw_parts(
                 pointer,

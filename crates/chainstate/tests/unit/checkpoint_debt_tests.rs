@@ -1,6 +1,3 @@
-//! An in-flight disconnect refuses checkpoint publication without touching
-//! the published state.
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -23,8 +20,6 @@ fn checkpoint_dirs(root: &std::path::Path) -> Result<BTreeSet<String>, Box<dyn s
     Ok(dirs)
 }
 
-/// An `InFlight` disconnect marker refuses publication and leaves the marker,
-/// `CURRENT`, and the generation directories exactly as they were.
 #[test]
 fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
 -> Result<(), Box<dyn std::error::Error>> {

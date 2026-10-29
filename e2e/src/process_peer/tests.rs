@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use bitcoin::consensus::serialize;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
-use serde_json::Value;
+use sonic_rs::Value;
 use tempfile::TempDir;
 
 use super::ProcessPeer;
@@ -43,7 +43,7 @@ fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::Error) {
     let records: Vec<Value> = std::fs::read_to_string(dir.path().join("p2p.jsonl"))
         .expect("record text")
         .lines()
-        .map(|line| serde_json::from_str(line).expect("record JSON"))
+        .map(|line| sonic_rs::from_str(line).expect("record JSON"))
         .collect();
     assert_eq!(
         records.first().expect("first record")["direction"],
@@ -134,8 +134,6 @@ fn record_write_failure_does_not_replace_the_network_error() {
 fn bytes_past_the_deadline_do_not_renew_it() {
     let (mut peer, mut remote, _dir) = fixture();
     remote.write_all(&[7]).expect("one byte before the read");
-    // Wait for the byte to reach the socket so the lapsed deadline pauses on
-    // real progress instead of timing out on an empty queue.
     peer.stream
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("peek timeout");
@@ -173,8 +171,6 @@ fn a_paused_frame_resumes_from_where_it_stopped() {
     remote
         .write_all(&frame[..10])
         .expect("partial header bytes");
-    // Wait for the partial header to be queued so the first call consumes
-    // it before its deadline interrupts.
     peer.stream
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("peek timeout");

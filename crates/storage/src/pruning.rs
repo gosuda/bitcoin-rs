@@ -1,42 +1,12 @@
 //! Deletion of historical block bodies and undo records, once the active
 //! chain no longer needs them.
 //!
-//! [`crate::pruning::stage_block_and_undo_prune`] is the main entry point. It stages
-//! block-body and undo-row deletion together with prune-height metadata into
-//! one caller-owned atomic batch, so node wiring commits them in a single
-//! backend commit. Both kinds of data are pruned against the durable tip
-//! rather than the in-memory tip: a crash restores to the last durable
-//! checkpoint, and bodies between that base and the crash-recovery sidecar tip
-//! are evidence needed for local replay while undo records are needed to
-//! disconnect back through the restored chain. After the index rows commit,
-//! [`crate::pruning::reclaim_staged_flat_block_files`] deletes the staged flat block files,
-//! and [`crate::pruning::PruneOutcome`] reports the bytes and row counts freed.
-//!
-//! Rows pinned by a live [`RetentionLease`] are never staged: the pass
-//! reserves its deletion line through [`RetentionRegistry::reserve`], which
-//! folds every live lease floor into that line before any deletion is
-//! selected, so a reader holding a lease keeps exactly its required
-//! history.
-//!
-//! Three prune meanings stay separate. The *requested* height is operator
-//! intent (`node:pruneheight`). The *effective* line is that intent folded
-//! with reorg safety, live retention, and the byte target. The
-//! [`crate::pruning::ExecutedFrontier`] (`node:prune_executed`) is the durable, monotonic
-//! fact of what a committed pass deleted, written in the same batch as its
-//! deletions: it is what a restart reconstructs and what refuses a lease,
-//! and no consumer infers it from the intent line.
-//!
-//! [`PrunePolicy`] converts the configured mebibyte target to bytes and applies the
-//! reorg-safety retention floor. The node supplies the policy; the pruning
-//! pass selects and stages deletions.
 
 use alloc::sync::Arc;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
 
-/// Block-body pruning over persisted block rows.
 mod block_pruner;
-/// Retention leases that keep required history against pruning.
 mod lease;
 
 pub use crate::undo::block_undo_key;
@@ -57,22 +27,18 @@ pub struct PrunePolicy {
 }
 
 impl PrunePolicy {
-    /// Returns true when this policy disables pruning.
     #[must_use]
     pub const fn is_full_node(self) -> bool {
         self.target_size_mb == u64::MAX
     }
 
-    /// Returns the byte target used by pruning passes.
     #[must_use]
     pub const fn target_size_bytes(self) -> u64 {
         self.target_size_mb.saturating_mul(BYTES_PER_MIB)
     }
 
-    /// Returns the effective retention depth below tip.
     #[must_use]
     pub fn retention_depth(self) -> u32 {
-        // SPEC: Core's reorg-safety margin is 288 blocks.
         self.keep_below_tip.max(CORE_REORG_SAFETY_MARGIN)
     }
 }
@@ -107,7 +73,6 @@ fn load_u32_metadata<S: crate::KvStore>(
     Ok(Some(u32::from_be_bytes(encoded)))
 }
 
-/// Loads the persisted prune-batch receipt counter.
 fn load_prune_batch<S: crate::KvStore>(store: &S) -> Result<Option<u64>, StorageError> {
     let Some(bytes) = store.get(crate::ColumnFamily::UtxoMeta, PRUNE_BATCH_METADATA_KEY)? else {
         return Ok(None);
@@ -124,7 +89,6 @@ fn load_prune_batch<S: crate::KvStore>(store: &S) -> Result<Option<u64>, Storage
 }
 
 /// Loads the persisted manual-prune line.
-///
 /// This is the operator's requested height: intent, and never proof that
 /// rows were deleted. The deleted range is
 /// [`load_executed_frontier`].
@@ -132,7 +96,6 @@ pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, Sto
     load_u32_metadata(store, PRUNEHEIGHT_METADATA_KEY, "pruneheight")
 }
 
-/// Loads the persisted executed prune frontier, when the record exists.
 pub fn load_executed_frontier<S: crate::KvStore>(
     store: &S,
 ) -> Result<Option<ExecutedFrontier>, StorageError> {
@@ -143,29 +106,19 @@ pub fn load_executed_frontier<S: crate::KvStore>(
 /// The durable, monotonic executed prune frontier: one past the highest
 /// block-body or undo row a committed prune pass deleted.
 ///
-/// This is the one authoritative answer to "what history is permanently
-/// gone?". Three meanings stay distinct: the *requested* prune height is
-/// operator intent (`node:pruneheight`); the *effective* prune line is that
-/// intent folded with reorg safety, active retention, and the byte target;
-/// the frontier names only deletions that committed.
-///
 /// PRE: [`Self::NONE`] is the state of a store that has deleted nothing.
 ///
-/// POST: a pass writes its frontier inside the same batch as its row
-/// deletions, so the record and the deletion commit together or not at all,
-/// and a restart reconstructs exactly the committed boundary.
-///
-/// INVARIANT: the frontier never moves backwards, every height below it is
-/// gone, and no lease is granted below it, so no reader can pin rows the
-/// frontier names as deleted.
+/// POST: a pass writes its frontier inside the same batch as its row deletions, so the
+/// record and the deletion commit together or not at all, and a restart reconstructs
+/// exactly the committed boundary. INVARIANT: the frontier never moves backwards, every
+/// height below it is gone, and no lease is granted below it, so no reader can pin rows
+/// the frontier names as deleted.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ExecutedFrontier(u32);
 
 impl ExecutedFrontier {
-    /// The frontier of a store that has deleted nothing.
     pub const NONE: Self = Self(0);
 
-    /// Wraps a raw frontier height.
     #[must_use]
     pub const fn new(height: u32) -> Self {
         Self(height)
@@ -177,7 +130,6 @@ impl ExecutedFrontier {
         self.0
     }
 
-    /// The monotonic join of two frontiers.
     #[must_use]
     pub(crate) const fn advance(self, other: Self) -> Self {
         if self.0 >= other.0 { self } else { other }
@@ -185,8 +137,6 @@ impl ExecutedFrontier {
 
     /// Loads the committed frontier without inferring deletions from surviving rows.
     ///
-    /// Every current prune pass commits the frontier, requested height and batch
-    /// receipt atomically with its deletions, including passes deleting nothing.
     /// Absence is legitimate only before any pass committed. A missing frontier
     /// alongside either prune record is incompatible data, never an empty frontier.
     pub fn reconstruct<S: crate::KvStore>(store: &S) -> Result<Self, StorageError> {
@@ -203,44 +153,20 @@ impl ExecutedFrontier {
 }
 
 /// What one pruning pass staged for its caller's atomic batch.
-///
-/// [`stage_block_and_undo_prune`] fills this; the caller commits the batch,
-/// reclaims the flat files, and then promotes [`StagedPrune::pruned_below`]
-/// through [`PruneReservation::commit`] so later lease requests learn what
-/// is actually gone.
 #[derive(Debug, Default)]
 pub struct StagedPrune {
-    /// Block-body rows the batch deletes.
     pub blocks: PruneOutcome,
-    /// Undo rows the batch deletes.
     pub undo: PruneOutcome,
-    /// Flat block files to reclaim after the batch commits.
     pub file_numbers: Vec<u32>,
-    /// One past the highest deleted row height; zero when the pass staged
-    /// nothing. This is the value to promote through
-    /// [`PruneReservation::commit`]: floors at or below it may name deleted
-    /// rows, floors above it name rows the pass left.
     pub pruned_below: u32,
 }
 
 /// One manual prune pass.
 ///
-/// It clamps the line under the Core reorg margin, reserves it, stages rows,
-/// persists the requested height and the executed frontier in the same batch,
-/// commits durably, and reclaims files.
-///
 /// PRE: the caller holds the pruning authority, so passes do not overlap.
 ///
-/// POST: on `Ok`, the deletions and the [`ExecutedFrontier`] describing them
-/// are committed through one durable batch and the registry's executed line
-/// is at least [`StagedPrune::pruned_below`]; on `Err`, the outcome is
-/// reconciled before the claim releases — a provably committed batch
-/// promotes the line, a provably unapplied one releases the reservation,
-/// and an unprovable one holds it until restart-time recovery.
-///
-/// INVARIANT: no lease is granted below the line this pass deletes
-/// through, because the reservation refuses such grants from the moment it
-/// is taken.
+/// INVARIANT: no lease is granted below the line this pass deletes through, because the
+/// reservation refuses such grants from the moment it is taken.
 pub fn prune_to_height<S: crate::KvStore>(
     store: &S,
     block_files: &crate::FlatFileBlockStore,
@@ -316,28 +242,12 @@ pub fn prune_to_height<S: crate::KvStore>(
 
 /// Stages block-body and undo-row pruning into a caller-owned atomic batch.
 ///
-/// This is intentionally narrow: node wiring uses it to combine manual-prune
-/// row deletion with prune-height metadata in one backend commit.
+/// PRE: `reservation` was taken from the registry the pass commits through, with a line
+/// derived from the durable tip and the policy's retention depth.
 ///
-/// PRE: `reservation` was taken from the registry the pass commits through,
-/// with a line derived from the durable tip and the policy's retention
-/// depth. The pass deletes through [`PruneReservation::line`] and never
-/// re-derives it, so a lease registered after the reservation cannot narrow
-/// the range this batch has already staged.
-///
-/// POST: the batch holds deletions strictly below the reserved line, and
-/// [`StagedPrune::pruned_below`] is one past the highest row staged — a
-/// byte target that stops early, or one already met, leaves nothing to
-/// record.
-///
-/// INVARIANT: block bodies and undo records stage through the one reserved
-/// line, so a lease never holds block bodies while their undo records
-/// delete around them (or the reverse). Both kinds prune against the
-/// durable tip rather than the in-memory applied tip: a crash restores to
-/// the last durable checkpoint, bodies above that base may be named by the
-/// crash-recovery sidecar and must stay available for local replay, and
-/// undo records below the base are needed to disconnect the restored
-/// chain's own tip.
+/// The pass deletes through [`PruneReservation::line`] and never re-derives it, so a
+/// lease registered after the reservation cannot narrow the range this batch has
+/// already staged.
 pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
     batch: &mut BufferedWriteBatch,
@@ -405,22 +315,16 @@ pub struct PruneOutcome {
     pub bytes_freed: u64,
     /// Number of block or undo rows deleted from storage.
     pub blocks_removed: u64,
-    /// Highest row height the pass staged for deletion, if any. A pass
-    /// whose byte target is met stops above rows it leaves behind, so
-    /// this — not the requested line — is what a completed pass may claim
-    /// as gone.
     pub max_height: Option<u32>,
 }
 
 impl PruneOutcome {
-    /// Adds one deleted row to the outcome.
     pub(crate) fn record_removed(&mut self, bytes: u64, height: u32) {
         self.bytes_freed = self.bytes_freed.saturating_add(bytes);
         self.blocks_removed = self.blocks_removed.saturating_add(1);
         self.max_height = Some(self.max_height.map_or(height, |seen| seen.max(height)));
     }
 
-    /// Returns true when no rows were deleted.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.blocks_removed == 0

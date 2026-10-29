@@ -15,10 +15,7 @@ use crate::{
     stats::CoinStatsListener,
 };
 
-/// Per-shard hash table of compact, inline UTXO record owners.
 pub(crate) struct ShardTable {
-    /// Hash table of boxed `UtxoRecord` owners stored inline (16 bytes on
-    /// 64-bit targets).
     pub table: HashTable<UtxoRecord>,
 }
 
@@ -41,13 +38,6 @@ impl ShardTable {
         self.table.iter().map(UtxoRecord::payload_bytes).sum()
     }
 
-    /// Estimated bytes held by the hash table itself, excluding record payloads.
-    ///
-    /// `hashbrown` exposes usable capacity, not bucket count, so this
-    /// reconstructs the layout: buckets are a power of two above
-    /// `capacity / 0.875`, and each carries one `UtxoRecord` (two words on
-    /// 64-bit targets) plus one control byte. An estimate by construction —
-    /// treat it as the right order of magnitude, not an exact figure.
     pub(crate) fn table_bytes(&self) -> usize {
         let capacity = self.table.capacity();
         if capacity == 0 {
@@ -58,13 +48,11 @@ impl ShardTable {
     }
 }
 
-/// One cache-padded, lock-protected UTXO shard.
 pub(crate) struct Shard {
     inner: CachePadded<RwLock<ShardTable>>,
 }
 
 impl Shard {
-    /// Builds an empty shard.
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
@@ -117,7 +105,6 @@ impl Shard {
         commit_single_shard_with_listener(&mut table, adds, removes, shard_idx, listener)
     }
 
-    /// Returns an owned transaction output if `key:vout` is live in this shard.
     #[must_use]
     pub(crate) fn get(&self, key: UtxoKey, txid: &Hash256, vout: u32) -> Option<TxOut> {
         let table = self.inner.read();
@@ -128,8 +115,6 @@ impl Shard {
         Some(txout_from_parts(output.value, output.script_pubkey))
     }
 
-    /// Returns the full live coin (outpoint + txout + coinbase + height)
-    /// if `key:vout` is live in this shard.
     #[must_use]
     pub(crate) fn get_entry(&self, key: UtxoKey, txid: &Hash256, vout: u32) -> Option<UtxoCoin> {
         let table = self.inner.read();
@@ -145,7 +130,6 @@ impl Shard {
         })
     }
 
-    /// Returns true when this shard has any live output for `txid`.
     #[must_use]
     pub(crate) fn has_live_outputs_for_txid(&self, key: UtxoKey, txid: &Hash256) -> bool {
         let table = self.inner.read();
@@ -301,7 +285,6 @@ fn commit_single_shard_coalesced<T: Borrow<TxOut>>(
     )
 }
 
-/// One maximal run of consecutive same-identity payloads in a commit stream.
 #[derive(Copy, Clone)]
 struct RunSpan {
     key: UtxoKey,
@@ -310,13 +293,6 @@ struct RunSpan {
     len: usize,
 }
 
-/// Splits a commit stream into `(key, txid)` runs and sorts them by full
-/// identity, letting the two no-listener sides be merged in one ordered pass
-/// regardless of the caller's input order. The single-shard path never sorts
-/// its input and the multi-shard path only groups runs for `<= 8` active
-/// shards, so this sort is what makes the merge sound. It is stable, so
-/// payloads keep their request/payload order within an identity. Spans
-/// reference the original slice; no payload is copied here.
 fn sorted_run_spans<T>(
     items: &[T],
     identity: impl Fn(&T) -> (UtxoKey, Hash256),
@@ -349,11 +325,6 @@ fn sorted_run_spans<T>(
     spans
 }
 
-/// Merges the sorted remove and add run streams by full identity. When both
-/// sides carry the same record identity the combined editor rebuilds it once;
-/// a one-sided identity keeps its existing optimized remove/add path. New-record
-/// table capacity is reserved once up front, before any record borrow, so no
-/// insert can reallocate the table mid-merge.
 fn merge_commit_runs<'src>(
     table: &mut ShardTable,
     remove_spans: &[RunSpan],
@@ -455,9 +426,6 @@ fn reserve_add_runs(table: &mut ShardTable, additional_runs: usize) {
     }
 }
 
-/// Invokes `apply` once per maximal run of consecutive items sharing the
-/// run's identity under `same_run` (each item compared to the run's first).
-/// Runs are adjacent groups in caller order; the stream is not sorted first.
 fn for_each_run<'a, T: 'a, E>(
     mut items: &'a [T],
     same_run: impl Fn(&T, &T) -> bool,
@@ -475,7 +443,6 @@ fn for_each_run<'a, T: 'a, E>(
     Ok(())
 }
 
-/// Counts the runs `for_each_run` would yield, for table pre-reservation.
 fn run_count<T>(items: &[T], same_run: impl Fn(&T, &T) -> bool) -> usize {
     let mut count = 0usize;
     let _: Result<(), core::convert::Infallible> = for_each_run(items, same_run, |_| {
@@ -572,7 +539,6 @@ fn apply_combined_run(
         let add_unique = vouts_are_strictly_increasing(None, parts.iter().map(|part| part.vout));
         let fresh = UtxoRecord::add_run_replacement(None, txid, parts, add_unique, None)?;
         match fresh.edit_replacement(vouts, &[])? {
-            // Nothing of the fresh record was spent: the additions stand.
             RemovedRecord::Unchanged => RecordMutation::Replace(fresh),
             RemovedRecord::Emptied => RecordMutation::Delete,
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
@@ -722,15 +688,11 @@ fn removed_events(
     events
 }
 
-/// Where one shard commit sends the events it produced.
 trait CommitSink<'a> {
-    /// Takes the outputs one spend run removed.
     fn push_spend_run(&mut self, removals: SmallVec<[UtxoRemoved; 2]>);
 
-    /// Takes the output an addition overwrote, ordered ahead of that addition.
     fn push_overwrite(&mut self, removal: UtxoRemoved);
 
-    /// Takes a run of insertions.
     fn push_inserts(&mut self, inserted: SmallVec<[UtxoInserted<'a>; 8]>);
 }
 
@@ -762,8 +724,6 @@ impl<'a> CommitSink<'a> for UtxoChangeEvents<'a> {
     }
 }
 
-/// Emits one add run: every overwrite removal ends the insert run in front of
-/// it, so the removal is ordered ahead of the insertion that replaces it.
 fn emit_add_events<'a>(
     sink: &mut impl CommitSink<'a>,
     payloads: &[BuildPayload<'a>],
@@ -818,9 +778,6 @@ mod tests {
         Ok(())
     }
 
-    /// A remove run whose vouts match none of a fresh record's additions
-    /// must not drop the additions: the record lands whole and the stray
-    /// spend stays the no-op it always was for a missing record.
     #[test]
     fn fresh_record_with_non_matching_remove_keeps_additions() -> Result<(), UtxoError> {
         let shard = Shard::new();
@@ -835,8 +792,6 @@ mod tests {
             false,
             1,
         );
-        // vout 5 was never created under this txid: the spend no-ops and
-        // the addition still lands.
         shard.commit_single_shard_batch(
             &[add],
             &[OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 5)],

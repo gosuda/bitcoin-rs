@@ -1,5 +1,3 @@
-// CONTRACT: `docs/contracts/mempool-mutations.md#MPL-04` owns peer admission,
-// orphan/reject lifecycle, connection attribution, generation fencing, and retries.
 use super::*;
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
@@ -36,8 +34,6 @@ fn coinbase_tx(value: u64) -> Tx {
     }
 }
 
-// Empty `scriptSig` plus an `OP_TRUE` prevout satisfy `SCRIPT_VERIFY_CLEANSTACK`;
-// the `OP_RETURN` payload pads the non-witness size to the 65-byte floor.
 fn spending_tx() -> Tx {
     let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
     Tx {
@@ -339,9 +335,6 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
-    // Witness counts 1× toward BIP141 weight. A 400_000-byte stack
-    // item puts the body over the 400k standard cap so MissingInputs
-    // cannot consume orphan quota.
     let tx = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -378,14 +371,11 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
     ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
-    // Spend an unfunded parent so the tx lands in the orphan pool.
     let mut orphan = spending_tx();
     orphan.inputs[0].previous_output =
         OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0xEE; 32])), 0);
     let txid = orphan.txid();
 
-    // The fixture source was never registered in this consumer's peer table,
-    // which models a connection disappearing before the next ingress poll.
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(orphan, test_source()));
     assert_eq!(gateway.orphan_count(), 1);
 
@@ -413,9 +403,6 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     let consumer = make_consumer(&gateway, &mining);
     let table = Arc::clone(&consumer.peer_table);
 
-    // Ancestor package: the parent spends UTXO 0xAA:0 into a P2SH `OP_TRUE`
-    // output, which the child spends by revealing its redeem script. The
-    // `OP_RETURN` output of `spending_tx` cannot be spent.
     let mut parent = spending_tx();
     parent.outputs[0].script_pubkey = Script::from_bytes(vec![
         0xA9, 0x14, 0xDA, 0x17, 0x45, 0xE9, 0xB5, 0x49, 0xBD, 0x0B, 0xFA, 0x1A, 0x56, 0x99, 0x71,
@@ -439,7 +426,6 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     let child_wtxid = child.wtxid();
     let child_txid = child.txid();
 
-    // Register the peer that will own the solicited package.
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 19_333);
     let (queue, _frames) = crossbeam_channel::unbounded();
     let lease = bitcoin_rs_p2p::PeerLease::new(queue);
@@ -470,9 +456,6 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
         ),
     );
 
-    // The ancestor-package lifecycle: the node solicits `ancpkginfo` for the
-    // subject, the answer names the missing ancestors, and `getpkgtxns` claims
-    // the request for exactly that sequence.
     assert!(table.request_package_info(source, child_wtxid, &[]));
     assert!(table.request_package_transactions(
         source,
@@ -480,7 +463,6 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
         vec![parent.wtxid(), child_wtxid]
     ));
 
-    // Encode package payload.
     let mut payload = Vec::new();
     payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(2));
     parent.consensus_encode(&mut payload);
@@ -499,15 +481,12 @@ fn consumer_processes_admitted_package_and_publishes_generation() {
     assert_eq!(capacity.held(), 1);
     assert!(capacity.reserved() > 0);
 
-    // Deliver through the consumer.
     consumer.process_body(InboundBody::Package(Box::new(inbound)));
 
-    // Both parent and child must now be in the mempool.
     assert!(gateway.read().contains_txid(&parent_txid));
     assert!(gateway.read().contains_txid(&child_txid));
     assert_eq!(mining.publish_count(), 1);
 
-    // Post-admission release must have returned the capacity and cleared the claim.
     assert_eq!(capacity.reserved(), 0);
     assert_eq!(capacity.held(), 0);
     let teardown = table.clear_package_claims(&capacity);
@@ -520,8 +499,6 @@ fn publish_peer_info(
     lease: &bitcoin_rs_p2p::PeerLease,
     addr: SocketAddr,
 ) {
-    // The poll reconcile only keeps peers with a published handshake; without
-    // this it would treat the peer as gone and retire its requests.
     let version = bitcoin::p2p::message_network::VersionMessage {
         version: 70016,
         services: bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
@@ -602,7 +579,6 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
     publish_peer_info(&table, endpoint, &lease, addr);
     assert!(table.seed_package_relay(source, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
 
-    // Fill the peer's shared in-flight budget with live solicitations.
     let mut fillers = Vec::new();
     for n in 0u32..100 {
         let mut hash = [0u8; 32];
@@ -618,8 +594,6 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
             .into_message();
     }
 
-    // A held orphan from the saturated peer cannot solicit: the refusal must
-    // leave nothing owned and queue no `ancpkginfo` for it.
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
@@ -628,7 +602,6 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
     ));
     assert!(receiver.try_recv().is_err());
     assert_eq!(consumer.mempool_gateway.orphan_count(), 1);
-    // The subject stays recoverable: another peer may still solicit it.
     let (other, other_receiver) = negotiated_peer(&table, 18_341);
     assert!(table.request_package_info(other, subject, &[]));
     assert!(matches!(
@@ -639,7 +612,6 @@ fn refused_solicitation_at_in_flight_cap_queues_parents_for_retry() {
         bitcoin_rs_p2p::Message::GetData(_)
     ));
 
-    // Free one slot, and the paced poll delivers the queued parents.
     assert!(table.release_package_info(source, fillers[0], consumer.mempool_gateway.as_ref()));
     table.poll_transaction_requests(consumer.mempool_gateway.as_ref());
     assert_eq!(
@@ -671,7 +643,6 @@ fn unanswered_solicitation_suppresses_duplicate_parent_requests() {
     assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_b), lease_b));
     assert!(table.seed_package_relay(source_b, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
 
-    // `b` solicits first and waits unanswered with the parents riding along.
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
     assert!(table.request_package_info(source_b, subject, &[parent]));
@@ -683,15 +654,12 @@ fn unanswered_solicitation_suppresses_duplicate_parent_requests() {
         bitcoin_rs_p2p::Message::GetData(_)
     ));
 
-    // The same child arrives from `a`: the live package fetch must not be
-    // raced by duplicate parent requests.
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
         orphan_spending(parent),
         source_a,
     ));
     assert!(receiver_a.try_recv().is_err());
     assert_eq!(consumer.mempool_gateway.orphan_count(), 1);
-    // The successful solicitation is untouched and still owns the subject.
     assert!(table.release_package_info(source_b, subject, consumer.mempool_gateway.as_ref()));
     assert!(receiver_b.try_recv().is_err());
 }
@@ -715,7 +683,6 @@ fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
     assert!(!table.register(bitcoin_rs_p2p::PeerEndpoint::Ip(addr_b), lease_b));
     assert!(table.seed_package_relay(source_b, bitcoin_rs_p2p::packages::PKG_RELAY_ANC));
 
-    // `a` solicits, then closes with its solicitation unanswered.
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     let subject = orphan_spending(parent).wtxid();
     assert!(table.request_package_info(source_a, subject, &[parent]));
@@ -728,8 +695,6 @@ fn closed_owner_solicitation_falls_back_to_live_supplier_parents() {
     ));
     lease_a.cancel();
 
-    // The child arrives from live `b`: the dead solicitation blocks nothing
-    // and the riding parents fall back to the live supplier.
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(
         orphan_spending(parent),
         source_b,

@@ -4,14 +4,11 @@ use bitcoin_rs_primitives::Hash256;
 use secp256k1::{Parity, Scalar, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 
-/// BIP341 annex tag prefix (Core `ANNEX_TAG`).
 pub(crate) const ANNEX_TAG: u8 = 0x50;
 
-/// Control block base size: 1 leaf-version/parity byte + 32-byte x-only internal key.
 pub(crate) const TAPROOT_CONTROL_BASE_SIZE: usize = 33;
 pub(crate) const TAPROOT_CONTROL_NODE_SIZE: usize = 32;
 
-/// Maximum number of merkle-path nodes in a control block (BIP341).
 pub(crate) const TAPROOT_CONTROL_MAX_NODE_COUNT: usize = 128;
 pub(crate) const TAPROOT_CONTROL_MAX_SIZE: usize =
     TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
@@ -19,12 +16,9 @@ pub(crate) const TAPROOT_CONTROL_MAX_SIZE: usize =
 pub(crate) const TAPROOT_LEAF_MASK: u8 = 0xfe;
 pub(crate) const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
 
-// BIP340 "Tagged Hashes": the doubled tag digest is exactly one SHA256
-// block. Keep only these two fixed public prefixes, never request data.
 static TAPBRANCH_ENGINE: LazyLock<Sha256> = LazyLock::new(|| tagged_hash_engine(b"TapBranch"));
 static TAPTWEAK_ENGINE: LazyLock<Sha256> = LazyLock::new(|| tagged_hash_engine(b"TapTweak"));
 
-/// Initializes SHA256 after `SHA256(tag) || SHA256(tag)`, before any message.
 fn tagged_hash_engine(tag: &[u8]) -> Sha256 {
     let tag_hash = Sha256::digest(tag);
     let mut engine = Sha256::new();
@@ -33,7 +27,6 @@ fn tagged_hash_engine(tag: &[u8]) -> Sha256 {
     engine
 }
 
-/// BIP341 `TapBranch`: raw-byte lexicographic ordering, not display order.
 fn compute_tapbranch_hash(prefix: &Sha256, a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     let (first, second) = if a <= b { (a, b) } else { (b, a) };
     let mut engine = prefix.clone();
@@ -42,11 +35,6 @@ fn compute_tapbranch_hash(prefix: &Sha256, a: &[u8; 32], b: &[u8; 32]) -> [u8; 3
     engine.finalize().into()
 }
 
-/// Walks the merkle path from `tapleaf_hash` through the control block's
-/// nodes, returning the computed merkle root.
-///
-/// Mirrors Core's `ComputeTaprootMerkleRoot`. The caller must have already
-/// validated the control block size.
 #[must_use]
 pub(crate) fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256) -> Hash256 {
     let mut k = *tapleaf_hash.as_byte_array();
@@ -55,7 +43,6 @@ pub(crate) fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256
     if nodes.is_empty() {
         return *tapleaf_hash;
     }
-    // Resolve lazy initialization once per path, not once per Merkle node.
     let prefix = LazyLock::force(&TAPBRANCH_ENGINE);
     for node in nodes {
         k = compute_tapbranch_hash(prefix, &k, node);
@@ -63,12 +50,6 @@ pub(crate) fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256
     Hash256::from_le_bytes(&k)
 }
 
-/// Verifies the taproot commitment: that the output pubkey (`program`) equals
-/// the internal pubkey tweaked by the merkle root.
-///
-/// Mirrors Core's `VerifyTaprootCommitment` / `XOnlyPubKey::CheckTapTweak`.
-/// Returns `false` (not an error) when the internal pubkey is invalid or the
-/// tweak check fails, matching Core's behavior.
 #[must_use]
 pub(crate) fn verify_taproot_commitment(
     control: &[u8],
@@ -85,10 +66,6 @@ pub(crate) fn verify_taproot_commitment(
         return false;
     };
     let merkle_root = compute_taproot_merkle_root(control, tapleaf_hash);
-    // TapTweak hash: TaggedHash("TapTweak", internal_pubkey || merkle_root).
-    // The internal pubkey is serialized in big-endian (standard x-only form);
-    // the merkle root is serialized in little-endian (matching Core's uint256
-    // memory layout).
     let mut engine = LazyLock::force(&TAPTWEAK_ENGINE).clone();
     Digest::update(&mut engine, internal.serialize());
     Digest::update(&mut engine, merkle_root.as_byte_array());
@@ -122,8 +99,6 @@ mod tests {
         engine.finalize().into()
     }
 
-    /// Builds a valid single-leaf taproot commitment and returns all the
-    /// pieces needed for script-path tests.
     struct TaprootFixture {
         control: Vec<u8>,
         output: [u8; 32],
@@ -147,7 +122,6 @@ mod tests {
             let tapleaf_bytes = tagged_hash(b"TapLeaf", &tapleaf_msg);
             let tapleaf = Hash256::from_le_bytes(&tapleaf_bytes);
 
-            // Single leaf: merkle root = tapleaf
             let mut tweak_msg = internal.serialize().to_vec();
             tweak_msg.extend_from_slice(&tapleaf_bytes);
             let tweak_bytes = tagged_hash(b"TapTweak", &tweak_msg);
@@ -181,9 +155,6 @@ mod tests {
         if n < 0xfd { vec![n as u8] } else { vec![] }
     }
 
-    /// BIP341 commitment rules: the valid single-leaf tree verifies, its
-    /// merkle root is the tapleaf hash, and every perturbation of the control
-    /// block or output key fails the tweak check.
     #[test]
     fn taproot_commitment_accepts_the_valid_tree_and_rejects_perturbations() {
         for script in [[0x51].as_slice(), &[0x51, 0x52, 0x53]] {
@@ -248,9 +219,6 @@ mod tests {
         output: &'static str,
     }
 
-    // BIP341 wallet-test-vectors.json, scriptPubKey cases 1, 3 and 5.
-    // Source Git blob: 11261b00ba24afb90b62109505d9ca5ddd773b3b.
-    // Expected roots/output keys are published bytes, not candidate outputs.
     const BIP341_VECTORS: [CommitmentVector; 6] = [
         CommitmentVector {
             control: concat!(
@@ -349,8 +317,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP340 Tagged Hashes and BIP341 Script validation rules: compare with
-    // the direct formula at every legal Merkle depth, including equal nodes.
     #[test]
     fn cached_branch_prefix_matches_direct_hash_at_every_control_depth() {
         let leaf = Hash256::from_le_bytes(&[0x5a; 32]);
@@ -383,8 +349,6 @@ mod tests {
         }
     }
 
-    // BIP340 domain separation: concurrent callers must not contaminate the
-    // two fixed prefixes or carry one message into the next message's state.
     #[test]
     fn cached_tag_prefixes_are_independent_across_threads() {
         std::thread::scope(|scope| {

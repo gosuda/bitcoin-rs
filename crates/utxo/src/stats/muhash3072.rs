@@ -1,4 +1,4 @@
-#![allow(clippy::inline_always)] // PERF: Criterion shows forced inlining improves MuHash insert hot paths.
+#![allow(clippy::inline_always)]
 
 use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
@@ -89,14 +89,6 @@ impl Num3072 {
             let mut d1 = 0_u64;
             let mut d2 = 0_u64;
             mul_limb(&mut d0, &mut d1, left[j + 1], right[LIMBS - 1]);
-            // PERF: split the high-column accumulation into two independent
-            // triple-carry chains so the 128-bit multiplies issue without
-            // waiting on the carry chain of the previous `muladd3`. Both chains
-            // sum a disjoint subset of the same products and are merged before
-            // the column total is consumed, so the 192-bit column value is
-            // byte-identical to the serial accumulation: integer addition is
-            // associative/commutative and every partial sum is bounded by the
-            // full column total, which the original algorithm keeps < 2^192.
             let mut e0 = 0_u64;
             let mut e1 = 0_u64;
             let mut e2 = 0_u64;
@@ -118,11 +110,6 @@ impl Num3072 {
             add3(&mut d0, &mut d1, &mut d2, e0, e1, e2);
             mulnadd3(&mut c0, &mut c1, &mut c2, d0, d1, d2, MAX_PRIME_DIFF);
 
-            // PERF: same split for the low-column accumulation. The seed
-            // (carry-in plus the `mulnadd3` fold above) stays in the (c0,c1,c2)
-            // chain; the second chain (f0,f1,f2) starts at zero and collects the
-            // odd-offset products. Merging before `extract3` preserves the exact
-            // column total and therefore the emitted limb and carry-out.
             let mut f0 = 0_u64;
             let mut f1 = 0_u64;
             let mut f2 = 0_u64;
@@ -195,7 +182,6 @@ impl Num3072 {
     }
 }
 
-/// Running 3072-bit `MuHash` accumulator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MuHash3072 {
     numerator: Num3072,
@@ -203,7 +189,6 @@ pub struct MuHash3072 {
 }
 
 impl MuHash3072 {
-    /// Creates the identity accumulator.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -212,17 +197,14 @@ impl MuHash3072 {
         }
     }
 
-    /// Inserts one byte string into the multiset.
     pub fn insert(&mut self, data: &[u8]) {
         self.numerator.multiply(&element(data));
     }
 
-    /// Removes one byte string from the multiset.
     pub fn remove(&mut self, data: &[u8]) {
         self.denominator.multiply(&element(data));
     }
 
-    /// Combines another accumulator into this accumulator.
     #[inline(always)]
     pub fn combine(&mut self, other: &Self) {
         self.numerator.multiply(&other.numerator);
@@ -251,7 +233,6 @@ impl MuHash3072 {
     }
 
     /// Finalizes to Bitcoin Core's 32-byte `MuHash` digest.
-    ///
     /// Core hashes the finalized 3072-bit group element in little-endian
     /// byte order, then exposes the resulting `uint256` with `GetHex()`.
     #[must_use]
@@ -526,11 +507,6 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Frozen byte-for-byte copy of the ORIGINAL serial `Num3072::multiply`
-    /// (single triple-carry accumulator, no chain splitting). Reuses the
-    /// unchanged column helpers (`mul_limb`, `muladd3`, `mulnadd3`, `extract3`,
-    /// `muln2`, `addnextract2`, `is_overflow`, `full_reduce`) so it is a genuine
-    /// reference for the optimized implementation, not a transform of it.
     fn reference_multiply_into(target: &mut Num3072, other: &Num3072) {
         let left = target.limbs;
         let right = &other.limbs;
@@ -576,8 +552,6 @@ mod tests {
         }
     }
 
-    /// Deterministic 64-bit splitmix PRNG: zero-dependency, reproducible seed
-    /// expansion for the `>=100_000` random differential vectors.
     struct SplitMix64(u64);
 
     impl SplitMix64 {
@@ -698,8 +672,6 @@ mod tests {
 
     #[test]
     fn finalize_byte_identical_after_optimized_multiply_chain() {
-        // Confirms the optimized path also matches the ruint reference through
-        // finalize() across a seeded operation chain.
         let mut rng = SplitMix64::new(0xf1_0a11_2e57_3072);
         for _ in 0..2_000 {
             let mut candidate = MuHash3072::new();

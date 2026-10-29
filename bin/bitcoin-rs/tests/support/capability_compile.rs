@@ -4,20 +4,18 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use anyhow::Result;
-use serde_json::Value;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
-/// A separate Cargo workspace and target directory containing one consumer.
 pub(super) struct ProductionConsumer {
     directory: tempfile::TempDir,
 }
 
 impl ProductionConsumer {
-    /// Adds node without its workspace dev-dependencies or fixture feature.
     pub(super) fn with_node(root: &Path) -> Result<Self> {
         use std::io::Write as _;
 
         let consumer = Self::new(root)?;
-        let node = serde_json::to_string(&root.join("crates/node"))?;
+        let node = sonic_rs::to_string(&root.join("crates/node"))?;
         let mut manifest = std::fs::OpenOptions::new()
             .append(true)
             .open(consumer.directory.path().join("Cargo.toml"))?;
@@ -28,13 +26,12 @@ impl ProductionConsumer {
         Ok(consumer)
     }
 
-    /// Copies the repository lock to retain its pinned dependency versions.
     pub(super) fn new(root: &Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;
-        let chain = serde_json::to_string(&root.join("crates/chain"))?;
-        let chainstate = serde_json::to_string(&root.join("crates/chainstate"))?;
-        let p2p = serde_json::to_string(&root.join("crates/p2p"))?;
-        let utxo = serde_json::to_string(&root.join("crates/utxo"))?;
+        let chain = sonic_rs::to_string(&root.join("crates/chain"))?;
+        let chainstate = sonic_rs::to_string(&root.join("crates/chainstate"))?;
+        let p2p = sonic_rs::to_string(&root.join("crates/p2p"))?;
+        let utxo = sonic_rs::to_string(&root.join("crates/utxo"))?;
         std::fs::create_dir(directory.path().join("src"))?;
         std::fs::write(
             directory.path().join("Cargo.toml"),
@@ -62,11 +59,10 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         Ok(Self { directory })
     }
 
-    /// Adds the storage and RPC fixture owners without enabling test features.
     pub(super) fn with_fixture_owners(root: &Path) -> Result<Self> {
         let consumer = Self::new(root)?;
-        let storage = serde_json::to_string(&root.join("crates/storage"))?;
-        let rpc = serde_json::to_string(&root.join("crates/rpc"))?;
+        let storage = sonic_rs::to_string(&root.join("crates/storage"))?;
+        let rpc = sonic_rs::to_string(&root.join("crates/rpc"))?;
         let path = consumer.directory.path().join("Cargo.toml");
         let mut manifest = std::fs::read_to_string(&path)?;
         manifest.push_str(&format!(
@@ -99,7 +95,6 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         Ok(command.output()?)
     }
 
-    /// The positive control also normalizes the seeded lock for this workspace.
     pub(super) fn allow_reads(&self, source: &str) -> Result<()> {
         let output = self.check(source, false)?;
         assert!(
@@ -111,7 +106,6 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         Ok(())
     }
 
-    /// Requires the intended consumer diagnostic, never just a failed build.
     pub(super) fn deny(&self, source: &str, codes: &[&str], member: &str) -> Result<()> {
         let output = self.check(source, true)?;
         assert!(
@@ -120,7 +114,7 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         );
         let messages = String::from_utf8_lossy(&output.stdout)
             .lines()
-            .map(serde_json::from_str::<Value>)
+            .map(sonic_rs::from_str::<Value>)
             .collect::<Result<Vec<_>, _>>()?;
         let errors: Vec<_> = messages
             .iter()

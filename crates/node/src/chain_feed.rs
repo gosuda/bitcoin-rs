@@ -1,27 +1,20 @@
-//! Bounded, positional observation of the node's settled committed chain.
-
 use bitcoin_rs_chain::BlockTree;
 pub use bitcoin_rs_chainstate::events::ChainSnapshot;
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
 
 use crate::{Node, NodeError};
 
-/// Hash-addressed header metadata copied from the authoritative block tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockHeaderInfo {
     pub header: Header,
     pub height: u32,
-    /// Cumulative chainwork, in big-endian order.
     pub chainwork: [u8; 32],
 }
 
-/// A polling consumer's last observed identity. Owns no node resources or queue.
 pub struct ChainSubscription {
     cursor: ChainSnapshot,
 }
 
-/// A settled replay target minted by this running Node. Does not retain storage
-/// or prevent pruning; re-pin after restart or if bounded ancestry is unavailable.
 #[derive(Clone, Debug)]
 pub struct ChainTarget {
     snapshot: ChainSnapshot,
@@ -42,24 +35,19 @@ impl ChainSubscription {
     }
 }
 
-/// An invalidation hint; consumers reconcile positions rather than replay a log.
 #[derive(Clone, Debug)]
 pub struct ChainUpdate {
     pub previous: ChainSnapshot,
     pub current: ChainTarget,
-    /// More than one commit, an epoch change, or a non-adjacent tip move.
     pub gap: bool,
 }
 
-/// One step in positional reconciliation to a pinned target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChainStep {
     Connected(BlockHeaderInfo),
-    /// Metadata describes the removed block, not its parent.
     Disconnected(BlockHeaderInfo),
 }
 
-/// Bounded replay progress. Keep `target` fixed until `complete`, or re-pin.
 pub struct ChainReplay {
     pub steps: Vec<ChainStep>,
     pub position: BlockHash,
@@ -86,15 +74,12 @@ fn metadata(tree: &BlockTree, hash: Hash256) -> Result<BlockHeaderInfo, NodeErro
 }
 
 impl Node {
-    /// Reads metadata even when the block body is pruned. Height hints are unnecessary.
     pub fn block_header(&self, hash: BlockHash) -> Result<BlockHeaderInfo, NodeError> {
         let chain = self.state.chainstate();
         let reader = chain.block_tree_reader();
         metadata(&reader.read(), Hash256::from(hash))
     }
 
-    /// Captures a tip only after node-owned follower/mempool settlement.
-    /// Returns unavailable during a transition, shutdown, or recovery-required fence.
     pub fn settled_snapshot(&self) -> Result<ChainSnapshot, NodeError> {
         let stable = self.state.stable_read();
         let _guard = stable
@@ -104,14 +89,12 @@ impl Node {
         Ok(self.snapshot())
     }
 
-    /// Starts a queue-free polling subscription at one settled identity.
     pub fn subscribe_chain(&self) -> Result<ChainSubscription, NodeError> {
         Ok(ChainSubscription {
             cursor: self.settled_snapshot()?,
         })
     }
 
-    /// Pins one settled target without retaining block bodies or blocking apply.
     pub fn pin_chain(&self) -> Result<ChainTarget, NodeError> {
         Ok(ChainTarget {
             snapshot: self.settled_snapshot()?,
@@ -119,16 +102,11 @@ impl Node {
         })
     }
 
-    /// Resumes observations from a consumer-owned cursor, including after restart.
-    /// The next poll detects an older epoch; it never trusts the old sequence.
     #[must_use]
     pub const fn resume_chain(cursor: ChainSnapshot) -> ChainSubscription {
         ChainSubscription { cursor }
     }
 
-    /// Polls without blocking chain apply or running consumer callbacks.
-    /// No history is queued: multiple commits produce a detectable gap. The
-    /// consumer replays by hash from its actual applied position, not this hint.
     pub fn poll_chain(
         &self,
         subscription: &mut ChainSubscription,
@@ -163,11 +141,6 @@ impl Node {
         }))
     }
 
-    /// Reconciles a consumer's applied position to a previously pinned settled
-    /// target, disconnecting before connecting. The target may now be stale.
-    /// Headers are copied under a bounded read; bodies are fetched separately
-    /// with `block_by_hash`, which reports missing retained data explicitly.
-    /// Across restart re-pin first: epochs are advisory, hashes own position.
     pub fn replay_chain(
         &self,
         from: BlockHash,

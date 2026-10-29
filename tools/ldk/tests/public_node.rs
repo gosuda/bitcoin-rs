@@ -53,7 +53,6 @@ fn probe() -> TestResult {
             consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&native_genesis))?;
         assert_eq!(block, expected);
         assert_eq!(block.block_hash(), hash);
-        // Exercise both conversion directions with non-palindromic real hashes.
         assert_eq!(
             hash.to_byte_array(),
             *native_genesis.block_hash().as_bytes()
@@ -84,7 +83,6 @@ fn probe() -> TestResult {
             .expect("unknown block");
         assert_eq!(error.kind(), BlockSourceErrorKind::Transient);
 
-        // Height hints are advisory; hash-addressed metadata is authoritative.
         for hint in [None, Some(0), Some(123)] {
             let data =
                 block_on(source.get_header(&hash, hint)).map_err(|error| error.into_inner())?;
@@ -105,8 +103,6 @@ fn probe() -> TestResult {
         .map_err(|error| error.into_inner())?;
         assert_eq!(validated.height, 0);
 
-        // A standard-shaped transaction with a nonexistent input reaches the
-        // shared gateway and returns Node's admission error, without mutation.
         let tx = orphan_transaction();
         let native_tx = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(
             &consensus::serialize(&tx),

@@ -2,25 +2,15 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ColumnFamily {
-    /// Confirmed transaction index rows.
     TxConfirmed = 0,
-    /// Mempool transaction index rows.
     TxMempool = 1,
-    /// Block header rows.
     BlockHeaders = 2,
-    /// Transaction funding rows.
     Funding = 3,
-    /// Transaction spending rows.
     Spending = 4,
-    /// Coinstats index rows.
     Coinstats = 5,
-    /// Block-tree node rows.
     BlockTree = 6,
-    /// UTXO snapshot metadata rows.
     UtxoMeta = 7,
-    /// Serialized block body rows.
     BlockBodies = 8,
-    /// Per-block UTXO undo records, needed to disconnect a block during a reorg.
     UndoData = 9,
     /// Live script-index rows: `script-prefix || outpoint` for currently
     /// unspent outputs.

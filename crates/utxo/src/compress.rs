@@ -1,18 +1,12 @@
 //! Compact encodings for UTXO record fields.
-//!
-//! Two encodings, chosen because both are pure per-output transforms with no
-//! cross-output invariant to violate:
 
 use core::cmp::Ordering;
 
 use crate::UtxoError;
 use bitcoin_rs_primitives::Amount;
 
-/// Largest number of bytes a `u64` varint can occupy.
 pub(crate) const VARINT_MAX_LEN: usize = 10;
 
-/// Writes `value` as a base-128 varint into `out` starting at `at`, returning
-/// the offset just past it, or `None` when `out` is too short.
 #[inline]
 pub(crate) fn write_varint_at(value: u64, out: &mut [u8], at: usize) -> Option<usize> {
     let mut remaining = value;
@@ -31,7 +25,6 @@ pub(crate) fn write_varint_at(value: u64, out: &mut [u8], at: usize) -> Option<u
     }
 }
 
-/// Bytes [`write_varint`] will produce for `value`.
 #[inline]
 pub(crate) const fn varint_len(value: u64) -> usize {
     let mut remaining = value >> 7;
@@ -43,12 +36,10 @@ pub(crate) const fn varint_len(value: u64) -> usize {
     len
 }
 
-/// Reads a base-128 varint at `offset`, returning the value and the next offset.
 #[inline]
 pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), UtxoError> {
     let first = *bytes.get(offset).ok_or(UtxoError::CorruptRecord)?;
     if first & 0x80 == 0 {
-        // `get` succeeded, so `offset < bytes.len() <= isize::MAX`.
         return Ok((u64::from(first), offset + 1));
     }
 
@@ -59,14 +50,11 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
         let byte = *bytes.get(cursor).ok_or(UtxoError::CorruptRecord)?;
         cursor += 1;
         let payload = u64::from(byte & 0x7f);
-        // The tenth byte of a `u64` varint carries only one significant bit.
         if shift >= 64 || (shift == 63 && payload > 1) {
             return Err(UtxoError::CorruptRecord);
         }
         value |= payload << shift;
         if byte & 0x80 == 0 {
-            // A continuation that contributes nothing is a longer spelling of a
-            // shorter varint.
             if shift > 0 && payload == 0 {
                 return Err(UtxoError::CorruptRecord);
             }
@@ -80,7 +68,6 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
 /// Largest amount the compression is defined for: 21,000,000 BTC in satoshis.
 pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
-/// Bitcoin Core's `CTxOutCompressor` amount compression.
 #[inline]
 pub(crate) const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
     if amount > MAX_COMPRESSIBLE_AMOUNT {
@@ -104,7 +91,6 @@ pub(crate) const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
     }
 }
 
-/// The powers of ten the transform can factor out, indexed by exponent.
 const POW10: [u64; 10] = [
     1,
     10,
@@ -118,8 +104,6 @@ const POW10: [u64; 10] = [
     1_000_000_000,
 ];
 
-/// Inverse of [`compress_amount`], or `None` when `compressed` is not something
-/// [`compress_amount`] could have produced.
 #[inline]
 pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     if compressed == 0 {
@@ -135,17 +119,12 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     } else {
         n = n.checked_add(1)?;
     }
-    // `exponent` is `x % 10`, so the lookup is in range by construction.
     let scale = POW10.get(usize::try_from(exponent).ok()?)?;
     let value = n.checked_mul(*scale)?;
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
 }
 
 /// Writes `value` as Bitcoin Core's subtract-one MSB VARINT into `out`.
-///
-/// This is the exact inverse of Core's `core_varint` decoder. Each 7-bit group has its
-/// continuation bit set on all but the last byte; because 1 is subtracted after each
-/// continuation, this is deliberately NOT LEB128.
 pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {
     let mut buf = [0_u8; 10];
     let mut len = 0;
@@ -162,10 +141,6 @@ pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {
     }
 }
 
-/// Encodes `value` as Core's subtract-one MSB VARINT into a fixed buffer.
-///
-/// Allocation-free mirror of [`write_core_varint`] so ordering can compare
-/// keys without a heap push per comparison.
 #[inline]
 pub(crate) fn encode_core_varint_array(mut value: u64) -> ([u8; 10], usize) {
     let mut reversed = [0_u8; 10];
@@ -188,13 +163,6 @@ pub(crate) fn encode_core_varint_array(mut value: u64) -> ([u8; 10], usize) {
 /// Compares two vouts by Core's coins-DB key order: bytewise order of the
 /// subtract-one MSB VARINT encodings, which is the `LevelDB` cursor order that
 /// defines Core's `HASH_SERIALIZED` commitment and dumptxoutset group order.
-///
-/// This is NOT numeric order across a width transition: 2-byte max 16,511
-/// encodes `[0xFF, 0x7F]` while 3-byte min 16,512 encodes
-/// `[0x80, 0x80, 0x00]`, so bytewise 16,511 sorts AFTER 16,512. Within one
-/// width the orders agree. No encoding is a prefix of another, so plain
-/// lexicographic byte comparison is the cursor order; length-first would be
-/// numeric order and is wrong here.
 #[inline]
 pub(crate) fn cmp_core_varint_key(left: u32, right: u32) -> Ordering {
     let (left_bytes, left_len) = encode_core_varint_array(u64::from(left));
@@ -204,14 +172,8 @@ pub(crate) fn cmp_core_varint_key(left: u32, right: u32) -> Ordering {
 
 /// Compresses a scriptPubKey into Bitcoin Core's snapshot format.
 ///
-/// Returns `Some((code, payload))` for compressible script types:
-/// - Code 0: P2PKH (25-byte `76 a9 14 <20-byte-pkh> 88 ac`, payload `script[3..23]`)
-/// - Code 1: P2SH (23-byte `a9 14 <20-byte-sh> 87`, payload `script[2..22]`)
-/// - Codes 2/3: Compressed P2PK (35-byte `21 <02|03> <32-byte-X> ac`, code `script[1]`, payload `script[2..34]`), preserving non-curve points
-/// - Codes 4/5: Valid uncompressed P2PK (67-byte `41 04 <32-byte-X> <32-byte-Y> ac`, secp256k1-validated, code `4 + (script[65] & 1)`, payload `script[2..34]`)
-///
-/// Returns `None` for any other script, or for uncompressed P2PK with an invalid curve point,
-/// prompting the caller to emit raw script length + 6.
+/// Returns `None` for any other script, or for uncompressed P2PK with an invalid curve
+/// point, prompting the caller to emit raw script length + 6.
 pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
     if script.len() == 25
         && script[0] == 0x76
@@ -245,8 +207,6 @@ pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
 }
 
 #[cfg(test)]
-// A codec test that cannot decode its own output has failed; panicking names
-// the offending value.
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::{
@@ -254,9 +214,6 @@ mod tests {
         varint_len, write_varint_at,
     };
 
-    /// Test shim for the removed fixed-buffer writer: the encoder lays varints
-    /// into a shared buffer at an offset, so `write_varint_at` is the only
-    /// writer, and these tests want "encode one, from zero".
     fn write_varint(value: u64, out: &mut [u8; VARINT_MAX_LEN]) -> usize {
         write_varint_at(value, out, 0).expect("a u64 varint fits VARINT_MAX_LEN")
     }
@@ -317,7 +274,6 @@ mod tests {
         comp3.push(0xac);
         assert_eq!(super::compress_script(&comp3), Some((3, &[0xfe; 32][..])));
 
-        // secp256k1 generator G
         let gx = [
             0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
             0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
@@ -332,10 +288,8 @@ mod tests {
         p2pk_g.extend_from_slice(&gx);
         p2pk_g.extend_from_slice(&gy);
         p2pk_g.push(0xac);
-        // gy has even Y (last byte 0xb8 & 1 == 0), so code 4
         assert_eq!(super::compress_script(&p2pk_g), Some((4, &gx[..])));
 
-        // -G has odd Y
         let neg_gy = [
             0xb7, 0xc5, 0x25, 0x88, 0xd9, 0x5c, 0x3b, 0x9a, 0xa2, 0x5b, 0x04, 0x03, 0xf1, 0xee,
             0xf7, 0x57, 0x02, 0xe8, 0x4b, 0xb7, 0x59, 0x7a, 0xab, 0xe6, 0x63, 0xb8, 0x2f, 0x6f,
@@ -347,19 +301,16 @@ mod tests {
         p2pk_neg_g.push(0xac);
         assert_eq!(super::compress_script(&p2pk_neg_g), Some((5, &gx[..])));
 
-        // Invalid curve point for 67-byte script -> returns None (fallback to raw)
         let mut invalid_uncompressed = p2pk_g.clone();
         invalid_uncompressed[2..34].fill(0xff);
         assert_eq!(super::compress_script(&invalid_uncompressed), None);
 
-        // Raw scripts -> return None
         assert_eq!(super::compress_script(&[0x51]), None);
         assert_eq!(super::compress_script(&[]), None);
     }
 
     #[test]
     fn varint_round_trips_at_every_width_boundary() {
-        // One byte per 7 bits, so each boundary is where the width steps up.
         for shift in 0..64_u32 {
             let value = 1_u64 << shift;
             varint_roundtrip(value);
@@ -371,8 +322,6 @@ mod tests {
 
     #[test]
     fn varint_costs_one_byte_for_the_values_outputs_actually_have() {
-        // This is the entire point of the change: `vout` and script lengths are
-        // small, and were costing 4 and 2 fixed bytes.
         for value in [0_u64, 1, 2, 41, 127] {
             assert_eq!(varint_roundtrip(value), 1);
         }
@@ -381,12 +330,9 @@ mod tests {
 
     #[test]
     fn varint_rejects_a_truncated_or_overlong_encoding() {
-        // Continuation bit set with nothing after it.
         assert!(read_varint(&[0x80], 0).is_err());
         assert!(read_varint(&[], 0).is_err());
-        // Eleven continuation bytes cannot be a `u64`.
         assert!(read_varint(&[0xff; 11], 0).is_err());
-        // Ten bytes whose final byte carries more than the one remaining bit.
         assert!(
             read_varint(
                 &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02],
@@ -396,11 +342,8 @@ mod tests {
         );
     }
 
-    /// Two byte strings decoding to one value would break the record layer's
-    /// byte equality, which the fixed-width v4 fields gave for free.
     #[test]
     fn varint_rejects_a_non_minimal_encoding() {
-        // Longer spellings of 0, 1 and 128.
         for bytes in [
             vec![0x80, 0x00],
             vec![0x81, 0x00],
@@ -412,7 +355,6 @@ mod tests {
                 "non-minimal varint {bytes:?} was accepted"
             );
         }
-        // The minimal spellings of the same values still decode.
         assert_eq!(read_varint(&[0x00], 0).expect("zero decodes").0, 0);
         assert_eq!(read_varint(&[0x01], 0).expect("one decodes").0, 1);
         assert_eq!(
@@ -431,13 +373,10 @@ mod tests {
             MAX_COMPRESSIBLE_AMOUNT,
             21_000_000 * COIN,
             50 * COIN,
-            // The subsidy halvings, which is what most coinbase outputs are.
             25 * COIN,
             1_250_000_000,
             625_000_000,
         ];
-        // Every power of ten, and its neighbours, since the transform factors
-        // out powers of ten.
         let mut power = 1_u64;
         while let Some(next) = power.checked_mul(10) {
             if power > MAX_COMPRESSIBLE_AMOUNT {
@@ -465,7 +404,6 @@ mod tests {
 
     #[test]
     fn a_round_amount_compresses_to_fewer_varint_bytes_than_it_costs_raw() {
-        // 1 BTC is the shape the transform exists for: eight raw bytes today.
         let mut buf = [0_u8; VARINT_MAX_LEN];
         let compressed = compress_amount(100_000_000).expect("1 BTC is in range");
         let len = write_varint(compressed, &mut buf);
@@ -491,8 +429,6 @@ mod tests {
             prop_assert_eq!(decompress_amount(compressed), Some(value));
         }
 
-        /// No `u64` may panic the decoder, and every value it accepts must be
-        /// one the encoder could have produced.
         #[test]
         fn decompress_accepts_exactly_the_encoder_image(compressed in any::<u64>()) {
             if let Some(value) = decompress_amount(compressed) {
@@ -501,8 +437,6 @@ mod tests {
             }
         }
 
-        /// The compression must be injective over the range it will ever see,
-        /// or two distinct amounts would decode to one.
         #[test]
         fn compression_is_injective(
             a in 0..=MAX_COMPRESSIBLE_AMOUNT,

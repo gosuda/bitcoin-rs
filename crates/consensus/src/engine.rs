@@ -2,22 +2,16 @@
 
 use core::fmt;
 
-/// Which script-verification engine the validation pipeline runs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ValidationEngine {
-    /// The native Rust interpreter in `bitcoin-rs-script`: legacy, P2SH, `SegWit`
-    /// v0, and Taproot key-path and script-path spends.
     #[default]
     Native,
-    /// Bitcoin Core's C++ consensus engine (`libbitcoinkernel`).
     Kernel,
 }
 
 impl ValidationEngine {
-    /// Every engine this type can name.
     pub const ALL: &'static [Self] = &[Self::Native, Self::Kernel];
 
-    /// Returns the stable configuration spelling.
     #[must_use]
     const fn as_str(self) -> &'static str {
         match self {
@@ -26,7 +20,6 @@ impl ValidationEngine {
         }
     }
 
-    /// Whether this engine's implementation is compiled into the current build.
     #[must_use]
     pub const fn is_supported(self) -> bool {
         match self {
@@ -35,7 +28,6 @@ impl ValidationEngine {
         }
     }
 
-    /// Parses a configuration spelling, case-insensitively.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {

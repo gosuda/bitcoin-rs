@@ -1,12 +1,8 @@
-//! Public commit/get coverage for the UTXO set.
-
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{UtxoError, UtxoSet};
 use sha2::{Digest, Sha256};
 
-/// One live output as the tests describe it: outpoint, payload, coinbase flag,
-/// creating height.
 type Entry = (OutPoint, TxOut, bool, u32);
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -29,8 +25,6 @@ fn txout(seed: u64) -> TxOut {
     }
 }
 
-/// A script one byte past the record ceiling, the cheapest way to make a
-/// commit fail inside the shard pass.
 fn oversized_txout(value: u64) -> TxOut {
     TxOut {
         value: Amount::from_sat(value),
@@ -113,8 +107,6 @@ fn owned_changes(adds: &[Entry], removes: &[OutPoint]) -> BlockChanges {
     changes
 }
 
-/// Commits one block through the public contract, with the payloads owned or
-/// borrowed from the caller. Both shapes must behave identically.
 fn commit(
     set: &UtxoSet,
     adds: &[Entry],
@@ -173,10 +165,6 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
     Ok(())
 }
 
-/// A commit that fails inside the shard pass must leave the set exactly as it
-/// was: no remove applied, no earlier add of the same commit applied. Covers
-/// the owned and borrowed payload shapes and the single-shard and multi-shard
-/// commit paths, which reject in different places.
 #[test]
 fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult {
     for cross_shard in [false, true] {
@@ -228,13 +216,8 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
     Ok(())
 }
 
-/// Every output-level boundary the record encoding has a case for, carried
-/// through the public API: the metadata each read surface reports, the
-/// serialization hash, and the per-vout spend path.
 #[test]
 fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
-    // Scripts stay distinct so each one selects exactly its own output in a
-    // scan; vouts cross the inline-partition and directory-width boundaries.
     let cases: [(u32, u64, bool, u32, Vec<u8>); 6] = [
         (0, 100, false, 0, Vec::new()),
         (63, 200, true, 123, vec![0x51]),
@@ -294,7 +277,6 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
         assert_eq!(scan.unspents[0].height, *height);
     }
 
-    // One vout at a time: the record survives until its last output leaves.
     for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
         assert!(set.has_live_outputs_for_txid(&live));
         let block = txid(91 + u64::try_from(index)?);
@@ -337,8 +319,6 @@ fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResul
     Ok(())
 }
 
-/// The set keys on the full txid, so two txids sharing a prefix must stay
-/// independent through partial spends and the full-record delete path.
 #[test]
 fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
     for reverse in [false, true] {
@@ -366,7 +346,6 @@ fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
         assert_eq!(set.get(&first_b), Some(first_b_txout));
         assert_eq!(set.get(&peer), Some(peer_txout.clone()));
 
-        // Emptying the first record must not take its prefix peer with it.
         commit(&set, &[], &[first_b], &txid(302), false)?;
         assert_eq!(set.get(&peer), Some(peer_txout));
         assert!(!set.has_live_outputs_for_txid(&first));

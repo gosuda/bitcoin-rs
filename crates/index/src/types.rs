@@ -3,19 +3,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-/// Number of bytes retained from hashes in electrs index rows.
 pub(crate) const HASH_PREFIX_LEN: usize = 8;
 /// Number of bytes used for big-endian block heights in index rows.
-///
 /// Big-endian makes lexicographic KV order match numeric height order within
-/// one prefix, so LSM prefix compression and chronological scans share the
-/// same key layout.
 pub(crate) const HEIGHT_SIZE: usize = 4;
-/// Serialized byte length of a hash-prefix row.
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
-/// Serialized byte length of a Bitcoin block header.
 pub const HEADER_ROW_SIZE: usize = bitcoin_rs_primitives::Header::LEN;
-/// Exclusive upper bound of a packed 24-bit field (`offset`, `length`, or live `vout`).
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 
 /// Encodes a block height so lexicographic byte order matches numeric order.
@@ -24,7 +17,6 @@ pub(crate) const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
     height.to_be_bytes()
 }
 
-/// Decodes a block height stored by [`encode_height`].
 #[must_use]
 pub(crate) const fn decode_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     u32::from_be_bytes(bytes)
@@ -39,7 +31,6 @@ const fn decode_u24_le(bytes: [u8; 3]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
 }
 
-/// Prefix used as the seek key for electrs-style hash-prefix rows.
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
 /// A stable electrs hash-prefix row: eight prefix bytes followed by a big-endian height.
@@ -61,7 +52,6 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 )]
 #[repr(C)]
 pub struct HashPrefixRow {
-    /// The first eight bytes of the indexed hash-derived key.
     pub prefix: HashPrefix,
     /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
@@ -81,7 +71,6 @@ impl HashPrefixRow {
         decode_height(self.height)
     }
 
-    /// Returns the serialized database row.
     pub fn to_db_row(self) -> [u8; HASH_PREFIX_ROW_SIZE] {
         let mut row = [0_u8; HASH_PREFIX_ROW_SIZE];
         row.copy_from_slice(self.as_bytes());
@@ -89,7 +78,6 @@ impl HashPrefixRow {
     }
 }
 
-/// Protocol-neutral SHA256 identifier for a scriptPubKey.
 #[derive(
     Copy,
     Clone,
@@ -112,29 +100,24 @@ pub struct ScriptHash {
 }
 
 impl ScriptHash {
-    /// Hashes a Bitcoin script into its script-index identifier.
     pub fn new(script: &[u8]) -> Self {
         Self::from_script_bytes(script)
     }
 
-    /// Hashes raw script bytes into their script-index identifier.
     pub fn from_script_bytes(script: &[u8]) -> Self {
         Self {
             bytes: Sha256::digest(script).into(),
         }
     }
 
-    /// Creates a scripthash from raw SHA256 bytes.
     pub const fn from_byte_array(bytes: [u8; 32]) -> Self {
         Self { bytes }
     }
 
-    /// Returns the raw SHA256 bytes.
     pub const fn to_byte_array(self) -> [u8; 32] {
         self.bytes
     }
 
-    /// Returns the compact index scan prefix.
     pub const fn prefix(self) -> HashPrefix {
         let bytes = self.bytes;
         [
@@ -143,36 +126,29 @@ impl ScriptHash {
     }
 }
 
-/// Row builder for confirmed and unconfirmed script-funding rows.
 pub struct ScriptHashRow;
 
 impl ScriptHashRow {
-    /// Returns the prefix used to scan rows for a scripthash.
     pub const fn scan_prefix(scripthash: ScriptHash) -> HashPrefix {
         scripthash.prefix()
     }
 
-    /// Builds a database row for a funding occurrence at `height`.
     pub const fn row(scripthash: ScriptHash, height: u32) -> HashPrefixRow {
         HashPrefixRow::new(scripthash.prefix(), height)
     }
 }
 
-/// Row builder for spending rows keyed by previous outpoint.
 pub struct SpendingPrefixRow;
 
 impl SpendingPrefixRow {
-    /// Returns the prefix used to scan rows for a previous outpoint.
     pub(crate) fn scan_prefix(outpoint: &OutPoint) -> HashPrefix {
         spending_prefix(outpoint.txid.as_bytes(), outpoint.vout)
     }
 
-    /// Builds a database row for a spending occurrence at `height`.
     pub fn row(outpoint: &OutPoint, height: u32) -> HashPrefixRow {
         HashPrefixRow::new(Self::scan_prefix(outpoint), height)
     }
 
-    /// Builds a database row from zero-copy previous-outpoint parts.
     pub(crate) fn row_parts(
         txid_bytes: &[u8],
         vout: u32,
@@ -185,22 +161,18 @@ impl SpendingPrefixRow {
     }
 }
 
-/// Row builder for transaction-id rows.
 pub(crate) struct TxidRow;
 
 impl TxidRow {
-    /// Returns the prefix used to scan rows for a transaction id.
     pub(crate) fn scan_prefix(txid: &Txid) -> HashPrefix {
         txid_prefix(txid.as_bytes())
     }
 
-    /// Builds a database row for a transaction occurrence at `height`.
     #[cfg(test)]
     pub(crate) fn row(txid: &Txid, height: u32) -> HashPrefixRow {
         HashPrefixRow::new(Self::scan_prefix(txid), height)
     }
 
-    /// Builds a database row from zero-copy transaction-id bytes.
     pub(crate) fn row_bytes(txid_bytes: &[u8], height: [u8; HEIGHT_SIZE]) -> HashPrefixRow {
         HashPrefixRow {
             prefix: txid_prefix(txid_bytes),
@@ -212,17 +184,8 @@ impl TxidRow {
 /// Byte width of one live script-index row key: `scan-prefix || txid || vout_u24`.
 pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
-/// One live-output row: a currently unspent outpoint filed under its script.
-///
 /// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian) ||
 /// vout(3, little-endian u24)` -- and the value is empty. This is the full-outpoint
-/// baseline locator: the 8-byte prefix is lossy exactly like `Funding`'s (readers
-/// exact-check the resolved coin's `script_pubkey`), but the outpoint half is
-/// complete, so two scripts that collide on the prefix can never collide on a whole key. That is what makes
-/// a **point delete collision-safe**: removing a spent output deletes one
-/// exact key and cannot touch a colliding script's rows. Prefix-range scans
-/// over this family are read-only by contract; a delete is always a whole-key
-/// point delete.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptLiveRow {
@@ -230,11 +193,7 @@ pub struct ScriptLiveRow {
 }
 
 impl ScriptLiveRow {
-    /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
-        // Consensus transaction output counts cannot reach 2^24 under the
-        // serialized-block size cap, so this drops no identity bits; enforce
-        // in all builds, not just debug.
         assert!(outpoint.vout <= U24_MAX, "vout does not fit in u24");
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
@@ -243,19 +202,15 @@ impl ScriptLiveRow {
         Self { key }
     }
 
-    /// Rebuilds a row from stored key bytes, refusing any other length.
     pub(crate) fn from_db_row(bytes: &[u8]) -> Option<Self> {
         let key: [u8; SCRIPT_LIVE_ROW_SIZE] = bytes.try_into().ok()?;
         Some(Self { key })
     }
 
-    /// The exact stored key.
     pub const fn as_bytes(&self) -> &[u8; SCRIPT_LIVE_ROW_SIZE] {
         &self.key
     }
 
-    /// The outpoint this row locates, for resolution against authoritative
-    /// UTXO state.
     pub fn outpoint(&self) -> OutPoint {
         let mut txid = [0_u8; 32];
         txid.copy_from_slice(&self.key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32]);
@@ -268,10 +223,7 @@ impl ScriptLiveRow {
 /// Serialized byte length of one [`TxPosition`].
 pub const TX_POSITION_SIZE: usize = 6;
 
-/// Byte position of one transaction within its block's serialized body.
-///
 /// Both fields are little-endian byte arrays rather than `u32` so the type has
-/// alignment 1 and can be read in place from an arbitrary row-value slice.
 #[derive(
     Copy,
     Clone,
@@ -288,18 +240,12 @@ pub const TX_POSITION_SIZE: usize = 6;
 )]
 #[repr(C)]
 pub struct TxPosition {
-    /// Byte offset of the transaction from the start of the serialized block.
     offset: [u8; 3],
-    /// Consensus-serialized byte length of the transaction.
     len: [u8; 3],
 }
 
-/// Ordered numerically, so sorting a position list puts it in block order.
-///
 /// Deriving `Ord` would compare the little-endian byte arrays lexicographically,
 /// least-significant byte first — offset 256 would sort before offset 1. The
-/// stored order is what a reader emits entries in, and it has to match the order
-/// a full block scan produces, so this cannot be left to the derive.
 impl Ord for TxPosition {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.offset()
@@ -316,9 +262,6 @@ impl PartialOrd for TxPosition {
 
 impl TxPosition {
     /// Creates a position from a native-endian offset and length.
-    ///
-    /// Both values must fit in 24 bits; serialized blocks never exceed 4 MB,
-    /// so wider values are a caller bug, enforced in all builds.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
         assert!(
@@ -343,26 +286,16 @@ impl TxPosition {
         decode_u24_le(self.len)
     }
 
-    /// Returns the exclusive end offset, or `None` on overflow.
     #[must_use]
     pub const fn end(self) -> Option<u32> {
         self.offset().checked_add(self.byte_len())
     }
 }
 
-/// Exclusive upper bound, in bytes, of a transaction position's end offset
-/// within one serialized block.
-///
-/// Consensus caps a serialized block at 4,000,000 bytes
-/// (`bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE`); a position ending
-/// past this names bytes no valid block holds. The writer enforces it, and
 /// the query engine and the portable bundle framing apply [`positions_are_valid`],
 /// so a row the writer admits is never corrupt to an exporter.
 pub(crate) const MAX_POSITION_END_BYTES: usize = 4_000_000;
 
-/// Reports whether `positions` are a valid, block-ordered position list:
-/// nonzero lengths inside one serialized block, strictly ascending and
-/// non-overlapping. This is the one predicate the writer enforces and the
 /// query engine and bundle framing apply before trusting a stored row.
 pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
     let mut previous: Option<TxPosition> = None;
@@ -384,29 +317,16 @@ pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
     true
 }
 
-/// Codec for the row value carrying a row's transaction byte positions.
-///
 /// Layout: a packed `TxPosition[n]`, `n >= 1`. Writers emit a row only for
 /// a nonempty group of positioned transactions. An empty value is corrupt
-/// derived state and queries refuse it; it never represents an older format.
-///
-/// The value carries no block identity; the watermark committed with every row
-/// change supplies it, and snapshot queries accept rows only while that
-/// watermark equals the applied tip. Readers still exact-check every decoded
-/// transaction, and a single malformed or mismatched position discards all
-/// tentative results for the row rather than skipping one entry.
 pub struct TxPositionValue;
 
 impl TxPositionValue {
-    /// Encodes positions into a row value.
     #[must_use]
     pub fn encode(positions: &[TxPosition]) -> Vec<u8> {
         positions.as_bytes().to_vec()
     }
 
-    /// Decodes a row value into its positions.
-    ///
-    /// Returns `None` for an empty or malformed value. Queries reject empty
     /// rows before using the all-or-scan safety path for other invalid positions.
     #[must_use]
     pub fn decode(value: &[u8]) -> Option<&[TxPosition]> {
@@ -465,16 +385,12 @@ mod tests {
     #[test]
     fn script_live_row_roundtrips_outpoint() {
         let scripthash = ScriptHash::from_byte_array([7_u8; 32]);
-        // Nonuniform so a reversed-endian writer cannot satisfy the stored-byte
-        // assertion; a palindrome such as `[9; 32]` would.
         let txid_le = [
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
             0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
             0x1d, 0x1e, 0x1f, 0x20,
         ];
         let txid = Txid::from(Hash256::from_le_bytes(&txid_le));
-        // Nonuniform u24 value: format 5 stores `vout` in 3 bytes, so the
-        // fixture must fit `U24_MAX` (consensus vouts always do).
         let outpoint = OutPoint::new(txid, 0x000a_0b0c);
         let row = ScriptLiveRow::new(scripthash, &outpoint);
 

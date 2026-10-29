@@ -1,11 +1,3 @@
-//! Synchronization progress of the applied chain.
-//!
-//! Like the initial-block-download latch beside it, progress is chain state:
-//! [`ChainProgressReader`] derives it from the node's published tips and block
-//! tree, so `getblockchaininfo` and the embedding API report it without
-//! rebuilding it from those handles. Bitcoin Core derives the same facts from
-//! its `ChainstateManager`.
-
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, i64_to_f64, u64_to_f64};
@@ -15,38 +7,19 @@ use crate::ibd::InitialBlockDownload;
 use crate::node::ChainWork;
 use crate::view::{BlockTreeReader, TipReader};
 
-/// Chain synchronization facts at one applied publication.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChainProgress {
-    /// Applied height; `0` before the first applied tip.
     pub blocks: u32,
-    /// Header-chain height; may lead `blocks` during sync.
     pub headers: u32,
-    /// Applied tip hash, or the network's genesis hash before the first
-    /// applied tip.
     pub best_block_hash: Hash256,
-    /// The applied tip header's `bits`, `None` without an applied tip.
     pub bits: Option<CompactTarget>,
-    /// The applied tip header's timestamp, UNIX seconds; `0` without one.
     pub time: u64,
-    /// Median time past at the applied tip; `0` without one.
     pub median_time: u64,
-    /// Estimated verification progress in the inclusive range `[0, 1]`.
     pub verification_progress: f64,
-    /// The shared [`InitialBlockDownload`] decision.
     pub initial_block_download: bool,
-    /// The applied chain's work, or the header chain's before the first
-    /// applied tip; `None` with neither.
     pub chain_work: Option<ChainWork>,
 }
 
-/// Read-only synchronization progress over the node's chain handles.
-///
-/// PRE: the readers and the latch are the node's published handles; Chainstate
-///   mints this from its own.
-/// POST: [`Self::progress_at`] derives every [`ChainProgress`] field from one
-///   applied snapshot plus the header tip sampled with it.
-/// INVARIANT: holds readers only; it can publish no tip and mutate no tree.
 #[derive(Clone)]
 pub struct ChainProgressReader {
     header_tip: TipReader,
@@ -56,7 +29,6 @@ pub struct ChainProgressReader {
 }
 
 impl ChainProgressReader {
-    /// Builds the reader over node-owned chain handles.
     #[must_use]
     pub const fn new(
         header_tip: TipReader,
@@ -72,25 +44,16 @@ impl ChainProgressReader {
         }
     }
 
-    /// The shared initial-block-download decision at `now` for `network`.
     #[must_use]
     pub fn initial_block_download(&self, now: u64, network: Network) -> bool {
         self.ibd.is_active(now, network)
     }
 
-    /// Progress at the current applied publication.
     #[must_use]
     pub fn progress(&self, network: Network, now: u64) -> ChainProgress {
         self.progress_at(self.applied_tip.load_full().as_deref(), network, now)
     }
 
-    /// Progress at a retained applied snapshot.
-    ///
-    /// PRE: `applied` is the publication the caller's response is built from;
-    ///   `now` is UNIX seconds; `network` is the node's network.
-    /// POST: applied fields come from `applied`; the header height and the
-    ///   pre-applied chain work come from one header-tip sample, which may lead.
-    /// INVARIANT: never reloads the applied publication.
     #[must_use]
     pub fn progress_at(
         &self,
@@ -112,9 +75,6 @@ impl ChainProgressReader {
                 ))
             })
             .unwrap_or((None, 0, 0));
-        // Core's estimate when the verified-transaction count is known, the
-        // height ratio when it is not; `None` is a pre-tracking datadir and
-        // means unknown, never zero.
         let verification_progress = applied
             .and_then(|tip| tip.chain_tx_count.get())
             .map_or_else(
@@ -143,23 +103,6 @@ impl ChainProgressReader {
     }
 }
 
-/// Bitcoin Core's `GuessVerificationProgress`, as a fraction in `[0, 1]`.
-///
-/// The quantity is **transactions verified over transactions believed to
-/// exist** — not a ratio of heights. Early blocks are nearly empty, so a height
-/// ratio reports the chain as most of the way done while most of the work is
-/// still ahead; Core moved off height for that reason.
-///
-/// The denominator cannot be known, so it is extrapolated from the network's
-/// pinned [`bitcoin_rs_primitives::ChainTxData`] observation at `tx_rate`
-/// transactions per second. When the node is already past that observation its
-/// own count is used as the baseline instead, which keeps the fraction from
-/// sticking at 1.0 forever.
-///
-/// `tip_time` is the applied tip's block timestamp. When the tip is within two
-/// hours of `now`, Core stops trusting that miner-set timestamp and estimates
-/// the tip's age from how many blocks the header chain is ahead instead — which
-/// also quantizes the answer near 1.0, where people expect to see it settle.
 fn verification_progress(
     network: Network,
     chain_tx_count: u64,
@@ -188,12 +131,9 @@ fn verification_progress(
     };
 
     let total = if chain_tx_count <= data.tx_count {
-        // Still behind the pinned observation: extrapolate forward from it.
         let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
     } else {
-        // Past it, so this node's own count is the better baseline. Without
-        // this the fraction would pin at 1.0 and stay there.
         let elapsed = now_signed.saturating_sub(block_time);
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
     };
@@ -280,17 +220,11 @@ mod verification_progress_tests {
     use super::verification_progress;
     use bitcoin_rs_primitives::Network;
 
-    /// Regtest's pinned observation is `{time: 0, tx_count: 0, tx_rate: 0.001}`,
-    /// so the estimate reduces to arithmetic that can be done by hand:
-    /// `total = verified + elapsed * 0.001`.
     #[test]
     fn verification_progress_is_transactions_verified_over_transactions_estimated() {
         let now = 1_800_000_000_u64;
-        // Ten thousand seconds behind, which is outside the two-hour window, so
-        // the tip's own timestamp is the one used.
         let tip_time = now - 10_000;
 
-        // 100 / (100 + 10_000 * 0.001) = 100 / 110
         let progress = verification_progress(Network::Regtest, 100, 9, 9, tip_time, now);
         assert!(
             (progress - (100.0 / 110.0)).abs() < 1e-12,
@@ -301,8 +235,6 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_is_not_the_height_ratio_it_replaced() {
         let now = 1_800_000_000_u64;
-        // Half the headers applied, on a mainnet whose pinned observation counts
-        // more than a billion transactions. The old field said 0.5 here.
         let progress = verification_progress(Network::Mainnet, 5_000, 50, 100, now - 10_000, now);
         assert!(
             progress < 0.001,
@@ -313,9 +245,6 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_ignores_the_tip_timestamp_when_the_tip_is_recent() {
         let now = 1_800_000_000_u64;
-        // Both inside the two-hour window: Core stops trusting the miner-set
-        // timestamp there and derives the tip's age from the header chain, so
-        // these must agree despite an hour between them.
         let a = verification_progress(Network::Regtest, 100, 9, 10, now - 60, now);
         let b = verification_progress(Network::Regtest, 100, 9, 10, now - 3_600, now);
         let boundary = verification_progress(Network::Regtest, 100, 9, 10, now - 2 * 60 * 60, now);
@@ -325,7 +254,6 @@ mod verification_progress_tests {
             "Core includes the exact two-hour boundary: {a} != {boundary}"
         );
 
-        // Outside the window the timestamp is used again, so this one differs.
         let outside = verification_progress(Network::Regtest, 100, 9, 10, now - 100_000, now);
         assert!(outside < a, "{outside} should trail {a}");
     }
@@ -341,10 +269,6 @@ mod verification_progress_tests {
     #[test]
     fn verification_progress_never_exceeds_one_for_a_future_dated_tip() {
         let now = 1_800_000_000_u64;
-        // A miner-set timestamp ahead of our clock by more than the two-hour
-        // window, so the tip's own time is used and the elapsed term goes
-        // negative — the estimated total lands *below* what this node has
-        // already verified. Unclamped that is a progress above 1.0.
         let tip_time = now + 10_000;
         let unclamped_total = 10_000.0_f64.mul_add(-0.001, 100.0_f64);
         assert!(

@@ -1,4 +1,3 @@
-//! Certified input reads must not depend on a speculative verbose JSON estimate.
 #![cfg(feature = "silent-payments")]
 
 use std::path::Path;
@@ -12,7 +11,7 @@ use bitcoin_rs_e2e::helpers::{
     sign_p2pkh_inputs, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 #[test]
 fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<()> {
@@ -35,8 +34,6 @@ fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<
     let (outpoint, prevout) = funding_output(&coinbase_at(&mut node, 1)?)?;
     let script = ScriptBuf::from_bytes(Vec::from_hex(&format!("5120{KEY}"))?);
     let mut tx = raw_spend_to(outpoint, &prevout, 10_000, Sequence::MAX, &script);
-    // These outputs alone exceeded the old source estimate:
-    // 12,500 * (1,024 + 2 * 34 * 64) > 64 MiB, before counting body/input bytes.
     tx.output.resize(
         OUTPUTS,
         TxOut {
@@ -48,8 +45,6 @@ fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<
     let mined = node.rpc("generateblock", &json!(["raw(51)", [tx_hex(&tx)]]))?;
     let hash = mined["hash"].as_str().context("mined hash")?;
 
-    // The real getblock adapter reads Chainstate::block_spends, including its
-    // durable receipt, native undo and historical prevout (now spent in live UTXO).
     let verbose = node.rpc("getblock", &json!([hash, 3]))?;
     assert_eq!(verbose["hash"], hash);
     assert!(verbose["weight"].as_u64().context("weight")? <= 4_000_000);
@@ -68,7 +63,6 @@ fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<
 
     let response = node.http_get(&format!("/rest/spenttxouts/{hash}.bin"))?;
     assert_eq!(response.status, 200);
-    // CompactSize row count, empty coinbase row, then one spent prevout.
     let mut expected = vec![2, 0, 1];
     expected.extend_from_slice(&serialize(&prevout));
     assert_eq!(response.body, expected);

@@ -38,11 +38,12 @@ const FLOOR_NS: u64 = 1_000_000_000;
 /// Measured samples per invocation (indices 1..=10; index 0 is the warmup).
 const MEASURED_SAMPLES: u64 = 10;
 
-/// Counted sampling for one row: one warmup sample plus ten measured samples,
-/// each one second of accumulated measured whole-unit time. The callback must
-/// execute exactly one whole semantic unit per call and return its measured
-/// duration; setup, teardown and identity assertions keep their existing
-/// sides of the unit's timer.
+/// Counted sampling for one row: one warmup sample plus ten measured samples, each one
+/// second of accumulated measured whole-unit time.
+///
+/// The callback must execute exactly one whole semantic unit per call and return its
+/// measured duration; setup, teardown and identity assertions keep their existing sides
+/// of the unit's timer.
 pub(crate) fn run(row: &str, mut unit: impl FnMut() -> Duration) {
     for sample in 0..=MEASURED_SAMPLES {
         let (total_ns, unit_ns) = sample_units(&mut unit);
@@ -53,10 +54,11 @@ pub(crate) fn run(row: &str, mut unit: impl FnMut() -> Duration) {
 /// Deterministic untimed verification of the counted stopping rule: zero
 /// durations, exact-floor stopping, and overshoot, with no sample records.
 ///
-/// The harness supplies the unit durations directly, so the assertions hold
-/// on the exact contract inputs, not on wall-clock samples. The returned
-/// per-unit vector proves both the stop point (its length) and the retained
-/// overshoot surplus (its sum); real workloads are not assumed to land the
+/// The harness supplies the unit durations directly, so the assertions hold on the
+/// exact contract inputs, not on wall-clock samples.
+///
+/// The returned per-unit vector proves both the stop point (its length) and the
+/// retained overshoot surplus (its sum); real workloads are not assumed to land the
 /// total exactly on the floor.
 pub(crate) fn verify_stopping_rule() {
     let (total, units) = driven(&[0, 0, 0, FLOOR_NS]);
@@ -103,10 +105,12 @@ fn driven(schedule: &[u64]) -> (u64, Vec<u64>) {
     })
 }
 
-/// Accumulates whole units until the accumulated measured time reaches the
-/// acceptance raw floor on a completed unit; returns `(total_ns, unit_ns)`
-/// with the exact per-unit nanoseconds in call order. Serialization consumes
-/// the returned checked total, so the units are traversed exactly once.
+/// Accumulates whole units until the accumulated measured time reaches the acceptance
+/// raw floor on a completed unit; returns `(total_ns, unit_ns)` with the exact per-unit
+/// nanoseconds in call order.
+///
+/// Serialization consumes the returned checked total, so the units are traversed
+/// exactly once.
 fn sample_units(mut unit: impl FnMut() -> Duration) -> (u64, Vec<u64>) {
     let mut unit_ns = Vec::new();
     let mut total_ns = 0_u64;
@@ -127,10 +131,12 @@ fn sample_units(mut unit: impl FnMut() -> Duration) -> (u64, Vec<u64>) {
     (total_ns, unit_ns)
 }
 
-/// Serializes and emits one counted sample line: `MRP_COUNTED_SAMPLE` prefix
-/// plus one ASCII space, exact JSON keys in contract order, no extra fields,
-/// no mean, no clamping. `total_ns` is the already-checked accumulation from
-/// `sample_units`; serialization does not re-traverse the units.
+/// Serializes and emits one counted sample line: `MRP_COUNTED_SAMPLE` prefix plus one
+/// ASCII space, exact JSON keys in contract order, no extra fields, no mean, no
+/// clamping.
+///
+/// `total_ns` is the already-checked accumulation from `sample_units`; serialization
+/// does not re-traverse the units.
 fn print_sample(row: &str, sample: u64, total_ns: u64, unit_ns: &[u64]) {
     let mut line = String::with_capacity(96 + unit_ns.len() * 21);
     line.push_str("MRP_COUNTED_SAMPLE {\"bench\":\"");

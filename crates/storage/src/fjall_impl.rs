@@ -12,11 +12,9 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 /// Fjall's default block-cache capacity for unbudgeted opens.
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Fjall-backed key-value store.
 pub struct FjallStore {
     db: Database,
     keyspaces: Vec<Keyspace>,
-    // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
@@ -26,7 +24,6 @@ pub struct FjallStore {
 
 impl FjallStore {
     /// Keeps `guard` alive until this store's engine handle is closed.
-    ///
     /// Panics when a guard is already installed: replacing it would release
     /// the first guard while the engine handle it protects is still open.
     #[must_use]
@@ -41,16 +38,15 @@ impl FjallStore {
         }
     }
 
-    /// Opens or creates a Fjall store at `path` with one keyspace per column family.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, FJALL_DEFAULT_CACHE_BYTES)
     }
 
     /// Opens or creates a Fjall store with an explicit block-cache capacity.
     ///
-    /// `cache_bytes` sizes fjall's shared block cache and is configured
-    /// exactly: a budgeted share is never raised above its allocation. Zero
-    /// selects the engine default for unbudgeted opens.
+    /// `cache_bytes` sizes fjall's shared block cache and is configured exactly: a
+    /// budgeted share is never raised above its allocation. Zero selects the engine
+    /// default for unbudgeted opens.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             FJALL_DEFAULT_CACHE_BYTES
@@ -108,12 +104,8 @@ impl FjallStore {
 
         #[cfg(any(test, feature = "test-seam"))]
         {
-            // Apply boundary: the engine commit that lands the batch atomically.
             if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
                 if fault == crate::PersistFault::PartialApply {
-                    // A strict prefix is staged into the engine batch and the
-                    // boundary then faults: the never-committed batch leaves
-                    // no family with a partial view.
                     let mut fjall_batch = self.db.batch();
                     self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
                 }
@@ -122,8 +114,6 @@ impl FjallStore {
 
             if durability == Some(PersistMode::SyncAll) {
                 if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
-                    // The batch applies without the durability mode; completion
-                    // faults or is lost after that.
                     let mut fjall_batch = self.db.batch();
                     self.stage_ops(&mut fjall_batch, batch.ops)?;
                     fjall_batch.commit().map_err(StorageError::backend)?;
@@ -369,9 +359,6 @@ impl KvSnapshot for FjallSnapshot<'_> {
         prefix: &[u8],
     ) -> Result<Option<crate::KvPair>, StorageError> {
         let keyspace = self.store.keyspace(cf)?;
-        // The bounded range holds exactly the prefixed rows, and an unbounded
-        // range past an all-`0xFF` (or empty) prefix can only hold prefixed
-        // rows, so the range tail needs no prefix check.
         let mut range = match prefix_end(prefix) {
             Some(end) => self.snapshot.range(keyspace, prefix.to_vec()..end),
             None => self.snapshot.range(keyspace, prefix.to_vec()..),

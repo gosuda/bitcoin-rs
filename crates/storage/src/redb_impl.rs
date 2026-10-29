@@ -17,7 +17,6 @@ type FixedWindow<const N: usize> = (Bound<[u8; N]>, [u8; N]);
 /// `ScriptLive` key width: `prefix(8) || txid(32) || vout_le_u24(3)`.
 const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
-/// Unbounded scan budget: `iter_prefix` returns every matching row.
 const UNBOUNDED: crate::PrefixScanLimit = crate::PrefixScanLimit {
     max_rows: usize::MAX,
     max_bytes: usize::MAX,
@@ -157,7 +156,6 @@ fn write_durable_if(
     Ok(true)
 }
 
-/// redb-backed key-value store.
 pub struct RedbStore {
     db: Database,
     #[cfg(any(test, feature = "test-seam"))]
@@ -169,8 +167,8 @@ pub struct RedbStore {
 impl RedbStore {
     /// Keeps `guard` alive until this store's database handle is closed.
     ///
-    /// Panics when a guard is already installed: replacing it would release
-    /// the first guard while the database handle it protects is still open.
+    /// Panics when a guard is already installed: replacing it would release the first
+    /// guard while the database handle it protects is still open.
     #[must_use]
     pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
         assert!(
@@ -183,16 +181,15 @@ impl RedbStore {
         }
     }
 
-    /// Opens or creates a redb store at `path` with one table per column family.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, REDB_DEFAULT_CACHE_BYTES)
     }
 
     /// Opens or creates a redb store with an explicit page-cache capacity.
     ///
-    /// `cache_bytes` bounds redb's in-memory page cache and is configured
-    /// exactly: a budgeted share is never raised above its allocation. Zero
-    /// selects the engine default for unbudgeted opens.
+    /// `cache_bytes` bounds redb's in-memory page cache and is configured exactly: a
+    /// budgeted share is never raised above its allocation. Zero selects the engine
+    /// default for unbudgeted opens.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             REDB_DEFAULT_CACHE_BYTES
@@ -371,7 +368,6 @@ impl KvStore for RedbStore {
     }
 }
 
-/// redb-backed transaction-index store using fixed-width physical tables.
 struct RedbTxIndexStore {
     db: Database,
     #[cfg(any(test, feature = "test-seam"))]
@@ -381,7 +377,6 @@ struct RedbTxIndexStore {
 }
 
 impl RedbTxIndexStore {
-    /// Opens or creates a transaction-index store at `path`.
     fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_cache(path, REDB_TXINDEX_DEFAULT_CACHE_BYTES)
     }
@@ -584,21 +579,16 @@ impl KvStore for RedbTxIndexStore {
     }
 }
 
-/// Opens the fixed-width redb transaction-index store at `path` behind an
-/// opaque [`KvStore`].
+/// The concrete store type is an implementation detail.
 ///
-/// The concrete store type is an implementation detail. The store serves
-/// [`ColumnFamily::TxConfirmed`], [`ColumnFamily::Funding`],
+/// The store serves [`ColumnFamily::TxConfirmed`], [`ColumnFamily::Funding`],
 /// [`ColumnFamily::Spending`], [`ColumnFamily::BlockHeaders`],
-/// [`ColumnFamily::ScriptLive`], and [`ColumnFamily::UtxoMeta`]; every other
-/// family returns [`StorageError::InvalidOperation`].
+/// [`ColumnFamily::ScriptLive`], and [`ColumnFamily::UtxoMeta`]; every other family
+/// returns [`StorageError::InvalidOperation`].
 pub fn open_redb_tx_index_store(path: &Path) -> Result<impl KvStore, StorageError> {
     RedbTxIndexStore::open(path)
 }
 
-/// Opens the fixed-width redb transaction-index store with an explicit
-/// page-cache capacity. `guard`, when given, is kept alive until the
-/// returned store's database handle is closed.
 pub fn open_redb_tx_index_store_with_cache(
     path: &Path,
     cache_bytes: u64,
@@ -681,8 +671,6 @@ fn apply_redb_batch_op(
     }
 }
 
-/// Applies every ordered batch operation inside one open write transaction,
-/// opening each column family's table only once per consecutive run.
 fn apply_redb_ops(
     write_txn: &redb::WriteTransaction,
     ops: std::vec::IntoIter<BatchOp>,
@@ -891,10 +879,6 @@ fn scan_prefix(
 }
 
 /// Returns the greatest row with the given prefix via one reverse cursor step.
-///
-/// The bounded range holds exactly the prefixed rows, and an unbounded range
-/// past an all-`0xFF` (or empty) prefix can only hold prefixed rows, so the
-/// range tail needs no prefix check.
 fn greatest_prefix(
     read_txn: &redb::ReadTransaction,
     table_def: ByteTable,
@@ -1020,11 +1004,11 @@ fn fixed_prefix_bounds<const N: usize>(prefix: &[u8]) -> Result<([u8; N], [u8; N
     Ok((start, end))
 }
 
-/// Key range of the fixed-width keys that begin with `prefix` and sort at or
-/// after the seek point `start`, as a lower bound and an inclusive upper key.
+/// Key range of the fixed-width keys that begin with `prefix` and sort at or after the
+/// seek point `start`, as a lower bound and an inclusive upper key.
 ///
-/// `None` means no key of the prefix can sort at or after `start`. An empty
-/// `start`, or one before the prefix, begins at the prefix itself.
+/// `None` means no key of the prefix can sort at or after `start`. An empty `start`, or
+/// one before the prefix, begins at the prefix itself.
 fn fixed_prefix_window<const N: usize>(
     prefix: &[u8],
     start: &[u8],
@@ -1041,8 +1025,6 @@ fn fixed_prefix_window<const N: usize>(
         seek[..start.len()].copy_from_slice(start);
         Bound::Included(seek)
     } else {
-        // A key equal to `start[..N]` is a proper prefix of `start` and sorts
-        // before it, so the seek excludes that key.
         seek.copy_from_slice(&start[..N]);
         if seek == last {
             return Ok(None);
@@ -1232,8 +1214,6 @@ fn scan_txindex_prefix(
     }
 }
 
-/// Returns the greatest fixed-width row with the given prefix via one reverse
-/// cursor step. Every key inside the width-padded bounds carries the prefix.
 fn fixed_greatest_prefix<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
@@ -1254,8 +1234,6 @@ fn fixed_greatest_prefix<const N: usize>(
         .transpose()
 }
 
-/// Returns the greatest fixed-width value row with the given prefix via one
-/// reverse cursor step on the membership table plus one point lookup.
 fn fixed_value_greatest_prefix(
     read_txn: &ReadTransaction,
     main_def: FixedTable<12>,
@@ -1440,8 +1418,6 @@ fn apply_byte_run(
     Ok(())
 }
 
-/// Validates every batch operation's family and widths before any transaction
-/// begins, mirroring exactly what the apply path would reject mid-transaction.
 fn validate_txindex_batch(batch: &BufferedWriteBatch) -> Result<(), StorageError> {
     batch.ops.iter().try_for_each(|op| match op {
         BatchOp::Put { cf, key, value } => {
@@ -1474,7 +1450,6 @@ fn validate_txindex_key(cf: ColumnFamily, key: &[u8]) -> Result<(), StorageError
     }
 }
 
-/// Applies every ordered batch operation inside one open write transaction.
 fn apply_txindex_ops(
     write_txn: &redb::WriteTransaction,
     ops: std::vec::IntoIter<BatchOp>,

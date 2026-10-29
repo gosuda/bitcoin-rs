@@ -1,12 +1,3 @@
-//! Wires inbound peer transactions and packages to mempool admission and
-//! committed outcomes.
-//!
-//! Mempool owns preparation, policy, orphan/reject state and retry progress.
-//! P2P owns inventory, parent requests, the package request claims and charge
-//! ledger, and the bounded relay worker. This loop owns only channel draining
-//! and ordering admission results before consumers. It is the single decoder
-//! of package bodies: one package at a time is decoded and admitted here.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,13 +12,8 @@ use crossbeam_channel::Receiver;
 
 use crate::state::NodeState;
 
-/// Empty ingress polling also gives mempool-owned ready work a bounded wake.
 const TX_INGRESS_POLL: Duration = Duration::from_millis(100);
 
-/// Starts the ingress consumer over an already-owned P2P relay queue.
-///
-/// The caller registers each worker with teardown immediately after spawning.
-/// A later startup failure therefore cannot lose an earlier worker's handle.
 pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
@@ -52,13 +38,7 @@ pub fn spawn_tx_ingress_consumer(
         .name("bitcoin-rs-tx-ingress".to_owned())
         .spawn(move || {
             while !shutdown.load() {
-                // One bounded pass: transient retries remain with mempool and
-                // cannot starve fresh ingress or shutdown by spinning here.
                 let made_progress = consumer.process_retries();
-                // A committed retry may have readied the next generation of
-                // children. Yield to ingress, then continue without imposing
-                // one poll interval per dependency level. Transient failures
-                // still wait, and shutdown is checked on every bounded pass.
                 let timeout = if made_progress {
                     Duration::ZERO
                 } else {
@@ -102,15 +82,6 @@ impl TxIngressConsumer {
         }
     }
 
-    /// Decodes and admits one peer package, then releases it exactly once.
-    ///
-    /// PRE: `package` was accepted by the listener: its claim is `Enqueued`
-    ///   and its frame and decoded bytes are charged.
-    /// POST: the package reached the gateway once (`submit_peer_package`) or
-    ///   never; either way its charge and claim are released through exactly
-    ///   one of `package_response_rejected` / `package_response_completed`.
-    /// INVARIANT: the gateway receives the peer-supplied order and decides
-    ///   atomically; a refusal leaves membership and observer order unchanged.
     fn process_package(&self, package: bitcoin_rs_p2p::InboundPackage) {
         let source = package.source();
         let opened = match package.open() {
@@ -135,7 +106,6 @@ impl TxIngressConsumer {
             &self.chain_view(),
         );
         drop(txs);
-        // The gateway has answered, `Ok` or `Err`: the body is finished with.
         self.peer_table
             .package_response_completed(token, self.mempool_gateway.as_ref());
         match outcome {
@@ -148,8 +118,6 @@ impl TxIngressConsumer {
         }
     }
 
-    /// Announces every member the package committed and returns whether its
-    /// subject (the last member) is among them.
     fn announce_package(
         &self,
         identities: &[(Txid, Wtxid)],
@@ -195,13 +163,9 @@ impl TxIngressConsumer {
             bitcoin_rs_primitives::unix_time_secs(),
             &self.chain_view(),
         );
-        // The gateway has classified this body. Release its announcement and
-        // request slot before a Held outcome queues missing parent requests.
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
         if self.dispatch_outcome(txid, wtxid, source, outcome, true) {
-            // Core credits a peer only here, not when a retried orphan of it
-            // is accepted later.
             self.peer_table.note_useful_transaction(inbound.source);
         }
         self.peer_table
@@ -226,8 +190,6 @@ impl TxIngressConsumer {
         made_progress
     }
 
-    /// Acts on a classified peer transaction and returns whether `txid`
-    /// itself entered the mempool.
     fn dispatch_outcome(
         &self,
         txid: Txid,
@@ -255,11 +217,6 @@ impl TxIngressConsumer {
                 true
             }
             Ok(SubmitOutcome::Held { missing_parents }) => {
-                // Only a live solicitation suppresses the legacy parent
-                // requests. A refused solicitation with no live owner falls
-                // back so a dying package path never strands the parents; a
-                // live one is left to answer instead of being raced by
-                // duplicate parent requests.
                 let package_requested = allow_package_request
                     && self.peer_table.package_relay_versions(source)
                         & bitcoin_rs_p2p::packages::PKG_RELAY_ANC

@@ -1,5 +1,3 @@
-//! Relative locks of staged-confirmation parents in projected template selection.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
@@ -14,12 +12,8 @@ use bitcoin_rs_primitives::{
 };
 use common::{PAYOUT, context, zero_fee_pool};
 
-/// BIP68 time-flag bit (`1 << 22`): the consensus flag constant is
-/// crate-private, so the test names the bit it sets.
 const TIME_FLAG: u32 = 1 << 22;
 
-/// A child spending the given parent outpoint with the given version and
-/// sequence.
 fn lock_child(parent: Txid, vout: u32, version: u32, sequence: u32) -> Tx {
     Tx {
         version,
@@ -45,12 +39,6 @@ fn insert_staged(pool: &mut Mempool, tx: Tx) -> Result<Txid, Box<dyn Error>> {
     Ok(txid)
 }
 
-/// Relative locks of staged-confirmation parents evaluate at the staged
-/// confirmation height instead of being skipped: a height lock met exactly
-/// at the staged height selects, a lock needing one more block refuses, a
-/// version-1 child stays exempt, and a time lock follows the staged
-/// predecessor MTP against the candidate cutoff. Skipping would select
-/// every child below.
 #[test]
 fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> Result<(), Box<dyn Error>> {
     let mut pool = zero_fee_pool();
@@ -83,9 +71,6 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> Result<(), B
     let plan = pool.plan_block_removals(&block);
     assert_eq!(plan.removals.len(), 1, "only the parent stages");
 
-    // Candidate at height 100: the staged parent confirms at 99. The exact
-    // body set proves both directions: the met lock and the unsigned child
-    // select, the unmet height and time locks refuse.
     let base = context();
     let selected = select_template_body_after(&pool, &plan, &base, PAYOUT)?;
     let body: Vec<Txid> = selected.transactions.iter().map(|tx| tx.txid).collect();
@@ -93,8 +78,6 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> Result<(), B
     assert!(body.contains(&height_met), "the met height lock selects");
     assert!(body.contains(&unsigned), "the unsigned child selects");
 
-    // Time lock with predecessor MTP 1_000: satisfied at cutoff 1_512,
-    // refused at 1_511. The cutoff alone never stands in for the MTP.
     let met_time = CandidateContext {
         locktime_cutoff: 1_512,
         staged_parent_mtp: 1_000,

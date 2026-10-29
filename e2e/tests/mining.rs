@@ -1,5 +1,4 @@
 //! Mining-surface E2E: block templates, `submitblock`/`submitheader`,
-//! `generateblock`/`generatetoaddress`, and mining introspection.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -10,11 +9,8 @@ use bitcoin_rs_e2e::helpers::{
     genesis_block, mine_bare_blocks, op_true_script, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
-/// A template assembled offline grinds to valid proof-of-work: its header is
-/// admitted by `submitheader`, the matching body then connects via
-/// `submitblock`, and the applied tip advances to it.
 #[test]
 fn template_assembly_header_then_block() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -35,8 +31,6 @@ fn template_assembly_header_then_block() -> Result<()> {
         json!(block.block_hash().to_string())
     );
 
-    // Re-submitting an applied block is a duplicate, not an error, and
-    // genesis is always already known.
     let tip_hex = node.rpc("getblock", &json!([block.block_hash().to_string(), 0]))?;
     assert_eq!(
         node.rpc("submitblock", &json!([tip_hex]))?,
@@ -49,8 +43,6 @@ fn template_assembly_header_then_block() -> Result<()> {
     node.stop()
 }
 
-/// Malformed block/header hex and unmineable `generateblock` requests each
-/// carry Core's distinct error code.
 #[test]
 fn mining_rejections_carry_core_error_codes() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -75,7 +67,6 @@ fn mining_rejections_carry_core_error_codes() -> Result<()> {
     node.stop()
 }
 
-/// `generatetoaddress` pays the requested script in the coinbase.
 #[test]
 fn generatetoaddress_pays_address() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -98,8 +89,6 @@ fn generatetoaddress_pays_address() -> Result<()> {
     node.stop()
 }
 
-/// Mining introspection reports tip height, difficulty, and a non-negative
-/// network hashrate estimate.
 #[test]
 fn mining_info_and_hashps() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -126,8 +115,6 @@ fn mining_info_and_hashps() -> Result<()> {
     node.stop()
 }
 
-/// A transaction that pays full fee rate is included when named in
-/// `generateblock`'s tx list, and the block's tx root verifies.
 #[test]
 fn generateblock_with_listed_tx_verifies() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;

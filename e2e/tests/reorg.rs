@@ -1,5 +1,4 @@
 //! Reorg E2E: `invalidateblock` rewinds, a heavier competing Core chain
-//! re-orgs a synced node, and chain tips expose both branches.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -10,10 +9,8 @@ use bitcoin_rs_e2e::helpers::{
     mine_bare_blocks, mine_blocks_to, spawn_synced_pair, submit_genesis,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt, mock_time};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, Value, json};
 
-/// `invalidateblock` rewinds the applied tip and records the dead branch
-/// in `getchaintips`.
 #[test]
 fn invalidateblock_rewinds_tip() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -22,7 +19,7 @@ fn invalidateblock_rewinds_tip() -> Result<()> {
 
     assert_eq!(
         node.rpc("invalidateblock", &json!([hashes[2]]))?,
-        Value::Null
+        Value::new()
     );
     assert_eq!(node.rpc("getblockcount", &json!([]))?, json!(2));
     assert_eq!(node.rpc("getbestblockhash", &json!([]))?, json!(hashes[1]));
@@ -44,17 +41,12 @@ fn invalidateblock_rewinds_tip() -> Result<()> {
         "dead branch status: {dead}"
     );
 
-    // Mining continues from the rewound tip with a different branch: a
-    // distinct coinbase script makes the regenerated height-3 hash provably
-    // differ from the invalidated one.
     let fork = mine_blocks_to(&mut node, 4, "raw(52)")?;
     assert_ne!(fork[0], hashes[2]);
     assert_eq!(node.rpc("getblockcount", &json!([]))?, json!(6));
     node.stop()
 }
 
-/// A deeper competing branch mined on Core re-orgs the synced node's
-/// applied tip to the heavier chain.
 #[test]
 fn core_reorg_repoints_node_tip() -> Result<()> {
     let (mut core, mut node) = spawn_synced_pair(6)?;
@@ -62,16 +54,12 @@ fn core_reorg_repoints_node_tip() -> Result<()> {
     let hash_at_3 = core.rpc("getblockhash", &json!([3]))?;
     assert_eq!(
         core.rpc("invalidateblock", &json!([hash_at_3]))?,
-        Value::Null
+        Value::new()
     );
     assert_eq!(core.rpc("getblockcount", &json!([]))?, json!(2));
 
-    // Core runs at frozen `-mocktime`; regenerated blocks would hash
-    // identically to the invalidated ones. Advancing its clock makes the
-    // new branch actually diverge.
     core.rpc("setmocktime", &json!([mock_time() + 3_600]))?;
 
-    // Core builds a competing branch of 8 more blocks (tip at height 10).
     core.rpc(
         "generatetoaddress",
         &json!([8, bitcoin_rs_e2e::helpers::funding_address()?.to_string()]),
@@ -82,7 +70,6 @@ fn core_reorg_repoints_node_tip() -> Result<()> {
     let core_tip = core.rpc("getbestblockhash", &json!([]))?;
     assert_eq!(node_tip, core_tip, "node must re-org to the heavier chain");
 
-    // The old branch tip must be gone from the active chain's height map.
     let at_6 = node.rpc("getblockhash", &json!([6]))?;
     assert_eq!(
         at_6,
@@ -93,8 +80,6 @@ fn core_reorg_repoints_node_tip() -> Result<()> {
     core.stop()
 }
 
-/// A node restarted mid-chain keeps its tip and catches up with the
-/// peer on new blocks without a fresh full sync.
 #[test]
 fn restart_mid_chain_resumes_sync() -> Result<()> {
     let (mut core, node) = spawn_synced_pair(5)?;

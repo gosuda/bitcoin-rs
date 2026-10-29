@@ -1,29 +1,5 @@
 //! Per-connection SV1 session state machine, the shared pool core, and the
 //! bounded TCP server.
-//!
-//! # Sharing model and lock order
-//!
-//! [`crate::JobBook`] is single-owner (`&mut`, not `Sync`). Many connection
-//! threads reach it through [`PoolCore`], which wraps it in one `Mutex`:
-//!
-//! 1. `PoolCore.book` (the `JobBook`): held for `open_session`, `close_session`,
-//!    `install`, `invalidate_active`, and `validate`. Never across a socket
-//!    read or write, a ledger call, or a node call.
-//! 2. `PoolCore.published` (latest job, sequence numbers): held for a clone of
-//!    the latest `Arc<Job>`. Taken while holding `book` only by `install` and
-//!    `invalidate_active`, in that order; no code takes `book` while holding
-//!    `published`.
-//!
-//! A panicking connection thread poisons nothing it cannot afford to: lock
-//! guards recover from poison, and the thread's `Lease` closes its book
-//! session while unwinding.
-//!
-//! # Ownership of verdicts
-//!
-//! Stale, duplicate, version, `ntime`, network-target and share-target
-//! decisions are `JobBook::validate`'s. This module only maps its
-//! `ShareError` onto SV1 error codes, picks the session's share target
-//! (difficulty policy), and hands accepted shares to the [`ShareLedger`].
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -53,113 +29,70 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-// ---------------------------------------------------------------------------
-// Events, endings, configuration
-// ---------------------------------------------------------------------------
-
 /// Observer callback. Events never carry passwords.
 pub type Observer = Arc<dyn Fn(&ServerEvent) + Send + Sync>;
 
-/// Why a connection was refused before a session thread started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalReason {
-    /// `max_connections` reached.
     ConnectionLimit,
-    /// `max_connections_per_ip` reached for the peer address.
     PerIpLimit,
-    /// The OS refused a thread.
     SpawnFailed,
 }
 
 /// How a connection ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEnd {
-    /// The peer closed its side.
     ClientClosed,
-    /// Server shutdown.
     Cancelled,
-    /// Subscribe and authorize did not complete within `handshake_timeout`.
     HandshakeTimeout,
-    /// No complete frame within `idle_timeout`.
     IdleTimeout,
-    /// A frame stayed unterminated longer than `frame_timeout`.
     FrameTimeout,
-    /// A line exceeded `max_frame_bytes`.
     FrameTooLong,
-    /// A write did not finish within `write_timeout`.
     WriteTimeout,
-    /// Other socket failure.
     Io(io::ErrorKind),
-    /// Too many consecutive malformed or out-of-order requests.
     TooManyViolations,
-    /// Too many failed authorizations.
     TooManyAuthFailures,
-    /// Too many consecutive rejected shares.
     TooManyRejects,
-    /// The pool had no session slot.
     PoolRefused,
-    /// The pool produced something the wire cannot carry.
     PoolFault(&'static str),
 }
 
-/// Observable server facts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerEvent {
-    /// A connection thread started.
     Accepted {
-        /// Remote address.
         peer: SocketAddr,
     },
-    /// A connection was dropped before any thread started.
     Refused {
-        /// Remote address.
         peer: SocketAddr,
-        /// Why.
         reason: RefusalReason,
     },
-    /// `mining.subscribe` succeeded.
     Subscribed {
-        /// Remote address.
         peer: SocketAddr,
-        /// Native session id.
         session: SessionId,
-        /// Miner software string, truncated.
         user_agent: Option<String>,
     },
     /// The share passed validation and was credited to the ledger or queued
     /// in the outbox.
     ShareAccepted {
-        /// Native session id.
         session: SessionId,
-        /// Header hash, the ledger key.
         hash: BlockHash,
-        /// Share or block candidate.
         class: ShareClass,
-        /// True: recorded immediately; false: buffered in the outbox.
         delivered: bool,
     },
     /// A found block was handed to the node.
     BlockSubmitted {
-        /// Header hash.
         hash: BlockHash,
-        /// Node answer class.
         outcome: BlockOutcome,
     },
-    /// A connection thread is finishing. The session lease is already closed.
     SessionEnded {
-        /// Remote address.
         peer: SocketAddr,
-        /// Why.
         end: SessionEnd,
     },
 }
 
-/// A rejected [`ServerConfig`] field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfigError {
-    /// Field name.
     pub field: &'static str,
-    /// What is wrong.
     pub reason: &'static str,
 }
 
@@ -182,45 +115,28 @@ fn require(ok: bool, field: &'static str, reason: &'static str) -> Result<(), Co
 /// Bounds and deadlines of one [`Server`].
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
-    /// Connections served at once.
     pub max_connections: usize,
-    /// Connections served at once per peer address.
     pub max_connections_per_ip: usize,
-    /// Longest inbound line, terminator excluded.
     pub max_frame_bytes: usize,
-    /// Longest outbound `mining.notify` line.
     pub max_notify_bytes: usize,
-    /// Socket read timeout and the interval between work polls.
     pub poll_interval: Duration,
-    /// Sleep between `accept` attempts on an idle listener.
     pub accept_poll: Duration,
-    /// Time from connect to a subscribed and authorized session.
     pub handshake_timeout: Duration,
-    /// Longest silence between complete frames.
     pub idle_timeout: Duration,
-    /// Longest an unterminated line may stay incomplete (slowloris bound).
     pub frame_timeout: Duration,
-    /// Longest a single response write may block.
     pub write_timeout: Duration,
-    /// Workers one connection may authorize.
     pub max_workers_per_session: usize,
-    /// Failed authorizations before the connection is closed.
     pub max_auth_failures: u32,
-    /// Consecutive violations before the connection is closed.
     pub max_consecutive_violations: u32,
-    /// Consecutive rejected shares before the connection is closed.
     pub max_consecutive_share_rejects: u32,
     /// After a difficulty change, how long the easier of old and new target
     /// still judges shares (in-flight work).
     pub retarget_grace: Duration,
-    /// Stack of each connection thread.
     pub thread_stack_bytes: usize,
-    /// Starting difficulty and the range `mining.suggest_difficulty` may use.
     pub difficulty: DifficultyPolicy,
 }
 
 impl ServerConfig {
-    /// Conservative defaults around `difficulty`.
     #[must_use]
     pub fn new(difficulty: DifficultyPolicy) -> Self {
         Self {
@@ -244,7 +160,6 @@ impl ServerConfig {
         }
     }
 
-    /// Checks every bound.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let day = Duration::new(86_400, 0);
         require(
@@ -332,9 +247,6 @@ impl ServerConfig {
 
 struct DeferredResponse {
     id: RequestId,
-    /// Whether the originating frame carried an `"id"` member. `false` is a
-    /// notification: the later completion still emits `ServerEvent`s but never
-    /// a wire reply.
     has_id: bool,
     hash: BlockHash,
     class: ShareClass,
@@ -360,21 +272,12 @@ fn share_error_wire(error: &ShareError) -> super::WireError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared server state
-// ---------------------------------------------------------------------------
-
-/// What a [`Server`] needs from its embedder.
 pub struct ServerDeps {
-    /// The shared pool.
     pub pool: Arc<PoolCore>,
-    /// Credential check. There is no default.
     pub accounts: Arc<dyn AccountResolver>,
-    /// Optional event sink.
     pub observer: Option<Observer>,
 }
 
-/// Shared admission limits for every pool protocol listener.
 pub struct ConnectionLimiter {
     max_connections: usize,
     max_connections_per_ip: usize,
@@ -386,14 +289,12 @@ struct AdmissionState {
     per_ip: HashMap<IpAddr, usize>,
 }
 
-/// A connection's admission slot. Dropping it releases both counters.
 pub struct ConnectionPermit {
     limiter: Arc<ConnectionLimiter>,
     ip: IpAddr,
 }
 
 impl ConnectionLimiter {
-    /// Builds explicit total and per-peer admission caps.
     pub fn new(max_connections: usize, max_connections_per_ip: usize) -> Result<Self, ConfigError> {
         require(max_connections > 0, "max_connections", "must be at least 1")?;
         require(
@@ -411,7 +312,6 @@ impl ConnectionLimiter {
         })
     }
 
-    /// Attempts one total-and-per-peer admission atomically.
     pub fn try_admit(self: &Arc<Self>, ip: IpAddr) -> Result<ConnectionPermit, RefusalReason> {
         let mut state = locked(&self.state);
         if state.total >= self.max_connections {
@@ -429,7 +329,6 @@ impl ConnectionLimiter {
         })
     }
 
-    /// Number of currently admitted connections.
     #[must_use]
     pub fn active(&self) -> usize {
         locked(&self.state).total
@@ -471,27 +370,17 @@ struct ConnectionSlot {
     _permit: ConnectionPermit,
 }
 
-// ---------------------------------------------------------------------------
-// Session state machine
-// ---------------------------------------------------------------------------
-
 enum Flow {
     Continue,
     Close(SessionEnd),
 }
 
 enum Verdict {
-    /// A valid request answered; resets the violation count.
     Good,
-    /// A share accepted; resets violation and reject counts.
     Accepted,
-    /// Answered without touching any counter.
     Ignored,
-    /// Malformed or out-of-order request.
     Violation,
-    /// A share the pool refused.
     Rejected,
-    /// End the connection.
     Fatal(SessionEnd),
 }
 
@@ -519,7 +408,6 @@ fn emit_line(out: &mut Vec<u8>, line: &str) {
 }
 
 /// Emits `line` unless `request` is a notification without an `"id"` member.
-/// State changes still apply; only the wire reply is suppressed.
 fn emit_reply(request: &Request, out: &mut Vec<u8>, line: &str) {
     if request.has_id {
         emit_line(out, line);
@@ -560,8 +448,6 @@ impl SessionState {
     fn handle_frame(&mut self, frame: &[u8], out: &mut Vec<u8>) -> Flow {
         let verdict = match decode_line(frame) {
             Err(failure) => {
-                // JSON-RPC notifications carry no `"id"`: no reply, not even
-                // for decode failures. The violation still counts.
                 if failure.has_id {
                     emit_line(out, &encode_error(&failure.id, &failure.error));
                 }
@@ -620,8 +506,6 @@ impl SessionState {
             ClientRequest::Authorize(authorize) => self.on_authorize(request, authorize, out),
             ClientRequest::Submit(submit) => self.on_submit(request, &submit, out),
             ClientRequest::ExtranonceSubscribe => {
-                // The common owner fixes each session's extranonce prefix; it is
-                // never rotated, so there is nothing to subscribe to.
                 emit_reply(
                     request,
                     out,
@@ -676,8 +560,6 @@ impl SessionState {
                     members.push(String::from("\"version-rolling\":false"));
                 }
             } else {
-                // minimum-difficulty, subscribe-extranonce, info, and anything
-                // unknown: declined, as BIP310 allows.
                 members.push(format!("{}:false", json_string(name)));
             }
         }
@@ -803,8 +685,6 @@ impl SessionState {
         Verdict::Good
     }
 
-    /// The target the share is judged against: the session's, or for a short
-    /// grace after a change the easier of the old and new target.
     fn effective_target(&self, now: Instant) -> ShareTarget {
         match self.previous_target {
             Some((previous, until)) if now < until => previous.max(self.difficulty.target()),
@@ -852,7 +732,6 @@ impl SessionState {
                 return Verdict::Rejected;
             }
         }
-        // Job text this adapter never issued cannot name a job.
         let Some(job) = parse_wire_job_id(&submit.job_id) else {
             emit_reply(
                 request,
@@ -861,9 +740,6 @@ impl SessionState {
             );
             return Verdict::Rejected;
         };
-        // Shed before validation: an accepted share burns its duplicate
-        // identity, so a second submit while a completion is outstanding
-        // must not enter the book or the outbox.
         if !self.deferred.is_empty() {
             emit_reply(
                 request,
@@ -872,7 +748,6 @@ impl SessionState {
             );
             return Verdict::Ignored;
         }
-        // Normalize the wire version bits before the common submit owner.
         let version = match self.normalized_version(job, submit) {
             Ok(version) => version,
             Err(failure) => return Self::submit_failure_verdict(request, &failure, out),
@@ -893,12 +768,6 @@ impl SessionState {
         }
     }
 
-    /// Normalizes the wire version bits to the canonical header version:
-    /// rolled-bits interpretation lives in this SV1 edge (read through the
-    /// single authoritative `JobBook`, which stays the sole owner of the
-    /// share predicate), so `PoolCore::submit` and settlement below see only
-    /// canonical submissions and hold no wire branching. An unknown job
-    /// answers with the same verdict the owner would produce.
     fn normalized_version(&self, job: JobId, submit: &Submit) -> Result<u32, SubmitFailure> {
         match self.shared.pool.with_job_book(|book| {
             let job_ref = book.job(job)?;
@@ -912,10 +781,6 @@ impl SessionState {
         }
     }
 
-    /// Records an accepted share: answers immediately when its accounting is
-    /// complete, otherwise withholds the reply on the session's single
-    /// outstanding completion. Always `Accepted`: the verdict counts the
-    /// submission, not its durability.
     fn admit_credited(
         &mut self,
         request: &Request,
@@ -940,11 +805,6 @@ impl SessionState {
         Verdict::Accepted
     }
 
-    /// Maps a common-owner submit refusal onto the wire reply and verdict.
-    /// Reply suppression, verdicts, and deferred completion behavior are
-    /// unchanged: `OutboxFull` stays silent-side `Ignored` (the miner may
-    /// retry: nothing burned); every `Share` refusal and `Duplicate` answers
-    /// and counts.
     fn submit_failure_verdict(
         request: &Request,
         failure: &SubmitFailure,
@@ -970,8 +830,6 @@ impl SessionState {
                 Verdict::Rejected
             }
             SubmitFailure::OutboxFull => {
-                // The share was rejected BEFORE validation; the hash was NOT burned.
-                // The miner may retry.
                 emit_reply(
                     request,
                     out,
@@ -982,9 +840,6 @@ impl SessionState {
         }
     }
 
-    /// Records the credited share and, when `id` is present, answers it.
-    /// `None` is a notification completion: the `ShareAccepted`/`BlockSubmitted`
-    /// events still emit, but no wire reply does.
     fn emit_credited(
         &self,
         id: Option<&RequestId>,
@@ -1009,10 +864,6 @@ impl SessionState {
         }
     }
 
-    /// Reports a deferred share the ledger permanently refused. The drain
-    /// dropped the poisoned head to keep later shares flowing, but the waiter
-    /// must report failure with the same duplicate rejection as an inline
-    /// refusal, emitting no `ShareAccepted` instead of `result:true`.
     fn emit_deferred_rejected(&self, response: &DeferredResponse, out: &mut Vec<u8>) {
         if response.has_id {
             emit_line(
@@ -1022,8 +873,6 @@ impl SessionState {
         }
     }
 
-    /// Settles one deferred waiter. Returns the waiter when its completion is
-    /// still outstanding; otherwise emits its verdict and returns `None`.
     fn settle_deferred(
         &self,
         response: DeferredResponse,
@@ -1049,7 +898,6 @@ impl SessionState {
         None
     }
 
-    /// Sends pending difficulty and the newest job this session has not seen.
     fn poll(&mut self, out: &mut Vec<u8>) -> Flow {
         self.poll_hint = false;
         self.work_started = true;
@@ -1081,10 +929,6 @@ impl SessionState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Connection driver
-// ---------------------------------------------------------------------------
-
 fn flush(stream: &mut TcpStream, out: &mut Vec<u8>) -> Result<(), SessionEnd> {
     if out.is_empty() {
         return Ok(());
@@ -1104,7 +948,6 @@ fn run_connection(
     shared: &Arc<Shared>,
 ) -> SessionEnd {
     let config = &shared.config;
-    // Best effort: latency only.
     let _ = stream.set_nodelay(true);
     if let Err(error) = stream
         .set_nonblocking(false)
@@ -1189,27 +1032,17 @@ fn run_connection(
             }
         }
     };
-    // Best effort: deliver the answer that precedes a close.
     let _ = flush(&mut stream, &mut out);
     let _ = stream.shutdown(Shutdown::Both);
     end
 }
 
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
-
-/// Result of [`Server::shutdown`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShutdownReport {
-    /// Connection threads joined, including those that ended earlier.
     pub sessions_joined: usize,
-    /// Connection threads that panicked.
     pub sessions_panicked: usize,
 }
 
-/// A bounded Stratum V1 listener. Dropping it cancels and joins like
-/// [`Self::shutdown`].
 pub struct Server {
     local_addr: SocketAddr,
     shared: Arc<Shared>,
@@ -1247,8 +1080,6 @@ fn admit(shared: &Arc<Shared>, stream: TcpStream, peer: &SocketAddr, ordinal: u6
         });
     match spawned {
         Ok(handle) => locked(&shared.children).push(handle),
-        // The closure, with its slot and stream, was dropped: the connection
-        // is closed and its slot released.
         Err(_) => shared.emit(&ServerEvent::Refused {
             peer: peer_value,
             reason: RefusalReason::SpawnFailed,
@@ -1292,7 +1123,6 @@ fn accept_loop(
                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
                     thread::sleep(shared.config.accept_poll);
                 }
-                // Resource exhaustion or a reset handshake: back off, retry.
                 _ => thread::sleep(shared.config.accept_poll * 10),
             },
         }
@@ -1304,8 +1134,6 @@ fn accept_loop(
 }
 
 impl Server {
-    /// Binds `addr` and starts accepting. Connection threads exit on the next
-    /// poll tick after [`Self::shutdown`].
     pub fn bind<A: ToSocketAddrs>(
         addr: A,
         config: ServerConfig,
@@ -1321,7 +1149,6 @@ impl Server {
         Self::bind_with_limiter(addr, config, deps, limiter)
     }
 
-    /// Binds a server using an admission limiter shared with other protocols.
     pub fn bind_with_limiter<A: ToSocketAddrs>(
         addr: A,
         config: ServerConfig,
@@ -1355,28 +1182,20 @@ impl Server {
         })
     }
 
-    /// The bound address (useful with port 0).
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    /// Connections currently admitted across every protocol sharing the limiter.
     #[must_use]
     pub fn active_sessions(&self) -> usize {
         self.shared.limiter.active()
     }
 
-    /// Stops accepting, tells every connection to end, and joins every thread.
     pub fn shutdown(mut self) -> ShutdownReport {
         self.stop()
     }
 
-    /// Requests shutdown and joins the accept thread until `deadline`.
-    ///
-    /// On timeout, the unfinished accept handle remains owned by this server;
-    /// it is never detached. Dropping the server retains final ownership and
-    /// performs the blocking join.
     pub fn shutdown_until(&mut self, deadline: Instant) -> io::Result<ShutdownReport> {
         self.shared.cancel.store(true, Ordering::Release);
         let Some(accept) = self.accept.take() else {

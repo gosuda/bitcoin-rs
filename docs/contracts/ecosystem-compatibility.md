@@ -1,182 +1,32 @@
 # External ecosystem compatibility contract
 
-bitcoin-rs does not prove Bitcoin compatibility only with in-tree tests and
-self-authored documents. The stronger evidence is existing Bitcoin ecosystem
-software consuming bitcoin-rs through the same external surfaces it already
-uses with Bitcoin Core. This page owns the strategy, the test-ownership
-boundary, and the guardrails that keep that evidence thin. The maintained
-evidence record is [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml);
-this page is its normative policy.
-
-External integrations exist to produce **independent compatibility evidence**,
-not to accumulate features. If external software consumes bitcoin-rs without a
-bitcoin-rs-specific compatibility layer, that is stronger evidence than
-asserting compatibility from inside this repository.
+bitcoin-rs does not prove Bitcoin compatibility with in-tree tests and self-authored documents alone. The stronger evidence is existing ecosystem software consuming bitcoin-rs through the same external surfaces it already uses with Bitcoin Core. This page owns the strategy, the test-ownership boundary, and the guardrails that keep that evidence thin; the maintained evidence record is [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml), and this page is its normative policy. External integrations exist to produce independent compatibility evidence, not to accumulate features: consumption without a bitcoin-rs-specific layer is stronger evidence than in-repo assertion.
 
 ## Clauses
 
 ### `ECO-01`: Core-compatible boundaries, independent internals
-
-- **Principle**: external protocol/API compatibility should be
-  Core-compatible; internal architecture, storage, and test ownership remain
-  independent.
-- Compatibility is implemented at adapters and protocol boundaries so that:
-  external consumers see the interfaces they already understand; internal
-  crate ownership stays bitcoin-rs-native; storage and execution models stay
-  independently evolvable; and adding or replacing an external consumer never
-  requires production-code changes unless the public compatibility surface
-  itself is missing or wrong.
-- bitcoin-rs internals are never reshaped merely to resemble Bitcoin Core or
-  to satisfy a particular external harness.
-- This clause is the contract-side expression of the project compatibility
-  boundary: external interoperability is the stability contract; internal
-  compatibility — crate APIs, module boundaries, persistence formats — is not
-  guaranteed and is no reason to keep a worse design.
-
+External protocol and API compatibility SHOULD be Core-compatible; internal architecture, storage, and test ownership stay independent. Compatibility lives in adapters and protocol boundaries so external consumers see familiar interfaces, crate ownership stays bitcoin-rs-native, storage and execution stay evolvable, and adding or replacing a consumer never needs production-code changes unless the public surface itself is missing or wrong. Internals are never reshaped to resemble Core or to satisfy one harness. This clause is the contract-side expression of the project boundary: external interop is the stability contract; internal crate APIs, module boundaries, and persistence formats carry no compatibility promise and keep no worse design.
 ### `ECO-02`: Two-tier test ownership
-
-External ecosystem integrations are black-box compatibility evidence, not
-duplicate correctness suites:
-
-```text
-Correctness: unit tests | contract tests | Core differential tests | focused internal e2e
-  -> owns detailed state transitions, edge cases, implementation invariants
-
-External compatibility: Bitcoin Core peer | RPC/REST/ZMQ consumer | bpftrace/BCC
-                        | benchmark tooling | mining software
-  -> proves the public surface is consumable in the real ecosystem
-```
-
-External evidence answers only consumability questions: can an unmodified
-Core peer sync/relay with bitcoin-rs; can an existing RPC client parse a
-response; can an existing ZMQ subscriber consume notifications; can a
-Core-style USDT script attach and read the expected probe ABI; can mining or
-benchmark tooling invoke bitcoin-rs through the documented public surface.
-Detailed correctness stays owned by the correctness tier; external evidence
-never re-tests internal branches.
-
+External integrations are black-box compatibility evidence, not duplicate correctness suites. Correctness (unit tests, contract tests, Core differential tests, focused internal end to end) owns detailed state transitions, edge cases, and implementation invariants; external compatibility (Bitcoin Core peer, RPC/REST/ZMQ consumer, bpftrace/BCC, benchmark tooling, mining software) proves the public surface is consumable in the real ecosystem. External evidence answers only consumability questions: can an unmodified Core peer sync and relay with bitcoin-rs; can an existing RPC client parse a response; can an existing ZMQ subscriber consume notifications; can a Core-style USDT script attach and read the expected probe ABI; can mining or benchmark tooling invoke bitcoin-rs through the documented public surface. Detailed correctness stays in the correctness tier; external evidence never re-tests internal branches.
 ### `ECO-03`: Black-box evidence only
-
-External compatibility checks depend only on externally observable behavior
-and documented compatibility surfaces. Evidence must not depend on internal
-log strings, private structs, test-only RPCs, test-only callbacks or hooks,
-extra production state kept only for evidence collection, or execution
-branches enabled only for a particular tool. A refactor that preserves the
-public compatibility surface must not break ecosystem evidence merely because
-internals changed. Detailed internal diagnostics may be collected for
-debugging, but they are never part of the compatibility contract.
-
-**Deferred guarantee:** the live P2P compatibility lane (scripts/run-p2p-core-interop.sh)
-still derives some assertions from private log markers (e.g. compact-block
-reconstruction counts). This coupling is known and tracked; until the lane is
-decoupled from log markers, refactors that change those markers may break the
-lane even when public protocol behavior is unchanged. ECO-09 records that
-restriction.
-
+Compatibility checks depend only on externally observable behavior and documented surfaces. Evidence MUST NOT depend on internal log strings, private structs, test-only RPCs, test-only callbacks or hooks, extra production state kept for evidence collection, or branches enabled for one tool. A refactor preserving the public surface MUST NOT break ecosystem evidence. Internal diagnostics may be collected for debugging but are never part of the contract. Deferred guarantee: the live P2P lane (`scripts/run-p2p-core-interop.sh`) still derives some assertions from private log markers (for example compact-block reconstruction counts); until decoupled, refactors changing those markers may break the lane without changing public protocol behavior. `ECO-09` records that restriction.
 ### `ECO-04`: One representative consumer is enough
-
-Do not collect tools for their own sake. For a given surface, one
-representative external consumer is sufficient unless another consumer proves
-a materially different compatibility property: a distinct protocol mode, ABI
-property, deployment environment, or regression risk. One real Core interop
-lane proves basic P2P compatibility; one ordinary Core-compatible RPC client
-proves RPC consumability; one bpftrace/BCC workflow proves the USDT ABI; one
-mining consumer proves GBT/mining integration. External-tool count is never a
-KPI.
-
+For a given surface, one representative external consumer is sufficient unless another proves a materially different property: a distinct protocol mode, ABI property, deployment environment, or regression risk. One real Core interop lane proves basic P2P; one ordinary Core-compatible RPC client proves RPC consumability; one bpftrace/BCC workflow proves the USDT ABI; one mining consumer proves GBT and mining integration. External-tool count is never a KPI.
 ### `ECO-05`: No production dependency creep
-
-Third-party validation tooling lives outside core implementation crates:
-external or upstream repositories, `tools/`, `scripts/`, or dedicated
-interoperability CI jobs. External tooling libraries are never added to
-`crates/*` merely to support compatibility tests, and no production state is
-exposed solely to satisfy tooling.
-
+Third-party validation tooling lives outside core implementation crates: external or upstream repositories, `tools/`, `scripts/`, or dedicated interop CI jobs. External tooling libraries are never added to `crates/*` for compatibility tests, and no production state is exposed solely to satisfy tooling.
 ### `ECO-06`: No duplicated internal tests
-
-When an external tool exposes a bug, add the minimal missing internal
-regression test at the correct owner boundary. The same detailed scenario is
-never permanently encoded in both an external harness and internal suites
-unless the two prove materially different contracts. There is no parallel
-external correctness framework.
-
+When an external tool exposes a bug, add the minimal missing internal regression test at the correct owner boundary. The same detailed scenario is never permanently encoded in both an external harness and internal suites unless the two prove materially different contracts. There is no parallel external correctness framework.
 ### `ECO-07`: Prefer upstream integrations
-
-When an external project needs a change, prefer a generic multi-implementation
-abstraction upstream over a bitcoin-rs-only fork or adapter:
-
-```text
-existing external tool -> generic Bitcoin implementation interface -> Core | bitcoin-rs
-```
-
+When an external project needs a change, prefer a generic multi-implementation abstraction upstream over a bitcoin-rs-only fork or adapter: existing external tool to generic Bitcoin implementation interface to Core or bitcoin-rs.
 ### `ECO-08`: Evidence matrix and status vocabulary
-
-- **Owner**: [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml),
-  one row per independently tracked surface with the columns
-  `surface | core_reference | status | representative_consumer | evidence`.
-- `status` uses exactly this vocabulary:
-  `implemented`, `externally verified`, `partially compatible`,
-  `intentionally unsupported`, `experimental`.
-- An implementation is **not** `externally verified` until a real external
-  consumer has exercised it and the run is recorded in the row's `evidence`.
-  In-tree tests, schema-shape comparison, and self-authored harnesses are
-  `implemented` evidence only. `externally verified` scopes to the black-box
-  outcomes the evidence names, never to unlisted behavior of the same surface.
-- Compatibility surfaces are tracked independently: Network (P2P v1, BIP324
-  /v2, tx/block relay, compact blocks and filters, peer lifecycle);
-  Application APIs (JSON-RPC, REST, ZMQ); Mining (GBT, block
-  submission/proposal, the experimental regtest Stratum V2 adapter described in
-  [../../tools/stratum-sv2/README.md](../../tools/stratum-sv2/README.md), and
-  future mining IPC);
-  Observability (Core-compatible USDT, bpftrace/BCC, bitcoin-dev-tools);
-  Process/component interfaces (optional Core IPC as a narrowly scoped
-  adapter).
-- Proof (Stratum V2 adapter surface only): localhost Noise and embedded-Node
-  tests in `tools/stratum-sv2/template-provider` (for example
-  `tight_budget_gets_a_fitting_job_and_budgets_stay_independent`,
-  `partial_noise_frame_survives_a_job_refresh`, and
-  `embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown`)
-  plus the retained functional compose run the owner matrix row names.
-- This matrix is a different axis from
-  `crates/rpc/core-compat.toml` (Core reference identity pins) and
-  `crates/rpc/src/registry.rs` (per-method Core-schema status): those own
-  what the API shape claims against Core; this matrix owns which real
-  external consumers have exercised the surface. Neither substitutes for the
-  other.
-
+Owner: [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml), one row per independently tracked surface with columns `surface | core_reference | status | representative_consumer | evidence`. `status` uses exactly: `implemented`, `externally verified`, `partially compatible`, `intentionally unsupported`, `experimental`. A surface is `externally verified` only after a real external consumer exercised it and the run is recorded in the row's `evidence`; in-tree tests, schema-shape comparison, and self-authored harnesses are `implemented` evidence only, and the scope covers only the black-box outcomes the evidence names. Surfaces are tracked independently: Network (P2P v1, BIP324/v2, tx and block relay, compact blocks and filters, peer lifecycle); Application APIs (JSON-RPC, REST, ZMQ); Mining (GBT, block submission and proposal, the experimental regtest Stratum V2 adapter in [../../tools/stratum-sv2/README.md](../../tools/stratum-sv2/README.md), and future mining IPC); Observability (Core-compatible USDT, bpftrace/BCC, bitcoin-dev-tools); Process and component interfaces (optional Core IPC as a narrowly scoped adapter). Proof for the Stratum V2 adapter surface only: localhost Noise and embedded-Node tests in `tools/stratum-sv2/template-provider` (for example `tight_budget_gets_a_fitting_job_and_budgets_stay_independent`, `partial_noise_frame_survives_a_job_refresh`, `embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown`) plus the retained functional compose run the owner matrix row names. This matrix is a different axis from `crates/rpc/core-compat.toml` (Core reference identity pins) and `crates/rpc/src/registry.rs` (per-method Core-schema status): those own what the API shape claims against Core; this matrix owns which real consumers exercised the surface. Neither substitutes for the other.
 ### `ECO-09`: Interop evidence is observable protocol outcomes
-
-The live Bitcoin Core P2P interop lane is external evidence only where it
-observes externally visible outcomes: handshake, sync, relay, serving
-behavior, disconnect behavior, chain identity. Counts derived from internal
-bitcoin-rs log markers (for example compact-block reconstruction log
-messages) are diagnostic material, not a compatibility contract; they must
-not become long-term external evidence. Those details belong to internal P2P
-tests or benchmark/diagnostic tooling.
+The live Bitcoin Core P2P interop lane is external evidence only where it observes externally visible outcomes: handshake, sync, relay, serving behavior, disconnect behavior, chain identity. Counts derived from internal bitcoin-rs log markers (for example compact-block reconstruction log messages) are diagnostic material, not a compatibility contract; those details belong to internal P2P tests or benchmark and diagnostic tooling.
 
 ## Non-goals
 
-- Cloning every Bitcoin Core interface.
-- Supporting internal Core filesystem or database formats for parity.
-- Importing Core's internal ownership model into bitcoin-rs.
-- Bespoke integrations that no external project uses.
-- Claiming compatibility from schema shape alone.
-- Turning every experimental Core interface into a required bitcoin-rs
-  feature.
-- External-tool count as a project KPI.
-- Exposing internal state solely to satisfy compatibility tooling.
-- A parallel external correctness framework.
+Cloning every Bitcoin Core interface; supporting internal Core filesystem or database formats for parity; importing Core's internal ownership model; bespoke integrations no external project uses; compatibility claims from schema shape alone; every experimental Core interface as a required feature; external-tool count as a KPI; internal state solely to satisfy tooling; a parallel external correctness framework.
 
 ## Proven by
 
-- [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml): the
-  maintained matrix; each row's `evidence` names its proof owner, and every
-  current row is honestly downgraded to `implemented` or weaker wherever only
-  in-tree proof exists.
-- `scripts/run-p2p-core-interop.sh` with `crates/p2p/tests/core_interop_live.rs`
-  (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`, `CORE-06`): the
-  one real-consumer lane today — an unmodified Bitcoin Core 31.1 peer.
-- Acceptance items that need real external validation runs (a representative
-  real-world consumer per verified surface, an upstreamed or out-of-repo
-  integration, thin CI separation of ecosystem lanes) are tracked in issue
-  #1122 follow-up work, not claimed here.
+- [../api/ecosystem-compat.toml](../api/ecosystem-compat.toml), with each row's `evidence` naming its proof owner and every current row honestly downgraded to `implemented` or weaker wherever only in-tree proof exists; `scripts/run-p2p-core-interop.sh` with `crates/p2p/tests/core_interop_live.rs` (`docs/contracts/core-differential.md` `CORE-02`, `CORE-03`, `CORE-06`), the one real-consumer lane today, an unmodified Bitcoin Core 31.1 peer. Items needing real external validation runs are tracked as issue #1122 follow-up work, not claimed here.

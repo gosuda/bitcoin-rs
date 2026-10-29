@@ -5,7 +5,7 @@
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};
 use bitcoin_rs_e2e::rpc::Connection;
 use bitcoin_rs_e2e::{Kind, ProcessNode, Result, SpawnOptions};
-use serde_json::{Value, json};
+use sonic_rs::{JsonValueTrait as _, Value, json};
 use std::net::SocketAddr;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -116,7 +116,7 @@ fn wait_parameters_and_timeouts_match_core_with_declared_short_help() -> Result<
     }
     std::fs::write(
         candidate.evidence.join("wait-parameter-comparisons.json"),
-        serde_json::to_vec_pretty(&evidence)?,
+        sonic_rs::to_vec_pretty(&evidence)?,
     )?;
     candidate.stop()?;
     core.stop()
@@ -129,9 +129,6 @@ fn check_header_only_waits(
     applied: &Value,
 ) -> Result<()> {
     assert!(node.rpc("submitheader", &json!([&raw[..160]]))?.is_null());
-    // Each finite request completes after header admission. Its answer proves
-    // the header-only state still exposes the old applied tip, regardless of
-    // scheduling. The owner's private notification gate proves parked races.
     for (method, params) in [
         ("waitfornewblock", json!([1, applied["hash"]])),
         ("waitforblock", json!([hash, 1])),
@@ -178,7 +175,6 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
         assert_eq!(task.join().expect("waiter")?, expected);
     }
 
-    // A committed rollback wakes hash-change observers at the lower height.
     let mut tasks = Vec::new();
     for node in [&mut core, &mut candidate] {
         tasks.push(waiting(
@@ -191,8 +187,6 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
     for task in tasks {
         assert_eq!(task.join().expect("rollback waiter")?["result"], before);
     }
-    // A same-height replacement is a different hash, and the old tip/ancestor
-    // does not satisfy waitforblock merely because its body is still known.
     let replacement = core.rpc("generateblock", &json!(["raw(52)", []]))?;
     let replacement_hash = replacement["hash"].as_str().expect("replacement");
     assert_ne!(replacement_hash, next_hash);
@@ -219,10 +213,6 @@ fn waits_follow_applied_blocks_reorgs_restart_and_shutdown_like_core() -> Result
         let address = node.rpc_addr;
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let task = std::thread::spawn(move || {
-            // Reuse an established HTTP connection to avoid racing TCP accept.
-            // This black-box scenario observes a shutdown response; it does
-            // not expose the point where the wait predicate parks. Deterministic
-            // admitted cancellation is proved by the owner/real-server tests.
             let mut connection = Connection::new(address);
             connection.rpc(
                 &envelope("getblockcount", json!([])),

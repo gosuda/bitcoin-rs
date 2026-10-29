@@ -73,7 +73,6 @@ pub(crate) fn open_at_genesis(network: Network) -> Result<NodeFixture> {
     Ok(fixture)
 }
 
-/// Regtest node at its applied genesis tip plus the coordinator over it.
 pub(crate) fn regtest_mining() -> Result<(NodeFixture, MiningCoordinator)> {
     let fixture = open_at_genesis(Network::Regtest)?;
     let mining = coordinator(&fixture.state);
@@ -81,7 +80,6 @@ pub(crate) fn regtest_mining() -> Result<(NodeFixture, MiningCoordinator)> {
 }
 
 pub(crate) fn coordinator(state: &NodeState) -> MiningCoordinator {
-    // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -118,8 +116,6 @@ pub(crate) fn template_request(long_poll_id: Option<CompactString>) -> BlockTemp
     }
 }
 
-/// An ordinary template request that also asks the owner to leave `budget`
-/// of coinbase growth.
 pub(crate) fn budgeted_template_request(budget: CoinbaseBudget) -> BlockTemplateRequest {
     BlockTemplateRequest {
         coinbase_budget: Some(budget),
@@ -385,8 +381,6 @@ pub(crate) fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
     seed_coinbase_spend_at(1, fee_sats)
 }
 
-/// Spend of the coinbase `seed_chain` mines at `height`, paying `fee_sats`.
-/// The coinbase is mature for the next block once the tip is `height + 99`.
 pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
     let seed_coinbase = Tx {
         version: 2,
@@ -523,7 +517,6 @@ pub(crate) fn mining_handler(state: &NodeState) -> Handler {
     rpc_handler(state, Arc::new(coordinator(state)))
 }
 
-/// RPC handler over `state` whose mining methods run on `mining_control`.
 pub(crate) fn rpc_handler(state: &NodeState, mining_control: Arc<dyn MiningControl>) -> Handler {
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
@@ -629,8 +622,6 @@ pub(crate) fn required_u64(value: &sonic_rs::Value, key: &str) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("template field {key} missing or not a number"))
 }
 
-/// Native BIP141 witness merkle fold with the odd-leaf duplication rule.
-/// The coinbase wtxid is replaced by all-zeroes before folding.
 pub(crate) fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
     if txs.is_empty() {
         return None;
@@ -655,25 +646,14 @@ pub(crate) fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
     Some(Hash256::from_le_bytes(&level[0]))
 }
 
-/// Seed blocks after which the height-1, height-2, and height-3 coinbases are
-/// mature for the next block.
 pub(crate) const PRIORITY_SEED_BLOCKS: u32 = SEED_BLOCKS + 2;
-/// Fee of the pooled spend that starts out ranked last.
 pub(crate) const LOW_FEE_SATS: u64 = 10_000;
-/// Fee of the pooled spend that starts out ranked first.
 pub(crate) const HIGH_FEE_SATS: u64 = 20_000;
-/// Fee of the spend admitted after a prioritisation.
 pub(crate) const LATE_FEE_SATS: u64 = 15_000;
-/// Large enough that the prioritised spend outranks every other fee here.
 pub(crate) const PRIORITY_DELTA_SATS: i64 = 50_000;
-/// Ceiling for calls that must answer, above the coordinator's 1 s wait slice.
 pub(crate) const PROMPT: Duration = Duration::from_secs(5);
-/// Longest a long poll may take to register as a waiter before the test fails.
 const PARK_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The public `longpollid` format:
-/// `{tip_be_hex}{mempool_sequence}` at fee revision zero, otherwise
-/// `{tip_be_hex}{mempool_sequence}:{fee_delta_sequence}`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LongPollId {
     pub(crate) tip: String,
@@ -682,8 +662,6 @@ pub(crate) struct LongPollId {
 }
 
 impl LongPollId {
-    /// Decodes `id` by the public format and nothing else. Ids without the
-    /// fee suffix imply fee revision zero.
     pub(crate) fn parse(id: &str) -> Result<Self> {
         let (tip, counters) = id
             .split_at_checked(64)
@@ -703,9 +681,6 @@ impl LongPollId {
     }
 }
 
-/// The id the public format assigns to the node's live generation, built from
-/// the applied tip and the pool's own counters rather than from the
-/// coordinator.
 pub(crate) fn live_long_poll_id(state: &NodeState) -> Result<String> {
     let tip = current_tip(state)?;
     let mempool = state.mempool();
@@ -719,13 +694,10 @@ pub(crate) fn live_long_poll_id(state: &NodeState) -> Result<String> {
     Ok(id)
 }
 
-/// What a miner reads from one `getblocktemplate` reply.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TemplateView {
     pub(crate) long_poll_id: String,
-    /// Transaction ids in template order.
     pub(crate) txids: Vec<String>,
-    /// Actual fees, parallel to `txids`; prioritisation never changes them.
     pub(crate) fees: Vec<u64>,
     pub(crate) coinbase_value: u64,
 }
@@ -756,8 +728,6 @@ pub(crate) fn template_view(template: &sonic_rs::Value) -> Result<TemplateView> 
     })
 }
 
-/// One `getblocktemplate` call through the real RPC dispatcher; a
-/// `long_poll_id` makes it a long poll.
 pub(crate) fn gbt_view(handler: &Handler, long_poll_id: Option<&str>) -> Result<TemplateView> {
     let params = if let Some(id) = long_poll_id {
         json!([{"rules": ["segwit"], "longpollid": id}])
@@ -767,13 +737,6 @@ pub(crate) fn gbt_view(handler: &Handler, long_poll_id: Option<&str>) -> Result<
     template_view(&handler.dispatch("getblocktemplate", &params)?)
 }
 
-/// One call running on its own thread, with a single owner.
-///
-/// Dropping the handle before the result is collected releases the thread
-/// through the node shutdown latch, which every long-poll wait slice (1 s)
-/// observes, and joins it. A failing test therefore never leaves a parked
-/// poll behind. The result channel holds one slot, so the thread never blocks
-/// sending it.
 pub(crate) struct PendingPoll<T> {
     done: Receiver<T>,
     thread: Option<JoinHandle<()>>,
@@ -796,12 +759,10 @@ impl<T> PendingPoll<T> {
         }
     }
 
-    /// Whether the call has returned or panicked.
     pub(crate) fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    /// Collects the call's result; fails when it does not return in `within`.
     pub(crate) fn collect(mut self, within: Duration) -> Result<T> {
         let value = self
             .done
@@ -826,20 +787,6 @@ impl<T> Drop for PendingPoll<T> {
     }
 }
 
-/// Blocks until `mining` reports a long-poll waiter registered on its wake
-/// condvar.
-///
-/// The proof is causal, not timed. The coordinator counts a waiter under its
-/// state mutex immediately before the condvar wait that releases that mutex,
-/// and `parked_long_poll_waiters` reads the count under the same mutex. A
-/// count of at least one therefore means the poll has read the live
-/// generation, found it equal to the id it waits on, and is registered to
-/// receive every later publication; nothing that follows can be missed by
-/// starting late. It does not prove a notification fires: every wait slice
-/// re-derives the live generation, so a lost notify only delays the reply.
-/// The loop only bounds how long a regression takes to fail: it sleeps 1 ms
-/// between reads, gives up after `PARK_DEADLINE`, and fails early when the
-/// call returned without ever waiting.
 pub(crate) fn await_parked<T>(mining: &MiningCoordinator, poll: &PendingPoll<T>) -> Result<()> {
     let deadline = Instant::now() + PARK_DEADLINE;
     loop {
@@ -856,9 +803,6 @@ pub(crate) fn await_parked<T>(mining: &MiningCoordinator, poll: &PendingPoll<T>)
     }
 }
 
-/// One coordinator wired the way `lifecycle` wires production: gateway
-/// mutations reach it through a `MiningGenerationSignal` observer leg, and the
-/// RPC handler runs its mining methods on the same coordinator.
 pub(crate) struct WiredMining {
     pub(crate) mining: Arc<MiningCoordinator>,
     pub(crate) handler: Arc<Handler>,
@@ -879,23 +823,17 @@ pub(crate) fn wire_mining(state: &NodeState) -> Result<WiredMining> {
     Ok(WiredMining { mining, handler })
 }
 
-/// Transaction ids as the template renders them, in the given order.
 pub(crate) fn txid_strings(txs: &[&Tx]) -> Vec<String> {
     txs.iter().map(|tx| tx.txid().to_string()).collect()
 }
 
-/// A long-poll `getblocktemplate` running on its own thread.
 pub(crate) type Poll = PendingPoll<Result<TemplateView>>;
 
-/// Regtest node with a wired coordinator and two independent pooled spends of
-/// matured seed coinbases, so prioritising one reorders the template.
 pub(crate) struct PriorityFixture {
     pub(crate) wired: WiredMining,
     pub(crate) state: NodeState,
     _dir: tempfile::TempDir,
-    /// Pays `LOW_FEE_SATS`; ranks below `high` until prioritised.
     pub(crate) low: Tx,
-    /// Pays `HIGH_FEE_SATS`.
     pub(crate) high: Tx,
 }
 
@@ -922,13 +860,10 @@ impl PriorityFixture {
         &self.wired.mining
     }
 
-    /// `getblocktemplate` through the real RPC dispatcher.
     pub(crate) fn template(&self) -> Result<TemplateView> {
         gbt_view(&self.wired.handler, None)
     }
 
-    /// Real RPC `prioritisetransaction`: the handler mutates the pool through
-    /// the gateway and publishes the fee generation.
     pub(crate) fn prioritise(&self, tx: &Tx, delta: i64) -> Result<()> {
         let accepted = self.wired.handler.dispatch(
             "prioritisetransaction",
@@ -940,18 +875,12 @@ impl PriorityFixture {
         Ok(())
     }
 
-    /// Admits a third spend through the real gateway; the observer leg wakes
-    /// the coordinator with the admission's sequence.
     pub(crate) fn admit_late(&self) -> Result<Tx> {
         let late = seed_coinbase_spend_at(3, LATE_FEE_SATS);
         admit_to_mempool(&self.state, &late)?;
         Ok(late)
     }
 
-    /// Starts a long poll on the live template's id and returns only once the
-    /// coordinator reports it parked (see [`await_parked`]). Nothing has been
-    /// published since the template was read, so a poll that has returned by
-    /// then did not wait and the proof is void; that fails here.
     pub(crate) fn park_long_poll(&self) -> Result<(TemplateView, Poll)> {
         let current = self.template()?;
         let poll = self.poll(&current.long_poll_id);
@@ -962,7 +891,6 @@ impl PriorityFixture {
         Ok((current, poll))
     }
 
-    /// A long-poll `getblocktemplate` on its own thread, waiting on `id`.
     pub(crate) fn poll(&self, id: &str) -> Poll {
         let handler = Arc::clone(&self.wired.handler);
         let id = id.to_owned();

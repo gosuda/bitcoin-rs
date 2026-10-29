@@ -3,63 +3,39 @@
 use std::fmt;
 use std::path::PathBuf;
 
-/// Anything that can go wrong while driving a node process end-to-end.
+use sonic_rs::JsonValueTrait as _;
+
 #[derive(Debug)]
 pub enum Error {
-    /// Underlying I/O failure (spawn, socket, file).
     Io(std::io::Error),
-    /// JSON encode/decode failure.
-    Json(serde_json::Error),
-    /// RPC returned a structured error reply.
+    Json(sonic_rs::Error),
     Rpc {
-        /// Method that was called.
         method: String,
-        /// JSON-RPC error code.
         code: i64,
-        /// Server-side message.
         message: String,
     },
-    /// The child exited before it became ready or while still owned.
     ChildExit {
-        /// Process id.
         pid: u32,
-        /// Exit status observed.
         status: std::process::ExitStatus,
-        /// Directory holding captured output.
         evidence: PathBuf,
     },
-    /// A deadline expired while waiting for a condition.
     Timeout {
-        /// Process id of the node whose wait expired.
         pid: u32,
-        /// What was being awaited.
         operation: &'static str,
-        /// Directory holding captured output.
         evidence: PathBuf,
-        /// Last observed state, for debugging.
         detail: String,
     },
-    /// A wire-contract violation on a harness HTTP or P2P exchange.
     Protocol(String),
-    /// The pinned reference binary does not match the manifest digest.
     Reference {
-        /// Path of the binary that was checked.
         path: PathBuf,
-        /// Digest the manifest pins.
         expected: String,
-        /// Why the binary failed the check.
         detail: String,
     },
-    /// A behavior difference between the reference and candidate replies.
     Difference {
-        /// The observation that diverged.
         observation: String,
-        /// The reply from the pinned reference process.
-        reference: serde_json::Value,
-        /// The reply from the candidate process.
-        candidate: serde_json::Value,
+        reference: sonic_rs::Value,
+        candidate: sonic_rs::Value,
     },
-    /// A test-level assertion or protocol assumption failed.
     Assertion(String),
 }
 
@@ -123,27 +99,22 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
+impl From<sonic_rs::Error> for Error {
+    fn from(error: sonic_rs::Error) -> Self {
         Self::Json(error)
     }
 }
 
-/// Convenience result alias used by every harness call.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Extension helpers for JSON values returned by the node.
 pub trait ValueExt {
-    /// Required object field.
-    fn field(&self, key: &str) -> Result<&serde_json::Value>;
-    /// Required string field.
+    fn field(&self, key: &str) -> Result<&sonic_rs::Value>;
     fn str_field(&self, key: &str) -> Result<&str>;
-    /// Required unsigned integer field.
     fn u64_field(&self, key: &str) -> Result<u64>;
 }
 
-impl ValueExt for serde_json::Value {
-    fn field(&self, key: &str) -> Result<&serde_json::Value> {
+impl ValueExt for sonic_rs::Value {
+    fn field(&self, key: &str) -> Result<&sonic_rs::Value> {
         self.get(key)
             .ok_or_else(|| Error::Assertion(format!("missing field {key} in {self}")))
     }

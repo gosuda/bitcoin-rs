@@ -1,12 +1,3 @@
-//! Resource-bound evidence for the mempool surfaces changed by #639.
-//!
-//! Raw count-bound chains isolate graph costs; verified P2WSH chains check
-//! sigop-adjusted and fractional weight boundaries against rust-bitcoin.
-//! Process custody is covered by `overhaul_process_harness`. Linux RSS is
-//! process `VmHWM`; other platforms explicitly leave RSS unavailable. Retained
-//! bytes are the pool's capacity-based estimates at operation endpoints. A vsize limit is not an RSS
-//! limit. These samples do not certify unrelated resources or performance.
-
 use bitcoin_rs_consensus::{ValidationEngine, transaction_sigop_cost};
 use std::error::Error;
 use std::path::PathBuf;
@@ -26,7 +17,7 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
-use serde_json::{Value, json};
+use sonic_rs::{JsonValueTrait as _, Value, json};
 
 #[path = "support/fixtures.rs"]
 mod common;
@@ -222,9 +213,6 @@ fn witness_program(script: &[u8]) -> Vec<u8> {
     .concat()
 }
 
-/// BIP141 / Core 31.1 policy.cpp: adjusted weight is max(wire, sigops*20).
-/// Each witness script executes a false branch containing 199 multisig
-/// opcodes: 201 counted opcodes, 3,980 static sigops, and a true result.
 fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
     let heavy_script = [vec![0x00, 0x63], vec![0xae; 199], vec![0x68, 0x51]].concat();
     let middle_script = [vec![0x61; 20], vec![0x51]].concat();
@@ -406,9 +394,9 @@ fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
         "cluster_count_bound": MEMBERS, "conflicting_cluster_bound": CLUSTERS,
         "retained_estimate_endpoint_max_bytes": retained_endpoint_max,
         "process_rss_high_water_kib": rss_kib("VmHWM:")?,
-        "rss_limit": Value::Null,
+        "rss_limit": json!(null),
         "rss_unavailable_reason": (!cfg!(target_os = "linux")).then_some("No RSS collector is configured for this platform; policy checks still run."),
-        "transient_retained_allocation_high_water_bytes": Value::Null,
+        "transient_retained_allocation_high_water_bytes": json!(null),
         "complete_cl14_evidence": false,
         "notes": "RSS has no configured mempool-specific cap. Retained estimates are endpoint samples and omit transient allocations. Vsize and structural limits are checked separately. These partial measurements are not complete resource evidence or a regression/throughput claim.",
         "measurements": measurements,
@@ -422,7 +410,7 @@ fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
         "resource-bounds-{}-{captured_at}.json",
         std::process::id()
     ));
-    std::fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+    std::fs::write(&path, sonic_rs::to_vec_pretty(&report)?)?;
     println!("RESOURCE_EVIDENCE {report}");
     println!("resource evidence: {}", path.display());
     Ok(())

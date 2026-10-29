@@ -1,34 +1,21 @@
 //! One HTTP/1.1 transport for every harness request to a node listener: the
-//! keep-alive connection, the strict reply parser, the request wire builder,
-//! and the Basic-authorization encoder.
-//!
-//! A request that reached the peer's dispatch is never resent. Only a socket
-//! provably closed or broken before any request byte could have been
-//! processed is retried, and at most once per call.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use sonic_rs::Value;
 
 use crate::error::{Error, Result};
 use crate::node::HttpResponse;
 
-/// Bound on a request or response body the transport reads or writes.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
-/// Transport outcome for the cached socket. `Stale` means the request
-/// provably never reached the server, so one resend on a fresh socket is
-/// safe; anything else is surfaced as the original harness error.
 enum ConnFail {
     Stale,
     Error(Error),
 }
 
-/// A persistent HTTP/1.1 connection to one node listener. A socket whose
-/// peer closed it is dropped before any request byte leaves the client, so a
-/// retry always runs on a fresh connection.
 #[derive(Debug)]
 pub struct Connection {
     addr: SocketAddr,
@@ -36,24 +23,17 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Opens no socket: the first request connects lazily and every later
-    /// request reuses the keep-alive connection until it closes.
     #[must_use]
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr, conn: None }
     }
 
-    /// POST one pre-built JSON-RPC envelope to `/` and return the parsed
-    /// envelope. Error conversion into [`Error::Rpc`] is the caller's policy.
     pub fn rpc(&mut self, request: &Value, auth: (&str, &str), deadline: Instant) -> Result<Value> {
         let wire = request_wire(self.addr, request, Some(auth))?;
         let response = self.round_trip(&wire, deadline)?;
         response.json()
     }
 
-    /// Send one HTTP request and return the parsed reply. Non-2xx replies
-    /// are returned, not converted to errors; only protocol and transport
-    /// violations fail the call.
     pub fn http(
         &mut self,
         method: &str,
@@ -66,10 +46,6 @@ impl Connection {
         self.round_trip(&wire, deadline)
     }
 
-    /// One round trip on the cached connection, reconnecting once when the
-    /// socket is stale (idle close) or the exchange never reached dispatch.
-    /// A request that reached the server is never resent: admission calls
-    /// are not idempotent from the caller's view.
     fn round_trip(&mut self, wire: &[u8], deadline: Instant) -> Result<HttpResponse> {
         match self.try_round_trip(wire, deadline) {
             Ok(response) => Ok(response),
@@ -82,18 +58,12 @@ impl Connection {
                     })
             }
             Err(ConnFail::Error(error)) => {
-                // A hard failure may leave an in-flight request on the
-                // socket: drop it so a later call cannot be pipelined or
-                // answered with the wrong response.
                 self.conn = None;
                 Err(error)
             }
         }
     }
 
-    /// Ensures `conn` holds a socket the peer has not already closed:
-    /// connects when absent, probes a reused socket for an idle close before
-    /// any request bytes leave the client (`Stale` means safe to reconnect).
     fn live_conn(&mut self, deadline: Instant) -> std::result::Result<(), ConnFail> {
         let fresh = if self.conn.is_none() {
             let stream = TcpStream::connect_timeout(
@@ -114,9 +84,6 @@ impl Connection {
         Ok(())
     }
 
-    /// One request/response exchange on the cached socket. `Stale` marks a
-    /// socket that closed or broke before the request could have been
-    /// dispatched (idle close, dead peer), so re-sending once is safe.
     fn try_round_trip(
         &mut self,
         wire: &[u8],
@@ -128,8 +95,6 @@ impl Connection {
         conn.get_ref()
             .set_write_timeout(Some(remaining().map_err(ConnFail::Error)?))
             .map_err(|_| ConnFail::Stale)?;
-        // A failed write() transferred zero bytes, so resending is safe.
-        // Any partial send is not: the peer may hold a request prefix.
         let sent = conn.get_mut().write(wire).map_err(|_| ConnFail::Stale)?;
         if sent == 0 {
             return Err(ConnFail::Stale);
@@ -153,11 +118,6 @@ impl Connection {
                 }
             })?;
             if count == 0 {
-                // serve_connection writes a response before every close it
-                // initiates, so zero response bytes prove this request never
-                // reached dispatch: re-sending once is safe (a dead daemon
-                // fails the reconnect instead). Mid-headers EOF is
-                // ambiguous and is never retried.
                 return Err(if head.is_empty() {
                     ConnFail::Stale
                 } else {
@@ -177,18 +137,12 @@ impl Connection {
         let (status, headers, content_length, peer_close) =
             parse_reply_head(&head).map_err(ConnFail::Error)?;
         let content_length = match content_length {
-            // The head bound covers header bytes only; a corrupt peer could
-            // advertise an arbitrary length and drive an unbounded
-            // allocation, so bound it before the buffer exists.
             Some(length) if length > MAX_BODY => {
                 return Err(ConnFail::Error(Error::Protocol(
                     "RPC body length exceeds the response bound".into(),
                 )));
             }
             Some(length) => length,
-            // A 1xx, 204, or 304 reply carries no body and may omit
-            // Content-Length; any other framing-less reply is a protocol
-            // violation on a keep-alive connection.
             None if matches!(status, 100..=199 | 204 | 304) => 0,
             None => {
                 return Err(ConnFail::Error(Error::Protocol(
@@ -216,16 +170,10 @@ impl Connection {
     }
 }
 
-/// One-shot JSON-RPC exchange: connect, send, read to EOF, close. The total
-/// deadline bounds connect, every write, and every read; a peer that
-/// dribbles bytes cannot renew it.
 pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<Value> {
     let wire = request_wire(addr, request, Some(("parity", "parity")))?;
     let remaining = || remaining_time(deadline, Instant::now(), "RPC deadline reached");
     let mut stream = TcpStream::connect_timeout(&addr, remaining()?.min(Duration::from_secs(2)))?;
-    // Nonblocking writes: a blocked send may ignore SO_SNDTIMEO on macOS
-    // (its timeout is documented as best-effort), so the deadline must
-    // interleave between calls rather than rely on the syscall bound.
     stream.set_nonblocking(true).map_err(Error::Io)?;
     let mut pending = wire.as_slice();
     while !pending.is_empty() {
@@ -244,8 +192,6 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
             Err(error) => return Err(Error::Io(error)),
         }
     }
-    // Reads stay nonblocking too: SO_RCVTIMEO is best-effort on macOS just
-    // like SO_SNDTIMEO, so the deadline must interleave between reads.
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
@@ -274,7 +220,6 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
     response.json()
 }
 
-/// Time left before `deadline`, or a protocol failure naming `message`.
 pub(crate) fn remaining_time(
     deadline: Instant,
     now: Instant,
@@ -286,15 +231,11 @@ pub(crate) fn remaining_time(
         .ok_or_else(|| Error::Protocol(message.to_owned()))
 }
 
-/// Builds the wire bytes for one JSON-RPC POST to `/`.
 fn request_wire(addr: SocketAddr, request: &Value, auth: Option<(&str, &str)>) -> Result<Vec<u8>> {
-    let body = serde_json::to_vec(request)?;
+    let body = sonic_rs::to_vec(request)?;
     http_wire(addr, "POST", "/", &body, auth)
 }
 
-/// Builds one HTTP/1.1 keep-alive request. `keep-alive` asks the peer to
-/// hold the socket so the harness can reuse it across calls instead of
-/// paying a fresh accept-poll per request.
 fn http_wire(
     addr: SocketAddr,
     method: &str,
@@ -323,10 +264,6 @@ fn http_wire(
     Ok(wire)
 }
 
-/// Status code, lower-cased headers, declared body length, and whether the
-/// peer announced a close. Duplicate `Content-Length`, any
-/// `Transfer-Encoding`, a non-HTTP/1.x version, and a status code outside
-/// 100..=599 are protocol failures.
 type ReplyHeadParts = (u16, Vec<(String, String)>, Option<usize>, bool);
 
 fn parse_reply_head(head: &[u8]) -> Result<ReplyHeadParts> {
@@ -375,7 +312,6 @@ fn parse_reply_head(head: &[u8]) -> Result<ReplyHeadParts> {
     Ok((status, headers, content_length, peer_close))
 }
 
-/// Parses a complete reply (head plus body bytes) into an HTTP response.
 fn parse_reply(bytes: &[u8]) -> Result<HttpResponse> {
     let split = bytes
         .windows(4)
@@ -400,9 +336,6 @@ fn parse_reply(bytes: &[u8]) -> Result<HttpResponse> {
     })
 }
 
-/// Reports whether a kept-alive socket was already closed (or desynced) on
-/// the peer side. A non-blocking peek sees the close before any request
-/// bytes are sent, which makes reconnecting unambiguously safe.
 fn idle_closed(stream: &TcpStream) -> bool {
     if stream.set_nonblocking(true).is_err() {
         return true;
@@ -417,9 +350,6 @@ fn idle_closed(stream: &TcpStream) -> bool {
     stale
 }
 
-/// Socket-close errors proving the peer tore the connection down.
-/// WouldBlock/TimedOut are absent: an alive-but-slow peer means the request
-/// may still be in flight server-side, so those stay non-retryable.
 fn socket_closed(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -431,8 +361,6 @@ fn socket_closed(error: &std::io::Error) -> bool {
     )
 }
 
-/// Standard base64: the Basic authorization encoder for every harness
-/// credential. The wire never carries a hardcoded credential literal.
 fn base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

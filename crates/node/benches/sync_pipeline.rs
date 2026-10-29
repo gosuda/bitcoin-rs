@@ -1,5 +1,4 @@
 //! Deterministic initial-sync proxy benchmark.
-// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![expect(
     clippy::as_conversions,
     reason = "benchmark casts are intentionally lossy for perf measurement"
@@ -42,13 +41,6 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
-};
-use bitcoin_rs_script::push_int;
-// seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::{All, Message as SecpMessage, Secp256k1, SecretKey};
@@ -61,11 +53,14 @@ use bitcoin::{
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
 use bitcoin_rs_consensus::compute_merkle_root;
+use bitcoin_rs_primitives::encode::double_sha256;
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
+use bitcoin_rs_script::push_int;
 pub mod evidence;
 
-// seam: the shared measured-work sampler for MRP counted rows. The file is
-// owned by `tools/benchmark-support` and copied identically into every
-// control root; this bench consumes it by relative path.
 #[path = "../../../tools/benchmark-support/measured_samples.rs"]
 mod measured_samples;
 
@@ -128,18 +123,11 @@ const SPEND_PROXY_COINBASE_OUTPUT_VALUE: u64 = 78_125_000;
 
 const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
 
-/// Signed-spend output value: the 501-sat fee (`78_125_000 - 78_124_499`) clears the
-/// mempool's 1,000 sat/kvB minimum-relay floor in every spend class, so the
-/// same transactions the connect arms apply are also admissible through the
-/// gateway.
 const SIGNED_SPEND_OUTPUT_VALUE: u64 = 78_124_499;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
     print_proxy_summary(&blocks);
-    // Locally assembled fixtures: one encode each retains the exact bytes.
-    // Built once outside every timer so the measured spans stay apply-only
-    // with no second parse and no re-encode.
     let payloads: Vec<BlockPayload> = blocks
         .iter()
         .cloned()
@@ -222,17 +210,6 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     });
 }
 
-/// Signed-spend proxy benchmark: the same 117-block skeleton as
-/// `spend_heavy_proxy_blocks`, but every spend input carries a real ECDSA
-/// signature verified by the script engine. Spend classes are P2PKH (legacy
-/// ECDSA), P2WPKH (BIP143), and P2WSH 2-of-3 multisig (BIP143). Signatures are
-/// produced with rust-bitcoin 0.32's `SighashCache` + secp256k1 as an
-/// independent oracle, then consensus-serialized and decoded into native
-/// `Tx` (the `to_native` pattern from `crates/script/tests/proptest.rs`).
-///
-/// Criterion 0.8 cannot report p95/p99/max, so a manual timed sample loop
-/// collects per-sweep durations and prints the percentile table; Criterion
-/// keeps the headline median for comparability with the existing docs.
 fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     let blocks = legacy_signed_spend_proxy_blocks();
     print_signed_spend_proxy_summary(&blocks);
@@ -284,12 +261,6 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     record_evidence("sync_pipeline.signed_spend_proxy", &blocks, &sweeps);
 }
 
-/// Appends one identity-bearing sample per sweep to the bench evidence
-/// ledger under `target/benchmarks/`.
-///
-/// Every number carries the binary, configuration, corpus, backend and
-/// durability it was taken under, so a later comparison can match or reject
-/// it; the ledger is append-only across runs.
 fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]) {
     if sweeps.is_empty() {
         return;
@@ -334,14 +305,12 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
     store_bench_ledger(&path, &ledger);
 }
 
-/// Path of one bench evidence file under the workspace `target/benchmarks/`.
 fn bench_ledger_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/benchmarks")
         .join(name)
 }
 
-/// Loads an append-only bench ledger; a missing file is an empty ledger.
 fn load_bench_ledger(path: &Path) -> Ledger {
     match std::fs::read_to_string(path) {
         Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
@@ -353,7 +322,6 @@ fn load_bench_ledger(path: &Path) -> Ledger {
     }
 }
 
-/// Writes `ledger` back to `path`, creating the evidence directory.
 fn store_bench_ledger(path: &Path, ledger: &Ledger) {
     std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
         .unwrap_or_else(|error| panic!("bench evidence dir: {error}"));
@@ -635,9 +603,6 @@ struct SyncFixture {
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
-    /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup, in
-    /// the exact order the timed scenario sends them. Built off the production
-    /// path so the timed region measures only the channel handoff plus `tick`.
     prebuilt_inbound: Vec<bitcoin_rs_p2p::InboundBlock>,
     received_scan_expected: Vec<BlockHash>,
 }
@@ -708,8 +673,6 @@ impl SyncFixture {
         }
     }
 
-    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
-    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
     fn prebuild_run(mut self) -> Self {
         self.prebuilt_inbound = self.blocks[1..]
             .iter()
@@ -720,8 +683,6 @@ impl SyncFixture {
         self
     }
 
-    /// Pre-builds the single unsolicited payload `request_after_unsolicited_received`
-    /// stages (block height 2).
     fn prebuild_unsolicited(mut self) -> Self {
         self.prebuilt_inbound = vec![bitcoin_rs_p2p::InboundBlock::from_local(
             self.blocks[1].clone(),
@@ -729,8 +690,6 @@ impl SyncFixture {
         self
     }
 
-    /// Pre-builds the in-order inbound payloads (`run_in_order_inbound`): every
-    /// block in ascending height order.
     fn prebuild_in_order(mut self) -> Self {
         self.prebuilt_inbound = self
             .blocks
@@ -740,8 +699,6 @@ impl SyncFixture {
         self
     }
 
-    /// Pre-builds the oversized burst payloads (`run_oversized_inbound_burst`):
-    /// heights `2..=N` reversed.
     fn prebuild_oversized_burst(mut self) -> Self {
         self.prebuilt_inbound = self.blocks[1..]
             .iter()
@@ -754,9 +711,6 @@ impl SyncFixture {
     fn new_reverse_scan_overflow(tx_index_mode: DerivedIndexMode) -> Self {
         let mut fixture =
             Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
-        // The bench stages 128 received blocks and still needs to request a
-        // full pending window, so the received-block budget must cover both
-        // the staged blocks and the new requests.
         let mut budget = default_sync_budget(bitcoin_rs_primitives::Network::Regtest);
         budget.max_received_blocks = budget
             .max_pending_blocks
@@ -809,10 +763,6 @@ impl SyncFixture {
             }
         }
 
-        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
-        // Send the out-of-order tail, tick, then deliver the contiguous head and
-        // tick again — same send order and tick interleaving as before, but the
-        // clone+serialize now happens in setup, not the timed region.
         let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
         let contiguous = prebuilt
             .next_back()
@@ -949,20 +899,14 @@ impl SyncFixture {
     }
 }
 
-/// A boundary of the production replay that a caller may time.
 #[derive(Clone, Copy)]
 enum ReplayPhase {
-    /// The contiguous head is delivered; the next tick applies the window.
     ApplyStart,
-    /// The applying tick returned.
     ApplyDone,
 }
 
-/// What one production replay observed.
 struct ReplayReport {
-    /// Items in the first getdata the replay issued.
     requested: usize,
-    /// Height of the applied tip once the replay finished.
     applied_height: u32,
 }
 
@@ -971,9 +915,6 @@ struct ProductionStateSyncFixture {
     state: NodeState,
     outbound_rxs: Vec<crossbeam_channel::Receiver<bitcoin_rs_p2p::QueuedFrame>>,
     blocks: Vec<Block>,
-    /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup for
-    /// the `run` scenario, in send order (heights `2..=N` reversed, then height
-    /// 1 last). Left empty for the apply-tick scenarios, which stage in setup.
     prebuilt_inbound: Vec<bitcoin_rs_p2p::InboundBlock>,
     expected_getdata_count: usize,
 }
@@ -1004,10 +945,6 @@ impl ProductionStateSyncFixture {
         )
     }
 
-    /// Production replay of `body_blocks` coinbase-only blocks under the
-    /// same deep header chain and single synthetic peer as the 128-block arm.
-    /// Window attribution varies only the body count, so the header tree,
-    /// storage backend and request shape stay identical across scenarios.
     fn window_replay(body_blocks: u32) -> Self {
         let expected_getdata_count = usize::try_from(body_blocks)
             .unwrap_or_else(|error| panic!("invalid window body count: {error}"));
@@ -1069,8 +1006,6 @@ impl ProductionStateSyncFixture {
         }
     }
 
-    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
-    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
     fn prebuild_run(mut self) -> Self {
         self.prebuilt_inbound = self.blocks[1..]
             .iter()
@@ -1087,19 +1022,11 @@ impl ProductionStateSyncFixture {
         replay.applied_height
     }
 
-    /// The production replay of `run`, reporting the boundaries of the tick
-    /// that applies the window so a caller can time that tick on its own.
-    /// The fixture stays alive afterwards: its teardown is not part of any
-    /// interval the caller times.
     fn run_phased(&mut self, mut phase: impl FnMut(ReplayPhase)) -> ReplayReport {
         let sync = self.state.sync();
         sync.tick();
         let requested = self.first_getdata_len();
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
-        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
-        // Send the out-of-order tail, tick, then deliver the contiguous head and
-        // tick again — same send order and tick interleaving, with clone+serialize
-        // moved to setup.
         let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
         let contiguous = prebuilt
             .next_back()
@@ -1128,9 +1055,6 @@ impl ProductionStateSyncFixture {
         }
     }
 
-    /// One more sync tick. After the applying tick it closes the window's
-    /// measurement-only intervals (apply-idle, download-blocked-by-apply),
-    /// which record only when they close.
     fn settle_tick(&self) {
         self.state.sync().tick();
     }
@@ -1201,8 +1125,6 @@ impl ProductionStateSyncFixture {
         assert_eq!(self.first_getdata_len(), self.expected_getdata_count);
     }
 
-    /// Drains header requests up to the first getdata and returns its item
-    /// count.
     fn first_getdata_len(&self) -> usize {
         let rx = self
             .outbound_rxs
@@ -1238,15 +1160,6 @@ fn production_state_config() -> NodeConfig {
     config
 }
 
-/// The engine this bench run selects, exactly once.
-///
-/// Selection is runtime configuration, never a compiled-feature side effect:
-/// `BITCOIN_RS_VALIDATION_ENGINE` names the arm (`native` or `kernel`) and
-/// defaults to `native`. The kernel arm must both compile the capability
-/// (`--features fjall,kernel`) and select `kernel` here; selecting an engine
-/// this build cannot run panics loudly instead of silently benchmarking the
-/// other arm. Recorded in every summary line and covered by each evidence
-/// sample's resolved-configuration identity.
 fn bench_engine() -> bitcoin_rs_node::ValidationEngine {
     let spelling = sample_engine_label();
     let engine = bitcoin_rs_node::ValidationEngine::parse(&spelling)
@@ -1259,10 +1172,6 @@ fn bench_engine() -> bitcoin_rs_node::ValidationEngine {
     engine
 }
 
-/// The raw engine label that evidence samples and the `--mrp-verify` pin line
-/// report: `BITCOIN_RS_VALIDATION_ENGINE` verbatim, `native` when unset.
-/// Unlike `bench_engine` it neither validates nor normalizes, so a
-/// non-canonical spelling stays visible to the registration's engine pin.
 fn sample_engine_label() -> String {
     std::env::var("BITCOIN_RS_VALIDATION_ENGINE").unwrap_or_else(|_| "native".into())
 }
@@ -1559,24 +1468,14 @@ fn coinbase_script_sig(height: u32) -> Vec<u8> {
     script
 }
 
-// ---------------------------------------------------------------------------
-// Signed-spend corpus: real ECDSA signatures verified by the script engine.
-// ---------------------------------------------------------------------------
-
-/// BIP141 witness commitment prefix: `OP_RETURN OP_PUSH36 BIP141_COMMITMENT_TAG`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
-/// BIP141 reserved witness value for the coinbase input.
 const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
-/// Signing keys for the three spend classes, all derived deterministically.
 struct SigningKeys {
     secp: Secp256k1<All>,
-    /// P2PKH: one key per funded output.
     p2pkh: Vec<bitcoin::PublicKey>,
-    /// P2WPKH: one compressed key per funded output.
     p2wpkh: Vec<bitcoin::PublicKey>,
-    /// P2WSH 2-of-3: three keys shared across all P2WSH outputs.
     p2wsh: Vec<bitcoin::PublicKey>,
 }
 
@@ -1611,14 +1510,6 @@ fn secret_key(byte: u8) -> SecretKey {
     SecretKey::from_slice(&[byte; 32]).unwrap_or_else(|e| panic!("invalid secret key: {e}"))
 }
 
-/// Builds the 117-block signed-spend corpus.
-///
-/// Heights 1..100: fanout coinbase blocks funding 64 outputs split across P2PKH,
-/// P2WPKH, and P2WSH script classes. Heights 101..116: spend blocks that consume
-/// the coinbase outputs from 100 blocks back, each carrying a real ECDSA signature
-/// and paying a 501-sat fee to a standard bare-multisig output (mempool-
-/// admissible; see `build_signed_spend_tx`).
-/// Witness-bearing blocks carry a BIP141 commitment output on the coinbase.
 fn signed_spend_proxy_blocks() -> Vec<Block> {
     let keys = SigningKeys::new();
     let spend_start = SPEND_PROXY_COINBASE_MATURITY.saturating_add(1);
@@ -1646,12 +1537,6 @@ fn signed_spend_proxy_blocks() -> Vec<Block> {
     blocks
 }
 
-/// Coinbase block funding 64 outputs across P2PKH, P2WPKH, and P2WSH.
-///
-/// The first 22 outputs are P2PKH (legacy), the next 22 are P2WPKH (segwit v0),
-/// and the remaining 20 are P2WSH 2-of-3 multisig. Because this block carries
-/// witness-paying outputs, the coinbase includes a BIP141 witness commitment
-/// output and a 32-byte reserved witness element.
 fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningKeys) -> Block {
     let coinbase = signed_fanout_coinbase_transaction(height, keys);
     let mut block = Block {
@@ -1673,7 +1558,6 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
 
 fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     let mut outputs = Vec::with_capacity(SPEND_PROXY_FANOUT as usize + 1);
-    // P2PKH outputs (indices 0..22).
     for i in 0..22u32 {
         let pkh = keys.p2pkh[usize::try_from(i).unwrap()].pubkey_hash();
         let script = OracleScriptBuf::new_p2pkh(&pkh);
@@ -1682,7 +1566,6 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // P2WPKH outputs (indices 22..44).
     for i in 0..22u32 {
         let pkh = keys.p2wpkh[usize::try_from(i).unwrap()]
             .wpubkey_hash()
@@ -1693,7 +1576,6 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // P2WSH 2-of-3 outputs (indices 44..64).
     for i in 0..20u32 {
         let redeem = p2wsh_2of3_redeem_script(keys, i);
         let script_hash = redeem.wscript_hash();
@@ -1703,7 +1585,6 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // BIP141 witness commitment output.
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
         value: Amount::from_sat(0),
@@ -1723,7 +1604,6 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     }
 }
 
-/// P2WSH 2-of-3 multisig redeem script: `OP_2 PK1 PK2 PK3 OP_3 OP_CHECKMULTISIG`.
 fn p2wsh_2of3_redeem_script(keys: &SigningKeys, _index: u32) -> OracleScriptBuf {
     OracleBuilder::new()
         .push_int(2)
@@ -1735,13 +1615,7 @@ fn p2wsh_2of3_redeem_script(keys: &SigningKeys, _index: u32) -> OracleScriptBuf 
         .into_script()
 }
 
-/// Computes the BIP141 witness commitment for a coinbase that has no witness
-/// transactions besides itself. The witness merkle root uses all-zero for the
-/// coinbase leaf and the wtxid of every other transaction — but the coinbase is
-/// the only transaction in these blocks, so the root is all-zero and the
-/// commitment is `SHA256d(zeros || reserved)`.
 fn witness_commitment_for_coinbase(_outputs: &[TxOut]) -> Hash256 {
-    // Single-tx block: witness merkle root = [0; 32].
     let root = [0u8; 32];
     let mut buffer = [0u8; 64];
     buffer[..32].copy_from_slice(&root);
@@ -1749,7 +1623,6 @@ fn witness_commitment_for_coinbase(_outputs: &[TxOut]) -> Hash256 {
     double_sha256(&buffer)
 }
 
-/// Builds the BIP141 witness commitment scriptPubKey: `6a24aa21a9ed || commitment`.
 fn witness_commitment_script_pubkey(commitment: &Hash256) -> Vec<u8> {
     let mut script = Vec::with_capacity(38);
     script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
@@ -1757,13 +1630,6 @@ fn witness_commitment_script_pubkey(commitment: &Hash256) -> Vec<u8> {
     script
 }
 
-/// Target block: funding-style coinbase plus a caller-supplied spend list.
-///
-/// The assembly shape is exactly the spend-fanout block's below (BIP34
-/// coinbase, witness commitment recomputed over the full tx set, merkle
-/// recompute, trivial-PoW mining); parameterizing the spend set lets every
-/// measured sample connect a distinct block. The coinbase is the same
-/// 64-output funding coinbase the step-4 corpus uses, so its shape is proven.
 fn child_signed_target_block(
     parent: &Block,
     height: u32,
@@ -1771,7 +1637,6 @@ fn child_signed_target_block(
     spends: Vec<Tx>,
 ) -> Block {
     let mut txs = Vec::with_capacity(spends.len().saturating_add(1));
-    // Coinbase for this target block (witness-bearing, with commitment).
     txs.push(signed_fanout_coinbase_transaction(height, keys));
     txs.extend(spends);
     let mut block = Block {
@@ -1786,26 +1651,19 @@ fn child_signed_target_block(
         txs,
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
-    // Recompute the coinbase witness commitment now that the full tx set is known.
     let commitment = block_witness_commitment(&block.txs);
     let coinbase = &mut block.txs[0];
-    // Replace the placeholder commitment output (last output) with the real one.
     let last = coinbase
         .outputs
         .last_mut()
         .unwrap_or_else(|| panic!("target coinbase missing commitment output"));
     last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
-    // Recompute merkle root after updating the commitment.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
         .unwrap_or_else(|error| panic!("mining target block failed: {error}"));
     block
 }
 
-/// Spend block consuming 64 coinbase outputs from 100 blocks back, each with a
-/// real signature. The spend transactions are built as rust-bitcoin oracle
-/// transactions, signed, then converted to native `Tx` via consensus
-/// serialization.
 fn child_signed_spend_fanout_block(
     parent: &Block,
     height: u32,
@@ -1817,7 +1675,6 @@ fn child_signed_spend_fanout_block(
         .first()
         .unwrap_or_else(|| panic!("signed-spend source block missing coinbase"));
     let source_txid = source_coinbase.txid();
-    // 64 spend transactions, one per funded output.
     let mut spends = Vec::with_capacity(SPEND_PROXY_FANOUT as usize);
     for vout in 0..SPEND_PROXY_FANOUT {
         let prevout_value = SPEND_PROXY_COINBASE_OUTPUT_VALUE;
@@ -1828,13 +1685,9 @@ fn child_signed_spend_fanout_block(
             keys,
         ));
     }
-    // Same bytes as before: identical coinbase, spends, header, commitment,
-    // and mining sequence as child_signed_target_block.
     child_signed_target_block(parent, height, keys, spends)
 }
 
-/// Computes the BIP141 witness commitment for a block's transaction set.
-/// Coinbase leaf is all-zero; every other leaf is the transaction's wtxid.
 fn block_witness_commitment(txs: &[Tx]) -> Hash256 {
     let mut leaves: Vec<[u8; 32]> = txs
         .iter()
@@ -1854,14 +1707,6 @@ fn block_witness_commitment(txs: &[Tx]) -> Hash256 {
     double_sha256(&buffer)
 }
 
-/// Builds and signs a single spend transaction for output `vout` of
-/// `source_txid`. The spend class is determined by the output index:
-/// 0..22 = P2PKH, 22..44 = P2WPKH, 44..64 = P2WSH 2-of-3. Every spend pays a
-/// 501-sat fee to a standard bare 2-of-3 multisig output so the same
-/// transactions the connect arms apply also pass mempool admission
-/// (`min_relay_fee_sat_per_kvb` 1,000 sat/kvB and the standard-output
-/// whitelist in `crates/mempool/src/standardness.rs`); the block-connect
-/// fixture alone never required either.
 fn build_signed_spend_tx(
     source_txid: Txid,
     vout: u32,
@@ -1898,7 +1743,6 @@ fn build_signed_spend_tx(
     }
 }
 
-/// P2PKH spend: scriptSig = `<sig> <pubkey>`, signed with legacy sighash.
 fn build_signed_p2pkh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -1947,7 +1791,6 @@ fn build_signed_p2pkh_spend(
     to_native_tx(&tx)
 }
 
-/// P2WPKH spend: empty scriptSig, witness = `[sig, pubkey]`, signed with BIP143.
 fn build_signed_p2wpkh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -1996,8 +1839,6 @@ fn build_signed_p2wpkh_spend(
     to_native_tx(&tx)
 }
 
-/// P2WSH 2-of-3 multisig spend: witness = `[empty_dummy, sig1, sig2, redeem_script]`,
-/// signed with BIP143 using the redeem script as the witness script.
 fn build_signed_p2wsh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -2034,7 +1875,6 @@ fn build_signed_p2wsh_spend(
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wsh sighash: {e}"));
-    // Sign with the first two keys.
     let mut sigs = Vec::with_capacity(2);
     for &key_byte in &[0xC0u8, 0xC1] {
         let secret = secret_key(key_byte);
@@ -2045,7 +1885,6 @@ fn build_signed_p2wsh_spend(
         sig_bytes.push(EcdsaSighashType::All as u8);
         sigs.push(sig_bytes);
     }
-    // BIP147: empty dummy element before the signatures.
     let witness_items: Vec<Vec<u8>> = vec![
         Vec::new(),
         sigs[0].clone(),
@@ -2056,7 +1895,6 @@ fn build_signed_p2wsh_spend(
     to_native_tx(&tx)
 }
 
-/// Consensus-bytes round-trip from rust-bitcoin oracle types to native `Tx`.
 fn to_native_tx(tx: &OracleTx) -> Tx {
     let bytes = bitcoin::consensus::serialize(tx);
     deserialize(&bytes).unwrap_or_else(|e| panic!("oracle transaction must decode natively: {e}"))
@@ -2089,13 +1927,6 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-/// Standard output script for the signed spend set's own outputs.
-///
-/// Bare 2-of-3 multisig over the fixture's P2WSH key set: the mempool's
-/// `is_standard_output_script` whitelist accepts bare multisig of at most
-/// three pubkeys, and the 501-sat output is far above the dust threshold. The
-/// previous `push_int(1)` output was consensus-valid but fails mempool
-/// standardness, so the admitted arm would have panicked on sample one.
 fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
     OracleBuilder::new()
         .push_int(2)
@@ -2108,18 +1939,6 @@ fn bench_multisig_output_script(keys: &SigningKeys) -> Vec<u8> {
         .to_bytes()
 }
 
-// ---------------------------------------------------------------------------
-// Legacy signed-spend corpus: byte-identical to the pre-step-4 bench.
-// ---------------------------------------------------------------------------
-
-/// Builds the legacy 117-block signed-spend corpus this bench measured
-/// before the step-4 harness: 1-sat fees (`SPEND_PROXY_SPEND_OUTPUT_VALUE`)
-/// and `push_int(1)` spend outputs. Consensus-valid and block-connectable,
-/// but not mempool-admissible (fee floor, standard-output whitelist), so the
-/// step-4 connect arms use `signed_spend_proxy_blocks` instead. Only
-/// `sync_pipeline_apply_signed_spend_proxy` uses this corpus, keeping its
-/// history comparable; the step-4 arms stay byte-identical to the accepted
-/// baseline.
 fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
     let keys = SigningKeys::new();
     let spend_start = SPEND_PROXY_COINBASE_MATURITY.saturating_add(1);
@@ -2147,9 +1966,6 @@ fn legacy_signed_spend_proxy_blocks() -> Vec<Block> {
     blocks
 }
 
-/// Legacy spend block: the pre-step-4 fanout shape with 1-sat, `push_int(1)`
-/// spends. Funding coinbases are shared with the step-4 corpus, so sighashes
-/// match the historical bodies exactly.
 fn legacy_child_signed_spend_fanout_block(
     parent: &Block,
     height: u32,
@@ -2193,8 +2009,6 @@ fn legacy_child_signed_spend_fanout_block(
     block
 }
 
-/// Legacy spend dispatcher: same classes as `build_signed_spend_tx`, with
-/// the pre-step-4 outputs.
 fn legacy_build_signed_spend_tx(
     source_txid: Txid,
     vout: u32,
@@ -2223,7 +2037,6 @@ fn legacy_build_signed_spend_tx(
     }
 }
 
-/// Legacy P2PKH spend: 1-sat fee to `push_int(1)`, legacy sighash.
 fn legacy_build_signed_p2pkh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -2271,7 +2084,6 @@ fn legacy_build_signed_p2pkh_spend(
     to_native_tx(&tx)
 }
 
-/// Legacy P2WPKH spend: 1-sat fee to `push_int(1)`, BIP143.
 fn legacy_build_signed_p2wpkh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -2319,7 +2131,6 @@ fn legacy_build_signed_p2wpkh_spend(
     to_native_tx(&tx)
 }
 
-/// Legacy P2WSH 2-of-3 spend: 1-sat fee to `push_int(1)`, BIP143.
 fn legacy_build_signed_p2wsh_spend(
     source_txid: OracleTxid,
     vout: u32,
@@ -2375,24 +2186,6 @@ fn legacy_build_signed_p2wsh_spend(
     to_native_tx(&tx)
 }
 
-/// Step-4 measurement gate (`script-execution-cache`): connect of a block
-/// whose non-coinbase transactions were admitted through the real mempool
-/// gateway, timed as last-apply only.
-///
-/// Per unit: a fresh `NodeState`, every block but the last applied untimed,
-/// every non-coinbase transaction of the last block admitted through
-/// `MempoolGateway::submit_local_transaction` (the production
-/// `sendrawtransaction` path, real `ChainAdmissionView`, no seams) untimed,
-/// then only `apply_block(last)` is timed. Counted sampling replaces the
-/// Criterion registration (`--mrp-counted`, full ID
-/// `connect_admitted_signed_spend_block/flat`): one second of measured work
-/// per sample, one warmup sample, ten measured samples, and the per-unit
-/// timed span stays apply-only; the companion
-/// `connect_unseen_signed_spend_block` skips admission and is the miss
-/// control.
-///
-/// Runs one whole unit with exactly the timed span above. The temp state
-/// drops at return, outside every timer.
 fn connect_admitted_unit_once(
     blocks: &[Block],
     last_index: usize,
@@ -2408,8 +2201,6 @@ fn connect_admitted_unit_once(
     }
     admit_signed_spends(&state, admission_txs);
     assert_admission_residency(&state, admission_txs);
-    // Exact bytes retained once outside the timed span so the measurement
-    // stays apply-only with no second parse and no re-encode.
     let last_payload = BlockPayload::from_local(last_block.clone());
     let timed = Instant::now();
     state
@@ -2418,15 +2209,6 @@ fn connect_admitted_unit_once(
     timed.elapsed()
 }
 
-/// Step-4 miss control: the identical block connected without any mempool
-/// admission, so its script checks always run. Counted sampling replaces the
-/// Criterion registration (`--mrp-counted`, full ID
-/// `connect_unseen_signed_spend_block/flat`) with the same per-sample
-/// protocol as the admitted arm.
-///
-/// Runs one whole unit with exactly the timed span above: fresh state,
-/// untimed prefix to the penultimate tip, then the timed connect of the
-/// unseen block. The temp state drops at return, outside every timer.
 fn connect_unseen_unit_once(blocks: &[Block], last_index: usize, last_block: &Block) -> Duration {
     let (_dir, state) = open_regtest_state();
     for block in &blocks[..last_index] {
@@ -2443,12 +2225,6 @@ fn connect_unseen_unit_once(blocks: &[Block], last_index: usize, last_block: &Bl
     timed.elapsed()
 }
 
-/// Admits the signed spend set through the production gateway. Never timed.
-///
-/// A submission that does not commit means the fixture drifted; the connect
-/// arm would then measure a different block than the throughput arm admits.
-/// Residency is asserted by the caller after admission, outside any timed
-/// span.
 fn admit_signed_spends(state: &NodeState, txs: &[Arc<Tx>]) {
     let gateway = state.mempool_gateway();
     let chainstate = state.chainstate();
@@ -2474,7 +2250,6 @@ fn admit_signed_spends(state: &NodeState, txs: &[Arc<Tx>]) {
     }
 }
 
-/// Asserts every spend is pool-resident. Called once outside timed spans.
 fn assert_admission_residency(state: &NodeState, txs: &[Arc<Tx>]) {
     let reader = state.mempool_reader();
     let pool = reader.read();
@@ -2487,17 +2262,6 @@ fn assert_admission_residency(state: &NodeState, txs: &[Arc<Tx>]) {
     }
 }
 
-/// Step-4 throughput arm: the same signed spend set through the production
-/// gateway, timed as gateway submits only, so the second verification pass's
-/// cost is visible before and after the cache lands. One residency check per
-/// unit runs after the timed span closes. Counted sampling replaces the
-/// Criterion registration (`--mrp-counted`, full ID
-/// `connect_admission_throughput/flat`) with the same per-sample protocol as
-/// the admitted arm.
-///
-/// Runs one whole unit with exactly the timed span above: fresh state,
-/// untimed prefix to the penultimate tip, the timed gateway submissions, then
-/// the residency check outside the timer. The temp state drops at return.
 fn connect_admission_unit_once(
     blocks: &[Block],
     last_index: usize,
@@ -2517,22 +2281,12 @@ fn connect_admission_unit_once(
     elapsed
 }
 
-/// Full counted row IDs, in dispatch order. The MRP measured-work stopping
-/// correction converts exactly these three T4 rows from Criterion
-/// registration to counted sampling; every other row keeps its Criterion or
-/// standalone protocol, and no duplicate Criterion registration remains for
-/// the converted rows.
 const COUNTED_ROWS: [&str; 3] = [
     "connect_admission_throughput/flat",
     "connect_admitted_signed_spend_block/flat",
     "connect_unseen_signed_spend_block/flat",
 ];
 
-/// Runs one counted row by full ID through the shared
-/// `measured_samples::run` sampler: one warmup sample plus ten measured
-/// samples, each accumulating whole independent units (fresh state per unit)
-/// until one second of measured work. The caller has already validated the
-/// ID against `COUNTED_ROWS`.
 fn run_counted_row(row: &str) {
     match row {
         "connect_admission_throughput/flat" => {
@@ -2570,7 +2324,6 @@ fn run_counted_row(row: &str) {
     }
 }
 
-/// Prints p50/p95/p99/max from the collected per-sweep durations.
 fn print_percentiles(label: &str, samples: &[Duration]) {
     if samples.is_empty() {
         return;
@@ -2600,56 +2353,20 @@ fn print_percentiles(label: &str, samples: &[Duration]) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Step-21 block-to-template baseline: admitted 100k pool, coinbase-plus-2000
-// target blocks, connect tail through the first new-tip template.
-// ---------------------------------------------------------------------------
-
-/// MRP standalone floor: whole independent units repeat inside one sample
-/// until the measured total reaches this duration. No pilot counts, no
-/// post-hoc tuning: the loop always runs at least one unit and stops at the
-/// first unit that reaches the floor. Setup stays outside every timer.
 const MRP_SAMPLE_MEASURED_FLOOR: Duration = Duration::from_secs(2);
 
-/// Step-21 live pool before connect: 98,000 background spends plus one sample's
-/// 2,000 target spends, all admitted through the production gateway path at the
-/// current wall-clock time, never direct inserts.
 const BLOCK_TEMPLATE_POOL_TXS: usize = 100_000;
-/// Step-21 background fill: admitted once per sample; the sample's target
-/// spends bring the live pool to exactly `BLOCK_TEMPLATE_POOL_TXS` before
-/// connect, and connect removes exactly the targets afterwards.
 const BLOCK_TEMPLATE_BACKGROUND_TXS: usize = 98_000;
-/// Step-21 non-coinbase spends per measured target block (2001 txs total).
 const BLOCK_TEMPLATE_TARGET_SPENDS: usize = 2_000;
-/// Step-21 warmup connects: same path, reported, excluded from totals.
 const BLOCK_TEMPLATE_WARMUPS: usize = 3;
-/// Step-21 measured independent connect/reply samples.
 const BLOCK_TEMPLATE_SAMPLES: usize = 10;
-/// Step-21 funded outputs per funding coinbase (P2PKH/P2WPKH/P2WSH cycling).
 const BLOCK_TEMPLATE_FANOUT_WIDTH: u32 = 4_096;
-/// Step-21 funding fanout blocks: 32 x 4096 = `131_072` funded outputs cover the
-/// 98k background fill plus 13 x 2000 target spends; the rest stays unspent.
 const BLOCK_TEMPLATE_FANOUT_BLOCKS: u32 = 32;
-/// Step-21 coinbase-only maturation fillers: every funding output is mature at
-/// the prefix tip (latest funding height 32 + 100 <= tip height 132), and every
-/// block stays below the regtest subsidy halving at height 150, so all
-/// coinbases claim against the 50 BTC subsidy.
 const BLOCK_TEMPLATE_FILLER_BLOCKS: u32 = 100;
-/// Step-21 funding output value: 4096 outputs must fit the 50 BTC subsidy.
 const BLOCK_TEMPLATE_FUND_VALUE_SAT: u64 = 1_000_000;
-/// Step-21 spend output value: the same 501-sat fee as the proven spend corpus,
-/// so fee rates (and gateway admission) match the step-4 arms exactly.
 const BLOCK_TEMPLATE_SPEND_VALUE_SAT: u64 = BLOCK_TEMPLATE_FUND_VALUE_SAT - 501;
-/// Step-21 key slots: each signing key funds many outputs; output `j` funds
-/// class `j % 3` from slot `(j / 3) % 22`.
 const BLOCK_TEMPLATE_KEY_SLOTS: u32 = 22;
 
-/// Funding coinbase with `BLOCK_TEMPLATE_FANOUT_WIDTH` spendable outputs.
-///
-/// Output `j` funds class `j % 3` (0 = P2PKH, 1 = P2WPKH, 2 = P2WSH) from key
-/// slot `(j / 3) % 22`; `build_wide_signed_spend_tx` of output `j` signs with
-/// the matching key. Scripts reuse the exact constructors the per-class spend
-/// builders verify against; only the outpoint differs per spend.
 fn wide_signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     let width = usize::try_from(BLOCK_TEMPLATE_FANOUT_WIDTH)
         .unwrap_or_else(|error| panic!("invalid wide fanout width: {error}"));
@@ -2675,7 +2392,6 @@ fn wide_signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> T
             script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
-    // BIP141 witness commitment output (the spending blocks carry witnesses).
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
         value: Amount::from_sat(0),
@@ -2694,8 +2410,6 @@ fn wide_signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> T
     }
 }
 
-/// Funding block: wide coinbase only. The placeholder commitment is already
-/// correct for a coinbase-only block, as in `child_signed_fanout_coinbase_block`.
 fn child_wide_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningKeys) -> Block {
     let mut block = Block {
         header: Header {
@@ -2714,9 +2428,6 @@ fn child_wide_fanout_coinbase_block(parent: &Block, height: u32, keys: &SigningK
     block
 }
 
-/// Builds the spend of wide-funding output `vout` of `source_txid`, dispatching
-/// on the same class/slot rule the funding coinbase funds with. Signatures are
-/// fresh per outpoint, so every spend is a distinct valid transaction.
 fn build_wide_signed_spend_tx(source_txid: Txid, vout: u32, keys: &SigningKeys) -> Tx {
     let oracle_txid = OracleTxid::from_byte_array(*source_txid.as_bytes());
     let slot = usize::try_from(vout / 3 % BLOCK_TEMPLATE_KEY_SLOTS)
@@ -2748,9 +2459,6 @@ fn build_wide_signed_spend_tx(source_txid: Txid, vout: u32, keys: &SigningKeys) 
     }
 }
 
-/// Frozen step-21 corpus: one deterministic prefix, one 98k background spend
-/// set, and 13 disjoint 2000-spend target sets with their distinct blocks.
-/// Built once, shared across samples; every sample replays it in a fresh state.
 struct BlockTemplateCorpus {
     prefix: Vec<Block>,
     background: Vec<Arc<Tx>>,
@@ -2759,8 +2467,6 @@ struct BlockTemplateCorpus {
     target_height: u32,
 }
 
-/// Spends wide-funding output `global` with the class and key the funding
-/// coinbase assigned it, signing fresh so every spend is distinct.
 fn wide_spend_at(funding: &[Txid], width: usize, keys: &SigningKeys, global: usize) -> Arc<Tx> {
     let source = funding[global / width];
     let vout =
@@ -2768,8 +2474,6 @@ fn wide_spend_at(funding: &[Txid], width: usize, keys: &SigningKeys, global: usi
     Arc::new(build_wide_signed_spend_tx(source, vout, keys))
 }
 
-/// Builds the per-run target spend sets with their distinct blocks, verifying
-/// each block carries coinbase plus 2000 spends and hashes distinctly.
 fn build_corpus_targets(
     parent: &Block,
     target_height: u32,
@@ -2894,8 +2598,6 @@ fn build_block_template_corpus() -> BlockTemplateCorpus {
     }
 }
 
-/// Prints the frozen corpus identity: counts only, no applies (the protocol run
-/// below applies the prefix once per sample).
 fn print_block_template_corpus_summary(corpus: &BlockTemplateCorpus) {
     println!(
         "block_to_template corpus: prefix_blocks={} tip_height={} funded_outputs={} background={} targets={}x{} total_txs_per_target={}",
@@ -2909,9 +2611,6 @@ fn print_block_template_corpus_summary(corpus: &BlockTemplateCorpus) {
     );
 }
 
-/// Production span fields captured for one measured sample. The whole protocol
-/// runs on the bench thread; the static is drained per sample, so prefix
-/// applies never leak into a measurement.
 #[derive(Default)]
 struct TailCapture {
     t0: Option<quanta::Instant>,
@@ -2939,8 +2638,6 @@ impl TailCapture {
 
 static TAIL_CAPTURE: ParkingMutex<TailCapture> = ParkingMutex::new(TailCapture::new());
 
-/// Bench-side tracing subscriber: records only the step-21 profile events by
-/// their message literal and micros fields. Everything else is ignored.
 struct ProfileSubscriber;
 
 impl tracing::Subscriber for ProfileSubscriber {
@@ -3028,16 +2725,11 @@ fn take_tail_capture() -> TailCapture {
     std::mem::replace(&mut *TAIL_CAPTURE.lock(), TailCapture::new())
 }
 
-/// Bench-local measured `MiningControl`: forwards every call to the real
-/// per-sample coordinator and records the wall time plus candidate facts of
-/// each `get_block_template` call. No fake service: every other trait method
-/// forwards unchanged through the single `submit_block(BlockPayload)` entry.
 struct MeasuredMiningControl {
     inner: Arc<MiningCoordinator>,
     calls: ParkingMutex<Vec<MeasuredTemplateCall>>,
 }
 
-/// Facts recorded for one `get_block_template` call.
 struct MeasuredTemplateCall {
     elapsed: Duration,
     transactions: usize,
@@ -3052,8 +2744,6 @@ impl MeasuredMiningControl {
         }
     }
 
-    /// Recorded service calls, oldest first. Drained once per sample after the
-    /// handler reply lands, outside the measured interval.
     fn take_calls(&self) -> Vec<MeasuredTemplateCall> {
         std::mem::take(&mut *self.calls.lock())
     }
@@ -3112,11 +2802,6 @@ impl MiningControl for MeasuredMiningControl {
     }
 }
 
-/// Untimed serving stack, prefix, and admission for one Step-21 sample.
-///
-/// Builds the production stack as node birth does, replays the corpus prefix,
-/// and admits the background plus the run's target spends (100k live). The
-/// measured connect tail runs in `run_block_template_unit`.
 struct BlockTemplateSetup {
     measured: Arc<MeasuredMiningControl>,
     handler: Handler,
@@ -3130,10 +2815,6 @@ fn setup_block_template_sample(
     corpus: &BlockTemplateCorpus,
     run: usize,
 ) -> BlockTemplateSetup {
-    // The coordinator attaches to the node's generation signal, so connect
-    // publishes through the production wake path. The decorator records the
-    // wall time and candidate facts of the single service call the measured
-    // dispatch below performs.
     let coordinator = Arc::new(MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -3154,7 +2835,6 @@ fn setup_block_template_sample(
             .apply_block(&payload)
             .unwrap_or_else(|error| panic!("template prefix apply failed: {error}"));
     }
-    // Untimed: 98k background admissions at the current wall-clock time.
     admit_signed_spends(state, &corpus.background);
     let background_len = state.mempool_reader().read().len();
     assert_eq!(
@@ -3162,8 +2842,6 @@ fn setup_block_template_sample(
         "background admitted {background_len} transactions"
     );
     assert_admission_residency(state, &corpus.background);
-    // Untimed: this sample's 2000 target spends on the same clock, bringing
-    // the live pool to exactly 100k before connect.
     admit_signed_spends(state, &corpus.target_spends[run]);
     let pool_live = state.mempool_reader().read().len();
     assert_eq!(
@@ -3179,7 +2857,6 @@ fn setup_block_template_sample(
         background_len,
     }
 }
-/// Results of one measured T2 unit: timing splits plus identity counters.
 struct BlockTemplateUnit {
     tail_to_reply: Duration,
     apply_call_us: u128,
@@ -3196,20 +2873,6 @@ struct BlockTemplateUnit {
     tip_hash_be: String,
 }
 
-/// One measured T2 unit: fresh state, untimed serving stack plus prefix plus
-/// admission, then the timed connect tail through the first new-tip template
-/// response. The sample driver repeats whole units (reusing the sample's
-/// corpus index, so the frozen corpus is unchanged) until the measured total
-/// reaches `MRP_SAMPLE_MEASURED_FLOOR`; every unit is independent.
-///
-/// Setup asserts fail closed: 98k background plus 2000 targets (100k live)
-/// before connect with every target spend resident, 98k after connect, the new
-/// tip equals the target hash, and both the recorded service call and the
-/// handler response name the new tip with a non-empty selection. Span capture
-/// asserts exactly one tail-begin, publish-profile, and on-connect event per
-/// unit, and the decorator asserts exactly one service call per reply. All
-/// setup runs outside the timer; the asserts below run after the reply edge
-/// except the tip check, which is part of the measured path as before.
 fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTemplateUnit {
     let (_dir, state) = open_regtest_state();
     let BlockTemplateSetup {
@@ -3219,11 +2882,8 @@ fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTem
         pool_live,
         background_len,
     } = setup_block_template_sample(&state, corpus, run);
-    // Measured: connect tail through the first new-tip template reply.
     reset_tail_capture();
     let target = &corpus.target_blocks[run];
-    // Exact bytes retained once before the measured interval so the timed
-    // tail stays apply-plus-reply with no second parse and no re-encode.
     let target_payload = BlockPayload::from_local(target.clone());
     let target_hash = target.block_hash().0;
     let call_started = quanta::Instant::now();
@@ -3234,11 +2894,6 @@ fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTem
         tip.hash, target_hash,
         "connect must publish the target block as the new tip"
     );
-    // Protocol endpoint: the first real in-process RPC handler response,
-    // covering request parsing, readiness, rule negotiation, the single
-    // measured service assembly, mandatory-rule checks, and JSON rendering.
-    // Exactly one dispatch runs per sample: no prewarming call fills the
-    // cache first, so the recorded service call is the reply's own assembly.
     let response = handler.dispatch("getblocktemplate", &params);
     let reply_at = quanta::Instant::now();
     let response =
@@ -3287,10 +2942,6 @@ fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTem
         .unwrap_or_else(|| panic!("missing tail-begin edge"));
     let tail_to_reply_us = reply_at.duration_since(t0).as_micros();
     let apply_call_us = reply_at.duration_since(call_started).as_micros();
-    // Remainder inside the total: journal emission, head publication
-    // (`publish_applied`), handler negotiation and JSON rendering above the
-    // timed assembly, and bench overhead. Attributed nowhere; reported for
-    // the split to close.
     let remainder_us = tail_to_reply_us.saturating_sub(
         durable_sync_us
             .saturating_add(durable_commit_us)
@@ -3314,15 +2965,6 @@ fn run_block_template_unit(corpus: &BlockTemplateCorpus, run: usize) -> BlockTem
     }
 }
 
-/// Prints the per-sample JSONL ledger line for one Step-21 sample.
-///
-/// Carries every unit duration as exact integer nanoseconds (`unit_ns`), the
-/// unit count, and the exact measured total (`total_ns`; the parser derives
-/// the mean as `total_ns / unit_count`), plus the per-unit production splits
-/// (still `*_us` with explicit microsecond units); the boundary excludes HTTP
-/// transport and JSON-RPC framing/auth only. All units of one sample share
-/// the sample's corpus index, so pool facts and the tip are asserted equal
-/// across units and reported once.
 fn report_block_template_sample(run: usize, warmup: bool, units: &[BlockTemplateUnit]) {
     let first = units
         .first()
@@ -3388,43 +3030,6 @@ fn report_block_template_sample(run: usize, warmup: bool, units: &[BlockTemplate
     .unwrap_or_else(|error| panic!("render block-to-template sample: {error}"));
     println!("{line}");
 }
-/// Step-21 block-to-template baseline: connect tail through the first new-tip
-/// template response on a 100k live pool.
-///
-/// Workload: real native regtest `NodeState`, 98,000 background spends plus one
-/// sample's 2,000 target spends (100,000 live) admitted through the production
-/// `sendrawtransaction` gateway path at the current wall-clock time with
-/// validated spendable prevouts; each sample connects a distinct valid block
-/// (coinbase + 2000 admitted spends, 2001 txs) in a fresh state, then takes the
-/// first response from the real in-process RPC handler
-/// (`Handler::dispatch("getblocktemplate", …)` on a `Context` carrying the
-/// per-sample `MiningCoordinator`, regtest network) with
-/// `[{"rules": ["segwit"]}]`.
-///
-/// Measured interval: the production `apply_block: tail begin` event
-/// (`PublishMode::Now` arm entry) through the handler response, split into the
-/// existing `durable_sync_us` / `durable_commit_us` spans, the new
-/// `on_connect_us` span, and decorator-measured `assembly_us` (the single
-/// service call the dispatch performs: selection plus finish plus projection
-/// on a cold cache). The remainder inside the
-/// total covers journal emission, head publication (`publish_applied`), handler
-/// negotiation and JSON rendering above the timed assembly, and bench overhead.
-/// Outside the boundary by construction: HTTP transport and JSON-RPC
-/// framing/auth only.
-///
-/// Protocol: standalone and explicitly selected. This function builds the
-/// corpus and runs 3 warmups plus 10 measured samples exactly once, and only
-/// when the bench binary receives the exact `block_to_template_baseline`
-/// argument; otherwise it returns before any workload or registration.
-/// Inside each sample, whole independent units (fresh state each, same corpus
-/// index) repeat until the measured total reaches
-/// `MRP_SAMPLE_MEASURED_FLOOR`; at least one unit always runs. Nothing is
-/// registered with criterion and no criterion measurement is reported:
-/// per-sample JSON lines (`unit_ns`, `unit_count`, `total_ns`; the parser
-/// derives the mean as `total_ns / unit_count`) plus the p50/p95/p99/max
-/// summary over measured sample means on stdout are the ledger.
-/// Invocation: `cargo bench -p bitcoin-rs-node --bench sync_pipeline
-/// block_to_template_baseline -- --nocapture` (default features: fjall).
 fn block_to_template_baseline(_c: &mut Criterion) {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--list" || arg == "--help") {
@@ -3469,22 +3074,9 @@ fn block_to_template_baseline(_c: &mut Criterion) {
     print_percentiles("block_to_template_tail_to_reply", &sample_means);
 }
 
-// ---------------------------------------------------------------------------
-// Step-8 template-render baseline: repeated same-generation service and RPC
-// hits on a fixed 100k resident pool, plus a cold-miss control.
-// ---------------------------------------------------------------------------
-
-/// Step-8 warmup replies: same path, reported, excluded from summaries.
 const TEMPLATE_RENDER_WARMUPS: usize = 3;
-/// Step-8 measured warm-cache samples.
 const TEMPLATE_RENDER_SAMPLES: usize = 10;
 
-/// Transport-neutral template request the warm-cache arms repeat.
-///
-/// Mode `Template` with no capabilities, no caller rules, and no long-poll id.
-/// The RPC arms pass the equivalent `[{"rules": ["segwit"]}]` params through
-/// `Handler::dispatch`, which parses to the same mode; caller rules gate the
-/// mandatory-rule check, not assembly.
 fn template_render_request() -> BlockTemplateRequest {
     BlockTemplateRequest {
         mode: BlockTemplateMode::Template,
@@ -3495,14 +3087,6 @@ fn template_render_request() -> BlockTemplateRequest {
     }
 }
 
-/// Untimed serving stack, prefix, and admission for one Step-8 sample.
-///
-/// Builds the production stack as node birth does, replays the corpus prefix,
-/// and admits the background plus the run's target spends (100k live, nothing
-/// connects). The concrete coordinator moves into the trait object, so the
-/// handler and control share its single strong owner while the generation
-/// signal keeps only weak references. The measured arms run in
-/// `run_template_render_sample`.
 struct TemplateRenderSetup {
     control: Arc<dyn MiningControl>,
     handler: Handler,
@@ -3538,7 +3122,6 @@ fn setup_template_render_sample(
             .apply_block(&payload)
             .unwrap_or_else(|error| panic!("render prefix apply failed: {error}"));
     }
-    // Untimed: 98k background admissions at the current wall-clock time.
     admit_signed_spends(state, &corpus.background);
     let background_len = state.mempool_reader().read().len();
     assert_eq!(
@@ -3546,9 +3129,6 @@ fn setup_template_render_sample(
         "render background admitted {background_len} transactions"
     );
     assert_admission_residency(state, &corpus.background);
-    // Untimed: this sample's 2000 target spends on the same clock, bringing the
-    // live pool to exactly 100k. Nothing connects: the tip stays the prefix
-    // tip and the pool stays resident for every measured arm.
     admit_signed_spends(state, &corpus.target_spends[run]);
     let pool_live = state.mempool_reader().read().len();
     assert_eq!(
@@ -3569,16 +3149,6 @@ fn setup_template_render_sample(
         tip,
     }
 }
-/// One measured T3 cold unit: fresh state, untimed serving stack plus prefix
-/// plus admission, then the timed first (cold-miss) dispatch, which assembles
-/// on a cold cache (selection plus finish plus projection including
-/// `signalling_rules`) and renders the full JSON reply. Returns the owned
-/// prepared generation with its cold reply; the sample driver retains the
-/// last cold unit's generation for the warm arms, so every identity compare
-/// stays within one state. Never a sequence-wake invalidation: the miss is a
-/// genuinely cold cache in a fresh state, and the setup asserts (98k
-/// background plus the run's 2000 target spends, 100k live, every spend
-/// resident, prefix tip, no connect) run untimed before the dispatch.
 fn render_cold_unit(
     corpus: &BlockTemplateCorpus,
     run: usize,
@@ -3600,11 +3170,6 @@ fn render_cold_unit(
     (dir, state, setup, cold, cold_rpc)
 }
 
-/// Times one warm service call: `signalling_rules` plus
-/// `template_from_candidate` projection only, with no JSON serialization.
-/// Assembly is done on the retained generation; this is a pure hit. Returns
-/// the shared candidate `Arc` (moved, never cloned) so the driver can prove
-/// reuse without duplicating the selection.
 fn render_service_call(control: &Arc<dyn MiningControl>) -> (Duration, Arc<Candidate>) {
     let svc_started = quanta::Instant::now();
     let svc = control
@@ -3617,9 +3182,6 @@ fn render_service_call(control: &Arc<dyn MiningControl>) -> (Duration, Arc<Candi
     (elapsed, template.candidate)
 }
 
-/// Times one warm RPC dispatch on the retained generation: parse, readiness,
-/// rule negotiation, the cache-hit projection, mandatory-rule checks, and
-/// JSON render (`consensus_bytes` plus hex per transaction). No assembly.
 fn render_warm_dispatch(
     handler: &Handler,
     params: &sonic_rs::Value,
@@ -3632,10 +3194,6 @@ fn render_warm_dispatch(
     (elapsed, hit_rpc)
 }
 
-/// Cold arm of one warm-cache sample: fresh-state cold units until the
-/// measured total reaches the floor. Returns the last prepared generation
-/// for the warm arms. Setup stays outside every timer; each unit boundary
-/// is inside `render_cold_unit`.
 fn collect_render_cold_arm(
     corpus: &BlockTemplateCorpus,
     run: usize,
@@ -3652,10 +3210,6 @@ fn collect_render_cold_arm(
     }
 }
 
-/// Service-hit arm on the fixed generation: repeated trait calls until the
-/// measured total reaches the floor. Returns the first and last shared
-/// candidate `Arc`s plus the selection facts. Every timed span is inside
-/// `render_service_call`.
 fn collect_render_service_arm(
     control: &Arc<dyn MiningControl>,
     service_units: &mut Vec<Duration>,
@@ -3682,9 +3236,6 @@ fn collect_render_service_arm(
     (svc_first, svc_last, selected_txs, selected_weight)
 }
 
-/// Service-hit stability arm on the same generation: continued repeats
-/// until the measured total reaches the floor. Returns the last shared
-/// candidate `Arc`. Every timed span is inside `render_service_call`.
 fn collect_render_service2_arm(
     control: &Arc<dyn MiningControl>,
     service2_units: &mut Vec<Duration>,
@@ -3700,10 +3251,6 @@ fn collect_render_service2_arm(
     }
 }
 
-/// RPC warm-hit arm on the fixed generation: repeated dispatches until the
-/// measured total reaches the floor. Returns the first and last replies;
-/// a single-unit arm reuses the one reply for both roles. Every timed span
-/// is inside `render_warm_dispatch`.
 fn collect_render_rpc_arm(
     handler: &Handler,
     params: &sonic_rs::Value,
@@ -3731,27 +3278,11 @@ fn collect_render_rpc_arm(
     (rpc_first, rpc_last)
 }
 
-/// Runs one independent warm-cache sample: fresh-state cold units until the
-/// cold total reaches `MRP_SAMPLE_MEASURED_FLOOR`, then warm service/RPC rows
-/// repeated on the retained fixed generation until each arm's total reaches
-/// the same floor. The last cold unit's prepared generation serves every warm
-/// arm, so all measured arms serve one fixed generation.
-///
-/// Setup asserts fail closed per cold unit (100k live, every spend resident,
-/// prefix tip, no connect). Identity asserts fail closed after the timers:
-/// the first and last warm service calls of each arm reuse one cached
-/// `Arc<Candidate>` with an unchanged generation, and the first and last
-/// warm RPC replies match the cold reply on every deterministic field while
-/// `curtime` is checked for permitted evolution, never strict equality.
-/// Returns the four arm means in order `(rpc_miss, service_hit, service_hit2,
-/// rpc_hit)`.
 fn run_template_render_sample(
     corpus: &BlockTemplateCorpus,
     run: usize,
     warmup: bool,
 ) -> (Duration, Duration, Duration, Duration) {
-    // Cold arm: fresh-state units to the floor; retain the last prepared
-    // generation for the warm arms below.
     let mut cold_units: Vec<Duration> = Vec::new();
     let mut cold_total = Duration::ZERO;
     let (_dir, _state, setup, cold_rpc) =
@@ -3766,22 +3297,15 @@ fn run_template_render_sample(
     } = setup;
     let tip_hash_be = tip.hash.to_string_be();
     let tip_height = tip.height;
-    // Arm 2, service hits: repeated trait calls on the fixed generation. The
-    // driver retains the first and last shared candidate `Arc`s (moved, never
-    // cloned) plus the selection facts for the ledger.
     let mut service_units: Vec<Duration> = Vec::new();
     let mut service_total = Duration::ZERO;
     let (svc_first, svc_last, selected_txs, selected_weight) =
         collect_render_service_arm(&control, &mut service_units, &mut service_total);
-    // Arm 3, service-hit stability: continued repeats on the same generation.
-    // Every call must share the arm-2 candidate `Arc`, proving the timed
-    // calls were pure hits.
     let mut service2_units: Vec<Duration> = Vec::new();
     let mut service2_total = Duration::ZERO;
     let svc2_last = collect_render_service2_arm(&control, &mut service2_units, &mut service2_total);
     assert_render_service_reuse_arcs(&svc_first, &svc_last, &tip.hash);
     assert_render_service_reuse_arcs(&svc_first, &svc2_last, &tip.hash);
-    // Arm 4, RPC warm hits: repeated dispatches rendering the same generation.
     let mut rpc_units: Vec<Duration> = Vec::new();
     let mut rpc_total = Duration::ZERO;
     let (rpc_first, rpc_last) =
@@ -3834,11 +3358,6 @@ fn run_template_render_sample(
     )
 }
 
-/// Proves repeated warm service calls shared one cached candidate.
-///
-/// Asserts `Arc` pointer reuse plus unchanged generation identity, tip, and
-/// height, and that the candidate extends the sample tip with a non-empty
-/// selection.
 fn assert_render_service_reuse_arcs(
     candidate_a: &Arc<Candidate>,
     candidate_b: &Arc<Candidate>,
@@ -3876,10 +3395,6 @@ fn assert_render_service_reuse_arcs(
     );
 }
 
-/// Asserts every deterministic field matches between the cold and warm
-/// replies, including the full `transactions` array whose `data` hex a
-/// precomputed-hex field must preserve. `curtime` is excluded here and
-/// checked separately for permitted evolution.
 fn assert_render_deterministic_fields(cold_rpc: &sonic_rs::Value, hit_rpc: &sonic_rs::Value) {
     for key in [
         "version",
@@ -3912,13 +3427,6 @@ fn assert_render_deterministic_fields(cold_rpc: &sonic_rs::Value, hit_rpc: &soni
     }
 }
 
-/// Checks warm-hit time evolution and generation identity, returning the
-/// stamped times and the cold generation id for the ledger.
-///
-/// `curtime` is never strictly equated: the candidate clock reads the wall
-/// clock at assembly with no injection point, so a same-generation hit only
-/// promises monotonicity (`hit >= cold`) with both stamps at or above the
-/// chain-determined `mintime`.
 fn assert_render_reply_identity<'a>(
     cold_rpc: &'a sonic_rs::Value,
     hit_rpc: &sonic_rs::Value,
@@ -3992,9 +3500,6 @@ fn assert_render_reply_identity<'a>(
     (cold_curtime, hit_curtime, hit_mintime, cold_lp)
 }
 
-/// Ledger inputs for one Step-8 sample line. Borrows the rendered reply, the
-/// generation id, the tip hash, and every arm's unit slices; every other
-/// field is a copied scalar.
 struct TemplateRenderReport<'a> {
     pool_live: usize,
     background_len: usize,
@@ -4018,10 +3523,6 @@ struct TemplateRenderReport<'a> {
     run: usize,
     warmup: bool,
 }
-/// Assertion phase of the per-sample ledger line: selection facts plus the
-/// fail-closed sample checks. Returns the rendered transaction count and the
-/// `data` byte total. No timers run here; the JSON emission stays in
-/// `report_render_sample` with identical fields and units.
 fn render_report_selection_facts(report: &TemplateRenderReport) -> (usize, usize) {
     let &TemplateRenderReport {
         hit_rpc,
@@ -4070,13 +3571,6 @@ fn render_report_selection_facts(report: &TemplateRenderReport) -> (usize, usize
     (rpc_txs, rpc_data_bytes)
 }
 
-/// Records selection facts and prints the per-sample JSONL ledger line.
-///
-/// Every arm carries its unit durations as exact integer nanoseconds
-/// (`<arm>_ns`), the unit count (`<arm>_count`), and the exact measured total
-/// (`<arm>_total_ns`; the parser derives the mean as `total / count`). The
-/// rendered transaction count must equal the semantic selection, and the
-/// `data` byte total bounds the serialization work Step 8.1 targets.
 fn report_render_sample(report: &TemplateRenderReport) {
     let (rpc_txs, rpc_data_bytes) = render_report_selection_facts(report);
     let &TemplateRenderReport {
@@ -4160,53 +3654,6 @@ fn report_render_sample(report: &TemplateRenderReport) {
     .unwrap_or_else(|error| panic!("render template_render sample: {error}"));
     println!("{line}");
 }
-/// Step-8 template-render baseline: repeated same-generation hits on a 100k
-/// resident pool.
-///
-/// Workload: real native regtest `NodeState`, 98,000 background spends plus one
-/// sample's 2,000 target spends (100,000 live) admitted through the production
-/// `sendrawtransaction` gateway path at the current wall-clock time with
-/// validated spendable prevouts, on the shared frozen Step-21 corpus
-/// (`build_block_template_corpus`; prefix tip 132, heights below the regtest
-/// halving at 150). Nothing connects: the tip stays the prefix tip and the
-/// pool stays resident, so every measured arm serves one fixed generation
-/// through the real production `MiningCoordinator` (via the `MiningControl`
-/// trait) and the real in-process RPC `Handler::dispatch("getblocktemplate",
-/// [{"rules": ["segwit"]}])`.
-///
-/// Arms per sample, timed separately with `quanta` and reported as distinct
-/// JSONL fields, each with its exact unit durations (`<arm>_ns`), unit count
-/// (`<arm>_count`), and exact measured total (`<arm>_total_ns`; the parser
-/// derives the mean as `total / count`): `rpc_miss_ns` (cold dispatches, each
-/// a fresh state: assembly plus render), `service_hit_ns` (trait calls after
-/// the miss: projection only), `service_hit2_ns` (continued trait calls:
-/// `Arc` reuse proof and hit stability), `rpc_hit_ns` (warm dispatches:
-/// render on the warm cache). Every arm repeats to `MRP_SAMPLE_MEASURED_FLOOR`; cold units
-/// use fresh states while warm rows repeat on the last cold unit's retained
-/// fixed generation. The service-hit versus RPC-hit difference isolates the
-/// per-reply serialization cost Step 8.1 targets (`consensus_bytes` plus hex
-/// per transaction in `render_template_transactions`); the signalling skip
-/// lives inside the service-hit projection. Identity: `Arc::ptr_eq` plus
-/// unchanged `template_id`, tip hash, mempool sequence, and height across the
-/// first and last warm service call of each arm; strict equality on every
-/// deterministic RPC field (including the full `transactions` array) between
-/// the cold reply and the first and last warm replies, with `curtime` checked
-/// for permitted
-/// evolution (`hit >= cold`, both `>= mintime`), never strict equality,
-/// because the candidate clock has no injection point. Counts recorded per
-/// sample: resident pool, selected transactions and candidate weight,
-/// rendered transactions and `data` byte total.
-///
-/// Protocol: standalone and explicitly selected. This function builds the
-/// corpus and runs 3 warmups plus 10 measured samples exactly once, and only
-/// when the bench binary receives the exact `template_render_baseline`
-/// argument; otherwise it returns before any workload or registration.
-/// Nothing is registered with criterion and no criterion measurement is
-/// reported: per-sample JSON lines plus per-arm p50/p95/p99/max summaries
-/// over measured sample means on stdout are the ledger. The same command runs
-/// the baseline and the candidate trees; the parent labels the runs.
-/// Invocation: `cargo bench -p bitcoin-rs-node --bench sync_pipeline
-/// template_render_baseline -- --nocapture` (default features: fjall).
 fn template_render_baseline(_c: &mut Criterion) {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--list" || arg == "--help") {
@@ -4242,14 +3689,6 @@ fn template_render_baseline(_c: &mut Criterion) {
     print_percentiles("template_render_rpc_hit", &rpc_hit);
 }
 
-// MRP Criterion config: the explicit Criterion configuration below sets the
-// sample, warmup, and measurement budgets for the legacy rows. The three T4
-// arms moved from Criterion registration to counted
-// sampling (`--mrp-counted`, shared `measured_samples` sampler); their full
-// IDs stay `<arm>/flat`, with one warmup sample plus ten measured samples of
-// one second of measured work each. The standalone T2/T3 rows above register
-// nothing with Criterion; their duration rule is the per-sample
-// `MRP_SAMPLE_MEASURED_FLOOR` loop.
 criterion_group!(
     name = benches;
     config = Criterion::default()
@@ -4263,25 +3702,6 @@ criterion_group!(
     template_render_baseline
 );
 
-/// Untimed MRP verification entrypoint (`--mrp-verify`, called from `main`
-/// below). Executes the real unit/identity/assertion paths and proves,
-/// without running Criterion or emitting timing samples:
-/// - T2: one full unit on corpus target 0 (fresh state, untimed serving
-///   stack plus prefix plus 100k admission, timed-path connect tail through
-///   the first new-tip template reply) with every setup, tip, pool, service,
-///   and span assertion;
-/// - T3: one cold unit on corpus target 0 plus two warm service calls and
-///   one warm dispatch on its retained generation, with the `Arc` reuse,
-///   deterministic-field, and reply-identity assertions;
-/// - T4: one fresh-state unit per Criterion arm (admitted connect with
-///   gateway admission plus residency, unseen connect, admission
-///   throughput with residency) through the production paths.
-///
-/// Panics (fail-closed, nonzero exit) on any mismatch; prints deterministic
-/// `mrp-verify` lines, then one `mrp-verify: node_identity {json}` line (the
-/// registration's `node_identity` pins, built from the corpus, unit, and cold
-/// setup verified above, so it adds no timed work), and a final
-/// `mrp-verify: PASS` on success.
 fn mrp_verify() {
     let corpus = build_block_template_corpus();
     print_block_template_corpus_summary(&corpus);
@@ -4383,10 +3803,6 @@ fn mrp_verify() {
     println!("mrp-verify: PASS");
 }
 
-/// Prints the untimed `mrp-verify` node-identity pins: the raw engine label
-/// verbatim, both baselines' tips, and the pool/block shape counters. Object
-/// keys are emitted in sorted order so separate binaries produce
-/// byte-identical output for cross-binary byte comparison.
 fn print_mrp_node_identity(
     corpus: &BlockTemplateCorpus,
     unit: &BlockTemplateUnit,
@@ -4399,9 +3815,9 @@ fn print_mrp_node_identity(
         .map(|block| block.block_hash().0.to_string_be())
         .collect();
     let mut line = b"mrp-verify: node_identity ".to_vec();
-    serde_json::to_writer(
+    sonic_rs::to_writer(
         &mut line,
-        &serde_json::json!({
+        &sonic_rs::json!({
             "block_to_template_baseline": {
                 "background_txs": unit.background_len,
                 "block_noncoinbase": unit.block_noncoinbase,
@@ -4429,15 +3845,6 @@ fn print_mrp_node_identity(
         .unwrap_or_else(|error| panic!("write node identity pins: {error}"));
 }
 
-/// Untimed counted-verification entrypoint (`--mrp-verify-counted`, called
-/// from `main` below). Executes each converted real unit exactly once through
-/// the production paths with the counted arms' exact timer boundaries, then
-/// exercises the shared stopping-rule arithmetic on deterministic durations.
-/// Emits no `MRP_COUNTED_SAMPLE` records and no timing measurements.
-///
-/// Panics (fail-closed, nonzero exit) on any mismatch; prints deterministic
-/// `mrp-verify-counted` lines and a final `mrp-verify-counted: PASS` on
-/// success.
 fn mrp_verify_counted() {
     {
         let blocks = signed_spend_proxy_blocks();
@@ -4480,10 +3887,6 @@ fn mrp_verify_counted() {
     println!("mrp-verify-counted: PASS");
 }
 
-/// Validates the `--mrp-counted` invocation shape before any benchmark
-/// framework use: the flag first, exactly one ID argument, no other
-/// arguments, and a known counted row. Malformed or unknown IDs exit nonzero
-/// without entering Criterion.
 fn counted_cli_row(args: &[String]) -> &str {
     let fail = |message: &str| -> ! {
         eprintln!("mrp-counted: {message}");
@@ -4505,8 +3908,6 @@ fn counted_cli_row(args: &[String]) -> &str {
     &args[1]
 }
 
-/// Rejects any single-flag counted invocation that carries extra arguments,
-/// before the benchmark framework starts.
 fn require_bare_counted_flag(args: &[String], flag: &str) {
     if args.len() != 1 {
         eprintln!("{flag}: expected no additional arguments");
@@ -4514,27 +3915,12 @@ fn require_bare_counted_flag(args: &[String], flag: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Step-24 window attribution: the production replay of one windowed apply,
-// control against candidate, single-group against multi-group.
-// ---------------------------------------------------------------------------
-
-/// Blocks per durable group commit: `DURABLE_HEAD_GROUP_BLOCKS` in
-/// `bitcoin-rs-chainstate`, private there. Drift trips the per-unit group
-/// flush assertion instead of being absorbed.
 const WINDOW_GROUP_BLOCKS: u32 = 64;
-/// Units that bring the allocator, page cache and fjall to steady state.
-/// Retained raw, excluded from every summary and from the ledger.
 const WINDOW_WARMUP_UNITS: usize = 5;
-/// Measured units per run. Equals `evidence::MIN_SAMPLES_FOR_P99`, so every
-/// per-unit series supports its own p99.
 const WINDOW_MEASURED_UNITS: usize = 100;
-/// `/proc/<pid>/stat` reports CPU time in `USER_HZ` ticks, fixed at 100.
 const WINDOW_CPU_TICK_NS: u64 = 10_000_000;
 const WINDOW_ATTRIBUTION_SCHEMA: &str = "bitcoin-rs-window-attribution-v1";
 
-/// Which tree built this binary. The label names the arm; the artifact digest
-/// in the identity is what proves the two arms are different programs.
 #[derive(Clone, Copy)]
 enum WindowArm {
     Control,
@@ -4556,8 +3942,6 @@ impl WindowArm {
     }
 }
 
-/// One window shape: the number of coinbase-only body blocks the replay
-/// delivers as a single contiguous window.
 #[derive(Clone, Copy)]
 struct WindowScenario {
     id: &'static str,
@@ -4565,17 +3949,12 @@ struct WindowScenario {
 }
 
 impl WindowScenario {
-    /// Group commits the window must issue: one per started group.
     fn groups(self) -> usize {
         usize::try_from(self.body_blocks.div_ceil(WINDOW_GROUP_BLOCKS))
             .unwrap_or_else(|error| panic!("invalid window group count: {error}"))
     }
 }
 
-/// Single-group: exactly one full group, the largest window that flushes
-/// once. Multi-group: two full groups, so a mid-window flush separates
-/// them. The byte bound (`8 MiB`) is not reached by coinbase-only blocks;
-/// only the block-count bound is exercised.
 const WINDOW_SCENARIOS: [WindowScenario; 2] = [
     WindowScenario {
         id: "single_group",
@@ -4587,24 +3966,16 @@ const WINDOW_SCENARIOS: [WindowScenario; 2] = [
     },
 ];
 
-/// What a captured interval measures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowSpanKind {
-    /// `transition_held_us`: the chain transition lock, acquire to release.
     TransitionHeld,
-    /// `flush_wait_us`: the caller's wait on one durable group commit.
     FlushWait,
-    /// A group commit that failed; a replay that sees one is invalid.
     FlushFailed,
-    /// `node.sync.apply_idle_seconds`: apply starved while downloads were owed.
     ApplyIdle,
-    /// `node.sync.download_blocked_by_apply_seconds`: front in flight while
-    /// apply held the frontier.
     DownloadBlocked,
 }
 
 impl WindowSpanKind {
-    /// Ledger path the interval measures.
     const fn ledger_path(self) -> &'static str {
         match self {
             Self::TransitionHeld => "apply.window.transition_held",
@@ -4616,24 +3987,15 @@ impl WindowSpanKind {
     }
 }
 
-/// One interval captured from the production diagnostics: it ended when the
-/// event or histogram record arrived and lasted `duration_ns`.
 struct WindowSpan {
     kind: WindowSpanKind,
     end: quanta::Instant,
     duration_ns: u64,
-    /// Blocks the group commit covered; set for `FlushWait` only.
     blocks: Option<u64>,
 }
 
-/// Spans of the unit in flight. The replay runs on the bench thread, and the
-/// harness drains this per unit, so no span crosses a unit boundary.
 static WINDOW_SPANS: ParkingMutex<Vec<WindowSpan>> = ParkingMutex::new(Vec::new());
 
-/// Bench-side tracing subscriber. It enables only the two production events
-/// that carry `transition_held_us` and `flush_wait_us`; every other callsite
-/// is disabled at registration, so the replay pays no tracing cost beyond
-/// these events.
 struct WindowSpanSubscriber;
 
 impl WindowSpanSubscriber {
@@ -4734,8 +4096,6 @@ impl tracing::Subscriber for WindowSpanSubscriber {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-/// Scoped recorder for the unit's replay: it keeps only the two existing
-/// window-gate histograms and drops every other metric.
 struct WindowSeriesRecorder;
 
 impl metrics::Recorder for WindowSeriesRecorder {
@@ -4801,20 +4161,14 @@ impl metrics::HistogramFn for WindowSeriesHistogram {
     }
 }
 
-/// Everything one replay of one window measured.
 struct WindowUnit {
     started: quanta::Instant,
     apply_started: quanta::Instant,
-    /// Ticks 1..=4: request, stage, apply, and the closing tick.
     wall: Duration,
-    /// Tick 3 alone, the one that applies the window.
     apply_wall: Duration,
-    /// Tick 4, which closes the measurement-only intervals.
     settle_wall: Duration,
-    /// Process CPU in `/proc` ticks across `wall`, dead threads included.
     cpu_ticks: u64,
     rss_start_bytes: u64,
-    /// Process peak resident set across `wall`; the peak was reset first.
     rss_peak_bytes: u64,
     requested: usize,
     applied_height: u32,
@@ -4835,8 +4189,6 @@ impl WindowUnit {
         self.cpu_ticks.saturating_mul(WINDOW_CPU_TICK_NS)
     }
 
-    /// The window's commit transition is the longest hold in the unit; any
-    /// other hold (genesis bootstrap) stays in the raw record only.
     fn window_transition_held_us(&self) -> u64 {
         self.spans_of(WindowSpanKind::TransitionHeld)
             .map(|span| span.duration_ns / 1_000)
@@ -4853,7 +4205,6 @@ fn read_proc_text(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
-/// The text after `field` on its line of a `/proc` file, trimmed.
 fn proc_field(path: &str, field: &str) -> String {
     read_proc_text(path)
         .lines()
@@ -4872,14 +4223,8 @@ fn proc_kib(path: &str, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("{field} in {path} is not a KiB count"))
 }
 
-/// Process CPU time, user plus system, in `/proc` clock ticks. Counts every
-/// thread including exited ones, so scoped worker threads are not lost; the
-/// price is `WINDOW_CPU_TICK_NS` resolution, which is why runs summarise it
-/// as a total beside the per-unit values.
 fn process_cpu_ticks() -> u64 {
     let stat = read_proc_text("/proc/self/stat");
-    // Fields after the parenthesised command name start at field 3; utime
-    // and stime are fields 14 and 15.
     let after_comm = stat
         .rsplit_once(')')
         .map_or_else(|| panic!("malformed /proc/self/stat"), |(_, rest)| rest);
@@ -4895,14 +4240,6 @@ fn process_cpu_ticks() -> u64 {
     user.saturating_add(system)
 }
 
-/// Resets the process peak resident set to the current one (`proc(5)`:
-/// writing `5` to `clear_refs`, Linux 4.0 and later), so the next `VmHWM`
-/// read is the peak of the interval that follows. Returns the resident set
-/// that interval starts from.
-///
-/// Verifies the reset took effect: after it the peak must sit within 1 MiB of
-/// the resident set, otherwise a stale lifetime peak would be reported as
-/// this unit's peak.
 fn reset_peak_rss() -> u64 {
     std::fs::OpenOptions::new()
         .write(true)
@@ -4919,8 +4256,6 @@ fn reset_peak_rss() -> u64 {
     resident_kib.saturating_mul(1024)
 }
 
-/// Toolchain and build facts the six-identity record needs beyond
-/// `EvidenceIdentity`.
 fn window_toolchain_identity() -> sonic_rs::Value {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let output = std::process::Command::new(&rustc)
@@ -4953,11 +4288,6 @@ fn window_toolchain_identity() -> sonic_rs::Value {
     })
 }
 
-/// Host facts beyond `EvidenceIdentity.hardware`: kernel, pinned core set,
-/// memory, and the filesystem holding the durable state.
-///
-/// Fails closed on a RAM-backed temporary directory: a group flush there is
-/// not a durable write, so `flush_wait_us` would measure nothing.
 fn window_host_identity() -> sonic_rs::Value {
     let tmpdir = std::env::temp_dir()
         .canonicalize()
@@ -4994,12 +4324,6 @@ fn window_host_identity() -> sonic_rs::Value {
     })
 }
 
-/// Replays one window on fresh durable state and measures it.
-///
-/// Setup (state, headers, pre-serialized payloads) is outside every timer
-/// and every counter. The measured interval is the whole replay: the request
-/// tick, the out-of-order staging tick, the applying tick, and one closing
-/// tick that lets the window close its measurement-only intervals.
 fn run_window_unit(scenario: WindowScenario) -> WindowUnit {
     let mut fixture =
         ProductionStateSyncFixture::window_replay(scenario.body_blocks).prebuild_run();
@@ -5043,9 +4367,6 @@ fn run_window_unit(scenario: WindowScenario) -> WindowUnit {
     }
 }
 
-/// Fails closed unless the replay did what the scenario names: every body
-/// block applied, one group flush per started group covering every block,
-/// no failed flush, and the transition hold present.
 fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
     let body_blocks = usize::try_from(scenario.body_blocks)
         .unwrap_or_else(|error| panic!("invalid window body count: {error}"));
@@ -5091,8 +4412,6 @@ fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
     );
 }
 
-/// Order statistics of `values` plus whether p99 is supported; an empty set
-/// is reported as unobserved, never as zero.
 fn quantiles_json(values: &[u64]) -> sonic_rs::Value {
     if let Some(quantiles) = evidence::Quantiles::of(values) {
         json!({
@@ -5138,9 +4457,6 @@ fn window_unit_json(index: usize, origin: quanta::Instant, unit: &WindowUnit) ->
     })
 }
 
-/// Summaries over the measured units. Each is read beside the raw units in
-/// the same file, never instead of them. Production spans are nested inside
-/// the wall and inside each other, so none is summed with another.
 fn window_summary_json(measured: &[WindowUnit]) -> sonic_rs::Value {
     let walls: Vec<u64> = measured
         .iter()
@@ -5220,9 +4536,6 @@ fn window_sample(identity: &EvidenceIdentity, path: &str, start_ns: u64, end_ns:
     }
 }
 
-/// One wall sample, one apply-tick sample and one sample per captured span.
-/// Offsets are on the run clock, so the nested spans overlap the wall and
-/// the ledger refuses to add them.
 fn window_evidence_samples(
     identity: &EvidenceIdentity,
     origin: quanta::Instant,
@@ -5260,15 +4573,6 @@ fn window_evidence_samples(
     samples
 }
 
-/// Runs one arm of one scenario in this process and writes its evidence:
-/// every measured unit as identity-bearing ledger samples
-/// (`target/benchmarks/window_attribution.toml`, append-only across runs) and
-/// one self-contained JSON record with raw units, summaries and the six
-/// identities (`target/benchmarks/window_attribution/`).
-///
-/// The deterministic regtest workload proves the mechanism and the
-/// measurement surface; its walls are not mainnet speed and fill no product
-/// cell (`HPA-09`, `HPA-12`).
 fn run_window_attribution(arm: WindowArm, scenario: WindowScenario) {
     let host = window_host_identity();
     let toolchain = window_toolchain_identity();
@@ -5366,9 +4670,6 @@ fn run_window_attribution(arm: WindowArm, scenario: WindowScenario) {
     print_percentiles("window_attribution_apply_tick", &apply_walls);
 }
 
-/// Validates the `--window-attribution` invocation shape before any fixture
-/// work: the flag, one arm, one scenario, and nothing else. Cargo appends
-/// `--bench`, which carries no meaning here and is ignored.
 fn window_attribution_cli(args: &[String]) -> (WindowArm, WindowScenario) {
     let args: Vec<&str> = args
         .iter()
@@ -5399,17 +4700,6 @@ fn window_attribution_cli(args: &[String]) -> (WindowArm, WindowScenario) {
     (arm, scenario)
 }
 
-/// Binary entrypoint: `--mrp-verify` runs the untimed real-fixture
-/// verification path with no Criterion involvement and no timing output;
-/// `--window-attribution ARM SCENARIO` replays one windowed apply on fresh
-/// durable state, measures it, and writes ledger and JSON evidence;
-/// `--mrp-list-counted` lists the counted row IDs without fixture
-/// construction or sampling; `--mrp-counted ROW_ID` runs one counted row
-/// through the shared measured-work sampler; `--mrp-verify-counted` runs
-/// each converted real unit once plus the stopping-rule arithmetic without
-/// sample records. Malformed counted invocations are rejected before the
-/// benchmark framework starts. Every other invocation runs the Criterion
-/// benchmarks exactly as `criterion_main!` did.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--mrp-list-counted") {

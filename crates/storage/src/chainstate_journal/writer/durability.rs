@@ -1,5 +1,3 @@
-//! Undo flush, segment sync, and atomic durable-head publication in dependency order.
-
 use super::DurableCursor;
 use super::HeadMarker;
 use super::JournalWriter;
@@ -16,15 +14,10 @@ impl<S: KvStore> JournalWriter<S> {
     /// 1. storage flush (deferred undo rows become durable),
     /// 2. log fsync,
     /// 3. atomic `head.json` publish.
-    ///
-    /// `target` is the record index (exclusive) in `pending_records` that the
-    /// boundary covers.
     pub(super) fn advance_durability(&mut self) -> Result<(), JournalWriterError> {
         self.advance_durability_upto(self.pending_records.len())
     }
 
-    /// Publishes `head.json` without advancing the cursor (used at
-    /// initialization and by `freeze`).
     pub(super) fn publish_head_now(&self) -> Result<(), JournalWriterError> {
         let marker = self.head();
         self.write_head_atomic(&marker)
@@ -53,9 +46,6 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    /// Flushes buffered records up to and including `height` (plan §2.5's
-    /// `flush_to`). No-op when the height is already durable; errors when the
-    /// height is beyond the buffered frontier.
     pub(crate) fn flush_to(&mut self, height: u32) -> Result<(), JournalWriterError> {
         if height <= self.durable.height {
             return Ok(());
@@ -72,7 +62,6 @@ impl<S: KvStore> JournalWriter<S> {
         self.advance_durability_upto(index + 1)
     }
 
-    /// Boundary over the first `target` buffered records.
     pub(super) fn advance_durability_upto(
         &mut self,
         target: usize,

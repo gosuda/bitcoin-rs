@@ -1,4 +1,3 @@
-//! Shared mining integration fixtures.
 #![allow(dead_code)]
 
 use std::error::Error;
@@ -13,14 +12,12 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::VerifyFlags;
 
-/// Anyone-can-spend payout script used wherever the payout itself is not under test.
 pub(crate) const PAYOUT: &[u8] = &[0x51];
 
 pub(crate) fn p2pkh() -> Vec<u8> {
     [vec![0x76, 0xa9, 0x14], vec![0x11; 20], vec![0x88, 0xac]].concat()
 }
 
-/// Generous regtest context: segwit and CSV active, limits far above any fixture.
 pub(crate) fn context() -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
@@ -40,7 +37,6 @@ pub(crate) fn context() -> CandidateContext {
     }
 }
 
-/// Mempool that admits every fixture fee rate.
 pub(crate) fn zero_fee_pool() -> Mempool {
     Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -79,12 +75,6 @@ pub(crate) fn insert_with_cost(
     Ok(())
 }
 
-/// Forged consensus facts for one pool entry in limit-boundary tests.
-///
-/// `vsize` drives fee-rate ordering and cluster accounting; `weight` and
-/// `size` override the wire numbers after `MempoolEntry::new` and drive the
-/// selection limits. Keep forged weights under `101_000` and member counts
-/// under 64 so admission cluster checks pass.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Forged {
     pub(crate) vsize: u32,
@@ -95,8 +85,6 @@ pub(crate) struct Forged {
 }
 
 impl Forged {
-    /// Forged `fee`, `weight`, and `size` with the common 100-vbyte rate
-    /// basis and no sigops.
     pub(crate) const fn new(fee: u64, weight: u64, size: u32) -> Self {
         Self {
             vsize: 100,
@@ -118,8 +106,6 @@ impl Forged {
     }
 }
 
-/// Pool insert with forged consensus weight/size/sigops. Acceptance time and
-/// height are fixed: selection ranks by modified fee rate, never by arrival.
 pub(crate) fn insert_forged(
     pool: &mut Mempool,
     tx: Tx,
@@ -139,7 +125,6 @@ pub(crate) fn insert_forged(
     Ok(())
 }
 
-/// Snapshot entry whose weight, size, and vsize are measured from `tx`.
 pub(crate) fn measured_entry(
     tx: &Arc<Tx>,
     fee: u64,
@@ -163,8 +148,6 @@ pub(crate) fn measured_entry(
     entry
 }
 
-/// Snapshot entry with resource fields chosen by the caller, so limit tests can
-/// place a package exactly on a boundary without building a matching wire image.
 pub(crate) fn forged_entry(
     tx: Arc<Tx>,
     fee: u64,
@@ -195,12 +178,10 @@ pub(crate) fn forged_entry(
     }
 }
 
-/// Single-input, single-output transaction spending `parent` or a label-derived outpoint.
 pub(crate) fn tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
     build_tx(label, value, parent, Witness::new())
 }
 
-/// Same shape as [`tx`] with a 32-byte witness item, so wtxid differs from txid.
 pub(crate) fn witnessed_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
     build_tx(label, value, parent, vec![vec![label; 32]].into())
 }
@@ -231,7 +212,6 @@ pub(crate) fn oracle_transaction(tx: &Tx) -> Result<bitcoin::Transaction, Box<dy
     Ok(bitcoin::consensus::deserialize(&consensus_bytes(tx))?)
 }
 
-/// rust-bitcoin's independent sigop-cost implementation over the same wire image.
 pub(crate) fn oracle_sigop_cost(tx: &Tx) -> Result<u64, Box<dyn Error>> {
     Ok(u64::try_from(
         oracle_transaction(tx)?.total_sigop_cost(|_| None),

@@ -2,7 +2,7 @@
 #![allow(clippy::expect_used)]
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 use std::{env, time::Duration};
 
 fn setting(name: &str) -> Result<String> {
@@ -62,7 +62,6 @@ fn exchange(
     let tip = hashes.last().expect("nonempty mined chain");
     receiver.wait_block_count(height, Duration::from_secs(180))?;
     assert_eq!(receiver.rpc("getbestblockhash", &json!([]))?, json!(tip));
-    // Check admitted headers and complete bodies, not just peer byte counters.
     for hash in hashes {
         assert_eq!(
             receiver.rpc("getblockheader", &json!([hash, false]))?,

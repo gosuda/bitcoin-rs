@@ -1,7 +1,4 @@
 //! Native protocol scalar newtypes: amounts, sequences, locktime, compact targets.
-//!
-//! Arithmetic and wire conversion live here so `Tx`, `TxIn`, `TxOut`, and
-//! `Header` do not restate satoshi, sequence, or nBits layout.
 
 use core::fmt;
 
@@ -10,28 +7,22 @@ use core::fmt;
 pub struct Amount(u64);
 
 impl Amount {
-    /// Zero satoshis.
     pub const ZERO: Self = Self(0);
-    /// One satoshi.
     pub const SAT: Self = Self(1);
-    /// One bitcoin in satoshis.
     pub const COIN: Self = Self(100_000_000);
     /// Consensus maximum money (21 million bitcoin).
     pub const MAX_MONEY: Self = Self(21_000_000 * Self::COIN.0);
 
-    /// Constructs an amount from satoshis.
     #[must_use]
     pub const fn from_sat(sat: u64) -> Self {
         Self(sat)
     }
 
-    /// Returns the amount in satoshis.
     #[must_use]
     pub const fn to_sat(self) -> u64 {
         self.0
     }
 
-    /// Saturating addition.
     #[must_use]
     pub const fn saturating_add(self, rhs: Self) -> Self {
         Self(self.0.saturating_add(rhs.0))
@@ -50,25 +41,21 @@ impl PartialEq<u64> for Amount {
     }
 }
 
-/// A transaction input sequence number.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Sequence(u32);
 
 impl Sequence {
-    /// Sequence zero.
     pub const ZERO: Self = Self(0);
     /// `0xffffffff` — final, disables relative locktime and RBF signaling.
     pub const MAX: Self = Self(u32::MAX);
     /// BIP125 opt-in RBF without locktime (`0xfffffffd`).
     pub const ENABLE_RBF_NO_LOCKTIME: Self = Self(0xffff_fffd);
 
-    /// Constructs a sequence from its consensus `u32`.
     #[must_use]
     pub const fn from_consensus(n: u32) -> Self {
         Self(n)
     }
 
-    /// Returns the consensus `u32`.
     #[must_use]
     pub const fn to_consensus(self) -> u32 {
         self.0
@@ -101,7 +88,6 @@ impl core::ops::BitAnd<u32> for Sequence {
     }
 }
 
-/// A transaction lock time (`nLockTime`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LockTime(u32);
 
@@ -109,13 +95,11 @@ impl LockTime {
     /// Locktime zero — always final from the locktime field alone.
     pub const ZERO: Self = Self(0);
 
-    /// Constructs a lock time from its consensus `u32`.
     #[must_use]
     pub const fn from_consensus(n: u32) -> Self {
         Self(n)
     }
 
-    /// Returns the consensus `u32`.
     #[must_use]
     pub const fn to_consensus(self) -> u32 {
         self.0
@@ -134,18 +118,15 @@ impl fmt::Display for LockTime {
     }
 }
 
-/// Compact proof-of-work target (`nBits`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompactTarget(u32);
 
 impl CompactTarget {
-    /// Constructs a compact target from its consensus `u32`.
     #[must_use]
     pub const fn from_consensus(n: u32) -> Self {
         Self(n)
     }
 
-    /// Returns the consensus `u32`.
     #[must_use]
     pub const fn to_consensus(self) -> u32 {
         self.0

@@ -1,27 +1,18 @@
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
-/// Errors returned by Bitcoin compact-size integer decoding.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum VarintError {
-    /// The buffer ends before the encoded integer is complete.
     #[error(
         "compact-size varint truncated after prefix {prefix:#04x}; need {needed} bytes, got {available}"
     )]
     Truncated {
-        /// Prefix byte that selected the integer width.
         prefix: u8,
-        /// Required total encoded bytes.
         needed: usize,
-        /// Available total encoded bytes.
         available: usize,
     },
-    /// The integer used a wider encoding than consensus permits for its value.
     #[error("non-canonical compact-size varint encoding for {value}")]
-    NonCanonical {
-        /// Decoded value.
-        value: u64,
-    },
+    NonCanonical { value: u64 },
 }
 
 /// Decodes a Bitcoin compact-size integer and returns `(value, bytes_consumed)`.
@@ -77,7 +68,6 @@ pub const fn encoded_len(value: u64) -> usize {
     }
 }
 
-/// Encodes a Bitcoin compact-size integer into a stack-backed buffer.
 #[must_use]
 pub fn encode(value: u64) -> ArrayVec<[u8; 9]> {
     let mut out = ArrayVec::new();

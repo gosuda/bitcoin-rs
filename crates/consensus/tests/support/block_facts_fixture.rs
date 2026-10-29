@@ -1,14 +1,9 @@
-//! Deterministic wire fixtures shared by borrowed-fact tests and benchmarks.
-//! These are parse/identity workloads, not signed consensus-valid blocks.
-
 use bitcoin_rs_consensus::BlockFacts;
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
 };
 
-/// A zero witness modulus selects legacy transactions; otherwise the last
-/// transaction in each modulus-sized group carries one witness stack.
 pub(crate) fn fixture(
     tx_count: usize,
     input_count: usize,
@@ -63,8 +58,6 @@ pub(crate) fn fixture(
     }
 }
 
-/// Independent rust-bitcoin decoding, hashing, weight and Merkle reduction.
-/// All assertions run outside benchmark timing loops.
 pub(crate) fn assert_oracle(bytes: &[u8], facts: &BlockFacts) {
     let oracle: bitcoin::Block = bitcoin::consensus::deserialize(bytes)
         .unwrap_or_else(|error| panic!("oracle block decode: {error}"));

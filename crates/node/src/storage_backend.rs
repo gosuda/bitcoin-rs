@@ -1,24 +1,8 @@
-//! Runtime storage-backend composition.
-//!
-//! This module is the only node owner of concrete backend constructors. Each
-//! namespace is opened here and handed immediately to a generic consumer that
-//! constructs the narrow capability its caller needs. The visitor is not a
-//! second storage facade: all reads, writes, batches, and durability remain
-//! owned by [`bitcoin_rs_storage::KvStore`].
-//!
-//! Every store leaves this module carrying the caller's [`StoreGuard`] (the
-//! node's data-directory lock). The lock therefore lives exactly as long as
-//! the last handle to any store that can still write the directory, whoever
-//! retains that handle: a detached RPC connection, an index worker, or an
-//! embedder's clone.
-
 use std::path::Path;
 use std::sync::Arc;
 
 use bitcoin_rs_storage::{KvStore, StorageBackend, StorageError, StoreGuard};
 
-/// Consumes one freshly opened concrete store without exposing its type to the
-/// runtime caller.
 pub(crate) trait StoreConsumer {
     type Output;
     type Error: From<StorageError>;
@@ -39,8 +23,6 @@ pub(crate) fn open_generic<C>(
 where
     C: StoreConsumer,
 {
-    // The fallback arm below is the only reader; builds with every backend
-    // feature compiled in cfg it away, so consume the label here.
     let _ = namespace;
     match backend {
         #[cfg(feature = "rocksdb")]
@@ -76,8 +58,6 @@ where
     }
 }
 
-/// Opens the selected transaction-index backend exactly once. The redb lane
-/// deliberately retains its fixed-width specialized store.
 pub(crate) fn open_txindex<C>(
     backend: StorageBackend,
     path: &Path,
@@ -90,7 +70,6 @@ where
 {
     match backend {
         #[cfg(feature = "redb")]
-        // Zero selects the engine default, exactly as `open_with_cache` does.
         StorageBackend::Redb => consumer.consume(Arc::new(
             bitcoin_rs_storage::open_redb_tx_index_store_with_cache(
                 path,
@@ -117,11 +96,6 @@ fn unsupported(namespace: &str, backend: StorageBackend) -> StorageError {
 mod tests {
     use std::path::Path;
 
-    /// Concrete open entry points that may appear only in this module. A call
-    /// anywhere else bypasses the budgeted `open_with_cache` path and silently
-    /// runs on the engine-default cache — the defect the cache-share test in
-    /// `tests/state_storage.rs` cannot see because it measures only opens that
-    /// already went through here.
     const CONCRETE_OPEN_TOKENS: &[&str] = &[
         "RocksDbStore::open",
         "FjallStore::open",
@@ -129,9 +103,6 @@ mod tests {
         "open_redb_tx_index_store",
     ];
 
-    /// Runtime crates whose stores must be composed through this module.
-    /// Test-only files are skipped: unit and integration fixtures open
-    /// concrete stores by design.
     #[test]
     fn runtime_backend_construction_has_one_owner() {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");

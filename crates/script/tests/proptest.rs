@@ -1,9 +1,3 @@
-//! Property tests for native taproot key-path execution over signed spends.
-//!
-//! The signing side deliberately uses rust-bitcoin's sighash + Schnorr APIs as
-//! an independent oracle: if the native interpreter's BIP341 digest diverged,
-//! these spends would stop verifying.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
@@ -16,7 +10,6 @@ use bitcoin_rs_primitives::{Tx, TxOut};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use proptest::prelude::*;
 
-/// Consensus-bytes round-trip from the rust-bitcoin oracle types to native types.
 fn to_native(tx: &Transaction) -> Tx {
     let bytes = bitcoin::consensus::serialize(tx);
     bitcoin_rs_primitives::deserialize(&bytes)
@@ -72,11 +65,6 @@ proptest! {
             &fixture.tx,
             0,
         );
-        // With script-path now implemented, a two-element witness with a
-        // bogus extra element is rejected. When the extra starts with 0x50
-        // (ANNEX_TAG) it is stripped as an annex, leaving a key-path spend
-        // whose signature fails verification. Otherwise it is treated as a
-        // control block and rejected for wrong size or commitment mismatch.
         prop_assert!(
             matches!(
                 ok,
@@ -93,10 +81,6 @@ proptest! {
 
 }
 
-/// Valid multi-input taproot key-path spend must verify once all prevouts are supplied.
-///
-/// Before the prevout-threading fix this fails with `TaprootPrevoutsUnavailable` because
-/// the interpreter only receives the single input's prevout.
 #[test]
 fn valid_multi_input_taproot_keypath_spend_executes() {
     let Some((oracle_tx, oracle_prevouts)) = signed_multi_input_p2tr([1, 2]) else {
@@ -154,10 +138,6 @@ fn signed_p2tr(byte: u8) -> Option<SpendFixture> {
     })
 }
 
-/// Builds a two-input taproot key-path transaction signed with BIP341 `Prevouts::All`.
-///
-/// Signatures are produced with rust-bitcoin sighash/schnorr APIs independently of the
-/// interpreter under test.
 fn signed_multi_input_p2tr(seeds: [u8; 2]) -> Option<(Transaction, Vec<OracleTxOut>)> {
     let secp = Secp256k1::new();
     let mut keypairs = Vec::with_capacity(seeds.len());

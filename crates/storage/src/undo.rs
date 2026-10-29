@@ -24,32 +24,21 @@ pub fn block_undo_key(height: u32, hash: Hash256) -> [u8; KEY_LEN] {
 }
 
 /// Storage for per-block UTXO undo records.
-///
 /// Records survive an orderly restart. They are not crash-safe: see
 /// [`KvUndoStore::persist_undo`] for why no fsync sits here.
-///
-/// Undo records are consensus state, not an optional index: without the record
-/// for a block the node cannot disconnect it, so it can advance `applied_tip`
-/// into a chain it is unable to leave. The handle is therefore mandatory rather
-/// than `Option`, and every construction path must supply a real
-/// implementation. [`InMemoryUndoStore`] is a real one — it round-trips — and
-/// is the correct choice for tests that need no durability. A no-op
-/// implementation would recreate exactly the silent failure this type exists to
-/// prevent, so do not add one.
 ///
 /// Records are keyed by height AND block hash. Keying by height alone would let
 /// a stale record from an abandoned branch be replayed against a different
 /// block at the same height.
 pub trait UndoStore: Send + Sync {
-    /// Writes the undo record for one block.
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError>;
 
-    /// Reads the undo record for one block, if present.
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Reads undo only when its borrowed/pinned value fits the owned-copy bound.
-    /// Engine-internal allocation is outside this bound; unsupported stores
-    /// refuse rather than falling back to the unbounded consensus read.
+    ///
+    /// Engine-internal allocation is outside this bound; unsupported stores refuse
+    /// rather than falling back to the unbounded consensus read.
     fn load_undo_bounded(
         &self,
         _height: u32,
@@ -60,51 +49,29 @@ pub trait UndoStore: Send + Sync {
     }
 
     /// Records that a disconnect is about to mutate state, durably.
-    ///
-    /// Armed BEFORE the first mutation, not after a failure. A marker written
-    /// on the error path cannot exist for the case that needs it most: the
-    /// process dying mid-rollback writes nothing at all. Armed first, both a
-    /// crash and a returned `Fatal` leave the same evidence behind.
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Records that the rollback finished, in memory, and is owed a checkpoint.
-    ///
-    /// Distinct from clearing. The phase decides what recovery may do with the
-    /// marker, not whether startup proceeds: startup recovers automatically
-    /// from either phase by reconstructing the durable certified chainstate
-    /// (see `docs/contracts/recovery.md`), and only a checkpoint may clear a
     /// `RolledBack` marker — a checkpoint taken over a half-finished rollback
     /// would be a checkpoint of the damage.
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Clears the marker once a disconnect has finished cleanly.
-    ///
     /// The marker covers authoritative UTXO and tip state between checkpoints.
-    /// `TxIndex` is outside this transaction and recovers from its own atomic
-    /// watermark after restart.
     fn disarm_disconnect(&self) -> Result<(), StorageError>;
 
     /// Clears the marker unconditionally after disconnect recovery.
     ///
-    /// The recovery transaction has reconstructed a coherent chainstate to the
-    /// durable head and published the clean checkpoint that makes it durable,
-    /// so the marker's evidence is spent even when its phase is `InFlight`.
-    /// Ordinary callers — the checkpoint settling a completed rollback — keep
-    /// using [`UndoStore::disarm_disconnect`], which refuses `InFlight`.
+    /// The recovery transaction has reconstructed a coherent chainstate to the durable
+    /// head and published the clean checkpoint that makes it durable, so the marker's
+    /// evidence is spent even when its phase is `InFlight`.
     fn retire_disconnect_marker(&self) -> Result<(), StorageError>;
 
-    /// Reads the marker left by a disconnect that never finished.
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError>;
 }
 
 /// A disconnect that started and never reported finishing through a clean
 /// checkpoint.
-///
-/// Its presence at startup means one of two things, and the node cannot tell
-/// them apart: the disconnect returned `Fatal`, or the process died between
-/// the first mutation and the last. Both leave authoritative UTXO and tip
-/// state potentially inconsistent, so startup runs automatic recovery: it
-/// reconstructs the chainstate to the durable head before anything serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisconnectMarker {
     /// Block being disconnected.
@@ -116,15 +83,8 @@ pub struct DisconnectMarker {
 }
 
 /// How far a disconnect got before the marker was last written.
-///
-/// Startup recovers automatically from either phase. The phase decides only
-/// whether an ordinary checkpoint may clear the marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisconnectPhase {
-    /// Mutation started and was never reported finished: the rollback is
-    /// half-done, or the process died inside it. A checkpoint must NOT clear
-    /// this, because a checkpoint over a half-finished rollback captures the
-    /// damage instead of repairing it.
     InFlight,
     /// The rollback completed in memory and is waiting for a checkpoint to make
     /// it durable. Only this phase may be cleared, and only by that checkpoint.
@@ -132,10 +92,6 @@ pub enum DisconnectPhase {
 }
 
 /// Key for the in-flight disconnect marker.
-///
-/// One key, not one per block: only one disconnect runs at a time, and a
-/// per-block key would leave the reader scanning to find out whether any are
-/// set.
 const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
 
 impl DisconnectMarker {
@@ -179,9 +135,6 @@ impl DisconnectMarker {
 }
 
 /// Process-local undo storage.
-///
-/// A real implementation: what is written can be read back. Suitable wherever
-/// durability across a restart is not required, such as tests.
 #[derive(Debug, Default)]
 pub struct InMemoryUndoStore {
     records: parking_lot::RwLock<HashMap<(u32, Hash256), Vec<u8>>>,
@@ -267,7 +220,6 @@ pub struct KvUndoStore<S: KvStore> {
 }
 
 impl<S: KvStore> KvUndoStore<S> {
-    /// Creates an undo store over `store`.
     #[must_use]
     pub const fn new(store: Arc<S>) -> Self {
         Self { store }
@@ -290,19 +242,11 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
 
     /// Deferred, matching the rest of the apply path.
     ///
-    /// `put` is what this used to call, and on redb `put` commits an
-    /// immediately durable transaction, so every connected block paid an fsync
-    /// on that backend — the same per-block durability cost the deferred
-    /// block-body write path exists to avoid. `write_deferred` leaves the row
-    /// visible to later reads in this process and lets the checkpoint flush
-    /// make it durable, which is what `disconnect_block` needs and all it needs.
-    ///
-    /// Deferred is correct because the durable-head commit is the receipt
-    /// that makes this row authoritative: the apply path flushes it together
-    /// with the head row in one atomic batch (`RCV-02`), and the head's
-    /// `undo_extent` names it only from that receipt on. Writing it earlier
-    /// keeps it readable for planning; it is an orphan tail, safely
-    /// discarded, until the head names it.
+    /// Deferred is correct because the durable-head commit is the receipt that makes
+    /// this row authoritative: the apply path flushes it together with the head row in
+    /// one atomic batch (`RCV-02`), and the head's `undo_extent` names it only from
+    /// that receipt on. Writing it earlier keeps it readable for planning; it is an
+    /// orphan tail, safely discarded, until the head names it.
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         let mut batch = self.store.new_batch();
         batch.put(
@@ -319,12 +263,6 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     }
 
     /// Flushed, unlike every other write on this path.
-    ///
-    /// The rest of block apply does not fsync because a crash there is
-    /// recoverable by re-applying blocks. This one is different: it is the only
-    /// record that a rollback started, and it is worthless if the crash that it
-    /// exists to survive can lose it. One fsync per disconnect, and disconnects
-    /// are rare.
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
         self.store.put(
             ColumnFamily::UtxoMeta,
@@ -354,7 +292,6 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     }
 
     /// Refuses to clear a marker that is still `InFlight`.
-    ///
     /// The caller is a checkpoint, and a checkpoint taken while a rollback is
     /// half-done captures the damage. Only a completed rollback may be cleared.
     fn disarm_disconnect(&self) -> Result<(), StorageError> {
@@ -391,13 +328,6 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
 mod tests {
     use super::*;
 
-    /// Deferred durability must not become deferred visibility.
-    ///
-    /// `disconnect_block` reads back the undo record the connect wrote, in the
-    /// same process and before any checkpoint flush. redb is the backend that
-    /// makes this worth pinning: its `put` commits immediately, so moving the
-    /// write to `write_deferred` is exactly the change that could have made the
-    /// row unreadable until a flush.
     #[cfg(feature = "redb")]
     #[test]
     fn a_deferred_undo_record_is_readable_before_any_flush()
@@ -419,9 +349,6 @@ mod tests {
         Ok(())
     }
 
-    /// The marker exists to survive a crash, so an in-memory round trip proves
-    /// nothing. This closes the backend and reopens it, which is the only shape
-    /// of test that can fail if the write is not durable.
     #[cfg(feature = "fjall")]
     #[test]
     fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store()
@@ -469,8 +396,6 @@ mod tests {
         Ok(())
     }
 
-    /// A truncated marker must not read as "no disconnect was in flight".
-    /// Corruption clearing the interlock is the one failure it cannot have.
     #[test]
     fn a_truncated_disconnect_marker_is_an_error_not_an_absence() {
         let Err(error) = DisconnectMarker::decode(&[0_u8; 20]) else {

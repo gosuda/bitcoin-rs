@@ -1,11 +1,3 @@
-//! Canonical Bitcoin Core transaction JSON projections.
-//!
-//! Callers supply optional confirmed-chain context. This module never queries
-//! node state and does not choose JSON-RPC versus REST transport policy.
-
-// Address encoding uses the sanctioned rust-bitcoin seam. Core disassembly
-// uses the native instruction parser, and descriptor inference reuses the
-// existing shape owner and Miniscript parser without keys or wallet state.
 use bitcoin_rs_primitives::{BlockHash, Network, Tx, TxIn, TxOut, consensus_bytes};
 
 #[cfg(test)]
@@ -18,32 +10,20 @@ use bitcoin_rs_script::{Instruction, instructions};
 
 use crate::convert::{self};
 
-/// Optional confirmed-chain fields projected beside a transaction object.
 #[derive(Debug)]
 pub(crate) struct TransactionChainContext {
-    /// Confirming block hash.
     pub block_hash: BlockHash,
-    /// Confirmations on the applied chain, or `0` when the named block is inactive.
     pub confirmations: i64,
-    /// Confirming block time, emitted only with positive confirmations.
     pub block_time: u64,
-    /// Whether the confirming block is on the applied chain.
-    ///
-    /// Rendered only when `Some`. Explicit `blockhash` lookups set this;
-    /// txindex lookups leave it absent.
     pub in_active_chain: Option<bool>,
 }
 
 /// Exact eight-decimal BTC spelling used by Core JSON amount fields.
-///
-/// Parsed with sonic's raw-number mode so the decimal spelling survives
-/// serialization instead of being reduced through binary floating point.
 #[must_use]
 pub(crate) fn btc_amount_json(satoshis: u64) -> Value {
     btc_amount_parts(false, satoshis)
 }
 
-/// Core signed amount projection, including negative fees and raw wire amounts.
 #[must_use]
 pub(crate) fn signed_btc_amount_json(satoshis: i64) -> Value {
     btc_amount_parts(satoshis < 0, satoshis.unsigned_abs())
@@ -61,16 +41,6 @@ fn btc_amount_parts(negative: bool, magnitude: u64) -> Value {
     }
 }
 
-/// Render one transaction in Bitcoin Core's verbose object shape.
-///
-/// PRE: `tx` is the transaction to project, `network` is the selected Bitcoin
-///   network, and `chain` carries confirmed-chain fields when the caller has
-///   them.
-/// POST: returns the ordinary Core verbose object: identifiers, sizes, weight,
-///   lock time, inputs, outputs, hex, and the chain fields when `chain` is
-///   set.
-/// INVARIANT: the projection reads no node state and emits no `fee` or
-///   per-input `prevout` field.
 #[must_use]
 pub(crate) fn transaction_json(
     tx: &Tx,
@@ -121,12 +91,6 @@ pub(crate) fn transaction_json(
     value
 }
 
-/// Extends the canonical transaction projection with certified block inputs.
-///
-/// The native unsigned transaction version remains owned by
-/// `transaction_json`; the pinned verbose transaction DTO cannot represent
-/// its full wire range. Header version semantics are independent and
-/// unchanged.
 pub(crate) fn transaction_json_with_spends(
     tx: &Tx,
     network: Network,
@@ -180,14 +144,11 @@ pub(crate) fn transaction_json_with_spends(
     Ok(value)
 }
 
-/// Render a `scriptPubKey` object in Bitcoin Core's verbose shape.
 #[must_use]
 pub(crate) fn script_pub_key_json(script: &[u8], network: Network) -> Value {
     script_json(script, network, true, true)
 }
 
-/// Core `ScriptToUniv` projection. Address-bearing views also infer a descriptor;
-/// PSBT redeem/witness-script metadata deliberately requests neither field.
 #[must_use]
 pub(crate) fn script_json(
     script: &[u8],
@@ -247,8 +208,6 @@ fn input_json(input: &TxIn, coinbase: bool) -> Value {
         return value;
     }
     let previous_output = input.previous_output;
-    // Field copies come before any `&self` method: `OutPoint` is `#[repr(packed)]`
-    // (consensus wire layout), so field references would be unaligned.
     let (prev_txid, prev_vout) = (previous_output.txid, previous_output.vout);
     let mut value = json!({
         "txid": prev_txid.to_string(),
@@ -278,8 +237,6 @@ fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
     })
 }
 
-/// Core's disassembly uses decimal short pushes and omits push-opcode labels.
-/// Signature annotations are used only for input scripts, never output scripts.
 #[must_use]
 pub(crate) fn script_asm(script: &[u8], attempt_sighash_decode: bool) -> String {
     let mut words = String::new();
@@ -350,14 +307,11 @@ fn unspendable(script: &[u8]) -> bool {
         || script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
 }
 
-/// Infer a checksummed descriptor with no key or script provider.
 #[must_use]
 pub(crate) fn script_descriptor(script: &[u8], network: Network) -> String {
     script_desc(script, network, None)
 }
 
-// Infer only information present in the script. There is no public/private key
-// provider here; decodescript supplies only the script behind its P2WSH wrapper.
 fn script_desc(script: &[u8], network: Network, redeem: Option<&[u8]>) -> String {
     let body = if let Some(redeem) = redeem {
         infer_inner_descriptor(redeem, true).map(|inner| format!("wsh({inner})"))
@@ -366,7 +320,6 @@ fn script_desc(script: &[u8], network: Network, redeem: Option<&[u8]>) -> String
     }
     .or_else(|| convert::script_address(script, network).map(|address| format!("addr({address})")))
     .unwrap_or_else(|| format!("raw({})", script.to_lower_hex_string()));
-    // All inferred text uses the descriptor alphabet (hex, op names, addresses).
     let checksum = crate::handlers::util::descriptor_checksum(&body)
         .unwrap_or_else(|| unreachable!("inferred descriptor contains only descriptor characters"));
     format!("{body}#{checksum}")
@@ -411,10 +364,6 @@ fn infer_inner_descriptor(script: &[u8], witness: bool) -> Option<String> {
         _ => {}
     }
     if witness {
-        // Core considers impossible-to-satisfy scripts such as `0` sane when
-        // their other type properties hold. rust-miniscript's default policy
-        // additionally requires a satisfaction. Reuse its parsed AST and
-        // sanity properties, applying Core's optional satisfaction bounds.
         let descriptor =
             miniscript::Miniscript::<bitcoin::PublicKey, miniscript::Segwitv0>::decode_with_ext(
                 bitcoin::Script::from_bytes(script),
@@ -434,7 +383,6 @@ fn infer_inner_descriptor(script: &[u8], witness: bool) -> Option<String> {
     None
 }
 
-/// Decode and wrap one script using Core's wallet-free `ScriptToUniv` policy.
 pub(crate) fn decoded_script_json(script: &[u8], network: Network) -> Value {
     use convert::ScriptShape;
     let mut result = script_json(script, network, false, true);

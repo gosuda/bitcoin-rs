@@ -3,12 +3,12 @@
 //! Bounded, genesis-scoped JSON sidecars with a `.prev` rotation, plus the
 //! process-visible warning snapshot (RCV-12).
 //!
-//! `applied-tip-witness.json` records the applied tip at the last durable
-//! checkpoint publication; `chain-rollback-event.json` records the last
-//! detected rollback event. Publishing stages `.tmp` (`create_new`, fsync),
-//! rotates a *valid* current to `.prev`, renames, and fsyncs the directory.
-//! Reads try current then `.prev`; a missing or invalid current falls
-//! through. Never selects by greatest height.
+//! `applied-tip-witness.json` records the applied tip at the last durable checkpoint
+//! publication; `chain-rollback-event.json` records the last detected rollback event.
+//!
+//! Publishing stages `.tmp` (`create_new`, fsync), rotates a *valid* current to
+//! `.prev`, renames, and fsyncs the directory. Reads try current then `.prev`; a
+//! missing or invalid current falls through. Never selects by greatest height.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub enum EvidenceError {
     Io(#[from] std::io::Error),
     /// JSON serialization failure.
     #[error("evidence serialization error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(#[from] sonic_rs::Error),
     /// A staged payload exceeds the bounded file size.
     #[error("evidence payload is {found} bytes, over the {limit}-byte limit")]
     TooLarge {
@@ -90,7 +90,7 @@ impl AppliedTipWitness {
         if data.len() > MAX_FILE_BYTES {
             return None;
         }
-        let w: Self = serde_json::from_slice(data.strip_suffix(b"\n").unwrap_or(data)).ok()?;
+        let w: Self = sonic_rs::from_slice(data.strip_suffix(b"\n").unwrap_or(data)).ok()?;
         (w.format == FORMAT && w.genesis_hash == genesis_hash).then_some(w)
     }
 }
@@ -169,7 +169,7 @@ impl ChainRollbackEvent {
         if data.len() > MAX_FILE_BYTES {
             return None;
         }
-        let e: Self = serde_json::from_slice(data.strip_suffix(b"\n").unwrap_or(data)).ok()?;
+        let e: Self = sonic_rs::from_slice(data.strip_suffix(b"\n").unwrap_or(data)).ok()?;
         (e.format == FORMAT && e.genesis_hash == genesis_hash).then_some(e)
     }
 }
@@ -222,13 +222,7 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
-        // `std::fs::rename` substitutes atomically over an existing
-        // destination on both platforms — POSIX rename semantics; Windows
-        // applies MoveFileExW REPLACE_EXISTING under the hood — so a crash
-        // can never find the published evidence file gone.
         std::fs::rename(&tmp, &current)?;
-        // std cannot open a directory on Windows; the checkpoint fsync
-        // primitive carries the platform rules for flushing the entry.
         let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
         crate::checkpoint::fs::sync_dir(&capability)?;
         Ok(())
@@ -249,17 +243,14 @@ pub fn read_witness(dir: &Path, genesis_hash: &str) -> Option<AppliedTipWitness>
 
 /// Publishes the applied-tip witness atomically.
 pub fn write_witness(dir: &Path, witness: &AppliedTipWitness) -> Result<(), EvidenceError> {
-    write_sidecar(
-        dir,
-        WITNESS_FILE,
-        &serde_json::to_string(witness)?,
-        |data| AppliedTipWitness::decode(data, &witness.genesis_hash).is_some(),
-    )
+    write_sidecar(dir, WITNESS_FILE, &sonic_rs::to_string(witness)?, |data| {
+        AppliedTipWitness::decode(data, &witness.genesis_hash).is_some()
+    })
 }
 
 /// Publishes a rollback marker atomically. Last-event-wins.
 pub(crate) fn write_marker(dir: &Path, event: &ChainRollbackEvent) -> Result<(), EvidenceError> {
-    write_sidecar(dir, MARKER_FILE, &serde_json::to_string(event)?, |data| {
+    write_sidecar(dir, MARKER_FILE, &sonic_rs::to_string(event)?, |data| {
         ChainRollbackEvent::decode(data, &event.genesis_hash).is_some()
     })
 }

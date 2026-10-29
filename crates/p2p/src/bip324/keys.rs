@@ -12,19 +12,12 @@ use super::packet::{RecvCipher, SendCipher};
 /// Bytes in a garbage terminator.
 pub(crate) const GARBAGE_TERMINATOR_LEN: usize = 16;
 
-/// Which side opened the connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
-    /// Sent the first `ElligatorSwift` key: the outbound side.
     Initiator,
-    /// Answered it: the inbound side.
     Responder,
 }
 
-/// The shared secret both sides derive from the two `ElligatorSwift` encodings.
-///
-/// libsecp256k1's BIP324 hash orders the encodings initiator first, so both
-/// sides hash the same input whichever of them computes it.
 pub(crate) fn shared_secret(
     secret_key: SecretKey,
     ours: ElligatorSwift,
@@ -42,7 +35,6 @@ pub(crate) fn shared_secret(
     secret.to_secret_bytes()
 }
 
-/// Every key BIP324 derives from one shared secret, before role assignment.
 pub(crate) struct KeyMaterial {
     pub(crate) initiator_length: [u8; 32],
     pub(crate) initiator_packet: [u8; 32],
@@ -54,12 +46,11 @@ pub(crate) struct KeyMaterial {
 }
 
 impl KeyMaterial {
-    /// HKDF-SHA256 over `shared_secret`, salted with
-    /// `"bitcoin_v2_shared_secret" || magic` and expanded once per BIP324
-    /// label. The magic binds the session to the network, custom magic
-    /// included.
+    /// HKDF-SHA256 over `shared_secret`, salted with `"bitcoin_v2_shared_secret" ||
+    /// magic` and expanded once per BIP324 label.
     ///
-    /// Each output is 32 bytes, far below HKDF-SHA256's 8160-byte limit.
+    /// The magic binds the session to the network, custom magic included. Each output
+    /// is 32 bytes, far below HKDF-SHA256's 8160-byte limit.
     pub(crate) fn derive(
         shared_secret: &[u8; 32],
         magic: Magic,
@@ -89,7 +80,6 @@ impl KeyMaterial {
     }
 }
 
-/// One side's view of an established session.
 #[derive(Debug)]
 pub(crate) struct Session {
     pub(crate) send: SendCipher,
@@ -100,7 +90,6 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Assigns the initiator's keys to whichever direction `role` sends in.
     pub(crate) fn new(material: &KeyMaterial, role: Role) -> Self {
         let initiator = (
             material.initiator_length,

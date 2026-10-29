@@ -1,5 +1,3 @@
-//! Chainstate storage, pruning, and recovery-evidence composition.
-
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
@@ -24,13 +22,6 @@ pub(super) struct NodeStorage {
     undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
-    /// The retained-history authority storage/pruning owns, seeded once from
-    /// the deletions the store reports.
-    ///
-    /// Composition distributes it: chainstate receives the mandatory
-    /// acquisition capability, the prune service and the optional index
-    /// history receive what their role requires. Chainstate is not a
-    /// broker for it.
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
@@ -38,7 +29,6 @@ pub(super) struct NodeStorage {
 struct ChainstateComposer<'a> {
     backend: StorageBackend,
     data_dir: &'a std::path::Path,
-    /// The data-directory lock; the block files carry it like the store does.
     guard: &'a StoreGuard,
 }
 
@@ -56,11 +46,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
             &store,
         )));
-        // Load the commit point before block-file recovery can change bytes.
-        // A clean checkpoint does not make a damaged committed frame an orphan.
         let committed = durable_head.load()?.and_then(|head| head.body_extent);
-        // The frontier is read once, before any lease can be granted, so no
-        // capability hands out history a previous process already deleted.
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
         ));
@@ -92,8 +78,6 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
 }
 
 impl NodeStorage {
-    /// Opens the configured backend for the chainstate namespace with its
-    /// cache share from the process budget.
     pub(super) fn open(
         config: &NodeConfig,
         chainstate_cache_bytes: u64,
@@ -129,11 +113,6 @@ impl NodeStorage {
         Arc::clone(&self.block_body_store)
     }
 
-    /// Builds the undo store for the configured backend.
-    ///
-    /// Mandatory rather than optional: without undo records the node cannot
-    /// disconnect a block, so it could advance its tip into a chain it is
-    /// unable to leave.
     pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
         Arc::clone(&self.undo_store)
     }
@@ -142,20 +121,14 @@ impl NodeStorage {
         Arc::clone(&self.durable_head)
     }
 
-    /// The retained-history authority composition owns and distributes.
     pub(super) fn retention(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
         Arc::clone(&self.retention)
     }
 
-    /// The mandatory acquisition capability granted to chainstate.
     pub(super) fn mandatory_retention(&self) -> bitcoin_rs_storage::MandatoryRetention {
         bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&self.retention))
     }
 
-    /// The bounded optional-history capability for index and block-input reads.
-    ///
-    /// A stalled optional consumer is bounded by the reorg margin, so it
-    /// never competes with the mandatory window chainstate pins into.
     pub(super) fn bounded_history(&self) -> bitcoin_rs_storage::pruning::HistoryAccess {
         bitcoin_rs_storage::pruning::HistoryAccess::new(
             Arc::clone(&self.retention),
@@ -166,9 +139,6 @@ impl NodeStorage {
     }
 }
 
-/// Capabilities whose inputs become available after the chainstate store is
-/// opened. This is a composition seam, not a storage API: concrete reads,
-/// batches, and durability remain generic over `KvStore` below it.
 pub(super) trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
@@ -281,12 +251,6 @@ impl BlockBodySource for StoredBlockBodySource {
         offset: u32,
         len: u32,
     ) -> Option<Vec<u8>> {
-        // `None` is overloaded here: it means both "this store cannot slice"
-        // and "the read failed". Callers must treat either as a reason to fall
-        // back to the whole body, so the return type stays — but this is the
-        // hot path for every ScriptIndex history call now, and an I/O error that
-        // silently degrades into a full block scan is exactly the failure that
-        // would otherwise show up only as unexplained latency.
         match self
             .store
             .load_block_body_range(height, hash.0, offset, len)
@@ -317,24 +281,16 @@ impl BlockBodySource for StoredBlockBodySource {
     }
 }
 
-/// Storage-backed implementation of RPC manual pruning.
 pub(super) struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
     authority: bitcoin_rs_chainstate::PruneAuthority,
     pruneheight: Mutex<Option<u32>>,
-    /// Height the last clean checkpoint would restore to, 0 when none exists.
-    ///
-    /// Undo pruning is bounded by this, not by the in-memory applied tip, which
-    /// can run far ahead of it.
     durable_tip_height: Arc<AtomicU32>,
-    /// Registry the prune line is recorded into after a committed pass, and
-    /// whose live leases clamp this pass's line below every pinned floor.
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
 }
 
 impl<S: KvStore> NodePruneService<S> {
-    /// Creates a manual pruning service over the chainstate store and RPC block cache.
     pub(super) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
@@ -381,7 +337,6 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             |_pruned_below| Ok(()),
         )
         .map_err(|err| match err {
-            // The reorg-margin/overflow refusals are operator-facing RPC text; pass them through verbatim.
             PruneError::Storage(StorageError::InvalidOperation(message)) => {
                 PruneServiceError::failed(message)
             }
@@ -408,7 +363,6 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
     }
 }
 
-/// Adapts storage-owned recovery evidence to index and RPC consumers.
 pub(crate) struct RecoveryReporter(pub(crate) RecoveryEvidencePublisher);
 
 impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {

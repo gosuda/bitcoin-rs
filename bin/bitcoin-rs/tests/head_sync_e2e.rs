@@ -1,16 +1,3 @@
-//! E2E: live head-sync over the real P2P wire against a spawned bitcoin-rs
-//! daemon (regtest, fjall). A minimal loopback wire peer feeds `headers` /
-//! `inv` announcements and serves `getdata` bodies, exercising the live
-//! live tip-following fixes:
-//!
-//!  * inv-echo getdata must upgrade announced `MSG_BLOCK` to
-//!    `MSG_WITNESS_BLOCK` for WITNESS peers;
-//!  * while a heavier branch is pending, the apply path must not drain the
-//!    winner-branch body staged at `applied_height + 1` (drain/fail/
-//!    re-request churn), and the reorg switch must complete;
-//!  * untracked deliveries (hedge/inv-race bodies with no pending request)
-//!    must not corrupt the request cursor.
-
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::time::{Duration, Instant};
@@ -25,12 +12,6 @@ use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::live_peer::pump_until_tip;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 
-/// T1+T2: a block announced by `inv` is availability, not a body order: the
-/// node fetches headers first, and the admitted tip's body rides a window
-/// request as `MSG_WITNESS_BLOCK`. The
-/// headers->getdata->bodies->apply pipeline must still apply segwit bodies
-/// served with witnesses, and an `inv` for the already-known tip must never
-/// produce a plain `MSG_BLOCK` request.
 #[test]
 fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -50,8 +31,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
     let tip = chain.last().expect("chain tip");
     let tip_hash = tip.block_hash();
 
-    // Send the chain's headers, then announce the tip by `inv` as well: the
-    // announcement route must keep the header-led fetch intact.
     let deadline = Instant::now() + Duration::from_secs(10);
     peer.announce_headers(&chain, deadline)?;
     peer.send(
@@ -59,8 +38,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
         deadline,
     )?;
 
-    // Observe while serving every getdata type-faithfully, until the window
-    // asks for the announced tip (bounded so a stalled plan still fails).
     let tip_hex = tip_hash.to_string();
     let tip_requested_witness = |peer: &LivePeer| {
         peer.getdata_seen.iter().any(|frame| {
@@ -79,8 +56,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
             }
         });
     }
-    // The announced tip's body must be requested as MSG_WITNESS_BLOCK —
-    // possibly batched by the window with its other near-tip requests.
     assert!(
         tip_requested_witness(&peer),
         "no MSG_WITNESS_BLOCK getdata for the announced tip was observed; \
@@ -91,7 +66,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
             .collect::<Vec<_>>()
     );
 
-    // A plain MSG_BLOCK request for ANY announced block is the bug signature.
     for block in &chain {
         assert_eq!(
             peer.plain_block_requests(&block.block_hash()),
@@ -102,7 +76,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
     }
     eprintln!("[E2E] no MSG_BLOCK-typed getdata for announced blocks");
 
-    // Bodies served in response to witness requests must apply end to end.
     assert!(
         pump_until_tip(
             &mut peer,
@@ -129,10 +102,6 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
     Ok(())
 }
 
-/// T3: while a heavier branch B is pending (applied tip sits on losing
-/// branch A), the staged winner body at `applied_height+1` (B3) must stay
-/// staged for the branch switch — not drain/fail/re-request every tick.
-/// After B1,B2 arrive the switch must complete and the tip move to B3.
 #[test]
 fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -146,7 +115,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     );
 
     let genesis = genesis_block();
-    // Branch A: two blocks, applied first.
     let branch_a = build_chain(&genesis, 2, 0x0A, 1);
     peer.offer_chain(&branch_a);
     let a2_hash = branch_a[1].block_hash();
@@ -166,7 +134,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     );
     eprintln!("[E2E] applied tip at A2 ({a2_hash}), count=2");
 
-    // Heavier branch B: three blocks forked at genesis.
     let branch_b = build_chain(&genesis, 3, 0x0B, 1);
     peer.offer_chain(&branch_b);
     let b_hashes: Vec<bitcoin::BlockHash> =
@@ -174,11 +141,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
 
     peer.announce_headers(&branch_b, deadline)?;
 
-    // Collect the window getdata for the branch-B bodies, then serve ONLY
-    // B3 (the winner-branch block at applied_height+1 = 3). Under the buggy
-    // code it drains into the extension commit each tick and gets
-    // dropped/re-requested (PrevHashMismatch); under the fix it stays staged
-    // for the branch switch.
     let served = b_hashes[2];
     collect_window_requests_serving_only(&mut peer, served, Duration::from_secs(3));
     assert!(
@@ -189,9 +151,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
         "[E2E] window requested B bodies; served ONLY B3 ({served}); holding to observe churn"
     );
 
-    // Hold ~2.4s (2-3 sync ticks at 1s cadence; below the ~2-3s stall-fire
-    // edge since frontier B1 is pending on this peer — abort early if the
-    // node convicts us and drops the connection).
     let hold_start = Instant::now();
     peer.pump(Duration::from_millis(2400), &mut |_, _| {});
     let held_ms = hold_start.elapsed().as_millis();
@@ -206,9 +165,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
         "staged winner-branch body B3 was re-requested {b3_requests} times — \
          drain/fail/re-request churn"
     );
-    // The request cursor must never rewind to already-applied blocks:
-    // each branch-A body may appear in at most one getdata ever (its
-    // original fetch). A re-request is the rewind signature.
     for applied in &branch_a {
         let hash = applied.block_hash();
         let requests = peer.requests_for(&hash);
@@ -218,11 +174,7 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
         );
     }
 
-    // Now deliver B1 and B2 — the connect path — and let the switch run.
     if peer.dropped {
-        // The fixed stall machinery may legitimately convict the withheld
-        // frontier owner; reconnect, re-announce all headers so the fresh
-        // lease demonstrates height, and keep serving.
         eprintln!("[E2E] peer was disconnected during the hold (stall conviction); reconnecting");
         let mut fresh = LivePeer::connect(&node, "t3b")?;
         fresh.offer_chain(&branch_a);
@@ -232,12 +184,9 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
             NetworkMessage::Headers(headers),
             Instant::now() + Duration::from_secs(10),
         )?;
-        // Carry the getdata observations forward so the B3 count still
-        // includes the pre-disconnect frames.
         fresh.getdata_seen = peer.getdata_seen.clone();
         peer = fresh;
     }
-    // B1 and B2 are still pending on the node — deliver them explicitly.
     let serve_deadline = Instant::now() + Duration::from_secs(10);
     for hash in [b_hashes[0], b_hashes[1]] {
         let body = peer.blocks.get(&hash).cloned().expect("offered block body");
@@ -262,11 +211,6 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     Ok(())
 }
 
-/// T4: an unsolicited block body for a tree-known hash whose pending request
-/// was already released (peer disconnect) takes the untracked-delivery path:
-/// the stager holds the body and the block tree supplies its height. The
-/// chain must still converge and the request cursor must never rewind to
-/// applied heights.
 #[test]
 fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -287,8 +231,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     let deadline = Instant::now() + Duration::from_secs(10);
     peer.announce_headers(&chain, deadline)?;
 
-    // Serve every window request EXCEPT the tip: h1..h4 arrive as tracked
-    // deliveries while h5 stays pending on this peer.
     let mut served_all_but_tip = false;
     let collect_end = Instant::now() + Duration::from_secs(15);
     while Instant::now() < collect_end && !peer.dropped && !served_all_but_tip {
@@ -323,9 +265,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     );
     eprintln!("[E2E] applied tip at h4; h5 still pending on peer 1");
 
-    // Second peer connects; peer 1 disconnects — h5's pending request is
-    // released. A block body arriving now for h5 has NO pending entry:
-    // the untracked-delivery path.
     let mut hedge = LivePeer::connect(&node, "t4-hedge")?;
     drop(peer);
     std::thread::sleep(Duration::from_millis(300));
@@ -334,7 +273,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
         "[E2E] peer 1 dropped; pushed tree-known block {tip_hash} from second peer (untracked)"
     );
 
-    // The staged h5 body must apply; the chain converges to h5.
     hedge.pump(Duration::from_millis(100), &mut |_, _| {});
     assert!(
         wait_for(Duration::from_secs(30), &mut || {
@@ -347,9 +285,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     );
     eprintln!("[E2E] untracked h5 body applied; tip={tip_hash}, count=5");
 
-    // Watch a few more ticks on the hedge connection: a retry of that entry
-    // must never rewind the request cursor toward genesis, so the node never
-    // re-requests already-applied heights.
     hedge.pump(Duration::from_secs(4), &mut |peer, items| {
         let deadline = Instant::now() + Duration::from_secs(5);
         for item in items {
@@ -364,8 +299,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
             block.block_hash()
         );
     }
-    // h5 may be re-requested at most once: if the disconnect requeue beat
-    // the hedge delivery, one legitimate re-request is expected behavior.
     assert!(
         hedge.requests_for(&tip_hash) <= 1,
         "h5 re-requested {} times on the hedge peer",
@@ -377,8 +310,6 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     Ok(())
 }
 
-/// Pumps the wire until `dur` elapses, serving only the getdata item naming
-/// `served` — every other requested body is withheld.
 fn collect_window_requests_serving_only(
     peer: &mut LivePeer,
     served: bitcoin::BlockHash,

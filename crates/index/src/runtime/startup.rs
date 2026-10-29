@@ -32,11 +32,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Opens an `IndexWriter` with legacy/unsupported-format recovery.
-///
-/// Any marker older than the current format 5 full-resets for rebuild: every
 /// row family changed, so no in-place upgrade path exists. Cursorless legacy
-/// tables reset the same way.
 fn open_writer<S>(store: &Arc<S>, generation: u64) -> Result<IndexWriter<S>, IndexError>
 where
     S: bitcoin_rs_storage::KvStore,
@@ -58,15 +54,6 @@ where
     }
 }
 
-/// Worker-owned open: opens the store, constructs writer/reader/engine,
-/// publishes lifecycle, and runs reconciliation — all behind one
-/// `catch_unwind` boundary that starts before directory creation and includes
-/// schema inspection, writer construction, complete query-engine construction,
-/// publication, and the initial reconciliation handoff.
-///
-/// On an ordinary error or panic, publishes `Failed` with a bounded
-/// diagnostic and no query, if the generation is still current. If the token
-/// was revoked, publishes nothing. Converts panic payloads to bounded text.
 #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(super) fn run_worker_with_open(
     runtime: &Arc<DerivedIndexRuntime>,
@@ -137,9 +124,6 @@ pub(super) fn run_worker_with_open(
     );
 }
 
-/// Report the terminal outcome before releasing its namespace claim.
-/// An abandoned backend may still touch the store, so its claim must stay
-/// poisoned for the process lifetime (`IDX-07`).
 fn finish_worker(
     runtime: &DerivedIndexRuntime,
     lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
@@ -157,15 +141,9 @@ fn finish_worker(
         tracing::error!(%error, "txindex worker open or run failed");
         fail_worker(runtime, lifecycle, generation, &error.to_string());
     }
-    // Release is generation-checked and never removes a poisoned claim.
     registry.release(namespace_key, generation.id());
 }
 
-/// Fails the worker as one unit: the runtime stops the loop and gates the
-/// query engine, and the lifecycle withdraws the query payload so the
-/// adapter answers typed `Unavailable`. The lifecycle write is skipped for a
-/// revoked generation; the runtime write is unconditional because the
-/// runtime belongs to this worker alone.
 pub(super) fn fail_worker(
     runtime: &DerivedIndexRuntime,
     lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
@@ -180,8 +158,6 @@ pub(super) fn fail_worker(
     );
 }
 
-/// Publishes a lifecycle transition with generation-checked `rcu`.
-/// A stale token returns the current `Arc` unchanged.
 pub(super) fn publish_lifecycle(
     lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
@@ -200,7 +176,6 @@ pub(super) fn publish_lifecycle(
     });
 }
 
-/// Opens the store, constructs the engine, publishes lifecycle, and runs.
 #[expect(clippy::too_many_arguments, clippy::ref_option)]
 pub(super) fn open_and_run(
     runtime: &Arc<DerivedIndexRuntime>,
@@ -226,10 +201,7 @@ pub(super) fn open_and_run(
             shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop()
         })?;
 
-    // Check shutdown and generation immediately after backend open returns.
     if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
-        // Drop all store values (open.writer, open.reader) and exit without
-        // publication or reconciliation.
         return Ok(());
     }
 
@@ -246,22 +218,16 @@ pub(super) fn open_and_run(
         },
     ));
 
-    // Publish the complete engine atomically; readiness is proven per query.
     publish_lifecycle(
         lifecycle,
         generation,
         DerivedIndexLifecycle::Serving(query_engine),
     );
 
-    // Check shutdown immediately after publication.
     if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
         return Ok(());
     }
 
-    // Rows without a `TxLookup` watermark exist only after an interrupted
-    // portable import. Clear them through the capability reset before the
-    // directive or any derivation runs; the engine already refuses the
-    // un-watermarked capability.
     if spec.enabled.contains(IndexCapability::TxLookup)
         && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
             .map_err(DerivedIndexWorkerError::Index)?
@@ -278,13 +244,6 @@ pub(super) fn open_and_run(
         enabled: spec.enabled,
         cancelled: &cancelled,
     };
-    // A refused request wrote nothing the index serves, so ordinary
-    // reconciliation proceeds and the operator reads the refusal in the log:
-    // a one-shot key left set, a lagging export, or a bad bundle must never
-    // keep the index from reaching the tip. Only writer or reader failures,
-    // which can leave the store uncertain, fail the worker. A failed import
-    // cleanup surfaces as `Index`, so partial rows never mix with derived
-    // rows on the way to readiness.
     match crate::portable::run(&host, &spec.bundle) {
         Ok(None) => {}
         Ok(Some(outcome)) => log_bundle_outcome(&outcome),
@@ -324,9 +283,6 @@ pub(super) fn open_and_run(
         chain_events: Arc::clone(chain_events),
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
-        // The seed cell rides the spec into the worker; the bundle starts
-        // empty and the first take happens in `finish_reconcile_pass`.
-        // Bundle restore never consumes, clears, or replaces the cell.
         seed_slot: spec.seed_slot.clone(),
         seed_bundle: parking_lot::Mutex::new(None),
     };
@@ -334,7 +290,6 @@ pub(super) fn open_and_run(
     worker.run()
 }
 
-/// Reports how a bundle directive ended.
 fn log_bundle_outcome(outcome: &BundleOutcome) {
     match outcome {
         BundleOutcome::Exported(report) => tracing::info!(
@@ -359,22 +314,12 @@ fn log_bundle_outcome(outcome: &BundleOutcome) {
     }
 }
 
-/// Opens the txindex store with a bounded deadline.
-///
-/// The storage engine open (fjall/lsm-tree recovery, rocksdb column-family
-/// open) can wedge on a large or partially-corrupted store, spinning one
-/// thread at 100% CPU indefinitely. This wrapper runs the open on a separate
-/// thread and waits with [`TXINDEX_OPEN_TIMEOUT`]. If the deadline fires, the
-/// open thread is detached (it may eventually finish or hang — we cannot
-/// kill a thread) and `OpenTimeout` is returned so the worker publishes
-/// `Failed` and the node stays operable without the index.
 pub(super) fn open_derived_index_with_timeout(
     spec: &DerivedIndexOpenSpec,
     txindex_dir: &Path,
     open_timeout: Duration,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
-    // No open thread exists yet: cancellation here can release the namespace.
     if should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
     }
@@ -400,7 +345,6 @@ pub(super) fn open_derived_index_with_timeout(
     result
 }
 
-/// Constructs the writer and reader from the opened store.
 pub fn open_derived_index_store_on_worker<S>(
     store: Arc<S>,
     batch_limits: PreparedBatchLimits,
@@ -419,8 +363,6 @@ where
     })
 }
 
-/// Heartbeat: emits a log line every 30 seconds while the worker's
-/// backend open is blocked. Observability only — not a timeout.
 pub(super) struct Heartbeat {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -463,10 +405,8 @@ impl Heartbeat {
     }
 }
 
-/// Maximum gap between cancellation checks while backend recovery is pending.
 const OPEN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The caller must retain namespace exclusion for abandoned-open errors.
 pub(super) fn wait_for_open_result(
     receiver: &std::sync::mpsc::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
     timeout: Duration,
@@ -474,7 +414,6 @@ pub(super) fn wait_for_open_result(
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     let deadline = Instant::now() + timeout;
     loop {
-        // Shutdown wins even when its observation coincides with the deadline.
         if should_stop() {
             return Err(DerivedIndexWorkerError::OpenStopped);
         }
@@ -503,7 +442,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
-    /// IDX-07: a detached backend may still access the namespace after its worker exits.
     #[test]
     fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
         for error in [
@@ -537,7 +475,6 @@ mod tests {
         Ok(())
     }
 
-    /// IDX-07: completed workers and failures with no detached thread can release.
     #[test]
     fn completed_worker_outcomes_release_without_poisoning() -> std::io::Result<()> {
         for result in [
@@ -574,15 +511,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let checks = AtomicUsize::new(0);
             let result = wait_for_open_result(&open_rx, Duration::from_secs(30), || {
-                // Stop on the second check, after one pending receive. No scheduler
-                // race or storage-engine sleep is needed to put the wait in flight.
                 checks.fetch_add(1, Ordering::Relaxed) > 0
             });
             let _ = done_tx.send(result);
         });
         let result = done_rx.recv_timeout(Duration::from_secs(2));
-        // Unblock even the old, uncapped receive before asserting, so a regression
-        // fails promptly rather than leaking a 30-second test thread.
         drop(open_tx);
         assert!(worker.join().is_ok());
         assert!(matches!(
@@ -662,10 +595,6 @@ mod tests {
         Ok(())
     }
 
-    /// An incomplete bundle is a refusal: ordinary reconciliation proceeds
-    /// and backfill earns readiness. Only an `Index` error — including a
-    /// failed import cleanup that may have left partial rows — fails the
-    /// worker and stops readiness.
     #[test]
     fn incomplete_is_a_refusal_only_index_failures_stop_readiness() {
         let refusal = IndexBundleError::Incomplete {

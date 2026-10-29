@@ -1,8 +1,4 @@
 //! Shared test support: a backend-free `KvStore` over `BTreeMap`.
-//!
-//! Deliberately not behind a storage feature. Correctness tests that gate a
-//! refactor must run on a plain `cargo test --workspace`; a test hidden behind
-//! `required-features` is a test that silently does not run.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -38,13 +34,6 @@ impl MemoryStore {
     }
 }
 
-/// Seeks `rows` to the first key `>= max(start, prefix)` and collects the
-/// prefix's rows under `limit`, never visiting keys before the seek point.
-///
-/// The scan ends complete at the first key outside `prefix` or at the end of
-/// `rows`; the first row `limit` refuses, or whose byte total overflows, ends
-/// it incomplete, so a zero-row limit over a non-empty range yields no rows
-/// and `complete == false`.
 fn scan_prefix_from(
     rows: &BTreeMap<Vec<u8>, Vec<u8>>,
     prefix: &[u8],
@@ -80,7 +69,6 @@ fn scan_prefix_from(
     }
 }
 
-/// Folds one batch's recorded operations into the column families, in order.
 fn apply_ops(cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()], ops: Vec<BatchOp>) {
     for op in ops {
         match op {
@@ -109,7 +97,7 @@ impl KvStore for MemoryStore {
         Ok(guard[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter must own cloned rows after the lock guard is dropped.
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -155,10 +143,6 @@ impl KvStore for MemoryStore {
                 "injected fenced write failure".into(),
             ));
         }
-        // Every condition observes pre-batch state; the batch is allowed to
-        // put or delete a condition key itself. The check and the apply run
-        // under one write lock, matching the backend's atomic conditional
-        // write.
         let mut guard = self.cfs.write();
         let matched = conditions.iter().all(|condition| {
             let (cf, key) = condition.location();
@@ -180,9 +164,7 @@ impl KvStore for MemoryStore {
         Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
     }
 
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {}
 }
 
 pub(crate) struct MemorySnapshot {
@@ -194,7 +176,7 @@ impl KvSnapshot for MemorySnapshot {
         Ok(self.cfs[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter owns cloned rows to match backend iterator ownership.
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -224,9 +206,6 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
-/// Writes one funding-row key at `height` with an empty value.
-///
-/// Empty values take the scan-fallback resolver path. Tests that pin
 /// little-endian key order, not watermark contiguity, use this instead of
 /// [`bitcoin_rs_index::IndexWriter::commit_block`].
 pub(crate) fn put_funding_row(
@@ -241,7 +220,6 @@ pub(crate) fn put_funding_row(
     )
 }
 
-/// Writes one spending-row key at `height` with an empty value.
 pub(crate) fn put_spending_row(
     store: &MemoryStore,
     outpoint: &OutPoint,

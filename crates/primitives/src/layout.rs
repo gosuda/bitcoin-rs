@@ -1,26 +1,4 @@
 //! Checked borrowed wire layout for blocks and transactions.
-//!
-//! This module is the sole owner of block and transaction wire parsing. Every
-//! byte range it hands out is a [`layout::ByteSpan`] that was bounds-checked against
-//! one immutable byte image at parse time, and the `'a` borrow on
-//! [`layout::ParsedBlock`] and [`layout::ParsedTransaction`] ties every offset to that image,
-//! so a span can never outlive the bytes it indexes. Positions inside the
-//! parsed metadata vectors use the distinct [`layout::MetadataRange`] type, so byte
-//! offsets and metadata indices can never be confused.
-//!
-//! Parsing establishes wire *shape* only: BIP144 marker/flag rules, canonical
-//! compact-size lengths, and counts that could still fit in the remaining
-//! bytes. Consensus acceptance (amounts, maturity, script validity, weight
-//! limits) is deliberately not evaluated here; [`layout::ParsedTransaction::materialize`]
-//! hands the owned form to the callers that own those rules. Record counts
-//! whose minimal serialized footprint already exceeds the remaining bytes are
-//! rejected up front, so a malformed length can never drive an oversized
-//! allocation or an out-of-bounds access.
-//!
-//! Span offsets are `u32` relative to the parsed image.
-//! Lengths outside the representable span domain surface as an impossible
-//! [`DecodeError::EndOfData`] requirement, following `read_script`'s
-//! convention for lengths beyond `usize`.
 
 use std::ops::Range;
 
@@ -36,29 +14,18 @@ use crate::{
     varint,
 };
 
-/// Serialized block header length in bytes.
 #[expect(
     clippy::as_conversions,
     reason = "the fixed 80-byte header fits in u64"
 )]
 const HEADER_LEN: u64 = Header::LEN as u64;
-/// Minimal serialized transaction: version, input count, output count, lock time.
 const MIN_TX_LEN: u64 = 10;
-/// Minimal serialized input: outpoint (36), script length prefix (1), sequence (4).
 const MIN_INPUT_LEN: u64 = 41;
-/// Minimal serialized output: value (8), script length prefix (1).
 const MIN_OUTPUT_LEN: u64 = 9;
-/// Minimal serialized witness stack item: its length prefix alone.
 const MIN_WITNESS_ITEM_LEN: u64 = 1;
 /// Fixed serialized input outpoint length: 32-byte txid plus 4-byte vout.
 const OUTPOINT_LEN: u64 = 36;
 
-/// A checked byte range within one parsed image.
-///
-/// Construction validates `start + len` in `u64` arithmetic against the image
-/// limit before the range is ever used for slicing, so every [`ByteSpan`] is
-/// in-bounds by construction. Offsets are `u32` relative to the image; widen
-/// with [`ByteSpan::end`] instead of storing absolute positions in `u32`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ByteSpan {
     start: u32,
@@ -66,9 +33,6 @@ pub struct ByteSpan {
 }
 
 impl ByteSpan {
-    /// Constructs the span `[start, start + len)` against an image of `limit`
-    /// bytes, rejecting ranges that leave the image, whose end overflows
-    /// `u64`, or whose endpoints do not fit the `u32` span domain.
     fn checked(start: u64, len: u64, limit: u64) -> Result<Self, DecodeError> {
         let available = usize::try_from(limit.saturating_sub(start)).unwrap_or(usize::MAX);
         let end = start
@@ -86,37 +50,27 @@ impl ByteSpan {
         Ok(Self { start, len })
     }
 
-    /// Offset of the first byte, relative to the owning image.
     #[must_use]
     pub const fn start(self) -> u32 {
         self.start
     }
 
-    /// Number of bytes in the span.
     #[must_use]
     pub const fn len(self) -> u32 {
         self.len
     }
 
-    /// Whether the span covers no bytes.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.len == 0
     }
 
-    /// Offset one past the last byte, computed in `u64` (the sum of two
-    /// `u32` offsets never overflows `u64`).
     #[must_use]
     pub fn end(self) -> u64 {
         u64::from(self.start) + u64::from(self.len)
     }
 }
 
-/// A checked index range over one parsed metadata vector.
-///
-/// This is a record index, not a byte offset: it selects entries of vectors
-/// such as [`ParsedTransaction::witness_spans`] and can never be mixed up
-/// with a [`ByteSpan`] into the byte image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MetadataRange {
     start: u32,
@@ -124,12 +78,8 @@ pub struct MetadataRange {
 }
 
 impl MetadataRange {
-    /// The empty range (legacy inputs carry no witness metadata).
     const EMPTY: Self = Self { start: 0, end: 0 };
 
-    /// Constructs the record range `[start, end)` over a metadata vector of
-    /// `limit` records, rejecting inverted, oversized, or unrepresentable
-    /// ranges with the same impossible-requirement error as [`ByteSpan`].
     fn new(start: u64, end: u64, limit: u64) -> Result<Self, DecodeError> {
         let available = usize::try_from(limit.saturating_sub(start)).unwrap_or(usize::MAX);
         if end < start || end > limit {
@@ -140,31 +90,21 @@ impl MetadataRange {
         Ok(Self { start, end })
     }
 
-    /// Whether no records are selected.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.end == self.start
     }
 
-    /// The record range as a `usize` half-open range for indexing vectors.
     #[must_use]
     pub fn as_range(self) -> Range<usize> {
         widen(self.start)..widen(self.end)
     }
 }
 
-/// Widens a span coordinate to `usize` for indexing.
-///
-/// Every target this crate builds for stores `usize` at least as wide as
-/// `u32`, so the widening is total; the saturating fallback only satisfies
-/// the workspace ban on `as` conversions and is unreachable in practice.
 fn widen(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-/// The impossible byte requirement reported for lengths outside every
-/// representable domain (`read_script` reports `usize::MAX` for lengths beyond
-/// `usize` in exactly the same way).
 fn impossible(available: usize) -> DecodeError {
     DecodeError::EndOfData {
         needed: usize::MAX,
@@ -172,47 +112,36 @@ fn impossible(available: usize) -> DecodeError {
     }
 }
 
-/// Widens a `usize` length into `u64`; slice and vector lengths always fit.
 fn widening(len: usize) -> u64 {
     u64::try_from(len).unwrap_or_else(|_| unreachable!("usize length fits u64"))
 }
 
-/// Parse cursor over one immutable byte image: positions are `u64` and every
-/// advance is bounds-checked before any slicing or reservation happens.
 struct ImageCursor<'i> {
     image: &'i [u8],
     pos: u64,
 }
 
 impl ImageCursor<'_> {
-    /// The image length in `u64`.
     fn limit(&self) -> u64 {
         widening(self.image.len())
     }
 
-    /// Bytes from the cursor to the end of the image.
     fn remaining(&self) -> u64 {
         self.limit().saturating_sub(self.pos)
     }
 
-    /// Consumes `len` bytes and returns their span, checking `offset + length`
-    /// in `u64` against the image before the range is ever used.
     fn take(&mut self, len: u64) -> Result<ByteSpan, DecodeError> {
         let span = ByteSpan::checked(self.pos, len, self.limit())?;
         self.pos = span.end();
         Ok(span)
     }
 
-    /// Reads one byte, returning it together with its span.
     fn read_u8(&mut self) -> Result<(u8, ByteSpan), DecodeError> {
         let span = self.take(1)?;
         let byte = self.image[widen(span.start())];
         Ok((byte, span))
     }
 
-    /// Reads a compact-size integer, returning it with the span of its
-    /// encoding; non-canonical and truncated lengths are rejected by the
-    /// varint codec.
     fn read_compact(&mut self) -> Result<(u64, ByteSpan), DecodeError> {
         let offset = usize::try_from(self.pos)
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
@@ -223,9 +152,6 @@ impl ImageCursor<'_> {
         Ok((value, span))
     }
 
-    /// Rejects a record count whose minimal serialized footprint already
-    /// exceeds the remaining bytes, before any per-record parsing or vector
-    /// growth begins.
     fn require_count(&self, count: u64, min_item_len: u64) -> Result<(), DecodeError> {
         let min_needed = min_item_len.saturating_mul(count);
         let remaining = self.remaining();
@@ -239,8 +165,6 @@ impl ImageCursor<'_> {
     }
 }
 
-/// Slices a span out of `image`; spans are constructed only against the image
-/// they index, so the fallbacks are unreachable.
 fn slice_at(image: &[u8], span: ByteSpan) -> &[u8] {
     let start = widen(span.start());
     let end = usize::try_from(span.end())
@@ -250,8 +174,6 @@ fn slice_at(image: &[u8], span: ByteSpan) -> &[u8] {
         .unwrap_or_else(|| unreachable!("span was checked against this image"))
 }
 
-/// Wire layout of one transaction input: byte spans into the owning image
-/// plus the metadata index range of its witness stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputLayout {
     outpoint: ByteSpan,
@@ -267,21 +189,17 @@ impl InputLayout {
         self.outpoint
     }
 
-    /// Span of the scriptSig contents (without the length prefix).
     #[must_use]
     pub const fn script_sig(&self) -> ByteSpan {
         self.script_sig
     }
 
-    /// Index range of this input's witness stack items within
-    /// [`ParsedTransaction::witness_spans`]; empty for legacy inputs.
     #[must_use]
     pub const fn witness(&self) -> MetadataRange {
         self.witness
     }
 }
 
-/// Wire layout of one transaction output: byte spans into the owning image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutputLayout {
     value: ByteSpan,
@@ -289,25 +207,15 @@ pub struct OutputLayout {
 }
 
 impl OutputLayout {
-    /// Span of the scriptPubKey contents (without the length prefix).
     #[must_use]
     pub const fn script_pubkey(&self) -> ByteSpan {
         self.script_pubkey
     }
 }
 
-/// A transaction parsed into checked borrowed spans over one immutable byte
-/// image.
-///
-/// The struct borrows the image (`'a`), so every span it exposes is valid
-/// exactly as long as the bytes it indexes. Parsing validates wire shape and
-/// BIP144 encoding rules only; consensus acceptance is a separate concern of
-/// the owned form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedTransaction<'a> {
-    /// The immutable byte owner every span indexes into.
     bytes: &'a [u8],
-    /// Span of the complete transaction serialization.
     span: ByteSpan,
     version_span: ByteSpan,
     input_count_span: ByteSpan,
@@ -317,14 +225,10 @@ pub struct ParsedTransaction<'a> {
     segwit: bool,
     inputs: Vec<InputLayout>,
     outputs: Vec<OutputLayout>,
-    /// Witness stack item spans, concatenated across inputs in input order;
-    /// each input's [`InputLayout::witness`] selects its slice of this vector.
     witness_spans: Vec<ByteSpan>,
 }
 
 impl<'a> ParsedTransaction<'a> {
-    /// Parses one transaction from the front of `reader`, advancing `reader`
-    /// past exactly the consumed bytes.
     pub(crate) fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
@@ -335,8 +239,6 @@ impl<'a> ParsedTransaction<'a> {
         Ok(parsed)
     }
 
-    /// Parses one transaction that must occupy exactly `bytes`; trailing
-    /// bytes are a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
         let mut cursor = 0_u64;
         let parsed = Self::parse_at(bytes, &mut cursor)?;
@@ -350,8 +252,6 @@ impl<'a> ParsedTransaction<'a> {
         Ok(parsed)
     }
 
-    /// Parses one transaction starting at `*cursor` inside `image` and
-    /// advances `*cursor` past it; spans are absolute offsets into `image`.
     fn parse_at(image: &'a [u8], cursor: &mut u64) -> Result<Self, DecodeError> {
         let mut cur = ImageCursor {
             image,
@@ -364,8 +264,6 @@ impl<'a> ParsedTransaction<'a> {
         let mut output_count_override: Option<(u64, ByteSpan)> = None;
         let mut segwit = false;
         if input_count_value == 0 {
-            // Core treats a zero flag as the legacy empty-input/empty-output form,
-            // while 0x01 is the BIP144 segwit marker; any other value is rejected.
             let (flag, flag_span) = cur.read_u8()?;
             if flag == 0 {
                 output_count_override = Some((0, flag_span));
@@ -424,9 +322,6 @@ impl<'a> ParsedTransaction<'a> {
                 let limit = widening(witness_spans.len());
                 input.witness = MetadataRange::new(first, limit, limit)?;
             }
-            // BIP144 round-trip rule (checked before the lock time): the marker/flag exists
-            // only to carry witness data, so an all-empty witness section can never
-            // re-encode byte-identically and is not a parseable shape.
             if inputs.iter().all(|input| input.witness.is_empty()) {
                 return Err(DecodeError::SuperfluousWitness);
             }
@@ -451,50 +346,36 @@ impl<'a> ParsedTransaction<'a> {
         })
     }
 
-    /// Span of the complete transaction serialization.
     #[must_use]
     pub const fn span(&self) -> ByteSpan {
         self.span
     }
 
-    /// Whether the BIP144 marker/flag was present in the wire encoding. For
-    /// every parseable encoding this coincides with witness data being
-    /// present, because an all-empty witness section is rejected as
-    /// superfluous.
     #[must_use]
     pub const fn is_segwit(&self) -> bool {
         self.segwit
     }
 
-    /// Parsed input layouts in wire order.
     #[must_use]
     pub fn inputs(&self) -> &[InputLayout] {
         &self.inputs
     }
 
-    /// Parsed output layouts in wire order.
     #[must_use]
     pub fn outputs(&self) -> &[OutputLayout] {
         &self.outputs
     }
 
-    /// Witness stack item spans concatenated across inputs; each input's
-    /// [`InputLayout::witness`] selects its slice.
     #[must_use]
     pub fn witness_spans(&self) -> &[ByteSpan] {
         &self.witness_spans
     }
 
-    /// Bytes this transaction occupies inside the owning image.
     #[must_use]
     pub fn consumed_len(&self) -> usize {
         widen(self.span.len())
     }
 
-    /// Slices `span` out of the owning image.
-    ///
-    /// Returns `None` only when `span` was taken from a different image; a
-    /// span produced by this parse always resolves.
     #[must_use]
     pub fn span_bytes(&self, span: ByteSpan) -> Option<&'a [u8]> {
         let start = widen(span.start());
@@ -502,11 +383,6 @@ impl<'a> ParsedTransaction<'a> {
         self.bytes.get(start..end)
     }
 
-    /// Computes the transaction id from checked borrowed spans.
-    ///
-    /// PRE: This value was produced by a successful parse.
-    /// POST: The result equals the txid of `materialize()`.
-    /// INVARIANT: Witness marker, flag, and witness data do not contribute.
     #[must_use]
     pub fn txid(&self) -> Txid {
         if !self.segwit {
@@ -519,11 +395,6 @@ impl<'a> ParsedTransaction<'a> {
         Txid(finalize_double_sha256(engine))
     }
 
-    /// Returns the serialized transaction size without witness data.
-    ///
-    /// PRE: This value was produced by a successful parse.
-    /// POST: The result equals the base size of `materialize()`.
-    /// INVARIANT: The result is derived from checked spans and does not allocate.
     #[must_use]
     pub fn base_size(&self) -> usize {
         if !self.segwit {
@@ -534,18 +405,11 @@ impl<'a> ParsedTransaction<'a> {
             + slice_at(self.bytes, self.lock_time_span).len()
     }
 
-    /// The input and output byte range of a `SegWit` transaction's base
-    /// serialization, between the marker/flag and the witness section.
     fn segwit_base_body(&self) -> &'a [u8] {
-        // An empty final script still ends after its CompactSize prefix. With
-        // no outputs, the output-count prefix itself is the end of the base
-        // body.
         let body_end = self.outputs.last().map_or_else(
             || self.output_count_span.end(),
             |output| output.script_pubkey().end(),
         );
-        // Layout offsets are image-relative, not transaction-relative.
-        // Subtract the transaction origin before indexing the borrowed slice.
         let bytes = slice_at(self.bytes, self.span);
         let origin = u64::from(self.span.start());
         let start = usize::try_from(u64::from(self.input_count_span.start()) - origin)
@@ -555,11 +419,6 @@ impl<'a> ParsedTransaction<'a> {
         &bytes[start..end]
     }
 
-    /// Borrowed parts of the canonical serialization without witness data.
-    ///
-    /// Concatenating these parts preserves the version, inputs, outputs, and
-    /// lock time while omitting the BIP144 marker/flag and witness section.
-    /// Legacy transactions occupy the first part; the other parts are empty.
     #[must_use]
     pub fn stripped_parts(&self) -> [&'a [u8]; 3] {
         if !self.segwit {
@@ -572,10 +431,6 @@ impl<'a> ParsedTransaction<'a> {
         ]
     }
 
-    /// Materializes the owned transaction from the validated spans.
-    ///
-    /// Infallible: every span was bounds-checked at parse time, so the scalar
-    /// re-reads cannot fail.
     #[must_use]
     pub fn materialize(&self) -> Tx {
         let mut version_reader = slice_at(self.bytes, self.version_span);
@@ -645,22 +500,17 @@ impl<'a> ParsedTransaction<'a> {
     }
 }
 
-/// A block parsed into checked borrowed spans over one immutable byte image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedBlock<'a> {
-    /// The immutable byte owner every span indexes into.
     bytes: &'a [u8],
     header_span: ByteSpan,
     tx_count_span: ByteSpan,
     tx_spans: Vec<ByteSpan>,
     txs: Vec<ParsedTransaction<'a>>,
-    /// Absolute end of the parsed structure inside the image.
     consumed: u64,
 }
 
 impl<'a> ParsedBlock<'a> {
-    /// Parses one block from the front of `reader`, advancing `reader` past
-    /// exactly the consumed bytes.
     pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
@@ -671,8 +521,6 @@ impl<'a> ParsedBlock<'a> {
         Ok(parsed)
     }
 
-    /// Parses one block that must occupy exactly `bytes`; trailing bytes are
-    /// a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
         let mut cursor = 0_u64;
         let parsed = Self::parse_at(bytes, &mut cursor)?;
@@ -686,8 +534,6 @@ impl<'a> ParsedBlock<'a> {
         Ok(parsed)
     }
 
-    /// Parses one block starting at `*cursor` inside `image` and advances
-    /// `*cursor` past it; all spans are absolute offsets into `image`.
     fn parse_at(image: &'a [u8], cursor: &mut u64) -> Result<Self, DecodeError> {
         let mut cur = ImageCursor {
             image,
@@ -723,41 +569,32 @@ impl<'a> ParsedBlock<'a> {
         self.header_span
     }
 
-    /// Span of the transaction-count compact-size encoding.
     #[must_use]
     pub const fn tx_count_span(&self) -> ByteSpan {
         self.tx_count_span
     }
 
-    /// Number of transactions.
     #[must_use]
     pub fn tx_count(&self) -> usize {
         self.txs.len()
     }
 
-    /// Span of every transaction, in block order.
     #[must_use]
     pub fn transaction_spans(&self) -> &[ByteSpan] {
         &self.tx_spans
     }
 
-    /// Parsed transactions in block order, sharing this block's byte image.
     #[must_use]
     pub fn transactions(&self) -> &[ParsedTransaction<'a>] {
         &self.txs
     }
 
-    /// Bytes this block occupies inside the owning image.
     #[must_use]
     pub fn consumed_len(&self) -> usize {
         usize::try_from(self.consumed)
             .unwrap_or_else(|_| unreachable!("consumed stays within the image"))
     }
 
-    /// Slices `span` out of the owning image.
-    ///
-    /// Returns `None` only when `span` was taken from a different image; a
-    /// span produced by this parse always resolves.
     #[must_use]
     pub fn span_bytes(&self, span: ByteSpan) -> Option<&'a [u8]> {
         let start = widen(span.start());
@@ -765,9 +602,6 @@ impl<'a> ParsedBlock<'a> {
         self.bytes.get(start..end)
     }
 
-    /// Materializes the owned block from the validated spans.
-    ///
-    /// Infallible: every span was bounds-checked at parse time.
     #[must_use]
     pub fn materialize(&self) -> Block {
         let mut header_reader = slice_at(self.bytes, self.header_span);

@@ -2,11 +2,12 @@
 //! real mainnet block bodies), signed round-trips per spend type, and
 //! malformed/context failure modes.
 //!
-//! The fixture at `crates/rpc/tests/bip337_vectors.json` was derived
-//! once from the published vectors plus mempool.space mainnet block
-//! bodies at heights 833265..833280 by a throwaway generator; no context
-//! field was written by hand. The ignored `mainnet_bodies_truth` test
-//! re-derives every field from the bodies themselves.
+//! The fixture at `crates/rpc/tests/bip337_vectors.json` was derived once from the
+//! published vectors plus mempool.space mainnet block bodies at heights 833265..833280
+//! by a throwaway generator; no context field was written by hand.
+//!
+//! The ignored `mainnet_bodies_truth` test re-derives every field from the bodies
+//! themselves.
 
 #![expect(
     clippy::expect_used,
@@ -157,26 +158,21 @@ fn varint_uses_core_carry_form() {
         let mut reader = super::Reader::new(&encoded);
         assert_eq!(reader.read_varint().unwrap(), value);
     }
-    // Ten bytes carry every `u64`: the largest amount keeps a spelling.
     let mut encoded = Vec::new();
     write_varint(u64::MAX, &mut encoded).unwrap();
     assert_eq!(encoded.len(), 10);
     let mut reader = super::Reader::new(&encoded);
     assert_eq!(reader.read_varint().unwrap(), u64::MAX);
-    // Six bytes carry past `u32`: still a valid `u64` spelling.
     let mut encoded = Vec::new();
     write_varint(1_u64 << 40, &mut encoded).unwrap();
     assert_eq!(encoded.len(), 6);
     let mut reader = super::Reader::new(&encoded);
     assert_eq!(reader.read_varint().unwrap(), 1_u64 << 40);
-    // `u32` fields keep their five-byte ceiling: a six-byte spelling is
-    // out of range even when the value would fit.
     let mut reader = super::Reader::new(&encoded);
     assert_eq!(
         super::read_u32_varint(&mut reader),
         Err(CodecError::Overflow)
     );
-    // Eleven continuation bytes never terminate within the ten-byte cap.
     let unterminated = [0x80; 11];
     let mut reader = super::Reader::new(&unterminated);
     assert_eq!(reader.read_varint(), Err(CodecError::Overflow));
@@ -236,7 +232,6 @@ fn handlers_gate_on_the_runtime_opt_in() {
         .dispatch("decompressrawtransaction", &json!([compressed_hex]))
         .unwrap();
     assert_eq!(restored.as_str().unwrap(), raw_hex);
-    // Oversize hex is refused (-8) before any decoding happens.
     let oversize = "00".repeat(super::MAX_COMPRESSED_TX_BYTES + 1);
     let error = enabled
         .dispatch("compressrawtransaction", &json!([oversize]))
@@ -364,7 +359,6 @@ impl Signer {
         let signature = self.secp.sign_ecdsa(&message, &self.secret);
         let mut compact = signature.serialize_compact();
         if high_s {
-            // s := n - s over the secp256k1 group order.
             const ORDER: [u8; 32] = [
                 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                 0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c,
@@ -466,7 +460,6 @@ fn roundtrip_legacy_p2pkh() {
 
 #[test]
 fn roundtrip_legacy_p2pkh_uncompressed_key() {
-    // The 65-byte `0x04` form round-trips through recovery exactly.
     let signer = Signer::new(7);
     let uncompressed = signer.uncompressed_pubkey();
     let prevout = TxOut {
@@ -489,8 +482,6 @@ fn roundtrip_legacy_p2pkh_uncompressed_key() {
 
 #[test]
 fn hybrid_p2pkh_key_falls_back_to_uncompressed_envelope() {
-    // A hybrid (non-round-tripping) pubkey must not compress: recovery
-    // could never reproduce it, so the input keeps its exact bytes.
     let signer = Signer::new(7);
     let mut hybrid = signer.uncompressed_pubkey();
     hybrid[0] = 0x06;
@@ -514,8 +505,6 @@ fn hybrid_p2pkh_key_falls_back_to_uncompressed_envelope() {
 
 #[test]
 fn foreign_p2pkh_key_falls_back_instead_of_changing_signer() {
-    // A valid key that does not hash to the prevout commitment must not
-    // compress: rebuilding from recovery would silently swap the signer.
     let signer = Signer::new(7);
     let stranger = Signer::new(19);
     let prevout = TxOut {
@@ -538,12 +527,9 @@ fn foreign_p2pkh_key_falls_back_instead_of_changing_signer() {
 
 #[test]
 fn lossy_input_shapes_fall_back_to_uncompressed_envelope() {
-    // Each shape carries bytes the compressed rebuild cannot reproduce, so
-    // the round trip must still restore the exact transaction.
     let signer = Signer::new(7);
     let stranger = Signer::new(19);
 
-    // P2PKH spend that also carries a witness item.
     let prevout = TxOut {
         value: Amount::from_sat(50_000),
         script_pubkey: p2pkh_script(signer.pubkey_hash()),
@@ -562,7 +548,6 @@ fn lossy_input_shapes_fall_back_to_uncompressed_envelope() {
     resolver.register_tx(100, &prev_tx, 3);
     roundtrip(&tx, &mut resolver, true);
 
-    // P2WPKH spend whose witness key does not hash to the prevout.
     let prevout = TxOut {
         value: Amount::from_sat(50_000),
         script_pubkey: p2wpkh_script(signer.pubkey_hash()),
@@ -583,7 +568,6 @@ fn lossy_input_shapes_fall_back_to_uncompressed_envelope() {
     resolver.register_tx(100, &prev_tx, 0);
     roundtrip(&tx, &mut resolver, true);
 
-    // P2TR key-path spend that also carries scriptSig bytes.
     let mut script = vec![0x51, 0x20];
     script.extend_from_slice(&[3_u8; 32]);
     let prev_tx = funding_tx(TxOut {
@@ -602,10 +586,6 @@ fn lossy_input_shapes_fall_back_to_uncompressed_envelope() {
 
 #[test]
 fn nonminimal_p2pkh_pushes_fall_back_to_uncompressed_envelope() {
-    // Non-minimal PUSHDATA spellings carry the same payloads but rebuild
-    // to different bytes via `push_data` on decompress, so they must not
-    // take the compressed path. They fall back to the uncompressed
-    // envelope and survive the round trip byte-for-byte.
     fn pushdata1(data: &[u8]) -> Vec<u8> {
         let mut out = vec![0x4c, u8::try_from(data.len()).unwrap()];
         out.extend_from_slice(data);
@@ -631,7 +611,6 @@ fn nonminimal_p2pkh_pushes_fall_back_to_uncompressed_envelope() {
         .unwrap();
     let sig_item = signer.ecdsa_item(digest, false);
     let pubkey = signer.compressed_pubkey();
-    // Positive control: the canonical spelling still compresses.
     let mut script_sig = super::push_data(&sig_item);
     script_sig.extend_from_slice(&super::push_data(&pubkey));
     canonical.inputs[0].script_sig = Script::from_bytes(script_sig);
@@ -644,8 +623,6 @@ fn nonminimal_p2pkh_pushes_fall_back_to_uncompressed_envelope() {
     resolver.register_tx(100, &prev_tx, 3);
     roundtrip(&canonical, &mut resolver, true);
 
-    // The legacy sighash does not commit to the scriptSig framing, so this
-    // payload-identical `sig_item` stays valid across push spellings.
     for script_sig in [
         {
             let mut raw = pushdata1(&sig_item);
@@ -677,8 +654,6 @@ fn nonminimal_p2pkh_pushes_fall_back_to_uncompressed_envelope() {
 
 #[test]
 fn decompress_prepare_finalize_matches_single_pass() {
-    // The handler recovers outside the stable chainstate lock; the split
-    // entry points must agree with the single-pass wrapper exactly.
     let signer = Signer::new(23);
     let prevout = TxOut {
         value: Amount::from_sat(50_000),
@@ -819,10 +794,6 @@ fn roundtrip_taproot_script_path_uses_uncompressed_envelope() {
 
 #[test]
 fn taproot_nonempty_scriptsig_falls_back_to_uncompressed_envelope() {
-    // Decompression rebuilds an empty scriptSig for P2TR, so a key-path
-    // witness paired with a non-empty scriptSig must not take the
-    // compressed path: it has no round trip. It falls back to the
-    // uncompressed envelope and survives the round trip byte-for-byte.
     let mut script = vec![0x51, 0x20];
     script.extend_from_slice(&[9_u8; 32]);
     let prevout = TxOut {
@@ -831,7 +802,6 @@ fn taproot_nonempty_scriptsig_falls_back_to_uncompressed_envelope() {
     };
     let prev_tx = funding_tx(prevout.clone());
     let kind = super::prevout_kind(prevout.script_pubkey.as_bytes());
-    // Positive control: the exact key-path shape still compresses.
     let canonical = spend_of(
         &prev_tx,
         Script::new(),
@@ -845,7 +815,6 @@ fn taproot_nonempty_scriptsig_falls_back_to_uncompressed_envelope() {
     resolver.register_tx(100, &prev_tx, 0);
     roundtrip(&canonical, &mut resolver, true);
 
-    // The same witness with a non-empty scriptSig falls back instead.
     let tx = spend_of(
         &prev_tx,
         Script::from_bytes(vec![0x51]),
@@ -866,7 +835,6 @@ fn taproot_nonempty_scriptsig_falls_back_to_uncompressed_envelope() {
     reason = "one table of output shapes exercised in a single round trip"
 )]
 fn roundtrip_p2sh_multisig_and_output_shapes() {
-    // P2SH multisig prevout: signature compression must not trigger.
     let signer = Signer::new(15);
     let prevout = TxOut {
         value: Amount::from_sat(50_000),
@@ -888,7 +856,6 @@ fn roundtrip_p2sh_multisig_and_output_shapes() {
     resolver.register_tx(100, &prev_tx, 0);
     roundtrip(&tx, &mut resolver, true);
 
-    // Every output shape, nonzero locktime, all sequence spellings.
     let mut multi = Tx {
         version: 3,
         inputs: vec![
@@ -982,9 +949,6 @@ fn roundtrip_p2sh_multisig_and_output_shapes() {
 
 #[test]
 fn minimum_height_sentinel_and_locktime_only_candidate_roundtrip() {
-    // No locktime and no compressible coin: the u32::MAX "no candidate"
-    // sentinel encodes as zero, so the minimum-height presence bit (bit
-    // 7 of the metadata byte) stays clear and offsets never appear.
     let tx = funding_tx(TxOut {
         value: Amount::from_sat(50_000),
         script_pubkey: p2wpkh_script([2_u8; 20]),
@@ -1002,8 +966,6 @@ fn minimum_height_sentinel_and_locktime_only_candidate_roundtrip() {
     let restored = decompress_transaction(&compressed, &mut resolver).unwrap();
     assert_eq!(restored, tx);
 
-    // Locktime alone supplies the candidate: minimum height is
-    // locktime - 1 and the stored locktime is the checked difference 1.
     let mut locked = tx.clone();
     locked.lock_time = LockTime::from_consensus(500_000);
     let (compressed, _) = compress_transaction(
@@ -1046,7 +1008,6 @@ fn missing_context_degrades_compress_but_refuses_decompress() {
         signer.compressed_pubkey(),
     ]);
 
-    // Compress with no context: raw outpoint plus exactly one warning.
     let mut empty = MapResolver::default();
     let (compressed, warnings) = compress_transaction(
         &tx,
@@ -1058,13 +1019,9 @@ fn missing_context_degrades_compress_but_refuses_decompress() {
     .unwrap();
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].starts_with("UTXO(0): "), "{warnings:?}");
-    // The signature stayed uncompressed (prevout kind unknown), so the
-    // same empty resolver can still decompress.
     let restored = decompress_transaction(&compressed, &mut empty).unwrap();
     assert_eq!(restored, tx);
 
-    // Compress with context (compressed signature + outpoint), then
-    // decompress without it: refusal, never a fabricated prevout.
     let mut full = MapResolver::default();
     full.register_tx(100, &prev_tx, 0);
     let (compressed, warnings) = compress_transaction(
@@ -1084,11 +1041,12 @@ fn missing_context_degrades_compress_but_refuses_decompress() {
     );
 }
 
-/// Production resolver integration: a Context whose block log and body
-/// source serve one crafted block must compress the spend's outpoint
-/// (no warning) and restore it through the handlers. Exercises
-/// `RpcPrevoutResolver` against `block_by_height_in_view` and the body
-/// source directly, not a codec fake.
+/// Production resolver integration: a Context whose block log and body source serve one
+/// crafted block must compress the spend's outpoint (no warning) and restore it through
+/// the handlers.
+///
+/// Exercises `RpcPrevoutResolver` against `block_by_height_in_view` and the body source
+/// directly, not a codec fake.
 #[test]
 fn production_resolver_resolves_through_block_bodies() {
     use std::sync::Arc;
@@ -1209,22 +1167,17 @@ fn malformed_streams_are_rejected() {
     );
     let mut resolver = fixture_resolver(vector);
 
-    // Truncated.
     let error =
         decompress_transaction(&compressed[..compressed.len() - 3], &mut resolver).unwrap_err();
     assert_eq!(error, CodecError::Truncated);
-    // Trailing bytes.
     let mut trailed = compressed.clone();
     trailed.push(0);
     let error = decompress_transaction(&trailed, &mut resolver).unwrap_err();
     assert_eq!(error, CodecError::NonCanonical);
-    // Set padding bit in the metadata packing (byte 5 low bits are pad).
     let mut padded = compressed.clone();
     padded[5] |= 0x01;
     let error = decompress_transaction(&padded, &mut resolver).unwrap_err();
     assert_eq!(error, CodecError::NonCanonical);
-    // Corrupt one ECDSA signature byte in the P2WPKH vector: recovery no
-    // longer matches the prevout commitment.
     let wpkh = &fixture_vectors()[1];
     let wpkh_compressed = hex_bytes(wpkh.get("compressed_hex").and_then(Value::as_str).unwrap());
     let mut wpkh_resolver = fixture_resolver(wpkh);
@@ -1232,10 +1185,8 @@ fn malformed_streams_are_rejected() {
     forged[20] ^= 0xff;
     let error = decompress_transaction(&forged, &mut wpkh_resolver).unwrap_err();
     assert_eq!(error, CodecError::SignatureUnrecoverable);
-    // Empty input.
     let error = decompress_transaction(&[], &mut resolver).unwrap_err();
     assert_eq!(error, CodecError::Truncated);
-    // Cancellation.
     resolver.cancelled = true;
     let error = decompress_transaction(&compressed, &mut resolver).unwrap_err();
     assert_eq!(error, CodecError::Cancelled);
@@ -1246,7 +1197,7 @@ fn malformed_streams_are_rejected() {
 /// run, so a stale fixture cannot pass against itself.
 #[cfg(test)]
 struct BodyResolver {
-    heights: HashMap<Txid, (u32, u32, u32, u32)>, // txid -> (height, tx index, first flat, output count)
+    heights: HashMap<Txid, (u32, u32, u32, u32)>,
     txouts: HashMap<OutPoint, (TxOut, u32)>,
     at: HashMap<(u32, u32), OutPoint>,
 }
@@ -1270,7 +1221,6 @@ impl BodyResolver {
             let (height, hash) = name.split_once('-').unwrap();
             let height: u32 = height.parse().unwrap();
             let bytes = std::fs::read(&path).unwrap();
-            // The filename hash must be the body's double-SHA256 header hash.
             let digest = {
                 use sha2::{Digest as _, Sha256};
                 let first = Sha256::digest(&bytes[..80]);
@@ -1355,10 +1305,11 @@ impl PrevoutResolver for BodyResolver {
     }
 }
 
-/// Truth loop over the downloaded mainnet bodies: re-derives every
-/// fixture field, then compresses and decompresses every published
-/// vector against body-derived context, reporting ratio and cost per
-/// representative type. Absent bodies are BLOCKED, not a pass.
+/// Truth loop over the downloaded mainnet bodies: re-derives every fixture field, then
+/// compresses and decompresses every published vector against body-derived context,
+/// reporting ratio and cost per representative type.
+///
+/// Absent bodies are BLOCKED, not a pass.
 #[test]
 #[ignore = "requires BITCOIN_RS_BIP337_MAINNET_BODIES with mainnet block bodies"]
 #[allow(
@@ -1512,10 +1463,6 @@ fn compact_of(der_plus_hashtype: &[u8]) -> [u8; 64] {
 #[test]
 #[expect(clippy::too_many_lines)]
 fn shared_sighash_cache_recovers_every_input() {
-    // One cache over the immutable skeleton must serve every compressed
-    // input: the legacy input and the segwit input below share the same
-    // transaction midstates, so rebuilding the cache per input repeats
-    // identical hashing work.
     let signer_a = Signer::new(31);
     let signer_b = Signer::new(32);
     let prevout_a = TxOut {
@@ -1529,8 +1476,6 @@ fn shared_sighash_cache_recovers_every_input() {
     let prev_tx_a = funding_tx(prevout_a.clone());
     let prev_tx_b = funding_tx(prevout_b.clone());
 
-    // Skeleton first: sighashes commit to outpoints, sequences, outputs,
-    // and locktime, never to the authorizations being reconstructed.
     let mut tx = Tx {
         version: 2,
         inputs: vec![
@@ -1573,11 +1518,6 @@ fn shared_sighash_cache_recovers_every_input() {
     let sig_item_b = signer_b.ecdsa_item(digest_b, false);
     tx.inputs[1].witness = Witness::from_stack(vec![sig_item_b, signer_b.compressed_pubkey()]);
 
-    // The shared cache pins the new call shape at compile time: one
-    // `SighashCache` borrowed alongside both recovery requests. The
-    // transaction carries DER signatures plus a sighash byte; recovery
-    // needs the 64-byte compact form, so strip the trailing byte and
-    // parse the DER prefix.
     let cache = SighashCache::new(&tx);
     let compact_a = compact_of(&sig_item_a);
     let compact_b = compact_of(&tx.inputs[1].witness[0]);
@@ -1618,8 +1558,6 @@ fn shared_sighash_cache_recovers_every_input() {
     .unwrap();
     assert_eq!(recovered_b, signer_b.compressed_pubkey());
 
-    // End to end: both inputs compress and the split prepare/finalize
-    // path (which now builds that single cache) restores the pair.
     let mut resolver = MapResolver::default();
     resolver.register_tx(100, &prev_tx_a, 0);
     resolver.register_tx(101, &prev_tx_b, 0);
@@ -1689,10 +1627,6 @@ fn production_resolver_clones_only_the_requested_output() {
         }
     }
 
-    // One funding transaction with three distinct outputs: resolving or
-    // locating the middle one must return exactly that output, proving
-    // the resolver cloned the requested `TxOut` rather than the whole
-    // funding transaction.
     let funding = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -1741,7 +1675,6 @@ fn production_resolver_clones_only_the_requested_output() {
     let latch = bitcoin_rs_chain::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
 
-    // `prevout` resolves each vout to its own output.
     for (vout, expected) in funding.outputs.iter().enumerate() {
         let vout = u32::try_from(vout).unwrap();
         let resolved = resolver
@@ -1751,14 +1684,11 @@ fn production_resolver_clones_only_the_requested_output() {
         assert_eq!(&resolved.txout, expected, "vout {vout} must match");
         assert_eq!(resolved.confirmed_height, Some(100));
     }
-    // The middle output differs from its neighbours: a whole-transaction
-    // mix-up would surface here, not just a missing-output failure.
     let middle = resolver.prevout(&OutPoint::new(txid, 1)).unwrap().unwrap();
     assert_eq!(middle.txout, funding.outputs[1]);
     assert_ne!(middle.txout, funding.outputs[0]);
     assert_ne!(middle.txout, funding.outputs[2]);
 
-    // `outpoint_at` is the flat-index inverse and returns the same TxOuts.
     assert_eq!(resolver.flat_output_index(100, &txid, 1).unwrap(), Some(1));
     for flat in [0_u32, 1, 2] {
         let (outpoint, resolved) = resolver
@@ -1774,7 +1704,6 @@ fn production_resolver_clones_only_the_requested_output() {
         assert_eq!(resolved.confirmed_height, Some(100));
     }
 
-    // Proved-absent stays `None` on both paths, never an error.
     assert!(resolver.prevout(&OutPoint::new(txid, 9)).unwrap().is_none());
     assert!(resolver.outpoint_at(100, 9).unwrap().is_none());
 }
@@ -1800,9 +1729,10 @@ impl bitcoin_rs_chain::BlockBodySource for CountingBodies {
     }
 }
 
-/// Builds one single-output funding block per `heights` entry, wires the
-/// records plus a counting body source into a fresh [`Context`], and funds
-/// the UTXO set so the compress pass resolves prevouts without body reads.
+/// Builds one single-output funding block per `heights` entry, wires the records plus a
+/// counting body source into a fresh [`Context`], and funds the UTXO set so the
+/// compress pass resolves prevouts without body reads.
+///
 /// Returns the context, the source, and the funding txids in height order.
 fn cycling_fixture(
     heights: &[u32],
@@ -1898,12 +1828,12 @@ fn assert_loads(source: &CountingBodies, heights: &[u32], per_height: usize) {
     assert_eq!(total, heights.len() * per_height);
 }
 
-/// Five heights cycling through the four-body cache: grouped resolution
-/// loads each body once instead of paying a full body read, parse,
-/// materialization, and txid pass per input inside the stable-chainstate
-/// exclusion. Ten inputs round-robin five heights; the counting source
-/// proves five total loads (one per height), and both codec passes
-/// round-trip the spending transaction.
+/// Five heights cycling through the four-body cache: grouped resolution loads each body
+/// once instead of paying a full body read, parse, materialization, and txid pass per
+/// input inside the stable-chainstate exclusion.
+///
+/// Ten inputs round-robin five heights; the counting source proves five total loads
+/// (one per height), and both codec passes round-trip the spending transaction.
 #[test]
 fn five_heights_cycling_loads_each_body_once() {
     use std::sync::Arc;
@@ -1913,8 +1843,6 @@ fn five_heights_cycling_loads_each_body_once() {
     let ctx = Arc::new(ctx);
     let spend = cycling_spend(&txids, 10);
 
-    // Compress: prevouts hit the UTXO set, so all five body loads happen in
-    // the grouped flat-index pass — one per height despite round-robin inputs.
     let latch = bitcoin_rs_chain::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
     let (compressed, warnings) = compress_transaction(
@@ -1928,8 +1856,6 @@ fn five_heights_cycling_loads_each_body_once() {
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_loads(&source, &heights, 1);
 
-    // Decompress resolves the same five heights grouped: one load each,
-    // restoring the exact spending transaction.
     let latch = bitcoin_rs_chain::LatchReader::fixture_never();
     let mut resolver = crate::context::RpcPrevoutResolver::new(&ctx, latch).unwrap();
     let plan = super::decompress_prepare(&compressed, &mut resolver).unwrap();
@@ -1962,7 +1888,6 @@ fn cumulative_body_budget_fails_closed_past_grouped_heights() {
     )
     .unwrap_err();
     assert_eq!(error, CodecError::LimitExceeded(super::Limit::Loads));
-    // Bounded work: eight loads happened; the ninth failed before body I/O.
     let loads = source.loads.lock().unwrap();
     let total: usize = loads.values().sum();
     assert_eq!(total, super::MAX_CUMULATIVE_BODY_LOADS);

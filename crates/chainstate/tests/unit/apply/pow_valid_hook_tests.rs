@@ -1,10 +1,3 @@
-//! Early compact-block announce hook: firing rules at the connect site.
-//!
-//! The hook fires exactly once per commit-intent tip child whose parent is
-//! the published tip, after block rules pass and before the durable commit.
-//! It never fires for a block whose parent is stale, and a later connect
-//! failure sends nothing more while leaving the published tip unchanged.
-
 #![expect(
     clippy::expect_used,
     reason = "poisoned test-recorder locks must fail the test"
@@ -37,7 +30,6 @@ fn pow_valid_hook_fires_once_for_tip_child_commit() -> Result<(), Box<dyn std::e
     handles
         .set_pow_valid_block(recording_hook(&calls))
         .map_err(|_| "hook installs once")?;
-    // Seeding publishes the tip directly: no connect, no hook.
     let genesis_tip = seed_genesis(&handles)?;
     assert!(calls.lock().expect("hook calls").is_empty());
 
@@ -68,8 +60,6 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> Result<(), Box<dyn
     assert_eq!(handles.applied_tip_snapshot().ok_or("tip")?.height, 3);
     calls.lock().expect("hook calls").clear();
 
-    // A fork off genesis: its parent is not the published tip, so the hook
-    // must not fire whether the fork stages or is refused.
     let stale = mined_child(genesis_tip.hash.into(), 1)?;
     let _ = handles.apply_block(&BlockPayload::from_local(stale));
     assert!(
@@ -82,9 +72,6 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> Result<(), Box<dyn
         "a stale fork never moves the published tip"
     );
 
-    // A rules-valid tip child that fails later (coinbase overspend): the
-    // hook fires at the rules boundary, then the failure sends nothing more
-    // and the published tip stays put.
     let tip = handles.applied_tip_snapshot().ok_or("tip")?;
     let mut falling = mined_child(tip.hash.into(), 4)?;
     let coinbase = falling
@@ -140,9 +127,6 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> Result<(), Box<dyn st
         .map_err(|_| "hook installs once")?;
     seed_genesis(&handles)?;
     let tip = handles.applied_tip_snapshot().ok_or("tip")?;
-    // A coinbase timelock with an enabled sequence is non-final at height 1.
-    // Block rules still pass, so only the contextual precheck can refuse it
-    // before the announcement.
     let mut non_final = mined_child(tip.hash.into(), 1)?;
     let coinbase = non_final.txs.first_mut().ok_or("coinbase")?;
     coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
@@ -180,8 +164,6 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
     handles
         .set_pow_valid_block(recording_hook(&calls))
         .map_err(|_| "hook installs once")?;
-    // Regtest enforces BIP34 from height 500: seed the chain to 499 so the
-    // next child is the first BIP34-gated block.
     let mut tip_hash = seed_genesis(&handles)?.hash;
     for height in 1..=499 {
         let block = mined_child(tip_hash.into(), height)?;
@@ -190,9 +172,6 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
     }
     assert_eq!(handles.applied_tip_snapshot().ok_or("tip")?.height, 499);
     calls.lock().expect("hook calls").clear();
-    // A coinbase that does not start with the height push violates BIP34
-    // while passing block rules, so only the contextual precheck can refuse
-    // it before the announcement.
     let mut violating = mined_child(tip_hash.into(), 500)?;
     violating
         .txs
@@ -229,9 +208,6 @@ fn hook_installation_after_a_clone_is_visible_through_both_handles()
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let shadow = handles.clone();
     let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
-    // Install through the pre-install clone: the original must refuse a
-    // second install, and firing through the original must reach the
-    // clone-installed hook.
     shadow
         .set_pow_valid_block(recording_hook(&calls))
         .map_err(|_| "hook installs once")?;

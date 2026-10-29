@@ -7,19 +7,15 @@ use crate::UtxoSet;
 use crate::contract::OutputSource;
 use crate::set::UtxoCoin;
 
-/// The committed UTXO set plus the net effect of window blocks already prepared.
 /// Spends are tombstoned rather than removed so a later window block can
 /// recreate an outpoint.
 pub struct WindowOverlay<'u> {
     base: &'u UtxoSet,
     max_script_size: usize,
-    /// `Some` created and live, `None` spent, absent means ask `base`.
     changed: HashMap<OutPoint, Option<UtxoCoin>>,
 }
 
 impl<'u> WindowOverlay<'u> {
-    /// `max_script_size` is the limit the committed set applies when it skips
-    /// oversized outputs.
     pub fn new(base: &'u UtxoSet, max_script_size: usize) -> Self {
         Self {
             base,
@@ -28,10 +24,6 @@ impl<'u> WindowOverlay<'u> {
         }
     }
 
-    /// Folds one block's net effect into the view. `same_block_spent`
-    /// outpoints are skipped on both sides, as in
-    /// [`build_block_changes`](crate::contract::build_block_changes). Genesis is
-    /// a no-op, as in the apply path.
     pub fn advance(
         &mut self,
         block: &Block,
@@ -83,7 +75,6 @@ impl<'u> WindowOverlay<'u> {
     }
 }
 
-/// Why the view refused to fold in a block.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 #[expect(missing_docs)]
 pub enum WindowOverlayError {

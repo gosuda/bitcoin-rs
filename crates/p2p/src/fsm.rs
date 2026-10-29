@@ -3,7 +3,6 @@ use crate::packages::SendPackages;
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
-/// Advance a peer by one inbound message.
 pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
     match message {
         Message::Version(version) => receive_version(peer, version.clone()),
@@ -22,8 +21,6 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
         }
         Message::WtxidRelay => {
             ensure_negotiating_or_ready(peer)?;
-            // BIP339 requires negotiation before verack. Once Ready, keep
-            // the published per-connection relay preference unchanged.
             if peer.state == PeerState::Ready {
                 return Ok(());
             }
@@ -71,16 +68,6 @@ fn receive_version<S>(
 }
 
 /// Record one BIP434 `feature` announcement.
-///
-/// PRE: `announcement` decoded within the codec bounds.
-/// POST: the peer sent it after its `version`, at protocol version
-///   [`FEATURE_VERSION`] or above, and before its `verack`; otherwise the
-///   result is a protocol violation and the peer is unchanged. Unknown
-///   identifiers (printable or not) and invalid payloads for a recognised
-///   identifier are ignored, not punished. The first valid payload of a
-///   recognised identifier is retained and later ones are ignored.
-/// INVARIANT: `Peer::remote_features` only ever holds
-///   [`FeatureAnnouncement::is_supported`] announcements, one per identifier.
 fn receive_feature<S>(
     peer: &mut Peer<S>,
     announcement: &FeatureAnnouncement,
@@ -99,16 +86,8 @@ fn receive_feature<S>(
 }
 
 /// Record one BIP331 `sendpackages`.
-///
-/// PRE: `send_packages` decoded; any `versions` value is well formed.
-/// POST: the peer sent it after its `version` and before its `verack`;
-///   otherwise the result is a protocol violation and the peer is unchanged.
-///   Only the known `PKG_RELAY_*` bits of the first message are kept: `0`,
 ///   unknown bits and later messages are ignored, not punished. BIP331 has no
 ///   protocol-version floor and no BIP434 mapping.
-/// INVARIANT: this records the peer's offer only. [`Peer::package_relay_versions`]
-///   is the one place that combines it with `verack`, `wtxidrelay`, `fRelay`
-///   and our own `sendpackages`.
 fn receive_send_packages<S>(
     peer: &mut Peer<S>,
     send_packages: SendPackages,
@@ -118,11 +97,6 @@ fn receive_send_packages<S>(
     Ok(())
 }
 
-/// The peer's protocol version, when it is inside its own pre-`verack`
-/// negotiation window: after its `version`, before its `verack`.
-///
-/// The window is the peer's `verack`, not our [`PeerState`]: the inbound
-/// handshake resets the state to `VersionExchange` after accepting `version`.
 fn ensure_version_to_verack_window<S>(peer: &Peer<S>) -> Result<u32, PeerError> {
     let Some(remote_version) = peer.remote_version.as_ref() else {
         return Err(PeerError::Misbehavior(
@@ -175,7 +149,6 @@ mod tests {
         Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN)
     }
 
-    /// A peer that has sent `version` at `version` and owes its `verack`.
     fn peer_awaiting_verack(version: u32) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
         let mut peer = fresh_peer();
         step(
@@ -188,8 +161,6 @@ mod tests {
         Ok(peer)
     }
 
-    /// A `feature` message as decoded from any wire bytes: the identifier
-    /// need not be printable.
     fn feature_message(id: &[u8], data: &[u8]) -> Message {
         Message::Feature(FeatureAnnouncement::new(
             FeatureId::from_raw_unchecked(id.to_vec()),
@@ -295,7 +266,6 @@ mod tests {
     fn feature_is_accepted_while_the_inbound_handshake_holds_version_exchange()
     -> Result<(), PeerError> {
         let mut peer = peer_awaiting_verack(FEATURE_VERSION)?;
-        // `run_inbound_handshake` resets the state after accepting `version`.
         peer.state = PeerState::VersionExchange;
         step(&mut peer, &feature_message(b"BIP332", &[0]))?;
         assert_eq!(peer.remote_feature(b"BIP332"), Some([0].as_slice()));
@@ -335,7 +305,6 @@ mod tests {
         for id in unknown_ids {
             step(&mut peer, &feature_message(id, &[1]))?;
         }
-        // A peer cannot grow the map with distinct unknown identifiers.
         for index in 0_u32..1_000 {
             let id = format!("unknown-feature-{index}");
             step(&mut peer, &feature_message(id.as_bytes(), &[0; 64]))?;
@@ -374,9 +343,6 @@ mod tests {
         Message::SendPackages(SendPackages { versions })
     }
 
-    /// A peer that offered `ours` in its version reply, then received the
-    /// remote's `version` (its `fRelay` is `relay`), the pre-`verack`
-    /// messages in `negotiation`, and finally its `verack`.
     fn completed_handshake(
         ours: u64,
         relay: bool,
@@ -391,7 +357,6 @@ mod tests {
                 ..version_message()
             }),
         )?;
-        // The version reply sends our `sendpackages`, then `verack`.
         if let Some(versions) = peer.package_relay.unsent_offer() {
             peer.package_relay.record_advertised(versions);
         }
@@ -403,8 +368,6 @@ mod tests {
         Ok(peer)
     }
 
-    /// The remote's usual full-relay package negotiation: `wtxidrelay`, then
-    /// `sendpackages` for `versions`.
     fn package_negotiation(versions: u64) -> [Message; 2] {
         [Message::WtxidRelay, send_packages(versions)]
     }
@@ -416,7 +379,6 @@ mod tests {
             (PKG_RELAY_PKGTXNS, BOTH, PKG_RELAY_PKGTXNS),
             (BOTH, PKG_RELAY_ANC, PKG_RELAY_ANC),
             (PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, 0),
-            // Zero and unknown bits are ignored on both sides.
             (BOTH, 0, 0),
             (BOTH, 1 << 40, 0),
             (BOTH, (1 << 40) | PKG_RELAY_ANC, PKG_RELAY_ANC),
@@ -531,7 +493,6 @@ mod tests {
         step(&mut peer, &send_packages(BOTH))?;
         assert!(peer.remote_features.is_empty());
 
-        // A BIP434 announcement does not stand in for `sendpackages` either.
         let before = peer.package_relay;
         step(&mut peer, &feature_message(b"BIP331", &[3]))?;
         assert!(peer.remote_features.is_empty());

@@ -13,11 +13,9 @@ fn ip_source_disguised_as_overlay_is_rejected_without_rewriting_the_book() {
     );
     book.save();
     let original = fs::read(&path).expect("valid book");
-    let mut value = serde_json::to_value(&book.state.lock().stored).expect("state");
-    // This alias has the same source group as the valid IP source, so only
-    // the source representation invariant rejects the otherwise valid file.
-    value["records"][0]["source"] = serde_json::json!({"overlay": addr(2).address().to_string()});
-    let mut bytes = serde_json::to_vec(&value).expect("invalid source payload");
+    let mut value = sonic_rs::to_value(&book.state.lock().stored).expect("state");
+    value["records"][0]["source"] = sonic_rs::json!({"overlay": addr(2).address().to_string()});
+    let mut bytes = sonic_rs::to_vec(&value).expect("invalid source payload");
     let checksum = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
     fs::write(&path, &bytes).expect("write alias");
@@ -75,7 +73,7 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     book.succeeded(onion, 9, EPOCH + 1);
     book.succeeded(i2p, 9, EPOCH + 1);
     book.remember_anchors(&[onion, i2p], EPOCH + 2);
-    let before = serde_json::to_value(&book.state.lock().stored).expect("state");
+    let before = sonic_rs::to_value(&book.state.lock().stored).expect("state");
     let rows = book.gossip(EPOCH + 3);
     assert!(rows.iter().any(
         |row| matches!(row.addr, bitcoin::p2p::address::AddrV2::TorV3(key) if key == [1; 32])
@@ -88,7 +86,7 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     book.save();
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
     assert_eq!(
-        serde_json::to_value(&restored.state.lock().stored).expect("restored"),
+        sonic_rs::to_value(&restored.state.lock().stored).expect("restored"),
         before
     );
     assert_ne!(

@@ -1,11 +1,4 @@
 //! Inbound eviction selection, ported from Bitcoin Core's `SelectNodeToEvict`
-//! (`node/eviction.cpp:178-240`).
-//!
-//! Three Core steps are absent. Core protects the eight inbound peers with the
-//! lowest minimum ping time, and bitcoin-rs measures no ping round trip. Core
-//! breaks transaction-time ties on a loaded bloom filter, and BIP37 filters are
-//! never loaded here. Core prefers peers it accepted while discouraged, and
-//! bitcoin-rs refuses a discouraged address at accept.
 
 use crate::PeerRemote;
 use std::cmp::Ordering;
@@ -13,41 +6,21 @@ use std::time::Instant;
 
 use hashbrown::HashMap;
 
-/// One inbound connection the policy may choose: Core's
-/// `NodeEvictionCandidate` without the fields of the absent steps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EvictionCandidate {
     pub(crate) addr: PeerRemote,
     pub(crate) connected: Instant,
-    /// Recency of the last block from this connection the node committed;
-    /// 0 when there is none (Core `m_last_block_time`).
     pub(crate) last_block: u64,
-    /// Recency of the last transaction from this connection the mempool
-    /// accepted; 0 when there is none (Core `m_last_tx_time`).
     pub(crate) last_tx: u64,
-    /// Core `fRelevantServices`.
     pub(crate) relevant_services: bool,
-    /// Core `m_relay_txs`.
     pub(crate) relay_txs: bool,
-    /// Core `nKeyedNetGroup`.
     pub(crate) keyed_netgroup: u64,
-    /// Core `m_is_local`.
     pub(crate) is_local: bool,
 }
 
-/// Chooses the inbound connection to drop for a newcomer, or `None` when
-/// every candidate is protected.
-///
-/// PRE: `candidates` holds only live inbound connections without `NoBan`,
-///   which Core's `ProtectNoBanConnections` and `ProtectOutboundConnections`
-///   leave.
-/// POST: the result is the newest member of the netgroup with the most
-///   unprotected candidates.
 pub(crate) fn select_inbound_to_evict(
     mut candidates: Vec<EvictionCandidate>,
 ) -> Option<PeerRemote> {
-    // Core's `std::sort` leaves ties unordered; stable sorts from a
-    // newest-first start make them deterministic.
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.connected));
     protect_last(
         &mut candidates,
@@ -67,8 +40,6 @@ pub(crate) fn select_inbound_to_evict(
     newest_in_largest_netgroup(&candidates)
 }
 
-/// Core's `EraseLastKElements`: sorts by `compare`, then removes from the last
-/// `k` the candidates `protect` accepts.
 fn protect_last(
     candidates: &mut Vec<EvictionCandidate>,
     k: usize,
@@ -80,7 +51,6 @@ fn protect_last(
     candidates.extend(tail.into_iter().filter(|candidate| !protect(candidate)));
 }
 
-/// Core `CompareNodeTXTime`.
 fn compare_tx_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering {
     a.last_tx
         .cmp(&b.last_tx)
@@ -88,7 +58,6 @@ fn compare_tx_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering {
         .then_with(|| b.connected.cmp(&a.connected))
 }
 
-/// Core `CompareNodeBlockRelayOnlyTime`.
 fn compare_block_relay_only_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering {
     b.relay_txs
         .cmp(&a.relay_txs)
@@ -97,7 +66,6 @@ fn compare_block_relay_only_time(a: &EvictionCandidate, b: &EvictionCandidate) -
         .then_with(|| b.connected.cmp(&a.connected))
 }
 
-/// Core `CompareNodeBlockTime`.
 fn compare_block_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering {
     a.last_block
         .cmp(&b.last_block)
@@ -105,11 +73,6 @@ fn compare_block_time(a: &EvictionCandidate, b: &EvictionCandidate) -> Ordering 
         .then_with(|| b.connected.cmp(&a.connected))
 }
 
-/// Core's `ProtectEvictionCandidatesByRatio`: protects the half connected
-/// longest, reserving up to a quarter of the candidates for localhost peers
-/// even when they are newer. Overlay peers use the existing eviction policy
-/// without Core's onion/I2P quotas; transport support does not add those
-/// policy preferences. This deviation is recorded in the compatibility policy.
 fn protect_by_ratio(candidates: &mut Vec<EvictionCandidate>) {
     let initial = candidates.len();
     let protect_total = initial / 2;
@@ -135,10 +98,6 @@ fn protect_by_ratio(candidates: &mut Vec<EvictionCandidate>) {
     );
 }
 
-/// Core's final step: the newest member of the netgroup with the most
-/// candidates, a size tie going to the group whose newest member is newer.
-///
-/// PRE: `candidates` is sorted newest first.
 fn newest_in_largest_netgroup(candidates: &[EvictionCandidate]) -> Option<PeerRemote> {
     let mut groups: HashMap<u64, (usize, &EvictionCandidate)> = HashMap::new();
     let mut chosen: Option<(usize, &EvictionCandidate)> = None;
@@ -163,7 +122,6 @@ mod tests {
 
     use super::*;
 
-    /// A plain candidate: `order` sets its connection age, higher is newer.
     fn candidate(base: Instant, order: u16, keyed_netgroup: u64) -> EvictionCandidate {
         EvictionCandidate {
             addr: PeerRemote::from(([203, 0, 113, 1], order)),
@@ -177,7 +135,6 @@ mod tests {
         }
     }
 
-    /// Forty connections from one netgroup, oldest first.
     fn flood(base: Instant) -> Vec<EvictionCandidate> {
         (0..40).map(|order| candidate(base, order, 7)).collect()
     }
@@ -239,9 +196,6 @@ mod tests {
     #[test]
     fn localhost_peers_keep_up_to_a_quarter_of_the_protection() {
         let base = Instant::now();
-        // Thirty-six older peers in their own netgroups, then four newer
-        // localhost peers sharing one: without the reservation the localhost
-        // group would be the largest.
         let mut candidates: Vec<_> = (0..36)
             .map(|order| candidate(base, order, 1 + u64::from(order)))
             .collect();

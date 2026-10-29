@@ -34,7 +34,6 @@ const LEVELS: [CheckLevel; 4] = [
     CheckLevel::CheckUndoAndCommitments,
 ];
 
-/// A body store the tests can damage, empty, corrupt, or interleave with a read.
 #[derive(Default)]
 struct Bodies {
     rows: Mutex<HashMap<(u32, Hash256), Vec<u8>>>,
@@ -117,7 +116,6 @@ struct Fixture {
     bodies: Arc<Bodies>,
     undo: Arc<InMemoryUndoStore>,
     retention: Arc<RetentionRegistry>,
-    /// Genesis, then one child per height.
     blocks: Vec<Block>,
 }
 
@@ -252,8 +250,6 @@ fn a_chain_with_no_block_above_genesis_has_nothing_to_check() -> Result {
     Ok(())
 }
 
-/// A corrupt referenced frame is damage at every level: never a missing
-/// body, and never a skip, even without a history floor.
 #[test]
 fn a_corrupt_referenced_frame_is_damage_not_missing_or_skipped() -> Result {
     let f = fixture(4)?;
@@ -305,7 +301,6 @@ fn a_missing_body_above_the_floor_is_damage_inside_the_window_only() -> Result {
 
 #[test]
 fn bodies_that_are_not_the_named_block_fail_to_decode() -> Result {
-    // Truncated: not one complete block.
     let f = fixture(4)?;
     f.damage_body(3, |bytes| bytes.truncate(bytes.len() - 1))?;
     for level in LEVELS {
@@ -323,7 +318,6 @@ fn bodies_that_are_not_the_named_block_fail_to_decode() -> Result {
         );
     }
 
-    // Trailing bytes are not a canonical block either.
     let f = fixture(4)?;
     f.damage_body(3, |bytes| bytes.push(0))?;
     let error = f.damage(CheckLevel::ReadBodies, None)?;
@@ -339,7 +333,6 @@ fn bodies_that_are_not_the_named_block_fail_to_decode() -> Result {
         "{error}"
     );
 
-    // A header that hashes to something else is another block's body.
     let f = fixture(4)?;
     f.damage_body(2, |bytes| bytes[79] ^= 0xff)?;
     let error = f.damage(CheckLevel::ReadBodies, None)?;
@@ -360,8 +353,6 @@ fn bodies_that_are_not_the_named_block_fail_to_decode() -> Result {
 #[test]
 fn a_body_that_decodes_but_breaks_its_header_binding_needs_the_body_level() -> Result {
     let f = fixture(4)?;
-    // The final byte is the coinbase lock time: the body still decodes and
-    // keeps its header, but its transaction id and Merkle root change.
     f.damage_body(3, |bytes| {
         if let Some(last) = bytes.last_mut() {
             *last ^= 0xff;
@@ -393,9 +384,6 @@ fn a_body_that_decodes_but_breaks_its_header_binding_needs_the_body_level() -> R
 fn a_body_with_valid_commitments_but_broken_transaction_rules_needs_the_body_level() -> Result {
     let f = fixture(4)?;
     let tip = f.chain.applied_tip_snapshot().ok_or("no applied tip")?;
-    // Shorten the tip coinbase scriptSig below the 2-byte consensus floor,
-    // then re-root and re-mine the header so the Merkle root, the header
-    // hash and the work all check out and only the transaction rules fail.
     let mut ruled = f.blocks[4].clone();
     ruled.txs[0].inputs[0].script_sig = Script::from_bytes(vec![0]);
     ruled.header.merkle_root = merkle_root(&ruled.txs).ok_or("the tip keeps its transaction")?;
@@ -442,9 +430,6 @@ fn a_body_with_valid_commitments_but_broken_transaction_rules_needs_the_body_lev
 #[test]
 fn a_witness_only_mutation_passes_core_levels_but_fails_the_startup_level() -> Result {
     let f = fixture(4)?;
-    // A witness stack on the tip coinbase changes the stored bytes without
-    // touching the txid, the header, or the work, so no re-root, re-mine, or
-    // tree surgery is needed.
     let mut bytes = f.bodies.bytes(4, f.hash(4))?;
     let mut block: Block = deserialize(&bytes)?;
     block.txs[0].inputs[0].witness = Witness::from_stack(vec![[0u8; 32].to_vec()]);
@@ -480,9 +465,6 @@ fn a_witness_only_mutation_passes_core_levels_but_fails_the_startup_level() -> R
 fn a_header_that_misses_its_target_fails_the_body_level() -> Result {
     let f = fixture(4)?;
     let tip = f.chain.applied_tip_snapshot().ok_or("no applied tip")?;
-    // Same parent, height, and transactions; a nonce whose hash misses the
-    // regtest target. The tree is then made to name this block, so the body
-    // is exactly the block the chain claims and only its work is wrong.
     let mut unmined = f.blocks[4].clone();
     loop {
         let hash = Hash256::from(unmined.header.compute_hash());
@@ -539,7 +521,6 @@ fn undo_records_are_read_and_decoded_only_at_the_undo_level() -> Result {
         matches!(error, VerifyError::UndoMissing { height: 3, hash } if hash == f.hash(3)),
         "{error}"
     );
-    // Heights below the missing record still hold the undecodable one.
     f.undo.persist_undo(3, f.hash(3), &[0xff, 0x00])?;
     let error = f.damage(CheckLevel::CheckUndo, None)?;
     assert!(
@@ -553,7 +534,6 @@ fn undo_records_are_read_and_decoded_only_at_the_undo_level() -> Result {
 fn an_executed_prune_line_ends_the_window_without_hiding_damage_above_it() -> Result {
     let f = fixture(5)?;
     f.retention.reserve(3).commit(3);
-    // Height 1 is below the line and its body is gone, as pruning leaves it.
     f.drop_body(1)?;
     f.undo.remove_archived(1, f.hash(1));
     for level in LEVELS {
@@ -563,14 +543,12 @@ fn an_executed_prune_line_ends_the_window_without_hiding_damage_above_it() -> Re
             "{level:?}"
         );
     }
-    // The line itself is retained history: height 3 is checked.
     f.drop_body(3)?;
     let error = f.damage(CheckLevel::CheckUndo, None)?;
     assert!(
         matches!(error, VerifyError::BodyMissing { height: 3, .. }),
         "{error}"
     );
-    // A window entirely above the line is an ordinary window.
     assert_eq!(
         f.outcome(CheckLevel::CheckUndo, Some(2))?,
         VerifyOutcome::Passed { blocks: 2 }
@@ -763,7 +741,6 @@ fn a_pin_withdrawn_mid_walk_skips_even_when_the_rows_are_still_readable() -> Res
 #[test]
 fn rows_a_prune_pass_took_while_the_pin_was_withdrawn_are_not_damage() -> Result {
     let mut f = fixture(5)?;
-    // A budget of one block lets the pass below expire the walk's pin.
     f.chain.history = HistoryAccess::new(Arc::clone(&f.retention), RetentionBudget::Depth(1));
     let (bodies, retention, doomed) = (Arc::clone(&f.bodies), Arc::clone(&f.retention), f.hash(5));
     *f.bodies.before_read.lock() = Some(Box::new(move || {
@@ -772,8 +749,6 @@ fn rows_a_prune_pass_took_while_the_pin_was_withdrawn_are_not_damage() -> Result
             Some(1),
             "the window must be pinned before its first read"
         );
-        // The pass reserves a deletion line far above the pin, which expires
-        // it, and then deletes the row under the current read.
         drop(retention.reserve(5));
         assert_eq!(retention.retention_floor(), None, "the pin was withdrawn");
         bodies.remove(5, doomed);
@@ -785,9 +760,6 @@ fn rows_a_prune_pass_took_while_the_pin_was_withdrawn_are_not_damage() -> Result
     assert_eq!(f.retention.active_leases(), 0);
     Ok(())
 }
-/// A latch fired on the window's only (hence final) read interrupts before
-/// success: the per-height poll already passed over the quiet latch, so only
-/// the pre-success poll observes it. Removing that poll reports Passed.
 #[test]
 fn a_request_cancelled_on_the_final_read_interrupts_before_success() -> Result {
     let f = fixture(4)?;
@@ -811,9 +783,6 @@ fn a_request_cancelled_on_the_final_read_interrupts_before_success() -> Result {
     Ok(())
 }
 
-/// A recovery closure landing on the window's only (hence final) read refuses
-/// success: the per-height poll already passed over the open chainstate, so
-/// only the pre-success poll observes it. Removing that poll reports Passed.
 #[test]
 fn closing_for_recovery_on_the_final_read_refuses_success() -> Result {
     let f = fixture(4)?;
@@ -832,19 +801,12 @@ fn closing_for_recovery_on_the_final_read_refuses_success() -> Result {
     Ok(())
 }
 
-/// A pin withdrawn on the window's only (hence final) read skips instead of
-/// passing: the per-height poll already passed over the live pin, so only the
-/// pre-success poll observes the withdrawal. Removing that poll reports
-/// Passed over rows the owner no longer protects.
 #[test]
 fn a_pin_withdrawn_on_the_final_read_skips_instead_of_passing() -> Result {
     let mut f = fixture(5)?;
     f.chain.history = HistoryAccess::new(Arc::clone(&f.retention), RetentionBudget::Depth(1));
     let retention = Arc::clone(&f.retention);
     *f.bodies.before_read.lock() = Some(Box::new(move || {
-        // The lease floors at the tip (5) under a depth-1 budget, so the
-        // pass must claim past 6 to expire it; the mechanics are otherwise
-        // the mid-walk pin test's.
         drop(retention.reserve(7));
         assert_eq!(retention.retention_floor(), None, "the pin was withdrawn");
     }));

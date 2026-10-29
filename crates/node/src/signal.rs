@@ -7,20 +7,12 @@ use signal_hook::{
     iterator::Signals,
 };
 
-/// Owns the signal iterator and its forwarding thread.
-///
-/// Closing the iterator is required before joining: setting the node shutdown
-/// flag alone does not wake `Signals::forever`, so dropping only its join
-/// handle would leak a process-level signal worker. The lifecycle service
-/// graph owns this handler from install until the shared teardown closes and
-/// joins it, so no lifecycle leaks — or double-joins — the forwarding thread.
 pub(crate) struct ShutdownHandler {
     handle: signal_hook::iterator::Handle,
     thread: Option<JoinHandle<()>>,
 }
 
 impl ShutdownHandler {
-    /// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
     pub(crate) fn install(
         request_shutdown: impl Fn() + Send + 'static,
         shutdown_tx: Sender<()>,
@@ -29,7 +21,6 @@ impl ShutdownHandler {
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
-                // First signal flips the flag; later ones only re-wake.
                 request_shutdown();
                 if shutdown_tx.try_send(()).is_err() {
                     break;
@@ -44,12 +35,6 @@ impl ShutdownHandler {
         })
     }
 
-    /// Closes the signal iterator and joins the forwarding thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the forwarding thread panicked; the iterator is
-    /// closed either way, so SIGINT/SIGTERM handling is released.
     pub(crate) fn close_and_join(&mut self) -> Result<()> {
         self.handle.close();
         match self.thread.take() {
@@ -79,9 +64,6 @@ pub(crate) mod testing;
 mod tests {
     use super::*;
 
-    /// Closing must release the forwarding thread promptly: `close_and_join`
-    /// blocks forever if the iterator is not closed before the join, which
-    /// is exactly the leak the handler exists to prevent.
     #[test]
     fn close_and_join_releases_the_forwarding_thread() -> Result<()> {
         let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
@@ -97,10 +79,6 @@ mod tests {
         Ok(())
     }
 
-    /// Repeated lifecycles must each acquire and release the process-level
-    /// signal handling: a second install after a close must work and close
-    /// again, which is what lets a host run several node lifetimes without
-    /// inheriting a stale handler from the previous one.
     #[test]
     fn signal_handler_supports_repeated_lifecycles() -> Result<()> {
         let installed_before = testing::installed_total();

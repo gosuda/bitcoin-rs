@@ -41,8 +41,6 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         )?;
         for output in &tx.outputs {
             let script = output.script_pubkey.as_bytes();
-            // Core's burn guard is per output, not a sum. HasValidOps is
-            // already owned by the script crate, including malformed pushes.
             if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
                 || bitcoin_rs_script::is_op_return(script)
                 || !bitcoin_rs_script::has_valid_ops(script))
@@ -77,8 +75,6 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             }
             other => submit_error_to_rpc_error(other),
         })?;
-    // `hashtx` for newly admitted members is published once by the gateway
-    // observer, in commit order ahead of `rawtx` and the `sequence` `A` event.
     render_submission(&txs, facts)
 }
 

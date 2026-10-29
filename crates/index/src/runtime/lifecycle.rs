@@ -21,16 +21,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 impl DerivedIndexWorker {
-    /// Spawns a worker that opens the store on its own thread, constructs the
-    /// complete query engine, publishes lifecycle snapshots, and runs
-    /// reconciliation — all behind one `catch_unwind`.
-    ///
-    /// The `lifecycle` `ArcSwap` is the publication surface: the caller
-    /// constructs a stable `DerivedIndexQueryAdapter` over it before this call.
-    /// The `generation` token makes late publication a no-op after
-    /// abandonment. The `shutdown` signal is checked immediately after
     /// backend open returns. `reporter` receives the index-ahead rollback
-    /// evidence the worker detects against the restored tip.
     #[expect(clippy::too_many_arguments)]
     pub fn spawn_with_open(
         runtime: Arc<DerivedIndexRuntime>,
@@ -48,7 +39,6 @@ impl DerivedIndexWorker {
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
         let shutdown = shutdown.into();
-        // Compute the namespace key before moving `spec` into the thread.
         let namespace_key =
             NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace).ok();
         let runtime_for_thread = Arc::clone(&runtime);
@@ -103,22 +93,16 @@ impl DerivedIndexWorker {
         })
     }
 
-    /// Returns true if the worker thread has exited.
     pub fn is_finished(&self) -> bool {
         self.join_handle
             .as_ref()
             .is_some_and(std::thread::JoinHandle::is_finished)
     }
 
-    /// True when this worker's backend open was abandoned: a shutdown or the
-    /// open deadline detached the open thread, which may still touch the
-    /// store after the supervisor exits. `finish_worker` records it on the
-    /// worker's exit path, so read it only after `is_finished`.
     pub fn open_was_abandoned(&self) -> bool {
         self.open_abandoned.load(Ordering::Acquire)
     }
 
-    /// Requests shutdown and joins the worker thread.
     pub fn join(mut self) {
         self.runtime.request_shutdown();
         if let Some(handle) = self.join_handle.take() {
@@ -126,17 +110,10 @@ impl DerivedIndexWorker {
         }
     }
 
-    /// Detaches the worker thread so `Drop` will not join it. Used by the
-    /// abandonment path in `bounded_index_shutdown` when the worker is still
-    /// blocked past the deadline. The thread continues running; dropping the
-    /// `JoinHandle` detaches it.
     pub fn detach(&mut self) {
         self.join_handle = None;
     }
 
-    /// Poisons the namespace associated with this worker. Used by the
-    /// abandonment path so the namespace is permanently `Poisoned` and
-    /// subsequent claims are rejected.
     pub fn poison_namespace(&self) {
         if let Some(key) = &self.namespace_key {
             NAMESPACE_REGISTRY.poison(key, self.generation.id());

@@ -1,7 +1,3 @@
-//! Owner-local persistence for the fee estimator's confirmation history.
-//!
-//! CONTRACT: docs/policies/db-migration.md.
-
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -11,11 +7,8 @@ use crate::{FeeEstimator, Mempool};
 
 const HISTORY_FILE: &str = "fee-estimator-history.dat";
 const HISTORY_TEMP: &str = "fee-estimator-history.dat.tmp";
-/// Version-1 payloads larger than this bound are treated as corrupt.
 const MAX_HISTORY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Reads only bounded, ordinary files. Only a genuinely missing path permits
-/// creating a new history; all other failures must preserve the live entry.
 fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {}
@@ -39,7 +32,6 @@ fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Adopts persisted estimator history at node open, if any.
 pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     let path = data_dir.join(HISTORY_FILE);
     let bytes = match read_history(&path) {
@@ -77,13 +69,6 @@ pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     }
 }
 
-/// Persists the estimator history at shutdown while preserving rejected files.
-///
-/// Publish: stage with `create_new`, `sync_all`, rename over the live file,
-/// best-effort dir sync; any failure is a
-/// warning, never a failed shutdown. A live file this build cannot adopt is
-/// preserved until an explicitly authorized rebuild, including after shutdown.
-/// Stale staging files are removed even when the live history is rejected.
 pub fn save(data_dir: &Path, history_bytes: &[u8]) {
     let temp_path = data_dir.join(HISTORY_TEMP);
     let live_path = data_dir.join(HISTORY_FILE);
@@ -396,8 +381,6 @@ mod tests {
         let marker_path = temp_path.join("operator-data");
         std::fs::write(&marker_path, b"preserve me").expect("operator marker");
 
-        // Cleanup is best effort at shutdown; it must neither recursively
-        // delete a directory nor replace the RCV-09 rejected live file.
         save_pool(dir.path(), &seeded_pool());
         assert_eq!(std::fs::read(&path).expect("history survives"), rejected);
         assert_eq!(

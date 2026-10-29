@@ -1,10 +1,3 @@
-//! Whole-block resource limits, checked against rust-bitcoin serialization.
-//!
-//! BIP141 / Core 31.1 `GetBlockWeight` counts both the fixed header and the
-//! `CompactSize` transaction count. Configured capacity is inclusive:
-//! resource-skipped chunks contribute a fitting ancestor-closed prefix meeting
-//! the rate floor; finality and missing-ancestor skips contribute nothing.
-
 #[path = "support/fixtures.rs"]
 mod common;
 
@@ -23,13 +16,11 @@ use common::zero_fee_pool;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-/// Checks the 80-byte header and one-byte count against an independently parsed block.
 #[test]
 fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult {
     for segwit_active in [false, true] {
         let pool = zero_fee_pool();
         let snapshot = pool.mining_snapshot();
-        // Selection arm: empty live pool.
         {
             let mut context = context(segwit_active);
             let candidate = assemble_candidate(&context, &pool, &[0x51])?;
@@ -49,7 +40,6 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
                 ));
             }
         }
-        // Ordered arm: empty snapshot.
         {
             let mut context = context(segwit_active);
             let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
@@ -73,7 +63,6 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
     Ok(())
 }
 
-/// Both assemblers accept exact limits and account for the 252-to-253 count growth.
 #[test]
 fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult {
     for segwit_active in [false, true] {
@@ -85,7 +74,6 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
         for body_count in [251, 252] {
             let pool = build_pool(body_count, &witness)?;
             let snapshot = pool.mining_snapshot();
-            // Selection arm.
             {
                 let mut context = context(segwit_active);
                 let candidate = assemble_candidate(&context, &pool, &[0x51])?;
@@ -97,7 +85,6 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
                 assert_eq!(exact.transactions.len(), body_count);
                 assert_serialized_limits(&exact)?;
             }
-            // Ordered arm.
             {
                 let mut context = context(segwit_active);
                 let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
@@ -109,7 +96,6 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
                 assert_eq!(exact.transactions.len(), body_count);
                 assert_serialized_limits(&exact)?;
                 for field in ["weight", "size"] {
-                    // Isolate each dimension while leaving the other generous.
                     let mut limited = context.clone();
                     lower_limit(&mut limited, field);
                     assert!(matches!(
@@ -130,8 +116,6 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
     Ok(())
 }
 
-/// Count growth with a tightened limit fills the parent prefix and leaves the
-/// child and its descendant unselected.
 #[test]
 fn count_encoding_growth_fills_parent_prefix_and_skips_descendant() -> TestResult {
     for segwit_active in [false, true] {
@@ -147,8 +131,6 @@ fn count_encoding_growth_fills_parent_prefix_and_skips_descendant() -> TestResul
         let child_tx = make_tx(252, Some(parent_txid), &witness);
         let child_txid = child_tx.txid();
         insert_measured(&mut pool, child_tx, 1_000)?;
-        // 250 independent transactions plus this two-member fee chunk produce
-        // 253 total transactions including coinbase, growing CompactSize by 2.
         let mut context = context(segwit_active);
         let boundary_snapshot = pool.mining_snapshot();
         let boundary = assemble_ordered_candidate(&context, &boundary_snapshot, &[0x51])?;
@@ -180,9 +162,6 @@ fn count_encoding_growth_fills_parent_prefix_and_skips_descendant() -> TestResul
             let mut limited = context.clone();
             lower_limit(&mut limited, field);
             let selected = assemble_candidate(&limited, &pool, &[0x51])?;
-            // Whole chunk misses the tightened limit including count growth;
-            // parent prefix meets the floor parent-first, child and descendant
-            // omitted for missing ancestor.
             assert_eq!(selected.transactions.len(), 251);
             assert_eq!(selected.transactions[250].txid, parent_txid);
             assert_eq!(selected.transactions[250].depends, [0_u32; 0]);
@@ -203,7 +182,6 @@ fn count_encoding_growth_fills_parent_prefix_and_skips_descendant() -> TestResul
     Ok(())
 }
 
-/// Makes one capacity dimension one unit too small while leaving the other unconstrained.
 fn lower_limit(context: &mut CandidateContext, field: &str) {
     if field == "weight" {
         context.max_weight -= 1;
@@ -214,7 +192,6 @@ fn lower_limit(context: &mut CandidateContext, field: &str) {
     }
 }
 
-/// Compares reported totals with rust-bitcoin wire parsing and enforces configured limits.
 fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     let block = candidate.into_unsolved_block()?;
     let bytes = consensus_bytes(&block);
@@ -233,7 +210,6 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
         Network::Regtest.subsidy_halving_interval(),
     );
     let fees = candidate.transactions.iter().map(|tx| tx.fee).sum::<u64>();
-    // Greedy assembly claims selected fees; ordered assembly claims none.
     assert!(
         candidate.coinbase_value == subsidy + fees || candidate.coinbase_value == subsidy,
         "coinbase value is neither subsidy plus claimed fees nor bare subsidy"
@@ -241,7 +217,6 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     Ok(())
 }
 
-/// Supplies independent transactions with equal fees so count boundaries decide selection.
 fn build_pool(count: usize, witness: &Witness) -> Result<Mempool, Box<dyn Error>> {
     let mut pool = zero_fee_pool();
     for label in 1..=count {
@@ -258,7 +233,6 @@ fn insert_measured(pool: &mut Mempool, tx: Tx, fee: u64) -> Result<Txid, Box<dyn
     Ok(txid)
 }
 
-/// Creates a measured transaction spending `parent`, carrying `witness` on its input.
 fn make_tx(label: u16, parent: Option<Txid>, witness: &Witness) -> Tx {
     let mut hash = [0; 32];
     hash[..2].copy_from_slice(&label.to_le_bytes());

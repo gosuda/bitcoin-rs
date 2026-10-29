@@ -1,6 +1,3 @@
-//! Block-download service eligibility: the initial-block-download rule and the
-//! retained-window rule for pruned peers.
-
 use std::sync::Arc;
 
 use bitcoin::p2p::ServiceFlags;
@@ -10,7 +7,6 @@ use crate::download_window::{
     BlockDownloadPolicy, MIN_PEERS_FOR_FANOUT, PENDING_BUDGET, statically_fanout_eligible,
 };
 
-/// A pruned peer: witness relay plus `NODE_NETWORK_LIMITED`, no `NODE_NETWORK`.
 fn limited_peer(addr: PeerRemote, height: i32) -> PeerInfo {
     PeerInfo {
         services: ServiceFlags::WITNESS.to_u64() | ServiceFlags::NETWORK_LIMITED.to_u64(),
@@ -18,8 +14,6 @@ fn limited_peer(addr: PeerRemote, height: i32) -> PeerInfo {
     }
 }
 
-/// A full-history peer: `NODE_NETWORK | NODE_WITNESS`, the [`synthetic_peer`]
-/// default.
 fn full_peer(addr: PeerRemote, height: i32) -> PeerInfo {
     synthetic_peer(addr, height)
 }
@@ -32,7 +26,6 @@ fn policy(ibd: Arc<InitialBlockDownload>, requested_height: u32) -> BlockDownloa
     }
 }
 
-/// Everything the connection was sent so far.
 fn sent_messages(rx: &crate::test_support::MessageReceiver) -> Vec<Message> {
     rx.try_iter().collect()
 }

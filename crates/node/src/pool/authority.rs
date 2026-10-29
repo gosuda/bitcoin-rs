@@ -10,10 +10,6 @@ const KEY_HEX_LEN: usize = KEY_BYTES * 2;
 const MAX_KEY_FILE_BYTES: usize = 256;
 const MAX_KEY_FILE_READ: u64 = 257;
 
-/// Failure to load the SV2 Noise authority key.
-///
-/// Parse errors deliberately carry no input text so key material cannot reach
-/// logs through either `Display` or `Debug`.
 #[derive(Debug, Error)]
 pub(crate) enum AuthorityKeyError {
     #[error("could not open or read the SV2 authority key: {0}")]

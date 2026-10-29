@@ -1,8 +1,3 @@
-//! Side-branch retention in the header artifact (`recovery.md`, "Checkpoint
-//! header artifact and side branches"): valid side
-//! branches survive restart in learn order without moving the selected best
-//! tip; invalid subtrees stay excluded; active-only artifacts still load.
-
 use super::*;
 use bitcoin_rs_chain::NodeStatus;
 
@@ -15,8 +10,6 @@ struct Branched {
     invalid: Vec<Hash256>,
 }
 
-/// Appends a header under `parent` whose time differs from the active header
-/// at `height`, so it starts or extends a side branch.
 fn fork_header(tree: &mut BlockTree, parent: NodeId, height: u32, salt: u32) -> TestResult<NodeId> {
     let prev = BlockHash(tree.node(parent)?.hash);
     let mut header = mined_regtest_header(prev, height)?;
@@ -32,7 +25,6 @@ fn fork_header(tree: &mut BlockTree, parent: NodeId, height: u32, salt: u32) -> 
     Ok(accepted.ids[0])
 }
 
-/// Extends the active chain from `parent` with its canonical fixture header.
 fn active_header(tree: &mut BlockTree, parent: NodeId, height: u32) -> TestResult<NodeId> {
     let header = mined_regtest_header(BlockHash(tree.node(parent)?.hash), height)?;
     let accepted = accept_headers(
@@ -45,11 +37,6 @@ fn active_header(tree: &mut BlockTree, parent: NodeId, height: u32) -> TestResul
     Ok(accepted.ids[0])
 }
 
-/// Active chain 0..=6 (applied at its tip) whose side branches are learned
-/// between active extensions, so an active-first restore reorders slab
-/// positions: `a4-a5` off height 3 before active 5 (briefly the tip), `b5`
-/// off height 4 (equal work to `a5`, learned later), an invalid `c3-c4` off
-/// height 2, active 6, then `d6` off height 5 with the best tip's exact work.
 fn branched() -> TestResult<Branched> {
     let (mut tree, main4, _) = chain_with_applied_height(4, 4)?;
     let at = |tree: &BlockTree, height| {
@@ -86,7 +73,6 @@ fn branched() -> TestResult<Branched> {
     })
 }
 
-/// Valid side leaves in slab order: the stale-tip retainer's learn order.
 fn side_leaf_hashes(tree: &BlockTree, best: Hash256) -> TestResult<Vec<Hash256>> {
     let mut leaves = Vec::new();
     for id in tree.leaf_node_ids() {
@@ -170,8 +156,6 @@ fn valid_side_branches_survive_restart_in_learn_order() -> TestResult {
         &applied_tip,
     )?;
 
-    // Two restarts: the second republishes the restored tree, proving the
-    // retained branches persist across generations, not only once.
     let super::super::RestoredChainstate {
         tree,
         utxo,
@@ -234,8 +218,6 @@ fn active_only_artifact_still_loads_without_side_branches() -> TestResult {
     let best_hash = tree.node(fixture.best)?.hash;
     let mut ancestry = tree.ancestor_chain(fixture.best)?;
     ancestry.reverse();
-    // The version-1 layout, built from its specification rather than the
-    // writer: prefix with version 1, then the active headers and nothing else.
     let mut active_only = Vec::new();
     active_only.extend_from_slice(b"BRSHEAD\0");
     active_only.extend_from_slice(&headers::ACTIVE_ONLY_HEADER_VERSION.to_le_bytes());

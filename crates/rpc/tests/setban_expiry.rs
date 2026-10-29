@@ -1,12 +1,5 @@
-//! Finite setban expiry and rejection without state mutation.
-//!
-//! Contracts: SETBAN-EXPIRY-01 and SETBAN-ABSOLUTE-01 on `ban_until` in
-//! `crates/rpc/src/handlers/network.rs`. The permanent-ban sentinel is owned
-//! by `BannedSubnet` in `crates/p2p/src/subnet.rs`, not by timestamp arithmetic.
 //! The default of 24 hours is independently specified by Bitcoin Core v31.1
 //! `src/rpc/net.cpp::setban` and `src/banman.h::DEFAULT_MISBEHAVING_BANTIME`.
-//! Rust's `SystemTime::checked_add` defines the representability boundary;
-//! these tests do not claim full Bitcoin Core setban compatibility.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,9 +21,6 @@ fn only_ban(handler: &Handler) -> BannedSubnet {
 }
 
 fn assert_overflow_fixture() {
-    // u64::MAX exercises the parser's full accepted integer range. Prove
-    // that this fixture exceeds the platform's SystemTime range, rather
-    // than silently skipping the rejection contract on a different target.
     assert!(
         UNIX_EPOCH
             .checked_add(Duration::from_secs(u64::MAX))
@@ -61,8 +51,6 @@ fn overflow_does_not_create_a_permanent_ban() {
 fn overflow_preserves_existing_entries_and_order() -> Result<(), RpcError> {
     assert_overflow_fixture();
     for absolute in [false, true] {
-        // Exercise both replacement of an existing target and insertion of
-        // a new target. Compare full records, including reasons and times.
         for target in ["192.0.2.1", "203.0.113.99"] {
             let handler = handler();
             handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
@@ -93,8 +81,6 @@ fn relative_defaults_and_explicit_durations_remain_finite() -> Result<(), RpcErr
         assert!(handler.dispatch("setban", &params)?.is_null());
         let entry = only_ban(&handler);
         assert!(entry.banned_until.is_some());
-        // Derive from the stored creation instant, not a second wall-clock
-        // observation, so this assertion has no scheduling tolerance.
         assert_eq!(
             entry.banned_until,
             entry
@@ -107,9 +93,6 @@ fn relative_defaults_and_explicit_durations_remain_finite() -> Result<(), RpcErr
 
 #[test]
 fn absolute_expiry_uses_epoch_not_creation_time() -> Result<(), RpcError> {
-    // Keep the real-dispatch fixture in the future rather than giving it a
-    // fixed calendar expiry. The one-day lead is not a latency assertion;
-    // exact whole-second boundaries use a synthetic clock in the owner tests.
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|error| panic!("test clock must follow the epoch: {error}"))
@@ -131,9 +114,6 @@ fn absolute_expiry_uses_epoch_not_creation_time() -> Result<(), RpcError> {
     Ok(())
 }
 
-// SETBAN-ABSOLUTE-01 and Bitcoin Core v31.1 `src/rpc/net.cpp::setban`:
-// null defaults to zero; both zero and one are past absolute epoch seconds.
-// Invalid requests must preserve full records, not just the entry count.
 fn assert_past_absolute_expiry(handler: &Handler, target: &str) {
     for bantime in [json!(null), json!(0), json!(1)] {
         let before = handler.context().network.p2p.banned();

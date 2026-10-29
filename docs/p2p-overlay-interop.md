@@ -49,34 +49,7 @@ The test harness requires exact, reproducible external daemons. Any version or m
 
 ## 3. Test architecture and topology
 
-The test spins up a private multi-daemon network whose listeners all bind loopback. No overlay daemon uses public bootstrap: Tor runs a private 3-authority plus 3-relay TestingTorNetwork on loopback, and I2P runs seven i2pd routers on netid 77 with distinct 127.0.77.x addresses and a ZIP of their own RouterInfos. Any public FallbackDir, public reseed URL, or non-loopback port fails closed:
-
-```
-+--------------------------------------------------------------------------+
-| Workdir (ephemeral or user-specified)                                    |
-|                                                                          |
-|   +-------------------+              +-------------------------------+   |
-|   | Tor net (3/3/1)   |              | i2pd mesh (7, net77)         |   |
-|   | - ControlPort     |              | - SAM loopback               |   |
-|   | - SOCKS5 Backend  |              +---------------+---------------+   |
-|   +---------+---------+                              |                   |
-|             |                                        |                   |
-|             v                                        v                   |
-|   +---------+----------------------------------------+---------------+   |
-|   | Bounded Overlay Loopback Recorder Proxy (overlay_recorder.py)    |   |
-|   | - Listens on recorder SOCKS and SAM proxy ports                  |   |
-|   | - Sanitizes auth passwords and private SESSION DESTINATION lines |   |
-|   | - Records ATYP=0x03 length=62, SAM 3.3 handshakes and streams    |   |
-|   +---------+----------------------------------------+---------------+   |
-|             ^                                        ^                   |
-|             |                                        |                   |
-|   +---------+---------+              +---------------+---------------+   |
-|   | Node A (Listener) |              | Node B (Dialer)               |   |
-|   | - Onion service   |              | - Outbound proxy dialer       |   |
-|   | - I2P accept      |              | - Connects via Tor / I2P      |   |
-|   +-------------------+              +-------------------------------+   |
-+--------------------------------------------------------------------------+
-```
+The test spins up a private multi-daemon network whose listeners all bind loopback. No overlay daemon uses public bootstrap: Tor runs a private 3-authority plus 3-relay TestingTorNetwork on loopback, and I2P runs seven i2pd routers on netid 77 with distinct 127.0.77.x addresses and a ZIP of their own RouterInfos. Any public FallbackDir, public reseed URL, or non-loopback port fails closed.
 
 ### Components
 1. Tor process: starts with loopback `ControlPort` (cookie authentication enabled) and `SocksPort`.

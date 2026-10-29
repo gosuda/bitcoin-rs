@@ -17,7 +17,7 @@ use bitcoin_rs_e2e::helpers::{
 };
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 const BASE: &str = "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9";
 const COMMITMENT: &str = "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a";
@@ -25,7 +25,7 @@ const CORE_SNAPSHOT: &[u8] = include_bytes!("../../crates/utxo/tests/fixtures/co
 const CORE_BLOCKS: &str = include_str!("../../crates/utxo/tests/fixtures/core-v2/blocks200.json");
 
 fn core_blocks() -> Result<Vec<Block>> {
-    let hex: Vec<String> = serde_json::from_str(CORE_BLOCKS)?;
+    let hex: Vec<String> = sonic_rs::from_str(CORE_BLOCKS)?;
     hex.iter()
         .map(|raw| {
             let bytes =
@@ -46,9 +46,6 @@ fn admit_headers(node: &mut ProcessNode, blocks: &[Block]) -> Result<()> {
 }
 
 fn states(node: &mut ProcessNode) -> Result<Value> {
-    // Sending a historical block is not an acknowledgement that validation has
-    // released the lifecycle owner. Retry only this declared transient result,
-    // with one deadline shared by transport and polling; preserve other errors.
     let deadline = Instant::now() + bitcoin_rs_e2e::node::REQUEST_TIMEOUT;
     loop {
         match node.rpc_until("getchainstates", &json!([]), deadline) {
@@ -77,19 +74,16 @@ fn reject(node: &mut ProcessNode, path: &Path, code: i64) -> Result<()> {
     Ok(())
 }
 
-/// Monotonic microseconds, saturating; every phase below is an `Instant` delta.
 fn micros(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Linux reports `VmRSS` (now) and `VmHWM` (process high-water, including
-/// startup). Other platforms report null instead of inventing an equivalent.
 fn memory_sample(pid: u32) -> Value {
     if !cfg!(target_os = "linux") {
-        return Value::Null;
+        return Value::new();
     }
     let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-        return Value::Null;
+        return Value::new();
     };
     let field = |name: &str| {
         status.lines().find_map(|line| {
@@ -103,22 +97,18 @@ fn memory_sample(pid: u32) -> Value {
     json!({"vm_rss_kib": field("VmRSS:"), "vm_hwm_kib": field("VmHWM:")})
 }
 
-/// Sets one section of `snapshot-import-resources.json`, preserving the others,
-/// so import and restart samples of one run share a single evidence file.
 fn merge_resources(evidence: &Path, section: &str, value: Value) -> Result<()> {
     let path = evidence.join("snapshot-import-resources.json");
     let mut document: Value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Ok(bytes) => sonic_rs::from_slice(&bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
         Err(error) => return Err(error.into()),
     };
     document[section] = value;
-    std::fs::write(&path, serde_json::to_vec_pretty(&document)?)?;
+    std::fs::write(&path, sonic_rs::to_vec_pretty(&document)?)?;
     Ok(())
 }
 
-/// The node's own decode/verify and activation durations for the import it just
-/// served, read from its structured stderr under one bounded deadline.
 fn node_import_phases(node: &mut ProcessNode) -> Result<Value> {
     let log = node.evidence.join("stderr.log");
     node.wait_for(
@@ -129,7 +119,7 @@ fn node_import_phases(node: &mut ProcessNode) -> Result<Value> {
                 return Ok(None);
             };
             Ok(text.lines().rev().find_map(|line| {
-                let record: Value = serde_json::from_str(line).ok()?;
+                let record: Value = sonic_rs::from_str(line).ok()?;
                 (record["fields"]["message"] == "snapshot import phases")
                     .then(|| record["fields"].clone())
             }))
@@ -137,9 +127,6 @@ fn node_import_phases(node: &mut ProcessNode) -> Result<Value> {
     )
 }
 
-/// Time to the first successful lookup of an imported coin by txid, then one
-/// address-descriptor scan of the same set. The scan outcome is recorded, not
-/// asserted: only the txid lookup is a pass condition.
 fn first_indexed_queries(node: &mut ProcessNode, blocks: &[Block]) -> Result<Value> {
     let (outpoint, _) = funding_output(&blocks[0].txdata[0])?;
     let txid = outpoint.txid.to_string();
@@ -172,13 +159,10 @@ fn first_indexed_queries(node: &mut ProcessNode, blocks: &[Block]) -> Result<Val
         "gettxout_polls": polls,
         "scantxoutset_addr_micros": micros(scan_started.elapsed()),
         "scantxoutset_addr_error_code": scan["error"]["code"],
-        "scantxoutset_addr_unspents": scan["result"]["unspents"].as_array().map(Vec::len),
+        "scantxoutset_addr_unspents": scan["result"]["unspents"].as_array().map(sonic_rs::Array::len),
     }))
 }
 
-/// Extends the import resource proof in place with the same Core-produced
-/// artifact's phases. Raw single-run samples only: there is no baseline here,
-/// so nothing in this file is a comparison or a claimed gain.
 fn record_import_resources(
     node: &mut ProcessNode,
     snapshot: &Path,
@@ -211,7 +195,7 @@ fn record_import_resources(
     });
     std::fs::write(
         node.evidence.join("snapshot-import-resources.json"),
-        serde_json::to_vec_pretty(&evidence)?,
+        sonic_rs::to_vec_pretty(&evidence)?,
     )?;
     Ok(())
 }
@@ -255,9 +239,6 @@ fn produce_core_snapshot(snapshot_path: &Path) -> Result<(ProcessNode, Vec<Block
 }
 
 fn reach_partial_history(node: &mut ProcessNode, blocks: &[Block]) -> Result<()> {
-    // Hold back history after height 10 while serving the Core-generated
-    // foreground suffix. This proves the roles can advance independently and
-    // gives restart a deterministic nonterminal point without timing races.
     let allowed: BTreeSet<_> = blocks[..10]
         .iter()
         .chain(blocks[200..].iter())
@@ -267,7 +248,7 @@ fn reach_partial_history(node: &mut ProcessNode, blocks: &[Block]) -> Result<()>
     peer.offer_chain(blocks);
     peer.announce_headers(blocks, Instant::now() + Duration::from_secs(10))?;
     let deadline = Instant::now() + Duration::from_secs(60);
-    let mut last = Value::Null;
+    let mut last = Value::new();
     while Instant::now() < deadline {
         peer.pump(Duration::from_millis(100), &mut |peer, items| {
             for item in items {
@@ -298,8 +279,6 @@ fn reach_partial_history(node: &mut ProcessNode, blocks: &[Block]) -> Result<()>
     Ok(())
 }
 
-/// Produce the portable bytes anew with the pinned Core process, then prove
-/// foreground progress, partial historical validation, restart, and convergence.
 #[test]
 fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -341,8 +320,6 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     let restart_ready_micros = micros(restart_started.elapsed());
-    // Recovery reconstructs coins from the retained historical archive; it
-    // must not fabricate the durable cursor before that replay completes.
     let recovered = node.wait_for(
         "recover historical archive without a peer",
         Duration::from_secs(15),
@@ -368,7 +345,6 @@ fn core_snapshot_import_syncs_both_roles_and_recovers() -> Result<()> {
         }),
     )?;
 
-    // A genuine Core P2P peer supplies the remaining historical bodies.
     node.rpc("addnode", &json!([core.p2p_addr.to_string(), "onetry"]))?;
     node.wait_for(
         "snapshot historical convergence",
@@ -414,7 +390,6 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
     let mut node =
         ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &SpawnOptions::default(), datadir)?;
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
-    // A correct portable snapshot cannot bootstrap trusted headers by itself.
     reject(&mut node, &snapshot, -32603)?;
     assert_eq!(states(&mut node)?["chainstates"][0]["blocks"], 0);
     admit_headers(&mut node, &core_blocks()?)?;
@@ -453,18 +428,6 @@ fn invalid_core_snapshots_fail_without_activating() -> Result<()> {
         );
         assert_eq!(view["chainstates"][0]["blocks"], 0, "{name}: {view}");
     }
-    // The RPC argument is UTF-8, but canonicalization can resolve its symlink
-    // to a non-UTF-8 filename. Response serialization must still succeed after
-    // activation; it must not report a post-commit error.
-    //
-    // Only the `core-\xff.dat` entry name needs a filesystem that accepts
-    // arbitrary non-NUL filename bytes; others (APFS, ZFS with `utf8only`)
-    // fail it with EILSEQ. The datadir can sit on such a filesystem under a
-    // disk-backed `TMPDIR`, so the target lives in its own directory under
-    // `/tmp` while the UTF-8 `core200.dat` symlink stays in the datadir: a
-    // symlink's contents are not an entry name. `rename` cannot cross
-    // filesystems, hence copy then remove. This binding owns the directory and
-    // removes it at test end, after the node has stopped, or on an early error.
     #[cfg(unix)]
     let _non_utf8_target_dir = {
         use std::os::unix::{ffi::OsStringExt as _, fs::symlink};
@@ -503,18 +466,12 @@ fn ordinary_chainstate(node: &mut ProcessNode) -> Result<Value> {
     }))
 }
 
-/// The pinned base must belong to the best header chain, even while all
-/// competing bodies are deliberately withheld. Restoring that ancestry must
-/// allow a retry in the same process, without a failed-import lifecycle left over.
 #[test]
 fn snapshot_base_must_belong_to_best_header_chain() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
     let snapshot = artifacts.path().join("core200.dat");
     std::fs::write(&snapshot, CORE_SNAPSHOT)?;
     let blocks = core_blocks()?;
-    // A different height-200 header and its child beat the pinned branch.
-    // These are header-only candidates: valid PoW and timestamps are checked
-    // by both daemons; no corresponding block body is offered.
     let mut fork = blocks[199].header;
     fork.time += 1;
     fork.nonce = 0;
@@ -573,8 +530,6 @@ fn invalidated_snapshot_base_cannot_activate() -> Result<()> {
     let blocks = core_blocks()?;
     for kind in [Kind::Core, Kind::BitcoinRs] {
         let mut node = ProcessNode::spawn(kind)?;
-        // Keep the surviving parent fully validated so invalidation does not
-        // also need to fetch missing historical bodies on the ordinary chain.
         for block in &blocks[..199] {
             assert!(
                 node.rpc("submitblock", &json!([serialize_hex(block)]))?
@@ -592,9 +547,6 @@ fn invalidated_snapshot_base_cannot_activate() -> Result<()> {
     Ok(())
 }
 
-/// Refusing a nonempty pool must preserve the transaction and ordinary tip.
-/// Confirming it on a short active fork drains the pool while the original
-/// 200-header branch still wins, allowing an immediate import retry.
 #[test]
 fn nonempty_mempool_refuses_snapshot_without_losing_transaction() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -668,8 +620,6 @@ fn nonempty_mempool_refuses_snapshot_without_losing_transaction() -> Result<()> 
     Ok(())
 }
 
-/// An empty mempool can still contain operator fee adjustments for absent
-/// transactions. Snapshot activation must retain that overlay, as Core does.
 #[test]
 fn core_snapshot_import_preserves_absent_transaction_prioritisation() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -705,9 +655,6 @@ fn core_snapshot_import_preserves_absent_transaction_prioritisation() -> Result<
     Ok(())
 }
 
-/// Native policy: a resident orphan can become spendable solely through the
-/// imported UTXO set. Core does not globally retry orphans at this boundary.
-/// Unit tests own the retry-claim count and closed-fence timing assertions.
 #[test]
 fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -726,8 +673,6 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     submit_genesis(&mut node)?;
     mine_bare_blocks(&mut node, 1)?;
-    // A recent ordinary tip exits the process-wide IBD latch. The pinned
-    // headers then win by work, but their coinbase bodies remain unavailable.
     assert_eq!(
         node.rpc("getblockchaininfo", &json!([]))?["initialblockdownload"],
         false
@@ -763,8 +708,6 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
         NetworkMessage::Tx(orphan),
         Instant::now() + Duration::from_secs(2),
     )?;
-    // A missing-parent request is positive evidence that ingress classified
-    // and retained the peer's body as an orphan. Never supply that parent.
     node.wait_for(
         "held orphan parent requested",
         Duration::from_secs(15),
@@ -782,8 +725,6 @@ fn snapshot_retries_resident_orphan_with_newly_available_prevout() -> Result<()>
     let imported = node.rpc("loadtxoutset", &json!([snapshot]))?;
     assert_eq!(imported["tip_hash"], BASE);
     assert_eq!(imported["coins_loaded"], 200);
-    // Keep the announcing peer alive, but offer no more tx or block bodies.
-    // The normal ingress retry driver must use only the newly imported coin.
     node.wait_for(
         "snapshot orphan admitted",
         Duration::from_secs(15),
@@ -814,8 +755,6 @@ fn corrupt_snapshot_recovery_fails_closed() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     admit_headers(&mut node, &core_blocks()?)?;
     node.rpc("loadtxoutset", &json!([snapshot]))?;
-    // A crash leaves the committed import archive authoritative. A clean
-    // shutdown could legitimately publish a newer checkpoint superseding it.
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
@@ -869,18 +808,12 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
             "pre-existing {name} must be preserved"
         );
     }
-    // Model identifiable reservations left by an interrupted writer. Their
-    // payloads come from the real node's native archive, not a lookalike codec.
     let orphan_coins = archive.join(".coins.dat.12345.100.tmp");
     let orphan_headers = archive.join(".headers.dat.12345.101.tmp");
     std::fs::copy(archive.join("coins.dat"), &orphan_coins)?;
     std::fs::copy(archive.join("headers.dat"), &orphan_headers)?;
-    // Even an exact reservation-shaped name is not removable when its content
-    // belongs to the operator's portable artifact rather than native staging.
     let unknown_alias = archive.join(".coins.dat.12345.102.tmp");
     std::fs::hard_link(&source, &unknown_alias)?;
-    // Recover from the newly committed native archives, not a clean-shutdown
-    // checkpoint that could mask an invalid archive publication.
     let datadir = node.take_datadir()?;
     node.send_sigkill();
     drop(node);
@@ -899,9 +832,6 @@ fn core_import_preserves_source_hardlinked_to_archive_staging() -> Result<()> {
     node.stop()
 }
 
-/// The bitcoin-rs exporter against the pinned Core process: the exported file
-/// is byte-identical to the unmodified Core artifact for the same chain, an
-/// existing destination is refused, and a fresh Core datadir accepts the file.
 #[test]
 fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
     let artifacts = tempfile::tempdir()?;
@@ -920,7 +850,6 @@ fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
         assert_eq!(reply["error"]["code"], json!(code), "{reply}");
         Ok(())
     };
-    // Core 31.1 gives `type` no usable default, and only "latest" is served.
     refused(&mut node, json!([export]), -8)?;
     refused(&mut node, json!([export, "rollback"]), -8)?;
     assert!(!export.exists());
@@ -957,10 +886,6 @@ fn bitcoin_rs_export_is_accepted_by_a_fresh_core_node() -> Result<()> {
     core.stop()
 }
 
-/// A directory at the final headers name fails archive publication after the
-/// coin archive exists and before the durable head names either file. The
-/// durable head is the sole authority, so the killed node restarts as an
-/// ordinary single chainstate and the same Core artifact then imports.
 #[cfg(unix)]
 #[test]
 fn interrupted_core_activation_restarts_ordinary_and_retries() -> Result<()> {

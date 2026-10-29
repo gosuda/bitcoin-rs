@@ -1,4 +1,3 @@
-//! Package submission through the existing stamped admission and mutation owner.
 use crate::admission::{
     AdmissionFence, MAX_ADMISSION_RETRIES, batch_requests, resolve_mempool_inputs,
 };
@@ -12,34 +11,22 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitcoin_rs_primitives::{Tx, Txid, Wtxid, unix_time_secs};
 
-/// One submitted transaction's result. Identities follow the submitted order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageTxResult {
-    /// Accepted or already resident. Resident entries have no effective rate.
     Accepted {
-        /// Sigop-adjusted virtual size.
         vsize: u32,
-        /// Actual transaction fee, without operator deltas.
         base_fee: u64,
-        /// Modified fee rate of the newly accepted subpackage, in sat/kvB.
         effective_fee_rate: Option<u64>,
-        /// Witnesses of the subpackage this admission committed with.
         effective_includes: Vec<Wtxid>,
     },
-    /// The resident transaction has the same txid and another witness.
     DifferentWitness(Wtxid),
-    /// No membership was committed for this transaction by this attempt.
     Rejected(SubmitError),
-    /// Package-wide validation stopped before this transaction was evaluated.
     Unvalidated,
 }
 
-/// Scoped submitpackage results, including independently accepted members.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageSubmission {
-    /// A structural or combined-policy failure, if any.
     pub package_error: Option<AcceptanceRejectReason>,
-    /// One result per submitted transaction, in input order.
     pub tx_results: Vec<PackageTxResult>,
 }
 
@@ -50,18 +37,6 @@ struct PackageAttempt {
     package_error: Option<AcceptanceRejectReason>,
 }
 
-/// Orders an arbitrary-order child-with-parents package for submission.
-///
-/// The returned vec is topologically ordered (independent parents sorted by
-/// txid, child last) but deliberately NOT fully structure-checked: package
-/// weight, intra-package conflicts, and package order are validated by
-/// [`crate::package::check_structure`], which
-/// [`MempoolGateway::submit_package_with_times`] runs as the single
-/// authoritative structural gate (snapshot restore enters there directly, so
-/// the check cannot live here without charging local submission a duplicate
-/// pass). This function stays private with [`MempoolGateway::submit_local_package`]
-/// as its only caller, so its output always flows through that gate and can
-/// never reach admission unchecked.
 fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     if txs.is_empty() || txs.len() > crate::standardness::MAX_PACKAGE_COUNT {
         return Err(AcceptanceRejectReason::PackageCount.into());
@@ -97,13 +72,6 @@ fn ordered(mut txs: Vec<Tx>) -> Result<Vec<Tx>, SubmitError> {
     Ok(txs)
 }
 
-/// The ancestors before the last member (the subject) in topological order,
-/// stable over the sender's order, and the subject last.
-///
-/// BIP331 lets an `ancpkginfo` list ancestors in any order. A package that
-/// cannot be ordered this way (too many members, or an ancestor that spends
-/// the subject) is returned unchanged so [`crate::package::check_structure`]
-/// reports it as before.
 fn ancestors_in_topological_order(txs: &[Tx]) -> alloc::borrow::Cow<'_, [Tx]> {
     use alloc::borrow::Cow;
     let Some((_, ancestors)) = txs.split_last() else {
@@ -138,11 +106,6 @@ fn ancestors_in_topological_order(txs: &[Tx]) -> alloc::borrow::Cow<'_, [Tx]> {
     Cow::Owned(order.into_iter().map(|index| txs[index].clone()).collect())
 }
 
-/// BIP331 ancestor shape over a package that already passed
-/// [`crate::package::check_structure`]: the last transaction is the subject
-/// and every other member is a transitive ancestor of it. Walking from the
-/// subject backwards, a member is admissible only when something later spends
-/// it, directly or through another member.
 fn check_ancestor_shape(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
     let Some(subject) = txs.last() else {
         return Err(AcceptanceRejectReason::PackageCount);
@@ -159,9 +122,6 @@ fn check_ancestor_shape(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
 }
 
 impl MempoolGateway {
-    /// Core's individual-then-aggregate submission for a singleton or 1p1c.
-    /// Wider packages and replacement are explicitly unsupported. The atomic
-    /// native operation remains the sole owner of preparation and commit.
     #[expect(
         clippy::too_many_lines,
         reason = "keep Core's individual pass, atomic reconsideration and final membership results in one auditable sequence"
@@ -177,8 +137,6 @@ impl MempoolGateway {
             return Err(AcceptanceRejectReason::PackageUnsupported.into());
         }
         let structure_error = crate::package::check_structure(txs).err();
-        // Core classifies every unordered pair — duplicates included — as a
-        // topology violation; run this check before the structural verdicts.
         if txs.len() == 2
             && (!txs[1]
                 .inputs
@@ -204,9 +162,6 @@ impl MempoolGateway {
         };
         let mut reconsider = Vec::new();
         let mut quit_early = false;
-        // Pinned Core AcceptPackage first commits individually admissible
-        // members. A valid parent survives a child's rejection; a low-fee
-        // parent remains absent until its paying child passes the atomic plan.
         for (index, tx) in txs.iter().enumerate() {
             let row = match self.submit_package_attempt(
                 core::slice::from_ref(tx),
@@ -261,7 +216,6 @@ impl MempoolGateway {
                         result.package_error = Some(AcceptanceRejectReason::MissingEphemeralSpends);
                     }
                     for (index, row) in reconsider.into_iter().zip(attempt.results) {
-                        // Core retains the individual error for unfinished rows.
                         if row != PackageTxResult::Unvalidated {
                             result.tx_results[index] = row;
                         }
@@ -274,8 +228,6 @@ impl MempoolGateway {
                 }
             }
         }
-        // Concurrent admissions may have evicted an earlier independent
-        // success. Never report it as currently resident after it disappeared.
         let pool = self.read();
         for (tx, row) in txs.iter().zip(&mut result.tx_results) {
             if !matches!(
@@ -295,11 +247,6 @@ impl MempoolGateway {
         Ok(result)
     }
 
-    /// Atomically submits a native child-with-independent-parents package,
-    /// accepting arbitrary input order. No replacement or capacity eviction;
-    /// new members pay the aggregate relay/pressure floor. Resident and
-    /// positively confirmed members contribute no fees. The RPC instead uses
-    /// `submit_rpc_package`'s individual-first result contract.
     pub fn submit_local_package(
         &self,
         txs: Vec<Tx>,
@@ -324,16 +271,6 @@ impl MempoolGateway {
         self.submit_package_atomic(txs, AdmissionOrigin::from(origin), max_rate, time, chain)
     }
 
-    /// Atomically submits a BIP331 ancestor package relayed by `source`: the
-    /// subject last, preceded by its unconfirmed ancestors. BIP331 does not
-    /// require the sender to sort the ancestors, so they are put in
-    /// topological order first, keeping the sender's order between
-    /// independent members; the subject stays last. Members are never
-    /// submitted individually, and nothing is replaced or evicted for
-    /// capacity. Structure and shape failures leave the pool, observers and
-    /// the orphan and reject caches untouched. An admission refusal commits
-    /// nothing and hands only the individually refused members, in dependency
-    /// order, to the existing bounded orphan hold or reject cache.
     pub fn submit_peer_package(
         &self,
         txs: &[Tx],
@@ -347,21 +284,11 @@ impl MempoolGateway {
         self.submit_package_atomic(&txs, AdmissionOrigin::Peer(source), None, |_| time, chain)
     }
 
-    /// The resident BIP331 ancestor package of `tip`: its unconfirmed
-    /// ancestors in topological order, then `tip`. `None` when `tip` is not
-    /// resident or the package would exceed
-    /// [`MAX_PACKAGE_COUNT`](crate::standardness::MAX_PACKAGE_COUNT)
-    /// transactions. Orphans and recent rejects are never served.
     #[must_use]
     pub fn ancestor_package_wtxids(&self, tip: Wtxid) -> Option<Vec<Wtxid>> {
         self.read().ancestor_package_wtxids(&tip)
     }
 
-    /// The resident bodies of `wtxids`, in the requested order and from one
-    /// pool read view, all or none: `None` when any wtxid is not resident.
-    /// Orphans, recent rejects and the reconstruction ring are never served.
-    /// The bodies are the pool's own `Arc<Tx>`, so no transaction is cloned.
-    /// The caller bounds `wtxids.len()`; duplicates yield duplicate handles.
     #[must_use]
     pub fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
         let pool = self.read();
@@ -372,8 +299,6 @@ impl MempoolGateway {
         Some(bodies)
     }
 
-    /// The one atomic owner behind local and peer package submission. The
-    /// caller has already verified the package's structure and shape.
     fn submit_package_atomic(
         &self,
         txs: &[Tx],
@@ -482,8 +407,6 @@ impl MempoolGateway {
             for request in &mut requests {
                 request.time = time(&request.tx);
             }
-            // Positive confirmed membership is a chain fact, so revalidate its
-            // generation and policy stamp just like both acceptance and refusal.
             let pending: Vec<_> = requests
                 .iter()
                 .map(|request| (*request.tx).clone())
@@ -523,9 +446,6 @@ impl MempoolGateway {
                     })
                     .collect();
                 let entries = crate::package::package_entries(&requests, &prepared);
-                // Modified fees decide effective rates; base fees miss the
-                // deltas the pool applies (standardness.rs). A failed lookup
-                // nulls the rates rather than reporting a base-fee quote.
                 let entry_fees: Option<Vec<_>> = entries
                     .iter()
                     .map(|entry| {
@@ -542,8 +462,6 @@ impl MempoolGateway {
                     entry_fees,
                 )
             };
-            // Unlike a single preview, even one new package member must use
-            // aggregate-package policy, including ephemeral-spend checks.
             let aggregate_error = plan.as_ref().err().copied();
             let facts = crate::package::finish_package(
                 &pending,
@@ -560,24 +478,15 @@ impl MempoolGateway {
                 .or_else(|| {
                     facts.results.iter().zip(&prepared).find_map(|(row, job)| {
                         row.reject_reason.map(|reason| {
-                            // Preview facts intentionally collapse consensus
-                            // errors. Submission retains the owner's verdict
-                            // for this row; package-only checks remain policy.
                             job.rejection
                                 .map_or(crate::AdmitError::Policy(reason), |(error, _)| error)
                         })
                     })
                 });
-            // Validated keys are carried out before the writer runs; the
-            // atomic commit below decides whether any of them is inserted,
-            // all or nothing, outside the pool write lock.
             let cache_keys: Vec<_> = prepared
                 .iter()
                 .filter_map(|job| job.script_cache_key)
                 .collect();
-            // One atomic commit enters the pool as a single subpackage: Core
-            // reports every committed member at the package's aggregate rate
-            // and lists the whole package in `effective-includes`.
             let effective_rate = entry_fees.as_ref().and_then(|fees| {
                 let (fee, size): (i128, u64) =
                     fees.iter()
@@ -620,8 +529,6 @@ impl MempoolGateway {
                         Some(stamp),
                     )?;
                     if let Some(error) = verdict {
-                        // A peer refusal reaches the bounded lifecycle in this
-                        // same revalidated interval; other origins record nothing.
                         self.record_peer_package_refusal(pool, &requests, &prepared);
                         return Err(error);
                     }
@@ -640,9 +547,6 @@ impl MempoolGateway {
                             cache.insert(wtxid, flags);
                         }
                     }
-                    // Only the newly submitted members: residents filtered out
-                    // of `pending` above were never admitted here, and expiry
-                    // must not fail the package over them.
                     let admitted: Vec<_> = pending.iter().map(Tx::txid).collect();
                     self.check_admitted_residency(origin, AdmissionFence::Stable, &admitted)?;
                     return Ok(PackageAttempt {
@@ -660,7 +564,6 @@ impl MempoolGateway {
                         crate::AdmitError::Policy(reason) => SubmitError::Policy(reason),
                         _ => SubmitError::Consensus,
                     };
-                    // A package floor failure is attributed to the paying child.
                     if facts.package_error == Some(AcceptanceRejectReason::MinRelayFeeNotMet) {
                         if let Some(index) = txs.iter().position(|tx| {
                             pending.last().is_some_and(|last| last.txid() == tx.txid())
@@ -668,8 +571,6 @@ impl MempoolGateway {
                             results[index] = PackageTxResult::Rejected(error);
                         }
                     }
-                    // A singleton always has an individual refusal, even when
-                    // the atomic package planner supplies the reason.
                     if txs.len() == 1 {
                         results[0] = PackageTxResult::Rejected(error);
                     }
@@ -700,7 +601,6 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// Records every published envelope in order.
     #[derive(Default)]
     struct Seen(parking_lot::Mutex<Vec<MutationEnvelope>>);
 
@@ -738,7 +638,6 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0)
     }
 
-    /// A chain that confirms each tagged coin at 100,000 sat behind an anyone-can-spend script.
     fn funded(tags: &[u32]) -> Coins {
         Coins(
             tags.iter()
@@ -765,12 +664,10 @@ mod tests {
         }
     }
 
-    /// A version-2 spend of confirmed coins behind the bare anyone-can-spend script.
     fn spend_coins(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
         spend_with(inputs, outputs, &Witness::new())
     }
 
-    /// A version-2 spend of outputs made by `output`, which need the script as witness.
     fn spend_outputs(inputs: &[OutPoint], outputs: &[u64]) -> Tx {
         spend_with(inputs, outputs, &Witness::from_stack(vec![vec![0x51]]))
     }
@@ -812,7 +709,6 @@ mod tests {
         txs.iter().map(|tx| Hash256::from(tx.txid())).collect()
     }
 
-    /// A zero-conflict chain of `length` transactions, each paying 1,000 sat.
     fn chain_of(length: usize) -> Vec<Tx> {
         let mut txs: Vec<Tx> = Vec::with_capacity(length);
         let mut value = 100_000_u64;
@@ -840,7 +736,6 @@ mod tests {
         let subject = spend_outputs(&[OutPoint::new(parent.txid(), 0)], &[96_000]);
         let now = unix_time_secs();
 
-        // The unpaid prefix fails the aggregate floor alone. Nothing about it is cached.
         assert_eq!(
             gateway.submit_peer_package(
                 &[grandparent.clone(), parent.clone()],
@@ -880,7 +775,6 @@ mod tests {
         let outsider = spend_coins(&[coin(2)], &[100_000]);
         assert_eq!(gateway.ancestor_package_wtxids(outsider.wtxid()), None);
 
-        // Bodies come back in the requested order, repeats included, all or none.
         let requested = [subject.wtxid(), grandparent.wtxid(), subject.wtxid()];
         let bodies = gateway
             .resident_package(&requested)
@@ -900,7 +794,6 @@ mod tests {
                 .is_some_and(|bodies| bodies.is_empty())
         );
 
-        // A replay finds every member resident: no mutation and no new envelope.
         assert!(
             gateway
                 .submit_peer_package(&package, source(), now, &chain)?
@@ -1029,7 +922,6 @@ mod tests {
         assert_eq!(gateway.recent_rejects_count(), 1);
         assert_eq!(gateway.orphan_count(), 0);
 
-        // The parent rolled back with its child, so the valid package still commits whole.
         let result = gateway.submit_peer_package(&[parent, child], source(), now, &chain)?;
         assert_eq!(result.len(), 2);
         assert_eq!(seen.0.lock().len(), 1);
@@ -1060,12 +952,9 @@ mod tests {
         assert_eq!(gateway.orphan_count(), 1);
         assert_eq!(gateway.recent_rejects_count(), 0);
         assert!(gateway.have_tx(Hash256::from(orphaned.wtxid()), true));
-        // An orphan is never served as part of an ancestor package or its bodies.
         assert_eq!(gateway.ancestor_package_wtxids(orphaned.wtxid()), None);
         assert!(gateway.resident_package(&[orphaned.wtxid()]).is_none());
 
-        // Rows are judged in dependency order: the first refusal wins, and a
-        // later member that was never evaluated is not cached.
         let first = spend_outputs(&[coin(9)], &[100_000]);
         let second = spend_outputs(&[OutPoint::new(first.txid(), 0)], &[200_000]);
         let fresh = self::gateway(0, None);
@@ -1099,7 +988,6 @@ mod tests {
             "ancestors then the tip"
         );
 
-        // One more descendant makes the tip's package 26 deep: nothing is served.
         let next = spend_outputs(&[OutPoint::new(tip.txid(), 0)], &[74_000]);
         let extended = gateway.submit_peer_package(
             std::slice::from_ref(&next),

@@ -4,7 +4,7 @@ use bitcoin::hex::FromHex as _;
 use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::helpers::funding_address;
 use bitcoin_rs_e2e::{Kind, ProcessNode};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use super::start;
 
@@ -119,8 +119,6 @@ fn compare_confirmed_views(
         )
         .expect("all summary fields retained");
     }
-    // Coinbase has neither an undo fee nor input prevout. This comparison does
-    // not certify the separately unimplemented non-coinbase undo projection.
     compare_reply(
         "nested coinbase transaction",
         &core_two["tx"][0],

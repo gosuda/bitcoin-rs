@@ -1,25 +1,9 @@
-//! Live Bitcoin Core differential verifier — the env-gated cut lane.
-//!
-//! NOT part of the default suite: requires a real `bitcoind` driven by
-//! `scripts/run-p2p-core-interop.sh`, which starts Bitcoin Core (regtest),
-//! brings up a bitcoin-rs node, syncs them over the P2P v1 transport, diffs
-//! observable chain-identity RPCs, syncs two fresh bitcoin-rs nodes from Core
-//! over BIP324 v2 (one dials Core, Core dials the other), and writes an
-//! evidence JSON.
-//!
-//! Run via:
-//! ```text
-//! scripts/run-p2p-core-interop.sh --bitcoind-command "$(scripts/install-bitcoind.sh)"
-//! ```
-//! or directly with `--ignored --nocapture` after setting
-//! `P2P_CORE_INTEROP_EVIDENCE=<path to evidence json>`.
-
 #![cfg(unix)]
 
 use std::path::PathBuf;
 
 use bitcoin_rs_primitives::USER_AGENT;
-use serde_json::Value;
+use sonic_rs::{JsonValueTrait, Value};
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
 const SCHEMA: &str = "bitcoin-rs-core-differential-v4";
@@ -51,7 +35,6 @@ fn evidence_bool(value: &Value, key: &str) -> Result<bool, LiveError> {
         .ok_or_else(|| main_error(format!("evidence missing `{key}`")))
 }
 
-/// Parses Core's user agent into its dotted version.
 fn parse_core_subversion(subversion: &str) -> Option<&str> {
     let rest = subversion.strip_prefix("/Satoshi:")?;
     let rest = rest.strip_suffix('/')?;
@@ -74,7 +57,6 @@ fn parse_core_subversion(subversion: &str) -> Option<&str> {
     Some(version)
 }
 
-/// `31.1` matches `31.1` and `31.1.0`; it does not match `31.10.0` or `31.2.0`.
 fn version_is_pinned_line(parsed: &str, pinned: &str) -> bool {
     let parsed: Vec<&str> = parsed.split('.').collect();
     let pinned: Vec<&str> = pinned.split('.').collect();
@@ -88,7 +70,7 @@ fn load_evidence() -> Result<Value, LiveError> {
         )
     })?;
     let raw = std::fs::read_to_string(PathBuf::from(&path))?;
-    Ok(serde_json::from_str(&raw)?)
+    Ok(sonic_rs::from_str(&raw)?)
 }
 
 fn assert_pinned_core_and_network(evidence: &Value) -> Result<(), LiveError> {
@@ -233,11 +215,6 @@ fn pinned_core_line_rejects_31_10() {
     ));
 }
 
-/// The BIP152 lane: near-tip compact fetches against live Core must show
-/// completed reconstructions, at least one `getblocktxn` recovery, at least
-/// one bounded-missing full-block fallback, and a raw-probe proof that the
-/// serving side answers `cmpctblock`/`blocktxn` and disconnects on
-/// out-of-range `getblocktxn` indexes.
 fn assert_bip152_relay(evidence: &Value) -> Result<(), LiveError> {
     let compact = evidence
         .get("compact")
@@ -296,8 +273,6 @@ fn assert_bip152_relay(evidence: &Value) -> Result<(), LiveError> {
     Ok(())
 }
 
-/// Compare the actual P2P frames emitted by pinned Core and bitcoin-rs for
-/// equivalent peers, then repeat the comparison across a live reorg.
 fn assert_block_announcements(evidence: &Value) -> Result<(), LiveError> {
     let announcements = evidence
         .get("block_announcements")
@@ -346,10 +321,6 @@ fn assert_block_announcements(evidence: &Value) -> Result<(), LiveError> {
     Ok(())
 }
 
-/// BIP324 against live Core: bitcoin-rs dialing Core and Core dialing
-/// bitcoin-rs both run v2, both ends report the same session id, and each v2
-/// connection answers a ping and carries a full header and block sync. The
-/// main node, with v2 off, stays on v1 with v2 Core.
 fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
     let transports = evidence
         .get("transports")
@@ -427,8 +398,6 @@ fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
         );
     }
 
-    // The byte counts are a recorded measurement, not a bound: only their
-    // presence and transports are checked.
     let cost = transports
         .get("ibd_cost")
         .ok_or_else(|| main_error("transports missing `ibd_cost`"))?;
@@ -445,7 +414,6 @@ fn assert_transports(evidence: &Value) -> Result<(), LiveError> {
             assert!(evidence_u64(run, key)? > 0, "ibd_cost.{transport}.{key}");
         }
     }
-    // The v2 run is the rs_to_core_v2 dialer, whose tip is checked above.
     let v1_cost = cost
         .get("v1")
         .ok_or_else(|| main_error("ibd_cost missing `v1`"))?;

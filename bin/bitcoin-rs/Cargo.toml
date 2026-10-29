@@ -28,7 +28,7 @@ bitcoin-rs-consensus.workspace = true
 [dev-dependencies]
 thiserror.workspace = true
 parking_lot.workspace = true
-serde_json.workspace = true
+sonic-rs.workspace = true
 tempfile.workspace = true
 bitcoin.workspace = true
 bitcoin-rs-primitives.workspace = true

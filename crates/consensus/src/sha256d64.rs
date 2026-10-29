@@ -1,14 +1,9 @@
 //! Eight-way `SHA256d` for fixed 64-byte Merkle parent inputs.
 
-/// Number of independent 64-byte messages one [`Avx2Sha256d64`] transform
-/// hashes.
 pub(crate) const LANES: usize = 8;
 
-/// Proof that the current x86-64 process can execute AVX2 instructions.
 pub(crate) struct Avx2Sha256d64(());
 
-/// Detects AVX2 together with the operating-system extended-state support that
-/// Rust's feature detector requires.
 #[must_use]
 pub(crate) fn detect_avx2() -> Option<Avx2Sha256d64> {
     #[cfg(target_arch = "x86_64")]
@@ -21,13 +16,11 @@ pub(crate) fn detect_avx2() -> Option<Avx2Sha256d64> {
 }
 
 impl Avx2Sha256d64 {
-    /// Hashes eight independent 64-byte messages with SHA256(SHA256(message)).
     pub(crate) fn transform_8way(&self, input: &[[u8; 64]; 8], output: &mut [[u8; 32]; 8]) {
         let Self(()) = self;
         #[cfg(target_arch = "x86_64")]
         {
             // SAFETY: the token has no public constructor and `detect_avx2`
-            // creates it only after Rust verifies CPU and OS AVX2 support.
             unsafe { x86_64::transform_8way(input, output) };
         }
 
@@ -146,19 +139,14 @@ mod x86_64 {
         // SAFETY: the capability token proves this target-feature boundary.
         let mut state = unsafe { initial_state() };
         // SAFETY: this function has AVX2 enabled and both arrays have the exact
-        // fixed widths required by the compression function.
         unsafe { compress(&mut state, &first_block) };
 
-        // A 64-byte message needs a second SHA-256 block containing 0x80,
-        // zero padding, and the big-endian bit length 512 in word 15.
         let mut first_padding = [zero; 16];
         first_padding[0] = _mm256_set1_epi32(0x8000_0000_u32.cast_signed());
         first_padding[15] = _mm256_set1_epi32(512);
         // SAFETY: the same AVX2 and fixed-array contract applies.
         unsafe { compress(&mut state, &first_padding) };
 
-        // The second SHA-256 hashes the 32-byte first digest. Its only block
-        // contains eight digest words, 0x80 in word 8, and bit length 256.
         let mut second_block = [zero; 16];
         second_block[..8].copy_from_slice(&state);
         second_block[8] = _mm256_set1_epi32(0x8000_0000_u32.cast_signed());
@@ -204,8 +192,6 @@ mod x86_64 {
     #[target_feature(enable = "avx2")]
     unsafe fn compress(state: &mut [__m256i; 8], block: &[__m256i; 16]) {
         // SAFETY: every helper below requires only AVX2, which this function's
-        // target-feature contract provides. All array indices are bounded by
-        // the fixed SHA-256 schedule and state sizes.
         unsafe {
             let zero = _mm256_setzero_si256();
             let mut schedule = [zero; 64];

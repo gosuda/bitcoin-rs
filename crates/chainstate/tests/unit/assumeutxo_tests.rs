@@ -1,4 +1,3 @@
-//! ARCH-07b: verified installation, isolated replay, and fail-closed convergence.
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -187,7 +186,6 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
 fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult {
     let fixture = Fixture::new()?;
     let mut bytes = fixture.snapshot.clone();
-    // Snapshot header (52), transaction record header (45), vout height offset (12).
     let offset = 52 + 45 + 12;
     let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
     assert!(height <= fixture.pinned.height);
@@ -211,8 +209,6 @@ fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult 
     Ok(())
 }
 
-// Core 31.1 ActivateSnapshot rejects an invalid base and any base outside
-// m_best_header's ancestry before making the snapshot chainstate active.
 #[test]
 fn snapshot_rejects_invalid_base_and_descendant_before_persistence() -> TestResult {
     for invalid_height in [2, 1] {
@@ -285,9 +281,6 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
         fixture.active.clone(),
         dir.path().to_path_buf(),
     )?;
-    // Authenticate the candidate before changing header selection. Invoke the
-    // final installation owner directly so a manager-only precheck cannot
-    // replace its guarded best-header admission rule.
     let loaded = fixture.load()?;
     assert_eq!(
         (loaded.tip_hash, loaded.height),
@@ -348,8 +341,6 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
     );
     assert!(!fixture.active.is_closed_for_recovery());
 
-    // Invalidating the competing branch restores the pinned ancestry; an
-    // operational refusal must not poison the next legitimate activation.
     fixture
         .active
         .block_tree
@@ -372,8 +363,6 @@ fn snapshot_rejects_competing_best_headers_and_allows_valid_retry() -> TestResul
 fn snapshot_rejects_base_above_shorter_best_work_header_chain() -> TestResult {
     let fixture = Fixture::new()?;
     let mut harder = competing_snapshot_headers()?.remove(0);
-    // Tree-level work-order fixture: this harder declared target makes a
-    // shorter branch win. It does not claim regtest difficulty admission.
     harder.header.bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x2000_ffff);
     harder.header.nonce = 0;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut harder)?;
@@ -457,11 +446,6 @@ fn snapshot_accepts_base_below_best_header_tip_on_same_ancestry() -> TestResult 
     Ok(())
 }
 
-// These fixtures exercise the shared installation owner with unequal-work
-// forks. Coin contents come from ordinarily applied regtest blocks; changing
-// only the declared header target does not change their coinbase transactions.
-// Every replacement header meets its declared target, but this is not a claim
-// that regtest's fixed contextual difficulty would admit those replacements.
 fn snapshot_work_branch(
     height: u32,
     bits: u32,
@@ -685,7 +669,6 @@ fn snapshot_accepts_lower_base_with_more_work_than_applied_tip() -> TestResult {
 
 #[test]
 fn snapshot_refuses_work_comparison_when_durable_and_applied_tips_differ() -> TestResult {
-    // Isolate identity, height and count mismatches, including equal hashes.
     for (change_hash, height_delta, count_delta) in [(true, 0, 0), (false, 1, 0), (false, 0, 1)] {
         let fixture = snapshot_work_fixture(2, 0x207f_ffff, 1, 0x207f_ffff)?;
         let applied = fixture
@@ -912,7 +895,6 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
     }
     let manager = fixture.manager(dir.path())?;
     let before = fixture.active.durable_head.load()?;
-    // This is an ordinary user refusal, not an unresolved storage mutation.
     assert!(matches!(
         {
             let loaded = fixture.load()?;
@@ -1192,8 +1174,6 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                         reader.progress(Network::Regtest, bitcoin_rs_primitives::unix_time_secs());
                     let _ = sent.send(progress);
                 });
-                // A storage callback may wait on slow I/O while public readers
-                // continue to describe the previously committed chainstate.
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();
@@ -1247,28 +1227,19 @@ fn lifecycle_report_refuses_contention_without_waiting_for_the_transition() -> T
     Ok(())
 }
 
-/// Row 10: activation staging proof — the witnessed staging encode mints and
-/// the durable `Validating` commit stages it into `pending_activation_mint`.
-/// Linearizability: lifecycle lock orders staging; idempotent: take clears.
 #[test]
 fn activation_stages_witness_only_after_durable_commit() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
-    // No mint before activation.
     assert!(manager.take_pending_activation_witness().is_none());
     fixture.activate(&manager)?;
-    // Full success stages exactly one witness; take clears it.
     let staged = manager.take_pending_activation_witness();
     assert!(staged.is_some(), "activation must stage a witness");
     assert!(manager.take_pending_activation_witness().is_none());
     Ok(())
 }
 
-/// Row 11: activation failure mints nothing, a stale witness can never pair
-/// with a later call. Covers pre-write hash refusal plus post-write durable
-/// commit failure after the staging write minted. A later restart mints from
-/// durable state instead. Snapshot isolation: commit orders staging.
 #[test]
 fn activation_failure_leaves_no_staged_witness() -> TestResult {
     let fixture = Fixture::new()?;
@@ -1322,13 +1293,6 @@ fn lifecycle_progress_omits_missing_and_unauthenticated_counts() -> TestResult {
     Ok(())
 }
 
-/// P1 acceptance row 11 (C4 offer discipline at the manager seam): only full
-/// activation success stages a witness. The take-and-drop below exercises the
-/// exact manager seam the post-start offer path calls on every error path
-/// (`SnapshotControl::activate` takes and drops; that node-crate invocation
-/// itself is not executable from these chainstate tests and is reported as
-/// the residual gap): once taken, nothing survives for a later call to pair
-/// with. Restart recovery still mints from the durable `Validating` state.
 #[test]
 fn activation_offer_only_on_full_success() -> TestResult {
     let fixture = Fixture::new()?;
@@ -1336,15 +1300,11 @@ fn activation_offer_only_on_full_success() -> TestResult {
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
 
-    // Settlement failure after manager success: take and drop the staged
-    // witness. The take proves staging happened; the drop proves nothing
-    // survives for a later call to pair with.
     let staged = manager.take_pending_activation_witness();
     assert!(staged.is_some(), "activation must stage a witness");
     let _ = staged;
     assert!(manager.take_pending_activation_witness().is_none());
 
-    // A later activation call is refused and stages nothing.
     let retry = fixture.load()?;
     assert!(matches!(
         manager.activate_pinned_snapshot(retry.set, retry.tip_hash, &fixture.pinned),
@@ -1352,8 +1312,6 @@ fn activation_offer_only_on_full_success() -> TestResult {
     ));
     assert!(manager.take_pending_activation_witness().is_none());
 
-    // Restart recovery still mints from the durable `Validating` state,
-    // without the dropped witness.
     drop(manager);
     let reopened = fixture.manager(dir.path())?;
     assert!(matches!(

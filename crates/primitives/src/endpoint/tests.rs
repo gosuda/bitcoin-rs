@@ -2,7 +2,6 @@ use super::*;
 
 #[test]
 fn overlay_destinations_have_canonical_checked_encodings() {
-    // RFC4648 encoding plus Python hashlib.sha3_256, independent of this codec.
     let onion = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion:8333";
     let endpoint = onion.parse::<PeerEndpoint>().expect("Tor v3 vector");
     assert_eq!(endpoint.address(), PeerAddress::Onion([0; 32]));
@@ -28,9 +27,9 @@ fn overlay_destinations_have_canonical_checked_encodings() {
     let i2p = PeerEndpoint::new(PeerAddress::I2p([255; 32]), 18444);
     assert_eq!(i2p.to_string().parse::<PeerEndpoint>().expect("I2P"), i2p);
     assert!(i2p.socket_addr().is_none());
-    let json = serde_json::to_string(&i2p).expect("encoding");
+    let json = sonic_rs::to_string(&i2p).expect("encoding");
     assert_eq!(
-        serde_json::from_str::<PeerEndpoint>(&json).expect("decoding"),
+        sonic_rs::from_str::<PeerEndpoint>(&json).expect("decoding"),
         i2p
     );
 }
@@ -48,5 +47,5 @@ fn ip_sockets_keep_scope_and_anonymous_circuits_are_not_durable_destinations() {
     assert_eq!(endpoint.to_canonical(), endpoint);
     assert!("tor-inbound-7:0".parse::<PeerEndpoint>().is_err());
     assert!("tor-inbound-7".parse::<PeerAddress>().is_err());
-    assert!(serde_json::from_str::<PeerEndpoint>("\"tor-inbound-7:0\"").is_err());
+    assert!(sonic_rs::from_str::<PeerEndpoint>("\"tor-inbound-7:0\"").is_err());
 }

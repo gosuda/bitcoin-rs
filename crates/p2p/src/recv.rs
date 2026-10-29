@@ -1,20 +1,9 @@
 //! Buffered reads that survive a peer socket's poll interval.
-//!
-//! Peer sockets poll with a short read timeout, so a frame or packet can
-//! stop arriving anywhere inside it. Every helper here leaves the bytes
-//! already consumed in place across `TimedOut`/`WouldBlock`, so the caller
-//! retries and the read resumes where it stopped instead of restarting
-//! mid-message. The v1 wire receiver and the BIP324 packet reader share
-//! this machinery; each maps the `io::Error` onto its own error type.
 
 use std::io::{self, Read};
 
-/// Largest single read into a message body. The retained buffer grows only
-/// with bytes actually received, so a peer that declares a large body then
-/// stalls holds what it sent, not the declared length.
 pub(crate) const RECEIVE_CHUNK: usize = 16 * 1024;
 
-/// The socket's poll interval elapsed; the rest of the read may still arrive.
 pub(crate) fn is_poll_timeout(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -22,8 +11,6 @@ pub(crate) fn is_poll_timeout(error: &io::Error) -> bool {
     )
 }
 
-/// Reads until `buffer` is full, recording progress in `filled` so a poll
-/// timeout resumes where it stopped.
 pub(crate) fn fill<R: Read>(
     reader: &mut R,
     buffer: &mut [u8],
@@ -40,10 +27,6 @@ pub(crate) fn fill<R: Read>(
     Ok(())
 }
 
-/// Reads until `buffer` holds `len` bytes, at most [`RECEIVE_CHUNK`] per
-/// read. Each read lands in a scratch buffer and only the bytes read are
-/// appended, so a stall reserves no spare capacity for bytes that never
-/// came.
 pub(crate) fn fill_growing<R: Read>(
     reader: &mut R,
     buffer: &mut Vec<u8>,
@@ -62,7 +45,6 @@ pub(crate) fn fill_growing<R: Read>(
     Ok(())
 }
 
-/// Appends at most `limit` bytes from one successful read to `buffer`.
 pub(crate) fn read_up_to<R: Read>(
     reader: &mut R,
     buffer: &mut Vec<u8>,

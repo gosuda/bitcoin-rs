@@ -25,13 +25,14 @@ fn nonce(prefix: u32, epoch: u64) -> [u8; 12] {
     nonce
 }
 
-/// The BIP324 `FSChaCha20` length cipher.
+/// Each rekey epoch is one continuous `ChaCha20` keystream under nonce `LE32(0) ||
+/// LE64(epoch)`.
 ///
-/// Each rekey epoch is one continuous `ChaCha20` keystream under nonce
-/// `LE32(0) || LE64(epoch)`. After [`REKEY_INTERVAL`] length fields the next
-/// 32 keystream bytes key the following epoch. A field is always
-/// [`LENGTH_FIELD_LEN`] bytes, so an epoch consumes `224 * 3 + 32 = 704`
-/// bytes, exactly eleven `ChaCha20` blocks: no keystream outlives its key.
+/// After [`REKEY_INTERVAL`] length fields the next 32 keystream bytes key the following
+/// epoch.
+///
+/// A field is always [`LENGTH_FIELD_LEN`] bytes, so an epoch consumes `224 * 3 + 32 =
+/// 704` bytes, exactly eleven `ChaCha20` blocks: no keystream outlives its key.
 pub(crate) struct FsChaCha20 {
     stream: ChaCha20,
     epoch: u64,
@@ -47,7 +48,6 @@ impl FsChaCha20 {
         }
     }
 
-    /// Encrypts or decrypts one length field in place.
     pub(crate) fn crypt(&mut self, field: &mut [u8; LENGTH_FIELD_LEN]) {
         self.stream.apply_keystream(field);
         self.fields += 1;
@@ -75,17 +75,15 @@ fn length_stream(key: [u8; 32], epoch: u64) -> ChaCha20 {
     ChaCha20::new(&key.into(), &nonce(0, epoch).into())
 }
 
-/// A sealed packet failed authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("BIP324 packet failed authentication")]
 pub(crate) struct AuthFailed;
 
-/// The BIP324 `FSChaCha20Poly1305` packet cipher.
+/// Packet `i` of epoch `e` is sealed under nonce `LE32(i) || LE64(e)`.
 ///
-/// Packet `i` of epoch `e` is sealed under nonce `LE32(i) || LE64(e)`. After
-/// the last packet of an epoch the key becomes the first 32 bytes of `ChaCha20`
-/// block 1 under nonce `0xffffffff || LE64(e)`. Every call advances the
-/// packet counter, including a failed authentication, as the reference does.
+/// After the last packet of an epoch the key becomes the first 32 bytes of `ChaCha20`
+/// block 1 under nonce `0xffffffff || LE64(e)`. Every call advances the packet counter,
+/// including a failed authentication, as the reference does.
 pub(crate) struct FsChaCha20Poly1305 {
     key: [u8; 32],
     epoch: u64,
@@ -101,8 +99,6 @@ impl FsChaCha20Poly1305 {
         }
     }
 
-    /// Encrypts `buffer` in place and returns its tag.
-    ///
     /// `ChaCha20-Poly1305` refuses only plaintexts beyond 256 GiB.
     pub(crate) fn encrypt(
         &mut self,
@@ -117,7 +113,6 @@ impl FsChaCha20Poly1305 {
         sealed.map(Into::into)
     }
 
-    /// Authenticates and decrypts `buffer` in place.
     pub(crate) fn decrypt(
         &mut self,
         aad: &[u8],

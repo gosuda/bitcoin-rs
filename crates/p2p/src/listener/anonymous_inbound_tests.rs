@@ -44,7 +44,6 @@ fn anonymous_admission_uses_capacity_without_learning_or_loopback_privilege() {
             session.addr
         );
     }
-    // All two slots are protected by the existing eviction policy at this size.
     admit_anonymous_tor(third, &shared);
     assert_eq!(table.live_inbound_count(), 2);
     let first = &sessions[0];

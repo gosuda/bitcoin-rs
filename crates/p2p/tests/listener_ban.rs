@@ -1,4 +1,3 @@
-//! P2P listener manual-ban and network-control enforcement coverage.
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::error::Error;
 use std::io::{self, Read};
@@ -26,9 +25,6 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
-    // WSADuplicateSocket does not inherit the nonblocking flag on Windows,
-    // so the accept loop's shutdown flag would go unread there: set it on
-    // the duplicate itself.
     accept_helper.set_nonblocking(true)?;
     let helper_shutdown = Arc::new(AtomicBool::new(false));
     let accept_shutdown = Arc::clone(&helper_shutdown);
@@ -149,9 +145,6 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
-    // WSADuplicateSocket does not inherit the nonblocking flag on Windows,
-    // so the accept loop's shutdown flag would go unread there: set it on
-    // the duplicate itself.
     accept_helper.set_nonblocking(true)?;
     let accept_shutdown = Arc::new(AtomicBool::new(false));
     let accept_handle = thread::spawn({
@@ -201,9 +194,6 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
-    // WSADuplicateSocket does not inherit the nonblocking flag on Windows,
-    // so the accept loop's shutdown flag would go unread there: set it on
-    // the duplicate itself.
     accept_helper.set_nonblocking(true)?;
     let accept_shutdown = Arc::new(AtomicBool::new(false));
     let accept_handle = thread::spawn({
@@ -296,7 +286,6 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn E
     )
 }
 
-/// Wiring for one test start epoch with no ready callback.
 fn wiring(
     peer_table: Arc<PeerTable>,
     banned: Arc<RwLock<Vec<BannedSubnet>>>,
@@ -408,9 +397,6 @@ fn join_listener(
     }
 }
 
-/// Shared teardown for one test epoch: revokes every lease, stops the accept
-/// loop, and joins both workers — surfacing an outbound panic or connection
-/// error instead of discarding it.
 fn teardown_epoch(
     session_cancel: &AtomicBool,
     peer_table: &PeerTable,

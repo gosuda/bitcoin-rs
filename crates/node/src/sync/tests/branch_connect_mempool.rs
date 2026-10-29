@@ -6,10 +6,6 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin_rs_primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
-    // Build a competing fork rooted at block 50. The first fork block has a
-    // corrupted body (coinbase value changed → txid changed → merkle root
-    // mismatch), so the connect stops on the first body. The descendant
-    // header must remain eligible for a later delivery of the correct body.
     let fork_root_hash = main[49].block_hash();
     let mut fork_parent = handles
         .block_tree()
@@ -47,9 +43,6 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
         ))
         .ok_or_else(|| std::io::Error::other("missing descendant fork node"))?;
 
-    // Corrupt the first fork block's body: change the coinbase value so
-    // the txid no longer matches the header's merkle root. This is a
-    // body mutation (MerkleRoot), which must not invalidate the subtree.
     let mut corrupt = fork_blocks[0].clone();
     corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
     fork_blocks[0] = corrupt;
@@ -91,14 +84,11 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
         invalidated.is_empty(),
         "body mutation cannot poison headers"
     );
-    // Both headers remain valid and may be retried with another body.
     {
         let tree = handles.block_tree().read();
         assert_eq!(tree.node(invalid_id)?.status, NodeStatus::HeaderValid);
         assert_eq!(tree.node(descendant_id)?.status, NodeStatus::HeaderValid);
     }
-    // The applied tip must be back at the fork root (block 50), the
-    // successful disconnect prefix.
     let fork_root_id_hash = Hash256::from_le_bytes(fork_root_hash.as_bytes());
     assert_eq!(
         handles.applied_tip().load_full().map(|tip| tip.hash),
@@ -108,10 +98,6 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     Ok(())
 }
 
-/// A disconnected package re-enters the pool through the shared evaluator in
-/// dependency order while the tip is fenced; a member made nonfinal by the
-/// lower tip is refused, and the published mutation stream stays one ordered
-/// Reorg sequence.
 #[test]
 #[expect(clippy::too_many_lines)]
 fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
@@ -182,9 +168,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Some(Arc::clone(&gateway)),
     );
 
-    // A spendable coinbase output with an empty script: a bare `push 1`
-    // scriptSig satisfies it. Children spend standard P2SH outputs whose
-    // redeem script is a bare OP_TRUE.
     let redeem: Vec<u8> = vec![0x51];
     let p2sh = Script::from_bytes(
         [
@@ -254,8 +237,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         prev_hash = block.block_hash();
         blocks.push(block);
     }
-    // A durable body store lets the reorg revisit the disconnected package
-    // body for re-admission; connect persists each applied body into it.
     let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
     let handles =
         bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
@@ -270,9 +251,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             block_body_store: Some(Arc::new(Bodies::default())),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            // This fixture drives chainstate alone: nothing reads through the
-            // other role, so the domain it mints loses nothing when only the
-            // mutation role is taken from it.
             chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
@@ -297,8 +275,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     let tip = &blocks[100];
     let child_txid = tip.txs[2].txid();
 
-    // A resident entry admitted while the tip is block 101 (next-height MTP
-    // T+96) but nonfinal once the tip drops to block 100 (MTP T+95).
     let nonfinal = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -383,9 +359,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     Ok(())
 }
 
-/// The adapter relays the chain-owned displaced tip unchanged: a linear
-/// extension displaces nothing, and a heavier fork reports the tip it moved
-/// onto another branch.
 #[test]
 fn admit_headers_reports_the_tip_a_heavier_fork_displaced() -> Result<(), Box<dyn std::error::Error>>
 {

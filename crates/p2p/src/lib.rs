@@ -1,82 +1,53 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Persistent, bounded peer discovery and automatic address selection.
 pub(crate) mod addrman;
 /// BIP324 v2 transport cryptography: key schedule and packet ciphers.
 pub(crate) mod bip324;
-/// Outbound block announcements: headers-first, high-bandwidth compact, inv fallback.
 pub mod block_announce;
-/// Out-of-order inbound block staging bounded by the download window budget.
 pub(crate) mod block_stager;
-/// Active-chain `getheaders` / `getdata` serving.
 pub(crate) mod chain_query;
 /// BIP152 compact-block reconstruction: bounded per-peer pending state.
 pub mod compact_blocks;
-/// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
 pub mod compat;
-/// Per-connection identity and cancellation.
 pub(crate) mod connection;
-/// Per-connection traffic counters.
 pub(crate) mod counters;
-/// Inbound message dispatcher.
 pub mod dispatch;
-/// Block download window, peer-assignment, stall, and scheduling policy.
 pub mod download_window;
 /// Typed endpoint parsing, BIP155 conversion, and the single transport dial.
 pub mod endpoint;
-/// Inbound eviction selection when the inbound slots are full.
 pub(crate) mod eviction;
 /// BIP434 feature negotiation messages and codec.
 pub mod feature;
-/// Peer finite-state machine.
 pub(crate) mod fsm;
-/// Version/verack negotiation helpers.
 pub mod handshake;
-/// Inbound block payloads with preserved wire bytes.
 pub(crate) mod inbound;
-/// Inventory relay helpers.
 pub mod inv;
-/// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
 pub(crate) mod netgroup;
-/// Opt-in Tor and IVNP I2P transport configuration.
 pub mod overlay;
 pub use overlay::OverlayNetworkState;
 
-/// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
 
 /// BIP331 ancestor package relay codec and combined package hash.
 pub mod packages;
 
-/// Peer state and DNS resolution types.
 pub(crate) mod peer;
-/// Peer metadata published after a successful handshake.
 pub(crate) mod peer_info;
-/// Single owner of live peer sessions: leases and their handshake metadata.
 pub(crate) mod peer_table;
-/// Buffered reads that survive a peer socket's poll interval.
 pub(crate) mod recv;
-/// I2P SAM v3 client for typed I2P transports.
 pub(crate) mod sam;
-/// Runtime owner for P2P control state and workers.
 pub(crate) mod service;
-/// SOCKS5 client for proxied IP and onion transports.
 pub(crate) mod socks;
 /// BIP332 `staletip` message codec.
 pub mod staletip;
-/// Manual IP subnet banning primitives.
 pub mod subnet;
-/// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
 /// A connection's v1 or BIP324 v2 transport and its negotiation.
 pub(crate) mod transport;
-/// Connection-bound transaction request and relay policy.
 pub(crate) mod tx_policy;
-/// Bounded transaction announcements and their peer relay worker.
 pub(crate) mod tx_relay;
-/// Bitcoin P2P wire codec.
 pub mod wire;
 
 #[cfg(test)]
@@ -137,5 +108,4 @@ pub use wire::{Message, PeerError};
 pub use download_window::default_sync_budget;
 pub use sync::StaleTipRetainer;
 
-/// Bounded automatic reconnect avoidance; manual bans retain their owner.
 pub mod discouragement;

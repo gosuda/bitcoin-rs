@@ -114,7 +114,6 @@ bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 sonic-rs.workspace = true
-serde_json.workspace = true
 toml.workspace = true
 rustix.workspace = true
 bitcoin-rs-script.workspace = true

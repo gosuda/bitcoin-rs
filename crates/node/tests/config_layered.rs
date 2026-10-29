@@ -1,5 +1,3 @@
-//! Resolver tests for grouped node configuration layers.
-
 use std::str::FromStr as _;
 
 use anyhow::Result;
@@ -67,8 +65,6 @@ fn public_listener_bind_validation_handles_wildcards_and_ephemeral_ports() -> Re
             assert!(error.to_string().contains("must not overlap"), "{error}");
         }
     }
-    // Both sockets stay bound: the second port-zero bind must select a
-    // different available port rather than reuse the first listener's port.
     let management = std::net::TcpListener::bind("0.0.0.0:0")?;
     let public = std::net::TcpListener::bind("0.0.0.0:0")?;
     assert_ne!(management.local_addr()?.port(), public.local_addr()?.port());
@@ -290,7 +286,6 @@ fn script_index_is_valid_without_core_txindex() -> Result<()> {
 
 #[test]
 fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
-    // IDX-01: `scriptindex=utxo` enables ScriptLive only; history stays off.
     let layer = UserConfig {
         indexes: bitcoin_rs_node::IndexOverrides {
             script_index: Some(ScriptIndexMode::Utxo),
@@ -592,7 +587,6 @@ fn chainstate_journal_rejects_invalid_values() {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
     use bitcoin_rs_node::MiningOverrides;
 
@@ -670,7 +664,6 @@ p2p_noban = ["192.0.2.99/24", "::1"]
     Ok(())
 }
 
-/// Resolves one environment entry as its own layer.
 fn environment(key: &str, value: &str) -> Result<UserConfig> {
     let mut layer = UserConfig::default();
     layer.apply_env(key, std::ffi::OsStr::new(value))?;
@@ -689,7 +682,6 @@ fn relay_features_are_opt_in_per_flag_and_follow_layer_precedence() -> Result<()
     let off = resolve(&[])?.p2p.relay_offers;
     assert!(!off.package_relay && !off.stale_tip_relay && !off.stale_tip_prefers_blocks);
 
-    // Each switch is its own slot: turning one on never turns another on.
     let package: UserConfig = toml::from_str("p2p_package_relay = true")?;
     let offers = resolve(&[&package])?.p2p.relay_offers;
     assert!(offers.package_relay && !offers.stale_tip_relay && !offers.stale_tip_prefers_blocks);
@@ -698,7 +690,6 @@ fn relay_features_are_opt_in_per_flag_and_follow_layer_precedence() -> Result<()
     let offers = resolve(&[&stale])?.p2p.relay_offers;
     assert!(!offers.package_relay && offers.stale_tip_relay && !offers.stale_tip_prefers_blocks);
 
-    // A higher layer's explicit false beats a lower layer's true.
     let disabled = environment("BITCOIN_RS_P2P_PACKAGE_RELAY", "false")?;
     assert!(
         !resolve(&[&package, &disabled])?
@@ -709,7 +700,6 @@ fn relay_features_are_opt_in_per_flag_and_follow_layer_precedence() -> Result<()
     let enabled = environment("BITCOIN_RS_P2P_STALE_TIP_RELAY", "on")?;
     assert!(resolve(&[&enabled])?.p2p.relay_offers.stale_tip_relay);
 
-    // An explicit setting on a test network is honored, not silently dropped.
     let regtest: UserConfig = toml::from_str("network = \"regtest\"")?;
     assert!(
         resolve(&[&regtest, &stale])?
@@ -732,12 +722,9 @@ fn stale_tip_prefers_blocks_needs_the_relay_it_modifies() -> Result<()> {
     let offers = resolve(&[&relay, &prefers])?.p2p.relay_offers;
     assert!(offers.stale_tip_relay && offers.stale_tip_prefers_blocks);
 
-    // The relay switch folds across layers before the check: a higher layer
-    // that turns the relay off leaves the lower layer's preference dangling.
     let relay_off = environment("BITCOIN_RS_P2P_STALE_TIP_RELAY", "false")?;
     assert!(refusal(&[&relay, &prefers, &relay_off]).contains("requires --p2p-stale-tip-relay"));
 
-    // Relay without a preference is the default announcement of headers.
     assert!(
         !resolve(&[&relay])?
             .p2p
@@ -761,8 +748,6 @@ fn index_bundle_is_an_explicit_one_shot_request() -> Result<()> {
     );
     assert_eq!(indexes.bundle_export, None);
 
-    // The same key from a higher layer replaces the path; the directory is
-    // never opened while the configuration resolves.
     let elsewhere = environment("BITCOIN_RS_INDEX_BUNDLE_IMPORT", "/nonexistent/elsewhere")?;
     let indexes = resolve(&[&txindex, &import, &elsewhere])?.indexes;
     assert_eq!(
@@ -801,7 +786,6 @@ fn index_bundle_requires_the_transaction_index_it_moves() -> Result<()> {
     let export = environment("BITCOIN_RS_INDEX_BUNDLE_EXPORT", "/srv/out")?;
     assert!(refusal(&[&export]).contains("--index-bundle-export requires --txindex"));
 
-    // A higher layer that disables txindex strands a lower layer's request.
     let txindex: UserConfig = toml::from_str("txindex = true")?;
     let no_txindex = environment("BITCOIN_RS_TXINDEX", "false")?;
     assert!(refusal(&[&txindex, &import, &no_txindex]).contains("requires --txindex"));
@@ -831,8 +815,6 @@ fn index_bundle_rejects_empty_and_unusable_directories_on_every_surface() {
         }
     }
 
-    // A programmatic caller bypassing the parser still meets identical
-    // validation for empty, whitespace-only, and NUL-bearing paths.
     for unusable in ["", "   ", "\t\n", "foo\0bar"] {
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.indexes.txindex = true;

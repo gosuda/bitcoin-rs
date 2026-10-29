@@ -1,15 +1,6 @@
 //! Versioned on-disk encoding for [`UndoBatch`].
-//!
-//! An undo record is what lets the node disconnect a block during a chain
-//! reorganization. Two properties matter more than compactness:
-//!
 //! 1. **Versioned.** The first byte is a format version, so a record written by
 //!    an older binary is rejected rather than misread.
-//! 2. **Bound to its block.** The record carries the hash of the block it
-//!    undoes, and [`decode`] refuses a record whose hash does not match the
-//!    block being disconnected. Keying by height alone would let a stale record
-//!    from an abandoned branch be replayed against a different block at the
-//!    same height, which silently corrupts the UTXO set.
 
 use std::collections::HashSet;
 
@@ -18,7 +9,6 @@ use thiserror::Error;
 
 use crate::contract::{UndoBatch, UtxoAdd};
 
-/// Current undo-record format version.
 pub(crate) const UNDO_FORMAT_VERSION: u8 = 1;
 
 #[cfg(test)]
@@ -33,10 +23,6 @@ const RESTORE_COUNT_OFFSET: usize = VERSION_BYTES + BLOCK_HASH_BYTES;
 const RESTORE_TRAILER_BYTES: usize = 1 + core::mem::size_of::<u32>() + COUNT_BYTES;
 
 /// Maximum encoded record for a consensus-valid block.
-///
-/// Spent scripts are bounded by the script interpreter; BIP30 overwrite
-/// scripts belong to the same transaction outputs as the block and fit within
-/// its serialized body.
 pub fn record_size_limit(block: &bitcoin_rs_primitives::Block, max_spent_script: usize) -> usize {
     let inputs = block
         .txs
@@ -45,16 +31,12 @@ pub fn record_size_limit(block: &bitcoin_rs_primitives::Block, max_spent_script:
         .map(|tx| tx.inputs.len())
         .sum::<usize>();
     let outputs = block.txs.iter().map(|tx| tx.outputs.len()).sum::<usize>();
-    // Version, hash and two u32 counts; each restore has an outpoint, value,
-    // CompactSize, script, coinbase flag and u32 height. Each output may also
-    // supply one BIP30 restore and one 36-byte removal.
     41_usize
         .saturating_add(inputs.saturating_mul(52_usize.saturating_add(max_spent_script)))
         .saturating_add(outputs.saturating_mul(52 + 36))
         .saturating_add(block.total_size())
 }
 
-/// Errors returned when decoding an undo record.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum UndoCodecError {
     #[error("undo record truncated: wanted {wanted} more bytes, {available} available")]
@@ -77,7 +59,6 @@ pub enum UndoCodecError {
     DuplicateOutpoint { txid: Hash256, vout: u32 },
 }
 
-/// Encodes `batch` as a record bound to `block_hash`.
 #[must_use]
 pub(crate) fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
     let mut out = Vec::new();
@@ -106,15 +87,12 @@ pub fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, UndoCod
     decode_bounded(bytes, expected_hash, usize::MAX, usize::MAX)
 }
 
-/// Query decoding shares the exact persisted codec while bounding allocations
-/// by the authenticated block's maximum inverse changes.
 pub(crate) fn decode_bounded(
     bytes: &[u8],
     expected_hash: Hash256,
     max_restores: usize,
     max_removes: usize,
 ) -> Result<UndoBatch, UndoCodecError> {
-    // A restore is at least an outpoint, a minimal TxOut, a flag, and a height.
     const MIN_RESTORE_BYTES: usize = 36 + 9 + 1 + 4;
     const MIN_REMOVE_BYTES: usize = 36;
 
@@ -166,8 +144,6 @@ pub(crate) fn decode_bounded(
         });
     }
     let mut removes = Vec::with_capacity(bounded_capacity(remove_count));
-    // `seen` deliberately carries over: a block cannot both restore and remove
-    // the same outpoint, so an appearance in both halves is corruption too.
     for _ in 0..remove_count {
         let outpoint = cursor.take_outpoint()?;
         reject_duplicate(&mut seen, outpoint)?;
@@ -181,16 +157,11 @@ pub(crate) fn decode_bounded(
     Ok(UndoBatch::from_parts(restores, removes))
 }
 
-/// Caps the pre-allocation a count field can request.
 fn bounded_capacity(count: u32) -> usize {
     const MAX_PREALLOC: u32 = 4096;
     usize::try_from(count.min(MAX_PREALLOC)).unwrap_or(0)
 }
 
-/// Converts an entry count for the wire.
-///
-/// Saturation is unreachable: a block is capped at 4 000 000 weight units, so it
-/// cannot carry anywhere near `u32::MAX` outputs or inputs.
 fn u32_len(len: usize) -> u32 {
     debug_assert!(u32::try_from(len).is_ok(), "undo entry count exceeds u32");
     u32::try_from(len).unwrap_or(u32::MAX)
@@ -214,7 +185,6 @@ fn put_outpoint(out: &mut Vec<u8>, outpoint: OutPoint) {
     out.extend_from_slice(&outpoint.vout.to_le_bytes());
 }
 
-/// Bounds-checked forward reader over the record.
 struct Cursor<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -255,7 +225,6 @@ impl<'a> Cursor<'a> {
         Ok(u32::from_le_bytes(self.take_array::<4>()?))
     }
 
-    /// Reads an entry count and rejects one the remaining bytes cannot hold.
     fn take_count(&mut self, min_entry_bytes: usize) -> Result<u32, UndoCodecError> {
         let count = self.take_u32()?;
         let available = self.remaining();

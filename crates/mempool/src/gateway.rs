@@ -1,17 +1,3 @@
-//! The single mutation gateway in front of the mempool.
-//!
-//! Every production mempool mutation routes through [`MempoolGateway`]: it
-//! owns the pool's write lock, commits the mutation, and then enqueues the
-//! ordered [`MutationEnvelope`] for the optional [`MempoolObserver`] — always
-//! in commit order, by construction. Publication is eventual: a nested or
-//! concurrent mutation call may return before its callback runs, and the
-//! elected drainer completes every queued callback exactly once, in
-//! sequence order, with no gateway lock held. After this, no production
-//! code outside the gateway takes the mempool write lock — lookups go
-//! through the [`MempoolGateway::read`] passthrough. The composition root
-//! constructs one gateway per pool and passes clones of that handle to every
-//! mutation route, so they share one publish queue and one observer slot.
-
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -30,8 +16,6 @@ use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// Adapter that lets the consensus verifier look up prevouts from a resolved
-/// `(OutPoint, TxOut)` slice, layered under the mempool by `MempoolUtxoView`.
 struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
 
 impl UtxoView for PrevoutMap<'_> {
@@ -43,14 +27,12 @@ impl UtxoView for PrevoutMap<'_> {
     }
 }
 
-/// Chain UTXO set with the mempool's unconfirmed outputs layered on top.
 struct MempoolUtxoView<'a, V> {
     pool: &'a Mempool,
     chain: &'a V,
 }
 
 impl<'a, V> MempoolUtxoView<'a, V> {
-    /// Layers `pool`'s unconfirmed outputs over `chain`.
     #[must_use]
     const fn new(pool: &'a Mempool, chain: &'a V) -> Self {
         Self { pool, chain }
@@ -70,7 +52,6 @@ where
     }
 }
 
-/// Why a chain-change reservation or finish failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainChangeError {
     /// A chain change is already active (the current generation is odd).
@@ -88,72 +69,35 @@ pub enum ChainChangeError {
     ForeignGuard,
 }
 
-// ---------------------------------------------------------------------------
-// Atomic admission — one generation-revalidated gateway operation.
-// ---------------------------------------------------------------------------
-
-/// Resolved context and exact state tokens for one admission attempt.
 pub struct AdmissionRequest {
-    /// The transaction to admit.
     pub tx: Arc<Tx>,
-    /// Resolved per-transaction context (fee, vsize, sigop cost, missing
-    /// inputs) from the mempool and UTXO set.
     pub context: crate::standardness::PackageTxContext,
-    /// Resolved prevouts for consensus verification. Empty when the caller
-    /// has not resolved them (e.g., missing inputs); the admission path
-    /// rejects the transaction outright rather than admitting it unverified.
     pub prevouts: Vec<(
         bitcoin_rs_primitives::OutPoint,
         bitcoin_rs_primitives::TxOut,
     )>,
-    /// Confirmed-chain metadata for each resolved prevout. Unconfirmed
-    /// mempool/package parents are derived by the gateway; confirmed entries
-    /// come from the chain snapshot. Absent entries carry no lock or maturity
-    /// constraint.
     pub prevout_meta: hashbrown::HashMap<OutPoint, crate::PrevoutMeta>,
     /// Median-time-past of the applied chain tip for BIP113 finality checks.
     /// Zero disables the locktime cutoff (pre-genesis).
     pub locktime_cutoff: u32,
-    /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
-    /// Script flags the next block will verify under. The script stage
-    /// re-verifies the transaction under these flags after the `STANDARD`
-    /// pass to fill the script-execution cache.
     pub next_block_script_flags: VerifyFlags,
     /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
     /// Wall-clock seconds for the mempool entry timestamp.
     pub time: u64,
-    /// Current applied block height for the mempool entry. Finality is
-    /// evaluated at the next block height (`height + 1`), matching Core's
-    /// `CheckFinalTxAtTip`, while the stored entry keeps this applied tip
-    /// height.
     pub height: u32,
-    /// How the transaction entered the node.
     pub origin: AdmissionOrigin,
-    /// Exact chain generation the caller captured before admission.
-    /// Ordinary submitters only ever hold an even value obtained from
-    /// [`MempoolGateway::stable_generation`]; requests prepared under a
-    /// [`ChainChangeGuard`] carry its odd value. The token alone grants no
-    /// authority — `check_admission_state` accepts it only under the
-    /// matching `AdmissionFence`.
     pub expected_generation: u64,
-    /// Exact mempool sequence the caller captured before admission.
     pub expected_sequence: u64,
 }
 
-/// The outcome of one admission attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdmitOutcome {
-    /// The transaction was committed to the pool. The result carries every
-    /// `Removed` change in commit order followed by exactly one `Accepted`.
     Committed(crate::mutation::MutationResult),
-    /// The exact transaction was already present. No envelope, sequence, or
-    /// publication was produced — the caller returns normal txid success.
     AlreadyKnown,
 }
 
-/// Why an admission attempt did not commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdmitError {
     /// The chain generation changed between capture and the write-lock
@@ -175,24 +119,14 @@ pub enum AdmitError {
     Consensus,
 }
 
-/// Immutable input facts and a provisional verdict. It carries no pool borrow:
-/// script execution must finish before the writer reservation is acquired.
 pub(crate) struct PreparedAdmission {
     pub(crate) fact: crate::standardness::TxAcceptanceFact,
     prevouts: Vec<(OutPoint, TxOut)>,
     pub(crate) rejection: Option<(AdmitError, RejectScope)>,
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
-    /// Floor bump a refused size trim earned, applied only in the stamped
-    /// commit closure. The reported rejection is unchanged.
     pub(crate) refused_bump: Option<crate::rbf::TrimBump>,
     replacement: ReplacementStage,
-    /// Engine for this attempt's script checks; set by the gateway that
-    /// prepared it, so the deferred `verify` phase cannot run under another.
     engine: ValidationEngine,
-    /// Validated script-cache key from the second verification pass. Set only
-    /// when that pass succeeds with no rejection pending; the commit outcome
-    /// below decides whether it is inserted, so rejected admissions and
-    /// failed packages never fill.
     pub(crate) script_cache_key: Option<(Wtxid, VerifyFlags)>,
 }
 
@@ -221,13 +155,9 @@ impl PreparedAdmission {
         if self.rejection.is_none()
             && self.fact.vsize != 0
             && maximum.is_some_and(|max| {
-                self.fact.modified_fee.is_some_and(|fee| {
-                    // Core 31.1 compares CFeeRate ratios, not GetFee or the
-                    // displayed integer rate. Divide the nonnegative limit
-                    // instead of multiplying the signed fee. u64 * u32 fits
-                    // i128, and negative or very large fee deltas stay exact.
-                    fee > i128::from(max) * i128::from(self.fact.vsize) / 1_000
-                })
+                self.fact
+                    .modified_fee
+                    .is_some_and(|fee| fee > i128::from(max) * i128::from(self.fact.vsize) / 1_000)
             })
         {
             self.reject(
@@ -247,10 +177,6 @@ impl PreparedAdmission {
         self.rejection = Some((error, scope));
     }
 
-    /// Both preview and submission execute precisely this verification over
-    /// the copied input outputs, never over a changing pool or chain reader.
-    /// A successful script stage records the cache key; the commit outcome
-    /// decides insertion. Previews pass `None` and stay dry.
     pub(crate) fn verify(
         &mut self,
         request: &AdmissionRequest,
@@ -281,9 +207,6 @@ impl PreparedAdmission {
             self.reject(AdmitError::Consensus, default_scope);
             return;
         };
-        // Core package prechecks must reject value/finality errors before
-        // any row is reported script-valid. Reuse the consensus owner over
-        // copied outputs; this phase executes no scripts and holds no lock.
         if bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
             &request.tx,
             &PrevoutMap(&self.prevouts),
@@ -325,25 +248,11 @@ impl PreparedAdmission {
         }
     }
 
-    /// Runs the `STANDARD` script pass, then re-verifies under the request's
-    /// next-block flags. A successful second pass with no rejection pending
-    /// records the cache key for the commit outcome to insert; a failed
-    /// second pass after a `STANDARD` pass is logged and records nothing, and
-    /// a rejected transaction never fills.
-    ///
-    /// A size-trim refusal (`refused_bump`) still runs the `STANDARD` pass
-    /// and the caller's max-feerate check: Core trims only script-valid,
-    /// under-cap transactions, so an invalid script or a breached cap
-    /// clears the bump while the reported `Full` rejection is kept either
-    /// way. The next-block pass and the cache fill are skipped on this
-    /// path — a refused transaction never fills.
     pub(crate) fn verify_scripts(
         &mut self,
         request: &AdmissionRequest,
         script_cache: Option<&ScriptExecutionCache>,
     ) {
-        // A refused trim earns its floor bump only with valid scripts, but
-        // the refusal itself is reported before scripts ever run.
         let verifying_refusal = self.refused_bump.is_some();
         if self.rejection.is_some() && !verifying_refusal {
             return;
@@ -378,11 +287,6 @@ impl PreparedAdmission {
             );
             return;
         }
-        // The caller's cap gates the bump like scripts do — Core applies
-        // `client_maxfeerate` in PreChecks, before any trim can touch the
-        // floor. The gate uses the transaction's actual base fee: a policy
-        // discount or surcharge must not change the client fee-limit result.
-        // A capped candidate keeps its Full report but earns nothing.
         let fee_for_max = self.fact.base_fee.unwrap_or(0);
         if crate::standardness::exceeds_max_feerate(
             fee_for_max,
@@ -452,9 +356,6 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
     }
 }
 
-/// Whether a script-verification failure may be witness-strippable, i.e. a
-/// different witness body of the same txid must still be allowed past the
-/// rejection cache.
 fn witness_strippable_failure(error: &ConsensusError, prevouts: &[(OutPoint, TxOut)]) -> bool {
     matches!(error, ConsensusError::Script { .. })
         && prevouts.iter().any(|(_, output)| {
@@ -469,27 +370,11 @@ use crate::pool::{MempoolError, PrioritiseError, PrioritisedTransaction};
 use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
 
-/// Receives every committed mempool mutation, exactly once, in sequence
-/// order.
-///
-/// Callbacks run without gateway locks and may re-enter the gateway. Nested
-/// commits enqueue behind the current callback and may return before publication.
-/// Observer panics are contained after the pool mutation has committed.
-///
-/// Whether an observer wants accepted transaction bodies is a
-/// registration-time fact ([`BodyInterest`]), never a callback: `commit`
-/// loads the composite's atomic before taking the pool write lock, so no
-/// observer code ever runs under any gateway lock.
 pub trait MempoolObserver: Send + Sync {
     /// Called once per committed, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
 }
 
-/// Body-retention interest declared when a leg registers.
-///
-/// Bodies are captured under the pool write lock because they must match
-/// the commit, not a later state, and are delivered in the ordered
-/// envelope. Metadata-only legs skip retention.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BodyInterest {
     /// Retain accepted transaction bodies until ordered publication.
@@ -498,24 +383,13 @@ pub enum BodyInterest {
     Metadata,
 }
 
-/// Fans one committed mutation out to several named observers.
 #[derive(Default)]
 pub struct CompositeObserver {
-    /// Guarded because a subsystem may attach its leg after the gateway is
-    /// constructed. Publication clones the list under this lock and releases it
-    /// before calling any leg, so a leg re-entering the gateway cannot
-    /// deadlock against an attach.
     legs: Mutex<Vec<(&'static str, Arc<dyn MempoolObserver>)>>,
-    /// Registration-time OR of every leg's [`BodyInterest`]: true once any
-    /// leg registers [`BodyInterest::Bodies`]. `commit` loads it before
-    /// taking the pool write lock, so interest never executes observer code
-    /// under any gateway lock. Legs are append-only, so the OR only ever
-    /// gains `true` and needs no recomputation.
     bodies_wanted: AtomicBool,
 }
 
 impl CompositeObserver {
-    /// An empty composite; attach legs with [`Self::add_leg`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -524,10 +398,6 @@ impl CompositeObserver {
         }
     }
 
-    /// Appends a named leg. Names identify the leg in failure logs only; the
-    /// operator failure counter is intentionally aggregate. Order is
-    /// publication order. Legs are append-only: once a [`BodyInterest::Bodies`]
-    /// leg registers, body retention stays on.
     pub fn add_leg(
         &self,
         name: &'static str,
@@ -540,11 +410,6 @@ impl CompositeObserver {
         }
     }
 
-    /// Whether any registered leg wants accepted transaction bodies.
-    ///
-    /// Loads the registration-time atomic; it calls no observer code and
-    /// holds no gateway lock, so `commit` reads it before taking the pool
-    /// write lock.
     #[must_use]
     pub fn wants_bodies(&self) -> bool {
         self.bodies_wanted.load(Ordering::Acquire)
@@ -595,38 +460,15 @@ impl MempoolObserver for CompositeObserver {
     }
 }
 
-/// Transactions kept beyond pool residency for BIP152 reconstruction: Core's
-/// `DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN` (`net_processing.h:47-48`).
 pub(crate) const BLOCK_RECONSTRUCTION_EXTRA_TXN: usize = 100;
-/// A policy-rejected transaction whose retained heap reaches this bound is
-/// not kept for reconstruction; Core's `RecursiveDynamicUsage(*ptx) < 100000`
-/// gate (`net_processing.cpp:3139`), measured here with the pool's own
-/// `transaction_heap_usage` accounting rather than the consensus
-/// serialization.
 pub(crate) const EXTRA_TXN_MAX_MEMORY_BYTES: usize = 100_000;
 
-/// One retained body with the identities its reconstruction match needs.
 struct ExtraTxn {
     txid: Txid,
     wtxid: Wtxid,
     tx: Arc<Tx>,
 }
 
-/// Bounded FIFO of transactions a compact block may still name after the pool
-/// dropped or never admitted them: replaced bodies, peer orphans and peer
-/// policy rejects (Core's `vExtraTxnForCompact`).
-///
-/// Identity is the witness hash, so two witness variants of one txid are two
-/// entries. Re-inserting a resident wtxid changes nothing: the entry keeps its
-/// place, so a repeated body can neither grow the ring nor postpone its own
-/// eviction. A coinbase is never retained. Entry count is bounded by
-/// [`BLOCK_RECONSTRUCTION_EXTRA_TXN`]. Bodies that reached the ring through
-/// the pool or the orphan pool are already bounded by the standardness rules
-/// that admitted them there; a policy reject is additionally bounded by the
-/// [`EXTRA_TXN_MAX_MEMORY_BYTES`] retained-memory gate.
-///
-/// The ring is reconstruction-hint state only. It is never consulted for
-/// inventory, `getdata`, relay, admission or any pool query.
 #[derive(Default)]
 pub(crate) struct ExtraTxnRing {
     entries: VecDeque<ExtraTxn>,
@@ -662,11 +504,6 @@ impl ExtraTxnRing {
     }
 }
 
-/// Whether a peer-origin refusal is a policy verdict whose body a block may
-/// still contain: only the typed policy class, below the retained-memory gate,
-/// and not a transaction that spends a null or out-of-range outpoint (which no
-/// block can carry). Consensus failures and stale-state retries are never
-/// retained.
 fn retains_rejected_body(pool: &Mempool, tx: &Tx, error: AdmitError) -> bool {
     let AdmitError::Policy(reason) = error else {
         return false;
@@ -678,79 +515,20 @@ fn retains_rejected_body(pool: &Mempool, tx: &Tx, error: AdmitError) -> bool {
         ) && crate::admission::has_unspendable_input(pool, tx))
 }
 
-/// The mutation publication queue state, protected by the `publish` mutex.
 struct PublishState {
-    /// Committed, non-empty envelopes awaiting their observer callback, in
-    /// commit order.
     queue: VecDeque<MutationEnvelope>,
-    /// Whether exactly one caller is draining the queue.
     draining: bool,
 }
 
-/// Owns the mempool's write lock and publishes ordered mutation events.
-///
-/// # Ordering invariant
-///
-/// Every mutating method flows through exactly one path, `Self::commit`,
-/// which runs, in this exact order:
-///
-/// 1. take the commit-ordering lock, then the pool write lock,
-/// 2. mutate and assign per-change mempool sequences,
-/// 3. release the write lock, join accepted bodies to the committed changes,
-///    then enqueue the non-empty envelope on the publish state's FIFO queue
-///    and elect a drainer if none exists,
-/// 4. release the ordering lock and the publish-state lock,
-/// 5. the elected drainer pops batches one at a time — releasing the
-///    publish-state lock before every observer call — and returns the
-///    publish state to idle only once the queue is empty.
-///
-/// Commits serialize under the ordering lock and step 3 enqueues under that
-/// same ownership, so the queue order is the commit order and the sequence
-/// order: every committed, non-empty batch is published exactly once, in
-/// order, even across nested and concurrent callers. Publication is
-/// eventual, not synchronous: a nested or concurrent mutation enqueues
-/// and returns while a drainer exists, and its callback may run after
-/// that call has returned. No gateway lock is ever held across an
-/// observer call, so observers may re-enter the gateway freely. An
-/// observer panic is caught and recorded; the drainer continues with
-/// the remaining queue and only then returns to idle. Empty results and
-/// an absent observer enqueue nothing, allocate nothing, and spawn no
-/// thread.
 pub struct MempoolGateway {
     pub(crate) pool: Arc<RwLock<Mempool>>,
-    /// Pool guards precede this lock. Never held during observer calls,
-    /// script verification, or chain/transport access.
     pub(crate) lifecycle: Mutex<crate::orphan::AdmissionLifecycle>,
-    /// The one observer slot, held as the composite so a second subsystem
-    /// can attach its own named leg after construction. An absent composite
-    /// means nobody is listening and the publish path stays allocation-free.
     observer: Option<Arc<CompositeObserver>>,
-    /// Serializes commit-to-enqueue so the publish queue order is the commit
-    /// order. Taken before the pool write lock and released after the
-    /// publish enqueue; the pool guard itself drops before the body join so
-    /// admission-lock time stays out of the join. Lock order is
-    /// commit-order, pool, publish, and it is never held across an observer
-    /// call.
     commit_order: Mutex<()>,
     publish: Mutex<PublishState>,
-    /// BIP152 reconstruction extras: replaced bodies, peer orphans and peer
-    /// policy rejects. A leaf lock: pool guards precede it, and nothing else
-    /// is acquired while it is held. Written only under the pool write lock,
-    /// so a walk under the pool read guard sees pool and ring at one instant.
     pub(crate) extra_txn: Mutex<ExtraTxnRing>,
-    /// Even means stable; odd means a chain change is active or a failed
-    /// chain change has closed admission. Initialized to `0` (even/stable)
-    /// in [`Self::new`]. Compare only for exact equality — never order or
-    /// subtract wrapping counters.
     chain_generation: AtomicU64,
-    /// The one script-verification engine this gateway's admission path runs,
-    /// resolved once from node configuration (`validation.engine`). The
-    /// admission pipeline is shared; only the script backend dispatches on it.
     engine: ValidationEngine,
-    /// Native-only script-execution cache filled after admission and
-    /// consulted by block connect. `None` without a node composition that
-    /// installed one (including every kernel-engine node, so the kernel
-    /// oracle stays authoritative).
     script_cache: Option<Arc<ScriptExecutionCache>>,
 }
 
@@ -764,18 +542,6 @@ impl core::fmt::Debug for MempoolGateway {
 }
 
 impl MempoolGateway {
-    /// Wraps `pool` and optionally installs `observer`.
-    ///
-    /// The composition root must construct exactly one gateway for a pool and
-    /// pass clones of that handle to every mutation route.
-    ///
-    /// Pass `None` — or use the node's no-op publisher behind its observer —
-    /// when no `--zmq-pub-sequence` endpoint is configured.
-    ///
-    /// `script_cache` is the node-owned script-execution cache this gateway
-    /// fills after admission; the node passes `Some` only when the validation
-    /// engine is native, `None` otherwise (including every test seam that
-    /// does not exercise the fill).
     #[must_use]
     pub fn new(
         pool: Arc<RwLock<Mempool>>,
@@ -804,19 +570,16 @@ impl MempoolGateway {
         }
     }
 
-    /// The resolved script-verification engine this gateway verifies with.
     #[must_use]
     pub const fn engine(&self) -> ValidationEngine {
         self.engine
     }
 
-    /// The node-owned script-execution cache this gateway fills, if any.
     #[must_use]
     pub(crate) fn script_cache(&self) -> Option<&ScriptExecutionCache> {
         self.script_cache.as_deref()
     }
 
-    /// Attaches another named leg to this gateway's observer slot.
     pub fn attach_observer_leg(
         &self,
         name: &'static str,
@@ -830,25 +593,17 @@ impl MempoolGateway {
         Ok(())
     }
 
-    /// Returns `true` when the gateway was constructed with an observer.
-    ///
-    /// Test seam: lifecycle assertions only.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn has_observer(&self) -> bool {
         self.observer.is_some()
     }
 
-    /// Returns a cloneable read-only capability over the pool.
     #[must_use]
     pub fn reader(&self) -> crate::MempoolReader {
         crate::MempoolReader::new(Arc::clone(&self.pool))
     }
 
-    /// Raw pool access for test fixture staging and read-side composition
-    /// only. The raw-site audit's production pattern matches
-    /// `.pool().write()` too; production mutations must go through the
-    /// gateway so observers stay in the loop.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn pool(&self) -> &Arc<RwLock<Mempool>> {
         &self.pool
@@ -868,8 +623,6 @@ impl MempoolGateway {
         value.is_multiple_of(2).then_some(value)
     }
 
-    /// The raw generation value, even or odd, for same-crate fence checks.
-    /// Callers compare only for exact equality — never order or subtract.
     pub(crate) fn chain_generation(&self) -> u64 {
         self.chain_generation.load(Ordering::Acquire)
     }
@@ -893,9 +646,6 @@ impl MempoolGateway {
         })
     }
 
-    /// Cross-crate test seam: prepares insertion outside the writer and
-    /// publishes one atomic result. No production caller; fixtures use it to
-    /// stage entries without resolving a chain snapshot.
     #[cfg(any(test, feature = "test-seam"))]
     #[expect(
         clippy::needless_pass_by_value,
@@ -919,9 +669,6 @@ impl MempoolGateway {
             let plan = match inputs.verify() {
                 Ok(plan) => plan,
                 Err(refusal) => {
-                    // Raises serialize under the write guard with every other
-                    // pool transition, so the floor cannot move between a
-                    // read-guard capture and its stamp check.
                     let mut pool = self.pool.write();
                     let (error, bump) = refusal.into_parts();
                     let error = match bump {
@@ -951,8 +698,6 @@ impl MempoolGateway {
         Err(MempoolError::StalePolicy)
     }
 
-    /// Verifies replacement outside the writer, then commits and publishes
-    /// only while the captured pool and fee state is still current.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn replace_transaction(
         &self,
@@ -971,7 +716,6 @@ impl MempoolGateway {
             let plan = match inputs.verify() {
                 Ok(plan) => plan,
                 Err(refusal) => {
-                    // See above: raises take the write guard.
                     let mut pool = self.pool.write();
                     let (error, bump) = refusal.into_parts();
                     let error = match bump {
@@ -996,26 +740,12 @@ impl MempoolGateway {
         Err(RbfError::StalePlan)
     }
 
-    /// Evaluates policy and copies input outputs under a pool read, then
-    /// verifies scripts without a pool lock. The writer rechecks the captured
-    /// chain generation, pool sequence and policy before any lifecycle change
-    /// or mutation. Exact duplicates retain their idempotent submission result.
-    /// Committed changes use the existing ordered publication seam, including
-    /// the capacity evictions verified before insertion.
-    // The public atomic API consumes its prepared request; the private path
-    // borrows it so the shared retry owner can recover the Arc after a mismatch.
     #[expect(clippy::needless_pass_by_value)]
-    /// Test seam: the pre-claimed single-shot door; production submissions
-    /// run through `submit_transaction`'s bounded claimed path.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
         self.admit_transaction_claimed(&request, None, crate::admission::AdmissionFence::Stable)
     }
 
-    /// A private resident-body claim joins generation/sequence validation.
-    /// Evicted or refreshed retry bodies may not mutate pool or lifecycle.
-    // Keep token checks, mutation, lifecycle finalization and FIFO publication
-    // in one auditable write-lock interval instead of splitting the commit.
     pub(crate) fn admit_transaction_claimed(
         &self,
         request: &AdmissionRequest,
@@ -1044,9 +774,6 @@ impl MempoolGateway {
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        // The validated key is copied out before the writer runs; the commit
-        // outcome below decides whether it is inserted, outside the pool
-        // write lock, with no re-verification and no cloning.
         let cache_key = prepared.script_cache_key;
 
         let outcome = self.commit(
@@ -1083,14 +810,9 @@ impl MempoolGateway {
                 }
                 let default_reject_scope = rejection_scope(&request.tx);
 
-                // The writer consumes the already verified graph plan. It checks
-                // the stamp again but never reruns the solver or script verifier.
                 let ReplacementStage::Verified(plan) = prepared.replacement else {
                     return Err(AdmitError::MempoolChanged);
                 };
-                // Replaced bodies leave the pool in the commit below, so they
-                // are captured first and retained in the same writer interval:
-                // a reader never sees them gone from both pool and ring.
                 let replaced: Vec<_> = plan
                     .replaced_entries(pool)
                     .map(|entry| (entry.txid, entry.wtxid, Arc::clone(&entry.tx)))
@@ -1111,9 +833,6 @@ impl MempoolGateway {
                 AdmitOutcome::Committed(result) => Some(result),
             },
         )?;
-        // Only an accepted mutation fills, after the commit released the
-        // pool write lock. Rejections, holds, and already-known outcomes
-        // record nothing.
         if matches!(outcome, AdmitOutcome::Committed(_)) {
             if let (Some((wtxid, flags)), Some(cache)) = (cache_key, self.script_cache()) {
                 cache.insert(wtxid, flags);
@@ -1122,7 +841,6 @@ impl MempoolGateway {
         Ok(outcome)
     }
 
-    /// Rejects an attempt whose captured admittance facts no longer hold.
     pub(crate) fn check_admission_state(
         &self,
         pool: &Mempool,
@@ -1143,8 +861,6 @@ impl MempoolGateway {
         Ok(())
     }
 
-    /// The shared policy evaluator. Pool-dependent work ends at this boundary;
-    /// the returned job owns every previous output its script checks may read.
     #[expect(
         clippy::too_many_lines,
         reason = "keep policy precedence and the captured preparation stamp in one owner"
@@ -1183,16 +899,6 @@ impl MempoolGateway {
                 context.sigop_cost,
             ));
         }
-        // Core re-admits a disconnected transaction with `bypassLimits = true`
-        // on `AcceptToMemoryPool` (validation.cpp), which skips the
-        // `GetMinFee()` floor and the mempool size limit while ancestor
-        // topology, TRUC, and ephemeral-spend checks still run. `Deferred` is
-        // that bypass: the fee floor is skipped here and the per-acceptance
-        // size trim downstream, with one size trim at settlement instead.
-        // It derives from the chain-change fence, not the caller-declared
-        // origin: `AdmissionOrigin::Reorg` is public metadata, so only a
-        // submission that actually runs under `AdmissionFence::ChainChange`
-        // may defer — anything else enforces in full.
         let enforcement = match (request.origin, fence) {
             (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
                 LimitEnforcement::Deferred
@@ -1215,9 +921,6 @@ impl MempoolGateway {
         } else {
             Some(pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs()))
         };
-        // BIP68 is evaluated at the next block. A resolved input that is not
-        // present in the confirmed metadata is an unconfirmed (mempool/package)
-        // parent and is encoded as the next block.
         let next_height = request.height.saturating_add(1);
         let resolved_prevouts: HashSet<OutPoint> =
             request.prevouts.iter().map(|(op, _)| *op).collect();
@@ -1269,8 +972,6 @@ impl MempoolGateway {
                 | AdmissionMode::PackageSubmit
                 | AdmissionMode::PackageRpcSubmit(_)
         ) {
-            // Package previews and native submissions forbid replacement;
-            // an already resident tx retains its duplicate result here.
             if !pool.contains_txid(&request.tx.txid())
                 && !pool.conflicts_for(&request.tx).is_empty()
             {
@@ -1291,11 +992,6 @@ impl MempoolGateway {
             }
         } else if prepared.rejection.is_none() {
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            // Core's `bypassLimits` re-acceptance still runs
-            // `SingleTRUCChecks` (validation.cpp): the pool the disconnect
-            // changed decides the topology now, so the TRUC conflict walk —
-            // which also returns the direct conflicts the BIP125 fee rules
-            // need — applies under Deferred exactly as under Full.
             let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
             let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
                 let entry = MempoolEntry::new(
@@ -1344,10 +1040,6 @@ impl MempoolGateway {
         prepared
     }
 
-    /// Removes resident entries the current chain no longer supports after a
-    /// disconnect: an input that is neither a live coin nor a resident parent,
-    /// an immature coinbase input, or locktime/BIP68 no longer final at the
-    /// next block. Descendants leave with `RemovalReason::Reorg`.
     pub fn remove_for_reorg(
         &self,
         change: &ChainChangeGuard,
@@ -1425,8 +1117,6 @@ impl MempoolGateway {
         )
     }
 
-    /// Commits `pool.remove_for_block` and publishes its result. `now` stamps
-    /// the rolling floor for decay, even when the block removes nothing.
     pub fn remove_for_block(
         &self,
         origin: AdmissionOrigin,
@@ -1440,9 +1130,6 @@ impl MempoolGateway {
         })
     }
 
-    /// Commits `pool.expire` when the acceptance-time index shows stale
-    /// entries, and publishes its result. Returns `None` without taking the
-    /// write lock when nothing is stale.
     pub fn expire(&self, origin: AdmissionOrigin, now: u64) -> Option<MutationResult> {
         if !self.pool.read().has_expired_entries(now) {
             return None;
@@ -1450,10 +1137,6 @@ impl MempoolGateway {
         Some(self.commit_infallible(origin, |pool| pool.expire(now)))
     }
 
-    /// Commits `pool.evict_below_fee_rate` and publishes its result.
-    ///
-    /// Test seam: fee-history fixture door; production trimming runs through
-    /// `enforce_size_limit`'s chunk-ordered eviction.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn evict_below_fee_rate(
         &self,
@@ -1471,7 +1154,6 @@ impl MempoolGateway {
         self.pool.read().limits.max_total_bytes
     }
 
-    /// Commits `pool.enforce_size_limit` and publishes its result.
     pub fn enforce_size_limit(
         &self,
         origin: AdmissionOrigin,
@@ -1489,9 +1171,6 @@ impl MempoolGateway {
         )
     }
 
-    /// Commits `pool.clear` and publishes its result.
-    ///
-    /// Test seam: wholesale fixture reset without a chain-change reservation.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn clear(&self, origin: AdmissionOrigin) -> MutationResult {
         self.commit_infallible(origin, Mempool::clear)
@@ -1531,8 +1210,6 @@ impl MempoolGateway {
         Ok(true)
     }
 
-    /// Applies the overlay and clears peer-reject evidence the new fee
-    /// ordering may have invalidated.
     fn apply_prioritise(
         &self,
         pool: &mut Mempool,
@@ -1546,41 +1223,23 @@ impl MempoolGateway {
         Ok(())
     }
 
-    /// Reads the stored fee-delta overlay map.
     #[must_use]
     pub fn prioritised_transactions(&self) -> Vec<PrioritisedTransaction> {
         self.read().prioritised_transactions()
     }
 
-    /// The single commit-and-publish path every publishing mutation flows
-    /// through. A failed `mutate` returns before the publish mutex is taken
-    /// and means nothing was committed. A successful mutation publishes
-    /// every accepted/removed change from its prevalidated plan.
-    /// Successful mutations acquire the publish mutex before releasing the
-    /// pool guard, then call observers only after releasing the pool guard.
     pub(crate) fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
         mutation: impl FnOnce(&T) -> Option<&MutationResult>,
     ) -> Result<T, E> {
-        // Registration-time fact, read before the pool write lock: no
-        // observer code runs here or under the write lock below. Linearizable
-        // capture at this load decides one commit's retention; a leg that
-        // attaches concurrently takes effect on a later commit.
         let bodies_wanted = self
             .observer
             .as_ref()
             .is_some_and(|observer| observer.wants_bodies());
-        // Linearizable commit-to-enqueue: held from the pool mutation through
-        // the publish enqueue so the queue order is the commit order even
-        // though the join no longer runs under the pool write lock. Dropped
-        // before the drain so observer re-entry never blocks on it.
         let order = self.commit_order.lock();
         let mut elected = false;
-        // Publication decided under the write lock; the index/body join below
-        // runs after the pool guard drops so large packages do not burn
-        // admission-lock time on a quadratic scan.
         let mut pending = None;
         let outcome = {
             let mut pool = self.pool.write();
@@ -1625,13 +1284,6 @@ impl MempoolGateway {
         Ok(outcome)
     }
 
-    /// Joins committed `Accepted` changes to their captured bodies.
-    ///
-    /// Capture runs under the pool write lock so bodies match the commit; the
-    /// index/body join itself needs no pool state and runs after the guard
-    /// drops. A missing body with capture enabled means an accept path
-    /// bypassed the capture and is logged instead of silently dropped;
-    /// without capture the envelope simply carries no bodies.
     fn join_accepted_bodies(
         result: &MutationResult,
         captured: Vec<(Txid, Arc<Tx>)>,
@@ -1667,9 +1319,6 @@ impl MempoolGateway {
             .collect()
     }
 
-    /// Finalizes peer-only holding/rejection while the exact admission state
-    /// remains locked. Thus a parent commit or chain reset cannot pass between
-    /// the verdict and registration of its lifecycle consequences.
     fn record_peer_failure(
         &self,
         pool: &Mempool,
@@ -1701,13 +1350,6 @@ impl MempoolGateway {
         }
     }
 
-    /// Hands each individually refused member of a refused package, in package
-    /// (dependency) order, to the peer lifecycle exactly as a refused single
-    /// transaction would be. Members with no individual refusal, such as those
-    /// caught only by an aggregate fee, topology or cluster check, are not
-    /// recorded. `requests` and `prepared` are the same-length batch the
-    /// refusal was decided on, and a non-peer origin records nothing. PRE: the
-    /// caller holds the pool write lock with the stamped state revalidated.
     pub(crate) fn record_peer_package_refusal(
         &self,
         pool: &Mempool,
@@ -1721,16 +1363,11 @@ impl MempoolGateway {
         }
     }
 
-    /// Retains `tx` in the reconstruction ring. PRE: the caller holds the pool
-    /// write lock, which is what makes the ring consistent with the pool.
     fn retain_for_reconstruction(&self, tx: &Arc<Tx>) {
         let (txid, wtxid) = (tx.txid(), tx.wtxid());
         self.extra_txn.lock().insert(txid, wtxid, tx);
     }
 
-    /// Retains the bodies one committed replacement removed, with the
-    /// identities the pool already computed. PRE: the caller holds the pool
-    /// write lock.
     fn retain_replaced(&self, replaced: &[(Txid, Wtxid, Arc<Tx>)]) {
         if replaced.is_empty() {
             return;
@@ -1743,14 +1380,6 @@ impl MempoolGateway {
 
     /// Invokes `f` for every transaction a BIP152 reconstruction may match:
     /// each pool entry, then each retained extra not already in the pool.
-    ///
-    /// Hint-only: the extras are never admitted, relayed, served as inventory,
-    /// or visible to [`Self::get_tx`], [`Self::get_tx_by_wtxid`] or
-    /// [`Self::have_tx`]. Pool read guard, then the ring's leaf lock, are held
-    /// across `f`, so `f` must not call back into this gateway; fetch bodies
-    /// with [`Self::reconstruction_tx_by_txid`] or
-    /// [`Self::reconstruction_tx_by_wtxid`] after the walk returns. The orphan
-    /// lock is never taken.
     pub fn for_each_reconstruction_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
         let pool = self.pool.read();
         for entry in pool.iter_entries() {
@@ -1789,8 +1418,6 @@ impl MempoolGateway {
             .map(|tx| (**tx).clone())
     }
 
-    /// Required internal lifecycle work is independent of fallible observers.
-    /// A ready marker authorizes re-preparation only, never admission itself.
     fn update_admission_lifecycle(&self, pool: &Mempool, result: &MutationResult) {
         if result.changes.is_empty() {
             return;
@@ -1807,7 +1434,6 @@ impl MempoolGateway {
         }
     }
 
-    /// The same path for pool methods that cannot fail.
     fn commit_infallible(
         &self,
         origin: AdmissionOrigin,
@@ -1821,16 +1447,6 @@ impl MempoolGateway {
         result
     }
 
-    /// Publishes queued batches until the queue is empty, then returns
-    /// the publish state to idle. Exactly one drainer runs at a time: the
-    /// election in [`Self::commit`] is the only place `draining` turns
-    /// true, and the idle transition happens under the same mutex only
-    /// when the queue is empty, so no enqueue is lost. No gateway lock is
-    /// held across an observer call: a nested or concurrent mutation
-    /// commits, enqueues, and returns while this loop runs. A panicking
-    /// observer is contained per batch — the mutation already committed,
-    /// and the panic must not take the caller down with it. The default
-    /// panic hook still prints the panic before it is caught here.
     fn drain(&self) {
         loop {
             let envelope = {
@@ -1859,10 +1475,6 @@ impl MempoolGateway {
         }
     }
 
-    /// Cross-crate test seam: stores `value` into `chain_generation` with
-    /// `Release` ordering, simulating an external generation move between
-    /// reservation and settlement so `ChainChangeGuard::finish` fails its
-    /// compare-exchange. No production caller.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn force_chain_generation(&self, value: u64) {
         self.chain_generation.store(value, Ordering::Release);
@@ -1871,11 +1483,6 @@ impl MempoolGateway {
 
 /// Owns an active chain-change reservation: the exact odd generation and the
 /// reserved next even value.
-///
-/// No `Drop` path reopens admission: early return or unwinding leaves the
-/// gateway odd. Only a successful [`Self::finish`] restores the reserved even
-/// generation; a failed finish does not release the reservation.
-/// One guard covers one coherent connect, disconnect, apply window, or reorg.
 #[derive(Debug)]
 pub struct ChainChangeGuard {
     gateway: Arc<MempoolGateway>,
@@ -1884,20 +1491,17 @@ pub struct ChainChangeGuard {
 }
 
 impl ChainChangeGuard {
-    /// Returns the exact odd generation this guard reserved.
     #[must_use]
     pub(crate) fn odd_generation(&self) -> u64 {
         self.odd
     }
 
-    /// Returns the reserved even value `finish` will store on success.
     #[cfg(test)]
     #[must_use]
     fn reserved_even(&self) -> u64 {
         self.even
     }
 
-    /// Whether this guard was issued by `gateway` itself.
     pub(crate) fn owns(&self, gateway: &MempoolGateway) -> bool {
         core::ptr::eq(Arc::as_ptr(&self.gateway), gateway)
     }
@@ -1918,7 +1522,6 @@ impl ChainChangeGuard {
     }
 }
 
-/// Test-only causal gate after admission verification, before writer recheck.
 #[cfg(any(test, feature = "test-seam"))]
 mod ordering_gate {
     use parking_lot::Mutex;
@@ -1930,15 +1533,12 @@ mod ordering_gate {
 
     static GATE: Mutex<Gate> = Mutex::new(Gate { armed: None });
 
-    /// Arms the gate with the test's signaling channels.
     pub(super) fn arm(target: usize, parked_tx: Sender<()>, release_rx: Receiver<()>) {
         let mut gate = GATE.lock();
         assert!(gate.armed.is_none(), "ordering gate armed twice");
         gate.armed = Some((target, parked_tx, release_rx));
     }
 
-    /// Restores the disarmed state; called by tests that may have failed
-    /// between arming and the one-shot park.
     pub(super) fn reset() {
         GATE.lock().armed = None;
     }
@@ -1964,9 +1564,6 @@ mod ordering_gate {
     }
 }
 
-/// Cross-crate test seam: arms the admission park gate so the next
-/// `admit_transaction` on the gateway at `target` blocks before the write
-/// lock, signalling `parked_tx` and waiting on `release_rx`.
 #[cfg(any(test, feature = "test-seam"))]
 pub fn arm_admission_park(
     target: usize,
@@ -1976,7 +1573,6 @@ pub fn arm_admission_park(
     ordering_gate::arm(target, parked_tx, release_rx);
 }
 
-/// Cross-crate test seam: disarms the admission park gate.
 #[cfg(any(test, feature = "test-seam"))]
 pub fn reset_admission_park() {
     ordering_gate::reset();
@@ -2003,8 +1599,6 @@ mod tests {
     use parking_lot::{Mutex, RwLock};
     use std::sync::mpsc;
 
-    /// Records counter keys so the observer-failure metric can prove its
-    /// operator series is aggregate rather than leg-labeled.
     #[derive(Default)]
     struct CounterKeyRecorder {
         keys: Mutex<Vec<(String, usize)>>,
@@ -2088,7 +1682,6 @@ mod tests {
         Hash256::from_le_bytes(txid.as_bytes())
     }
 
-    /// Records the txid and outcome of every change the observer sees.
     #[derive(Default)]
     struct RecordingObserver {
         seen: Mutex<Vec<(Hash256, MutationOutcome)>>,
@@ -2176,8 +1769,6 @@ mod tests {
         let observer = Arc::new(PayloadObserver::default());
         let gateway = gateway_with_bodies(observer.clone());
         let stale = Arc::new(tx(183));
-        // Fault-inject capture without mutating membership: failures must leave
-        // neither a queued envelope nor writer-local capture for the next call.
         let mut capture_enabled = false;
         let failure: Result<crate::MutationResult, ()> = gateway.commit(
             AdmissionOrigin::Rpc,
@@ -2207,8 +1798,6 @@ mod tests {
         Ok(())
     }
 
-    /// Records whether the pool write lock was held during delivery and how
-    /// many bodies each envelope retained.
     struct LockOrderObserver {
         pool: Arc<RwLock<Mempool>>,
         saw_write_locked: std::sync::atomic::AtomicBool,
@@ -2229,8 +1818,6 @@ mod tests {
     #[test]
     fn commit_runs_no_observer_code_under_the_pool_write_lock()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Interest is a registration-time atomic: answering it runs no
-        // observer code, under any lock or otherwise.
         let composite = CompositeObserver::new();
         assert!(!composite.wants_bodies());
         let metadata = Arc::new(RecordingObserver::default());
@@ -2240,9 +1827,6 @@ mod tests {
         composite.add_leg("bodies", dyn_observer(&bodies), BodyInterest::Bodies);
         assert!(composite.wants_bodies());
 
-        // Delivery runs after the pool write guard is released: the elected
-        // drainer calls legs with no gateway lock held, and retention follows
-        // the registered interest.
         for interest in [BodyInterest::Metadata, BodyInterest::Bodies] {
             let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
             let probe = Arc::new(LockOrderObserver {
@@ -2278,9 +1862,6 @@ mod tests {
         }
     }
 
-    /// Test gateway whose primary leg registers [`BodyInterest::Metadata`]:
-    /// no body retention. Use [`gateway_with_bodies`] for a body-wanting
-    /// primary.
     fn gateway_with(observer: Option<Arc<dyn MempoolObserver>>) -> Arc<MempoolGateway> {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -2290,7 +1871,6 @@ mod tests {
         ))
     }
 
-    /// Test gateway whose primary leg registers [`BodyInterest::Bodies`].
     fn gateway_with_bodies(observer: Arc<dyn MempoolObserver>) -> Arc<MempoolGateway> {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -2300,7 +1880,6 @@ mod tests {
         ))
     }
 
-    /// Clones a concrete observer as its trait object without an `as` cast.
     fn dyn_observer<T: MempoolObserver + 'static>(observer: &Arc<T>) -> Arc<dyn MempoolObserver> {
         observer.clone()
     }
@@ -2311,12 +1890,12 @@ mod tests {
 
     fn standard_tx(label: u8) -> Tx {
         let mut script = Vec::with_capacity(25);
-        script.push(0x76); // OP_DUP
-        script.push(0xa9); // OP_HASH160
-        script.push(0x14); // push 20 bytes
+        script.push(0x76);
+        script.push(0xa9);
+        script.push(0x14);
         script.extend_from_slice(&[label; 20]);
-        script.push(0x88); // OP_EQUALVERIFY
-        script.push(0xac); // OP_CHECKSIG
+        script.push(0x88);
+        script.push(0xac);
         Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2333,8 +1912,6 @@ mod tests {
         }
     }
 
-    /// A one-input one-output RBF-signalling spend of `prev`, paying `value`
-    /// to a bare-push script byte, for replacement scenarios.
     fn prevout_spend(prev: OutPoint, value: u64, script: u8) -> Tx {
         Tx {
             version: 2,
@@ -2342,7 +1919,7 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: prev,
                 script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME, // RBF signal
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -2690,8 +2267,6 @@ mod tests {
         );
     }
 
-    /// A test observer whose first `on_mutation` records the batch and then
-    /// blocks until released.
     struct GatedObserver {
         entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
@@ -2724,7 +2299,6 @@ mod tests {
         }
     }
 
-    /// Pins the observable signature of the publication state machine.
     #[test]
     fn gated_callback_lets_concurrent_mutation_enqueue_and_return() {
         for (first_admission, second_admission) in
@@ -2765,9 +2339,6 @@ mod tests {
                 let _ = done_tx.send(result);
             });
 
-            // The concurrent mutation must enqueue and return while the first
-            // callback is still gated: its thread hands back the committed
-            // result with the next sequence even though nothing has published.
             let queued_result = done_rx
                 .recv_timeout(core::time::Duration::from_secs(10))
                 .expect("the concurrent mutation must return while the callback is gated");
@@ -2776,7 +2347,6 @@ mod tests {
                 "the enqueued batch keeps its committed sequence"
             );
 
-            // Nothing may publish while the gate is closed.
             assert_eq!(
                 observer.stream.lock().len(),
                 1,
@@ -2815,8 +2385,6 @@ mod tests {
         result
     }
 
-    /// An observer that re-enters the gateway from its first callback and
-    /// records the nested call's returned result.
     struct ReentrantObserver {
         gateway: Mutex<Option<Arc<MempoolGateway>>>,
         stream: Mutex<Vec<u64>>,
@@ -2844,11 +2412,6 @@ mod tests {
         }
     }
 
-    /// A re-entrant mutation from inside a callback must commit, enqueue,
-    /// and return — never deadlock — and its callback completes afterwards
-    /// in sequence order: the recorded stream is exactly [1, 2] and the
-    /// nested call already returned sequence 2 while the outer callback
-    /// was still running.
     #[test]
     fn reentrant_observer_mutation_completes_with_callback_sequence_1_2() {
         let observer = Arc::new(ReentrantObserver {
@@ -2903,17 +2466,12 @@ mod tests {
         }
     }
 
-    /// An observer that re-enters the gateway on some batches while other
-    /// threads commit concurrently.
     struct ContiguityObserver {
         gateway: Mutex<Option<Arc<MempoolGateway>>>,
         stream: Mutex<Vec<u64>>,
         nested_vout: std::sync::atomic::AtomicU32,
     }
 
-    /// A nested-insert transaction unique for every trigger: the vout of
-    /// its only prevout varies, so each nested txid differs and the pool
-    /// never refuses one as a duplicate of an earlier nested insert.
     fn nested_tx(vout: u32) -> Tx {
         let mut nested = tx(5);
         nested.inputs[0].previous_output =
@@ -2942,11 +2500,6 @@ mod tests {
         }
     }
 
-    /// Concurrent mutators plus a re-entering observer: even though some
-    /// batches are enqueued from inside other batches' callbacks and may
-    /// publish after their calls returned, the published stream must be
-    /// exactly the contiguous sequence range — no gap, no duplicate, no
-    /// reorder — and the pool sequence must match the stream length.
     #[test]
     fn concurrent_reentrant_stream_is_contiguous() {
         const CYCLES: usize = 60;
@@ -3012,7 +2565,6 @@ mod tests {
         );
     }
 
-    /// Records every change sequence the observer sees, in publish order.
     #[derive(Default)]
     struct SequenceStreamObserver {
         stream: Mutex<Vec<u64>>,
@@ -3028,11 +2580,6 @@ mod tests {
         }
     }
 
-    /// Races mutations from several threads and requires the published stream
-    /// to be exactly the full sequence range in order. Sequences are assigned
-    /// in commit order under the write lock and enqueued under that same
-    /// ownership, so an in-order stream proves publish order == commit order
-    /// regardless of which caller is elected to drain the queue.
     #[test]
     fn concurrent_mutations_publish_in_sequence_order() {
         const CYCLES: usize = 1_500;
@@ -3075,7 +2622,6 @@ mod tests {
         assert_eq!(*stream, expected, "publish order must equal commit order");
     }
 
-    /// A refused insertion preserves state and publishes no mutation.
     #[test]
     fn refused_insertion_preserves_state_and_publishes_nothing() {
         let observer = Arc::new(RecordingObserver::default());
@@ -3114,7 +2660,6 @@ mod tests {
             .expect_err("entry cannot survive trimming");
         assert_eq!(error, crate::MempoolError::Full);
         assert!(!gateway.read().contains_txid(&shed_txid));
-        // Shed chunk rate floor(100 * 1_000 / 100) = 1_000, plus 1_000.
         assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 2_000);
         assert!(gateway.read().contains_txid(&filler_txid));
         assert_eq!(gateway.read().sequence_number(), before.0);
@@ -3122,8 +2667,6 @@ mod tests {
         assert!(observer.seen.lock().is_empty());
     }
 
-    /// A replacement that cannot survive trimming preserves membership,
-    /// fee deltas, estimator history and observers.
     #[test]
     fn rejected_replacement_preserves_pool_history_and_publication() {
         let observer = Arc::new(RecordingObserver::default());
@@ -3189,9 +2732,6 @@ mod tests {
         assert_eq!(pool.mining_snapshot().entries, before.0);
         assert_eq!(pool.estimator_history(), before.1);
         assert_eq!(pool.prioritised_transactions(), before.2);
-        // Membership, history, and publication are preserved, but the refused
-        // trim's floor raise revisions the stamp: a concurrent admission
-        // prepared before it must retry against the newer floor.
         assert_ne!(pool.policy_stamp(), before.3);
         assert!(pool.min_fee_sat_per_kvb(9) > 0);
         assert!(
@@ -3200,12 +2740,6 @@ mod tests {
         );
     }
 
-    /// A transaction whose input script fails execution must be rejected
-    /// before the pool mutates. Core runs its `PolicyScriptChecks` inside
-    /// `AcceptToMemoryPool` (validation.cpp, "This is done last to help
-    /// prevent CPU exhaustion denial-of-service attacks"); deferring scripts
-    /// to block connection let an unrelayable transaction occupy pool
-    /// capacity and relay.
     #[test]
     fn admit_transaction_rejects_a_script_invalid_input() {
         let gateway = gateway_with(None);
@@ -3222,7 +2756,6 @@ mod tests {
         assert!(gateway.read().is_empty());
     }
 
-    /// Core v31.1 policy.h limits a standard transaction to 16,000 sigops.
     #[test]
     fn admission_counts_resolved_sigops_before_verification()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3327,9 +2860,6 @@ mod tests {
         );
     }
 
-    /// The writer recheck's fee-delta leg. An overlay applied after
-    /// preparation moves the fee-delta sequence alone, so only the stamp can
-    /// reject the attempt: the fence and the membership sequence still hold.
     #[test]
     fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3431,13 +2961,11 @@ mod tests {
         let gateway = gateway_with(Some(dyn_observer(&observer)));
 
         let mut original = standard_tx(44);
-        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME; // RBF signal (< 0xFFFF_FFFE)
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let original_txid = original.txid();
         let mut replacement = standard_tx(45);
         replacement.inputs[0].previous_output = original.inputs[0].previous_output;
-        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // RBF signal
-        // Higher fee to pass BIP125 (original output is 10 000, replacement
-        // output is 5 000, so fee = 5 000 > original fee = 0).
+        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
         replacement.outputs[0].value = Amount::from_sat(5_000);
         let replacement_txid = replacement.txid();
 
@@ -3451,7 +2979,7 @@ mod tests {
         let request = AdmissionRequest {
             tx: Arc::new(replacement.clone()),
             context: PackageTxContext {
-                fee: 5_000, // 10 000 - 5 000
+                fee: 5_000,
                 vsize: 100,
                 sigop_cost: 0,
                 missing_inputs: false,
@@ -3520,7 +3048,6 @@ mod tests {
         );
     }
 
-    /// Every identity the reconstruction walk offers, in visit order.
     fn reconstruction_identities(
         gateway: &MempoolGateway,
     ) -> Vec<(Txid, bitcoin_rs_primitives::Wtxid)> {
@@ -3533,9 +3060,6 @@ mod tests {
         ring.insert(tx.txid(), tx.wtxid(), tx);
     }
 
-    // BIP152 extras: FIFO of 100, a repeated body neither grows the ring nor
-    // postpones its own eviction, a coinbase is never held, and two witness
-    // variants of one txid are two entries.
     #[test]
     fn extra_txn_ring_is_fifo_bounded_and_ignores_repeats() {
         let bodies: Vec<Arc<Tx>> = (0..=100_u8).map(|label| Arc::new(tx(label))).collect();
@@ -3589,8 +3113,6 @@ mod tests {
         );
     }
 
-    // BIP152 extras: a replacement retains the replaced bodies, descendants
-    // included, for reconstruction only.
     #[test]
     fn replaced_bodies_are_retained_for_reconstruction_and_stay_hint_only() {
         let gateway = gateway_with(None);
@@ -3640,7 +3162,6 @@ mod tests {
         );
     }
 
-    // BIP152 extras: block inclusion and size-limit eviction are not retained.
     #[test]
     fn block_and_size_limit_removals_are_not_retained() {
         let gateway = gateway_with(None);
@@ -3924,10 +3445,6 @@ mod tests {
         );
     }
 
-    /// Finality follows Core's `CheckFinalTxAtTip`: a height lock is final once
-    /// it is below the next block height, and a time lock is measured against
-    /// the caller-supplied applied-tip median-time-past, never a header tip
-    /// that may run ahead.
     #[test]
     fn admit_transaction_enforces_finality_at_the_next_block() {
         for (label, tag, lock_time, cutoff, final_now) in [
@@ -3967,8 +3484,6 @@ mod tests {
         }
     }
 
-    /// A non-coinbase transaction with no resolved prevouts must be rejected
-    /// by consensus verification, not admitted to the mempool.
     #[test]
     fn admit_transaction_rejects_a_transaction_with_no_prevouts() {
         let gateway = MempoolGateway::new(
@@ -4010,12 +3525,6 @@ mod tests {
         );
         assert!(gateway.read().is_empty());
     }
-    /// A transaction spending the same prevout twice must be rejected by
-    /// consensus verification. Policy does not check for duplicate inputs
-    /// and pool insertion admits the double claim, so only the step-4b
-    /// `verify_transaction` call can produce this rejection: any
-    /// other outcome fails this assertion. Observed red with the guard
-    /// neutered (the double-spend committed as `Accepted`).
     #[test]
     fn admit_transaction_rejects_duplicate_inputs_as_consensus() {
         let gateway = MempoolGateway::new(
@@ -4126,24 +3635,18 @@ mod tests {
         }
     }
 
-    /// A P2SH prevout script (`OP_HASH160 <20 bytes> OP_EQUAL`), the shape
-    /// that gives a script failure a witness-strippable variant.
     fn p2sh_prevout() -> TxOut {
         let mut script = Vec::with_capacity(23);
-        script.push(0xa9); // OP_HASH160
-        script.push(0x14); // push 20 bytes
+        script.push(0xa9);
+        script.push(0x14);
         script.extend_from_slice(&[0x2a; 20]);
-        script.push(0x87); // OP_EQUAL
+        script.push(0x87);
         TxOut {
             value: Amount::from_sat(11_000),
             script_pubkey: script.into(),
         }
     }
 
-    /// A cache-backed gateway inserts the admitted transaction under the
-    /// request's next-block flags once the `STANDARD` pass succeeds and the
-    /// admission commits, keyed exactly: the same wtxid under other flags
-    /// still misses.
     #[test]
     fn admission_fills_script_cache_under_next_block_flags() {
         let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
@@ -4164,8 +3667,6 @@ mod tests {
         assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::STANDARD));
     }
 
-    /// A transaction the `STANDARD` pass rejects fills nothing, under any
-    /// flags: rejected bodies never enter the script-execution cache.
     #[test]
     fn rejected_admission_fills_no_script_cache_entry() {
         let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
@@ -4205,7 +3706,6 @@ mod tests {
             );
             assert!(prepared.rejection.is_none());
             prepared.fact.modified_fee = Some(fee);
-            // A quote that cannot fit u64 must not disable the fee cap.
             prepared.fact.effective_fee_rate = None;
             prepared.check_package_max_feerate(Some(1_000));
             assert_eq!(
@@ -4215,12 +3715,6 @@ mod tests {
         }
     }
 
-    /// A transaction the fee-cap policy rejects after the `STANDARD` pass
-    /// fills nothing either: only fully admitted transactions warm the
-    /// script-execution cache. (A failed second pass is unreachable with
-    /// real flags — `STANDARD` is a superset of every consensus flag the
-    /// next-block derivation can emit, and policy enforces the one script
-    /// check outside it, push-only — so that branch stays defensive.)
     #[test]
     fn fee_capped_admission_fills_no_script_cache_entry() {
         let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
@@ -4244,10 +3738,6 @@ mod tests {
         assert!(!cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
     }
 
-    /// Verification alone never fills: both script stages can pass and only
-    /// the key is recorded; the commit outcome inserts it. (Under
-    /// insert-at-verify the first assertion takes true and fails, so this
-    /// pins the commit gate.)
     #[test]
     fn verify_without_commit_fills_nothing() {
         let cache = Arc::new(bitcoin_rs_consensus::ScriptExecutionCache::new());
@@ -4279,7 +3769,6 @@ mod tests {
         assert!(cache.take(candidate.wtxid(), bitcoin_rs_script::VerifyFlags::MANDATORY));
     }
 
-    /// Runs one prepared admission's script stage against a P2SH prevout.
     fn script_stage_rejection(engine: ValidationEngine) -> Option<(AdmitError, RejectScope)> {
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
@@ -4301,10 +3790,6 @@ mod tests {
         prepared.rejection
     }
 
-    /// A genuine script verdict on a witness-strippable prevout keeps the
-    /// Core contract: a different witness body of the same txid must still
-    /// pass the rejection cache. This is the contrast case the scope fix
-    /// must not disturb.
     #[test]
     fn genuine_script_verdicts_on_strippable_prevouts_stay_witness_scoped() {
         assert!(matches!(
@@ -4313,10 +3798,6 @@ mod tests {
         ));
     }
 
-    /// Wiring and backend failures are never witness-strippable, whatever the
-    /// build: a mutated witness body of the same txid must not bypass a
-    /// rejection cached from them. Genuine script verdicts — including the
-    /// kernel's per-input verdicts, which surface as `Script` — are.
     #[test]
     fn only_genuine_script_verdicts_are_witness_strippable() {
         use bitcoin_rs_consensus::ConsensusError;
@@ -4351,11 +3832,6 @@ mod tests {
         ));
     }
 
-    /// Shared floor-trim fixture: a 150-vbyte pool holding one standard
-    /// filler. Both filler and candidates use `standard_tx` so the standardness
-    /// stage passes and the size trim decides. The request vsize floor (100)
-    /// covers both bodies, so each occupies vsize 100; the filler admits,
-    /// and a subsequent candidate overflows the pool and is refused with `Full`.
     fn floor_trim_gateway_with_filler() -> MempoolGateway {
         let gateway = MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits {
@@ -4377,8 +3853,6 @@ mod tests {
         gateway
     }
 
-    /// The refused candidate for the floor-trim fixture: `standard_tx(71)`
-    /// with valid prevouts so value checks pass and only the trim decides.
     fn floor_trim_candidate(gateway: &MempoolGateway) -> AdmissionRequest {
         let shed = standard_tx(71);
         let mut request = admit_request(gateway, &shed, AdmissionOrigin::Rpc);
@@ -4405,7 +3879,6 @@ mod tests {
             ),
             "refusal keeps the mempool-full report: {error:?}"
         );
-        // Candidate chunk rate floor(100 * 1_000 / 100) = 1_000, plus 1_000.
         assert_eq!(gateway.read().min_fee_sat_per_kvb(1), 2_000);
         assert_eq!(gateway.read().len(), 1);
     }
@@ -4414,9 +3887,6 @@ mod tests {
     fn admit_transaction_invalid_script_refusal_leaves_the_floor() {
         let gateway = floor_trim_gateway_with_filler();
 
-        // Same trim shape as the valid-script refusal, but an unspendable
-        // prevout fails the `STANDARD` pass: the report stays `Full`, yet
-        // the floor bump is dropped.
         let mut request = floor_trim_candidate(&gateway);
         request.prevouts[0].1.script_pubkey = vec![0x00].into();
         let error = gateway
@@ -4439,8 +3909,6 @@ mod tests {
     fn admit_transaction_overcap_refusal_earns_no_bump() {
         let gateway = floor_trim_gateway_with_filler();
 
-        // Same trim shape as the bumping refusal, but the candidate breaches
-        // its caller cap: the report stays `Full`, yet no bump is earned.
         let mut request = floor_trim_candidate(&gateway);
         request.max_feerate_sat_per_kvb = Some(500);
         let error = gateway
@@ -4477,7 +3945,6 @@ mod tests {
                 MempoolEntry::new(Arc::new(tx(90)), 100, 9_000, 1, 7, 0),
             )
             .expect("seat");
-        // Capture the victim's stamp against the unraised floor.
         let (generation, sequence, stamp) = {
             let pool = gateway.read();
             (
@@ -4486,8 +3953,6 @@ mod tests {
                 pool.policy_stamp(),
             )
         };
-        // A concurrent oversized admission is refused, but its trim raises
-        // the floor — and the raise revisions the stamp.
         let error = gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
@@ -4496,8 +3961,6 @@ mod tests {
             .expect_err("oversized");
         assert_eq!(error, crate::MempoolError::Full);
         assert!(gateway.read().min_fee_sat_per_kvb(1) > 0);
-        // The victim no longer matches: its submission retries against the
-        // newer floor instead of committing below it.
         {
             let pool = gateway.read();
             assert!(!stamp.matches(&pool));
@@ -4543,7 +4006,6 @@ mod tests {
             .expect("eviction");
         assert_eq!(gateway.read().min_fee_sat_per_kvb(1_000), 3_000);
         gateway.remove_for_block(AdmissionOrigin::Rpc, &[], &[], 8, 1_000);
-        // Usage 200 of 400 is exactly half: full 12 h halflife, 3_000 -> 1_500.
         assert_eq!(
             gateway.read().min_fee_sat_per_kvb(1_000 + 12 * 60 * 60),
             1_500

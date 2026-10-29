@@ -1,5 +1,3 @@
-//! Authenticated journal fork cursors and fail-closed truncation/rewrite.
-
 use super::super::record::FRAME_HEADER_LEN;
 use super::super::record::decode_record;
 use super::DurableCursor;
@@ -203,8 +201,6 @@ impl<S: KvStore> JournalWriter<S> {
             b"journal fork crossed below checkpoint base\n",
         )?;
         crate::checkpoint::fs::sync_dir(&self.dir)?;
-        // Pending cursors name deleted segments and no boundary remains to
-        // retry; compaction rebuilds both from the replacement checkpoint.
         self.pending_records.clear();
         self.durability_retry_required = false;
         self.generation_invalidated = true;

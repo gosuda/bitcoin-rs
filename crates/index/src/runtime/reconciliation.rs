@@ -23,7 +23,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// First height a capability whose durable watermark is `watermark` still
-/// needs.
 fn forward_start(watermark: Option<IndexWatermark>) -> u32 {
     watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
 }
@@ -65,8 +64,6 @@ impl Worker {
             match action {
                 ReconcileAction::Progressed => continue,
                 ReconcileAction::CaughtUp => {
-                    // A wake can be coalesced or consumed while this pass runs.
-                    // The revision is authoritative: never sleep after it moved.
                     if self.runtime.revision() != revision_before {
                         continue;
                     }
@@ -90,11 +87,6 @@ impl Worker {
                         BatchWait::Woken => continue,
                         BatchWait::Deadline => {
                             if !self.commit_pending(&mut pending)? {
-                                // `commit_pending` already took the pending
-                                // forward; `Ok(false)` means a retryable
-                                // reset rejection, not a permanent failure.
-                                // Exit only on shutdown; otherwise let the
-                                // quiet wait throttle the retry.
                                 if self.runtime.should_stop() {
                                     break;
                                 }
@@ -106,8 +98,6 @@ impl Worker {
                     }
                 }
                 ReconcileAction::Stalled => {
-                    // Missing bodies and stopped writes retry only after one
-                    // revision lull; forward progress never waits.
                     quiet_armed = true;
                 }
             }
@@ -115,11 +105,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Reconciles the durable watermark to the current applied tip in one pass.
-    ///
-    /// All `BlockTree` data needed for the pass is copied under a short read
-    /// lock before any body I/O or index commit.  Body loads, prepares, and
-    /// commits happen with the lock released.
     pub(super) fn reconcile_once(
         &self,
         pending: &mut Option<PendingForward>,
@@ -128,11 +113,6 @@ impl Worker {
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
         }
-        // A forward leg commits one capability set at a time, so its
-        // completion is only `CaughtUp` when no enabled capability needs
-        // another transition against the current tip; otherwise the pass
-        // merely progressed and the remaining legs (and their published
-        // phase) carry over.
         let (target, _, watermarks) = self.capture_target_watermarks()?;
         if self
             .rollback_selection(watermarks, target.as_deref())
@@ -158,9 +138,6 @@ impl Worker {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
         let leftover = self.enabled.leftover(watermarks);
         if !leftover.is_empty() {
-            // `full` → `utxo` (and dropping internal TxLookup when explicit
-            // `txindex` is off) must reset only the families that are no
-            // longer configured. Live stays queryable through that demotion.
             self.writer
                 .reset_capabilities(leftover)
                 .map_err(DerivedIndexWorkerError::Index)?;
@@ -177,8 +154,6 @@ impl Worker {
         while let Some((capabilities, watermark)) =
             self.rollback_selection(watermarks, target.as_deref())
         {
-            // Report once per pass: an 834k-block stale branch would otherwise
-            // report once per rolled-back block.
             if let Some(target) = target.as_deref()
                 && !reported_ahead
                 && watermark.height > target.height
@@ -227,10 +202,6 @@ impl Worker {
                         self.runtime.fail_compact_filters(&error);
                         continue;
                     }
-                    // Undo is the ScriptLive spend-script authority. TxLookup
-                    // and ScriptHistory roll back from the block body alone,
-                    // so a pruned undo must not force those families through
-                    // a full rebuild.
                     tracing::warn!(
                         error = %error,
                         "index cursor cannot restore ScriptLive without undo; rebuilding ScriptLive"
@@ -249,13 +220,6 @@ impl Worker {
                         self.runtime.fail_compact_filters(&error);
                         continue;
                     }
-                    // Every answer here is provisional: an outstanding
-                    // reservation can abort and release the range, the owner
-                    // granted the history and the row is not there yet, or
-                    // the node is shutting down. Waiting is the whole
-                    // reaction: a rebuild cannot recover what may already
-                    // exist, and rebuilding on a transient gap would discard
-                    // rows the consumer had already derived.
                     tracing::debug!(
                         error = %error,
                         "index rollback waits on a provisional history answer"
@@ -263,11 +227,6 @@ impl Worker {
                     return Ok(ReconcileAction::Stalled);
                 }
                 Err(error) if error.requires_capability_rebuild() => {
-                    // D2: a `ScriptLive` rollback that surfaces pruned history
-                    // (`MissingBody` from a pruned rollback grant) takes the
-                    // scoped terminal path, never `reset_for_rebuild` (which
-                    // would loop back into seeding). Genuine corruption
-                    // (`MissingWatermarkIdentity`) still rebuilds.
                     if matches!(error, DerivedIndexWorkerError::MissingBody { .. })
                         && capabilities.contains(IndexCapability::ScriptLive)
                     {
@@ -303,19 +262,6 @@ impl Worker {
         self.finish_reconcile_pass(target, fence, watermarks, pending)
     }
 
-    /// Publishes the rollbacks-finished phase and runs the forward catch-up:
-    /// a rewind ends with the rollback loop, a rebuild ends only when the
-    /// reset capabilities reach the tip again.
-    ///
-    /// Capability groups run in ascending start height. A group whose next
-    /// body is absent and which retains no rows yields to the next higher
-    /// start within this pass, at most once per distinct start. No cursor or
-    /// queue outlives the pass: the lowest group is tried first again next
-    /// time. Every other outcome, including retained rows behind an absent
-    /// body, ends the pass, so no group runs on a fence or watermark capture
-    /// that a stop, reset, stale commit, deferred grant, or pending batch has
-    /// outdated. When every group that still needs rows waits on an absent
-    /// body the pass is `Stalled`: it is neither `CaughtUp` nor progress.
     fn finish_reconcile_pass(
         &self,
         target: Option<Arc<TipSnapshot>>,
@@ -328,41 +274,19 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        // `ScriptLive` with no watermark is seeded from one immutable snapshot
-        // artifact, replayed from genesis, or reported Unavailable — never the
-        // removed live guard scan. The worker bundle is the only active holder
-        // besides at most one queued cell artifact.
         let mut want_on_stall = false;
         if self.enabled.contains(IndexCapability::ScriptLive) {
             if watermarks.script_live.is_some() {
-                // Step 1: watermark present. Drop any queued token (a token
-                // that arrived mid-replay is stale: catch-up covers newer
-                // tips) and release the held seed lease exactly once the
-                // watermark has advanced past its floor. Continue normal
-                // reconcile; other families and pending rows are untouched.
-                // A scoped outage still needs a replacement artifact even
-                // though an older watermark remains queryable as stale state.
                 if self.runtime.script_live_failure.read().is_none() {
                     self.rest_seed_cell();
                 } else {
                     self.writer
                         .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
                         .map_err(DerivedIndexWorkerError::Index)?;
-                    // The reset cleared the watermark in storage: the
-                    // pre-reset capture above is stale, so reload before
-                    // selecting legs. Running selection on the stale tuple
-                    // would treat the erased watermark as synced and could
-                    // claim caught-up while storage has no watermark.
                     (fence, watermarks) = self
                         .writer
                         .fenced_watermarks()
                         .map_err(DerivedIndexWorkerError::Index)?;
-                    // The reset erased the watermark: the outage that
-                    // triggered it is stale, so clear it here and let the
-                    // reset family replay from genesis. Terminal
-                    // no-watermark failures (watermark already None on entry)
-                    // stay excluded via `effective_enabled` to avoid a history
-                    // spin; they retry only on a fresh token.
                     self.runtime.clear_script_live();
                     match self.seed_dispatch(pending.as_ref())? {
                         SeedFlow::Return(action) => return Ok(action),
@@ -379,8 +303,6 @@ impl Worker {
                 }
             }
         }
-        // First-leg lease: a committed seed lends its pin so the leg it covers
-        // requests no second history grant. An unused pin parks back.
         let mut seed_lease = self.take_seed_lease();
         let mut after_start = None;
         loop {
@@ -399,10 +321,6 @@ impl Worker {
                     && self.seed_bundle.lock().is_none()
                     && !self.runtime.should_stop()
                 {
-                    // Step 4: no token, no bundle, nothing grantable, no
-                    // progress. Keep demand set so a future token retries the
-                    // seed without a history spin. No spin work, no rebuild
-                    // churn; the existing one-second cadence rechecks.
                     if let Some(slot) = self.seed_slot.as_ref() {
                         slot.want();
                     }
@@ -440,14 +358,10 @@ impl Worker {
         let Some(state) = pending.as_ref() else {
             return Err(DerivedIndexWorkerError::PendingDurableChanged);
         };
-        // Any fence change invalidates the retained rows. Discard them and
-        // re-derive from the new reset, revision, and watermark state.
         if fence != state.fence {
             *pending = None;
             return Ok(ReconcileAction::Stalled);
         }
-        // A different watermark under the same fence is an incoherent writer
-        // response, not a concurrent commit. Treat it as corruption.
         if watermarks.selected(state.capabilities).ok() != Some(state.durable) {
             return Err(DerivedIndexWorkerError::PendingDurableChanged);
         }
@@ -478,8 +392,6 @@ impl Worker {
                     Ok(ReconcileAction::Stalled)
                 };
             }
-            // A retained pending batch continues with its own grant: a parked
-            // seed lease stays parked for the first clean leg instead.
             let mut no_seed_lease = None;
             let leg = self.catch_up_to(
                 target,
@@ -492,8 +404,6 @@ impl Worker {
             )?;
             return Ok(match leg {
                 ForwardLeg::Settled(action) => action,
-                // Retained rows answer `Buffered`, so an empty leg cannot
-                // occur here; waiting like any other stall is the safe reading.
                 ForwardLeg::BodyAbsent => ReconcileAction::Stalled,
             });
         }
@@ -522,19 +432,12 @@ impl Worker {
         if self.runtime.compact_filter_failure.read().is_some() {
             enabled = enabled.without(IndexCapability::CompactFilters);
         }
-        // A terminally pruned `ScriptLive` must not stall the other families:
-        // selection skips it while its scoped flag is set. Seeding still runs
-        // (it checks `self.enabled` directly) so a later token clears the flag
-        // and retries without a history spin.
         if self.runtime.script_live_failure.read().is_some() {
             enabled = enabled.without(IndexCapability::ScriptLive);
         }
         enabled
     }
 
-    /// Commits a retained forward batch and clears a scoped `ScriptLive`
-    /// outage when the commit made durable progress. A fresh `Pruned` refusal
-    /// sets the flag again.
     fn commit_pending_and_clear(
         &self,
         pending: &mut Option<PendingForward>,
@@ -586,10 +489,6 @@ impl Worker {
         Some((selection, selected))
     }
 
-    /// Selects the lowest group of enabled capabilities that still needs rows:
-    /// those sharing one next height. A group never mixes capabilities with
-    /// different next heights. `after_start` excludes groups starting at or
-    /// below it, which lets a pass step past a group that must wait.
     pub(super) fn forward_selection(
         &self,
         watermarks: IndexWatermarks,

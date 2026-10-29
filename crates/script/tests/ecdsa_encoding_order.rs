@@ -1,15 +1,3 @@
-//! ECDSA encoding-order regressions against Bitcoin Core v31.1.
-//!
-//! Empty ECDSA signatures are a clean verification failure, but Core still
-//! applies public-key encoding checks before reaching cryptographic verification.
-//!
-//! Contract: Bitcoin Core v31.1, commit
-//! `9be056a8a72b624dae9623b2f7bded92c2a21c91`, `src/script/interpreter.cpp`
-//! (blob `443714ceedaf6b0cc695316882080f79fb50316e`): `CheckSignatureEncoding`,
-//! `CheckPubKeyEncoding`, `EvalChecksigPreTapscript`, and `OP_CHECKMULTISIG`.
-//! The zero-signature multisig case also pins the latter's lazy key checks:
-//! keys are checked only while a signature is being matched, not up front.
-
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
 use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
@@ -46,7 +34,6 @@ fn verify_witness(
     witness: &[Vec<u8>],
     flags: VerifyFlags,
 ) -> Result<bool, ScriptError> {
-    // These legacy/v0 checks read only the selected input's prevout.
     let prevouts = vec![prevout.clone(); tx.inputs.len()];
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
@@ -59,17 +46,12 @@ fn verify_witness(
     )
 }
 
-/// The script context a signature check runs under: a bare `scriptPubKey`
-/// exercises the base lane; the same script wrapped in a P2WSH program
-/// exercises the witness-v0 lane.
 #[derive(Clone, Copy, Debug)]
 enum Lane {
     Base,
     WitnessV0,
 }
 
-/// Runs `key OP_CHECKSIG OP_NOT` so a clean false becomes script success and
-/// an encoding failure surfaces as the checker's `ScriptError` unchanged.
 fn check_via_script(
     tx: &Tx,
     key: &[u8],
@@ -81,8 +63,8 @@ fn check_via_script(
     let mut script = Vec::with_capacity(key.len() + 3);
     script.push(u8::try_from(key.len()).expect("short test pubkey"));
     script.extend_from_slice(key);
-    script.push(0xac); // CHECKSIG
-    script.push(0x91); // NOT: a clean signature failure succeeds; an encoding error cannot.
+    script.push(0xac);
+    script.push(0x91);
     let (script_pubkey, script_sig, witness, effective_flags) = match lane {
         Lane::Base => {
             let mut script_sig = Vec::with_capacity(sig.len() + 1);
@@ -105,7 +87,6 @@ fn check_via_script(
         value: Amount::from_sat(VALUE),
         script_pubkey: Script::from_bytes(script_pubkey),
     };
-    // These checks read only the selected input's prevout.
     let prevouts = vec![prevout.clone(); tx.inputs.len()];
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
@@ -122,15 +103,15 @@ fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
     assert!(pubkey.len() <= 75);
     let mut script = Vec::new();
     if multisig {
-        script.push(0x51); // one signature
+        script.push(0x51);
     }
     script.push(u8::try_from(pubkey.len()).expect("short test pubkey"));
     script.extend_from_slice(pubkey);
     if multisig {
-        script.push(0x51); // one key
+        script.push(0x51);
     }
-    script.push(if multisig { 0xae } else { 0xac }); // CHECKMULTISIG / CHECKSIG
-    script.push(0x91); // NOT: a clean signature failure succeeds; an encoding error cannot.
+    script.push(if multisig { 0xae } else { 0xac });
+    script.push(0x91);
     script
 }
 
@@ -138,7 +119,6 @@ fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
 fn empty_signature_cannot_bypass_key_encoding_policy() {
     let tx = fixture();
     let uncompressed = PublicKey::from_secret_key(SECP256K1, &test_key()).serialize_uncompressed();
-    // (key, policy flag on top of the permissive baseline, rejection code)
     let cases = [
         (
             Vec::new(),
@@ -173,7 +153,7 @@ fn empty_signature_cannot_bypass_key_encoding_policy() {
             };
             let run = |flags: VerifyFlags| {
                 if witness {
-                    let mut program = vec![0x00, 0x20]; // witness v0, 32-byte script hash
+                    let mut program = vec![0x00, 0x20];
                     program.extend_from_slice(&Sha256::digest(&script));
                     let prevout = TxOut {
                         value: Amount::from_sat(VALUE),
@@ -181,7 +161,6 @@ fn empty_signature_cannot_bypass_key_encoding_policy() {
                     };
                     verify_witness(&tx, &prevout, &witness_stack, flags)
                 } else {
-                    // Only INPUT's prevout is read; fill the other slot for the full-set API.
                     let prevout = TxOut {
                         value: Amount::from_sat(VALUE),
                         script_pubkey: Script::from_bytes(script.clone()),
@@ -242,8 +221,6 @@ fn encoding_error_precedence_matches_core() {
 fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
     let tx = fixture();
     let public = PublicKey::from_secret_key(SECP256K1, &test_key());
-    // The last entry is deliberately off-curve but correctly encoded. Empty
-    // signatures must not require cryptographic parsing of an unused key.
     let mut off_curve = vec![0xff; 33];
     off_curve[0] = 0x02;
     let keys = [
@@ -311,8 +288,6 @@ fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
 #[test]
 fn zero_signature_multisig_does_not_validate_unexamined_keys() {
     let tx = fixture();
-    // 0-of-1 with an empty (invalidly encoded) key; only the dummy is consumed.
-    // Hoisting key checks into a pre-scan would incorrectly reject this script.
     let script = vec![0x00, 0x00, 0x51, 0xae];
     let flags = VerifyFlags::MANDATORY
         .union(VerifyFlags::STRICTENC)
@@ -322,7 +297,6 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         value: Amount::from_sat(VALUE),
         script_pubkey: Script::from_bytes(script.clone()),
     };
-    // The fixture has two inputs, but these checks exercise only INPUT.
     let legacy_prevouts = vec![legacy_prevout; tx.inputs.len()];
     assert_eq!(
         Interpreter.execute_with_prevouts(

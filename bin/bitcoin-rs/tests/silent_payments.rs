@@ -1,4 +1,3 @@
-//! Signed, consensus-validated spend -> retained undo -> BIP352 -> authenticated HTTP.
 #![cfg(feature = "silent-payments")]
 
 use std::path::Path;
@@ -14,13 +13,11 @@ use bitcoin_rs_e2e::helpers::{
     sign_p2pkh_inputs, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 const OUTPUT_COUNT: usize = 3;
 const OUTPUT_KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-// Independent single-input BIP352 oracle: the fixture's known public key,
-// serialized funding outpoint and tagged SHA256, without the node/index codec.
 fn expected_tweak(outpoint: OutPoint, prevout: &TxOut) -> Result<String> {
     let key: PublicKey =
         "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f".parse()?;
@@ -52,7 +49,7 @@ fn signed_spend_survives_reorg_and_restart() -> Result<()> {
     let mut node = ProcessNode::spawn_with(Kind::BitcoinRs, &options)?;
     let request = json!({"jsonrpc":"2.0","id":1,"method":"getblocktweaks","params":[101]});
     assert_eq!(
-        node.http("POST", "/", &serde_json::to_vec(&request)?, false)?
+        node.http("POST", "/", &sonic_rs::to_vec(&request)?, false)?
             .status,
         401
     );
@@ -66,7 +63,6 @@ fn signed_spend_survives_reorg_and_restart() -> Result<()> {
     let expected = expected_tweak(outpoint, &prevout)?;
     let script = ScriptBuf::from_bytes(Vec::from_hex(&format!("5120{OUTPUT_KEY}"))?);
     let mut tx = raw_spend_to(outpoint, &prevout, 10_000, Sequence::MAX, &script);
-    // Keep duplicates and dust: candidate completeness is independent of policy.
     tx.output.resize(
         OUTPUT_COUNT,
         TxOut {

@@ -114,8 +114,6 @@ fn admit(gateway: &MempoolGateway, tx: &Tx, chain: &dyn AdmissionChain) -> TestR
     Ok(())
 }
 
-// MPL-01/POL-02: restoration publishes actual gateway commits once, in parent
-// order, and does not adopt saved fees, graph links or membership sequences.
 #[test]
 fn restores_dependencies_priorities_and_gateway_publication() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -300,7 +298,6 @@ fn rechecks_spent_coins_maturity_fee_floor_capacity_and_expiry() -> TestResult {
         assert_eq!(pool.read().unbroadcast_transactions().count(), 0);
         assert_eq!(pool.orphan_count(), 0);
     }
-    // A confirmed parent no longer enters, while its child can use the live coin.
     let confirmed = Coins {
         outputs: vec![(OutPoint::new(parent.txid(), 0), parent.outputs[0].clone())],
         height: 101,
@@ -441,8 +438,6 @@ fn restores_valid_subset_when_a_descendant_becomes_nonfinal() -> TestResult {
         NOW - 10,
         &chain,
     )?;
-    // The complete family fails finality, but its four valid members can
-    // still enter together without consuming either shared fee budget early.
     let mut nonfinal = spend(OutPoint::new(d.txid(), 0), 48_000);
     nonfinal.lock_time = LockTime::from_consensus(150);
     nonfinal.inputs[0].sequence = Sequence::ZERO;
@@ -539,8 +534,6 @@ fn capacity_limits_save_whole_families_and_all_priorities() -> TestResult {
             .transactions
             .is_empty()
     );
-    // The same public save/read path honors a raised byte budget, retaining
-    // every family rather than a small-budget prefix.
     let dir = tempfile::tempdir()?;
     save(
         dir.path(),
@@ -771,8 +764,6 @@ fn interrupted_or_failed_save_preserves_the_complete_live_snapshot() -> TestResu
         .restored,
         1
     );
-    // Unknown staging entries belong to the operator; only the writer's own
-    // unique temporary file is ever cleaned up.
     std::fs::remove_file(dir.path().join(INTERRUPTED_STAGE))?;
     std::fs::create_dir(dir.path().join(INTERRUPTED_STAGE))?;
     let marker = dir.path().join(INTERRUPTED_STAGE).join("operator-data");
@@ -817,7 +808,6 @@ fn failed_atomic_replacement_keeps_the_previous_snapshot() -> TestResult {
     )?;
     let path = dir.path().join(FILE_NAME);
     let before = std::fs::read(&path)?;
-    // Permit reads but deny deletion/rename while the staging file is written.
     let guard = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(1)
@@ -1029,8 +1019,6 @@ fn concurrent_admission_and_save_capture_a_coherent_candidate_set() -> TestResul
     );
     let second = writer.join().map_err(|_| "admission thread panicked")?;
     assert!(first.is_ok() || second.is_ok());
-    // Windows can refuse one overlapping replacement while the other writer's
-    // file handle is closing. Refusal must still leave a complete live file.
     for result in [first, second] {
         #[cfg(windows)]
         if let Err(error) = result {
@@ -1170,8 +1158,6 @@ fn restores_cpfp_after_saved_ancestors_confirm_and_are_fully_spent() -> TestResu
         deadline(),
     )?;
 
-    // G and P confirmed while offline. All G outputs are spent; only P's
-    // output funding A remains in Chainstate. A needs C to pay its relay fee.
     let changed_chain = Coins {
         outputs: vec![(OutPoint::new(parent.txid(), 0), parent.outputs[0].clone())],
         height: 102,
@@ -1271,7 +1257,6 @@ fn restore_timeout_preserves_all_priorities_through_the_next_save() -> TestResul
     let bytes = snapshot.encode(Network::Regtest, DEFAULT_MAX_BYTES, deadline())?;
     let decoded = Snapshot::decode(&bytes, Network::Regtest, DEFAULT_MAX_BYTES, deadline())?;
     let target = gateway(MempoolLimits::default(), None);
-    // Deterministically expire the admission budget after successful decoding.
     let report = restore_candidates(&decoded, &target, &chain, NOW, Instant::now())?;
     assert!(report.timed_out);
     assert_eq!(report.restored, 0);
@@ -1320,8 +1305,6 @@ impl AdmissionChain for AncestorReads {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(deadline) = self.expire_at {
-            // Simulate a chain read that consumes the cooperative budget.
-            // Its in-progress call cannot be preempted, but no next read is allowed.
             while Instant::now() < deadline {
                 std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
             }

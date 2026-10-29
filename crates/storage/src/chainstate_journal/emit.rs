@@ -1,13 +1,3 @@
-//! Type-erased journal-writer handle for the apply path.
-//!
-//! [`JournalWriter`] is generic over the storage backend, but
-//! `Chainstate` is not (it is a concrete struct shared by every backend).
-//! This module is the single owner of that erasure: the apply path holds an
-//! [`SharedJournalWriter`] and never names `S`. The trait mirrors exactly the
-//! operations the apply path may perform: append, batched flush, fork rewinds,
-//! and the retention and checkpoint-publication transitions (`freeze`,
-//! `compact_to_checkpoint`, `resume`).
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -17,32 +7,25 @@ use crate::KvStore;
 use super::record::JournalRecord;
 use super::writer::{JournalWriter, JournalWriterError};
 
-/// Type-erased operations used by the live apply path to maintain the journal.
 pub trait JournalEmit: Send + Sync {
-    /// Checks that the writer can append the next block.
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError>;
 
     /// The current apply records an append error, but the writer then enters a
-    /// fail-closed append-gap state. `prepare_for_apply` refuses the next block
-    /// before mutation, so a transient I/O failure cannot grow an untracked
-    /// hole between live chainstate and the journal frontier.
+    /// fail-closed append-gap state.
+    ///
+    /// `prepare_for_apply` refuses the next block before mutation, so a transient I/O
+    /// failure cannot grow an untracked hole between live chainstate and the journal
+    /// frontier.
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError>;
 
-    /// Records that the live apply could not be represented as a journal
-    /// record. The next pre-apply gate then fails closed at this height.
     fn mark_append_gap(&mut self, height: u32);
 
-    /// Enforces the §2.3 boundary for everything buffered: storage flush,
-    /// segment fsync, atomic `head.json` publish — in that order.
     fn flush_through(&mut self, height: u32) -> Result<(), JournalWriterError>;
 
-    /// Flushes buffered records when the configured batch deadline expires.
     fn flush_due(&mut self) -> Result<(), JournalWriterError>;
 
-    /// Reports whether journal retention requires checkpoint compaction.
     fn requires_compaction(&self) -> Result<bool, JournalWriterError>;
 
-    /// Durably rewrites the canonical journal frontier to a reorg fork.
     fn rewind_to(
         &mut self,
         fork_height: u32,
@@ -51,12 +34,8 @@ pub trait JournalEmit: Send + Sync {
         chain_tx_count: u64,
     ) -> Result<(), JournalWriterError>;
 
-    /// Freezes appends while a checkpoint publication consumes the journal.
     fn freeze(&mut self) -> Result<(), JournalWriterError>;
 
-    /// Replaces the journal base with a committed checkpoint tip. Recovery
-    /// progress passes `false` for marker retirement until replay reaches the
-    /// durable head; completed and ordinary publications pass `true`.
     fn compact_to_checkpoint(
         &mut self,
         checkpoint_generation: u64,
@@ -67,7 +46,6 @@ pub trait JournalEmit: Send + Sync {
         retire_full_revalidation_marker: bool,
     ) -> Result<(), JournalWriterError>;
 
-    /// Resumes appends after checkpoint publication completes.
     fn resume(&mut self) -> Result<(), JournalWriterError>;
 }
 
@@ -136,10 +114,8 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
     }
 }
 
-/// Thread-safe erased journal writer shared by the apply and publication paths.
 pub type SharedJournalWriter = Arc<Mutex<dyn JournalEmit>>;
 
-/// Wraps a concrete writer for sharing through the apply-path trait object.
 pub fn shared_journal_writer<S: KvStore + 'static>(
     writer: JournalWriter<S>,
 ) -> SharedJournalWriter {

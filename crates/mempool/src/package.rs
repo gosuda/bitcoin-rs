@@ -1,5 +1,3 @@
-//! Core 31.1 package structure and ephemeral-spend policy.
-
 use bitcoin_rs_primitives::{OutPoint, Tx};
 use hashbrown::HashSet;
 
@@ -62,8 +60,6 @@ pub(crate) fn unfinished(tx: &Tx) -> TxAcceptanceFact {
     }
 }
 
-/// The child that spends any output of an unconfirmed parent must also
-/// spend every dust output of that parent. Returns the offending child index.
 pub(crate) fn missing_ephemeral_spends(
     pool: &Mempool,
     txs: &[Tx],
@@ -140,8 +136,6 @@ pub(crate) fn capture_package_checks(
     }
 }
 
-/// Work over copied facts only. Unfinished rows never imply acceptance, and
-/// no candidate output or graph edge is installed in the live pool.
 pub(crate) fn finish_preview(
     txs: &[Tx],
     requests: &[crate::AdmissionRequest],
@@ -167,8 +161,6 @@ pub(crate) fn finish_preview(
     )
 }
 
-/// Package submission's shared tail: policy, then the script stage with the
-/// gateway's cache on real submission and `None` on preview.
 pub(crate) fn finish_package(
     txs: &[Tx],
     requests: &[crate::AdmissionRequest],
@@ -186,10 +178,7 @@ pub(crate) fn finish_package(
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
         job.verify_policy(request);
         if let crate::gateway::AdmissionMode::PackageRpcSubmit(maximum) = mode
-            // Core's singleton PreChecks applies its own floor before the
-            // client cap. Multi-transaction caps precede aggregate fee checks.
-            && (txs.len() > 1
-                || aggregate_error != Some(AcceptanceRejectReason::MinRelayFeeNotMet))
+            && (txs.len() > 1 || aggregate_error != Some(AcceptanceRejectReason::MinRelayFeeNotMet))
         {
             job.check_package_max_feerate(maximum);
         }
@@ -205,9 +194,6 @@ pub(crate) fn finish_package(
         facts.package_error = Some(error.into());
         return facts;
     }
-    // Core's RPC package submission checks its aggregate fee floor before
-    // cluster and ephemeral-spend policy. Other planner errors and native
-    // submission keep their existing precedence.
     if matches!(mode, crate::gateway::AdmissionMode::PackageRpcSubmit(_))
         && aggregate_error == Some(AcceptanceRejectReason::MinRelayFeeNotMet)
     {
@@ -226,8 +212,6 @@ pub(crate) fn finish_package(
             return facts;
         }
         Err(error) => {
-            // Preserve the existing preview error surface. Native submission
-            // reports pool/graph failures without pretending to run replacement.
             facts.package_error = Some(
                 if matches!(
                     mode,

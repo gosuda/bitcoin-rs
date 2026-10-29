@@ -12,7 +12,6 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Maps checkpoint errors into corruption or ordinary I/O load failures.
 pub fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
         CheckpointError::Io(error) => classify_checkpoint_io(error),
@@ -33,7 +32,6 @@ pub(crate) fn checkpoint_file_error(name: &str, error: std::io::Error) -> Checkp
         CheckpointError::Io(error)
     }
 }
-/// Classifies checkpoint filesystem errors as corruption or ordinary I/O.
 pub fn classify_checkpoint_io(error: std::io::Error) -> CheckpointLoadError {
     if is_checkpoint_corruption(&error) {
         corrupt_checkpoint(error.to_string())
@@ -41,7 +39,6 @@ pub fn classify_checkpoint_io(error: std::io::Error) -> CheckpointLoadError {
         CheckpointLoadError::Io(error)
     }
 }
-/// Wraps a validation reason as a fail-closed checkpoint corruption error.
 pub fn corrupt_checkpoint(reason: impl Into<String>) -> CheckpointLoadError {
     CheckpointLoadError::Corrupt(reason.into())
 }
@@ -62,7 +59,7 @@ pub(crate) fn read_current(root: &CheckpointRoot) -> Result<Option<CurrentV1>, C
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(checkpoint_file_error(CURRENT_FILE, e)),
     };
-    let current: CurrentV1 = serde_json::from_slice(&bytes)?;
+    let current: CurrentV1 = sonic_rs::from_slice(&bytes)?;
     if current.version != CURRENT_VERSION {
         return Err(CheckpointError::Invalid(format!(
             "CURRENT checkpoint version {} is not current",
@@ -86,7 +83,6 @@ pub(crate) fn read_current(root: &CheckpointRoot) -> Result<Option<CurrentV1>, C
 }
 
 impl CurrentV1 {
-    /// Returns the immutable reference carried by this validated pointer.
     pub fn reference(&self) -> Result<super::CheckpointReference, CheckpointError> {
         Ok(super::CheckpointReference {
             generation: self.generation,
@@ -95,7 +91,6 @@ impl CurrentV1 {
     }
 }
 
-/// Reads and authenticates the manifest against its owner's reference and identity.
 pub fn read_manifest(
     generation_dir: &Dir,
     reference: &super::CheckpointReference,
@@ -109,7 +104,7 @@ pub fn read_manifest(
             "manifest SHA256 does not match checkpoint reference".to_owned(),
         ));
     }
-    let manifest: CheckpointManifestV1 = serde_json::from_slice(&bytes)?;
+    let manifest: CheckpointManifestV1 = sonic_rs::from_slice(&bytes)?;
     if manifest.version != MANIFEST_VERSION {
         return Err(CheckpointError::Invalid(format!(
             "manifest version {} is not current",
@@ -193,7 +188,6 @@ pub fn verify_artifact(
         .map_err(|e| checkpoint_file_error(name, e))?;
     Ok(file)
 }
-/// Rejects path components and names that differ from the expected artifact.
 pub fn require_filename(actual: &str, expected: &str) -> Result<(), CheckpointError> {
     if actual != expected || Path::new(actual).components().count() != 1 {
         return Err(CheckpointError::Invalid(format!(
@@ -234,20 +228,13 @@ pub fn coinstats_artifact_payload(bytes: &[u8]) -> Result<&[u8], CheckpointError
     Ok(&bytes[16..])
 }
 
-/// Result of probing the data directory for a committed checkpoint.
 pub enum CheckpointOpen {
-    /// No checkpoint has committed; the node must start cold.
     Cold,
-    /// The owner identifies a generation directory and its expected manifest digest.
     Selected {
-        /// Open generation directory capability.
         generation_dir: Dir,
-        /// Immutable reference supplied by CURRENT or the durable head.
         reference: super::CheckpointReference,
     },
 }
-/// Opens a generation selected by an authoritative durable-head reference.
-/// CURRENT may be ahead or absent after an interrupted publication.
 pub fn open_checkpoint_generation_at(
     data_dir: &Dir,
     root_name: &str,
@@ -266,12 +253,10 @@ pub fn open_checkpoint_generation_at(
     })
 }
 
-/// Opens and validates the checkpoint named by the data directory's CURRENT.
 pub fn open_current_checkpoint(data_dir: &Dir) -> Result<CheckpointOpen, CheckpointLoadError> {
     open_current_checkpoint_at(data_dir, super::CHECKPOINT_ROOT)
 }
 
-/// Opens the published checkpoint in an explicit namespace.
 pub fn open_current_checkpoint_at(
     data_dir: &Dir,
     root_name: &str,

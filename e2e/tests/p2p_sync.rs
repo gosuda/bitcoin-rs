@@ -1,5 +1,4 @@
 //! P2P E2E against a pinned Bitcoin Core 31.1 peer: initial sync, peer
-//! introspection, connection management, banning, and network toggles.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -8,9 +7,8 @@ use std::time::Duration;
 
 use bitcoin_rs_e2e::helpers::spawn_synced_pair;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
-/// Wait until `getconnectioncount` reports `want` peers.
 fn wait_for_peers(node: &mut ProcessNode, label: &'static str, want: u64) -> Result<()> {
     node.wait_for(label, Duration::from_secs(20), |node| {
         let count = node
@@ -21,17 +19,12 @@ fn wait_for_peers(node: &mut ProcessNode, label: &'static str, want: u64) -> Res
     })
 }
 
-/// A fresh node answers its peerless surfaces with the empty/null values
-/// Core uses, and the ban list round-trips.
 #[test]
 fn fresh_node_surfaces_and_ban_list() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
 
-    // `ping` answering null is a documented deviation from Core's scheduled
-    // pong measurement; the rest are the empty address manager, peer table,
-    // and added-node list of a node that has never connected.
     for (method, expected) in [
-        ("ping", Value::Null),
+        ("ping", Value::new()),
         ("getnodeaddresses", json!([])),
         ("getpeerinfo", json!([])),
         ("getaddednodeinfo", json!([])),
@@ -43,7 +36,7 @@ fn fresh_node_surfaces_and_ban_list() -> Result<()> {
 
     assert_eq!(
         node.rpc("setban", &json!(["192.0.2.1", "add", 3600]))?,
-        Value::Null
+        Value::new()
     );
     let banned = node.rpc("listbanned", &json!([]))?;
     let list = banned
@@ -53,13 +46,11 @@ fn fresh_node_surfaces_and_ban_list() -> Result<()> {
     assert_eq!(list[0].str_field("address")?, "192.0.2.1/32");
     assert_eq!(list[0].u64_field("ban_duration")?, 3600);
 
-    assert_eq!(node.rpc("clearbanned", &json!([]))?, Value::Null);
+    assert_eq!(node.rpc("clearbanned", &json!([]))?, Value::new());
     assert_eq!(node.rpc("listbanned", &json!([]))?, json!([]));
     node.stop()
 }
 
-/// A fresh node syncs a Core-mined regtest chain to the same tip and keeps
-/// following the peer past startup.
 #[test]
 fn node_syncs_and_follows_core_chain() -> Result<()> {
     let (mut core, mut node) = spawn_synced_pair(12)?;
@@ -69,7 +60,6 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
         node.rpc("getbestblockhash", &json!([]))?,
         core.rpc("getbestblockhash", &json!([]))?
     );
-    // Hash-by-hash agreement over the synced range.
     for height in [1_u64, 6, 12] {
         assert_eq!(
             node.rpc("getblockhash", &json!([height]))?,
@@ -78,7 +68,6 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
         );
     }
 
-    // Blocks mined after the initial sync must still arrive.
     core.rpc(
         "generatetoaddress",
         &json!([6, bitcoin_rs_e2e::helpers::funding_address()?.to_string()]),
@@ -92,8 +81,6 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
     core.stop()
 }
 
-/// `getpeerinfo`/`getnetworkinfo`/`getnettotals` describe the live Core peer
-/// and the transport it runs over.
 #[test]
 fn peer_and_network_introspection() -> Result<()> {
     let (mut core, mut node) = spawn_synced_pair(5)?;
@@ -114,8 +101,6 @@ fn peer_and_network_introspection() -> Result<()> {
         peer.str_field("subver")?.starts_with("/Satoshi:"),
         "peer subver must echo the connected Core build: {peer}"
     );
-    // `synced_blocks`/`synced_headers` are honest "not measured" (-1) in this
-    // node rather than a guessed height.
     for field in ["synced_blocks", "synced_headers", "presynced_headers"] {
         assert_eq!(
             peer.field(field)?.as_i64(),
@@ -170,8 +155,6 @@ fn peer_and_network_introspection() -> Result<()> {
     core.stop()
 }
 
-/// Connectivity control: `disconnectnode` drops the live peer, `addnode`
-/// restores it, and `setnetworkactive` gates the whole transport.
 #[test]
 fn connectivity_control_drops_and_restores_the_peer() -> Result<()> {
     let (core, mut node) = spawn_synced_pair(2)?;
@@ -179,12 +162,12 @@ fn connectivity_control_drops_and_restores_the_peer() -> Result<()> {
 
     assert_eq!(
         node.rpc("disconnectnode", &json!([core_addr]))?,
-        Value::Null
+        Value::new()
     );
     wait_for_peers(&mut node, "peer disconnect", 0)?;
     assert_eq!(
         node.rpc("addnode", &json!([core_addr, "add"]))?,
-        Value::Null
+        Value::new()
     );
     wait_for_peers(&mut node, "reconnect", 1)?;
 
@@ -200,7 +183,7 @@ fn connectivity_control_drops_and_restores_the_peer() -> Result<()> {
     assert_eq!(node.rpc("setnetworkactive", &json!([true]))?, json!(true));
     assert_eq!(
         node.rpc("addnode", &json!([core_addr, "add"]))?,
-        Value::Null
+        Value::new()
     );
     wait_for_peers(&mut node, "network on", 1)?;
     node.stop()?;

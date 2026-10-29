@@ -1,8 +1,3 @@
-//! Handshake state-machine round trips.
-//!
-//! Both test-local helpers here drive cursor-backed peers only; production
-//! code exercises the handshake through `run_inbound_handshake` and
-//! `start` on real streams.
 use std::io::{Cursor, Read, Write};
 
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
@@ -14,14 +9,6 @@ use bitcoin_rs_p2p::handshake::start;
 use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_p2p::{Message, Peer, PeerError, PeerRole, PeerState};
 
-/// Drive a complete version/verack handshake between two cursor-backed
-/// peers.
-///
-/// PRE: both peers wrap independent buffers.
-/// POST: both peers are ready, advertising the explicit unpruned service
-///   set (full history plus witness), and each recorded the other's
-///   compact-block advertisement.
-/// INVARIANT: this helper never varies the advertisement by role.
 fn handshake_cursors(
     left: &mut Peer<Cursor<Vec<u8>>>,
     right: &mut Peer<Cursor<Vec<u8>>>,
@@ -42,12 +29,6 @@ fn handshake_cursors(
     Ok(())
 }
 
-/// Deliver each message from `from` to `to` through the chainless
-/// inbound dispatch, writing every response onto `to`'s stream.
-///
-/// PRE: both peers wrap writable buffers.
-/// POST: `to` applied every inbound message and answered onto its stream.
-/// INVARIANT: response order matches the dispatch order.
 fn exchange<A, B>(
     from: &mut Peer<A>,
     to: &mut Peer<B>,

@@ -1,24 +1,3 @@
-//! BIP152 compact-block conformance over the real P2P wire.
-//!
-//! One bitcoin-rs process, one raw loopback peer speaking the production
-//! codec and the production inbound dispatch path — no mock dispatcher, so
-//! what these tests observe is what a real peer sees: which message answers
-//! a `getdata`, which request follows a failed reconstruction, and whether a
-//! malformed request ends the connection.
-//!
-//! Three behaviours are pinned here and cannot be pinned in the crate unit
-//! tests, which stop at the protocol object boundary:
-//!
-//! * serving depth — a compact `getdata` and a `getblocktxn` are answered
-//!   with a `cmpctblock`/`blocktxn` only near the active tip, and with the
-//!   whole witness-bearing `block` beyond the bound;
-//! * the coinbase prefill a served compact block carries;
-//! * the receive side — a `cmpctblock` whose body does not hash to its own
-//!   header is never applied, and recovery is one full-block `getdata` on
-//!   the same connection.
-//!
-//! The pinned Core 31.1 authority for each is cited at the test.
-
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::collections::BTreeMap;
@@ -40,7 +19,7 @@ use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 mod wire_peer;
 use wire_peer::Peer;
 
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 
 /// Blocks applied before the serving probes: deep enough that a request 11
 /// below the tip exists on the active chain.
@@ -58,8 +37,6 @@ struct CompactPeer {
 }
 
 impl CompactPeer {
-    /// Handshakes at v70016 and negotiates BIP152 at `cmpct_version` so the
-    /// node will serve compact requests at it.
     fn connect(node: &ProcessNode, name: &str, cmpct_version: u64) -> Result<Self, Error> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut wire = Peer::connect(
@@ -90,7 +67,6 @@ impl CompactPeer {
         }
     }
 
-    /// Serves one block-typed inventory item from the offered chain.
     fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<bool, Error> {
         let hash = match item {
             Inventory::WitnessBlock(hash)
@@ -98,7 +74,6 @@ impl CompactPeer {
             | Inventory::Block(hash) => *hash,
             _ => return Ok(false),
         };
-        // The wire takes an owned body; the map keeps serving further requests.
         let Some(body) = self.blocks.get(&hash).cloned() else {
             self.wire
                 .send(NetworkMessage::NotFound(vec![*item]), deadline)?;
@@ -132,9 +107,6 @@ impl CompactPeer {
         Ok(())
     }
 
-    /// Drains the socket until a reply satisfies `wanted`, serving every
-    /// `getdata` the node issues on the way. Returns `None` at the deadline
-    /// while propagating transport and outbound failures.
     fn await_reply(
         &mut self,
         timeout: Duration,
@@ -176,8 +148,6 @@ impl CompactPeer {
         Ok(None)
     }
 
-    /// Reads until the connection dies or `timeout` elapses. `true` means the
-    /// peer was dropped; a soft timeout means it is still alive.
     fn observe_disconnect(&mut self, timeout: Duration) -> Result<bool, Error> {
         let end = Instant::now() + timeout;
         while Instant::now() < end {
@@ -194,8 +164,6 @@ impl CompactPeer {
     }
 }
 
-/// An expired batch must stop at the first attempted block, recording zero
-/// completed writes rather than silently attempting all 100 bodies.
 #[test]
 fn expired_block_batch_reports_first_unsent_hash() -> Result<(), Error> {
     let node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -218,9 +186,9 @@ fn expired_block_batch_reports_first_unsent_hash() -> Result<(), Error> {
         bitcoin_rs_e2e::node::workspace()
             .join("target/compact-blocks-e2e/expired-batch-peer.jsonl"),
     )?;
-    let records: Vec<serde_json::Value> = journal
+    let records: Vec<sonic_rs::Value> = journal
         .lines()
-        .map(serde_json::from_str)
+        .map(sonic_rs::from_str)
         .collect::<Result<_, _>>()?;
     assert_eq!(records.iter().filter(|r| r["dir"] == "serve").count(), 1);
     assert_eq!(records.iter().filter(|r| r["dir"] == "served").count(), 0);
@@ -234,8 +202,6 @@ fn expired_block_batch_reports_first_unsent_hash() -> Result<(), Error> {
     node.stop()
 }
 
-/// The offered block `depth` below the applied tip. `chain[0]` is height 1, so
-/// a tip at `tip_height` puts depth `d` at index `tip_height - 1 - d`.
 fn block_at_depth(chain: &[Block], tip_height: u32, depth: u32) -> &Block {
     let index = usize::try_from(tip_height - 1 - depth).expect("depth inside the chain");
     &chain[index]
@@ -289,7 +255,6 @@ fn synced_peer_with_len(
     )))
 }
 
-/// Serves every request for `dur` without waiting for a particular reply.
 impl CompactPeer {
     fn pump_serving(&mut self, dur: Duration, operation_end: Instant) -> Result<(), Error> {
         let poll_end = (Instant::now() + dur).min(operation_end);
@@ -298,15 +263,10 @@ impl CompactPeer {
     }
 }
 
-fn ok_count(value: &serde_json::Value) -> Option<u64> {
+fn ok_count(value: &sonic_rs::Value) -> Option<u64> {
     value.as_u64()
 }
 
-/// A compact `getdata` within 5 blocks of the active tip is answered with a
-/// `cmpctblock` that prefills the coinbase at index zero; one block deeper is
-/// answered with the whole witness-bearing `block`, not `notfound` and not a
-/// compact reply a peer cannot fill from its own mempool.
-/// Core 31.1 `net_processing.cpp:2705-2721`.
 #[test]
 fn serves_compact_by_depth_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("depth")?;
@@ -376,9 +336,6 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), Error> {
     node.stop()
 }
 
-/// A `getblocktxn` within 10 blocks of the tip is answered with a `blocktxn`;
-/// one block deeper is answered with the whole witness-bearing `block`
-/// (Core 31.1 `net_processing.cpp:4590-4624`).
 #[test]
 fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("blocktxn")?;
@@ -435,10 +392,6 @@ fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), Error> {
     node.stop()
 }
 
-/// An empty `getblocktxn` index list ends the connection at the inbound
-/// boundary (Core 31.1 `net_processing.cpp:4560-4574`). A ping/pong proves
-/// the socket was alive immediately before the request, so the drop is
-/// attributed to the malformed message and not to an idle timeout.
 #[test]
 fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, _chain) = synced_peer("empty-txn")?;
@@ -483,10 +436,6 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), Error> {
     node.stop()
 }
 
-/// A `cmpctblock` whose prefilled body does not hash to its own header is
-/// never delivered as a block: the node asks this same peer for the full
-/// witness body and applies the block only once the real body arrives
-/// (Core 31.1 `blockencodings.cpp:207-219`, `net_processing.cpp:3734-3754`).
 #[test]
 fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("wrong-root")?;
@@ -496,8 +445,6 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     let hash = real.block_hash();
     peer.offer_chain(std::slice::from_ref(&real));
 
-    // The same header, announced with a coinbase body that is not the one the
-    // header commits to.
     let mut wrong = real.txdata[0].clone();
     wrong.output[0].value = Amount::from_sat(1);
     let announced = CmpctBlock {
@@ -553,9 +500,10 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     )))
 }
 
-/// Hold a compact-block reconstruction across a real chain switch. Core v31.1
-/// GETBLOCKTXN resolves stored bodies by hash even after they leave the chain
-/// (9be056a8a72b624dae9623b2f7bded92c2a21c91, net_processing.cpp:4333-4391).
+/// Hold a compact-block reconstruction across a real chain switch.
+///
+/// Core v31.1 GETBLOCKTXN resolves stored bodies by hash even after they leave the
+/// chain (9be056a8a72b624dae9623b2f7bded92c2a21c91, net_processing.cpp:4333-4391).
 #[test]
 fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error> {
     use NetworkMessage::{BlockTxn, NotFound};
@@ -563,8 +511,6 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
     let (mut node, mut peer, common) = synced_peer_with_len("stale-race", 100)?;
     let parent = common.last().expect("common tip");
     let mut stale = segwit_coinbase_block(parent, 101, 0xD1);
-    // Include a non-coinbase transaction, forcing an actual missing short-ID
-    // slot after the compact response's sole coinbase prefill.
     stale.txdata[0].input[0].witness.clear();
     stale.txdata[0].output.truncate(1);
     let funding = &common[0].txdata[0];
@@ -600,7 +546,6 @@ fn stale_compact_block_finishes_reconstruction_after_reorg() -> Result<(), Error
     assert_eq!(compact.compact_block.prefilled_txs.len(), 1);
     assert_eq!(compact.compact_block.prefilled_txs[0].idx, 0);
 
-    // The peer holds the prefill while a different, longer branch wins.
     let branch = build_chain(parent, 2, 0xE1, 101);
     peer.headers = common.iter().map(|b| b.header).collect();
     peer.offer_chain(&branch);

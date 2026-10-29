@@ -1,6 +1,3 @@
-//! CRT SIGINT/SIGTERM bridge where signal-hook's Unix iterator is unavailable.
-//! This does not implement console close, logoff, or shutdown-event semantics.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -9,11 +6,6 @@ use std::time::Duration;
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
-
-// signal-hook names `SIGBREAK` (21) under cfg(windows): the CRT dispatches
-// it to `CTRL_BREAK_EVENT`, the only console event another process can aim
-// at a specific process group — how a harness or the console asks a
-// spawned node for a graceful stop.
 
 pub(crate) struct ShutdownHandler {
     registrations: Vec<signal_hook::SigId>,
@@ -88,8 +80,6 @@ pub(crate) mod testing;
 
 #[cfg(test)]
 mod tests {
-    /// Raise a real CRT signal in a child process so unrelated lifecycle tests
-    /// cannot observe its process-global signal registrations.
     #[test]
     fn crt_signal_reaches_shutdown_receiver() -> anyhow::Result<()> {
         const CHILD: &str = "BITCOIN_RS_TEST_CRT_SIGNAL_CHILD";

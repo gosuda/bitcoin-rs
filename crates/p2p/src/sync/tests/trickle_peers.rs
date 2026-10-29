@@ -2,10 +2,6 @@ use super::*;
 
 #[test]
 fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
-    // R10 slow-trickle: a peer delivering each front block just under
-    // the adaptive threshold is never disconnected (Core has the same
-    // exposure), but the stall state must be visible — via the window
-    // accessor and the node.sync.stall_seconds gauge.
     let recorder = TestRecorder::default();
     metrics::with_local_recorder(&recorder, || {
         let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(6)?;
@@ -82,22 +78,6 @@ fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
 
 #[test]
 fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes() -> TestResult {
-    // Sync-level smoke for the self-eclipse blocker and the ADV-DRIP-1
-    // drip: 8 eligible peers in saturated fan-out (window 24 = 8 peers x
-    // cap 3 over a 32-block chain, so refills keep R+P pinned at the
-    // count budget and "no request capacity" is the steady state) over a
-    // fully applicable mined chain. Every peer keeps streaming — one
-    // block per peer per round, lowest-block-first so the window front
-    // advances at the round cadence — while every round lands 150ms
-    // apart, past the injected 100ms threshold. Each tick drains the
-    // round's deliveries before observing, so per-peer delivery progress
-    // clears every delivery-time episode; the mid-gap ticks (the wake
-    // path observes between the front owner's deliveries — where the
-    // pre-fix drip fired) stay under the adaptive decay floor once the
-    // interval EWMA has its first sample: zero staller disconnects and
-    // the sync completes. (The timing-injected constructions live in the
-    // window module: `uniform_slow_streaming_saturated_fanout_never_fires`
-    // and `stall_decay_limit_cycle_stops_at_adaptive_floor`.)
     let recorder = TestRecorder::default();
     metrics::with_local_recorder(&recorder, || {
         let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(32)?;

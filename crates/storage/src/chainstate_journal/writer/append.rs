@@ -1,5 +1,3 @@
-//! Ordered journal append, partial-write repair, and bounded segment rotation.
-
 use super::super::record::JournalRecord;
 use super::super::record::encode_record;
 use super::DurableCursor;
@@ -13,9 +11,11 @@ use crate::KvStore;
 use std::io::Write;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// Buffers one record. Idempotent per height: re-appending a record whose
-    /// height equals the last appended height is rejected as a duplicate via
-    /// the strict ordering rule (callers replay whole records after a crash).
+    /// Buffers one record.
+    ///
+    /// Idempotent per height: re-appending a record whose height equals the last
+    /// appended height is rejected as a duplicate via the strict ordering rule (callers
+    /// replay whole records after a crash).
     pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
         if record.height != self.next_height {
@@ -109,9 +109,6 @@ impl<S: KvStore> JournalWriter<S> {
         };
         let name = segment_name(self.segment_gen);
         let mut options = cap_std::fs::OpenOptions::new();
-        // On Windows the access mapping drops FILE_WRITE_DATA deliberately:
-        // with it granted, every write would go to the file position (zero on
-        // a fresh open) instead of the end of file.
         options.append(true).create(true);
         let mut file = match self.dir.open_with(&name, &options) {
             Ok(file) => file,
@@ -131,9 +128,6 @@ impl<S: KvStore> JournalWriter<S> {
         #[cfg(not(any(test, feature = "test-seam")))]
         let write_result = file.write_all(bytes);
         if let Err(append_error) = write_result {
-            // The append handle cannot SetEndOfFile on Windows (no
-            // FILE_WRITE_DATA), so the rollback truncates through a fresh
-            // write handle instead.
             let mut write_options = cap_std::fs::OpenOptions::new();
             write_options.write(true);
             let rollback_result =
@@ -166,7 +160,6 @@ impl<S: KvStore> JournalWriter<S> {
         Err(error)
     }
 
-    /// Rotates the active segment when it crosses the size threshold.
     pub(super) fn maybe_rotate(&mut self) -> Result<(), JournalWriterError> {
         if self.segment_offset < self.rotate_bytes {
             return Ok(());

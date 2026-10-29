@@ -1,42 +1,5 @@
 //! BIP337 compressed-transaction codec (`compressrawtransaction` /
 //! `decompressrawtransaction`).
-//!
-//! One pure codec shared by the two RPC adapters. It owns no chain,
-//! mempool, or storage state: every contextual fact (prevout scripts and
-//! values, block-height locations, flat output indices) arrives through
-//! [`PrevoutResolver`], and the RPC layer supplies the single production
-//! resolver. Removing this module and its two registry rows leaves
-//! consensus, relay, mempool, storage, REST, and Esplora untouched.
-//!
-//! # Recorded spec decisions
-//!
-//! The published BIP337 prose and its reference implementation disagree
-//! in five places. This codec follows the reference behaviour, which is
-//! the only reading that restores the published test vectors
-//! byte-for-byte:
-//!
-//! 1. Every variable-length integer except CompactSize fields is the
-//!    carry-aware Core VARINT (the chainstate integer form), not the
-//!    7-bit little-endian form the prose describes: the amount `5000`
-//!    encodes as `a608`, which only the Core form produces.
-//! 2. The six-bit per-input metadata value needs the public-key-hash bit
-//!    the prose table omits: `m = sig | pkh<<1 | std<<2 | seq<<3 |
-//!    outpoint<<5`. Without that row the P2SH-P2WPKH vector's metadata
-//!    byte cannot be reproduced.
-//! 3. Compressed signatures cover the vector-proven closed set (P2TR key
-//!    path, P2PKH, P2WPKH, P2SH-P2WPKH). Everything else — P2TR script
-//!    path, P2WSH, multisig, P2PK, nonstandard scripts — uses the
-//!    uncompressed envelope: VARINT scriptSig length and bytes, then a
-//!    VARINT witness item count with VARINT length-prefixed items.
-//! 4. Minimum height follows the reference rule, not the prose: start at
-//!    `locktime - 1` when the locktime is nonzero, take the minimum with
-//!    each compressible `coin.height - 1`, and encode the `u32::MAX`
-//!    "no candidate" sentinel as zero (presence bit clear). Offsets and
-//!    the stored locktime are checked subtractions from that minimum.
-//! 5. A compressed outpoint is emitted only for a prevout with a
-//!    confirmed height and a resolvable flat output index. Anything else
-//!    degrades to the raw outpoint plus one `UTXO(i): <reason>` warning;
-//!    an unknown outpoint is never fabricated.
 
 use bitcoin::hashes::{Hash as _, hash160};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId, Signature};
@@ -49,32 +12,15 @@ use hashbrown::HashMap;
 
 use crate::error::RpcError;
 
-/// Largest compressed (or reconstructed) transaction, in bytes.
 pub(crate) const MAX_COMPRESSED_TX_BYTES: usize = 4_000_000;
-/// Largest input count accepted before any allocation is sized by it.
 pub(crate) const MAX_COMPRESSED_INPUTS: usize = 100_000;
-/// Largest output count accepted before any allocation is sized by it.
 pub(crate) const MAX_COMPRESSED_OUTPUTS: usize = 100_000;
-/// Total block-body bytes one resolver call may retain.
 pub(crate) const MAX_RETAINED_BODY_BYTES: usize = 16 * 1024 * 1024;
-/// Bodies one resolver call may retain (one largest body per slot).
 pub(crate) const MAX_RETAINED_BODIES: usize = MAX_RETAINED_BODY_BYTES / MAX_COMPRESSED_TX_BYTES;
-/// Total flat-index bytes one resolver call may retain.
 pub(crate) const MAX_RETAINED_INDEX_BYTES: usize = 12 * 1024 * 1024;
-/// Combined retained body plus index budget for one resolver call.
 pub(crate) const MAX_RETAINED_BYTES_TOTAL: usize = 32 * 1024 * 1024;
-/// Memoized resolver state (prevout memo entries) budget for one call.
 pub(crate) const MAX_RESOLVER_STATE_BYTES: usize = 8 * 1024 * 1024;
-/// Cumulative body loads (distinct reads plus eviction reloads) one
-/// resolver call may perform. Bounds the total body-read/parse/materialize/
-/// txid work under the stable-chainstate exclusion (snapshot isolation: one
-/// uninterrupted chainstate read) even when retained budgets stay satisfied
-/// through eviction; exceeding it fails closed. Sized at twice the retained
-/// slots so a grouped pass over a handful of heights succeeds while a
-/// cycling pass cannot reload forever.
 pub(crate) const MAX_CUMULATIVE_BODY_LOADS: usize = MAX_RETAINED_BODIES * 2;
-/// Cumulative body bytes one resolver call may read, bounding total parse
-/// work under the exclusion to twice the retained-body ceiling.
 pub(crate) const MAX_CUMULATIVE_BODY_BYTES: usize = MAX_RETAINED_BODY_BYTES * 2;
 
 /// Cancellation is polled once per this many codec inputs.
@@ -83,141 +29,96 @@ const CANCELLATION_POLL_INPUTS: usize = 256;
 type FlatLookup = Option<Result<Option<u32>, LookupError>>;
 type LocatedPrevoutLookup = Option<Result<Option<(OutPoint, ResolvedPrevout)>, LookupError>>;
 
-/// Caller-selected compression behaviour.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CompressOptions {
-    /// Replace resolvable outpoints with height/flat-index references.
     pub compress_outpoints: bool,
 }
 
-/// One prevout as resolution proved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedPrevout {
-    /// The spent output itself (script and value; BIP143 recovery commits
-    /// to the value, so it is mandatory context, never optional).
     pub txout: TxOut,
-    /// Height of the block confirming the prevout, when it is confirmed.
     pub confirmed_height: Option<u32>,
 }
 
-/// Which resolver budget a [`LookupError::LimitExceeded`] hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Limit {
-    /// Too many retained bodies.
     Bodies,
-    /// Retained body bytes.
     BodyBytes,
-    /// Cumulative body loads (distinct reads plus eviction reloads).
     Loads,
-    /// Cumulative body bytes read.
     LoadBytes,
-    /// Retained flat-index bytes.
     IndexBytes,
-    /// Memoized resolver state bytes.
     State,
 }
 
-/// Failure to resolve contextual facts for the codec.
-///
 /// `Ok(None)` from a resolver method means "proved absent"; the error
 /// variants mean "could not prove", and decompress refuses on them
 /// rather than fabricating a prevout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum LookupError {
-    /// The resolver has no route to the requested fact.
     #[error("prevout context is unavailable")]
     Missing,
-    /// No body is available at this height.
     #[error("block body at height {0} is unavailable")]
     BodyMissing(u32),
-    /// The body at this height does not parse.
     #[error("block body at height {0} is corrupt")]
     CorruptBody(u32),
-    /// The body at this height could not be read.
     #[error("block body at height {0} could not be read")]
     BodyReadFailed(u32),
-    /// A resolver budget ran out; the call may be retried.
     #[error("compressed transaction resource limit exceeded")]
     LimitExceeded(Limit),
-    /// The caller cancelled while resolving.
     #[error("compressed transaction request cancelled")]
     Cancelled,
 }
 
-/// Context source for one compress or decompress call.
-///
-/// Implementations may retain bounded per-call state (see the
-/// `MAX_RETAINED_*` and `MAX_CUMULATIVE_*` ceilings); `&mut self` carries
-/// it, so no interior mutability or second cache owner exists.
-///
 /// `flat_output_index` (cumulative outputs before `txid` in `height`,
 /// plus `vout`) and `outpoint_at` must be exact inverses on one block;
 /// the compressed form stores only the flat index.
 pub(crate) trait PrevoutResolver {
-    /// Resolves one spent outpoint, or `Ok(None)` when proved absent.
     fn prevout(&mut self, outpoint: &OutPoint) -> Result<Option<ResolvedPrevout>, LookupError>;
-    /// Flat output index of `txid`'s output `vout` inside `height`.
     fn flat_output_index(
         &mut self,
         height: u32,
         txid: &Txid,
         vout: u32,
     ) -> Result<Option<u32>, LookupError>;
-    /// Inverse of [`Self::flat_output_index`]: the outpoint and prevout
-    /// at flat output position `flat_index` inside `height`.
     fn outpoint_at(
         &mut self,
         height: u32,
         flat_index: u32,
     ) -> Result<Option<(OutPoint, ResolvedPrevout)>, LookupError>;
-    /// Cooperative cancellation, polled by the codec.
     fn cancelled(&self) -> bool;
 }
 
-/// Codec failure. Each variant maps to exactly one [`RpcError`]:
-/// structural malformation is `-22`, oversize input or output is `-8`,
-/// budget exhaustion and cancellation are retryable `-1`,
-/// a proved-absent prevout during decompress is `-5`.
+/// Codec failure.
+///
+/// Each variant maps to exactly one [`RpcError`]: structural malformation is `-22`,
+/// oversize input or output is `-8`, budget exhaustion and cancellation are retryable
+/// `-1`, a proved-absent prevout during decompress is `-5`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CodecError {
-    /// The byte stream ended before the transaction was complete.
     #[error("compressed transaction is truncated")]
     Truncated,
-    /// Non-minimal `CompactSize`, set padding bits, or trailing bytes.
     #[error("compressed transaction is not canonically encoded")]
     NonCanonical,
-    /// A value (varint, count, height arithmetic, total size) overflowed
-    /// its supported range.
     #[error("compressed transaction value exceeds its supported range")]
     Overflow,
-    /// A resolver budget ran out.
     #[error("compressed transaction resource limit exceeded")]
     LimitExceeded(Limit),
-    /// A transaction must carry at least one input and one output.
     #[error("compressed transaction has no inputs or outputs")]
     EmptyTransaction,
-    /// A compressed signature names a spend type outside the closed set.
     #[error("compressed transaction spends an unsupported script type")]
     UnsupportedScript,
-    /// The sighash needed for public-key recovery could not be computed.
     #[error("failed to compute sighash for compressed signature recovery")]
     Sighash,
-    /// Decompression needs this prevout and it is proved absent.
     #[error("prevout is unavailable for decompression")]
     PrevoutMissing(OutPoint),
-    /// No body is available at this height.
     #[error("block body at height {0} is unavailable")]
     BodyMissing(u32),
-    /// The body at this height does not parse.
     #[error("block body at height {0} is corrupt")]
     CorruptBody(u32),
-    /// The body at this height could not be read.
     #[error("block body at height {0} could not be read")]
     BodyReadFailed(u32),
-    /// No recovery id reproduces a key matching the prevout commitment.
     #[error("compressed signature could not be recovered")]
     SignatureUnrecoverable,
-    /// The caller cancelled mid-codec.
     #[error("compressed transaction request cancelled")]
     Cancelled,
 }
@@ -247,8 +148,6 @@ impl From<CodecError> for RpcError {
     }
 }
 
-/// Maps a resolver failure onto the codec taxonomy; `missing` is the
-/// call-site-specific meaning of [`LookupError::Missing`].
 fn lookup_failure(error: LookupError, missing: CodecError) -> CodecError {
     match error {
         LookupError::Missing => missing,
@@ -260,14 +159,11 @@ fn lookup_failure(error: LookupError, missing: CodecError) -> CodecError {
     }
 }
 
-// ---------------------------------------------------------------------
-// Integer primitives
-// ---------------------------------------------------------------------
-
-/// Encodes the carry-aware Core VARINT (chainstate form). At most ten
-/// bytes, so every `u64` amount has a spelling; larger spellings are
-/// impossible on this domain. `u32`-range values keep their short (at most
-/// five-byte) spelling, which the capped readers below rely on.
+/// Encodes the carry-aware Core VARINT (chainstate form).
+///
+/// At most ten bytes, so every `u64` amount has a spelling; larger spellings are
+/// impossible on this domain. `u32`-range values keep their short (at most five-byte)
+/// spelling, which the capped readers below rely on.
 fn write_varint(value: u64, out: &mut Vec<u8>) -> Result<(), CodecError> {
     let mut tmp = [0_u8; 10];
     let mut len = 0_usize;
@@ -290,9 +186,6 @@ fn write_varint(value: u64, out: &mut Vec<u8>) -> Result<(), CodecError> {
     Ok(())
 }
 
-/// Bounded byte sink: every write is charged against
-/// [`MAX_COMPRESSED_TX_BYTES`] before it lands, so neither the encoded
-/// nor the reconstructed buffer can grow past the ceiling.
 struct Writer {
     bytes: Vec<u8>,
 }
@@ -329,14 +222,12 @@ impl Writer {
         self.write(&encoded)
     }
 
-    /// VARINT length-prefixed bytestream (VLP).
     fn write_vlp(&mut self, data: &[u8]) -> Result<(), CodecError> {
         self.write_varint(u64::try_from(data.len()).map_err(|_| CodecError::Overflow)?)?;
         self.write(data)
     }
 }
 
-/// Bounds-checked cursor over one compressed transaction.
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -372,18 +263,10 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    /// Reads the carry-aware Core VARINT, up to ten bytes so every `u64`
-    /// amount decodes. The encoding is a bijection, so the re-encode
-    /// comparison is the non-minimal-form rejection; overlong spellings of
-    /// small values stay [`CodecError::NonCanonical`].
     fn read_varint(&mut self) -> Result<u64, CodecError> {
         self.read_varint_capped(10)
     }
 
-    /// Reads the carry-aware Core VARINT with at most `max_bytes` bytes.
-    /// `u32`-capped fields (counts, heights, offsets, sequence deltas) use
-    /// five: their canonical spellings never exceed it, so anything longer
-    /// is [`CodecError::Overflow`] even before the range check.
     fn read_varint_capped(&mut self, max_bytes: usize) -> Result<u64, CodecError> {
         let start = self.pos;
         let mut value = 0_u64;
@@ -407,8 +290,6 @@ impl<'a> Reader<'a> {
     }
 
     fn read_vlp(&mut self) -> Result<&'a [u8], CodecError> {
-        // Length prefixes stay five-byte capped: script and witness items
-        // are bounded by [`MAX_COMPRESSED_TX_BYTES`] well below it.
         let len = self.read_varint_capped(5)?;
         let len = usize::try_from(len).map_err(|_| CodecError::Overflow)?;
         self.take(len)
@@ -423,14 +304,6 @@ fn read_u32_compact_size(reader: &mut Reader<'_>) -> Result<u32, CodecError> {
     u32::try_from(reader.read_compact_size()?).map_err(|_| CodecError::Overflow)
 }
 
-// ---------------------------------------------------------------------
-// Bit packing (input/output metadata)
-// ---------------------------------------------------------------------
-
-/// Packs each 6-bit input value followed by each 3-bit output value,
-/// high-field-first, zero-padded to a whole byte. Input `37`
-/// (`outpoint=1, seq=0, std=1, pkh=0, sig=1`) plus output `5` is the
-/// byte pair `96 80`.
 fn encode_bits(inputs: &[u8], outputs: &[u8]) -> Vec<u8> {
     let total_bits = inputs.len() * 6 + outputs.len() * 3;
     let mut packed = vec![0_u8; total_bits.div_ceil(8)];
@@ -452,7 +325,6 @@ fn encode_bits(inputs: &[u8], outputs: &[u8]) -> Vec<u8> {
     packed
 }
 
-/// Inverse of [`encode_bits`]; set padding bits are non-canonical.
 fn decode_bits(
     reader: &mut Reader<'_>,
     inputs: usize,
@@ -487,11 +359,6 @@ fn decode_bits(
     Ok((input_meta, output_meta))
 }
 
-// ---------------------------------------------------------------------
-// Script shapes
-// ---------------------------------------------------------------------
-
-/// Output script classes, in metadata-code order (custom is 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputShape {
     Custom,
@@ -601,7 +468,6 @@ fn output_script(code: u8, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
     Ok(script)
 }
 
-/// Spend-side prevout classes relevant to signature compression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrevoutKind {
     P2pkh([u8; 20]),
@@ -631,7 +497,6 @@ fn hash160_20(data: &[u8]) -> [u8; 20] {
     *hash160::Hash::hash(data).as_byte_array()
 }
 
-/// One script push (`data` only), canonical direct/PUSHDATA1/PUSHDATA2.
 fn push_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 3);
     match data.len() {
@@ -652,7 +517,6 @@ fn push_data(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Reads one push at `pos`, returning `(payload, next_pos)`.
 fn read_push(script: &[u8], pos: usize) -> Option<(&[u8], usize)> {
     let opcode = *script.get(pos)?;
     let (len, header) = match opcode {
@@ -683,7 +547,6 @@ fn read_push(script: &[u8], pos: usize) -> Option<(&[u8], usize)> {
     Some((script.get(start..end)?, end))
 }
 
-/// DER-encodes `r || s` (each 32-byte big-endian) minimally.
 fn der_encode(sig64: &[u8; 64]) -> Vec<u8> {
     fn integer(half: &[u8]) -> Vec<u8> {
         let mut start = 0_usize;
@@ -712,18 +575,9 @@ fn der_encode(sig64: &[u8; 64]) -> Vec<u8> {
     der
 }
 
-// ---------------------------------------------------------------------
-// Signature forms
-// ---------------------------------------------------------------------
-
-/// A signature in its 64-byte compressed form.
 struct CompressedSig {
-    /// ECDSA `r || s`, or the 64-byte Schnorr signature for P2TR.
     sig: [u8; 64],
-    /// Redeem-script pubkey hash; only P2SH-P2WPKH carries it.
     pubkey_hash: Option<[u8; 20]>,
-    /// Non-standard hash type byte, present exactly when `standard` is
-    /// false.
     hash_type: Option<u8>,
     /// Standard hash type: `0x01` ECDSA, `0x00` (absent byte) taproot.
     standard: bool,
@@ -747,10 +601,6 @@ fn ecdsa_compressed(sig_item: &[u8]) -> Option<CompressedSig> {
 fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSig> {
     match kind {
         PrevoutKind::P2tr => {
-            // Decompression rebuilds an empty scriptSig (see the P2tr fill
-            // in `decompress_finalize`), so only inputs that already carry
-            // the exact key-path shape compress; anything else, including a
-            // non-empty scriptSig, falls back to the uncompressed envelope.
             if !input.script_sig.is_empty() || input.witness.len() != 1 {
                 return None;
             }
@@ -775,7 +625,6 @@ fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSi
             }
         }
         PrevoutKind::P2pkh(expected) => {
-            // Decompression rebuilds an empty witness for this input.
             if !input.witness.is_empty() {
                 return None;
             }
@@ -785,22 +634,11 @@ fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSi
             if end != script.len() {
                 return None;
             }
-            // Exact canonical push shape: both pushes must re-encode
-            // byte-for-byte via `push_data`. Non-minimal PUSHDATA1/2/4
-            // spellings carry the same payloads but rebuild to different
-            // bytes through `push_data` on decompress, so they fall back
-            // to the uncompressed envelope.
             let mut canonical = push_data(sig_item);
             canonical.extend_from_slice(&push_data(pubkey));
             if canonical != script {
                 return None;
             }
-            // Decompression rebuilds the scriptSig from a recovered key, so
-            // only an exactly round-tripping pubkey may compress: the
-            // 33-byte compressed form or the 65-byte `0x04` uncompressed
-            // form hashing to the prevout commitment. Hybrid keys, misc
-            // pushes, and foreign keys fall back to the uncompressed
-            // envelope rather than changing the signer on rebuild.
             let compressed = pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03);
             if !compressed && (pubkey.len() != 65 || pubkey.first() != Some(&0x04)) {
                 return None;
@@ -814,8 +652,6 @@ fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSi
             if !input.script_sig.is_empty() || input.witness.len() != 2 {
                 return None;
             }
-            // Decompression recovers the key committed by the prevout, so
-            // only that exact key may be dropped from the witness.
             let pubkey = input.witness.get(1)?;
             if pubkey.len() != 33 || hash160_20(pubkey) != *expected {
                 return None;
@@ -868,14 +704,6 @@ fn sequence_value(code: u8, reader: &mut Reader<'_>) -> Result<u32, CodecError> 
     }
 }
 
-// ---------------------------------------------------------------------
-// Compress
-// ---------------------------------------------------------------------
-
-/// Groups input indices needing flat-index lookups by required height, in
-/// first-appearance order. Heights are already known from the resolved
-/// prevouts; inputs degraded to raw outpoints or lacking confirmation need
-/// no lookup and stay out of every group.
 fn flat_lookup_groups(
     tx: &Tx,
     resolved: &[Option<ResolvedPrevout>],
@@ -901,10 +729,6 @@ fn flat_lookup_groups(
     (order, members)
 }
 
-/// Resolves flat output indices grouped by height so each body is loaded
-/// once: one height's lookups run consecutively, keeping every lookup a
-/// retained-body hit instead of evicting and reloading the body per input.
-/// Cancellation is polled like the per-input passes.
 fn resolve_flats_grouped(
     tx: &Tx,
     resolver: &mut dyn PrevoutResolver,
@@ -933,7 +757,6 @@ fn resolve_flats_grouped(
     Ok(results)
 }
 
-/// Per-input encoding plan, computed after prevout resolution.
 struct Plan {
     outpoint_compressed: bool,
     height_offset: u64,
@@ -945,10 +768,6 @@ struct Plan {
 /// Compresses `tx`. Missing contextual facts degrade a single input to
 /// its raw outpoint with one `UTXO(i): <reason>` warning; retained
 /// budget exhaustion and cancellation are errors, never downgrades.
-///
-/// # Errors
-/// Returns [`CodecError`] for empty or oversize transactions, invalid
-/// resolver budgets, and cancellation.
 #[allow(
     clippy::too_many_lines,
     reason = "one sequential encoding pass over the transaction fields"
@@ -968,8 +787,6 @@ pub(crate) fn compress_transaction(
         return Err(CodecError::Overflow);
     }
 
-    // Resolve every prevout once. Resolver resource failures propagate;
-    // ordinary absence degrades per-input below.
     let mut resolved: Vec<Option<ResolvedPrevout>> = Vec::with_capacity(tx.inputs.len());
     let mut degraded: Vec<Option<String>> = Vec::with_capacity(tx.inputs.len());
     for (index, input) in tx.inputs.iter().enumerate() {
@@ -1007,7 +824,6 @@ pub(crate) fn compress_transaction(
         }
     }
 
-    // Reference minimum-height rule (module docs, decision 4).
     let locktime = tx.lock_time.to_consensus();
     let mut min_height: Option<u32> = if locktime != 0 {
         Some(locktime - 1)
@@ -1024,14 +840,6 @@ pub(crate) fn compress_transaction(
     }
     let min_height = min_height.unwrap_or(0);
 
-    // Group flat-index lookups by required height so each body is loaded
-    // once: heights are already known from the resolved prevouts, so running
-    // one height's lookups consecutively keeps every lookup a retained-body
-    // hit instead of evicting and reloading the body per input. Heights run
-    // in first-appearance order to keep failure precedence closest to input
-    // order. Results are cached per input; the plan pass below still runs in
-    // input order, so warnings keep their `UTXO(i)` order and content, and
-    // proved-absent inputs still degrade rather than fail.
     let flat_results = if options.compress_outpoints {
         let (order, members) = flat_lookup_groups(tx, &resolved, &degraded);
         resolve_flats_grouped(tx, resolver, &order, &members)?
@@ -1039,7 +847,6 @@ pub(crate) fn compress_transaction(
         vec![None; tx.inputs.len()]
     };
 
-    // Per-input encoding plan.
     let mut plans: Vec<Plan> = Vec::with_capacity(tx.inputs.len());
     let mut warnings: Vec<String> = Vec::new();
     for (index, input) in tx.inputs.iter().enumerate() {
@@ -1101,7 +908,6 @@ pub(crate) fn compress_transaction(
         });
     }
 
-    // Transaction metadata and the fields its flags leave non-literal.
     let flag = |value: u32| -> u8 {
         if (1..=3).contains(&value) {
             u8::try_from(value).unwrap_or(0)
@@ -1142,7 +948,6 @@ pub(crate) fn compress_transaction(
         writer.write_varint(u64::from(min_height))?;
     }
 
-    // Packed input/output metadata.
     let mut input_meta: Vec<u8> = Vec::with_capacity(plans.len());
     for plan in &plans {
         let mut meta = 0_u8;
@@ -1167,7 +972,6 @@ pub(crate) fn compress_transaction(
     }
     writer.write(&encode_bits(&input_meta, &output_meta))?;
 
-    // Input data.
     for (index, (input, plan)) in tx.inputs.iter().zip(plans.iter()).enumerate() {
         let _ = index;
         if plan.outpoint_compressed {
@@ -1199,7 +1003,6 @@ pub(crate) fn compress_transaction(
         }
     }
 
-    // Output data.
     for output in &tx.outputs {
         let (shape, payload) = output_shape(output.script_pubkey.as_bytes());
         if shape == OutputShape::Custom {
@@ -1212,10 +1015,6 @@ pub(crate) fn compress_transaction(
 
     Ok((writer.bytes, warnings))
 }
-
-// ---------------------------------------------------------------------
-// Decompress
-// ---------------------------------------------------------------------
 
 enum SigParts {
     Compressed {
@@ -1230,14 +1029,8 @@ enum SigParts {
     },
 }
 
-/// One input's parsed fields: everything the byte stream says before any
-/// resolver call. Splitting parse from resolution lets the resolver run
-/// grouped by required height (each body loaded once) instead of cycling
-/// retained bodies in input order.
 struct ParsedInput {
-    /// Compressed outpoint reference; `None` carries `raw_outpoint`.
     height_flat: Option<(u32, u32)>,
-    /// Literal outpoint when `height_flat` is `None`.
     raw_outpoint: Option<OutPoint>,
     sequence: u32,
     signature: SigParts,
@@ -1250,9 +1043,6 @@ struct InputParts {
     signature: SigParts,
 }
 
-/// One public-key recovery attempt: the input under reconstruction and
-/// the resolved prevout commitment. The sighash cache over the immutable
-/// skeleton is passed separately so one cache serves every input.
 struct Recovery<'a> {
     index: usize,
     sig: &'a [u8; 64],
@@ -1262,10 +1052,6 @@ struct Recovery<'a> {
     stored_pkh: Option<&'a [u8; 20]>,
 }
 
-/// Recovers the public key for one compressed ECDSA input, grinding
-/// recovery ids `0..=3` against the resolved sighash and prevout script.
-/// `cache` must borrow the immutable skeleton every recovery input
-/// commits to; callers build it once per [`decompress_finalize`] call.
 fn recover_pubkey(cache: &SighashCache<'_>, request: &Recovery<'_>) -> Result<Vec<u8>, CodecError> {
     let digest = match request.kind {
         PrevoutKind::P2pkh(_) => cache
@@ -1342,11 +1128,6 @@ fn recover_pubkey(cache: &SighashCache<'_>, request: &Recovery<'_>) -> Result<Ve
     Err(CodecError::SignatureUnrecoverable)
 }
 
-/// Resolves compressed outpoints grouped by required height so each body is
-/// loaded once no matter how inputs interleave heights. Heights run in
-/// first-appearance order to keep failure precedence closest to input
-/// order. Raw outpoints need no body and stay out of every group; their
-/// slots hold `None`.
 fn resolve_outpoints_grouped(
     parsed: &[ParsedInput],
     resolver: &mut dyn PrevoutResolver,
@@ -1381,10 +1162,6 @@ fn resolve_outpoints_grouped(
     Ok(located)
 }
 
-/// Fetches the prevout for a compressed signature whose outpoint arrived
-/// raw. Context is mandatory exactly when reconstruction consumes it: every
-/// compressed signature needs its prevout script. Compressed outpoints
-/// already carry their resolution, so they pass through untouched.
 fn resolve_sig_prevout(
     resolver: &mut dyn PrevoutResolver,
     outpoint: &OutPoint,
@@ -1400,23 +1177,11 @@ fn resolve_sig_prevout(
     }
 }
 
-/// The parsed, context-resolved skeleton of one compressed transaction:
-/// everything [`decompress_prepare`] reads while the stable chainstate
-/// excludes transitions. No public-key recovery has run yet, so holding a
-/// plan needs no lock; [`decompress_finalize`] finishes it lock-free.
 pub(crate) struct DecompressPlan {
     tx: Tx,
     inputs: Vec<InputParts>,
 }
 
-/// Parses one compressed transaction and resolves every input that needs
-/// context. Unavailable context is a refusal, never a fabricated prevout.
-/// Callers hold the stable chainstate across this call only; recovery runs
-/// in [`decompress_finalize`] without the lock.
-///
-/// # Errors
-/// Returns [`CodecError`] for malformed encodings, unavailable context,
-/// budget exhaustion, and cancellation.
 #[allow(
     clippy::too_many_lines,
     reason = "one sequential decoding pass over the transaction fields"
@@ -1477,11 +1242,6 @@ pub(crate) fn decompress_prepare(
 
     let (input_meta, output_meta) = decode_bits(&mut reader, input_count, output_count)?;
 
-    // Parse every input before touching the resolver: the byte stream fixes
-    // the input order, but resolution runs grouped by height below. Parse
-    // runs ahead of resolution, so a malformed tail surfaces before an
-    // unresolvable early input; both are refusals, and single-fault inputs
-    // map exactly as before.
     let mut parsed: Vec<ParsedInput> = Vec::with_capacity(input_count);
     for index in 0..input_count {
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
@@ -1533,7 +1293,6 @@ pub(crate) fn decompress_prepare(
             }
         } else {
             let script_sig = reader.read_vlp()?.to_vec();
-            // Item counts stay five-byte capped like every other `u32` field.
             let witness_count = reader.read_varint_capped(5)?;
             let witness_count = usize::try_from(witness_count).map_err(|_| CodecError::Overflow)?;
             if witness_count > reader.remaining() {
@@ -1558,14 +1317,8 @@ pub(crate) fn decompress_prepare(
         });
     }
 
-    // Group outpoint resolution by required height so each body is loaded
-    // once no matter how inputs interleave heights.
     let mut located = resolve_outpoints_grouped(&parsed, &mut *resolver)?;
 
-    // Assemble in input order, preserving per-input error mapping. Raw
-    // outpoints with compressed signatures still resolve their prevout here
-    // in input order; the cumulative body-load budget fails those closed if
-    // they cycle past the retained slots.
     let mut inputs: Vec<InputParts> = Vec::with_capacity(input_count);
     for (index, part) in parsed.into_iter().enumerate() {
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
@@ -1630,9 +1383,6 @@ pub(crate) fn decompress_prepare(
         return Err(CodecError::NonCanonical);
     }
 
-    // Assemble the skeleton first: sighashes commit to outpoints,
-    // sequences, outputs, and locktime, but never to the scriptSig or
-    // witness being reconstructed, so placeholders are safe.
     let tx = Tx {
         version,
         inputs: inputs
@@ -1650,26 +1400,12 @@ pub(crate) fn decompress_prepare(
     Ok(DecompressPlan { tx, inputs })
 }
 
-/// Reconstructs every compressed authorization against the plan's resolved
-/// prevouts. Runs without the stable chainstate: recovery only reads the
-/// immutable skeleton and resolved data, never the chain. Cancellation is
-/// polled per input like the parse pass; input count stays bounded by
-/// [`MAX_COMPRESSED_INPUTS`] on both passes.
-///
-/// # Errors
-/// Returns [`CodecError`] for unrecoverable signatures and cancellation.
 pub(crate) fn decompress_finalize(
     plan: DecompressPlan,
     resolver: &dyn PrevoutResolver,
 ) -> Result<Tx, CodecError> {
     let DecompressPlan { mut tx, inputs } = plan;
-    // One cache over the immutable skeleton serves every input: sighash
-    // midstates are per-transaction, so rebuilding them per input repeats
-    // the same hashing work. The skeleton is only mutated after all fills
-    // are computed, so the shared borrow stays valid for the whole loop.
     let cache = SighashCache::new(&tx);
-    // Reconstruction reads the immutable skeleton (sighash inputs), so
-    // compute every authorization first and apply them afterwards.
     let mut fills: Vec<(Script, Witness)> = Vec::with_capacity(inputs.len());
     for (index, part) in inputs.iter().enumerate() {
         if index % CANCELLATION_POLL_INPUTS == 0 && resolver.cancelled() {
@@ -1771,16 +1507,6 @@ pub(crate) fn decompress_finalize(
     Ok(tx)
 }
 
-/// Decompresses one compressed transaction. Unavailable context is a
-/// refusal, never a fabricated prevout.
-///
-/// Test-only convenience: parses, resolves, and recovers in one step.
-/// Handlers that must not block chain transitions split the work across
-/// [`decompress_prepare`] and [`decompress_finalize`] instead.
-///
-/// # Errors
-/// Returns [`CodecError`] for malformed encodings, unavailable context,
-/// unrecoverable signatures, budget exhaustion, and cancellation.
 #[cfg(test)]
 pub(crate) fn decompress_transaction(
     bytes: &[u8],

@@ -19,8 +19,6 @@ pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
 
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
-/// The durable floor key for a capability, when it carries one.
-///
 /// `ScriptLive` reseeds from an immutable artifact or retained history and can never hold a
 /// pruned-prefix floor, so it has no key.
 pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u8]> {
@@ -31,34 +29,22 @@ pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u
     }
 }
 
-/// Exact durable point represented by all committed `TxIndex` rows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct IndexWatermark {
-    /// Indexed active-chain height.
     pub height: u32,
-    /// Full block identity at `height`.
     pub hash: [u8; 32],
 }
 
-/// One independently tracked family of derived index rows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum IndexCapability {
-    /// Core-compatible transaction lookup rows.
     TxLookup,
-    /// `ScriptIndex` scripthash funding and spending rows.
     ScriptHistory,
-    /// `ScriptIndex` live-output rows: one row per currently unspent outpoint,
-    /// filed under its script. Rebuildable from the authoritative UTXO
-    /// set alone, unlike history.
     ScriptLive,
     /// BIP158 basic filters and their BIP157 header chain.
     CompactFilters,
 }
 
 impl IndexCapability {
-    /// Every capability in mask-bit and report order.
-    ///
-    /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`, `CompactFilters`.
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
     pub(crate) const ALL: [Self; 4] = [
@@ -68,7 +54,6 @@ impl IndexCapability {
         Self::CompactFilters,
     ];
 
-    /// POST: the single mask bit this capability owns, matching the persisted
     /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100, `CompactFilters` 0b1000).
     pub(super) const fn bit(self) -> u8 {
         match self {
@@ -79,7 +64,6 @@ impl IndexCapability {
         }
     }
 
-    /// POST: the position of this capability in [`Self::ALL`], 0 to 3.
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::TxLookup => 0,
@@ -89,7 +73,6 @@ impl IndexCapability {
         }
     }
 
-    /// The persisted watermark key (`T`, `S`, `L`, or `F` under `0x00`).
     pub(super) const fn watermark_key(self) -> &'static [u8] {
         match self {
             Self::TxLookup => TX_LOOKUP_WATERMARK_KEY,
@@ -99,19 +82,15 @@ impl IndexCapability {
         }
     }
 
-    /// POST: the column families this capability occupies
-    /// (`TxLookup`: `TxConfirmed`; `ScriptHistory`: Funding, Spending;
-    /// `ScriptLive`: `ScriptLive`).
     pub(super) const fn column_families(self) -> &'static [ColumnFamily] {
         match self {
             Self::TxLookup => &[ColumnFamily::TxConfirmed],
             Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
             Self::ScriptLive => &[ColumnFamily::ScriptLive],
-            Self::CompactFilters => &[], // Own prefix in UtxoMeta; reset preserves its siblings.
+            Self::CompactFilters => &[],
         }
     }
 
-    /// POST: the display name (`tx_lookup`, `script_history`, `script_live`, `compact_filters`).
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::TxLookup => "tx_lookup",
@@ -121,7 +100,6 @@ impl IndexCapability {
         }
     }
 
-    /// The query-refusal text for this capability.
     pub(crate) const fn disabled_message(self) -> &'static str {
         match self {
             Self::TxLookup => "txindex is disabled",
@@ -132,39 +110,22 @@ impl IndexCapability {
     }
 }
 
-/// Named subset of [`IndexCapability`]: one prepared transition, an
-/// enabled configuration, or one query requirement.
-///
-/// PRE: build only from the named constants, `Self::insert`, or
-/// `FromIterator`.
-/// POST: `Self::contains`, `Self::iter`, and [`Self::leftover`] answer
-/// over the selected capabilities.
 /// INVARIANT: bit `capability.index()` is set iff `capability` is selected;
-/// `to_mask` persists exactly this byte, so the on-disk reset-marker
-/// encoding is unchanged.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexCapabilities(u8);
 
 impl IndexCapabilities {
-    /// No derived rows.
     pub const NONE: Self = Self(0);
-    /// Transaction lookup only.
     pub const TX_LOOKUP: Self = Self(IndexCapability::TxLookup.bit());
-    /// `ScriptIndex` history only.
     pub const SCRIPT_HISTORY: Self = Self(IndexCapability::ScriptHistory.bit());
-    /// `ScriptIndex` live outputs only.
     pub const SCRIPT_LIVE: Self = Self(IndexCapability::ScriptLive.bit());
-    /// Node `--txindex` plus `--scriptindex=utxo`.
     pub const TX_LOOKUP_SCRIPT_LIVE: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
-    /// Every index capability, including optional compact block filters.
     pub const ALL: Self = Self(0b1111);
-    /// Transaction lookup plus the full script index.
     pub const TX_AND_SCRIPTS: Self = Self(0b111);
     /// BIP158 basic filter index only.
     pub const COMPACT_FILTERS: Self = Self(0b1000);
 
-    /// Adds the optional compact-filter capability without changing script mode.
     #[must_use]
     pub const fn with_compact_filters(self, enabled: bool) -> Self {
         if enabled {
@@ -173,51 +134,35 @@ impl IndexCapabilities {
             self
         }
     }
-    /// Every capability derivable from a block body alone.
-    ///
-    /// Anchorless paths use this, because `ScriptLive` cannot be prepared
-    /// without a spent-coin script source.
     pub const HISTORICAL: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
-    /// POST: whether `capability` is selected.
     #[must_use]
     pub(crate) const fn contains(self, capability: IndexCapability) -> bool {
         self.0 & capability.bit() != 0
     }
 
-    /// POST: whether no capability is selected.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// POST: `capability` is selected in the result; every other selection
-    /// bit is unchanged.
     #[must_use]
     pub(crate) const fn insert(self, capability: IndexCapability) -> Self {
         Self(self.0 | capability.bit())
     }
 
-    /// POST: `capability` is unselected in the result; every other selection
-    /// bit is unchanged.
     #[must_use]
     pub(crate) const fn without(self, capability: IndexCapability) -> Self {
         Self(self.0 & !capability.bit())
     }
 
-    /// POST: the selected capabilities in [`IndexCapability::ALL`] order.
     pub(crate) fn iter(self) -> impl Iterator<Item = IndexCapability> {
         IndexCapability::ALL
             .into_iter()
             .filter(move |&capability| self.contains(capability))
     }
 
-    /// Persisted cursors this selection no longer maintains.
-    ///
-    /// Mode demotion (`full` → `utxo`) and an explicit-`txindex` independence
-    /// change leave durable rows behind. Those leftover families are reset
-    /// and rebuilt or discarded; they are never served as if still configured.
     #[must_use]
     pub fn leftover(self, watermarks: IndexWatermarks) -> Self {
         IndexCapability::ALL
@@ -232,11 +177,7 @@ impl IndexCapabilities {
         self.0
     }
 
-    /// POST: the set the mask encodes, or
-    /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
-    /// bit 3 is set.
     pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
-        // An older marker without bit 2 has no live rows to reset.
         if mask == 0 || mask & !0b1111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
@@ -250,7 +191,6 @@ impl FromIterator<IndexCapability> for IndexCapabilities {
     }
 }
 
-/// Durable cursors for the independently ready index capabilities.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexWatermarks {
     pub tx_lookup: Option<IndexWatermark>,
@@ -260,7 +200,6 @@ pub struct IndexWatermarks {
 }
 
 impl IndexWatermarks {
-    /// Returns one capability's durable cursor.
     pub(crate) const fn get(self, capability: IndexCapability) -> Option<IndexWatermark> {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup,
@@ -270,7 +209,6 @@ impl IndexWatermarks {
         }
     }
 
-    /// Sets one capability's durable cursor, leaving the others unchanged.
     pub(crate) const fn set(
         &mut self,
         capability: IndexCapability,
@@ -284,8 +222,6 @@ impl IndexWatermarks {
         }
     }
 
-    /// Returns the single common watermark across `capabilities`, or
-    /// `Err(IndexError::NonContiguousPrepared)` if none was selected or they disagree.
     pub(crate) fn selected(
         self,
         capabilities: IndexCapabilities,
@@ -304,7 +240,6 @@ impl IndexWatermarks {
         }
     }
 
-    /// Returns whether all `capabilities` are aligned at `target`.
     pub(crate) fn is_aligned(
         self,
         capabilities: IndexCapabilities,
@@ -317,9 +252,6 @@ impl IndexWatermarks {
 }
 
 impl IndexWatermark {
-    /// Encodes the durable representation as `height (4 LE) || hash (32)`.
-    ///
-    /// Watermarks are decoded numerically, never ordered as KV row keys, so
     /// they stay little-endian while row heights are big-endian (format 5).
     pub fn to_bytes(&self) -> [u8; WATERMARK_LEN] {
         let mut bytes = [0_u8; WATERMARK_LEN];
@@ -328,7 +260,6 @@ impl IndexWatermark {
         bytes
     }
 
-    /// Decodes the durable representation.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, IndexError> {
         if bytes.len() != WATERMARK_LEN {
             return Err(IndexError::InvalidWatermark);
@@ -343,7 +274,6 @@ impl IndexWatermark {
         })
     }
 
-    /// Reads the durable watermark from a snapshot without requiring a writer handle.
     pub(crate) fn read_from_snapshot(
         snapshot: &dyn KvSnapshot,
         capability: IndexCapability,
@@ -377,8 +307,6 @@ pub(super) fn read_coverage_floor(
     Ok(u32::from_le_bytes(bytes))
 }
 
-/// Stamps `floor` as the first covered height for each selected capability in
-/// `batch`. Only history-derived capabilities carry a floor.
 pub(super) fn put_selected_floors(
     batch: &mut BufferedWriteBatch,
     capabilities: IndexCapabilities,
@@ -394,7 +322,6 @@ pub(super) fn put_selected_floors(
     }
 }
 
-/// Drops the coverage-floor records of the selected capabilities; a reset
 /// rebuilds from genesis, which covers everything.
 pub(super) fn delete_selected_floors(
     batch: &mut BufferedWriteBatch,
@@ -429,9 +356,6 @@ pub(super) fn put_selected_watermarks(
 mod tests {
     use super::*;
 
-    /// Each fact method must equal the literal it replaces: a swapped arm
-    /// would silently change persisted bytes, column families, or refusal
-    /// text.
     #[test]
     fn per_capability_facts_match_the_literals_they_replace() {
         for (capability, bit, index, key, families, name, message) in [
@@ -498,8 +422,6 @@ mod tests {
         }
     }
 
-    /// The reset marker round-trips byte-identically and refuses an empty
-    /// mask and any bit above bit 3.
     #[test]
     fn reset_marker_mask_round_trips_and_refuses_invalid_masks() {
         for selection in [
@@ -541,20 +463,17 @@ mod tests {
         };
         let mut watermarks = IndexWatermarks::default();
 
-        // Empty selection is invalid
         assert!(matches!(
             watermarks.selected(IndexCapabilities::NONE),
             Err(IndexError::NonContiguousPrepared { watermark: None })
         ));
 
-        // Unindexed selection matches Ok(None)
         assert!(matches!(
             watermarks.selected(IndexCapabilities::HISTORICAL),
             Ok(None)
         ));
         assert!(watermarks.is_aligned(IndexCapabilities::HISTORICAL, None));
 
-        // Mixed watermarks reject
         watermarks.tx_lookup = Some(mark_a);
         assert!(matches!(
             watermarks.selected(IndexCapabilities::HISTORICAL),
@@ -562,7 +481,6 @@ mod tests {
         ));
         assert!(!watermarks.is_aligned(IndexCapabilities::HISTORICAL, Some(mark_a)));
 
-        // Aligned watermarks succeed
         watermarks.script_history = Some(mark_a);
         assert!(matches!(
             watermarks.selected(IndexCapabilities::HISTORICAL),

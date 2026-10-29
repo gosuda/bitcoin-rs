@@ -1,9 +1,3 @@
-//! Derived consumers of committed chain transitions.
-//!
-//! Ownership and ordering rules are defined by `ARCH-07` in
-//! [`docs/contracts/architecture.md`](../../docs/contracts/architecture.md). Apply
-//! does not import these consumer types.
-
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
@@ -18,36 +12,18 @@ use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_mempool::MutationResult;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
-/// Failure of a node-owned single-block connect.
-///
-/// The authoritative chainstate failure and a failure after a successful
-/// commit are deliberately different variants. Callers must not retry the
-/// latter as though the block had been refused.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectMutationError {
-    /// No complete authoritative commit was returned.
     #[error("connect did not produce a committed outcome: {0}")]
     NotCommitted(#[source] bitcoin_rs_chainstate::ApplyError),
-    /// Chainstate committed, but the node-owned mempool fence did not settle.
     #[error("authoritative connect committed, but node settlement failed: {source}")]
     CommittedButSettlementFailed {
-        /// The authoritative outcome, retained so no caller has to infer it
-        /// by rereading mutable global state.
         outcome: Box<ConnectOutcome>,
-        /// Failure that forced the node into recovery-required shutdown.
         #[source]
         source: bitcoin_rs_chainstate::ApplyError,
     },
 }
 
-/// Node-owned derived work that follows a committed chain event.
-///
-/// `Chainstate` does not hold this. The composition root dispatches after
-/// each committed connect or disconnect, and this type is the one owner of
-/// that dispatch: the RPC block log, hash/raw ZMQ, the derived-index wake,
-/// the sequence `C`/`D` events, the mining-generation wake, and mempool
-/// admission all run from here, in the order `ARCH-07` fixes.
-///
 /// INVARIANT: consumer failure is ignored. A full ZMQ socket or a lagged
 /// index cannot invalidate chainstate.
 #[derive(Clone)]
@@ -61,10 +37,6 @@ pub struct ChainFollowers {
 }
 
 impl ChainFollowers {
-    /// Builds the follower set over its consumers.
-    ///
-    /// `mempool` is `None` only for a node without an admission gate. Effects
-    /// run through [`Self::on_connect`] and [`Self::on_disconnect`].
     #[must_use]
     pub(crate) fn new(
         blocks: Arc<RwLock<BlockLog>>,
@@ -83,9 +55,6 @@ impl ChainFollowers {
         }
     }
 
-    /// Empty RPC log, no-op ZMQ, no index, no admission, a fresh mining signal.
-    ///
-    /// Test and planner handles use this.
     #[must_use]
     pub fn noop() -> Self {
         Self::new(
@@ -97,7 +66,6 @@ impl ChainFollowers {
         )
     }
 
-    /// Returns `self` with `zmq` swapped to `publisher`.
     #[cfg(test)]
     #[must_use]
     pub fn with_zmq_publisher(mut self, publisher: Arc<dyn ZmqPublisher>) -> Self {
@@ -105,14 +73,12 @@ impl ChainFollowers {
         self
     }
 
-    /// Returns `self` with the `TxIndex` wake handle swapped.
     #[must_use]
     pub fn with_tx_index(mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) -> Self {
         self.derived_index = derived_index;
         self
     }
 
-    /// Returns `self` with the block announcement queue swapped.
     #[must_use]
     pub fn with_block_announcer(
         mut self,
@@ -122,45 +88,38 @@ impl ChainFollowers {
         self
     }
 
-    /// Whether apply should capture per-transaction wire bytes for `rawtx`.
     #[must_use]
     pub fn needs_rawtx(&self) -> bool {
         self.zmq.wants_rawtx()
     }
 
-    /// Whether apply should serialize the full block for a derived consumer.
     #[must_use]
     pub fn needs_block_bytes(&self) -> bool {
         self.derived_index.is_some() || self.zmq.wants_rawblock()
     }
 
-    /// Returns a read-only capability to observe the applied-block log.
     #[must_use]
     pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
         bitcoin_rs_index::BlockLogReader::new(Arc::clone(&self.blocks))
     }
 
-    /// Shared RPC block log owned by this committed-effect dispatcher.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
         &self.blocks
     }
 
-    /// Publisher used by committed chain effects and RPC notifier discovery.
     #[must_use]
     pub(crate) fn zmq_publisher(&self) -> Arc<dyn ZmqPublisher> {
         Arc::clone(&self.zmq)
     }
 
-    /// `TxIndex` runtime, when one is wired.
     #[cfg(test)]
     #[must_use]
     pub fn derived_index(&self) -> Option<&Arc<DerivedIndexRuntime>> {
         self.derived_index.as_ref()
     }
 
-    /// Mining generation signal.
     #[must_use]
     pub(crate) fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
         &self.mining
@@ -206,29 +165,8 @@ impl ChainFollowers {
         Ok(())
     }
 
-    /// Dispatches a committed connect: RPC log, ZMQ, index wake, sequence `C`,
-    /// mining wake, and orphan re-evaluation, in that order.
-    ///
-    /// PRE: `outcome` is committed and the mempool fence, when present, is
-    /// held.
-    ///
-    /// POST: block-log record, hash/raw ZMQ, derived-index wake plus sequence
-    /// `C`, mining wake, and mempool orphan re-evaluation run once in that
-    /// order. The block-inclusion removals are committed before sequence
-    /// `C`; a `sequence` subscriber sees no `R` event for them, because the
-    /// block event already covers the departures. The committed removal
-    /// receipt travels with the mining wake so a staged preparation can
-    /// install against exactly these removals.
-    ///
-    /// INVARIANT: consumer failure cannot invalidate chainstate.
     pub(crate) fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
-        // Step-21 block-to-template baseline: debug-only on-connect span, same
-        // mechanism as the chainstate publish profile; no behavior change.
         let on_connect_started = quanta::Instant::now();
-        // A follower set without an admission gate removed nothing, so its
-        // receipt is truthfully empty: every committed connect publishes one,
-        // and a foreground joined on a prepared candidate always sees its
-        // tip's receipt arrive.
         let block_removals = if let Some(gateway) = &self.mempool {
             let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
@@ -266,17 +204,6 @@ impl ChainFollowers {
         );
     }
 
-    /// Dispatches a committed disconnect: log pop, index wake, and sequence
-    /// `D`, then the mining wake and orphan re-evaluation.
-    ///
-    /// PRE: `outcome` is a committed production disconnect.
-    ///
-    /// POST: the matching-tail log pop, derived-index wake, and gated
-    /// sequence `D` run once in that order; the mining wake and
-    /// `restored_parents` re-evaluation then run.
-    ///
-    /// INVARIANT: a non-matching tail is not popped, and no consumer
-    /// failure changes the chainstate result.
     pub(crate) fn on_disconnect(&self, outcome: &DisconnectOutcome) {
         self.pop_matching_tail(outcome.hash);
         self.wake_index();
@@ -290,8 +217,6 @@ impl ChainFollowers {
         }
     }
 
-    /// Emits hash/raw ZMQ topics for a committed block. See `ARCH-07` for
-    /// effect ordering.
     fn publish_block(&self, outcome: &ConnectOutcome) {
         if !self.zmq.wants_notifications() {
             return;
@@ -312,10 +237,6 @@ impl ChainFollowers {
         }
     }
 
-    /// Pops the RPC cache if the tail hash matches this block. See `ARCH-07`.
-    ///
-    /// The log starts empty on boot and pruning may drop the tail. Matching
-    /// the hash stops a pop of a record that is not this block.
     fn pop_matching_tail(&self, hash: Hash256) {
         let mut blocks = self.blocks.write();
         if blocks
@@ -326,9 +247,6 @@ impl ChainFollowers {
         }
     }
 
-    /// Reconciles derived consumers after an atomic snapshot-tip replacement.
-    /// The caller has verified an empty mempool under the held generation fence.
-    /// No per-block notifications are fabricated for the skipped history.
     pub(crate) fn on_snapshot(&self) {
         if let Some(gateway) = &self.mempool {
             gateway.snapshot_changed();
@@ -344,21 +262,6 @@ impl ChainFollowers {
         }
     }
 
-    /// Connects `block` and dispatches this set before the transition ends.
-    ///
-    /// See `ARCH-07`: production single-block paths must not finish the
-    /// [`bitcoin_rs_chainstate::ChainTransition`] and then dispatch, or a later
-    /// connect or disconnect can publish derived effects first.
-    ///
-    /// PRE: no transition or fence is held.
-    ///
-    /// POST: `Ok` means the block committed and settlement completed;
-    /// [`ConnectMutationError::CommittedButSettlementFailed`] retains the
-    /// committed outcome when only settlement failed; on refusal nothing is
-    /// dispatched and settlement is attempted.
-    ///
-    /// INVARIANT: fatal errors drop guards without settlement; operational
-    /// refusal attempts settlement.
     pub(crate) fn apply_connect(
         &self,
         handles: &bitcoin_rs_chainstate::Chainstate,
@@ -415,19 +318,6 @@ impl ChainFollowers {
     }
 }
 
-/// Applies genesis when the applied-tip slot is still empty and publishes
-/// the header tip from its outcome.
-///
-/// A fresh chainstate has no applied tip until genesis commits; every
-/// caller that can outrun the sync loop's first tick (startup before the
-/// RPC listener binds, the sync tick itself) funnels through this one
-/// owner. Idempotent — a populated applied tip returns immediately.
-///
-/// Either connect failure is returned so startup can abort instead of
-/// binding RPC onto a chainstate that cannot serve an applied tip. Only a
-/// refused connect leaves the slot empty for the sync tick to retry; a
-/// failed settlement publishes its tip but has already closed chain
-/// admission and requested shutdown, so there is nothing to retry.
 pub(crate) fn bootstrap_genesis(
     handles: &bitcoin_rs_chainstate::Chainstate,
     followers: &ChainFollowers,
@@ -438,8 +328,6 @@ pub(crate) fn bootstrap_genesis(
     let genesis = handles.network().genesis_block();
     let payload = BlockPayload::from_local(genesis);
     match followers.apply_connect(handles, &payload) {
-        // The header-tip cell is the chainstate's to publish — including on
-        // a committed-but-unsettled connect, which owns its outcome.
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
         Err(error) => {
             if let ConnectMutationError::CommittedButSettlementFailed { outcome, .. } = &error {
@@ -466,7 +354,6 @@ mod tests {
     };
     use parking_lot::Mutex;
 
-    /// Records every ZMQ call in the order the follower made it.
     #[derive(Debug, Default)]
     struct RecordingPublisher {
         events: Mutex<Vec<String>>,
@@ -557,7 +444,6 @@ mod tests {
         )
     }
 
-    /// `ARCH-07`: a no-op follower set asks for no derived payloads.
     #[test]
     fn noop_asks_for_no_payloads() {
         let followers = ChainFollowers::noop();
@@ -583,7 +469,6 @@ mod tests {
         }
     }
 
-    /// `ARCH-07`: connect then disconnect rewinds the RPC log and emits ZMQ in order.
     #[test]
     fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> anyhow::Result<()> {
         let genesis = Network::Regtest.genesis_block();
@@ -618,7 +503,6 @@ mod tests {
         Ok(())
     }
 
-    /// `ARCH-07`: disconnect does not pop a `BlockLog` tail that is not this block.
     #[test]
     fn disconnect_does_not_pop_a_different_tail() -> anyhow::Result<()> {
         let genesis = Network::Regtest.genesis_block();
@@ -633,7 +517,6 @@ mod tests {
         Ok(())
     }
 
-    /// Records the committed block receipts the mining wake received.
     #[derive(Default)]
     struct ReceiptWake {
         receipts: Mutex<Vec<(Hash256, usize)>>,
@@ -651,10 +534,6 @@ mod tests {
         }
     }
 
-    /// `RCV-02`: a follower set without an admission gate removed nothing, so a
-    /// committed connect still publishes a truthful, empty receipt for the
-    /// connected tip. A foreground joined on a prepared candidate waits for
-    /// exactly that receipt.
     #[test]
     fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> anyhow::Result<()> {
         let genesis = Network::Regtest.genesis_block();
@@ -770,9 +649,6 @@ mod tests {
             None,
         ));
         let followers = followers_with_gateway(&gateway);
-        // Fresh-submission clock: post-commit expiry runs against the wall
-        // clock, so orphan arrivals and retries must carry real time; an epoch
-        // timestamp would expire the retried commit immediately after admission.
         let now = bitcoin_rs_primitives::unix_time_secs();
         let parent = Network::Regtest.genesis_block().txs[0].txid();
         let available = orphan_child(OutPoint::new(parent, 0));
@@ -812,8 +688,6 @@ mod tests {
         assert_eq!(gateway.orphan_count(), 2);
         assert!(!gateway.has_observer());
         let fence = gateway.begin_chain_change()?;
-        // Existing parent work and the snapshot-wide wake must share one ready
-        // identity. The other parent becomes available only through the snapshot.
         gateway.chain_changed(&[missing.inputs[0].previous_output.txid]);
         *chain.prevouts.write() = vec![(
             available.inputs[0].previous_output,
@@ -824,8 +698,6 @@ mod tests {
         )];
         followers.on_snapshot();
         followers.on_snapshot();
-        // The queued claim must select a still-live announcer after the
-        // original connection leaves, without losing the resident body.
         gateway.maintain_orphans(now, [replacement, missing_source]);
         assert_eq!(gateway.retry_orphans(&chain, now), []);
         assert!(gateway.read().is_empty());
@@ -858,11 +730,6 @@ mod tests {
         Ok(())
     }
 
-    /// Exercise committed-outcome dispatch with a real gateway, without any
-    /// mempool mutation or observer that could independently wake the child.
-    /// Full chain application and transition ownership have separate tests in
-    /// `crates/chainstate`; this checks the follower's lifecycle notification
-    /// boundary.
     fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Result<()> {
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -871,8 +738,6 @@ mod tests {
             None,
         ));
         let followers = followers_with_gateway(&gateway);
-        // Fresh-submission clock: see the snapshot-retry test above; epoch
-        // timestamps would expire the retried commit under the wall clock.
         let now = bitcoin_rs_primitives::unix_time_secs();
         let block = Network::Regtest.genesis_block();
         let parent = block.txs[0].txid();

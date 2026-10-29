@@ -79,13 +79,11 @@ fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>
     shares.insert(3u64, b"three".as_slice())?;
     drop(shares);
     setup.commit()?;
-    // Committed tail with no overlay.
     let read = db.begin_read()?;
     let (key, value) = read.open_table(SHARES)?.last()?.ok_or_else(missing)?;
     assert_eq!(key.value(), 3u64);
     assert_eq!(value.value(), b"three");
     drop(read);
-    // Overlay put beyond the committed tail wins.
     let staged = db.begin_write()?;
     staged
         .open_table(SHARES)?
@@ -94,7 +92,6 @@ fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>
     assert_eq!(key.value(), 5u64);
     assert_eq!(value.value(), b"five");
     drop(staged);
-    // Overlay update of the tail key shadows the committed row.
     let staged = db.begin_write()?;
     staged
         .open_table(SHARES)?
@@ -103,21 +100,18 @@ fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>
     assert_eq!(key.value(), 3u64);
     assert_eq!(value.value(), b"three-new");
     drop(staged);
-    // Overlay delete of the tail falls back to the predecessor.
     let staged = db.begin_write()?;
     staged.open_table(SHARES)?.remove(3u64)?;
     let (key, value) = staged.open_table(SHARES)?.last()?.ok_or_else(missing)?;
     assert_eq!(key.value(), 2u64);
     assert_eq!(value.value(), b"two");
     drop(staged);
-    // Overlay tombstone beyond the tail deletes nothing.
     let staged = db.begin_write()?;
     staged.open_table(SHARES)?.remove(7u64)?;
     let (key, value) = staged.open_table(SHARES)?.last()?.ok_or_else(missing)?;
     assert_eq!(key.value(), 3u64);
     assert_eq!(value.value(), b"three");
     drop(staged);
-    // Empty table reports no tail; overlay-only rows still surface.
     let read = db.begin_read()?;
     assert!(read.open_table(BALANCES)?.last()?.is_none());
     drop(read);

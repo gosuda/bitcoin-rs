@@ -1,33 +1,6 @@
-//! Differential vector harness over Bitcoin Core's script consensus test data.
-//!
-//! Feeds Core's `script_tests.json`, `tx_valid.json` and `tx_invalid.json`
-//! through the native [`Interpreter`] and (when `--features kernel` is enabled)
-//! the bitcoinkernel oracle, then compares verdicts. `sighash.json` is graded
-//! by `checker::tests::sighash_json_corpus_legacy_path`, which reaches the
-//! crate-private `remove_all` this harness cannot call.
-//!
-//! ## Anti-vacuity
-//!
-//! Every corpus prints four counts: rows parsed, rows executed, rows skipped
-//! (with a one-line reason per category), and rows failed. The native columns
-//! pin those counts, so a row that silently stops executing fails the lane.
-//!
-//! ## Two columns
-//!
-//! The native evaluator runs the legacy, witness-v0 and taproot rows. Each column
-//! pins its remaining mismatch count, so a shrink lowers the constant with
-//! evidence and a growth fails the lane. The kernel column stays available
-//! under `--features kernel` as an oracle for the same rows.
-//!
-//! Run:
-//!
-//! ```sh
-//! cargo test -p bitcoin-rs-script --test core_vectors
-//! cargo test -p bitcoin-rs-script --features kernel --test core_vectors
-//! ```
-
 #![cfg(test)]
 
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 use std::str::FromStr;
 
 use bitcoin::ScriptBuf;
@@ -43,7 +16,6 @@ use bitcoin_rs_script::{
     VerifyFlags, instructions, opcode, push_data, push_int,
 };
 
-// Core error names admitted by the corpus parser; verdicts compare acceptance only.
 static CORE_ERROR_NAMES: &[&str] = &[
     "OK",
     "EVAL_FALSE",
@@ -101,17 +73,6 @@ static CORE_ERROR_NAMES: &[&str] = &[
     "SIG_FINDANDDELETE",
 ];
 
-// ===========================================================================
-// Core ASM script assembler
-// ===========================================================================
-
-/// Parses a Core test-vector script string into raw bytes.
-///
-/// Implements Core's `ParseScript` from `core_io.cpp`:
-/// - `0xHEX` → raw hex bytes inserted directly (not pushed)
-/// - decimal numbers (optionally negative) → `push_int`
-/// - `'quoted'` → `push_data` of the literal bytes
-/// - `OP_NAME` or bare `NAME` → the opcode byte
 fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
     let mut script = Vec::new();
     for token in asm.split([' ', '\t', '\n']) {
@@ -393,7 +354,6 @@ static OP_SUCCESS_NAMES: &[(u8, &str)] = &[
     (0xed, "SUCCESS_191"),
 ];
 
-/// Linear search through the opcode tables. Test-only, so O(n) is fine.
 fn lookup_opcode(bare: &str) -> Option<u8> {
     for &(byte, names) in OPCODE_BYTES {
         if names.contains(&bare) {
@@ -411,10 +371,6 @@ fn lookup_opcode(bare: &str) -> Option<u8> {
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     Vec::from_hex(hex).map_err(|error| error.to_string())
 }
-
-// ===========================================================================
-// Transaction construction — Core's BuildCrediting/BuildSpending
-// ===========================================================================
 
 fn build_crediting_tx(script_pubkey: &[u8], amount: u64) -> Tx {
     Tx {
@@ -451,15 +407,9 @@ fn build_spending_tx(script_sig: &[u8], witness: &[Vec<u8>], credit_tx: &Tx) -> 
     }
 }
 
-// ===========================================================================
-// Verdict model
-// ===========================================================================
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
     Accept,
-    /// Carries Core's error name when the interpreter produced one, so a
-    /// mismatch says which rule fired rather than only that something did.
     Reject(Option<String>),
 }
 
@@ -474,9 +424,6 @@ impl Verdict {
 
     #[cfg(feature = "kernel")]
     fn from_kernel(result: &Result<(), bitcoin_rs_consensus::ConsensusError>) -> Self {
-        // The kernel reports a verdict, not Core's error name, so its column
-        // can prove accept-or-reject parity and nothing about error names.
-        // Infrastructure and setup errors must fail closed (panic), never count as Reject.
         match result {
             Ok(()) => Self::Accept,
             Err(bitcoin_rs_consensus::ConsensusError::Script { .. }) => Self::Reject(None),
@@ -484,17 +431,10 @@ impl Verdict {
         }
     }
 
-    /// Whether the row was accepted. Rejection carries a code for triage, so
-    /// comparisons between a verdict and an expectation must go through this
-    /// rather than through equality on the payload.
     const fn accepted(&self) -> bool {
         matches!(self, Self::Accept)
     }
 }
-
-// ===========================================================================
-// Counters for anti-vacuity
-// ===========================================================================
 
 #[derive(Default, Debug)]
 struct Counts {
@@ -528,9 +468,6 @@ impl std::fmt::Display for Counts {
     }
 }
 
-/// VAL-02: zero mismatches on runnable rows is not corpus coverage unless
-/// skip reasons stay inside the named allow-list and the skip/executed
-/// counts stay pinned. A new skip category or a silent shrink fails.
 fn assert_pinned_column(
     counts: &Counts,
     mismatch_count: usize,
@@ -591,56 +528,21 @@ fn assert_pinned_native_column(
     );
 }
 
-// ===========================================================================
-// Corpus 1: script_tests.json
-// ===========================================================================
-
-// Core's `script_json_test` fills three markers the JSON corpus cannot express
-// as hex (`src/test/script_tests.cpp:925-945`, `:968-974`):
-//
-//   `#SCRIPT# <asm>`            - assemble `<asm>` with ParseScript, push the
-//                                 script bytes as the witness element;
-//   `#CONTROLBLOCK#`            - TaprootBuilder::Add(0, <last element>,
-//                                 TAPROOT_LEAF_TAPSCRIPT) then Finalize(key0),
-//                                 push the resulting control block;
-//   `0x51 0x20 #TAPROOTOUTPUT#` - scriptPubKey becomes OP_1 <output key>.
-//
-// `key0` is the fixed secret `vchKey0` at `script_tests.cpp:183`, the 32-byte
-// big-endian scalar 1.
-
-/// Core's `vchKey0`: the secret scalar the placeholder tree commits to.
 const CORE_TAPROOT_INTERNAL_SECRET: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ];
 
-/// Core's `#SCRIPT#` marker: the rest of the element is tapscript in Core's ASM
-/// dialect, not hex (`script_tests.cpp:931-935`).
 const SCRIPT_PLACEHOLDER: &str = "#SCRIPT#";
 
-/// Core's `#CONTROLBLOCK#` marker: the witness element is replaced by the
-/// generated control block committing to the preceding `#SCRIPT#` leaf
-/// (`script_tests.cpp:937-944`).
 const CONTROL_BLOCK_PLACEHOLDER: &str = "#CONTROLBLOCK#";
 
-/// The `scriptPubKey` spelling Core matches before substituting the output key
-/// (`script_tests.cpp:968-974`).
 const TAPROOT_OUTPUT_ASM: &str = "0x51 0x20 #TAPROOTOUTPUT#";
 
-/// The single-leaf tree Core auto-generates for one `#SCRIPT#`/`#CONTROLBLOCK#`
-/// pair: the witness element to append, and the program `#TAPROOTOUTPUT#` pays to.
 struct TaprootPlaceholder {
     control_block: Vec<u8>,
     output_key: [u8; 32],
 }
 
-/// Builds the placeholder tree for `leaf_script`, mirroring Core's
-/// `TaprootBuilder::Add(0, script, TAPROOT_LEAF_TAPSCRIPT).Finalize(key0)`.
-///
-/// The tree is assembled with rust-bitcoin's builder - an independent
-/// implementation of BIP341 - and its merkle root is checked against this
-/// workspace's own tapleaf hash before the tree is handed to the
-/// interpreter, so a row can never be graded against a commitment the
-/// driver itself would reject.
 fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, String> {
     let secp = Secp256k1::new();
     let secret = SecretKey::from_slice(&CORE_TAPROOT_INTERNAL_SECRET)
@@ -661,8 +563,6 @@ fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, S
         .serialize();
     let output_key = spend_info.output_key().serialize();
 
-    // The tree's own merkle root must equal the tapleaf hash this workspace
-    // computes for the same leaf.
     let tapleaf = tapleaf_hash(LeafVersion::TapScript.to_consensus(), leaf_script);
     let core_root = spend_info
         .merkle_root()
@@ -699,8 +599,8 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
     let path = reference_path("script_tests.json");
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("script_tests.json unreadable: {e}"))?;
-    let root: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("script_tests.json parse: {e}"))?;
+    let root: sonic_rs::Value =
+        sonic_rs::from_str(&text).map_err(|e| format!("script_tests.json parse: {e}"))?;
     let arr = root
         .as_array()
         .ok_or("script_tests.json root is not an array")?;
@@ -713,16 +613,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
         counts.parsed += 1;
 
         let (witness_raw, script_sig_idx, script_pubkey_idx, flags_idx, expected_idx, comment_idx) =
-            if arr.first().is_some_and(serde_json::Value::is_array) {
+            if arr.first().is_some_and(sonic_rs::Value::is_array) {
                 (Some(&arr[0]), 1, 2, 3, 4, 5)
             } else if arr.len() >= 4 {
                 (None, 0, 1, 2, 3, 4)
-            } else if arr.len() == 1 && arr[0].is_string() {
-                // Core's reader treats a lone string the same way: it is the
-                // corpus's prose (format note, section header), not a test, and
-                // it reports `Bad test` only for other short shapes
-                // (`script_tests.cpp:955-960`). There is no scriptSig,
-                // scriptPubKey, flags, or expected error to assemble.
+            } else if arr.len() == 1 && arr[0].is_str() {
                 counts.record_skip(SCRIPT_TESTS_PROSE_SKIP);
                 continue;
             } else {
@@ -733,8 +628,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                 continue;
             };
 
-        // The single-leaf tree built for a row's `#SCRIPT#`/`#CONTROLBLOCK#`
-        // markers; `#TAPROOTOUTPUT#` reads the same tree for the scriptPubKey.
         let mut placeholder_tree = None;
         let (witness, amount) = if let Some(wit_arr) = witness_raw {
             let wit = wit_arr
@@ -744,14 +637,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                 counts.record_skip("witness array empty");
                 continue;
             }
-            let Some(amount_btc) = wit.last().and_then(serde_json::Value::as_f64) else {
+            let Some(amount_btc) = wit.last().and_then(sonic_rs::Value::as_f64) else {
                 counts.record_skip("witness amount not a number");
                 continue;
             };
             let amount = btc_to_sats(amount_btc);
-            // Core reads the witness element-by-element and fills the two
-            // markers in place, so the assembled stack keeps the corpus order:
-            // [..., leaf script, control block].
             let mut items = Vec::new();
             for elem in &wit[..wit.len() - 1] {
                 let Some(s) = elem.as_str() else {
@@ -759,7 +649,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                     continue 'row;
                 };
                 if let Some(asm) = s.strip_prefix(SCRIPT_PLACEHOLDER) {
-                    // Core: `ParseScript(element.substr(SCRIPT_FLAG.size()))`.
                     let leaf = match parse_core_asm(asm) {
                         Ok(script) => script,
                         Err(e) => {
@@ -799,19 +688,19 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
 
         let script_sig_str = arr
             .get(script_sig_idx)
-            .and_then(serde_json::Value::as_str)
+            .and_then(sonic_rs::Value::as_str)
             .ok_or_else(|| format!("row {index}: scriptSig is not a string"))?;
         let script_pubkey_str = arr
             .get(script_pubkey_idx)
-            .and_then(serde_json::Value::as_str)
+            .and_then(sonic_rs::Value::as_str)
             .ok_or_else(|| format!("row {index}: scriptPubKey is not a string"))?;
         let flags_str = arr
             .get(flags_idx)
-            .and_then(serde_json::Value::as_str)
+            .and_then(sonic_rs::Value::as_str)
             .unwrap_or("");
         let expected_str = arr
             .get(expected_idx)
-            .and_then(serde_json::Value::as_str)
+            .and_then(sonic_rs::Value::as_str)
             .ok_or_else(|| format!("row {index}: expected result is not a string"))?;
 
         let script_sig = match parse_core_asm(script_sig_str) {
@@ -822,7 +711,6 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             }
         };
         let script_pubkey = if script_pubkey_str == TAPROOT_OUTPUT_ASM {
-            // Core replaces the whole string with the generated tree's program.
             if let Some(tree) = &placeholder_tree {
                 let mut spk = vec![opcode::OP_PUSHNUM_1, 0x20];
                 spk.extend_from_slice(&tree.output_key);
@@ -857,7 +745,7 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
 
         let comment = arr
             .get(comment_idx)
-            .and_then(serde_json::Value::as_str)
+            .and_then(sonic_rs::Value::as_str)
             .unwrap_or("")
             .to_owned();
 
@@ -915,10 +803,6 @@ fn run_script_tests(
     mismatches
 }
 
-// ===========================================================================
-// Corpus 2 & 3: tx_valid.json / tx_invalid.json
-// ===========================================================================
-
 struct TxVectorRow {
     tx: Tx,
     prevouts: Vec<(OutPoint, TxOut)>,
@@ -941,8 +825,8 @@ fn load_tx_vectors(
 ) -> Result<Vec<TxVectorRow>, String> {
     let path = reference_path(name);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{name} unreadable: {e}"))?;
-    let root: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("{name} parse: {e}"))?;
+    let root: sonic_rs::Value =
+        sonic_rs::from_str(&text).map_err(|e| format!("{name} parse: {e}"))?;
     let arr = root
         .as_array()
         .ok_or_else(|| format!("{name} root is not an array"))?;
@@ -982,7 +866,6 @@ fn load_tx_vectors(
             continue;
         };
 
-        // The two tx corpora read the same field in opposite directions.
         let flags = match if expected_accept {
             tx_valid_flags(flags_str)
         } else {
@@ -1007,25 +890,25 @@ fn load_tx_vectors(
                 prevout_error = true;
                 break;
             };
-            let Some(hash_hex) = spec_arr.first().and_then(serde_json::Value::as_str) else {
+            let Some(hash_hex) = spec_arr.first().and_then(sonic_rs::Value::as_str) else {
                 counts.record_skip("prevout hash not a string");
                 prevout_error = true;
                 break;
             };
-            let Some(vout_i64) = spec_arr.get(1).and_then(serde_json::Value::as_i64) else {
+            let Some(vout_i64) = spec_arr.get(1).and_then(sonic_rs::Value::as_i64) else {
                 counts.record_skip("prevout vout not an integer");
                 prevout_error = true;
                 break;
             };
             let vout = vout_i64 as u32;
-            let Some(script_asm) = spec_arr.get(2).and_then(serde_json::Value::as_str) else {
+            let Some(script_asm) = spec_arr.get(2).and_then(sonic_rs::Value::as_str) else {
                 counts.record_skip("prevout script not a string");
                 prevout_error = true;
                 break;
             };
             let amount = spec_arr
                 .get(3)
-                .and_then(serde_json::Value::as_u64)
+                .and_then(sonic_rs::Value::as_u64)
                 .unwrap_or(0);
 
             let script_pubkey = match parse_core_asm(script_asm) {
@@ -1054,8 +937,6 @@ fn load_tx_vectors(
             continue;
         }
 
-        // In Core's transaction_tests.cpp, the vector supplies a map of available
-        // UTXOs. Resolved prevouts must match the transaction in input order.
         let mut ordered_prevouts = Vec::with_capacity(tx.inputs.len());
         let mut missing_prevout = false;
         for input in &tx.inputs {
@@ -1096,8 +977,6 @@ fn verify_native_tx(row: &TxVectorRow) -> Verdict {
         Ok(prepared) => prepared,
         Err(error) => panic!("native harness prevout error: {error}"),
     };
-    // The first failing input decides the row, and its error name is what
-    // a triage reader needs; a bare Reject says nothing.
     let mut first_failure = None;
     for input_idx in 0..row.tx.inputs.len() {
         let result = prepared.verify_input(input_idx, row.flags, None);
@@ -1150,16 +1029,6 @@ fn run_tx_vectors(
     mismatches
 }
 
-// ===========================================================================
-// Helpers
-// ===========================================================================
-
-/// How many mismatch lines to print per corpus.
-///
-/// Five is enough to see a pattern without burying the counts; set
-/// `SCRIPT_VECTOR_MISMATCHES` higher when triaging a specific group.
-/// Renders a script as hex so a mismatch line names the exact bytes that
-/// failed rather than a row number the reader has to resolve by hand.
 fn hex_of(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1168,17 +1037,11 @@ fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
-/// The full flag mask this crate defines: `STANDARD` plus the three bits
-/// Core vectors name that `STANDARD` omits. Bit-equal to Core's
-/// `MAX_SCRIPT_VERIFY_FLAGS` minus the bits it has not assigned.
 const FULL_FLAGS: VerifyFlags = VerifyFlags::STANDARD
     .union(VerifyFlags::SIGPUSHONLY)
     .union(VerifyFlags::CONST_SCRIPTCODE)
     .union(VerifyFlags::MINIMALIF);
 
-/// Every single-bit flag const, used to rebuild a `VerifyFlags` from raw
-/// bits by union: the crate has no public bit-level constructor, and the
-/// complement below is computed over `.bits()`.
 const SINGLE_BIT_FLAGS: [VerifyFlags; 21] = [
     VerifyFlags::P2SH,
     VerifyFlags::STRICTENC,
@@ -1203,9 +1066,6 @@ const SINGLE_BIT_FLAGS: [VerifyFlags; 21] = [
     VerifyFlags::DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
 ];
 
-/// Unions every named flag bit contained in `bits`. The assertion is a
-/// maintenance tripwire: it fires only if a flag const is added to the
-/// crate without extending `SINGLE_BIT_FLAGS`.
 fn flags_from_bits(bits: u32) -> VerifyFlags {
     let mut flags = VerifyFlags::NONE;
     for flag in SINGLE_BIT_FLAGS {
@@ -1217,9 +1077,6 @@ fn flags_from_bits(bits: u32) -> VerifyFlags {
     flags
 }
 
-/// `tx_valid.json` names the flags Core turns OFF: it verifies with the
-/// complement (`transaction_tests.cpp:224`). A row whose complement is not a
-/// filled combination is bad test data, which Core reports rather than runs.
 fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
     let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
     let effective = flags_from_bits(FULL_FLAGS.bits() & !parsed.bits());
@@ -1231,9 +1088,6 @@ fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
     Ok(effective)
 }
 
-/// `tx_invalid.json` names the flags Core turns ON, unfilled and unedited, so
-/// an invalid combination is detected rather than repaired
-/// (`transaction_tests.cpp:310-315`).
 fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, String> {
     let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
     if parsed != parsed.filled() {
@@ -1252,17 +1106,11 @@ fn mismatch_print_limit() -> usize {
 }
 
 fn reference_path(name: &str) -> std::path::PathBuf {
-    // Anchored at this crate rather than the process working directory, so the
-    // corpora resolve identically from the workspace root, from a worktree at
-    // any depth, and from a bare `cargo test -p bitcoin-rs-script`.
     let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = crate_dir
         .ancestors()
         .find(|dir| dir.join(".references").is_dir())
         .unwrap_or(crate_dir);
-    // The tracked copy is the authority: `.references` is a local checkout of
-    // Core and is not in git, so a CI run that fell back to it would either
-    // fail to find the corpus or grade against a different one.
     let candidates = [
         crate_dir.join("../consensus/tests/vectors").join(name),
         workspace_root
@@ -1276,10 +1124,6 @@ fn reference_path(name: &str) -> std::path::PathBuf {
     }
     candidates[0].clone()
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[test]
 #[expect(
@@ -1308,12 +1152,7 @@ fn asm_assembler_matches_known_bytes() {
     );
 }
 
-/// Core rows the native evaluator does not yet match. Every one is triaged in
-/// the issue that owns the remaining work; the count is pinned so a shrink
-/// lowers it with evidence and a growth fails the lane.
 const NATIVE_SCRIPT_TESTS_FAILURES: usize = 0;
-/// Prose / section-header rows in `script_tests.json` (one string element).
-/// A growth means the harness started skipping real tests.
 const NATIVE_SCRIPT_TESTS_SKIPS: usize = 55;
 const NATIVE_SCRIPT_TESTS_EXECUTED: usize = 1233;
 const SCRIPT_TESTS_PROSE_SKIP: &str =
@@ -1361,8 +1200,6 @@ fn script_tests_native_column() {
     );
 }
 
-/// libbitcoinkernel enforces mandatory consensus flags only, so test vector
-/// rows expecting rejection under policy-only flags are filtered and pinned.
 #[cfg(feature = "kernel")]
 const SCRIPT_TESTS_POLICY_SKIP: &str =
     "policy-only rejection: libbitcoinkernel enforces mandatory consensus flags only";
@@ -1458,8 +1295,6 @@ fn script_tests_kernel_column() {
     );
 }
 
-/// Pinned like `NATIVE_SCRIPT_TESTS_FAILURES`: a shrink lowers it with
-/// evidence, a growth fails the lane.
 const NATIVE_TX_VALID_FAILURES: usize = 0;
 const NATIVE_TX_VALID_SKIPS: usize = 0;
 const NATIVE_TX_VALID_EXECUTED: usize = 121;
@@ -1534,10 +1369,7 @@ fn tx_valid_kernel_column() {
     );
 }
 
-/// A `tx_invalid` mismatch means the evaluator ACCEPTED a transaction Core
-/// rejects, so this count is the one that must reach zero first.
 const NATIVE_TX_INVALID_FAILURES: usize = 0;
-/// `BADTX` rows fail `CheckTransaction` before script verification.
 const NATIVE_TX_INVALID_SKIPS: usize = 9;
 const NATIVE_TX_INVALID_EXECUTED: usize = 84;
 const TX_INVALID_BADTX_SKIP: &str = "BADTX: fails CheckTransaction, not script verification";
@@ -1654,12 +1486,6 @@ fn kernel_oracle_infrastructure_error_panics() {
     Verdict::from_kernel(&Err(err));
 }
 
-// ===========================================================================
-// Signature-cache adversarial behavior (real Core signatures, verdicts only)
-// ===========================================================================
-
-/// Verifies every input with an optional admission-local cache, returning the
-/// first non-accept. Only the externally observable verdict is compared.
 fn sigcache_verify_every_input(
     tx: &Tx,
     prevouts: &[(OutPoint, TxOut)],
@@ -1679,8 +1505,6 @@ fn sigcache_verify_every_input(
     Ok(true)
 }
 
-/// Push template of a script: one entry per instruction, the pushed length
-/// for pushes and `None` for opcodes or decode failures.
 fn push_shape(script: &[u8]) -> Vec<Option<usize>> {
     instructions(script)
         .map(|instruction| match instruction {
@@ -1690,13 +1514,6 @@ fn push_shape(script: &[u8]) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// Flips the first byte of the first non-empty witness item or of the first
-/// non-empty push of a push-only scriptSig, so a well-formed signature
-/// becomes a cryptographic failure without changing any encoding shape.
-/// Byte 0 of a push-based scriptSig is the push opcode itself, so flipping
-/// it would reshape the script instead of mutating the signature; the flip
-/// lands inside the parsed payload, and the before/after push template
-/// proves the shape survived.
 fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
     for input in &mut tx.inputs {
         for item in input.witness.iter_mut() {
@@ -1709,8 +1526,6 @@ fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
             continue;
         }
         let before = push_shape(input.script_sig.as_bytes());
-        // Locate first, mutate after: the parsed push borrows the script,
-        // so the flip must land once the parse ends.
         let start = {
             let bytes = input.script_sig.as_bytes();
             let mut start = None;
@@ -1740,11 +1555,6 @@ fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
     panic!("adversarial row carries no signature bytes to flip");
 }
 
-/// First `tx_valid` row that is signature-bound: it accepts uncached under its
-/// own flags, and both a flipped signature byte and a bumped nLockTime (which
-/// every sighash mode commits to) break it uncached. Selecting for those
-/// properties keeps every negative test below non-vacuous without inventing a
-/// spend.
 fn sigcache_digest_bound_row() -> TxVectorRow {
     let mut counts = Counts::default();
     let rows = match load_tx_vectors("tx_valid.json", true, &mut counts) {
@@ -1764,9 +1574,6 @@ fn sigcache_digest_bound_row() -> TxVectorRow {
         if sigcache_verify_every_input(&row.tx, &row.prevouts, row.flags, None) != Ok(true) {
             return false;
         }
-        // The hit-parity test warms under MANDATORY, so the row must accept
-        // there too: tx_valid rows that disable DERSIG (e.g. row 0's 0xdd byte)
-        // pass under their own flags but fail MANDATORY with SigDer.
         if sigcache_verify_every_input(&row.tx, &row.prevouts, VerifyFlags::MANDATORY, None)
             != Ok(true)
         {
@@ -1842,8 +1649,6 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
         Ok(true),
         "warmup"
     );
-    // nLockTime is committed by every sighash mode, so bumping it retargets the
-    // digest without touching any signature or policy encoding.
     let mut retargeted = row.tx.clone();
     let bumped = row.tx.lock_time.to_consensus().wrapping_add(1);
     retargeted.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(bumped);
@@ -1860,10 +1665,6 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
     );
 }
 
-/// Fixed P2WPKH twins in the benchmark `ecdsa_case` shape: one real low-S
-/// ECDSA signature plus its high-S twin (same r, s replaced with n - s, same
-/// hashtype) over the same digest, key, and transaction. Returns the low-S
-/// spend, the high-S spend, and their shared prevout row.
 fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
     use bitcoin_hashes::{Hash as _, hash160};
     use bitcoin_rs_primitives::{Hash256, Sighash, SighashCache};
@@ -1952,8 +1753,6 @@ fn sigcache_p2wpkh_s_twins() -> (Tx, Tx, Vec<(OutPoint, TxOut)>) {
 
 #[test]
 fn signature_cache_policy_encoding_still_rejected_after_permissive_success() {
-    // Only the witness signature differs between the twins, so a LOW_S
-    // rejection cannot be blamed on any other input.
     let (low_tx, high_tx, rows) = sigcache_p2wpkh_s_twins();
     let strict = VerifyFlags::MANDATORY.union(VerifyFlags::LOW_S);
     let low_prepared = match PreparedTransaction::new(&low_tx, &rows) {
@@ -1971,9 +1770,6 @@ fn signature_cache_policy_encoding_still_rejected_after_permissive_success() {
         "low-S policy-clean"
     );
 
-    // The high-S twin is a real consensus-valid signature, so the permissive
-    // pass succeeds and caches the group operation; the LOW_S encoding check
-    // still rejects it afterwards on the same cached inputs.
     let cache = SignatureCache::new();
     let high_prepared = match PreparedTransaction::new(&high_tx, &rows) {
         Ok(prepared) => prepared,

@@ -1,12 +1,3 @@
-//! SegWit-v0 ECDSA sighash regressions against BIP143 and Bitcoin Core.
-//!
-//! The reference preimage uses rust-bitcoin's wire encoders and the BIP143
-//! field-selection rules, never the native sighash implementation. The published
-//! BIP143 P2WPKH digest and signature independently anchor that reference.
-//! Sources: bitcoin/bips bip-0143.mediawiki blob
-//! 5d451c221fa9ef052325c42086b8a7097b942556; bitcoin/bitcoin
-//! src/script/interpreter.cpp blob 98b16eca6bcdfb5c98b5f51f6afc42062efb5f01.
-
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
 use bitcoin::consensus::{deserialize as oracle_decode, encode::VarInt, serialize};
@@ -17,7 +8,6 @@ use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
 
-// Public test key and unsigned transaction from the BIP143 native-P2WPKH example.
 const TX_HEX: &str = concat!(
     "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f",
     "0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57",
@@ -48,8 +38,6 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
     bitcoin_rs_primitives::encode::double_sha256(bytes).to_le_bytes()
 }
 
-/// BIP143 reference serialization. Raw hash-type bits select fields using the
-/// low five bits and bit 7, but ALL 32 bits are appended to the preimage.
 fn reference_bip143(
     tx: &bitcoin::Transaction,
     input: usize,
@@ -119,7 +107,6 @@ fn verify_witness(
     witness: &[Vec<u8>],
     flags: VerifyFlags,
 ) -> Result<bool, ScriptError> {
-    // BIP143 uses INPUT's spent amount; repeat it to fill the full prevout set.
     let prevouts = vec![prevout.clone(); tx.inputs.len()];
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
@@ -132,17 +119,12 @@ fn verify_witness(
     )
 }
 
-// The optional oracle is a real kernel call, not an availability-based skip.
-// Failure to parse or prepare the transaction fails the positive assertion.
-// Policy-only flags are intentionally excluded: the wrapper masks them off.
 #[cfg(feature = "kernel")]
 fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
     use bitcoin_rs_consensus::{ConsensusError, kernel::verify_tx_scripts};
 
     let mut signed = tx.clone();
     signed.inputs[INPUT].witness = witness.to_vec().into();
-    // The other input has a synthetic OP_TRUE prevout. This is script-verdict
-    // parity, not contextual block validation or a claim about historical UTXOs.
     let mut spent: Vec<_> = signed
         .inputs
         .iter()
@@ -167,8 +149,6 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
         None,
     )
     .expect("kernel accepts independently signed BIP143 input");
-    // Every BIP143 mode commits to this amount. Ensure the oracle is not
-    // vacuously accepting, and require a script rejection, not an engine error.
     spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(Amount::from_sat(1));
     assert!(matches!(
         verify_tx_scripts(
@@ -225,8 +205,6 @@ fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
     let script = hex(SCRIPT_CODE);
     let prevout = p2wpkh_prevout();
     for output_count in [1, 2] {
-        // input 1 has no matching output in the one-output fixture. SINGLE
-        // must still hash a complete BIP143 preimage and allow a valid signature.
         let (tx, oracle) = fixture(output_count);
         let cache = SighashCache::new(&tx);
         for byte in 0_u8..=u8::MAX {
@@ -348,11 +326,8 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
     }
 }
 
-// Each script executes its first separator, retains separator-valued pushed
-// data, and leaves a later separator in an unexecuted branch. BIP143 commits
-// the suffix after the executed separator verbatim (bip-0143, Specification).
 fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<u8> {
-    let mut script = vec![0xab, 0x02, 0xab, 0xab, 0x75]; // CODESEPARATOR, push, DROP
+    let mut script = vec![0xab, 0x02, 0xab, 0xab, 0x75];
     if multisig {
         script.push(0x51);
     }
@@ -362,15 +337,15 @@ fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<
         script.push(0x51);
     }
     script.push(match (multisig, verify) {
-        (false, false) => 0xac, // CHECKSIG
-        (false, true) => 0xad,  // CHECKSIGVERIFY
-        (true, false) => 0xae,  // CHECKMULTISIG
-        (true, true) => 0xaf,   // CHECKMULTISIGVERIFY
+        (false, false) => 0xac,
+        (false, true) => 0xad,
+        (true, false) => 0xae,
+        (true, true) => 0xaf,
     });
     if verify {
-        script.push(0x51); // successful VERIFY still needs a true final stack
+        script.push(0x51);
     }
-    script.extend_from_slice(&[0x00, 0x63, 0xab, 0x68]); // false IF CODESEPARATOR ENDIF
+    script.extend_from_slice(&[0x00, 0x63, 0xab, 0x68]);
     script
 }
 
@@ -402,7 +377,7 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
                 signature.push(byte);
                 let mut witness = Vec::new();
                 if multisig {
-                    witness.push(Vec::new()); // CHECKMULTISIG dummy, not a signature
+                    witness.push(Vec::new());
                 }
                 witness.extend([signature, script.clone()]);
                 assert_eq!(
@@ -435,9 +410,6 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
 
 #[test]
 fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
-    // These are digest-API inputs, not necessarily executable scripts. Mixing
-    // scripts, amounts, and modes on one cache must not reuse script-dependent
-    // or amount-dependent state. Both CompactSize encodings around 253 matter.
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
         let cache = SighashCache::new(&tx);

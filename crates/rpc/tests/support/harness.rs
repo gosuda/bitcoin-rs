@@ -1,11 +1,5 @@
 //! RAII harness: a real regtest `NodeState`, the real authenticated
 //! `RpcServer` on loopback, and the replay client that exercises them.
-//!
-//! Every handle the RPC context consumes comes from the live `NodeState`
-//! exactly the way the daemon wires them (`crates/node/src/run.rs`); nothing
-//! here constructs a fake or empty context. The server thread and the
-//! shutdown flag are joined and released by `Drop`, and the temporary data
-//! directory is deleted after the node state closes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -26,26 +20,17 @@ use super::http::{Connection, RawRequest, RawResponse, base64, wait_for_server};
 use super::limits::{SERVER_IDLE_TIMEOUT, SERVER_MAX_CONNECTIONS};
 use super::{GateResult, fail};
 
-/// The replay credentials, matching the `user:password` Basic shape the
-/// authentication layer expects.
 pub(crate) const REPLAY_USER: &str = "parity";
 pub(crate) const REPLAY_PASSWORD: &str = "parity-secret";
 
-/// A real regtest node over a temporary data directory.
-///
 /// Field order is load-bearing: `state` closes its storage handles before
 /// `_datadir` deletes the directory.
 pub(crate) struct NodeHarness {
-    /// Live node state, dropped before the directory.
     pub state: NodeState,
     _datadir: TempDir,
 }
 
 impl NodeHarness {
-    /// Opens a fresh regtest node and applies genesis.
-    ///
-    /// # Errors
-    /// Propagates node open or genesis failures.
     pub(crate) fn open() -> GateResult<Self> {
         let datadir = tempfile::tempdir()?;
         let config = regtest_config(&datadir.path().join("node"));
@@ -57,19 +42,10 @@ impl NodeHarness {
         })
     }
 
-    /// Mines the deterministic seed chain.
-    ///
-    /// # Errors
-    /// Propagates validation failures.
     pub(crate) fn seed(&self, blocks: u32) -> GateResult<SeedChain> {
         seed_chain(&self.state, blocks)
     }
 
-    /// Reads the chain identity used for chain-bound key comparison. Both
-    /// values come from the node state directly, never from an RPC answer.
-    ///
-    /// # Errors
-    /// Fails when the applied tip is missing.
     pub(crate) fn live_chain(&self) -> GateResult<LiveChain> {
         let applied = current_tip(&self.state)?;
         let headers = self
@@ -85,9 +61,6 @@ impl NodeHarness {
     }
 }
 
-/// The real `RpcServer` on `127.0.0.1:0`, driven from one worker thread and
-/// shut down by `Drop`. The RPC context holds the node's actual transition
-/// read role, split from the same domain the daemon's block transitions take.
 pub(crate) struct ServerHarness {
     address: SocketAddr,
     shutdown: Arc<AtomicBool>,
@@ -96,13 +69,6 @@ pub(crate) struct ServerHarness {
 }
 
 impl ServerHarness {
-    /// Wires the production RPC context over `node` and starts the server.
-    ///
-    /// Mining is deliberately unattached: this gate measures the chain and
-    /// transport surfaces, not the template coordinator.
-    ///
-    /// # Errors
-    /// Propagates bind failures.
     pub(crate) fn start(node: &NodeHarness) -> GateResult<Self> {
         let state = &node.state;
         let chainstate = state.chainstate();
@@ -123,9 +89,6 @@ impl ServerHarness {
                 ..ChainHandles::default()
             },
             mempool: MempoolHandles {
-                // The daemon wires this handle as `state.mempool_gateway()`
-                // (lifecycle.rs): the gateway constructed with the resolved
-                // `config.validation.engine`, not a separate Native one.
                 gateway: state.mempool_gateway(),
             },
             indexes: IndexHandles {
@@ -160,7 +123,6 @@ impl ServerHarness {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let join = std::thread::spawn(move || {
-            // Shutdown errors at teardown are expected and ignored.
             let _ignored = server.serve_with_shutdown(flag);
         });
         wait_for_server(address)?;
@@ -172,40 +134,26 @@ impl ServerHarness {
         })
     }
 
-    /// Bound loopback address.
     #[must_use]
     pub(crate) fn address(&self) -> SocketAddr {
         self.address
     }
 
-    /// The node's transition-exclusion read role, wired into the RPC context
-    /// by `start` exactly as the daemon wires it. A test that holds this role
-    /// observes the server the way a status client does while a block
-    /// transition is running.
     #[must_use]
     pub(crate) fn chain_transition(&self) -> bitcoin_rs_chain::StableRead {
         self.transition.clone()
     }
 
-    /// Base64 token of the correct `user:password` credentials.
     #[must_use]
     pub(crate) fn basic_token() -> String {
         base64(format!("{REPLAY_USER}:{REPLAY_PASSWORD}").as_bytes())
     }
 
-    /// Base64 token of deliberately wrong credentials.
     #[must_use]
     pub(crate) fn wrong_token() -> String {
         base64(b"parity:not-the-password")
     }
 
-    /// Replays one request and decodes exactly one framed response.
-    ///
-    /// `fragment_at`, when present, splits the wire bytes into two writes
-    /// with a flush between them.
-    ///
-    /// # Errors
-    /// Propagates transport or framing failures.
     pub(crate) fn replay(
         &self,
         auth: RequestAuth,
@@ -234,7 +182,6 @@ impl Drop for ServerHarness {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
-            // A join failure at teardown must not panic inside Drop.
             let _ignored = join.join();
         }
     }

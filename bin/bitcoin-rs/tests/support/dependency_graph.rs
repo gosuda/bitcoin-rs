@@ -1,52 +1,34 @@
 //! Shared dependency-graph parser and validator for `g17_dependency_direction`.
-//!
-//! The validator enforces the five-layer one-way dependency model, the
-//! storage-engine ownership boundary, the ZMQ surface ownership boundary,
-//! backend feature-forwarding rules, and production test-seam isolation in
-//! `docs/contracts/architecture.md`.
 
 #![expect(
     clippy::expect_used,
     reason = "malformed Cargo metadata is a test failure"
 )]
 
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
-
 #[cfg(test)]
 #[path = "dependency_graph_tests.rs"]
 mod tests;
 
-/// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
 pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
-/// External ZMQ implementation dependency owned by the surface crate.
 pub(crate) const ZMQ_CRATE: &str = "zmq";
 
-/// Backend feature names whose forwarding above storage is forbidden.
 pub(crate) const BACKEND_FEATURES: [&str; 3] = ["rocksdb", "fjall", "redb"];
 
-/// The crate that owns every storage engine dependency.
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";
 
-/// The RPC surface crate.
 pub(crate) const RPC_CRATE: &str = "bitcoin-rs-rpc";
 
-/// The node composition crate.
 pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
-/// The node binary.
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
-/// The mempool admission owner.
 pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
-/// The authoritative applied-chain owner.
 pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 
-/// Crates the mempool owner must never depend on. The real edges point
-/// the other way: `p2p` consumes the mempool inventory view, `rpc` and
-/// `node` submit transactions to it, and `bitcoin-rs` composes the node.
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
-/// Crates permitted to define and forward storage backend feature selection.
 pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
     STORAGE_CRATE,
     CHAINSTATE_CRATE,
@@ -56,10 +38,6 @@ pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
     BIN_CRATE,
 ];
 
-/// Approved layer for each workspace crate.
-///
-/// Crates not listed here cause the validator to fail closed so the layer
-/// table cannot drift silently.
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
@@ -76,7 +54,6 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     }
 }
 
-/// A normal or build workspace dependency, before dev-feature unification.
 struct FeatureDependency {
     name: String,
     alias: String,
@@ -84,46 +61,30 @@ struct FeatureDependency {
     uses_default_features: bool,
 }
 
-/// Parsed workspace dependency graph used by the gates.
 pub(crate) struct WorkspaceGraph {
-    /// Normal `bitcoin-rs-*` dependencies per crate.
     normal_deps: BTreeMap<String, Vec<String>>,
-    /// Storage engine dependencies per crate.
     engine_deps: BTreeMap<String, Vec<String>>,
-    /// External ZMQ implementation dependencies per crate.
     zmq_deps: BTreeMap<String, Vec<String>>,
-    /// Cargo feature implies per crate.
     features: BTreeMap<String, BTreeMap<String, Vec<String>>>,
-    /// Feature selections on normal/build workspace edges, excluding dev fixtures.
     production_deps: BTreeMap<String, Vec<FeatureDependency>>,
-    /// Number of workspace packages seen in the metadata.
     pub classified: usize,
 }
 
-/// Result of validating a graph.
 #[derive(Debug)]
 pub(crate) struct Validation {
-    /// Number of normal internal dependency edges checked.
     pub checked_edges: usize,
-    /// Number of feature assertions checked.
     pub checked_features: usize,
-    /// Number of crate packages checked for dependency cycles.
     pub cycle_checked_crates: usize,
-    /// Human-readable summary.
     pub summary: String,
 }
 
-/// Locates the workspace root `Cargo.toml` from the integration test's
-/// manifest directory.
 pub(crate) fn workspace_root_manifest() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("Cargo.toml")
 }
 
-/// Runs `cargo metadata --locked --offline --no-deps --format-version 1`
-/// against the workspace root manifest.
-fn run_cargo_metadata() -> serde_json::Value {
+fn run_cargo_metadata() -> sonic_rs::Value {
     let output = Command::new(env!("CARGO"))
         .args([
             "metadata",
@@ -142,20 +103,15 @@ fn run_cargo_metadata() -> serde_json::Value {
         "cargo metadata failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON")
+    sonic_rs::from_slice(&output.stdout).expect("parse cargo metadata JSON")
 }
 
 impl WorkspaceGraph {
-    /// Runs `cargo metadata --locked --offline --no-deps --format-version 1` and
-    /// parses the result.
     pub(crate) fn from_cargo_metadata() -> Self {
         Self::from_json(&run_cargo_metadata())
     }
 
-    /// Parses the same `cargo metadata --format-version 1` shape from a
-    /// `serde_json::Value`. This lets synthetic tests build a graph without
-    /// spawning a subprocess.
-    pub(crate) fn from_json(metadata: &serde_json::Value) -> Self {
+    pub(crate) fn from_json(metadata: &sonic_rs::Value) -> Self {
         let mut normal_deps = BTreeMap::new();
         let mut engine_deps = BTreeMap::new();
         let mut zmq_deps = BTreeMap::new();
@@ -184,11 +140,6 @@ impl WorkspaceGraph {
                 if !dep_name.starts_with("bitcoin-rs") {
                     continue;
                 }
-                // Normal and build edges both count: a build dependency is
-                // still a dependency edge, and the RPC storage-independence
-                // rule admits no per-kind backdoor. Dev-dependencies stay
-                // excluded (the bench-only fixture exception the RPC manifest
-                // documents).
                 if matches!(
                     dependency["kind"].as_str().unwrap_or("normal"),
                     "normal" | "build"
@@ -219,13 +170,13 @@ impl WorkspaceGraph {
 
             let mut feature_map = BTreeMap::new();
             for (feature, implies) in package["features"].as_object().expect("features object") {
-                let implies = implies
+                let implies: Vec<String> = implies
                     .as_array()
                     .expect("feature implies array")
                     .iter()
                     .map(|value| value.as_str().expect("feature string").to_owned())
                     .collect();
-                feature_map.insert(feature.clone(), implies);
+                feature_map.insert(feature.to_owned(), implies);
             }
             features.insert(name, feature_map);
         }
@@ -240,11 +191,9 @@ impl WorkspaceGraph {
         }
     }
 
-    /// Validates the graph and returns either a summary or a list of violations.
     pub(crate) fn validate(&self) -> Result<Validation, Vec<String>> {
         let mut violations = Vec::new();
 
-        // 1. Every normal bitcoin-rs edge points to the same or a lower layer.
         let mut checked_edges = 0_usize;
         for (name, edges) in &self.normal_deps {
             let layer = approved_layer(name);
@@ -260,9 +209,6 @@ impl WorkspaceGraph {
             }
         }
 
-        // 1b. Mempool must not depend on its transaction consumers. The real
-        //     edges point the other way; this keeps admission owning the pool
-        //     while consumers read or submit through the gateway.
         if let Some(mempool_edges) = self.normal_deps.get(MEMPOOL_CRATE) {
             for dep in mempool_edges {
                 if MEMPOOL_CONSUMER_CRATES.contains(&dep.as_str()) {
@@ -274,11 +220,8 @@ impl WorkspaceGraph {
             }
         }
 
-        // 1c. Workspace dependency diagrams must stay acyclic; a cycle would
-        //     make the one-way layer model vacuously satisfiable.
         let cycle_checked_crates = self.detect_cycles(&mut violations);
 
-        // 2. No crate outside storage names a storage-engine dependency.
         let mut checked_engine_edges = 0_usize;
         for (name, engines) in &self.engine_deps {
             if name != STORAGE_CRATE && !engines.is_empty() {
@@ -290,7 +233,6 @@ impl WorkspaceGraph {
             checked_engine_edges += engines.len();
         }
 
-        // 3. RPC names no storage backend at all.
         if let Some(rpc_edges) = self.normal_deps.get(RPC_CRATE) {
             for dep in rpc_edges {
                 if dep == STORAGE_CRATE {
@@ -326,13 +268,8 @@ impl WorkspaceGraph {
         let mut checked_features = 0_usize;
         checked_features += self.validate_backend_forwarding(&mut violations);
 
-        // 5. The external ZMQ dependency is owned by the RPC surface crate.
-        //    Node may forward the surface feature but must not name the
-        //    external dependency directly.
         checked_features += self.validate_zmq_surface(&mut violations);
 
-        // 6. Fixture capabilities must never be selected by production edges
-        //    or forwarded by production/default features.
         checked_features += self.validate_test_seam_isolation(&mut violations);
 
         if violations.is_empty() {
@@ -352,8 +289,6 @@ impl WorkspaceGraph {
         }
     }
 
-    /// Rule 4: backend features carry a real backend choice and only the
-    /// forwarding allowlist may define them (see `BACKEND_FORWARDING_CRATES`).
     fn validate_backend_forwarding(&self, violations: &mut Vec<String>) -> usize {
         let mut checked_features = 0_usize;
         for (name, feature_map) in &self.features {
@@ -404,10 +339,6 @@ impl WorkspaceGraph {
         checked_features
     }
 
-    /// Validates the ZMQ surface ownership boundary: the external ZMQ
-    /// dependency is owned by the RPC surface crate, and node forwards
-    /// the surface feature without naming the dependency directly.
-    /// Returns the number of feature assertions checked.
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0_usize;
         for (name, dependencies) in &self.zmq_deps {
@@ -451,7 +382,6 @@ impl WorkspaceGraph {
         checked
     }
 
-    /// Rejects fixture features without conflating production and dev edges.
     fn validate_test_seam_isolation(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0;
         for (name, dependencies) in &self.production_deps {
@@ -486,8 +416,6 @@ impl WorkspaceGraph {
         checked
     }
 
-    /// Follows local aliases and dependency feature forwarding, including
-    /// renamed and weak optional edges. Feature cycles are visited only once.
     fn test_seam_target<'a>(&'a self, name: &'a str, feature: &'a str) -> Option<&'a str> {
         let mut pending = vec![(name, feature)];
         let mut visited = BTreeSet::new();
@@ -520,8 +448,6 @@ impl WorkspaceGraph {
         None
     }
 
-    /// Detects cycles in the internal bitcoin-rs-* dependency graph using
-    /// a depth-first coloring. Returns the number of crates visited.
     fn detect_cycles(&self, violations: &mut Vec<String>) -> usize {
         let mut color: BTreeMap<&str, u8> = BTreeMap::new();
         let mut stack: Vec<String> = Vec::new();

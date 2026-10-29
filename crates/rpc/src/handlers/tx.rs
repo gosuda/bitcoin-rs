@@ -25,8 +25,6 @@ use corepc_types::v31;
 
 pub(crate) mod submit_package;
 
-/// Decodes a lowercase or uppercase hexadecimal string into bytes.
-///
 /// A non-hex string is a correctly typed but unacceptable value, so it
 /// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
@@ -42,11 +40,6 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
 
 /// Builds Bitcoin Core 31.1's `-8` message for a malformed block-hash
 /// parameter.
-///
-/// PRE: `value` is the parameter string as supplied.
-/// POST: the `InvalidParameter` error naming a wrong length or non-hex
-///   content exactly as Core 31.1 spells it for `label`.
-/// INVARIANT: built only from the call's inputs; no state is read.
 fn block_hash_param_error(value: &str, label: &str) -> RpcError {
     if value.len() != 64 {
         return RpcError::InvalidParameter(format!(
@@ -77,8 +70,6 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .transpose()?;
 
     if let Some(hash) = blockhash {
-        // Detailed reads resolve only header identity before entering the
-        // certified, bounded body/undo owner under the shared render budget.
         let record = if verbose == 2 && ctx.chain.block_undo_source.is_some() {
             ctx.chain.header_record(hash)
         } else {
@@ -252,16 +243,12 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         }
     }
 
-    // Core: the UTXO lookup and the chainstate tip (`coins_view->GetBestBlock`)
-    // are read under `cs_main`; capture both inside the stability barrier so a
-    // tip advance cannot interleave between the coin and its `bestblock`.
     let Some((live, view)) = ctx.chain.with_stable_chainstate(|| {
         ctx.chain
             .utxo
             .get_entry(&outpoint)
             .map(|live| (live, ctx.chain.applied_view()))
     }) else {
-        // Spent or never existed: Core-spec returns JSON null.
         return Ok(Value::new_null());
     };
     let confirmations = view.height().saturating_sub(live.height).saturating_add(1);
@@ -322,39 +309,12 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         return proof_from_single_record(ctx, &record, &wanted);
     }
 
-    // Without a block hash the scan below reads, deserializes and hashes every
-    // block on the chain to answer one call. The txindex already knows which
-    // block confirms a txid, so ask it first and scan only when it cannot
-    // answer — the same route Bitcoin Core takes, which requires the block hash
-    // *unless* txindex is enabled.
     if let Some(proof) = proof_via_index(ctx, &wanted) {
         return Ok(proof);
     }
     proof_from_block_log(ctx, &wanted)
 }
 
-/// Answers `gettxoutproof` from the txindex, or `None` when it cannot.
-///
-/// Probes the wanted txids until one resolves to a confirming height, then tries
-/// to build the proof from that block alone. Probing *every* txid rather than an
-/// arbitrary one matters: `wanted` is a `HashSet`, so "the first" is whichever
-/// the hasher happens to yield, and one unresolvable txid would otherwise drop
-/// the call into the full chain scan non-deterministically — the very cost this
-/// path exists to avoid.
-///
-/// Every miss returns `None` so the caller falls back to that scan: no index,
-/// no row, a stale row, a pruned body, or a block that does not hold *all* the
-/// wanted txids. The last of those is not belt-and-braces — BIP30's duplicate
-/// coinbase txids mean a txid can confirm in more than one block, so a block
-/// chosen from a single txid is a candidate, never a verdict.
-///
-/// An index that returns an error is a miss too, logged rather than propagated.
-/// Before this path existed a broken txindex could not fail this call, and the
-/// scan can still answer it; an optimization must not turn a working call into
-/// an error. `TxQueryError::Retry` makes that concrete rather than defensive:
-/// the index reconciles asynchronously, so it reports `Retry` while it is
-/// catching up, and a call the scan can answer today must not be refused
-/// because the index is behind.
 fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
     let derived_index = ctx.indexes.derived_index.as_ref()?;
     for probe in wanted {
@@ -380,12 +340,6 @@ fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Opt
     None
 }
 
-/// Builds the proof from one named block, or reports why it could not.
-///
-/// The explicit-`blockhash` path: the caller named the block, so there is
-/// nothing to scan and the two failures are distinguishable — a body that is not
-/// there, and a block that does not hold every wanted txid. Both messages are
-/// the ones this handler returned before the index path existed.
 fn proof_from_single_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_index::block_log::BlockRecord,
@@ -398,29 +352,12 @@ fn proof_from_single_record(
         .ok_or(RpcError::NotFound("no block contains all requested txids"))
 }
 
-/// Scans the whole block-record log for a block holding every wanted txid.
-///
-/// Deliberately does **not** clone the log, and deliberately does not hold its
-/// lock either. Cloning it copies every record on the chain — about 160 MB at a
-/// mainnet tip — to answer one call, on the exact path taken when the index
-/// cannot. Holding the read guard instead would stall block application for the
-/// length of a scan that loads a block body from disk per record.
-///
-/// So the length is snapshotted once and each record is copied out under a
-/// momentary lock, released before its body is read. Records are only ever
-/// appended, and the tail `pop` on disconnect only removes what was never in the
-/// snapshot's range, so a stale length can miss a block appended mid-scan but
-/// can never read a record that moved.
 fn proof_from_block_log(
     ctx: &Arc<Context>,
     wanted: &hashbrown::HashSet<Txid>,
 ) -> Result<Value, RpcError> {
     let len = ctx.chain.blocks.read().len();
     let mut saw_pruned_block = false;
-    // Scan-cost instrumentation: any future bound on this fallback must be
-    // adopted from these counters on representative successful scans, not
-    // from a guess (ENG-74). The scan is forward from genesis, so a
-    // late-window txid costs nearly the whole log and its bodies.
     let mut records_scanned: u64 = 0;
     let mut body_bytes_scanned: u64 = 0;
     for index in 0..len {
@@ -459,8 +396,6 @@ fn proof_from_block_log(
     }
 }
 
-/// Builds the merkle proof for `wanted` from one block record, or `None` when
-/// that block is pruned, undecodable, or does not hold every wanted txid.
 fn proof_from_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_index::block_log::BlockRecord,
@@ -470,8 +405,6 @@ fn proof_from_record(
     proof_from_body(&bytes, wanted)
 }
 
-/// Builds the merkle proof for `wanted` from one serialized block, or `None`
-/// when it does not decode or does not hold every wanted txid.
 fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
     let block = native_deserialize::<NativeBlock>(bytes).ok()?;
     let block_txids = block
@@ -483,10 +416,7 @@ fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Va
         return None;
     }
 
-    // MerkleBlock construction requires bitcoin::Block (sanctioned seam).
     let bitcoin_block = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(bytes).ok()?;
-    // WHY `Hash`: `from_byte_array` comes from the rust-bitcoin `Hash` trait
-    // here; the wire txids ride the sanctioned MerkleBlock seam in native LE bytes.
     let bitcoin_wanted: hashbrown::HashSet<bitcoin::Txid> = wanted
         .iter()
         .map(|txid| bitcoin::Txid::from_byte_array(*txid.as_bytes()))
@@ -524,10 +454,7 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 /// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
-///
 /// Bitcoin Core's `DEFAULT_MAX_RAW_TX_FEE_RATE`, `COIN / 10` — 0.1 BTC per kvB.
-/// The guard exists because a change-output mistake shows up as an enormous
-/// fee, and a fee is not recoverable once the transaction confirms.
 use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -553,8 +480,6 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     )?;
     for output in &tx.outputs {
         let script = output.script_pubkey.as_bytes();
-        // Core's burn guard is per output, not a sum. HasValidOps is
-        // already owned by the script crate, including malformed pushes.
         if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
             || bitcoin_rs_script::is_op_return(script)
             || !bitcoin_rs_script::has_valid_ops(script))
@@ -578,14 +503,9 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             &ctx.chain.admission_chain(),
         )
         .map_err(submit_error_to_rpc_error)?;
-    // `hashtx` for newly admitted changes is published once by the gateway
-    // observer, in commit order ahead of `rawtx` and the `sequence` `A` event.
-    // Already-known (duplicate) admissions commit nothing, so they notify nothing.
     typed_to_sonic(&v31::SendRawTransaction(txid.to_string()))
 }
 
-// corepc-types 0.15's v31 alias only describes completed rows. Core 31.1
-// rpc/mempool.cpp also emits these identity-only or package-error rows.
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 enum AcceptanceRow {
@@ -674,8 +594,6 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     Ok(value)
 }
 
-/// BIP337 `compressrawtransaction`: encodes one raw transaction into
-/// its compressed form, degrading unresolvable outpoints to raw form
 /// with one warning each. Disabled (`-32603`) unless the node started
 /// with `--compressed-transactions`.
 pub(crate) fn compressrawtransaction(
@@ -698,10 +616,6 @@ pub(crate) fn compressrawtransaction(
     }
     let compress_outpoints = optional_bool(params, 1, true)?;
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
-    // Snapshot isolation: the resolver captures its applied view and
-    // resolves UTXO, txindex, and body facts only while this stable
-    // chainstate read excludes transitions, so one call cannot pair a
-    // new-branch UTXO entry with the captured height and body.
     ctx.chain.with_stable_chainstate(|| {
         let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
         let (compressed, warnings) = crate::compressed_tx::compress_transaction(
@@ -723,9 +637,6 @@ pub(crate) fn compressrawtransaction(
     })
 }
 
-/// BIP337 `decompressrawtransaction`: restores one compressed
-/// transaction to its raw hex form, refusing when the context its
-/// compressed outpoints or signatures commit to is unavailable.
 /// Disabled (`-32603`) unless the node started with
 /// `--compressed-transactions`.
 pub(crate) fn decompressrawtransaction(
@@ -748,12 +659,6 @@ pub(crate) fn decompressrawtransaction(
     }
     let bytes =
         hex_decode(raw).map_err(|_| RpcError::Deserialization("TX decode failed".to_owned()))?;
-    // Snapshot isolation, as in `compressrawtransaction`: every
-    // resolution read runs under the same stable chainstate read that
-    // captured the applied view. Public-key recovery runs after the lock
-    // is released: it only reads the resolved plan, so a large request
-    // cannot block chain transitions while grinding recovery ids. A tip
-    // move during recovery is caught by the second view check below.
     let (plan, resolver) = ctx.chain.with_stable_chainstate(|| {
         let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
         let plan = crate::compressed_tx::decompress_prepare(&bytes, &mut resolver)
@@ -799,7 +704,6 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     };
     let replaceable = optional_bool(params, 3, false)?;
 
-    // BIP125 opt-in sequence; 0xFFFFFFFF = final (no RBF, no locktime).
     let default_sequence: u32 = if replaceable {
         0xFFFF_FFFD
     } else {
@@ -845,7 +749,6 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         });
     }
 
-    // Address parsing requires bitcoin::Network (sanctioned seam).
     let network = convert::bitcoin_network(ctx.chain.chain_network);
     let mut tx_outputs = Vec::with_capacity(outputs.len());
     for (key, value) in outputs {
@@ -917,7 +820,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         return Err(RpcError::InvalidParams(message));
     }
 
-    // Optional positive sign; reject any other sign including negative.
     let text = if let Some(stripped) = text.strip_prefix('+') {
         stripped
     } else if text.starts_with('-') {
@@ -930,7 +832,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         return Err(RpcError::InvalidParams(message));
     }
 
-    // Parse scientific notation: mantissa and optional exponent.
     let (mantissa, exp) = if let Some(pos) = text.find(['e', 'E']) {
         let (m, e) = text.split_at(pos);
         let e_str = &e[1..];
@@ -960,9 +861,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         (text, 0_i32)
     };
 
-    // Split mantissa on decimal point. Like Core's ParseFixedPoint, a
-    // decimal point requires at least one digit on each side ("1." and
-    // ".1" are malformed), and a second point is garbage.
     let (int_part, frac_part) = if let Some(pos) = mantissa.find('.') {
         let (i, f) = mantissa.split_at(pos);
         let f = &f[1..];
@@ -974,8 +872,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         (mantissa, "")
     };
 
-    // Both parts must contain only ASCII digits, and the integer part
-    // must carry at least one digit.
     if int_part.is_empty()
         || !int_part.chars().all(|c| c.is_ascii_digit())
         || !frac_part.chars().all(|c| c.is_ascii_digit())
@@ -991,9 +887,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
         return Ok(0);
     }
 
-    // Normalize: trailing zeros carry no value, so the fractional-decimal
-    // count is taken after trimming them ("100e-10" and "1.000000000" are
-    // whole satoshis, not nine-decimal amounts).
     while digits.last() == Some(&b'0') {
         digits.pop();
     }
@@ -1044,17 +937,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
 
 /// `sendrawtransaction`'s fee argument: Core's `maxfeerate` amount, or the
 /// one pre-0.19 `allowhighfees` value that btcd's RPC client still emits.
-///
-/// Core 31.1 takes only an amount here and refuses any boolean as a type
-/// error; `testmempoolaccept` and `submitpackage` keep that strictness. btcd's
-/// client (pinned by LND v0.21.4 through btcwallet) picks the argument shape by
-/// stripping `/Satoshi:` and the trailing `/` from `getnetworkinfo.subversion`
-/// and string-comparing the rest to `0.19.0`. This node's honest
-/// `/bitcoin-rs:…/` user agent sorts below that, so LND broadcasts every
-/// wallet transaction as `["<hex>", false]`, `allowHighFees = false`. Only
-/// that value is accepted, and it means the default ceiling, exactly as an
-/// omitted or null argument. `true` would switch the fee guard off through a
-/// type Core refuses; nothing observed sends it, so it stays a type error.
 fn send_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
     let legacy_default = params_array(params)?
         .get(index)
@@ -1096,9 +978,6 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
     if sats == 0 {
         return Ok(None);
     }
-    // Core's `ParseFeeRate` refuses rates at or above 1 BTC/kvB, so the
-    // ceiling is enforced on the integer domain to keep the parameter
-    // contract identical.
     if sats >= 100_000_000 {
         return Err(RpcError::InvalidParams(
             "Fee rates larger than or equal to 1BTC/kvB are not accepted",
@@ -1111,21 +990,15 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
     sats_from_btc(value, "Invalid amount")
 }
 
-// ---------------------------------------------------------------------------
-// Prevout / context resolution and frozen reason mapping.
-// ---------------------------------------------------------------------------
-
-/// Maps an [`AcceptanceRejectReason`] to the Core-compatible RPC error.
-/// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the
-/// policy-contract integration test. All other admission rejections are
-/// transaction rejections (`-26`), matching Bitcoin Core's
-/// `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to
-/// Core's public `too-large-cluster` reason.
+/// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the policy-contract
+/// integration test.
+///
+/// All other admission rejections are transaction rejections (`-26`), matching Bitcoin
+/// Core's `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to Core's
+/// public `too-large-cluster` reason.
 pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
-        // Core reports spent/unknown inputs as RPC_VERIFY_ERROR (-25), not
-        // the policy-rejection -26 used for rule violations.
         AcceptanceRejectReason::MissingInputs => {
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
         }
@@ -1133,8 +1006,6 @@ pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcE
     }
 }
 
-/// Maps a gateway [`SubmitError`] to the Core-compatible RPC error for
-/// `sendrawtransaction` and `testmempoolaccept`.
 fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
     match error {
         SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
@@ -1143,7 +1014,6 @@ fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
     }
 }
 
-/// Maps an [`AcceptanceRejectReason`] to the frozen RPC reject-reason string.
 /// Cluster count and weight failures share Core's `too-large-cluster` reason;
 /// other variants use the mempool owner's public policy reason.
 fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
@@ -1165,8 +1035,6 @@ pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value,
         return Err(RpcError::InvalidParams("invalid base64 PSBT"));
     };
     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-    // The finalizer mutates every input it can satisfy and reports the rest.
-    // Incomplete inputs are part of the RPC result, not an RPC-level failure.
     let _incomplete = psbt.finalize_mut(&secp);
     let finalized_tx = if psbt.inputs.is_empty() {
         None
@@ -1257,10 +1125,6 @@ mod tests {
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_index::block_log::BlockRecord;
 
-    /// Minimal one-coinbase-tx fixture block standing in for the chain genesis.
-    ///
-    /// Identity is self-consistent via `block_hash()`; with a single transaction
-    /// the merkle root is its txid, matching consensus layering.
     fn fixture_genesis() -> Block {
         use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
         let coinbase = Tx {
@@ -1454,8 +1318,6 @@ mod tests {
             2,
             block.block_hash().to_string()
         ]);
-        // No body reader is installed: detailed reads must go directly to the
-        // bounded owner, and must not fall back after its typed refusal.
         let retry: fn() -> BlockSpendsError = || BlockSpendsError::Retry;
         for (failure, code) in [
             (retry, -1),
@@ -1479,9 +1341,6 @@ mod tests {
                     .code(),
                 code
             );
-            // The requested coinbase needs no prevouts, but explicit v2
-            // authenticates the entire block/undo. Even with its body
-            // readable, an undo failure for the block must remain visible.
             attach_body_for_block(Arc::get_mut(&mut ctx).expect("unique context"), &block, 0);
             for verbosity in [json!(1), json!(true)] {
                 let value = getrawtransaction(
@@ -1544,8 +1403,8 @@ mod tests {
                 let spent = match self.mode {
                     0 => Err(HistoryUnavailable::Missing),
                     1 => Err(HistoryUnavailable::Pruned { below: 1 }),
-                    2 => Ok(vec![vec![]]), // Missing the spend's row is not omission.
-                    _ => Ok(vec![vec![], vec![]]), // Nor is a partial input row.
+                    2 => Ok(vec![vec![]]),
+                    _ => Ok(vec![vec![], vec![]]),
                 };
                 Ok(BlockSpends {
                     block: self.block.clone(),
@@ -1589,10 +1448,6 @@ mod tests {
 
     #[test]
     fn getrawtransaction_uses_applied_ancestry_for_explicit_block_metadata() {
-        // API-02 / Core 31.1 rawtransaction.cpp (pinned source
-        // 9be056a8a72b624dae9623b2f7bded92c2a21c91, TxToJSON): a retained
-        // inactive block has zero confirmations and no time fields. Header
-        // validity, height, or body availability alone cannot confirm it.
         let genesis = distinct_block(1);
         let mut sibling = distinct_block(2);
         sibling.header.prev_blockhash = genesis.block_hash();
@@ -1970,9 +1825,6 @@ mod tests {
         ));
     }
 
-    /// Builds a block distinguishable from the blocks of other markers: the
-    /// coinbase script makes the txid differ, and the merkle root is recomputed
-    /// so `verifytxoutproof` can still extract matches from a proof over it.
     fn distinct_block(marker: u8) -> Block {
         use bitcoin_rs_primitives::Script;
         let mut block = fixture_genesis();
@@ -1984,13 +1836,9 @@ mod tests {
         block
     }
 
-    /// Adds a second transaction so one block can hold two wanted txids.
     fn block_with_two_txs(marker: u8) -> Block {
         use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         let mut block = distinct_block(marker);
-        // The extra tx must carry at least one input: the gettxoutproof path
-        // round-trips block bytes through the sanctioned rust-bitcoin
-        // MerkleBlock seam, whose decoder rejects input-less transactions.
         let extra = Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2011,12 +1859,6 @@ mod tests {
         block
     }
 
-    /// Stands in for the txindex, answering only the query these tests are about.
-    ///
-    /// `gettxoutproof` calls nothing else on `DerivedIndexQuery`, so the other three
-    /// methods answer emptily and every probe behaviour these tests need — a
-    /// fixed height, a selective one, an error, a panic, a counter — is the
-    /// closure rather than another stub type.
     struct HeightQuery<F>(F);
 
     impl<F> DerivedIndexQuery for HeightQuery<F>
@@ -2043,7 +1885,6 @@ mod tests {
         }
     }
 
-    /// Resolves only the txids it was told about, so a probe can be made to miss.
     fn resolving(
         resolvable: Vec<(Txid, u32)>,
     ) -> impl Fn(&Txid) -> Result<Option<u32>, TxQueryError> {
@@ -2130,8 +1971,6 @@ mod tests {
     #[test]
 
     fn gettxoutproof_index_path_does_not_read_unrelated_block_bodies() {
-        // Records without a body force a `BlockBodySource` read, so a scan over
-        // them panics; only skipping them entirely keeps this test green.
         let block = distinct_block(3);
         let Some(wanted) = block.txs.first().map(Tx::txid) else {
             panic!("block has no transactions");
@@ -2184,9 +2023,6 @@ mod tests {
 
     #[test]
     fn gettxoutproof_falls_back_when_the_indexed_block_lacks_some_wanted_txids() {
-        // The candidate block holds one wanted txid; only the second block holds
-        // both. A block chosen from a single txid is a candidate, not a verdict,
-        // so pointing the index at the wrong one must still produce the proof.
         let both = block_with_two_txs(9);
         let blocks = [distinct_block(1), both.clone()];
         let wanted = both.txs.iter().map(Tx::txid).collect::<Vec<_>>();
@@ -2264,10 +2100,6 @@ mod tests {
 
     #[test]
     fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
-        // `wanted` is a HashSet, so which txid is probed first is whatever the
-        // hasher yields. Making only the *second*-added txid resolvable pins that
-        // an unresolvable probe does not by itself drop the call into the scan —
-        // the scan here would panic.
         let block = block_with_two_txs(12);
         let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
         let Some(only_one) = wanted.last().copied() else {
@@ -2299,14 +2131,6 @@ mod tests {
 
     #[test]
     fn gettxoutproof_falls_back_to_the_scan_when_the_index_errors() {
-        // Before this path existed, a broken txindex could not fail this call and
-        // the scan answered it. An optimization must not turn a working call into
-        // an error.
-        //
-        // Every variant, not just the interesting-looking ones. `Retry` is the
-        // one that matters most: the index reconciles asynchronously, so it is
-        // the *routine* answer while the index catches up, and it must not
-        // refuse a call the scan can answer today.
         for error in [
             TxQueryError::Retry,
             TxQueryError::Unavailable(TxUnavailableCause::Other("worker stopped".into())),
@@ -2330,9 +2154,6 @@ mod tests {
 
             let result = proof_for(&ctx, &[wanted]);
 
-            // Comparing against the scan's answer, not merely asserting that
-            // *some* string came back: a failing index must not get to decide
-            // what the answer is, only that it is not the one supplying it.
             assert_eq!(
                 result.as_ref().ok().and_then(|value| value.as_str()),
                 scanned.as_str(),
@@ -2344,8 +2165,6 @@ mod tests {
 
     #[test]
     fn gettxoutproof_with_blockhash_never_consults_the_index() {
-        // The explicit-blockhash path is unchanged by this work, and an index
-        // that panics on use proves it stays that way.
         let block = distinct_block(4);
         let Some(wanted) = block.txs.first().map(Tx::txid) else {
             panic!("block has no transactions");
@@ -2376,12 +2195,6 @@ mod tests {
         );
     }
 
-    /// Counts probes so the loop can be pinned deterministically.
-    ///
-    /// `probes_every_txid_before_giving_up_on_the_index` pins the *outcome*, but
-    /// only probabilistically: `wanted` is a `HashSet`, so a one-probe
-    /// implementation happens to pick the resolvable txid about half the time.
-    /// Resolving nothing and counting instead is deterministic.
     #[test]
     fn gettxoutproof_asks_the_index_about_every_wanted_txid() {
         let block = block_with_two_txs(13);
@@ -2397,7 +2210,6 @@ mod tests {
         install_blocks(&mut ctx, std::slice::from_ref(&block));
         let ctx = Arc::new(ctx);
 
-        // Resolves nothing, so this falls through to the scan and still answers.
         let result = proof_for(&ctx, &wanted);
         assert!(
             result.as_ref().is_ok_and(|value| value.as_str().is_some()),
@@ -2411,14 +2223,6 @@ mod tests {
         );
     }
 
-    /// Pins that a candidate block failing verification does not end the walk.
-    ///
-    /// `falls_back_when_the_indexed_block_lacks_some_wanted_txids` pins the
-    /// outcome, but its index answers the same height for every probe, so
-    /// "keeps probing after a failed candidate" and "gives up on the first
-    /// candidate" reach the same place: the fallback scan, which answers either
-    /// way. Counting probes separates them — a walk that returns whatever the
-    /// first candidate produced asks exactly once.
     #[test]
     fn gettxoutproof_keeps_probing_after_a_candidate_block_fails_verification() {
         let block = block_with_two_txs(14);
@@ -2426,8 +2230,6 @@ mod tests {
         let probes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
 
         let counter = Arc::clone(&probes);
-        // Every probe names height 0, whose block holds none of the wanted
-        // txids, so every candidate fails verification.
         let mut ctx = Context::new();
         ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2449,14 +2251,6 @@ mod tests {
         );
     }
 
-    /// Pins that the block-record lock is released before each body load.
-    ///
-    /// The scan reads a block body from disk per record. Holding the log's
-    /// `RwLock` across that would stall block application for the whole scan,
-    /// and cloning the log to avoid it copies every record on the chain — about
-    /// 160 MB at a mainnet tip. The walk does neither, and this proves it: the
-    /// body source tries to take the write lock, which can only succeed if the
-    /// scan is not holding a read guard.
     #[test]
     fn scan_does_not_hold_the_block_log_lock_across_a_body_load() {
         struct LockProbeSource {
@@ -2503,7 +2297,6 @@ mod tests {
         }));
         let ctx = Arc::new(ctx);
 
-        // Body-less records, so every body must come from the source above.
         for (height, block) in blocks.iter().enumerate() {
             let height = u32::try_from(height).unwrap_or_else(|err| panic!("height: {err}"));
             let hash = block.block_hash();
@@ -2518,10 +2311,6 @@ mod tests {
         );
     }
 
-    /// `P2WSH(OP_TRUE)`: a version-0 push-32 program whose witness script is a
-    /// bare `OP_TRUE`. It is a standard output template, and spendable by a
-    /// one-item `[OP_TRUE]` witness, so the retry fixtures chain parent and
-    /// child generations without signature material.
     fn retry_spendable_script() -> Vec<u8> {
         let mut script = vec![0x00, 0x20];
         script.extend_from_slice(&[
@@ -2532,7 +2321,6 @@ mod tests {
         script
     }
 
-    /// Funds a UTXO in the context's UTXO set and returns the outpoint.
     fn retry_fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         use bitcoin_rs_primitives::{Amount, Script};
         let mut changes = BlockChanges::default();
@@ -2554,7 +2342,6 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
     }
 
-    /// One-input one-output tx spending `prevout` with `output_value` sats.
     fn retry_tx(prevout: OutPoint, output_value: u64) -> Tx {
         use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         Tx {
@@ -2573,27 +2360,15 @@ mod tests {
         }
     }
 
-    /// Consensus hex for RPC submission.
     fn retry_raw_hex(tx: &Tx) -> String {
         consensus_bytes(tx).to_lower_hex_string()
     }
 
-    /// Proves `sendrawtransaction` rebuilds admission context on retry: the
-    /// first attempt captures context from a mempool state where the child's
-    /// parent is absent (missing inputs), parks at the gateway seam, the test
-    /// changes the chain generation (forcing `GenerationChanged`) and admits
-    /// the parent, then releases the park. The retried attempt must observe
-    /// the FRESH mempool state — the parent now provides the child's prevout —
-    /// and succeed. If the context were reused from the first attempt (the
-    /// r4c3 mutation), the stale `missing_inputs` flag would reject the child.
     #[test]
     fn sendrawtransaction_rebuilds_admission_context_after_transient_rejection() {
         let ctx = Arc::new(Context::new());
         reset_admission_park();
 
-        // Parent spends a confirmed UTXO; child spends the parent's output.
-        // The parent output is NOT in the UTXO set, so the child's prevout is
-        // only available while the parent is in the mempool.
         let parent_prevout = retry_fund_utxo(&ctx, 0x70, 100_000);
         let parent = retry_tx(parent_prevout, 90_000);
         let parent_txid = parent.txid();
@@ -2602,10 +2377,6 @@ mod tests {
         let child_txid = child.txid();
         let child_hex = retry_raw_hex(&child);
 
-        // Provisional refusals reach this seam too, so retry must rebuild missing inputs.
-        // Arm the admission park gate: the first `admit_transaction` on this
-        // gateway will block before the write lock, signal `parked`, and wait
-        // for `release`.
         let (parked_tx, parked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let target = Arc::as_ptr(&ctx.mempool.gateway).expose_provenance();
@@ -2616,15 +2387,10 @@ mod tests {
         let admission =
             thread::spawn(move || handler.dispatch("sendrawtransaction", &json!([child_hex])));
 
-        // Wait for the first attempt to park at the gateway seam.
         parked_rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("first admission parked at the gateway seam");
 
-        // While the first attempt is parked (before the write lock, holding
-        // no guard), change the chain generation so the first attempt's
-        // captured generation token is stale, and admit the parent so the
-        // mempool sequence bumps and the parent's output is available.
         let guard = ctx_clone
             .mempool
             .gateway
@@ -2651,18 +2417,12 @@ mod tests {
             )
             .expect("parent admitted to the mempool");
 
-        // Release the park: the first attempt proceeds, sees the stale
-        // generation token, and returns `GenerationChanged` — retrying with
-        // fresh facts.
         release_tx.send(()).expect("release the parked admission");
 
         let result = admission.join().expect("admission thread did not panic");
 
         reset_admission_park();
 
-        // The retried admission must succeed: the parent is now in the
-        // mempool, the child's prevout is available, and the context was
-        // rebuilt from the fresh mempool state.
         let txid_str = result
             .as_ref()
             .map_err(|err| format!("sendrawtransaction failed: {err}"))
@@ -2678,12 +2438,10 @@ mod tests {
             "the retried admission must observe the fresh mempool state"
         );
 
-        // The child must be in the mempool.
         assert!(
             ctx.mempool.gateway.read().contains_txid(&child_txid),
             "the child must be pooled after successful retry"
         );
-        // The parent must still be in the mempool.
         assert!(
             ctx.mempool.gateway.read().contains_txid(&parent_txid),
             "the parent must remain pooled"
@@ -2751,7 +2509,6 @@ mod acceptance_tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[tag; 32])), 0)
     }
 
-    /// Seeds one confirmed, anyone-can-spend output worth `value`.
     fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(
@@ -2785,12 +2542,12 @@ mod acceptance_tests {
                 value: Amount::from_sat(output_value),
                 script_pubkey: {
                     let mut out = Vec::with_capacity(25);
-                    out.push(0x76); // OP_DUP
-                    out.push(0xa9); // OP_HASH160
+                    out.push(0x76);
+                    out.push(0xa9);
                     out.push(0x14);
                     out.extend_from_slice(&[9_u8; 20]);
-                    out.push(0x88); // OP_EQUALVERIFY
-                    out.push(0xac); // OP_CHECKSIG
+                    out.push(0x88);
+                    out.push(0xac);
                     Script::from_bytes(out)
                 },
             }],
@@ -2820,8 +2577,6 @@ mod acceptance_tests {
     fn sendrawtransaction_refuses_an_absurd_fee_by_default() {
         let ctx = Arc::new(Context::new());
         seed_utxo(&ctx, 8, 100_000_000);
-        // 1 BTC in, 0.01 BTC out: a 0.99 BTC fee on a ~110 vbyte transaction,
-        // which is thousands of times the 0.1 BTC/kvB default ceiling.
         let tx = spending_tx(8, 1_000_000);
 
         let error = sendrawtransaction(&ctx, &json!([hex_of(&tx)]))
@@ -2840,13 +2595,6 @@ mod acceptance_tests {
         );
     }
 
-    /// The guard is the caller's to lift, and the ceiling is a *rate*.
-    ///
-    /// Zero disables it outright. Any other value is BTC per kvB, turned into
-    /// an absolute fee for this transaction's vsize -- so 0.99 BTC/kvB on a
-    /// ~110-vbyte transaction is a ceiling near 0.109 BTC, and a 0.99 BTC fee
-    /// is still far above it. Reading the argument as an absolute cap would
-    /// send that transaction.
     #[test]
     fn the_fee_ceiling_is_a_rate_and_zero_disables_it() {
         let disabled = {
@@ -2873,12 +2621,10 @@ mod acceptance_tests {
         assert_eq!(ctx.mempool.gateway.read().len(), 0);
     }
 
-    /// A ceiling the transaction stays under changes nothing.
     #[test]
     fn sendrawtransaction_admits_a_fee_below_the_ceiling() {
         let ctx = Arc::new(Context::new());
         seed_utxo(&ctx, 10, 100_000);
-        // A ~10_000 sat fee on ~110 vbytes, well under the default ceiling.
         let tx = spending_tx(10, 90_000);
 
         let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
@@ -2887,8 +2633,6 @@ mod acceptance_tests {
         assert_eq!(ctx.mempool.gateway.read().len(), 1);
     }
 
-    /// Core's `ParseFeeRate` refuses ceilings at or above one whole coin per
-    /// kvB, so the parameter itself is invalid no matter how small the fee.
     #[test]
     fn sendrawtransaction_rejects_a_fee_rate_of_a_whole_coin() {
         let ctx = Arc::new(Context::new());
@@ -2907,8 +2651,6 @@ mod acceptance_tests {
         );
     }
 
-    /// Missing inputs are Core's `RPC_VERIFY_ERROR` (-25), not the policy
-    /// rejection code reserved for rule violations.
     #[test]
     fn sendrawtransaction_rejects_a_transaction_whose_inputs_do_not_exist() {
         let ctx = Arc::new(Context::new());
@@ -2927,8 +2669,6 @@ mod acceptance_tests {
         assert!(ctx.mempool.gateway.read().is_empty());
     }
 
-    /// A transaction with duplicate inputs must be rejected by consensus
-    /// verification, not admitted to the mempool.
     #[test]
     fn sendrawtransaction_rejects_a_transaction_with_duplicate_inputs() {
         let ctx = Arc::new(Context::new());
@@ -2969,7 +2709,6 @@ mod acceptance_tests {
         assert!(ctx.mempool.gateway.read().is_empty());
     }
 
-    /// Core rebroadcasts rather than failing, and callers retry on a dropped
     #[test]
     fn sendrawtransaction_is_idempotent_for_a_transaction_already_in_the_pool() {
         let ctx = Arc::new(Context::new());
@@ -3011,7 +2750,6 @@ mod acceptance_tests {
             "the original must enter the pool"
         );
 
-        // Same confirmed input, larger fee. BIP125 rules 3/4/6 all clear.
         let replacement = spending_tx(1, 80_000);
         let Ok(_) = sendrawtransaction(&ctx, &json!([hex_of(&replacement)])) else {
             panic!("the higher-fee replacement must be accepted");
@@ -3045,11 +2783,6 @@ mod acceptance_tests {
         );
     }
 
-    /// The verdict must come from the acceptance checks.
-    ///
-    /// This RPC used to answer `allowed: true` for anything that merely
-    /// decoded, so a transaction spending outputs that do not exist was
-    /// reported as acceptable.
     #[test]
     fn testmempoolaccept_rejects_a_transaction_that_only_decodes() {
         let ctx = Arc::new(Context::new());
@@ -3099,8 +2832,6 @@ mod acceptance_tests {
         );
     }
 
-    /// `wtxid` was a copy of `txid`. They differ for any witness transaction,
-    /// and package relay identifies transactions by the witness id.
     #[test]
     fn testmempoolaccept_reports_the_witness_txid() {
         let ctx = Arc::new(Context::new());
@@ -3139,17 +2870,12 @@ mod acceptance_tests {
         );
         seed_utxo(&mainnet, 1, 100_000);
         let mut tx = spending_tx(1, 90_000);
-        // Consensus-valid, non-standard.
         tx.version = 4;
         assert!(
             sendrawtransaction(&mainnet, &json!([hex_of(&tx)])).is_err(),
             "mainnet must enforce standardness"
         );
     }
-    /// Builds a 12-header chain in `ctx.chain.block_tree`, with the applied tip 6
-    /// blocks behind the header tip, and publishes both tips in `ctx`. Block
-    /// times start above the lock-time threshold so the MTP values actually
-    /// govern finality for the timestamp-locked transaction under test.
     fn build_divergent_tips(ctx: &Context) -> (u32, u32) {
         const BASE: u32 = 500_000_000;
         const STEP: u32 = 600;
@@ -3214,10 +2940,6 @@ mod acceptance_tests {
         )
     }
 
-    /// `sendrawtransaction` must take the BIP113 median-time-past from the
-    /// applied tip, not a header tip that has run ahead. A timestamp-locked
-    /// transaction that is final only under the header-tip MTP must be
-    /// rejected.
     #[test]
     fn sendrawtransaction_rejects_tx_final_only_under_header_tip_mtp() {
         const BASE: u32 = 500_000_000;
@@ -3238,7 +2960,7 @@ mod acceptance_tests {
         seed_utxo(&ctx, 1, 100_000);
         let mut tx = spending_tx(1, 90_000);
         tx.lock_time = LockTime::from_consensus(lock_time);
-        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
 
         let result = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
         assert!(
@@ -3401,7 +3123,6 @@ mod finalizepsbt_tests {
     fn exact_amount_parsing_honors_precision_invariants() {
         use super::sats_from_btc;
 
-        // 1e-8 = 1 sat accepted, 1e-9 rejected as Invalid amount
         assert_eq!(
             sats_from_btc(&json!(1e-8), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc 1e-8 must parse: {err}")),
@@ -3421,17 +3142,13 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("1e-9"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1E-9"), "Invalid amount").is_err());
 
-        // Exact 8-decimal satoshi boundary
         assert_eq!(
             sats_from_btc(&json!("0.00000001"), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc boundary must parse: {err}")),
             1
         );
-        // More than 8 fractional decimals rejected when they carry value
         assert!(sats_from_btc(&json!("0.000000001"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1.000000001"), "Invalid amount").is_err());
-        // Trailing zeros normalize away: these are whole satoshis, not
-        // nine-decimal amounts.
         assert_eq!(
             sats_from_btc(&json!("1.000000000"), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc trailing zeros must parse: {err}")),
@@ -3452,7 +3169,6 @@ mod finalizepsbt_tests {
                 .unwrap_or_else(|err| panic!("sats_from_btc zeros must parse: {err}")),
             0
         );
-        // A decimal point needs a digit on each side (Core ParseFixedPoint).
         assert!(sats_from_btc(&json!("1."), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!(".1"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("."), "Invalid amount").is_err());
@@ -3463,7 +3179,6 @@ mod finalizepsbt_tests {
     fn exact_amount_parsing_handles_zero_sign_and_malformed_inputs() {
         use super::sats_from_btc;
 
-        // Zero handling
         assert_eq!(
             sats_from_btc(&json!(0), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc zero must parse: {err}")),
@@ -3485,7 +3200,6 @@ mod finalizepsbt_tests {
             0
         );
 
-        // Optional positive sign accepted, negative sign rejected
         assert_eq!(
             sats_from_btc(&json!("+1.5"), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc +1.5 must parse: {err}")),
@@ -3495,7 +3209,6 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("-0"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("-0.0"), "Invalid amount").is_err());
 
-        // Non-digits and malformed text rejected (including whitespace)
         assert!(sats_from_btc(&json!("abc"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!(""), "Invalid amount").is_err());
@@ -3508,7 +3221,6 @@ mod finalizepsbt_tests {
     fn exact_amount_parsing_enforces_overflow_exponent_and_feerate_ceilings() {
         use super::{optional_max_feerate, parse_btc_amount, sats_from_btc};
 
-        // Overflow safety
         assert_eq!(
             sats_from_btc(&json!("184467440737.09551615"), "Invalid amount")
                 .unwrap_or_else(|err| panic!("sats_from_btc max must parse: {err}")),
@@ -3517,15 +3229,11 @@ mod finalizepsbt_tests {
         assert!(sats_from_btc(&json!("184467440737.09551616"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("18446744073709551616"), "Invalid amount").is_err());
         assert!(sats_from_btc(&json!("1e25"), "Invalid amount").is_err());
-        // Regression: `digits_len - point` overflows i32 for this input
-        // (point = -2147483646); it must return `InvalidParams`, not panic
-        // in an overflow-checking build.
         assert!(matches!(
             sats_from_btc(&json!("1.1e-2147483647"), "Invalid amount"),
             Err(RpcError::InvalidParams("Invalid amount"))
         ));
 
-        // parse_btc_amount routes through sats_from_btc
         assert_eq!(
             parse_btc_amount(&json!("1e-8"))
                 .unwrap_or_else(|err| panic!("parse_btc_amount 1e-8 must parse: {err}")),
@@ -3533,7 +3241,6 @@ mod finalizepsbt_tests {
         );
         assert!(parse_btc_amount(&json!("1e-9")).is_err());
 
-        // optional_max_feerate: 0 is no-cap, 1e-8 accepted, >= 1 BTC/kvB ceiling, negative rejected
         assert_eq!(
             optional_max_feerate(&json!([0]), 0)
                 .unwrap_or_else(|err| panic!("optional_max_feerate zero must parse: {err}")),

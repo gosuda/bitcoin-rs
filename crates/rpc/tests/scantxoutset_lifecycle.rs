@@ -1,5 +1,3 @@
-//! Bounded real HTTP admission and cancellation for the shared scan owner.
-
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -8,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_e2e::rpc::Connection;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
-use serde_json::{Value, json};
+use sonic_rs::{Value, json};
 
 fn call(connection: &mut Connection, method: &str, params: Value) -> anyhow::Result<Value> {
     let mut request = json!({"jsonrpc":"2.0", "id":1,"method":method});
@@ -83,8 +81,6 @@ fn scan_preserves_control_capacity_and_observes_server_shutdown() -> anyhow::Res
                         json!(true)
                     );
                 }
-                // The RPC transport deadline proves cancellation finishes while
-                // the authoritative transition is still excluded here.
                 let response = scan
                     .join()
                     .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;

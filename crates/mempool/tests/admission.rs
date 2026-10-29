@@ -1,13 +1,3 @@
-//! Gateway admission defects: stale-verdict retryability and prevout-aware sigop
-//! counting.
-//!
-//! Admission expectations are governed by `docs/contracts/mempool-policy.md`,
-//! especially POL-03 (fresh stamped admission context) and POL-04 (owner-
-//! computed sigop limits).
-//!
-//! A failed pool or fixture invariant is a test failure, and panicking reports
-//! it with the offending call site. `expect` is deliberate on individual tests.
-
 extern crate alloc;
 
 use alloc::sync::Arc;
@@ -126,8 +116,6 @@ fn admission_request(
     }
 }
 
-/// A stale Policy/Consensus verdict from `prepare_and_verify` is discarded when
-/// the pool or generation mutates before the writer re-check, and the caller
 #[test]
 #[expect(
     clippy::expect_used,
@@ -199,9 +187,6 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A P2SH spend whose redeem script is heavy with `OP_CHECKMULTISIG` is
-/// rejected before script verification because `transaction_sigop_cost` sees the
-/// P2SH sigops once the prevout is known.
 #[test]
 fn p2sh_sigop_cost_exceeds_standard_limit() {
     assert_eq!(
@@ -257,9 +242,6 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     );
 }
 
-/// A P2WSH spend whose witness script is heavy with `OP_CHECKMULTISIG` is
-/// rejected before script verification because `transaction_sigop_cost` sees the
-/// witness sigops once the prevout is known.
 #[test]
 fn p2wsh_sigop_cost_exceeds_standard_limit() {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
@@ -310,10 +292,6 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
     );
 }
 
-/// A child spending an in-pool P2SH parent counts the parent's sigops even
-/// when the request omits that prevout: verification resolves the input
-/// through the mempool overlay, so the sigop gate must resolve through the
-/// same view instead of counting the omission as zero.
 #[test]
 fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn Error>> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
@@ -392,8 +370,6 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// A caller-supplied `sigop_cost` must be ignored: the stored entry carries the
-/// value computed from the resolved prevouts.
 #[test]
 #[expect(
     clippy::expect_used,
@@ -451,13 +427,6 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// A v3 candidate whose direct-conflict set is empty still enters through the
-/// replacement door when its parent holds one in-pool v3 sibling: the
-/// discriminator is the conflicts vec `truc_conflicts` returns, and it runs
-/// before the door is chosen. No TRUC check runs in the plain door itself —
-/// routing on a separate direct-conflict lookup would instead admit this
-/// candidate alongside the sibling, and the regression would surface in the
-/// `removed_txids`/`contains_txid` assertions, not as a `TrucError`.
 #[test]
 fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door()
 -> Result<(), Box<dyn Error>> {

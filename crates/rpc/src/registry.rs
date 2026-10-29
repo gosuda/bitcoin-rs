@@ -1,10 +1,3 @@
-//! Unified RPC registry: one row owns compat metadata plus dispatch arm.
-//!
-//! [`REGISTRY`] is the single source of truth for every external surface.
-//! Each row declares the compat metadata (the [`Entry`] projection) and
-//! binds the dispatch arm (`handler`) in one literal. `dispatch` routes
-//! through this table; manifest views project from the same rows.
-
 use alloc::sync::Arc;
 
 use sonic_rs::Value;
@@ -14,7 +7,6 @@ use crate::error::RpcError;
 use crate::handlers::{chain, deployment, mempool, mining, network, tx, util};
 use crate::manifest::{CORE_VERSION, Entry, NO_WALLET, Status, SurfaceKind};
 
-/// Signature of one dispatch arm.
 type HandlerFn = fn(&Arc<Context>, &Value) -> Result<Value, RpcError>;
 
 #[derive(Clone, Copy)]
@@ -25,10 +17,6 @@ pub(crate) enum Dispatch {
     ),
 }
 
-/// One unified registry row: compat metadata plus the dispatch arm.
-///
-/// `handler` is `None` for surfaces not dispatched through this table
-/// (REST, ZMQ, `Unimplemented`, `pending`).
 pub(crate) struct Row {
     pub entry: Entry,
     pub handler: Option<Dispatch>,
@@ -41,10 +29,6 @@ pub(crate) enum Execution {
     Immediate,
     Blocking,
     Scan,
-    /// A call that waits only for some shapes of its parameters: a
-    /// `getblocktemplate` request whose first parameter is an object with a
-    /// string `longpollid` and a template mode (absent, null, or
-    /// `"template"`). Every other shape answers without waiting.
     LongPoll,
 }
 
@@ -93,7 +77,6 @@ pub(crate) fn blocking_request(request: &Value) -> bool {
         })
 }
 
-/// Handler for `getzmqnotifications`, compiled only under the `zmq` feature.
 #[cfg(feature = "zmq")]
 const ZMQ_NOTIFS_HANDLER: Option<HandlerFn> = Some(util::getzmqnotifications);
 
@@ -107,8 +90,6 @@ const BLOCK_TWEAKS_HANDLER: Option<HandlerFn> =
 #[cfg(not(feature = "silent-payments"))]
 const BLOCK_TWEAKS_HANDLER: Option<HandlerFn> = None;
 
-/// Declares both `REGISTRY` and [`MANIFEST`] from one set of row literals
-/// so a method is declared and bound in a single source location.
 macro_rules! declare_rows {
     (@execution) => { Execution::Immediate };
     (@execution $execution:ident) => { Execution::$execution };
@@ -152,9 +133,6 @@ macro_rules! declare_rows {
             }),*
         ];
 
-        /// Every external surface, declared against Core 31.x. Projection of
-        /// `REGISTRY` without the dispatch arms; re-exported as
-        /// `manifest::MANIFEST` for consumers that take `&[Entry]`.
         pub const MANIFEST: &[Entry] = &[
             $(Entry {
                 name: $name,
@@ -169,7 +147,6 @@ macro_rules! declare_rows {
     };
 }
 
-// Keep extension rows visible in the manifest without binding absent features.
 #[cfg(feature = "pool")]
 macro_rules! pool_handler {
     ($name:ident) => {
@@ -194,7 +171,6 @@ declare_rows! {
     "getpoolinfo", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: []. PPLNS configuration, durable share count and last twenty audit records read in one bounded snapshot. Inspect individual batches with getpayoutbatch; no unbounded batch enumeration. Does not verify the full audit chain. Disabled pool returns MethodDisabled, not synthetic status.", "0.14.0", pool_handler!(getpoolinfo);
     "getpoolrounds", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [first_round_id, count=100]. Reads monotonic ledger rounds, up to 1000 per call. States reflect hash-keyed chain reconciliation, not submission acknowledgements.", "0.14.0", pool_handler!(getpoolrounds);
     "getpoolbalances", SurfaceKind::Rpc, Status::Extension, "pool", "", "Management-only: [account_u64]. Reads one account's available, reserved, paid and deficit satoshis plus payout script. No wallet balance or custody.", "0.14.0", pool_handler!(getpoolbalances);
-    // -- JSON-RPC: shipped methods (registration order) --------------
     "getblockchaininfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Unavailable optional fields are omitted. Pruning mode/target and signet challenge are not reported (automatic_pruning, prune_target_size, signet_challenge); pruneheight reflects the backing prune service (crates/rpc/src/handlers/chain.rs).", "0.4.0", Some(chain::getblockchaininfo);
     "getdifficulty", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getdifficulty);
     "getchaintips", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(chain::getchaintips);
@@ -261,10 +237,8 @@ declare_rows! {
     "getnetworkhashps", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#api-28-getprioritisedtransactions-modified_fee-is-satoshis for modified_fee units.", "0.4.0", Some(mining::getprioritisedtransactions);
 
-    // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
-    // -- JSON-RPC: additional Core blockchain/control surfaces ------
     "dumptxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Writes an unmodified Core v2 snapshot of the applied tip's UTXO set. Only type latest is served: type is required to be \"latest\" as in Core 31.1, and rollback snapshots and the options object (rollback, in_memory) are not accepted. The encode holds chain-transition and stable-view exclusion for its whole duration, blocking block commits, and logs that time; it is cancellable through the request latch and node shutdown, answering -1 and publishing nothing. The output goes to a fsynced exclusive sibling temporary file and is renamed into place without replacement, then the directory is fsynced; an existing destination (including a named pipe), a destination under the assumeutxo recovery namespace, or a platform without atomic no-replace rename is refused. See API-33 in docs/contracts/external-api.md.", "0.14.0", Some(chain::dumptxoutset), Blocking;
     "getblockfilter", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Optional basic BIP158 filters. Active-chain only; stale/pruned or missing history is unavailable. Disabled by default; enable --blockfilterindex on an unpruned node. See docs/contracts/indexing.md.", "0.14.0", Some(chain::getblockfilter);
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
@@ -285,7 +259,6 @@ declare_rows! {
     "logging", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Log-category controls not exposed over RPC.", "n/a", None;
     "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;
 
-    // -- JSON-RPC: Core surface not exposed (mining/network/util/signer)
     "getaddrmaninfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Addrman table stats not exposed.", "n/a", None;
     "abortprivatebroadcast", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
     "analyzepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
@@ -306,7 +279,6 @@ declare_rows! {
     "signmessagewithprivkey", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Signing requires key material this process never holds.", "n/a", None;
     "verifymessage", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Message-signature verification not implemented.", "n/a", None;
 
-    // -- JSON-RPC: Core wallet surface, excluded by the no-wallet policy
     "abandontransaction", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "abortrescan", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "backupwallet", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
@@ -363,7 +335,6 @@ declare_rows! {
     "walletpassphrasechange", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
     "walletprocesspsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, NO_WALLET, "n/a", None;
 
-    // -- REST (Core StartREST registration order) --------------------
     "/rest/tx/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/notxdetails/", SurfaceKind::Rest, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/block/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Full transaction projection omits undo fees and prevouts; the shared undo read capability is used by spenttxouts and getblock verbosity 2/3.", "0.4.0", None;
@@ -378,7 +349,6 @@ declare_rows! {
     "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Serves retained certified undo in Core bin/hex/json formats. Older uncertified stale rows remain unavailable; transient retained-body absence and resource budgets return retry responses. See docs/contracts/external-api.md#retained-block-inputs.", "0.4.0", None;
     "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;
 
-    // -- ZMQ topics --------------------------------------------------
     "hashblock", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashblock endpoint.", "0.4.0", None;
     "hashtx", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashtx endpoint.", "0.4.0", None;
     "rawblock", SurfaceKind::Zmq, Status::ImplementedUnverified, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawblock endpoint.", "0.4.0", None;
@@ -411,8 +381,6 @@ mod tests {
                 &json!({"method":"scantxoutset","params":params})
             ));
         }
-        // A template request that waits on a string `longpollid` holds a
-        // blocking worker; every other shape answers without waiting.
         for params in [
             json!([{"longpollid": "x"}]),
             json!([{"longpollid": "bogus"}]),

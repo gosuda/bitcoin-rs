@@ -6,46 +6,29 @@
 pub use bitcoin_rs_script::MAX_SCRIPT_SIZE;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
 /// block's timestamp at a difficulty-adjustment boundary (`MAX_TIMEWARP`, Core
-/// `src/consensus/consensus.h:30-37`).
 pub const MAX_TIMEWARP: u32 = 600;
 
-/// BIP30 duplicate-transaction checks.
 pub mod bip30;
-/// BIP34 coinbase height checks.
 pub mod bip34;
-/// BIP68 relative-locktime checks.
 pub mod bip68;
-/// BIP9 versionbits checks.
 pub mod bip9;
-/// Parse-once block state shared by the native apply path.
 mod block_view;
-/// The one runtime validation-engine selector.
 mod engine;
-/// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
-/// Bounded script-execution cache shared by mempool admission and connect.
 pub mod script_cache;
-/// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
-/// BIP325 signet block solution check.
 pub mod signet;
-/// Shared transaction-level BIP141 sigop accounting.
 mod sigops;
-/// Optional Bitcoin Core-compatible USDT tracepoints (`usdt` feature).
 pub mod trace;
-/// Block rule checks.
 pub mod verify_block;
-/// Transaction rule checks.
 pub mod verify_tx;
 
 pub use bip9::{
     CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
     SoftforkState, compute_state, deployment_params,
 };
-/// Number of blocks spanned by median-time-past.
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 
-/// BIP113 locktime-cutoff selection: the one rule every caller shares.
 #[must_use]
 pub const fn locktime_cutoff(
     csv_active: bool,
@@ -86,23 +69,16 @@ pub use verify_tx::{
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use thiserror::Error;
 
-/// Lookup returns the referenced coin or None when absent; borrowed views agree.
 pub trait UtxoView {
-    /// Looks up a previous output by outpoint.
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
 }
 
-/// The engine that rejected a script.
-/// Kernel rejections are retryable; native rejections are consensus-final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptEngine {
-    /// Bitcoin Core's `bitcoinkernel` C++ engine (the `kernel` feature).
     Kernel,
-    /// The portable Rust interpreter in `bitcoin-rs-script`.
     Native,
 }
 
-/// Consensus validation error.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConsensusError {
     #[error("transaction has no inputs")]
@@ -185,15 +161,12 @@ pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
         return INITIAL_SUBSIDY_SATS;
     }
     let halvings = height / halving_interval;
-    // Core stops at 64 shifts; past that the subsidy is zero and shifting a
-    // u64 by 64 or more is undefined.
     if halvings >= 64 {
         return 0;
     }
     INITIAL_SUBSIDY_SATS >> halvings
 }
 
-/// Verifies that a block's coinbase claims no more than it earned.
 pub const fn verify_coinbase_amount(
     coinbase_out: u64,
     fees: u64,
@@ -212,5 +185,4 @@ pub const fn verify_coinbase_amount(
     Ok(())
 }
 
-/// Maximum block sigop cost after segwit scaling.
 pub const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;

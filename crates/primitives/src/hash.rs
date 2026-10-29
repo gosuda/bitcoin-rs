@@ -28,30 +28,20 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 #[repr(transparent)]
 pub struct Hash256([u8; 32]);
 
-/// Errors returned while parsing a big-endian hash string.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum HashError {
-    /// The input is not exactly 64 hexadecimal characters.
     #[error("hash hex must be 64 characters, got {0}")]
     InvalidLength(usize),
-    /// A byte contains a non-hexadecimal character.
     #[error("invalid hex at byte offset {offset}: {byte:#04x}")]
-    InvalidHex {
-        /// Offset of the invalid byte.
-        offset: usize,
-        /// The invalid byte.
-        byte: u8,
-    },
+    InvalidHex { offset: usize, byte: u8 },
 }
 
 impl Hash256 {
-    /// Constructs a hash from consensus little-endian bytes.
     #[must_use]
     pub const fn from_le_bytes(bytes: &[u8; 32]) -> Self {
         Self(*bytes)
     }
 
-    /// Returns the consensus little-endian bytes.
     #[must_use]
     pub const fn to_le_bytes(self) -> [u8; 32] {
         self.0
@@ -83,13 +73,11 @@ impl Hash256 {
         self.to_string()
     }
 
-    /// Returns the backing little-endian byte array.
     #[must_use]
     pub const fn as_byte_array(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// Returns the first eight bytes of the little-endian representation.
     #[must_use]
     pub fn prefix8(self) -> [u8; 8] {
         let mut prefix = [0_u8; 8];
@@ -101,14 +89,11 @@ impl Hash256 {
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut encoded = [0_u8; 64];
-        // Display order is byte-reversed (the Bitcoin convention).
         let (pairs, _) = encoded.as_chunks_mut::<2>();
         for (byte, pair) in self.0.iter().rev().zip(pairs) {
             pair[0] = HEX[usize::from(byte >> 4)];
             pair[1] = HEX[usize::from(byte & 0x0f)];
         }
-        // Every byte comes from the ASCII table. Keep this conversion checked
-        // rather than adding unsafe code to a presentation-only path.
         let text = core::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
         f.write_str(text)
     }
@@ -159,9 +144,6 @@ mod tests {
             hash.to_string(),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
         );
-        // `prefix8()` is an internal convenience helper (used only by the
-        // chain tree's hash-table key and a benchmark sharder), not a durable
-        // consensus/serialization contract, so it is not pinned here.
         Ok(())
     }
 

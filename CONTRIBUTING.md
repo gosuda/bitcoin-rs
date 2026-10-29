@@ -1,7 +1,6 @@
 # Contributing to bitcoin-rs
 
-Thank you for contributing to `bitcoin-rs`. This guide outlines the development
-workflow, coding standards, and verification commands used across the project.
+This guide covers the development workflow, coding standards, and verification commands used across the project.
 
 ## Prerequisites
 
@@ -42,15 +41,14 @@ job set.
 ## Pull-request verification
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
-against any base branch, including stacked PRs, on merge-group requests, and
-for pushes to `main`. PR green means fast feedback only: `fmt`, `deny`,
-`clippy`, and `test-crates` passed; `test-binary` and `test-workspace` are
-skipped. Merge-group green includes those two heavy lanes and is the
-pre-main integration signal. Main checks are post-merge evidence.
-Every lane fails fast at its first failing profile. Every gate
-command lives in [`scripts/ci-pr.sh`](scripts/ci-pr.sh) -- CI, the
-pre-commit hooks, and this guide all invoke that script, so the commands
-cannot drift:
+against any base branch (including stacked PRs), on merge-group requests, and
+for pushes to `main`. PR green is fast feedback only: `fmt`, `deny`,
+`clippy`, and `test-crates` passed while `test-binary` and `test-workspace`
+are skipped. Merge-group green adds those two heavy lanes as the pre-main
+integration signal; main checks are post-merge evidence. Every lane fails
+fast at its first failing profile. Every gate command lives in
+[`scripts/ci-pr.sh`](scripts/ci-pr.sh), which CI, the pre-commit hooks, and
+this guide all invoke:
 
 ```sh
 ./scripts/ci-pr.sh fmt            # format check
@@ -88,9 +86,8 @@ so local hooks are the kernel-free PR gate, not the C++ full-node lane.
 
 ### Merge queue and integration contract
 
-To prevent PR-green / main-red regressions, all merges to `main` must pass
-through the GitHub merge queue. Direct merges bypassing the queue are
-disallowed for standard pull requests.
+All merges to `main` must pass through the GitHub merge queue. Direct merges
+bypassing the queue are disallowed for standard pull requests.
 
 The merge queue enforces the integration contract on the latest combined ref
 (`merge_group`) before updating `main`:
@@ -109,23 +106,13 @@ Required status checks in repository branch rulesets (`ci-gate`,
 that heavy integration and production compilation checks have passed on the
 current base before `main` moves forward.
 
-The production kernel/native Clippy graph runs at the merge queue in
-[`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml). Full-node tests,
-benchmark smoke, native-script evidence, the comparator corpus, and Core
-reference lanes run on `main` in
-[`main.yml`](.github/workflows/main.yml). Dependency ranges, feature
-combinations, and MSRV checks run daily in
-[`compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml).
-Fuzz target builds run on `fuzz/**` pull requests; execution has its own
-daily campaign.
-
 ## Post-merge CI lanes
 
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
-tests and the main-only verification lanes -- bench smoke (with the
-witness-activation kernel regression and the SegWit-v0 kernel oracle),
-native-script evidence, the comparator corpus, and Core differential -- on
-pushes to `main` and manual dispatch.
+tests and the main-only verification lanes on pushes to `main` and manual
+dispatch: bench smoke (with the witness-activation kernel regression and the
+SegWit-v0 kernel oracle), native-script evidence, the comparator corpus, and
+Core differential.
 Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
 [`fuzz-build.yml`](.github/workflows/fuzz-build.yml).
@@ -163,8 +150,7 @@ them rather than run the oracle checks.
 ### Benchmark compilation check
 
 The main workflow compiles the retained crate-level benchmarks without kernel,
-under the `quickstart` profile (the `bench` profile's fat-LTO build is too
-expensive for a compile-only gate):
+under the `quickstart` profile:
 
 ```sh
 cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
@@ -176,8 +162,6 @@ cargo bench -p bitcoin-rs-node --no-run \
 cargo bench -p bitcoin-rs-node --no-run \
   --no-default-features --features fjall --bench chainstate_journal --profile quickstart
 ```
-
-`--no-run` checks compilation; it produces no performance measurement.
 
 The same `bench-smoke` job also compiles the kernel-enabled binary-package
 benches (`--features rocksdb,fjall,redb,kernel`), runs the witness-activation
@@ -197,17 +181,12 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-The path-scoped [`fuzz-build.yml`](.github/workflows/fuzz-build.yml) builds all
-five targets on `fuzz/**` pull requests. The daily campaign runs
-`p2p_message`, `block_validate`, `tx_validate`, `script_eval`, and
-`utxo_snapshot`. See [`fuzz/README.md`](fuzz/README.md) for local fuzzing and
-corpus guidance.
-
-The companion corpus repository is
-[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
-For local campaigns, see [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns)
-for a separate writable corpus and contribution guidance. The scheduled
-campaign is defined in [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml).
+[`fuzz-build.yml`](.github/workflows/fuzz-build.yml) builds all five targets
+on `fuzz/**` pull requests; the scheduled campaign is defined in
+[`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml). See
+[`fuzz/README.md`](fuzz/README.md) for local fuzzing, the
+[shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns),
+and the companion [corpus repository](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
 
 ### Dependency-range check
 
@@ -254,6 +233,9 @@ scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for ker
 scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
 ```
 
+CI runs the matrix and the MSRV gate in the scheduled/manual
+[`compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml).
+
 ## Architecture and contribution scope
 
 Read [AGENTS.md](AGENTS.md), the relevant issue or PR, and the owning
@@ -263,8 +245,8 @@ crate assignments, dependency direction, storage isolation, and their
 verification gate. The [validation-default contract](docs/contracts/validation-default.md)
 owns script-engine selection and its promotion criteria.
 
-Keep implementation guidance with its owner rather than introducing another
-architecture or validation specification in this guide.
+Keep implementation guidance with its owner instead of adding another
+architecture or validation specification here.
 
 Follow the [source and test organization policy](docs/policies/source-organization.md)
 when adding or reorganizing modules, tests, and fixtures.
@@ -316,9 +298,9 @@ reshapes internals, reviewers evaluate:
 1. **External contract preserved?** Consensus, P2P, and every affected
    supported external API keep observable behavior, proven with the
    regression, differential, or black-box evidence the owning contract names.
-2. **Better internals?** A concrete improvement — clearer ownership, simpler
+2. **Better internals?** A concrete improvement, clearer ownership, simpler
    boundaries, reduced duplication, measurable performance, or more reliable
-   recovery — with its migration/resync and operational cost assessed.
+   recovery, with its migration/resync and operational cost assessed.
 3. **No compatibility debt without a requirement?** No legacy adapters, dual
    paths, migration layers, or dead internal interfaces kept solely to avoid
    an intentional internal break.

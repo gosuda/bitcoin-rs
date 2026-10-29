@@ -1,9 +1,3 @@
-//! Early compact-block announce hook at the node composition boundary.
-//!
-//! A rules-valid tip child fires the installed hook exactly once before the
-//! durable commit; a block that fails later in connect sends nothing more
-//! and leaves the published tip unchanged.
-
 #![expect(
     clippy::expect_used,
     reason = "poisoned test-recorder locks must fail the test"
@@ -58,7 +52,6 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> anyhow
         .applied_tip_snapshot()
         .ok_or_else(|| anyhow::anyhow!("no applied tip"))?;
 
-    // A rules-valid tip child: the hook fires once, then the tip advances.
     let valid = regtest_fixture::mined_regtest_child_at_time(
         tip_before.hash.into(),
         tip_before_time(&state)? + 1,
@@ -72,9 +65,6 @@ fn connect_failure_after_early_send_keeps_tip_and_sends_nothing_more() -> anyhow
     assert_eq!(fired[0].0, Hash256::from(valid.block_hash()));
     assert_eq!(fired[0].1, tip_before.height + 1);
 
-    // A rules-valid tip child that overspends its coinbase: the hook fires
-    // at the rules boundary, the later amount check fails, the tip stays
-    // put, and nothing fires again.
     let tip = state
         .chainstate()
         .applied_tip_snapshot()

@@ -1,11 +1,3 @@
-//! Internal node runtime composition root and capability handles.
-//!
-//! Shared handles, checkpoint publication, and index lifecycle live with
-//! `NodeState`. Construction, recovery, storage, events, and pruning retain
-//! separate private implementations. Production embedders enter through
-//! [`crate::Node`]; the module is public only under the explicit `test-seam`
-//! feature used by integration tests and benchmarks.
-
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
@@ -40,7 +32,6 @@ use storage::StoredBlockBodySource;
 
 mod data_dir_lock;
 
-/// Locks an explicitly configured pool directory for the lifetime of its store.
 #[cfg(feature = "pool")]
 pub(crate) fn lock_pool_directory(
     path: &std::path::Path,
@@ -67,109 +58,54 @@ impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
     }
 }
 
-// Outbound full-relay slots set the automatic target. The bounded channel
-// rejects DNS requests at producers when full; the parked retry queue is a
-// second bound, whose overflow clears the address's DNS backoff for retry.
-// Bitcoin Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS`.
 pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 
-// Outbound block-relay-only slots: connections that relay blocks and nothing
-// else. Bitcoin Core's `MAX_BLOCK_RELAY_ONLY_CONNECTIONS`.
 pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
-// Bounds transient inbound-block buffering between the per-peer listener
-// threads and the single-threaded `BlockSync::tick` drain. Decoded inbound
-// blocks carry the full `Block` plus preserved wire bytes (up to ~4 MiB each),
-// so an unbounded channel lets a fast or flooding peer accumulate blocks faster
-// than they drain — an OOM vector. A full channel applies TCP backpressure to
-// the sending peer's listener thread; `tick` drains independently and holds no
-// lock a listener needs, so the bound cannot deadlock. Sized well above the
-// in-flight request window (`PENDING_BUDGET` = 256) so honest delivery, which
-// wakes the drain on every block, is never throttled.
 pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 
-// Bounds inbound peer transactions between the per-peer listener threads and
-// the single ingress consumer. A full channel applies TCP backpressure to
-// that peer's read loop; other peers keep their own threads. Sized to absorb
-// a burst of honest `tx` deliveries without stalling header/block traffic on
-// the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
-// Bounds the bytes retained for BIP331 `pkgtxns` bodies between the listener
-// threads and the single ingress consumer: the encoded frames queued on the
-// channel above plus each package's planned decoded heap. One package is at
-// most `MAX_PACKAGE_WEIGHT` weight units, so a full channel of them is the
-// cap. It is a charged lower-bound ledger of what the decoder requests, not a
-// physical heap ceiling: allocator rounding stays outside it.
 pub(crate) const PACKAGE_INGRESS_MAX_BYTES: u64 =
     1_024 * bitcoin_rs_mempool::standardness::MAX_PACKAGE_WEIGHT;
 
 const _: () = assert!(PACKAGE_INGRESS_MAX_BYTES == 413_696_000);
 const _: () = assert!(INBOUND_TX_CHANNEL_LIMIT == 1_024);
 
-/// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
-    /// Derived-index host: the always-present status source, the configured
-    /// parts, and the one worker state-machine slot.
     derived_index: index::DerivedIndexHost,
     prune_service: Option<Arc<dyn PruneService>>,
-    /// The single mutation gateway in front of `mempool`.
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
-    /// Runtime owner of P2P workers, session table, and inbound channels.
     p2p: Arc<bitcoin_rs_p2p::P2pService>,
-    /// Node-owned P2P-to-mempool ingress bridge. Unlike the service-owned
-    /// header/block channels, this receiver is drained by node orchestration.
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundBody>,
     inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundBody>>>,
-    /// The one ledger of retained `pkgtxns` bytes, shared by every listener
-    /// thread and the ingress consumer.
     package_capacity: bitcoin_rs_p2p::PackageCapacity,
-    /// The transition domain minted for this node.
-    ///
-    /// Composition splits it: chainstate holds the mutation role, and every
-    /// reader asking this type gets the matching stable-read role. This field
-    /// preserves provenance for those production paths; the public domain
-    /// constructor still allows unrelated roles outside this wiring.
     transition: bitcoin_rs_chain::TransitionDomain,
     chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
-    /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
-    /// Process-wide rollback-evidence reporter (warning snapshot + marker).
     recovery_reporter: Arc<storage::RecoveryReporter>,
-    /// `AssumeUTXO` coordinator managing chainstate roles.
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
 }
 
 impl Drop for NodeState {
     fn drop(&mut self) {
-        // Closes chain admission permanently. The derived-index worker stop
-        // and join run in `DerivedIndexHost::drop` when that field drops;
-        // relative to this admission guard the order is free: `Chainstate::
-        // close()` keeps admission closed through the permanent `closed`
-        // flag, and the index worker only reads chain handles, so releasing
-        // the guard before the join is behavior-identical to holding it.
         let _admission = self.chainstate.close();
-        // Close the history boundary first, so a worker still reconciling
-        // stops on the owner's shutdown answer instead of pinning rows a
-        // process that is leaving will not serve.
         self.storage.retention().shutdown();
     }
 }
 
 impl NodeState {
-    /// Returns a borrow of the resolved configuration.
     #[must_use]
     pub const fn config(&self) -> &NodeConfig {
         &self.config
     }
 
-    /// Returns the node's data directory.
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.config.data_dir
@@ -180,19 +116,12 @@ impl NodeState {
         self.resume_source
     }
 
-    /// Returns the configured storage backend that was opened.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub const fn storage_kind(&self) -> &'static str {
         self.storage.kind()
     }
 
-    /// Returns the undo store that owns disconnect markers: the recovery
-    /// evidence the startup path consumes.
-    ///
-    /// Crash-recovery test seam: exposes the undo/marker store so harnesses
-    /// can arm and inspect disconnect markers. Not a supported mutation
-    /// surface for node owners.
     #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
@@ -200,11 +129,6 @@ impl NodeState {
         self.storage.undo_store()
     }
 
-    /// Returns the durable-head store: the chain's commit point.
-    ///
-    /// Crash-recovery test seam: exposes the durable head store so
-    /// harnesses can read the commit point. Not a supported mutation
-    /// surface for node owners.
     #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
@@ -212,56 +136,37 @@ impl NodeState {
         self.storage.durable_head()
     }
 
-    /// Returns the manual pruning service when pruning is enabled.
     #[must_use]
     pub fn prune_service(&self) -> Option<Arc<dyn PruneService>> {
         self.prune_service.as_ref().map(Arc::clone)
     }
 
-    /// Returns the configured ZMQ publisher handle (default: `NoOpZmqPublisher`).
     #[must_use]
     pub(crate) fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
         self.followers.zmq_publisher()
     }
 
-    /// Returns the cloneable read-only mempool capability.
     #[must_use]
     pub fn mempool_reader(&self) -> bitcoin_rs_mempool::MempoolReader {
         self.mempool_gateway.reader()
     }
 
-    /// Raw pool access for test fixture staging only.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn mempool(&self) -> Arc<RwLock<Mempool>> {
         Arc::clone(self.mempool_gateway.pool())
     }
 
-    /// Returns the node-owned mutation gateway in front of `mempool`.
-    ///
-    /// Every mempool mutation in this process — RPC admission, embedded
-    /// broadcast, reorg re-admission, block-connect eviction — commits
-    /// through this one instance, so observers observe a single ordered
-    /// stream.
     #[must_use]
     pub fn mempool_gateway(&self) -> Arc<bitcoin_rs_mempool::MempoolGateway> {
         Arc::clone(&self.mempool_gateway)
     }
 
-    /// Returns the mining generation wake shared with the apply path and the
-    /// gateway observer. The template coordinator attaches itself here.
     #[must_use]
     pub(crate) fn mining_generation_signal(&self) -> Arc<crate::mining::MiningGenerationSignal> {
         Arc::clone(self.followers.mining())
     }
 
-    /// Attaches a test-owned template coordinator to the mining generation
-    /// signal, so committed connects publish through the production wake path.
-    ///
-    /// Test seam: exercises the connect-time publication (`on_connect` wakes
-    /// the attached coordinator and its sequence leg) against a bench- or
-    /// test-owned coordinator instead of omitting it. The signal holds weak
-    /// references; the caller keeps the coordinator alive.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn attach_mining_coordinator(&self, coordinator: &Arc<crate::MiningCoordinator>) {
         let signal = self.mining_generation_signal();
@@ -271,13 +176,11 @@ impl NodeState {
         signal.attach_sequence_wake(&wake);
     }
 
-    /// Returns a read-only capability to observe the applied-block log.
     #[must_use]
     pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
         self.followers.block_log_reader()
     }
 
-    /// Returns a durable block body reader for metadata-only block records.
     pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
         let store = self
             .chainstate
@@ -286,107 +189,79 @@ impl NodeState {
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
-    /// Returns the P2P runtime that owns workers and the session table.
     #[must_use]
     pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
         Arc::clone(&self.p2p)
     }
 
     #[must_use]
-    /// Returns the authoritative table of live peer sessions.
     pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
         self.p2p.table()
     }
 
-    /// Returns a cloned `Sender` that the P2P listener pushes inbound
-    /// blocks into for verification and relay.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
 
-    /// Returns the rollback-evidence reporter for `getblockchaininfo`.
     #[must_use]
     pub(crate) fn recovery_reporter(&self) -> Arc<storage::RecoveryReporter> {
         Arc::clone(&self.recovery_reporter)
     }
 
-    /// Returns a cloned `Sender` that the P2P listener pushes inbound
-    /// transactions and charged package frames into for mempool admission.
     pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBody> {
         self.inbound_tx_tx.clone()
     }
 
-    /// Takes the inbound body receiver for the single ingress consumer.
-    /// Returns `None` if the receiver has already been claimed.
     #[must_use]
     pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundBody>> {
         self.inbound_tx_rx.lock().take()
     }
 
-    /// Returns the shared ledger of retained `pkgtxns` bytes.
     #[must_use]
     pub fn package_capacity(&self) -> bitcoin_rs_p2p::PackageCapacity {
         self.package_capacity.clone()
     }
 
-    /// Takes the block announcement receiver for worker execution.
     #[must_use]
     pub fn take_block_announce_receiver(&self) -> Option<bitcoin_rs_p2p::BlockAnnounceReceiver> {
         self.block_announce_rx.lock().take()
     }
 
-    /// Returns the shared block-download orchestrator.
     #[must_use]
     pub fn sync(&self) -> Arc<crate::BlockSync> {
         Arc::clone(&self.sync)
     }
 
-    /// Returns the node's one initial-block-download latch.
     #[must_use]
     pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
     }
 
-    /// Returns a read-only capability to observe the process-wide shutdown signal.
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
         self.chainstate.shutdown_reader()
     }
 
-    /// Requests process shutdown across all runtime workers.
     pub fn request_shutdown(&self) {
         self.chainstate.request_shutdown();
     }
 
-    /// Clone of the chainstate facade used by apply, reorg, and sync.
     #[must_use]
     pub fn chainstate(&self) -> Arc<bitcoin_rs_chainstate::Chainstate> {
         Arc::clone(&self.chainstate)
     }
 
-    /// The stable-read role over this node's transition domain.
-    ///
-    /// Readers taking this role exclude this node's authoritative transitions
-    /// without receiving the mutation-side protocol. A separately constructed
-    /// domain is not interchangeable with this one.
     #[must_use]
     pub fn stable_read(&self) -> bitcoin_rs_chain::StableRead {
         self.transition.stable_read()
     }
 
-    /// Clone of the derived-consumer set used after committed transitions.
     #[must_use]
     pub fn chain_followers(&self) -> crate::chain_effects::ChainFollowers {
         self.followers.clone()
     }
 
-    /// Synthetically applies `payload` as the next tip after consensus checks.
-    ///
-    /// Holds the chain transition through follower dispatch (`ARCH-07`).
-    /// A post-commit settlement failure remains distinguishable in
-    /// [`crate::ConnectMutationError`] and retains the authoritative outcome.
-    /// Exactness is owned by the [`BlockPayload`] constructor; no re-encode.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
@@ -396,23 +271,14 @@ impl NodeState {
         Ok(outcome.tip)
     }
 
-    /// Publishes one durable clean checkpoint.
-    ///
-    /// PRE: the node state is open.
-    /// POST: the chainstate checkpoint result is returned, including `None`
-    /// when no applied tip exists to publish.
-    /// INVARIANT: publication goes through the chainstate's durable publish
-    /// path; this method adds no policy of its own.
     pub fn publish_checkpoint(&self) -> Result<Option<u64>> {
         Ok(self.chainstate.publish_checkpoint()?)
     }
 
-    /// Starts chainstate journal and retention maintenance.
     pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
         self.chainstate.start_maintenance()
     }
 
-    /// Produces a summary of active and background chainstates for operator reporting.
     pub fn chainstates_summary(
         &self,
     ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
@@ -420,7 +286,6 @@ impl NodeState {
         self.snapshots.manager.chainstates_summary()
     }
 
-    /// Imports a native v4 snapshot through the existing embedding contract.
     pub fn activate_assumeutxo_snapshot_file(
         &self,
         path: impl AsRef<std::path::Path>,
@@ -429,7 +294,6 @@ impl NodeState {
         Ok(())
     }
 
-    /// Returns the node-owned complete transaction-index query adapter.
     #[must_use]
     pub fn derived_index_query(
         &self,
@@ -440,10 +304,6 @@ impl NodeState {
         self.esplora_derived_index_query()
     }
 
-    /// Returns transaction lookup for internal Esplora projections.
-    ///
-    /// `--scriptindex` builds this dependency as well, but that does not
-    /// enable or advertise the Core `--txindex` contract.
     #[must_use]
     pub(crate) fn esplora_derived_index_query(
         &self,
@@ -454,19 +314,12 @@ impl NodeState {
         })
     }
 
-    /// Returns the node-owned historical query adapter when any index capability is enabled.
-    ///
-    /// Capability selection stays with the engine: a tx-only node serves
-    /// historical transactions while script calls fail closed with the typed
-    /// disabled cause. A node with no index capability returns `None` so the
-    /// caller maps to the per-call disabled cause.
     pub(crate) fn historical_index_adapter(
         &self,
     ) -> Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
         self.derived_index.adapter().cloned()
     }
 
-    /// Returns the optional compact-filter query owner for RPC and P2P.
     #[must_use]
     pub fn compact_filter_query(&self) -> Option<Arc<dyn bitcoin_rs_index::CompactFilterQuery>> {
         if !self.config.indexes.blockfilterindex {
@@ -478,7 +331,6 @@ impl NodeState {
         })
     }
 
-    /// Returns the node-owned complete generic script-index query adapter.
     #[must_use]
     pub fn script_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery>> {
         if !self.config.indexes.script_index.is_enabled() {
@@ -490,33 +342,20 @@ impl NodeState {
         })
     }
 
-    /// Starts the derived-index workers. Call only once the applied tip is
-    /// authoritative — after crash recovery — so the index reconciles against
-    /// the real chainstate and never mistakes a recovered gap for a stale branch.
     pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
         let history = self.storage.bounded_history();
         self.derived_index.start(&self.chainstate, history)
     }
 
-    /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
     pub fn derived_index_status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.derived_index.status()
     }
 
-    /// Bounded txindex-worker shutdown: requests the worker shutdown, waits up
-    /// to `deadline` for a clean join, and detaches on
-    /// expiry. On detach, revokes the generation token and publishes
-    /// `ShutdownAbandoned` so queries return typed `Unavailable` instead of
-    /// hitting a torn reader. An abandoned join is an error: the caller's
-    /// teardown records it and suppresses the clean checkpoint.
     pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) -> Result<()> {
         self.derived_index.shutdown(deadline)
     }
 
-    /// `true` once the owned index worker's join returned; stays `false` when
-    /// the bounded join was abandoned. The lifecycle tests read it at the
-    /// checkpoint seam to prove join-before-checkpoint.
     #[cfg(test)]
     pub(crate) fn index_worker_joined(&self) -> Arc<AtomicBool> {
         self.derived_index.worker_joined()
@@ -551,8 +390,6 @@ fn build_derived_index_open_spec(
         .unwrap_or_else(|_| config.data_dir.clone());
     let backend = config.storage.backend;
     let cache_bytes = txindex_cache_bytes;
-    // The index store opens on the worker thread, possibly after the node
-    // that built this spec is gone: the spec carries the lock to that open.
     let guard = Arc::clone(guard);
     Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
         data_dir: config.data_dir.clone(),
@@ -578,10 +415,6 @@ fn build_derived_index_open_spec(
     }))
 }
 
-/// The portable-bundle action the operator asked for, or `None`.
-///
-/// Configuration validation already rejects both directories together; a
-/// caller that bypassed it is refused here rather than guessing which wins.
 fn index_bundle_directive(
     config: &NodeConfig,
 ) -> Result<bitcoin_rs_index::portable::IndexBundleDirective> {

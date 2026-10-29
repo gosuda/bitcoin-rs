@@ -1,41 +1,3 @@
-//! Foreground offline import for the strict full-validation comparator.
-//!
-//! Consistency: chain mutation holds the exclusive chain-transition lock
-//! (linearizable single-writer per transition); certified reads use the
-//! stable whole-set view (snapshot isolation over the UTXO set, blocking
-//! commits for the scan); the manifest plus archive pin is bound by hash
-//! (a transactional outbox is unnecessary here because publication is a
-//! single atomic `create_new` state file after the checkpoint, and reruns
-//! either resume by tip comparison under a matching full-validation
-//! provenance record or are refused, so no exactly-once delivery is
-//! assumed).
-//!
-//! Consumes the single regular Core-framed archive file bound by
-//! `{corpus_path}` (the custody archive pin, parity-bound to the indexed
-//! logical stream), the manifest at `{manifest_path}`, and the output state
-//! path at `{state_path}`, all alongside the resolved [`NodeConfig`].
-//!
-//! Asymmetry is explicit: Bitcoin Core consumes the same file through its
-//! checked-in `-loadblock` family (`bitcoin-core/src/init.cpp:529`,
-//! `2128-2136` into `ImportBlocks`, `bitcoin-core/src/node/blockstorage.cpp:1270`,
-//! `bitcoin-core/src/validation.cpp:4975` `LoadExternalBlockFile`); this
-//! module is the bitcoin-rs counterpart. It never takes the custody
-//! `sources` directory: that directory holds multiple `blkNNNNN.dat` files
-//! while the timed command expects one regular corpus file.
-//!
-//! Guarantees: exact bytes (framing walk plus per-record manifest binding
-//! plus archive digest, verified for skipped prefix records and on reopen
-//! too), full validation (`--assume-valid-height 0` with the validation mode
-//! pinned to `Full` instead of any inherited live mode, indexes off, no
-//! stale persisted derived-index namespace, and no resumed prefix without a
-//! matching full-validation provenance record), durable bodies plus undo
-//! (authoritative commit path), production clean checkpoint (nonzero when
-//! publication fails), foreground only (no fork, no daemonize, no spawned
-//! descendants), and an eight-field certified state. Reopen against the same
-//! data directory resumes the applied prefix only when the provenance record
-//! this importer wrote at certification matches the applied tip; otherwise
-//! the rerun is refused and the operator revalidates from a fresh directory.
-
 use std::fs::File;
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
@@ -47,15 +9,6 @@ use sha2::Digest as _;
 
 use crate::NodeConfig;
 
-/// Accepted manifest schemas (subsets used here).
-///
-/// The authoritative C150 archive producer writes
-/// `bitcoin-rs-corpus-manifest` version 1 with `archive {sha256,size}`,
-/// `range {start_height,stop_height}`, and `entries`; the comparator-facing
-/// shape is `core-framed-archive-manifest-v1` with `archive_sha256`,
-/// `archive_bytes`, `start_height`/`stop_height`, and `blocks`. Both
-/// normalize into the internal [`Manifest`]; unknown schemas and
-/// unsupported corpus versions are refused at the boundary.
 const CORE_FRAMED_SCHEMA: &str = "core-framed-archive-manifest-v1";
 const CORPUS_SCHEMA: &str = "bitcoin-rs-corpus-manifest";
 const CORPUS_VERSION: u32 = 1;
@@ -91,10 +44,6 @@ struct CorpusArchive {
     size: u64,
 }
 
-/// Typed untagged view over the two accepted on-disk shapes. Extra
-/// producer members (`corpus_id`, `genesis_hash`, `manifest_sha256`,
-/// `source_tip_hash`) are ignored here; pinning beyond archive identity
-/// stays with the producer and the comparator.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum RawManifest {
@@ -119,7 +68,6 @@ enum RawManifest {
     },
 }
 
-/// Certified state written to `{state_path}` (matches the comparator).
 #[derive(Debug, serde::Serialize)]
 struct CertifiedState {
     height: u32,
@@ -134,21 +82,8 @@ struct CertifiedState {
 
 const HEADER_LEN: usize = 80;
 const MAX_PAYLOAD: usize = 4_000_000;
-/// Byte bound on the manifest, enforced while reading so an oversized or
-/// unbounded path (a device, a huge file) is refused without buffering it.
 const MAX_MANIFEST_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Runs the foreground offline import and writes the certified state.
-///
-/// PRE: `corpus`, `manifest`, and `state` are the expanded placeholder
-/// paths; `config` carries `--assume-valid-height 0` with auxiliary
-/// indexes off.
-/// POST: every archive record is validated and connected, bodies plus undo
-/// are durable, the production clean checkpoint is published, and `state`
-/// holds the eight certified fields.
-/// INVARIANT: no background workers start, no child is spawned, and any
-/// refusal fails closed with a nonzero exit (the caller maps `Err` to
-/// `ExitCode::FAILURE`).
 pub fn run_offline_import(
     mut config: NodeConfig,
     corpus: &Path,
@@ -158,10 +93,6 @@ pub fn run_offline_import(
     if config.validation.assume_valid_height != 0 {
         bail!("offline import requires --assume-valid-height 0 for full validation");
     }
-    // Offline fast-forward never inherits a live validation mode: the
-    // comparator contract carries no validation-mode token and the default
-    // mode skips scripts, so the mode is pinned here, before the chainstate
-    // opens, instead of flowing from operator config.
     config.validation.mode = resolve_offline_validation_mode(config.validation.mode);
     if config.indexes.txindex
         || config.indexes.blockfilterindex
@@ -198,19 +129,8 @@ pub fn run_offline_import(
             if !entry.hash.eq_ignore_ascii_case(&tip.hash.to_string()) {
                 bail!("applied tip hash does not match the manifest entry");
             }
-            // Fail closed on provenance: `TipSnapshot`/`DurableHead` record
-            // height, hash, work, and transaction count but not the
-            // `ValidationMode` that committed the prefix, so a prefix
-            // connected under `AssumeValid`/`Fast` (scripts skipped) is
-            // indistinguishable from a `Full` one. The skip below runs only
-            // when this importer's provenance record binds the same tip;
-            // otherwise the rerun is refused and the operator revalidates
-            // from a fresh data directory.
             require_full_validation_provenance(&data_dir, tip)?;
             if height == manifest_doc.stop_height {
-                // Tip already current: connect nothing, but still walk the
-                // archive below so the reopen re-binds every record and the
-                // digest instead of trusting the bytes it skips.
                 manifest_doc.blocks.len()
             } else {
                 let next = height.checked_add(1).context("applied tip overflow")?;
@@ -225,9 +145,6 @@ pub fn run_offline_import(
     let mut payloads: Vec<bitcoin_rs_primitives::BlockPayload> = Vec::new();
     for (index, entry) in manifest_doc.blocks.iter().enumerate() {
         let record = read_record(&mut stream, expected_magic, entry)?;
-        // Per-record binding runs before the resume skip: already-applied
-        // prefix bytes stay bound to their indexed entry instead of coasting
-        // on framing plus the trailing digest.
         check_payload_against_entry(entry, &record.payload)?;
         hasher.update(&record.framed);
         total += u64::try_from(record.framed.len()).context("record length does not fit")?;
@@ -342,24 +259,6 @@ fn read_record(
     Ok(FramedRecord { framed, payload })
 }
 
-/// Connects one batch of archive blocks, relieving journal retention pressure
-/// inline.
-///
-/// The foreground import runs no maintenance worker, so a retention-limit
-/// refusal would otherwise abort the whole import even though the refused
-/// block committed nothing and the tip is unchanged. On a
-/// [`bitcoin_rs_chainstate::ApplyError::JournalBackpressure`] refusal
-/// carrying a retention limit, this publishes one synchronous clean
-/// checkpoint — the same foreground publication the import performs at the
-/// end, which compacts the journal — and retries the uncommitted block
-/// exactly once. Any other failure, a skipped publication (no applied tip to
-/// checkpoint), or a second refusal propagates.
-///
-/// Neither the refused attempt nor the checkpoint moves the applied tip, so
-/// the inline retry resumes from the same durable state. A cross-process
-/// rerun over the same data directory resumes by tip comparison only under
-/// a matching provenance record; without one it is refused, so the operator
-/// wipes the data directory and revalidates from genesis.
 fn connect_batch(
     node: &crate::state::NodeState,
     batch: &mut Vec<bitcoin_rs_primitives::BlockPayload>,
@@ -403,16 +302,11 @@ fn connect_batch(
 
 fn read_manifest(path: &Path) -> Result<Manifest> {
     let raw = read_bounded(path, MAX_MANIFEST_BYTES)?;
-    // No duplicate-key `Value` is used here: the manifest is decoded into
-    // typed structs with contiguous-height and packed-offset checks, so a
-    // duplicated key cannot smuggle a second chain view.
     let raw_doc: RawManifest = sonic_rs::from_slice(&raw)
         .with_context(|| format!("manifest {} is not valid JSON", path.display()))?;
     raw_doc.normalize()
 }
 
-/// Reads at most `limit` bytes, refusing a longer input before buffering
-/// more than one byte past the bound.
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let file =
         File::open(path).with_context(|| format!("cannot read manifest {}", path.display()))?;
@@ -488,17 +382,6 @@ fn check_manifest_network(doc: &Manifest, expected_network: &str) -> Result<()> 
     Ok(())
 }
 
-/// Sidecar binding the applied tip this importer fully validated.
-///
-/// The persisted tip (`TipSnapshot`) and commit point (`DurableHead`) record
-/// height, hash, work, and transaction count, but not the `ValidationMode`
-/// that committed each block. A prefix connected under `AssumeValid`
-/// (scripts skipped below the anchor while the gate trusted it) or `Fast`
-/// (scripts skipped below the header tip) is therefore indistinguishable at
-/// reopen from one connected under `Full`. This record closes that gap: it is
-/// written only after this importer certifies the tip under the pinned
-/// `Full` mode, and a resume skips its prefix only while the record still
-/// binds the same tip.
 const FULL_VALIDATION_PROVENANCE_FILE: &str = "offline-full-validation-provenance.json";
 const FULL_VALIDATION_PROVENANCE_SCHEMA: &str = "offline-full-validation-provenance-v1";
 
@@ -509,12 +392,6 @@ struct FullValidationProvenance {
     tip_hash: String,
 }
 
-/// Maps an absolute block height to its position in the packed
-/// `blocks`/`entries` array. Both the reopen entry lookup and the skip
-/// count after a tip at `height` go through this coordinate, so a resume
-/// at height `H` over a range starting at `S` reads entry `H - S` and
-/// skips `H + 1 - S` records. For `S == 0` this is the old `height` /
-/// `height + 1` behavior exactly.
 fn block_index_for_height(start_height: u32, height: u32) -> Result<usize> {
     let offset = height
         .checked_sub(start_height)
@@ -522,14 +399,6 @@ fn block_index_for_height(start_height: u32, height: u32) -> Result<usize> {
     usize::try_from(offset).context("tip height does not fit")
 }
 
-/// Allows the resume skip only while the provenance record binds the tip.
-///
-/// Refuses when the record is absent, unreadable, the wrong schema, or names
-/// a different tip: a normal live run under `AssumeValid`/`Fast` leaves no
-/// such record, and a stale record (older certification, foreign data dir,
-/// torn write) never matches the current tip. Failing closed here keeps the
-/// skip from certifying unexecuted scripts as fully validated; the remedy is
-/// a fresh data directory, which revalidates every record from genesis.
 fn require_full_validation_provenance(
     data_dir: &Path,
     tip: &bitcoin_rs_chain::TipSnapshot,
@@ -572,11 +441,6 @@ fn read_full_validation_provenance(data_dir: &Path) -> Result<FullValidationProv
     Ok(doc)
 }
 
-/// Atomically publishes the full-validation provenance for `tip`.
-///
-/// The tmp-file plus rename keeps a torn write from ever reading as a
-/// match: a crash between write and rename leaves the previous record (or
-/// none), and the resume gate refuses anything but an exact tip bind.
 fn write_full_validation_provenance(
     data_dir: &Path,
     tip: &bitcoin_rs_chain::TipSnapshot,
@@ -603,32 +467,16 @@ fn write_full_validation_provenance(
     Ok(())
 }
 
-/// Pins the offline-import validation mode, refusing to inherit.
-///
-/// Every incoming mode maps to `Full`: the certified state claims full
-/// script validation, so fast-forward must execute every script regardless
-/// of the live posture the operator config carries. There is no refusal
-/// here because the comparator contract carries no validation-mode token
-/// (its default resolves to `AssumeValid`); silently inheriting that
-/// default would be the accident this pin prevents.
 fn resolve_offline_validation_mode(
     _inherited: bitcoin_rs_chainstate::ValidationMode,
 ) -> bitcoin_rs_chainstate::ValidationMode {
     bitcoin_rs_chainstate::ValidationMode::Full
 }
 
-/// Binds one archive record to its manifest block index.
-///
-/// Framing (`read_record`) proves network magic and length only, and the
-/// trailing archive digest binds bytes late. This check binds early and per
-/// record: the payload's header hash must equal the indexed entry hash,
-/// including records the resume cursor skips.
 fn check_payload_against_entry(entry: &ManifestBlock, payload: &[u8]) -> Result<()> {
     let header = payload
         .get(..HEADER_LEN)
         .with_context(|| format!("block at height {} is shorter than a header", entry.height))?;
-    // The same computation `Block::block_hash` performs, in `Display` order
-    // to match the indexed entry hash.
     let hash = bitcoin_rs_primitives::encode::double_sha256(header);
     if !hash.to_string().eq_ignore_ascii_case(&entry.hash) {
         bail!("block at height {} header hash diverged", entry.height);
@@ -636,17 +484,6 @@ fn check_payload_against_entry(entry: &ManifestBlock, payload: &[u8]) -> Result<
     Ok(())
 }
 
-/// Refuses when the data dir carries persisted derived-index content that
-/// this index-off import will neither maintain nor revalidate.
-///
-/// [`crate::state::NodeState::open`] leaves the derived-index host disabled
-/// under the posture gate above, so a `<data_dir>/txindex` namespace left by
-/// an earlier index-enabled run would sit untouched while the chainstate tip
-/// moves underneath it. The documented revalidation path is a normal indexed
-/// start, whose worker startup reconciles (rewind or rebuild from retained
-/// canonical chainstate) the namespace back to the applied tip; this
-/// foreground import runs no workers, so it refuses instead. Remove or
-/// quarantine the namespace, or revalidate it first, then re-run.
 fn refuse_stale_persisted_indexes(data_dir: &Path) -> Result<()> {
     let namespace = data_dir.join("txindex");
     if !namespace_has_content(&namespace) {
@@ -658,10 +495,6 @@ fn refuse_stale_persisted_indexes(data_dir: &Path) -> Result<()> {
     );
 }
 
-/// True when `path` holds persisted content: a missing path or an empty
-/// directory holds nothing stale; anything else (rows, a stray file, a
-/// symlink, or an unreadable directory) is state this import will not
-/// revalidate.
 fn namespace_has_content(path: &Path) -> bool {
     match std::fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_some(),
@@ -720,8 +553,6 @@ fn check_manifest_shape(doc: &Manifest) -> Result<()> {
         if entry.offset != cursor {
             bail!("manifest entry offset is not packed");
         }
-        // Linearizable cursor advance: single-writer offsets are packed, so a
-        // failed add refuses rather than wrapping to a second view.
         cursor = cursor
             .checked_add(8)
             .context("manifest cursor overflow")?
@@ -790,11 +621,6 @@ fn verify_and_certify(
             let set_hash = view
                 .hash_serialized_3()
                 .map_err(|error| anyhow::anyhow!("hash_serialized_3 failed: {error}"))?;
-            // Snapshot-isolated read: the stable view blocks commits for the
-            // scan, so txout counts and hashes belong to one tip. No
-            // exactly-once delivery is assumed; reruns resume by tip
-            // comparison under a matching provenance record, and are refused
-            // without one.
             Ok::<_, anyhow::Error>((
                 u64::try_from(view.len())
                     .map_err(|error| anyhow::anyhow!("txout count does not fit: {error}"))?,
@@ -819,14 +645,6 @@ fn verify_and_certify(
     if generation.is_none() {
         bail!("clean checkpoint publication skipped: no applied tip");
     }
-    // Bind full-validation provenance to the certified tip before publishing
-    // the certified state: the tip below already passed full validation
-    // (every record connected under the pinned `Full` mode, bodies plus undo
-    // durable, tip re-verified, checkpoint published), so the record is true
-    // the moment it lands. Ordering it first keeps a later `write_state`
-    // failure (for example `create_new` refusing a reused state path)
-    // resumable: the rerun still matches provenance and re-certifies instead
-    // of forcing a from-genesis revalidation.
     write_full_validation_provenance(data_dir, &tip)?;
     write_state(state_path, &certified)?;
     Ok(())
@@ -953,12 +771,6 @@ mod tests {
     fn connect_batch_relieve_journal_retention_pressure() {
         use bitcoin_rs_chain::regtest_fixture;
 
-        // The foreground import runs no maintenance worker, so retention
-        // pressure must be relieved inline: a batch connect that the journal
-        // refuses publishes one synchronous checkpoint (compacting the
-        // journal, including the pressure below) and retries the uncommitted
-        // block once. Without the relief this second connect would abort the
-        // import exactly like the proved refusal below.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config =
             crate::NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
@@ -976,10 +788,6 @@ mod tests {
             .expect("genesis");
         state.publish_checkpoint().expect("baseline checkpoint");
 
-        // Inflate the measured journal size past the retention budget: the
-        // next apply is refused before any tip mutation while the pressure
-        // stands. The relief checkpoint compacts every superseded segment,
-        // so this same file is gone before the retry runs.
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1110,9 +918,6 @@ mod tests {
     #[test]
     fn offline_import_pins_full_validation_mode() {
         use bitcoin_rs_chainstate::ValidationMode;
-        // The pin refuses to inherit: every incoming live mode maps to Full,
-        // so an operator default (AssumeValid) or a fast sync posture can
-        // never leak script skipping into the certified state.
         for inherited in [
             ValidationMode::Full,
             ValidationMode::AssumeValid,
@@ -1130,56 +935,40 @@ mod tests {
     }
 
     fn header_hash_hex(header: &[u8; HEADER_LEN]) -> String {
-        // Same computation the binding check performs, so the fixture hash
-        // is pinned to the indexed display order rather than the helper.
         bitcoin_rs_primitives::encode::double_sha256(header).to_string()
     }
 
     #[test]
     fn connected_records_stay_bound_to_the_manifest() {
-        // The per-record binding covers every record the import connects, so
-        // a corrupted payload of the right length is still refused.
         let header = [7u8; HEADER_LEN];
         let doc_hash = header_hash_hex(&header);
         let good = binding_entry(3, &doc_hash);
         let mut payload = header.to_vec();
         check_payload_against_entry(&good, &payload).expect("bound record");
-        // Uppercase manifest hashes normalize the same way.
         let upper = binding_entry(3, &doc_hash.to_ascii_uppercase());
         check_payload_against_entry(&upper, &payload).expect("case-insensitive");
-        // One flipped payload bit diverges from the indexed entry.
         payload[10] ^= 0x01;
         assert!(check_payload_against_entry(&good, &payload).is_err());
-        // A wrong entry hash refuses even with intact bytes.
         let wrong = binding_entry(3, &"ab".repeat(32));
         assert!(check_payload_against_entry(&wrong, &header).is_err());
-        // A runt that framing would already reject never binds.
         let runt = binding_entry(3, &doc_hash);
         assert!(check_payload_against_entry(&runt, &header[..HEADER_LEN - 1]).is_err());
     }
 
     #[test]
     fn offline_import_refuses_stale_persisted_index_namespace() {
-        // No namespace, or an empty one, holds nothing stale.
         let fresh = tempfile::tempdir().expect("tempdir");
         refuse_stale_persisted_indexes(fresh.path()).expect("absent namespace");
         std::fs::create_dir(fresh.path().join("txindex")).expect("empty namespace");
         refuse_stale_persisted_indexes(fresh.path()).expect("empty namespace");
-        // Rows left by an earlier index-enabled run refuse, even though the
-        // config posture gate already passed with indexes off.
         std::fs::write(fresh.path().join("txindex").join("CURRENT"), b"stale")
             .expect("seed stale row");
         assert!(refuse_stale_persisted_indexes(fresh.path()).is_err());
-        // A stray non-directory artifact is state this import will not
-        // revalidate either.
         let stray = tempfile::tempdir().expect("tempdir");
         std::fs::write(stray.path().join("txindex"), b"stale").expect("seed stray file");
         assert!(refuse_stale_persisted_indexes(stray.path()).is_err());
     }
 
-    /// Two real regtest blocks (genesis plus one mined child) framed as a
-    /// Core archive with a matching manifest, so the provenance tests run the
-    /// real entry point instead of asserting on helpers alone.
     struct TwoBlockArchive {
         blocks: Vec<bitcoin_rs_primitives::Block>,
         corpus: Vec<u8>,
@@ -1256,9 +1045,6 @@ mod tests {
 
     #[test]
     fn offline_import_fresh_dir_validates_and_records_provenance() {
-        // Fresh data directory: every record is connected under the pinned
-        // `Full` mode, the tip certifies, and the provenance record binds the
-        // certified tip for later resumes.
         let archive = two_block_archive();
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join("node");
@@ -1282,9 +1068,6 @@ mod tests {
 
     #[test]
     fn offline_import_certified_dir_resumes_idempotently() {
-        // The provenance record this importer wrote at certification lets a
-        // rerun skip the already-validated prefix: the tip is current, so no
-        // block is reconnected, but the archive is still walked and rebound.
         let archive = two_block_archive();
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join("node");
@@ -1318,12 +1101,6 @@ mod tests {
 
     #[test]
     fn offline_import_refuses_tip_without_provenance() {
-        // A data directory whose tip came from anywhere but this importer
-        // (here: blocks connected directly, as a live `AssumeValid`/`Fast`
-        // run would leave them) carries no provenance record, so the import
-        // refuses instead of skipping unexecuted scripts into a full-validation
-        // certificate. The corpus path is never even opened: the tip check
-        // runs first.
         let archive = two_block_archive();
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join("node");
@@ -1336,8 +1113,6 @@ mod tests {
                 ))
                 .expect("connect");
             }
-            // No provenance written; dropping releases the data-dir lock so
-            // the entry point below can reopen the directory.
         }
         let (corpus, manifest) = write_archive_fixture(dir.path(), &archive);
         let error = run_offline_import(
@@ -1360,10 +1135,7 @@ mod tests {
             parse_magic_hex("f9beb4d9").expect("hex"),
             [0xf9, 0xbe, 0xb4, 0xd9]
         );
-        // Eight bytes but multibyte UTF-8: refused, not sliced off a char
-        // boundary.
         assert!(parse_magic_hex("\u{e9}\u{e9}f9be").is_err());
-        // Sign prefixes `from_str_radix` would accept are not hex digits.
         assert!(parse_magic_hex("+fbeb4d9").is_err());
         assert!(parse_magic_hex("f9beb4d").is_err());
     }

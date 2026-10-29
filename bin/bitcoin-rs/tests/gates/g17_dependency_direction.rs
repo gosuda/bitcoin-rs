@@ -32,8 +32,6 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let _: ChainstateSnapshot = state.snapshot();
     let _ = state.chain_snapshot();
     let _ = tree.read().tip();
-    // The read-only UTXO capability is what production consumers receive;
-    // it must compile without the fixture seam.
     let _ = state.utxo_reader();
     (applied.load_full(), tree.clone().read().len())
 }
@@ -52,10 +50,6 @@ pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
 }
 ";
 
-/// Approved exact-payload edge: `primitives` owns `BlockPayload` on the
-/// workspace `bytes` buffer; chainstate/p2p/node/mining consume it.
-/// The gate pins the approved direction without forbidding the `bytes` edge
-/// and without reintroducing a cycle.
 #[test]
 fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -65,8 +59,6 @@ fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), Box<dy
         std::fs::read_to_string(root.join(relative))
             .unwrap_or_else(|error| panic!("read {relative}: {error}"))
     };
-    // Approved producer edge: primitives names the workspace `bytes`
-    // dependency that backs `BlockPayload::from_raw/from_local/from_prefix`.
     let primitives = read_manifest("crates/primitives/Cargo.toml");
     assert!(
         primitives.contains("bytes"),
@@ -77,8 +69,6 @@ fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), Box<dy
         lib.contains("BlockPayload"),
         "primitives must re-export the BlockPayload owner type"
     );
-    // Approved consumer direction: every payload consumer depends on
-    // primitives; primitives never depends back (no cycle reintroduced).
     for consumer in [
         "crates/chainstate/Cargo.toml",
         "crates/p2p/Cargo.toml",
@@ -162,8 +152,6 @@ pub fn observe(node: &Node) {
     )?;
     Ok(())
 }
-/// Compile a consumer in a separate workspace: dev feature unification must
-/// not make persistence injection or synthetic worlds into production APIs.
 #[test]
 fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> anyhow::Result<()> {
     let manifest = dependency_graph::workspace_root_manifest();
@@ -242,7 +230,6 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         &["E0599"],
         "persist_undo",
     )?;
-    // A private field may also be removed: both outcomes seal the capability.
     for (receiver, member) in [
         ("tip: &TipReader", "tip.inner"),
         ("tree: &BlockTreeReader", "tree.inner"),
@@ -272,8 +259,6 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "tip_handle",
     )?;
 
-    // Refer to associated methods without supplying arguments: this rejects
-    // availability regardless of signature, and deleted APIs remain valid.
     for method in [
         "chain_tip",
         "applied_tip",
@@ -281,18 +266,10 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "applied_tip_handle",
         "block_tree",
         "block_tree_handle",
-        // Tree reads go through `BlockTreeReader`; a facade read guard would
-        // be a second route to the same lock.
         "read_block_tree",
         "transition_barrier",
-        // Retained-history authority lives in storage/pruning; chainstate
-        // keeps acquisition roles and must not broker the registry.
         "retention_handle",
-        // The transition domain is minted by composition and split into roles;
-        // chainstate holds one role and must not republish a fence.
         "read_fence",
-        // The authoritative UTXO set stays with its mutation owner; consumers
-        // take `UtxoReader`, which carries no `utxo::contract` path.
         "utxo",
         "utxo_handle",
         "apply_block",
@@ -306,9 +283,6 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
             method,
         )?;
     }
-    // `UtxoReader::fixture_set` is the only route from a read capability back
-    // to the set `utxo::contract` mutates. It is compiled out of production
-    // builds, so a production consumer must not be able to name it.
     consumer.deny(
         &format!(
             "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"

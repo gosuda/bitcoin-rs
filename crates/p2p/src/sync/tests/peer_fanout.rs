@@ -93,8 +93,6 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> TestResult {
         vec![regtest_fixture::coinbase(2)],
     )
     .or_fail("regtest fixture block");
-    // The value change alters the txid, so the staged body contradicts the
-    // header's merkle root: a mutated body, not an invalid header.
     let mut bad_body = bad.clone();
     bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
     let descendant = regtest_fixture::mined_block_with_prev_hash(

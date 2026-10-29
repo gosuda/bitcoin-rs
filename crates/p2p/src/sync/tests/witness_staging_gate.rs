@@ -1,19 +1,14 @@
-//! Executor-level body/header binding interaction tests.
-
 use super::*;
 use crate::InboundBlock;
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 
-/// BIP141 witness commitment prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
 const WITNESS_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
-/// SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
 const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
     0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69, 0x53, 0x75,
     0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e, 0x8c, 0xf9,
 ];
 
-/// Builds a coinbase with a BIP141 commitment output.
 fn segwit_coinbase(height: u32, witness: bool) -> Tx {
     let mut script_sig = regtest_fixture::script_num_push(i64::from(height));
     script_sig.extend_from_slice(&regtest_fixture::script_num_push(1));
@@ -45,7 +40,6 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
     }
 }
 
-/// Mines a PoW-valid regtest block with a segwit commitment coinbase.
 fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block {
     regtest_fixture::mined_block_with_prev_hash(
         prev_blockhash,
@@ -63,9 +57,6 @@ type SegwitSyncFixture = (
     crossbeam_channel::Sender<InboundHeaders>,
 );
 
-/// Sets up a `BlockSync` with genesis applied, a single segwit block header in
-/// the tree, and a default sync budget. Returns the sync, the block hash, both
-/// body variants (correct and stripped), and the inbound-headers sender.
 fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>> {
     let (tree, _blocks) = mined_chain(0, 0)?;
     let harness = SyncHarness::new(tree);
@@ -80,8 +71,6 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
     let correct_block = segwit_block(prev_hash, 1, true);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
-    // Admit the header into the chain so the witness gate can derive
-    // segwit_active from the parent (genesis) and the block height.
     assert!(matches!(
         sync.chain.admit_headers(&[correct_block.header]),
         HeaderAdmission::Accepted { .. }

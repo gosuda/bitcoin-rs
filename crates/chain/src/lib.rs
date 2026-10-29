@@ -1,33 +1,19 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Neutral block-body read seam.
 mod block_body;
-/// Cumulative chain transaction count arithmetic.
 mod count;
-/// BIP9/softfork lookups over [`BlockTree`].
 mod deployment;
-/// Header acceptance and proof-of-work validation.
 pub mod header_sync;
-/// Initial block download state of the applied chain.
 mod ibd;
-/// Block-tree node types.
 pub mod node;
-/// Synchronization progress of the applied chain.
 mod progress;
-/// Regtest block and proof-of-work builders shared by cross-crate test
-/// harnesses. Compiled only under the `test-seam` feature.
 #[cfg(feature = "test-seam")]
 pub mod regtest_fixture;
-/// Reorganization planning.
 mod reorg;
-/// Read-only active-tip notification contract.
 mod tip_wait;
-/// One transition domain split into mutation and stable-read roles.
 mod transition;
-/// In-memory block tree.
 mod tree;
-/// Read-only capabilities over chain publications and topology.
 mod view;
 
 use bitcoin_rs_primitives::Hash256;
@@ -50,23 +36,12 @@ pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
-/// Atomic best-tip snapshot published to lock-free readers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TipSnapshot {
-    /// Node id of the best tip.
     pub tip_id: NodeId,
-    /// Best tip height.
     pub height: u32,
-    /// Accumulated work through the best tip.
     pub chainwork: ChainWork,
-    /// Best tip header hash.
     pub hash: Hash256,
-    /// Cumulative transaction count through this tip.
-    ///
-    /// An applied-tip snapshot carries the count its durable commit
-    /// certified. A header-tip snapshot copies its tree node's
-    /// known-or-unknown count, so a header tip may legitimately be ahead of
-    /// the applied chain and count differently.
     pub chain_tx_count: ChainTxCount,
 }
 
@@ -77,12 +52,10 @@ pub use transition::{
 pub use tree::{BlockTree, InvalidationOutcome};
 pub use view::{BlockTreeReader, LatchReader, TipReader};
 
-/// A caller-owned bound on fallback ancestor parent hops was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("block ancestry read budget exhausted")]
 pub struct AncestryBudgetExceeded;
 
-/// Errors returned by header sync, block-tree, and reorg planning operations.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChainError {
     #[error("block-tree node index {index} does not fit in NodeId")]
@@ -151,7 +124,6 @@ pub enum ChainError {
     TimestampTooFarAhead {
         hash: Hash256,
         timestamp: u32,
-        /// Maximum allowed future timestamp in Unix seconds (`now + 7200`).
         max_allowed: u32,
     },
 }

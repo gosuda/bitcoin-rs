@@ -1,6 +1,3 @@
-//! Cluster limits and retained ancestor/descendant query metadata.
-// A failed pool or fixture invariant is a test failure, and panicking reports
-// it with the offending call site. `expect` is deliberate.
 #![allow(clippy::expect_used)]
 
 extern crate alloc;
@@ -17,7 +14,6 @@ use bitcoin_rs_primitives::{
 fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), Box<dyn Error>>
 {
     fn weighted(mut tx: Tx, target: u64) -> Tx {
-        // Marker/flag + count + short length cost 4 bytes; length widens at 253.
         let padding = usize::try_from(target - tx.weight() - 4).expect("small padding");
         assert!(padding < 253);
         tx.inputs[0].witness = Witness::from_stack(vec![vec![0; padding]]);

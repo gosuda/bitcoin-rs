@@ -1,4 +1,3 @@
-//! Header synchronization integration tests.
 use bitcoin_rs_chain::header_sync::{next_work_required, validate_header_nbits};
 use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, NodeStatus, accept_headers, current_unix_seconds,
@@ -170,8 +169,6 @@ fn next_work_required_is_exactly_what_validate_header_nbits_enforces()
     let parent_id = tree.insert_node(None, parent, NodeStatus::HeaderValid)?;
     let candidate_time = Network::Regtest.target_spacing_seconds();
 
-    // The one next-work source: the bits a candidate builder reads are the
-    // bits validation demands at the same parent and candidate time.
     let expected = next_work_required(&tree, parent_id, candidate_time, Network::Regtest)?;
     assert_eq!(expected.to_consensus(), bits);
 
@@ -195,14 +192,11 @@ fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
     let parent_id = tree.insert_node(None, parent, NodeStatus::HeaderValid)?;
     let spacing = Network::Testnet3.target_spacing_seconds();
 
-    // Within 2*spacing of the parent the difficulty carries over unchanged.
     assert_eq!(
         next_work_required(&tree, parent_id, spacing, Network::Testnet3)?,
         CompactTarget::from_consensus(bits)
     );
 
-    // Past the window the testnet minimum-difficulty rule returns the
-    // proof-of-work limit.
     assert_eq!(
         next_work_required(
             &tree,
@@ -442,8 +436,6 @@ fn genesis_header() -> BlockHeader {
     Network::Regtest.genesis_block().header
 }
 
-/// Regtest genesis timestamp. Headers must advance past it, because the
-/// median-time-past rule compares against the ancestors actually in the tree.
 const GENESIS_TIME: u32 = 1_296_688_602;
 
 fn mine_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
@@ -511,7 +503,6 @@ fn target_to_compact_lossy(target: bitcoin_rs_chain::ChainWork) -> u32 {
         .to_consensus()
 }
 
-// Difficulty expectations use bitcoin's codec, not the production codec.
 fn decode_compact_to_target(bits: u32) -> bitcoin_rs_chain::ChainWork {
     bitcoin_rs_chain::ChainWork::from_be_bytes(
         bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).to_be_bytes(),
@@ -579,7 +570,6 @@ fn seed_period(
         .collect();
     seed_headers(tree, &headers)
 }
-// Period(bits, elapsed seconds, tip height), or explicit (bits, time) headers.
 enum Seed {
     Period(u32, u32, u32),
     Headers(Vec<(u32, u32)>),
@@ -712,7 +702,6 @@ fn testnet_nbits_cases() -> Vec<NbitsCase> {
     .map(|(name, seed, time, bits, expected)| (name, Network::Testnet3, seed, time, bits, expected))
     .collect::<Vec<_>>();
 
-    // A testnet4 retarget uses the first period target, not a min-difficulty tip.
     let t4_interval = Network::Testnet4.retarget_interval();
     let t4_span = t4_interval * 600;
     let t4_bits = scaled_pow_limit_bits(Network::Testnet4, 16);

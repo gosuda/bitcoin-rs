@@ -3,9 +3,6 @@
 use core::str::FromStr as _;
 use std::sync::Arc;
 
-// WHY rust-bitcoin: `/tx/:id/merkleblock-proof` returns the serialized
-// rust-bitcoin `MerkleBlock`; no native merkle-proof builder exists in-tree
-// (sanctioned compat seam).
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
@@ -16,7 +13,7 @@ use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
 };
-use serde_json::json;
+use sonic_rs::json;
 
 use super::http::{admission_error, query_error};
 use super::model::{
@@ -161,16 +158,10 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
                 unix_time_secs(),
                 &ctx.chain.admission_chain(),
             ) {
-                // `hashtx` for a newly admitted transaction is published once
-                // by the gateway observer; duplicates commit nothing and
-                // notify nothing.
                 Ok(_) => text_response("text/plain", txid.to_string().into_bytes()),
                 Err(error) => admission_error(error),
             }
         }
-        // `/txs/package` is in this namespace so it cannot fall through to
-        // JSON-RPC. This endpoint remains unsupported until its Esplora wire
-        // contract is implemented over the gateway's package operation.
         _ => not_found(),
     }
 }
@@ -219,7 +210,6 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
         |(record, bytes, txid)| {
-            // MerkleBlock construction requires bitcoin::Block (sanctioned seam).
             let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
             else {
                 return internal_error("stored block body is corrupt");
@@ -406,8 +396,6 @@ fn block_status(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
-    // Membership and the next-best lookup select from one captured applied
-    // publication, so a reorg between them cannot mix two branches.
     let view = ctx.chain.applied_view();
     let in_best_chain =
         ctx.chain.active_hash_in_view(&view, record.height) == Some(Hash256::from(record.hash));
@@ -455,8 +443,6 @@ pub(super) fn block_transaction_values(
     start: usize,
     limit: usize,
 ) -> Result<Vec<TransactionValue>, Response> {
-    // A record fetched by hash can be from a losing branch. Do not reuse the
-    // active block at the same height for its transactions' confirmation data.
     let block_status = (ctx.chain.active_hash_at_height(record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
@@ -478,7 +464,6 @@ pub(super) fn block_transaction_values(
             Ok((tx, state))
         })
         .collect::<Result<Vec<_>, Response>>()?;
-    // A decoded losing-branch block is not authoritative prevout history.
     projection.transaction_values(
         transactions,
         Some(ParentSource::Block(if block_status.is_some() {
@@ -514,8 +499,6 @@ fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
     })
 }
 fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
-    // One publication decides the default start and every height lookup, so the
-    // array cannot straddle two applied branches.
     let view = ctx.chain.applied_view();
     let start = start_height.unwrap_or_else(|| view.height());
     if ctx.chain.block_by_height_in_view(&view, start).is_none() {
@@ -535,10 +518,7 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     }
     json_ok(&values)
 }
-/// PRE: The gateway supplies one readable pool view.
 /// POST: Capture aggregate statistics and one `(fee_rate, total_vsize)` row per distinct rate.
-/// POST: Release the read guard before fee-rate formatting and JSON encoding.
-/// INVARIANT: Count, vsize, total fee and histogram come from one pool view.
 fn mempool(ctx: &Context) -> Response {
     let (stats, fee_histogram) = {
         let pool = ctx.mempool.gateway.read();
@@ -557,17 +537,11 @@ fn mempool(ctx: &Context) -> Response {
             .collect(),
     })
 }
-/// PRE: The gateway supplies one readable pool view.
 /// POST: Capture the ten latest transactions by `(time, txid)`.
-/// POST: Release the read guard before summing outputs and encoding JSON.
-/// INVARIANT: Equal times use descending txid order; sums saturate.
 fn mempool_recent(ctx: &Context) -> Response {
     const RECENT: usize = 10;
     let latest = {
         let pool = ctx.mempool.gateway.read();
-        // Bounded top-ten selection: candidates borrow the scanned entry, so
-        // only the ten survivors pay an `Arc` clone — an eviction ordering
-        // never clones a transaction it evicts (SEL-01).
         let mut latest: Vec<(u64, Txid, u64, u32, &Arc<Tx>)> = Vec::with_capacity(RECENT);
         for entry in pool.iter_entries() {
             let rank = (entry.time, entry.txid);
@@ -604,9 +578,6 @@ fn mempool_recent(ctx: &Context) -> Response {
     )
 }
 fn fee_estimates(ctx: &Context) -> Response {
-    // CONTRACT: docs/contracts/external-api.md#API-26. Capture every target
-    // from one estimator view, omitting unavailable estimates. Release the
-    // guard before formatting and retain the RPC's BTC/kvB rounding path.
     let estimates = {
         let pool = ctx.mempool.gateway.read();
         (1_u32..=25)
@@ -614,12 +585,12 @@ fn fee_estimates(ctx: &Context) -> Response {
             .filter_map(|target| pool.estimate_fee_rate(target).map(|rate| (target, rate)))
             .collect::<Vec<_>>()
     };
-    let mut values = serde_json::Map::new();
+    let mut values = sonic_rs::Object::new();
     for (target, rate) in estimates {
         let fee = fee_rate_sat_per_vbyte(convert::sat_to_btc(rate.as_sat_per_kvb()));
-        values.insert(target.to_string(), json!(fee));
+        values.insert(&target.to_string(), json!(fee));
     }
-    json_ok(&values)
+    json_ok(values.into_value())
 }
 
 pub(super) fn fee_rate_sat_per_vbyte(btc_per_kvb: f64) -> f64 {
@@ -656,7 +627,6 @@ pub(super) fn history(
     include_mempool: bool,
 ) -> Response {
     let projection = Projection::new(ctx);
-    // Sentinel "" selects mempool transactions only. Avoid confirmed resolution.
     if last == Some("") {
         let mempool = match projection.mempool_activity_for(h) {
             Ok(mempool) => mempool,
@@ -687,8 +657,6 @@ pub(super) fn history(
         Ok(records) => records,
         Err(response) => return response,
     };
-    // API-09: only an exact known lowercase txid advances the page. Unknown
-    // or noncanonical cursors restart, including links made stale by a reorg.
     let start = last.and_then(|x| {
         records
             .iter()

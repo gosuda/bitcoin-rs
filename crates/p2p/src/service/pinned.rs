@@ -16,8 +16,6 @@ pub(super) struct PinnedPeers {
 }
 
 impl PinnedPeers {
-    // The drain owns this state and active handles. Resolution only supplies
-    // desired destinations; neither resolvers nor transports schedule dials.
     pub(super) fn due(
         &mut self,
         configured: &[PeerEndpoint],
@@ -48,8 +46,6 @@ impl PinnedPeers {
         due
     }
 
-    // Completion or local admission refusal starts the next delay. A long
-    // pending dial never consumes another retry or creates a second handle.
     pub(super) fn finished(&mut self, endpoint: PeerEndpoint, now: Instant) {
         if let Some(retry) = self.retries.get_mut(&crate::addrman::canonical(endpoint)) {
             retry.next = now + retry.delay;

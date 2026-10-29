@@ -51,8 +51,6 @@ impl HistoricalDownload {
 impl BlockSync {
     pub(super) fn advance_historical(&self) {
         let _work = self.historical_work.lock();
-        // Bound consensus work per pass. Each chain-owned replay is itself
-        // bounded; a staged body never advances the authoritative cursor.
         for connected in 0..=8 {
             let required = match self.chain.advance_historical() {
                 Ok(required) => required,
@@ -103,10 +101,6 @@ impl BlockSync {
             network: self.chain.network(),
             requested_height: height,
         };
-        // PeerTable -> historical is the ingress lock order. Snapshot all
-        // peer data before holding download state, and stamp via send_then.
-        // Source-keyed live-session snapshot: anonymous (`endpoint: None`)
-        // sessions participate identically to addressed ones.
         let live = self
             .peer_table
             .usable_peers()
@@ -125,7 +119,6 @@ impl BlockSync {
             let HistoricalDownload { window, stager, .. } = &mut *historical;
             window.retain_owned_by(|owner| live.iter().any(|(source, _)| source == owner));
             for hash in stager.prune_expired(now) {
-                // The next request always starts at the chain-owned frontier.
                 window.requeue_for_retry(&hash, Some(height), now);
             }
             window.set_fanout_eligible_peers(peers.len(), now);
@@ -146,9 +139,6 @@ impl BlockSync {
                 chainwork: base.chainwork,
                 chain_tx_count: base.chain_tx_count,
             };
-            // Snapshot this peer's refused hashes before taking the
-            // historical lock: the scheduler lock is never held together
-            // with it, so the per-entry filter reads a copy.
             let refused = self
                 .scheduler
                 .lock()
@@ -157,16 +147,9 @@ impl BlockSync {
             let request = {
                 let mut historical = self.historical.lock();
                 let HistoricalDownload { window, stager, .. } = &mut *historical;
-                // Back off corrupt deliveries even if this is our only peer.
                 if window.peer_in_staller_cooldown(*source, now) {
                     continue;
                 }
-                // Bodies `source` already answered `notfound` for are
-                // excluded while the batch is built, exactly as the
-                // foreground path does: the scan plans around them and pins
-                // the cursor at the lowest refused height, so a later pass
-                // plans the same blocks again for another peer, or for this
-                // one once the retry interval has passed.
                 let is_refused = |hash| refused.contains(&hash);
                 let mut refusals = RefusalFilter::new(&is_refused);
                 window.next_peer_request(
@@ -203,7 +186,6 @@ impl BlockSync {
         }
     }
 
-    /// Consumes owned historical bodies; returns foreground deliveries intact.
     pub(super) fn receive_historical(&self, inbound: InboundBlock) -> Option<InboundBlock> {
         let _work = self.historical_work.lock();
         let hash = inbound.payload().block().block_hash().0;
@@ -254,9 +236,6 @@ impl BlockSync {
                 }
             }
         }
-        // A delivered body proves the connection has it, so an earlier
-        // `notfound` for the hash no longer applies. The historical lock is
-        // released first: the two locks are never held together.
         self.scheduler.lock().body_unavailable.clear(source, hash);
         None
     }

@@ -2,7 +2,7 @@
 
 use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::{Kind, ProcessNode, Result, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonValueTrait as _, json};
 
 #[test]
 fn deployment_info_historical_rpc_rest_and_native_deviations() -> Result<()> {
@@ -63,7 +63,7 @@ fn deployment_info_historical_rpc_rest_and_native_deviations() -> Result<()> {
             let rest = process.http_get(&format!("/rest/deploymentinfo/{text}.json"))?;
             assert_eq!(rest.status, 200);
             compare_reply("explicit historical RPC/REST", &rpc, &rest.json()?)?;
-            assert!(!serde_json::to_string(&rpc)?.contains("null"));
+            assert!(!sonic_rs::to_string(&rpc)?.contains("null"));
         }
     }
     for process in [&mut core, &mut node] {

@@ -111,9 +111,6 @@ pub(super) fn validate(text: &str, kind: Kind) -> io::Result<()> {
                 .decode(text)
                 .map_err(|_| invalid("invalid I2P private destination encoding"))?;
             let public_length = destination_length(&bytes)?;
-            // SAM PrivateKeyFile contains a 256-byte encryption-private-key
-            // field (also when unused), followed by a signing private key.
-            // DSA's 20 bytes are the smallest supported signing-key encoding.
             if bytes.len() < public_length + 256 + 20 || bytes.len() > 12_288 {
                 return Err(invalid("invalid I2P private destination length"));
             }
@@ -163,7 +160,7 @@ pub(super) fn read(path: &Path, kind: Kind) -> io::Result<Option<String>> {
         return Err(invalid("overlay identity file too large"));
     }
     let stored: Stored =
-        serde_json::from_str(&text).map_err(|_| invalid("damaged overlay identity file"))?;
+        sonic_rs::from_str(&text).map_err(|_| invalid("damaged overlay identity file"))?;
     if stored.version != 1
         || stored.checksum != <[u8; 32]>::from(Sha256::digest(stored.key.as_bytes()))
     {
@@ -202,7 +199,6 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     }
-    // A durable key also needs the newly created directory's name to survive.
     bitcoin_rs_storage::checkpoint::fs::sync_dir(
         &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,
     )
@@ -210,7 +206,7 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
 pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
     use bitcoin::secp256k1::rand::RngCore as _;
     validate(text, kind)?;
-    let bytes = serde_json::to_vec(&Stored {
+    let bytes = sonic_rs::to_vec(&Stored {
         version: 1,
         key: text.to_owned(),
         checksum: Sha256::digest(text.as_bytes()).into(),
@@ -223,8 +219,6 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
         .parent()
         .ok_or_else(|| invalid("identity path has no parent"))?;
     ensure_directory(parent)?;
-    // A previous publication may have linked the key but failed directory
-    // sync. Retry durability for that exact identity, never replace a key.
     if let Some(existing) = read(path, kind)? {
         if existing != text {
             return Err(io::Error::new(
@@ -253,7 +247,6 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
         file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
-        // No replacement, including a key concurrently created by another process.
         fs::hard_link(&temporary, path)?;
         bitcoin_rs_storage::checkpoint::fs::sync_dir(
             &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,

@@ -23,8 +23,6 @@ pub enum TrucError {
 }
 
 impl Mempool {
-    /// Direct conflicts, with the sole eligible TRUC sibling added when
-    /// allowed. Descendant collection and all fee decisions remain in RBF.
     pub(crate) fn truc_conflicts(
         &self,
         tx: &Tx,
@@ -79,8 +77,6 @@ impl Mempool {
         Ok((conflicts, sibling_eviction))
     }
 
-    /// `PackageTestAccept` forbids sibling eviction. Package-only ancestry,
-    /// siblings and children are checked after every row's prechecks.
     pub(crate) fn check_package_truc(&self, txs: &[Tx], vsizes: &[u32]) -> Result<(), TrucError> {
         for (index, tx) in txs.iter().enumerate() {
             let parent_ids: HashSet<Txid> =

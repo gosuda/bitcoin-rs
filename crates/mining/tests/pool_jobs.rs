@@ -1,12 +1,3 @@
-//! Job projection and share predicate tests over real regtest candidates.
-//!
-//! Candidates come from the node's own `assemble_candidate` over a real
-//! mempool filled through the public `MempoolGateway::submit_transaction`
-//! path (script verification and policy included, no test seam); blocks are
-//! checked by the consensus crate and by the same `compact_is_met_by` the
-//! chain crate uses. Only the node boundary (`MiningControl`) is replaced, by
-//! a recorder that implements no job logic.
-
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -65,8 +56,6 @@ fn context(height: u32, parent: u8) -> CandidateContext {
 const COIN_VALUE_SAT: u64 = 1_000_000;
 const ADMISSION_TIME: u64 = 1_700_000_000;
 
-/// `OP_0 <sha256(OP_TRUE)>`: spent by the witness stack `[OP_TRUE]`, so the
-/// spending transaction carries witness data and its wtxid differs from its txid.
 fn wsh_true_script() -> Vec<u8> {
     let program: [u8; 32] = Sha256::digest([0x51_u8]).into();
     let mut script = vec![0x00, 0x20];
@@ -86,8 +75,6 @@ fn coin_outpoint(label: u8) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0)
 }
 
-/// One confirmed `P2WSH(OP_TRUE)` coin spent by one 1-in/1-out `P2WPKH`
-/// transaction at `2 + label` `sat/vB`, so fee-rate order follows `label`.
 fn spend(label: u8) -> Tx {
     let mut tx = Tx {
         version: 2,
@@ -108,8 +95,6 @@ fn spend(label: u8) -> Tx {
     tx
 }
 
-/// A fixed confirmed coin set at a fixed tip, in the shape the node's
-/// chain adapter answers admission with.
 struct Coins(HashMap<OutPoint, TxOut>);
 
 impl AdmissionChain for Coins {
@@ -135,7 +120,6 @@ impl AdmissionChain for Coins {
     }
 }
 
-/// A real gateway holding `count` admitted transactions.
 fn admitted_gateway(count: u8) -> Result<MempoolGateway, Box<dyn Error>> {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -281,7 +265,6 @@ fn easy() -> Result<ShareTarget, JobError> {
     ShareTarget::from_le_bytes([0xff; 32])
 }
 
-/// Little-endian bytes of the target value 1: no real hash meets it.
 fn tiny_target_bytes() -> [u8; 32] {
     let mut value = [0_u8; 32];
     value[0] = 1;
@@ -403,9 +386,6 @@ fn block_candidate_passes_consensus_and_reproduces_the_share() -> TestResult {
         .sum();
     assert_eq!(paid, fx.candidate.coinbase_value);
     assert!(found.block.weight() <= fx.candidate.max_weight);
-    // The difficulty-1 channel target is almost certainly harder than this
-    // regtest block hash, so the block is a fallback: the judging target stays
-    // the channel target while accounting work is capped at the network.
     let network = ShareTarget::from_compact(fx.job.bits())?;
     assert_eq!(found.share.target, target);
     assert_eq!(found.share.work, network.work());
@@ -445,12 +425,10 @@ fn unburn_releases_duplicate_key_for_retry() -> TestResult {
     assert!(
         matches!(replay, Err(ShareError::Duplicate { first_job, .. }) if first_job == job.id())
     );
-    // Unknown keys release nothing.
     assert!(
         !fx.book
             .unburn(&BlockHash::from(Hash256::from_le_bytes(&[0xcc; 32])))
     );
-    // The burned key releases once; a retry then validates fresh.
     assert!(fx.book.unburn(&hash));
     assert!(!fx.book.unburn(&hash));
     let retry = fx
@@ -570,8 +548,6 @@ fn fallback_block_work_is_capped_at_the_network_target() -> TestResult {
     let mut fx = fixture(config(), 100, 3)?;
     let network = ShareTarget::from_compact(fx.job.bits())?;
     let harder = ShareTarget::from_le_bytes(tiny_target_bytes())?;
-    // Any network-valid hash is far above the value-1 channel target, so the
-    // block is a fallback: it meets the network but not the channel.
     let mut block_nonce = None;
     for candidate in nonces(&fx.session, &fx.job, true, 5)? {
         let hash = header_hash(&fx.session, &fx.job, candidate)?;
@@ -780,9 +756,6 @@ fn rejected_input_cannot_fill_the_duplicate_set_and_capacity_never_refuses_a_blo
 
 #[test]
 fn block_candidate_at_job_capacity_is_remembered_as_duplicate_on_replay() -> TestResult {
-    // A block bypasses the per-job capacity check, and it must still join
-    // the duplicate set: under the old tail the acceptance was not recorded,
-    // so a replay validated as a second block instead of `Duplicate`.
     let mut tiny = config();
     tiny.max_shares_per_job = 1;
     let mut fx = fixture(tiny, 100, 1)?;
@@ -1356,7 +1329,6 @@ fn accepted_block_retirement_makes_second_same_job_nonce_stale() -> TestResult {
         matches!(outcome, ShareOutcome::Block(_)),
         "first known winning nonce is accepted"
     );
-    // Mirrors the synchronous retire on `Applied` in both submit paths.
     fx.book.invalidate_active();
     assert!(fx.book.current().is_none());
     let err = fx

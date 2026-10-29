@@ -1,8 +1,4 @@
 //! Active-chain header walks and hash-addressed block serving.
-//!
-//! Locator interpretation, header-walk policy, and inventory serving live
-//! here. [`BlockTree`] answers active-chain identity; [`BlockBodySource`]
-//! supplies bodies.
 
 use crate::inv::native_block_hash;
 
@@ -32,53 +28,37 @@ use crate::staletip::{
 };
 use crate::wire::{Message, PeerError};
 
-/// Depth from the active tip for which a `getdata` of a block is still worth
-/// answering with a `cmpctblock`.
 const MAX_CMPCTBLOCK_DEPTH: u32 = 5;
 
-/// Depth from the active tip for which a `getblocktxn` is still answered with a
-/// `blocktxn`.
 const MAX_BLOCKTXN_DEPTH: u32 = 10;
 
-/// Core 31.1 `BlockRequestAllowed`: stale-block fingerprinting bound, in seconds.
 const STALE_RELAY_AGE_LIMIT: u32 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Copy)]
 enum ServingPolicy {
-    /// Unsolicited announcements must still name the applied, selected chain.
     Announcement,
-    /// Full/compact inventory replies, including deep getblocktxn fallback.
     Inventory,
-    /// Shallow getblocktxn uses stored data without the stale-age gate in Core.
     BlockTransactions,
 }
 
 type HeldBlock = (Hash256, Arc<Block>);
 
-/// Holds the block body from the most recent early-announcement attempt.
-///
-/// The query serves `getblocktxn` and compact `getdata` from this body
-/// before the store has it. Each attempt replaces the body. A failed
-/// connect does not clear it, as with Core's `m_most_recent_block`.
 #[derive(Clone, Default)]
 pub struct RecentBlockSlot {
     inner: Arc<Mutex<Option<HeldBlock>>>,
 }
 
 impl RecentBlockSlot {
-    /// Holds `block` under `hash`, replacing the previous body.
     pub fn store(&self, hash: Hash256, block: Arc<Block>) {
         *self.inner.lock() = Some((hash, block));
     }
 
-    /// The held body when the most recent early send was `hash`.
     #[must_use]
     pub fn load(&self) -> Option<(Hash256, Arc<Block>)> {
         self.inner.lock().clone()
     }
 }
 
-/// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
 pub struct ActiveChainQuery {
     block_tree: BlockTreeReader,
@@ -90,15 +70,6 @@ pub struct ActiveChainQuery {
 }
 
 impl ActiveChainQuery {
-    /// Builds a P2P chain query view over shared active-chain state of one
-    /// network.
-    ///
-    /// PRE: `block_tree` holds only headers of `network`, and `applied_tip`
-    ///   publishes the chain owner's fully-applied tip.
-    /// POST: returns the view; serving queries refuse below the network's
-    ///   minimum chain work, and tip-age reads (`best_block_time`) report
-    ///   the applied tip, never a fresher-but-unapplied header.
-    /// INVARIANT: the view's network never changes after construction.
     #[must_use]
     pub fn new(block_tree: BlockTreeReader, applied_tip: TipReader, network: Network) -> Self {
         Self {
@@ -111,14 +82,12 @@ impl ActiveChainQuery {
         }
     }
 
-    /// Returns `self` with a durable body source for metadata-only headers.
     #[must_use]
     pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
         self.block_body_source = Some(source);
         self
     }
 
-    /// Attaches the existing optional derived-index query owner.
     #[must_use]
     pub fn with_compact_filters(
         mut self,
@@ -128,20 +97,12 @@ impl ActiveChainQuery {
         self
     }
 
-    /// Attaches the early-announce body rendezvous so `getblocktxn` and
-    /// compact `getdata` for the most recently announced hash answer from
-    /// the held body before the store carries it.
     #[must_use]
     pub fn with_recent_block(mut self, recent: RecentBlockSlot) -> Self {
         self.recent = recent;
         self
     }
 
-    /// Resolve a hash against one tree view and the applied frontier. Header
-    /// selection alone is not evidence of body validation. Off-chain inventory
-    /// replies require a count recorded by application (or authenticated restore)
-    /// and Core's timestamp/proof-equivalent age checks. Shallow getblocktxn
-    /// follows Core's `HAVE_DATA` path; the body source proves data availability.
     fn serving_position(&self, hash: BlockHash, policy: ServingPolicy) -> Option<(u32, u32)> {
         let tree = self.block_tree.read();
         let tip = self.applied_tip.load_full()?;
@@ -174,10 +135,6 @@ impl ActiveChainQuery {
         allowed.then_some((tip.height, node.height))
     }
 
-    /// Load the exact (height, hash) body outside the tree lock, validate its
-    /// encoding and hash, then recheck eligibility and applied depth. A reorg
-    /// may retain a servable stale block; removal, invalidation or aging out
-    /// during I/O must still refuse it. Announcements remain active-only.
     fn load_block(
         &self,
         height: u32,
@@ -221,7 +178,6 @@ impl ActiveChainQuery {
         (current_height == height).then(|| (bytes::Bytes::from(bytes), tip_height))
     }
 
-    /// The stored body as a `block` payload, witnesses retained.
     fn full_block_response(
         &self,
         height: u32,
@@ -232,8 +188,6 @@ impl ActiveChainQuery {
             .map(|(body, _)| Message::BlockPayload(body))
     }
 
-    /// The held early-announced body for `hash`, when the most recent early
-    /// send was this block.
     fn recent_body(&self, hash: BlockHash) -> Option<Arc<Block>> {
         let (slot_hash, body) = self.recent.load()?;
         (BlockHash::from(slot_hash) == hash).then_some(body)
@@ -268,9 +222,7 @@ impl ActiveChainQuery {
         false
     }
 
-    /// One `blocktxn` reply from consensus-encoded body bytes under the
     /// peer's servable BIP152 profile. Shared by the stored path and the
-    /// held early-announced body.
     fn blocktxn_message(
         payload: &[u8],
         request: &BlockTransactionsRequest,
@@ -329,17 +281,11 @@ impl ChainQuery for ActiveChainQuery {
             return Ok(FilterServing::Done);
         }
         let stop_hash = Hash256::from_le_bytes(stop.as_byte_array());
-        // Filters follow validated, applied blocks even while a competing
-        // headers-only branch leads. The index query rechecks its snapshot.
         let end = self.applied_tip.load_full().and_then(|tip| {
             self.block_tree
                 .read()
                 .active_height_of(tip.tip_id, stop_hash)
         });
-        // A resumed remainder continues the range whose prefix was already
-        // sent. If the stop hash no longer ends at the same height (a reorg,
-        // or a stop hash that left the active chain) the rest cannot be
-        // spliced onto that prefix: the range is interrupted for good.
         if let Some(expected_end) = pending.expected_end
             && end != Some(expected_end)
         {
@@ -389,13 +335,6 @@ impl ChainQuery for ActiveChainQuery {
         if let Some(error) = send_error {
             return Err(error);
         }
-        // Never replay a sent prefix or silently abandon its tail. A halt at
-        // the outbound gate after a prefix was sent is not an interruption:
-        // the remainder starts after the prefix, keeps the end the prefix was
-        // computed against, and resumes without repeating anything sent. Only
-        // a range that stopped short without a halt is interrupted for good.
-        // A completed range remains complete even if the final snapshot check
-        // reports Retry.
         if emitted > 0 && halted {
             return Ok(FilterServing::Pending(FilterRequest {
                 request: Message::GetCFilters(GetCFilters {
@@ -415,12 +354,6 @@ impl ChainQuery for ActiveChainQuery {
         {
             return Ok(FilterServing::Pending(pending.clone()));
         }
-        // A resumed remainder has already sent a prefix of the range, so a
-        // pass that stops before its first filter for any reason other than
-        // backpressure or a snapshot retry (the index no longer answers, a
-        // storage error, or the tip moved under the snapshot) abandons the
-        // tail: the range is interrupted for good. A first attempt keeps
-        // BIP157's no-answer behavior below.
         if emitted == 0 && pending.expected_end.is_some() {
             return Err(PeerError::Io(std::io::Error::other(
                 "compact filter range interrupted",
@@ -451,12 +384,6 @@ impl ChainQuery for ActiveChainQuery {
         stop_hash: BlockHash,
         limit: usize,
     ) -> Vec<Header> {
-        // Locator-based replies follow the applied chain, not the header-best
-        // chain: Core only serves validated headers, and during a reorg the
-        // applied tip may sit off best while bodies catch up. The snapshot is
-        // validated under the tree lock; on mismatch return empty, never fall
-        // back to header-best traversal. The empty-locator single-header
-        // direct lookup stays on the header-best chain, unchanged.
         if limit == 0 {
             return Vec::new();
         }
@@ -515,11 +442,6 @@ impl ChainQuery for ActiveChainQuery {
         headers
     }
 
-    /// The applied tip's header time. Limited-peer admission derives the
-    /// local depth from it, so it must read the fully-applied tip the
-    /// download policy serves, not the header tip: fresh-but-unapplied
-    /// headers would make a lagging node look current and admit
-    /// `NODE_NETWORK_LIMITED` peers it cannot download bodies from.
     fn best_block_time(&self) -> Option<u32> {
         let tip = self.applied_tip.load_full()?;
         let tree = self.block_tree.read();
@@ -571,11 +493,6 @@ impl ChainQuery for ActiveChainQuery {
             let Some((tip_height, height)) =
                 self.serving_position(request.hash(), ServingPolicy::Inventory)
             else {
-                // A pre-commit announcement has no serving position yet: the
-                // tree names no applied height and no chain count exists. Its
-                // held body still answers compact requests, under the same
-                // headroom gate as every other serve. Full requests stay
-                // not-found: only the compact race may use the held body.
                 if let BlockRequest::Compact(hash) = request
                     && let Some(version) = compact_version
                     && let Some(body) = self.recent_body(hash)
@@ -607,24 +524,7 @@ impl ChainQuery for ActiveChainQuery {
         Ok(outcome)
     }
 
-    /// PRE: `request` carries decoded absolute, strictly increasing
-    /// transaction indexes for one block. `compact_version` is the peer's
     /// servable BIP152 profile.
-    /// POST: the held most-recent early-announced body answers its indexed
-    /// transactions first, before any depth or eligibility check (Core 31.1
-    /// `net_processing.cpp:4342-4351` serves its most-recent block the same
-    /// way). Disk-backed and deep requests use the fallback instead: the
-    /// `blocktxn` reply for a block within `MAX_BLOCKTXN_DEPTH` of the
-    /// active tip, encoded for `compact_version` (v1 strips witnesses, any
-    /// other profile keeps them), the whole witness-bearing `block` for a
-    /// deeper one, and `None` for a block this node cannot serve or while
-    /// the `headroom` gate is saturated; `Err` reports an index past the end
-    /// of the body.
-    /// INVARIANT: deep requests use full-block inventory policy, including
-    /// stale-block age/validation restrictions; shallow stored stale blocks
-    /// remain reconstructible (Core 31.1 `net_processing.cpp:4333-4391`).
-    /// `headroom` is evaluated immediately before loading, so a saturated
-    /// gate materializes no body.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -747,7 +647,6 @@ impl ChainQuery for ActiveChainQuery {
     }
 }
 
-/// Clear every witness in a `blocktxn` response for the v1 serving profile.
 fn strip_witnesses(transactions: &mut BlockTransactions) {
     for tx in &mut transactions.transactions {
         for input in &mut tx.input {
@@ -757,7 +656,6 @@ fn strip_witnesses(transactions: &mut BlockTransactions) {
 }
 
 impl ActiveChainQuery {
-    /// Builds one compact response under the caller's announcement or
     /// inventory policy at the negotiated BIP152 version.
     fn compact_block_for(
         &self,
@@ -766,8 +664,6 @@ impl ActiveChainQuery {
         compact_version: Option<u64>,
         policy: ServingPolicy,
     ) -> Option<Message> {
-        // The held early-announced body answers before the store, for both
-        // the announcement race and compact `getdata`.
         if let Some(body) = self.recent_body(hash) {
             return cmpct_message_from_native(&body, compact_version?);
         }
@@ -788,8 +684,6 @@ impl ActiveChainQuery {
         }))
     }
 
-    /// The reply for one resolved block request, or `None` when its body is
-    /// unavailable and the item belongs in `not_found`.
     fn response_for(
         &self,
         request: BlockRequest,
@@ -814,10 +708,6 @@ impl ActiveChainQuery {
     }
 }
 
-/// Bitcoin Core v31.1 `BlockRequestAllowed` and `GetBlockProofEquivalentTime`
-/// at commit 9be056a8a72b624dae9623b2f7bded92c2a21c91. The proof-time difference
-/// is signed: a block with at least best-header work is not too old. Overflow
-/// in the positive work-time product fails closed, like Core's int64 saturation.
 fn stale_block_is_recent(
     tree: &BlockTree,
     node: &bitcoin_rs_chain::BlockTreeNode,
@@ -842,12 +732,10 @@ fn stale_block_is_recent(
             .is_some_and(|scaled| scaled / work < ChainWork::from(STALE_RELAY_AGE_LIMIT))
 }
 
-/// Whether one block sits deeper below the active tip than `limit`.
 const fn beyond_depth(tip_height: u32, height: u32, limit: u32) -> bool {
     tip_height.saturating_sub(height) > limit
 }
 
-/// Which hash-addressed body one block-typed inventory item asks for.
 #[derive(Clone, Copy, Debug)]
 enum BlockRequest {
     Full {
@@ -889,9 +777,6 @@ fn fresh_nonce() -> u64 {
         .finish()
 }
 
-/// Builds one `cmpctblock` message from a native block already in hand,
-/// without a store lookup: the early-announce path relays a block whose body
-/// is not yet durable. The single build is shared by every eligible peer;
 /// `None` for a non-BIP152 version or an unencodable block.
 pub(crate) fn cmpct_message_from_native(block: &Block, version: u64) -> Option<Message> {
     let version = u32::try_from(version).ok()?;
@@ -990,7 +875,6 @@ mod tests {
         Ok((outcome, blocks.into_inner()))
     }
 
-    /// A single canned basic filter payload shared by range-serving tests.
     fn canned_filter() -> bitcoin_rs_index::BasicFilter {
         bitcoin_rs_index::BasicFilter {
             filter: vec![0],
@@ -999,7 +883,6 @@ mod tests {
         }
     }
 
-    /// A `getcfilters` range request for `stop` starting at `start_height`.
     fn getcfilters_request(stop: WireBlockHash, start_height: u32) -> Message {
         Message::GetCFilters(bitcoin::p2p::message_filter::GetCFilters {
             filter_type: 0,
@@ -1008,7 +891,6 @@ mod tests {
         })
     }
 
-    /// A `getcfheaders` range request for `stop` starting at `start_height`.
     fn getcfheaders_request(stop: WireBlockHash, start_height: u32) -> Message {
         Message::GetCFHeaders(bitcoin::p2p::message_filter::GetCFHeaders {
             filter_type: 0,
@@ -1017,7 +899,6 @@ mod tests {
         })
     }
 
-    /// A `getcfcheckpt` request stopping at `stop`.
     fn getcfcheckpt_request(stop: WireBlockHash) -> Message {
         Message::GetCFCheckpt(bitcoin::p2p::message_filter::GetCFCheckpt {
             filter_type: 0,
@@ -1025,9 +906,6 @@ mod tests {
         })
     }
 
-    /// The three compact-filter requests covering one range: filters,
-    /// headers, and checkpoints. `stop` ends the filter/header ranges while
-    /// `checkpoint_stop` ends the checkpoint range.
     fn filter_range_requests(
         stop: WireBlockHash,
         checkpoint_stop: WireBlockHash,
@@ -1040,9 +918,6 @@ mod tests {
         ]
     }
 
-    /// The parked remainder after one filter went out: the same range
-    /// narrowed to resume after the sent prefix, pinned to the end the
-    /// prefix was computed against.
     fn parked_cfilter_remainder(
         stop: WireBlockHash,
         resumed_start: u32,
@@ -1054,7 +929,6 @@ mod tests {
         }
     }
 
-    /// Serves `request` and collects every emitted filter payload.
     fn collect_filter_responses(
         query: &ActiveChainQuery,
         request: &FilterRequest,
@@ -1068,9 +942,6 @@ mod tests {
         Ok((outcome, responses))
     }
 
-    /// The complete two-item range every unsent backpressured request must
-    /// deliver on retry: two filters, two header hashes, or two checkpoint
-    /// headers.
     fn assert_complete_filter_range(request: &Message, responses: &[Message]) {
         match (request, responses) {
             (Message::GetCFilters(_), [Message::CFilter(_), Message::CFilter(_)]) => {}
@@ -1084,8 +955,6 @@ mod tests {
         }
     }
 
-    /// Invalid decoded requests are ignored before invoking the query engine.
-    /// Core 31.1 disconnects them; retaining the connection is deliberate.
     #[test]
     fn invalid_compact_filter_requests_are_ignored_without_querying_the_index()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1121,7 +990,6 @@ mod tests {
                 (0, 2001, stop),
                 (0, 0, stop),
             ] {
-                // Checkpoints have no start/range limit; these two cases are valid.
                 if command == 2 && kind == 0 && stop != WireBlockHash::all_zeros() {
                     continue;
                 }
@@ -1154,8 +1022,6 @@ mod tests {
         Ok(())
     }
 
-    /// Publication lag defers without blocking; completed responses are never
-    /// replayed and an interrupted prefix terminates the connection.
     #[test]
     fn compact_filters_wait_for_publication_without_replaying_sent_payloads()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1268,8 +1134,6 @@ mod tests {
                 step: u32,
                 emit: &mut dyn FnMut(Hash256, BasicFilter) -> bool,
             ) -> Result<Option<[u8; 32]>, TxQueryError> {
-                // Heights `start..=1` for a plain range; the two checkpoint
-                // heights otherwise.
                 let count = if step == 1 { 2 - start } else { 2 };
                 for _ in 0..count {
                     if !emit(stop, canned_filter()) {
@@ -1284,8 +1148,6 @@ mod tests {
         let checkpoint_stop = wire_block_hash(headers[2000].compute_hash());
         let query = query_with(headers)?.with_compact_filters(Some(Arc::new(Filters)));
         for request in filter_range_requests(stop, checkpoint_stop, 0) {
-            // Exhaust headroom at the entry gate, before the first item, or
-            // after one item. Header/checkpoint buffers have not reached wire.
             for allowed in 0_u8..=2 {
                 let remaining = Cell::new(allowed);
                 let mut responses = Vec::new();
@@ -1303,16 +1165,11 @@ mod tests {
                     },
                 );
                 if allowed == 2 && matches!(request, Message::GetCFilters(_)) {
-                    // One filter went out before the gate closed: the rest is
-                    // a remainder that starts after it, pinned to the end the
-                    // prefix was computed against. It is not an interruption.
                     let FilterServing::Pending(remainder) = result? else {
                         panic!("a halt after a sent prefix must park the remainder");
                     };
                     assert_eq!(responses.len(), 1);
                     assert_eq!(remainder, parked_cfilter_remainder(stop, 1, 1));
-                    // Resuming completes the range without replaying the
-                    // filter already sent.
                     let (outcome, delivered) =
                         collect_filter_responses(&query, &remainder, &|| true)?;
                     responses.extend(delivered);
@@ -1416,15 +1273,12 @@ mod tests {
         Ok(())
     }
 
-    /// Backpressure parks a remainder, but a range the index itself stops
-    /// short of, and a remainder whose chain moved under it, stay errors.
     #[test]
     fn compact_filter_interruptions_that_are_not_backpressure_stay_errors()
     -> Result<(), Box<dyn std::error::Error>> {
         use bitcoin::p2p::message_filter::GetCFilters;
         use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
 
-        /// Emits one filter and then reports the range finished.
         struct ShortIndex;
         impl CompactFilterQuery for ShortIndex {
             fn block_filter(&self, _: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
@@ -1465,8 +1319,6 @@ mod tests {
             stop_hash: stop,
         });
 
-        // One of two filters went out and the index stopped, with no gate
-        // involved: the range is interrupted, not parked.
         let mut sent = Vec::new();
         let early = query.serve_compact_filters(&FilterRequest::new(request), &|| true, &mut |m| {
             sent.push(m);
@@ -1475,8 +1327,6 @@ mod tests {
         assert!(matches!(early, Err(PeerError::Io(_))));
         assert_eq!(sent.len(), 1);
 
-        // A remainder pinned to an end the chain does not have fails before
-        // it reserves or sends anything.
         let moved = FilterRequest {
             request: Message::GetCFilters(GetCFilters {
                 filter_type: 0,
@@ -1492,7 +1342,6 @@ mod tests {
         );
         assert!(matches!(resumed, Err(PeerError::Io(_))));
 
-        // The same remainder pinned to the real end completes.
         let matching = FilterRequest {
             expected_end: Some(1),
             ..moved
@@ -1509,11 +1358,6 @@ mod tests {
         Ok(())
     }
 
-    /// A remainder resumes a range whose prefix already went out, so an index
-    /// that then stops before its first filter, with no gate involved, may not
-    /// end the request as `Done`: the tail would be abandoned without an
-    /// error. A first attempt keeps the no-answer behavior, and backpressure
-    /// or a snapshot retry keeps the request pending, unchanged.
     #[test]
     fn a_resumed_filter_range_that_stops_before_its_first_filter_is_interrupted()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1522,7 +1366,6 @@ mod tests {
             BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError, TxUnavailableCause,
         };
 
-        /// Reports `outcome` without ever delivering a filter.
         struct StopsAtOnce(Result<Option<[u8; 32]>, TxQueryError>);
         impl CompactFilterQuery for StopsAtOnce {
             fn block_filter(&self, _: Hash256) -> Result<Option<BasicFilter>, TxQueryError> {
@@ -1573,7 +1416,6 @@ mod tests {
             })
         };
 
-        // Not published, unreadable, or a tip that moved under the snapshot.
         for outcome in [
             Ok(None),
             Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
@@ -1595,8 +1437,6 @@ mod tests {
             );
         }
 
-        // A snapshot retry or a closed gate keeps the remainder pending, and
-        // unchanged.
         assert_eq!(
             serve(Err(TxQueryError::Retry), &resumed, true)?,
             FilterServing::Pending(resumed.clone())
@@ -2406,8 +2246,6 @@ mod tests {
         Ok(())
     }
 
-    /// A chain view over `headers` whose body source serves `block` at
-    /// `height`.
     fn chain_at(
         headers: &[Header],
         height: u32,
@@ -2421,7 +2259,6 @@ mod tests {
         Ok(query_with(headers.to_vec())?.with_block_body_source(Arc::new(source)))
     }
 
-    /// The block at `height` of a `seed_headers` chain, with two transactions.
     fn block_at(headers: &[Header], height: u32) -> Result<Block, Box<dyn std::error::Error>> {
         let index = usize::try_from(height)?;
         Ok(Block {
@@ -2430,8 +2267,6 @@ mod tests {
         })
     }
 
-    /// The reply to a `getblocktxn` for transaction index 1 of the block at
-    /// `height`.
     fn blocktxn_reply(
         headers: &[Header],
         height: u32,
@@ -2447,8 +2282,6 @@ mod tests {
             .ok_or("an active body is always answered")?)
     }
 
-    /// The reply to a compact `getdata` for the block at `height`, negotiated
-    /// at v2.
     fn compact_reply(
         headers: &[Header],
         height: u32,
@@ -2464,7 +2297,6 @@ mod tests {
         Ok(served.pop().ok_or("exactly one reply")?)
     }
 
-    /// The body a served full-block payload carries, witnesses included.
     fn payload_body(payload: &bytes::Bytes) -> Result<RegistryBlock, Box<dyn std::error::Error>> {
         Ok(bitcoin::consensus::encode::deserialize::<RegistryBlock>(
             payload.as_ref(),
@@ -2839,8 +2671,6 @@ mod tests {
         }
     }
 
-    /// A query over `tree` whose applied tip publishes the tree tip:
-    /// fixture trees mark every node `Active`, so the two tips coincide.
     fn query_over(tree: BlockTree, network: Network) -> ActiveChainQuery {
         let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
         let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
@@ -2855,8 +2685,6 @@ mod tests {
         source: Arc<CountingBodySource>,
     }
 
-    /// A previously applied block at height one and a different applied winner
-    /// at the same height. Counts are recorded through the chain owner's API.
     fn stale_query(depth: u32) -> Result<StaleFixture, Box<dyn std::error::Error>> {
         let headers = seed_headers(2);
         let stale = block_at(&headers, 1)?;
@@ -3010,9 +2838,6 @@ mod tests {
     #[test]
     fn stale_inventory_requires_validation_and_core_age_bounds()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Core 31.1 BlockRequestAllowed uses strict < 30 days independently
-        // for timestamp age and proof-equivalent age; regtest work is 2 and
-        // spacing 600s, so 4320 blocks is exactly 30 days.
         for (time_age, work_blocks, validated, allowed) in [
             (2_591_999, 4_319, true, true),
             (2_592_000, 4_319, true, false),
@@ -3046,8 +2871,6 @@ mod tests {
             )?;
             assert_eq!(outcome.not_found.is_empty(), allowed);
             assert_eq!(source.loads.load(Ordering::Relaxed), usize::from(allowed));
-            // Shallow HAVE_DATA requests intentionally do not inherit the
-            // inventory age/validation filter (Core GETBLOCKTXN).
             assert!(
                 query
                     .block_transactions(
@@ -3061,7 +2884,6 @@ mod tests {
                     .is_some()
             );
         }
-        // Deep getblocktxn takes inventory policy, including stale-age refusal.
         let StaleFixture {
             query,
             stale,
@@ -3219,8 +3041,6 @@ mod tests {
                 source,
                 ..
             } = stale_query(1)?;
-            // Capture the old applied tip while the competing headers already
-            // lead. The body read publishes the reorg, invalidation, or age change.
             {
                 let tree = query.block_tree.read();
                 let id = tree.lookup(stale.block_hash().into()).ok_or("stale")?;
@@ -3387,9 +3207,6 @@ mod tests {
         headers.iter().map(Header::compute_hash).collect()
     }
 
-    /// A `getblocktxn` and a compact `getdata` for the held early-announced
-    /// hash answer from the held body with no body source attached: the
-    /// replies cannot come from the store because there is none.
     #[test]
     fn held_early_body_answers_before_the_store() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(2);
@@ -3420,8 +3237,6 @@ mod tests {
             matches!(compact, Message::CmpctBlock(_)),
             "expected CmpctBlock from the held body, got {compact:?}"
         );
-        // An unservable BIP152 version answers nothing from the held body,
-        // directly or through the inventory path.
         assert!(
             ChainQuery::compact_block_for(&query, 1, block.block_hash(), Some(99)).is_none(),
             "an invalid compact version must not serve the held body"
@@ -3438,7 +3253,6 @@ mod tests {
             invalid_served.is_empty(),
             "an invalid version serves nothing"
         );
-        // An unknown hash still finds nothing without a store.
         let missing = bitcoin::bip152::BlockTransactionsRequest {
             block_hash: wire_block_hash(BlockHash::default()),
             indexes: vec![0],
@@ -3451,16 +3265,10 @@ mod tests {
         Ok(())
     }
 
-    /// A compact `getdata` for a held body with no serving position is served
-    /// from the held slot instead of `not_found`: a pre-commit announcement
-    /// names no applied height and carries no chain count yet. Full requests
-    /// for the same hash stay not-found, and a saturated gate halts first.
     #[test]
     fn held_body_without_serving_position_answers_compact_getdata()
     -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(2);
-        // Retarget the held block away from every tree header: the tree names
-        // no height for it, so no serving position is reachable.
         let mut block = block_at(&headers, 1)?;
         block.header.nonce = 0x7a7a_7a7a;
         let hash = block.block_hash();
@@ -3485,7 +3293,6 @@ mod tests {
             served[0]
         );
 
-        // The headroom gate still applies to the held path.
         let halted =
             query.serve_inventory_blocks(&[compact], Some(2), &|| false, &mut |_| Ok(()))?;
         assert!(halted.halted);
@@ -3495,7 +3302,6 @@ mod tests {
             "a headroom halt must not report missing inventory"
         );
 
-        // Full requests cannot use the held body.
         let mut full_served = Vec::new();
         let outcome = query.serve_inventory_blocks(&[full], Some(2), &|| true, &mut |message| {
             full_served.push(message);
@@ -3510,8 +3316,6 @@ mod tests {
         Ok(())
     }
 
-    /// A held body the tree marked invalid stays `not_found` on the
-    /// inventory path: the slot never resurrects an invalid block.
     #[test]
     fn held_invalid_body_is_not_served_from_inventory() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(2);
@@ -3538,8 +3342,6 @@ mod tests {
         Ok(())
     }
 
-    /// A held body for a block the inventory policy already rejected as
-    /// stale stays `not_found`: the slot follows the same age gate.
     #[test]
     fn held_stale_body_past_policy_is_not_served_from_inventory()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3568,10 +3370,6 @@ mod tests {
         Ok(())
     }
 
-    /// A held body whose header the tree already holds as the applied
-    /// tip's direct child answers compact `getdata` from the slot: the
-    /// early-announce race fires before commit, so no chain count exists
-    /// yet and no serving position is reachable.
     #[test]
     fn held_tip_child_body_is_served_from_inventory() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(3);
@@ -3600,8 +3398,6 @@ mod tests {
         Ok(())
     }
 
-    /// A held tip child older than the stale relay bound stays `not_found`:
-    /// the slot follows the same age gate as every other stale serve.
     #[test]
     fn held_stale_tip_child_is_not_served_from_inventory() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -3638,9 +3434,6 @@ mod tests {
         Ok(())
     }
 
-    /// A held body for a deep applied block answers the full block, not
-    /// a `cmpctblock`: depth routing runs before the compact path even
-    /// with the slot occupied.
     #[test]
     fn held_deep_body_uses_full_block_inventory_policy() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(8);

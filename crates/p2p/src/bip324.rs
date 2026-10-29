@@ -1,9 +1,4 @@
 //! BIP324 v2 transport.
-//!
-//! The `ElligatorSwift` key agreement, the HKDF key schedule, the
-//! forward-secure ciphers that seal and open packets, the handshake state
-//! machine, resumable packet reads, and the message type encoding. Nothing
-//! here owns a socket: [`crate::transport`] drives it over a connection.
 
 mod cipher;
 mod handshake;
@@ -17,28 +12,21 @@ pub(crate) use packet::SendCipher;
 pub(crate) use reader::{PacketReader, is_poll_timeout};
 
 /// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
-/// retried with all progress kept; every other error ends the connection.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TransportError {
     /// No garbage terminator within the 4095 bytes of garbage BIP324 allows.
     #[error("BIP324 garbage terminator not found within the garbage limit")]
     TerminatorNotFound,
-    /// A responder received a v1 `version` header for another network.
     #[error("peer sent a v1 version header for another network")]
     WrongNetworkV1,
-    /// A packet declared more contents than a peer may send.
     #[error("BIP324 packet contents of {0} bytes exceed the receive limit")]
     PacketTooLarge(usize),
-    /// A packet could not be sealed or failed authentication.
     #[error(transparent)]
     Packet(#[from] packet::PacketError),
-    /// HKDF refused an output length.
     #[error("BIP324 key schedule failed: {0}")]
     KeySchedule(hkdf::InvalidLength),
-    /// The handshake was advanced after it finished.
     #[error("BIP324 handshake already completed")]
     Completed,
-    /// The stream failed, or its poll interval elapsed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -58,7 +46,6 @@ mod vector_tests {
 
     type TestResult = Result<(), Box<dyn Error>>;
 
-    /// One upstream CSV file from `tests/data/bip324/`.
     struct Csv {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
@@ -94,8 +81,6 @@ mod vector_tests {
         key.x_only_public_key().0.serialize()
     }
 
-    /// Opens `packet` on the receiving side, returning its ignore bit and
-    /// contents.
     fn open(
         receiver: &mut Session,
         aad: &[u8],
@@ -138,7 +123,6 @@ mod vector_tests {
                 Ok(<[u8; 16]>::from_hex(value(name)?)?)
             };
 
-            // The key agreement inputs decode to the points the BIP records.
             let their_key = PublicKey::from_ellswift(theirs);
             assert_eq!(
                 x_only(PublicKey::from_secret_key(&secp, &secret_key)),
@@ -176,7 +160,6 @@ mod vector_tests {
                 sender.send_garbage_terminator
             );
 
-            // `in_idx` empty packets precede the vector packet.
             for _ in 0..value("in_idx")?.parse::<usize>()? {
                 let filler = sender.send.seal(&[], &[], false)?;
                 assert_eq!(open(&mut receiver, &[], filler)?, (false, Vec::new()));

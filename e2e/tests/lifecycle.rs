@@ -1,5 +1,4 @@
 //! Node lifecycle E2E: startup identity, readiness, graceful restart,
-//! and config rejection.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -8,10 +7,8 @@ use std::time::Duration;
 
 use bitcoin_rs_e2e::helpers::{genesis_block, mine_bare_blocks, submit_genesis};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, json};
 
-/// The node becomes ready on an empty datadir, reports the regtest
-/// genesis as its tip, and answers the identity RPCs.
 #[test]
 fn startup_reports_regtest_identity() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -56,8 +53,6 @@ fn node_info_rpcs_answer() -> Result<()> {
     node.stop()
 }
 
-/// A mined tip survives SIGTERM and is visible after a clean restart
-/// over the same datadir.
 #[test]
 fn restart_preserves_chain_tip() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -77,13 +72,8 @@ fn restart_preserves_chain_tip() -> Result<()> {
     restarted.stop()
 }
 
-/// Broken startup configuration must exit the process instead of yielding a
-/// half-configured node: unparseable config, an unknown `--network`, and an
-/// RPC port already held by someone else.
 #[test]
 fn startup_rejects_broken_configuration() -> Result<()> {
-    // The squatter holds the contested port for the whole table so the bind
-    // case cannot accidentally succeed.
     let squatter = std::net::TcpListener::bind("127.0.0.1:0")?;
     let held = squatter.local_addr()?;
     let timeout = Some(Duration::from_secs(30));

@@ -1,8 +1,4 @@
 //! Minimal SOCKS5 client (RFC 1928, username/password auth per RFC 1929).
-//!
-//! Overlay hostnames are carried as SOCKS domain names (`ATYP=0x03`) and
-//! are resolved by the proxy, never by the system resolver. There is no
-//! direct-TCP fallback: every failure is a transport error.
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
@@ -12,12 +8,9 @@ use bitcoin::secp256k1::rand::{RngCore, thread_rng};
 
 use crate::endpoint::DialFailure;
 
-/// Target of a SOCKS `CONNECT`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SocksTarget {
-    /// Literal IP target (no name resolution anywhere).
     Ip(SocketAddr),
-    /// Domain target resolved by the proxy (`ATYP=0x03`).
     Domain(String, u16),
 }
 
@@ -97,8 +90,6 @@ fn random_credentials() -> ([u8; 16], [u8; 16]) {
 }
 
 fn authenticate_isolated(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
-    // The handshake must not offer or accept SOCKS no-auth (0x00).
-    // Only RFC1929 username/password auth (0x02) is offered.
     write_all_deadline(stream, &[0x05, 0x01, 0x02], deadline)?;
     let mut selection = [0u8; 2];
     read_exact_deadline(stream, &mut selection, deadline)?;
@@ -108,13 +99,9 @@ fn authenticate_isolated(stream: &mut TcpStream, deadline: Instant) -> Result<()
         )));
     }
     match selection[1] {
-        0x00 => {
-            // Isolation-required dials must not silently downgrade
-            // to an unauthenticated, non-isolated stream.
-            Err(DialFailure::Transport(invalid(
-                "socks proxy selected no-authentication for an isolation-required dial",
-            )))
-        }
+        0x00 => Err(DialFailure::Transport(invalid(
+            "socks proxy selected no-authentication for an isolation-required dial",
+        ))),
         0x02 => {
             let (user, password) = random_credentials();
             let mut auth = [0u8; AUTH_LEN];
@@ -170,8 +157,6 @@ fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), D
             reply_kind(head[1]),
             format!("socks connect failed with reply code {}", head[1]),
         );
-        // Only 0x05 (ConnectionRefused) is genuine peer evidence;
-        // route/network unreachable, TTL expired, and local proxy failures are Transport.
         return Err(match head[1] {
             0x05 => DialFailure::PeerUnreachable(error),
             _ => DialFailure::Transport(error),
@@ -196,14 +181,6 @@ fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), D
     Ok(())
 }
 
-/// Dial `target` through the SOCKS5 proxy at `proxy`.
-///
-/// When `isolate` is set, RFC 1929 authentication with fresh per-dial
-/// credentials is required (Tor stream isolation). Otherwise no-auth is
-/// used. The whole exchange is bounded by `timeout` socket deadlines.
-/// Local proxy failures are [`DialFailure::Transport`]; only a proxy
-/// report that the peer itself is unreachable is
-/// [`DialFailure::PeerUnreachable`].
 pub(crate) fn socks_connect(
     proxy: SocketAddr,
     target: &SocksTarget,
@@ -255,8 +232,6 @@ pub(crate) fn socks_connect(
 
     read_connect_reply(&mut stream, deadline)?;
 
-    // The bridged stream carries the connection from here; per-socket
-    // deadlines were for the handshake only.
     stream
         .set_read_timeout(None)
         .map_err(DialFailure::Transport)?;
@@ -294,8 +269,6 @@ mod tests {
         fake_socks(false, connect_reply)
     }
 
-    /// One fake SOCKS server exchange. Returns the exact request bytes it
-    /// received for the CONNECT command.
     fn fake_socks(
         auth_required: bool,
         connect_reply: u8,
@@ -358,7 +331,6 @@ mod tests {
             let _ = tx.send(full);
             if connect_reply == 0x00 {
                 stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x8d])?;
-                // Keep the bridged stream open briefly.
                 std::thread::sleep(Duration::from_millis(200));
             } else {
                 let mut reply = vec![0x05, connect_reply, 0x00, 0x01];
@@ -395,8 +367,6 @@ mod tests {
     #[test]
     fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
     -> Result<(), Box<dyn std::error::Error>> {
-        // Fake proxy that offers only no-auth selection even when the
-        // client offered credentials: the dial must fail before CONNECT.
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let proxy = listener.local_addr()?;
         let (tx, rx) = mpsc::channel();
@@ -409,7 +379,6 @@ mod tests {
             stream.read_exact(&mut methods)?;
             assert_eq!(methods, vec![0x02], "isolation dial must offer only 0x02");
             stream.write_all(&[0x05, 0x00])?;
-            // Any further byte would be a CONNECT or auth attempt.
             let mut byte = [0u8; 1];
             let extra = stream.read(&mut byte).unwrap_or(0);
             let _ = tx.send(extra);
@@ -482,8 +451,6 @@ mod tests {
     #[test]
     fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std::error::Error>>
     {
-        // The onion name is intentionally unresolvable by any system
-        // resolver; with a refusing proxy the dial must fail at the proxy.
         let (proxy, _rx) = fake_socks_auth(0x05)?;
         let onion = format!("{}.onion", "z".repeat(56));
         let Err(error) = socks_connect(
@@ -512,7 +479,6 @@ mod tests {
             stream.read_exact(&mut head)?;
             let mut rest = [0u8; 6];
             stream.read_exact(&mut rest)?;
-            // Reply with VER=5, REP=0, RSV=1 (nonzero!), ATYP=1
             stream.write_all(&[0x05, 0x00, 0x01, 0x01, 127, 0, 0, 1, 0x20, 0x8d])?;
             Ok(())
         });
@@ -561,21 +527,18 @@ mod tests {
             let (mut stream, _) = listener.accept()?;
             let mut greeting = [0u8; 3];
             let _ = stream.read_exact(&mut greeting);
-            // Delay 800ms before greeting reply: exceeds 200ms deadline with generous margin.
             std::thread::sleep(Duration::from_millis(800));
             let _ = stream.write_all(&[0x05, 0x00]);
             let mut head = [0u8; 4];
             let _ = stream.read_exact(&mut head);
             let mut rest = [0u8; 6];
             let _ = stream.read_exact(&mut rest);
-            // Delay another 800ms before connect reply
             std::thread::sleep(Duration::from_millis(800));
             let _ = stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x8d]);
             Ok(())
         });
         let target: SocketAddr = "127.0.0.1:8333".parse()?;
         let started = Instant::now();
-        // Total timeout 200ms: each step takes 800ms, so total exceeds absolute deadline.
         let Err(error) = socks_connect(
             proxy,
             &SocksTarget::Ip(target),
@@ -613,15 +576,11 @@ mod tests {
             let (mut stream, _) = listener.accept()?;
             let mut greeting = [0u8; 3];
             let _ = stream.read_exact(&mut greeting);
-            // Send greeting reply immediately so greeting phase finishes in <1ms.
             let _ = stream.write_all(&[0x05, 0x00]);
             let mut head = [0u8; 4];
             let _ = stream.read_exact(&mut head);
             let mut rest = [0u8; 6];
             let _ = stream.read_exact(&mut rest);
-            // Trickle connect reply 1 byte at a time every 80ms.
-            // Each individual inter-byte pause is well below the 200ms total timeout,
-            // but cumulatively (10 bytes = 800ms) they exceed 200ms.
             for byte in [0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x20, 0x8d] {
                 std::thread::sleep(Duration::from_millis(80));
                 if stream.write_all(&[byte]).is_err() {
@@ -632,8 +591,6 @@ mod tests {
         });
         let target: SocketAddr = "127.0.0.1:8333".parse()?;
         let started = Instant::now();
-        // Total timeout 200ms: after 2 bytes (160ms), remaining budget is ~40ms.
-        // The 3rd byte delayed by 80ms must trip the deadline.
         let Err(error) = socks_connect(
             proxy,
             &SocksTarget::Ip(target),

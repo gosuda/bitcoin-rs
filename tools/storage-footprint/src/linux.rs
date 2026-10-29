@@ -1,9 +1,3 @@
-//! Read-only, single-pass measurement of a stopped node's data directory.
-//!
-//! In `bitcoin-rs-storage-allocation-v1`, the `namespaces` key `"."` accounts
-//! only for the root directory itself. Other keys account for each top-level
-//! entry and its descendants, with hard-linked inodes counted only once.
-
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -45,8 +39,6 @@ pub(super) struct Report {
     namespaces: BTreeMap<String, Bytes>,
 }
 
-/// Datadirs are only a few levels deep; the cap keeps a mis-pointed root
-/// from recursing without bound and exhausting the stack.
 const MAX_DEPTH: u32 = 32;
 
 pub(super) fn measure(root: &Path) -> io::Result<Report> {
@@ -101,8 +93,6 @@ fn visit(
             path.display()
         )));
     }
-    // Preserve the complete top-level inventory even when this path aliases
-    // an inode whose bytes were assigned to an earlier namespace.
     report.namespaces.entry(namespace.to_owned()).or_default();
     if !seen.insert((metadata.dev(), metadata.ino())) {
         return Ok(());
@@ -120,14 +110,10 @@ fn visit(
                 path.display()
             )));
         }
-        // Entries stream one at a time so a wide directory is never
-        // materialized in memory. Totals are order-independent; a
-        // cross-namespace hard link's bytes follow first-visit order.
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let name;
             let child_namespace = if namespace == "." {
-                // Each top-level entry is its own namespace, including loose files.
                 name = entry
                     .file_name()
                     .into_string()
@@ -159,8 +145,6 @@ mod tests {
     fn sparse_file_and_hard_link_are_not_double_counted() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let file = fs::File::create(dir.path().join("a"))?;
-        // This creates a sparse file where supported; allocation is determined
-        // by the filesystem, not required to be smaller than the file length.
         file.set_len(16 * 1024 * 1024)?;
         fs::hard_link(dir.path().join("a"), dir.path().join("b"))?;
         let report = measure(dir.path())?;
@@ -171,8 +155,6 @@ mod tests {
             report.totals.allocated_bytes,
             (root.blocks() + data.blocks()) * 512
         );
-        // Entries stream in readdir order, so either namespace may own the
-        // shared inode; exactly one of them must, and totals stay exact.
         assert_eq!(
             report.namespaces["a"].apparent_bytes + report.namespaces["b"].apparent_bytes,
             data.len()

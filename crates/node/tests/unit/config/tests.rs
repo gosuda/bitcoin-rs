@@ -328,7 +328,6 @@ fn default_rpc_auth_uses_a_generated_cookie() {
 fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(".cookie");
-    // A temporary file left by an interrupted start must not block the next.
     std::fs::write(dir.path().join(".cookie.tmp"), "stale")?;
     let auth = Auth::GeneratedCookie;
 
@@ -385,8 +384,6 @@ fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
     };
     assert!(super::resolve(&[&accept_without_sam]).is_err());
 
-    // With routes configured, the same selections resolve and the
-    // resolved overlay carries them through.
     let routed = UserConfig {
         p2p: P2pOverrides {
             dns_seeds: Some(false),
@@ -441,7 +438,6 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
         ..UserConfig::default()
     };
 
-    // Prove valid canonical counterpart validates under identical route config.
     let valid_user_config = UserConfig {
         p2p: P2pOverrides {
             connect: Some(vec![good_tor.clone()]),
@@ -452,19 +448,15 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
     let valid_config = super::resolve(&[&routes_layer, &valid_user_config])?;
     assert_eq!(valid_config.p2p.connect, vec![good_tor.clone()]);
 
-    // 1. Bad Tor v3 checksum (change first character of public key)
     let mut chars: Vec<char> = good_tor.chars().collect();
     chars[0] = if chars[0] == 'a' { 'b' } else { 'a' };
     let bad_checksum_onion: String = chars.into_iter().collect();
 
-    // 2. Missing port
     let missing_port_onion = good_onion_host.to_owned();
 
-    // 3. Invalid port (non-numeric, overflow)
     let non_numeric_port = format!("{good_onion_host}:notaport");
     let overflow_port = format!("{good_onion_host}:99999");
 
-    // 4. Zero port
     let zero_port_onion = format!("{good_onion_host}:0");
 
     let rejected_targets = [
@@ -483,7 +475,6 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
             },
             ..UserConfig::default()
         };
-        // Verify rejection both without routes and with routes configured.
         assert!(super::resolve(&[&invalid_config]).is_err());
         assert!(super::resolve(&[&routes_layer, &invalid_config]).is_err());
     }
@@ -502,7 +493,6 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
         ..UserConfig::default()
     };
 
-    // Prove valid canonical counterpart validates under identical route config.
     let valid_user_config = UserConfig {
         p2p: P2pOverrides {
             connect: Some(vec![good_i2p.clone()]),
@@ -513,8 +503,6 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
     let valid_config = super::resolve(&[&routes_layer, &valid_user_config])?;
     assert_eq!(valid_config.p2p.connect, vec![good_i2p]);
 
-    // Explicit I2P port 0 (unspecified/default service port) validates
-    // under identical route config and classifies as I2P port 0.
     let zero_port_i2p = format!("{}.b32.i2p:0", "a".repeat(52));
     let zero_port_user_config = UserConfig {
         p2p: P2pOverrides {
@@ -535,9 +523,6 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
         )
     );
 
-    // An absent port is still malformed: port 0 must be explicit (`:0`).
-    // Short/long payloads, non-numeric ports, and invalid payloads stay
-    // rejected as well.
     let malformed_i2p_targets = [
         format!("{}.b32.i2p:8333", "a".repeat(51)),
         format!("{}.b32.i2p:8333", "a".repeat(53)),
@@ -620,7 +605,6 @@ fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
     let config = super::resolve(&[&routed])?;
     assert_eq!(config.p2p.connect, vec![good_tor.clone(), good_i2p]);
 
-    // Tor also routes through a general proxy.
     let proxy_routed = UserConfig {
         p2p: P2pOverrides {
             dns_seeds: Some(false),
@@ -638,9 +622,6 @@ fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
 
 #[test]
 fn privacy_routes_with_default_dns_seeds_are_rejected() {
-    // DNS seeds resolve through the local system resolver, so leaving them
-    // enabled behind a privacy route would leak intent around the overlay.
-    // Resolution must fail fast instead of bypassing the proxy/bridge.
     let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
     let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
     for p2p in [
@@ -673,8 +654,6 @@ fn privacy_routes_with_default_dns_seeds_are_rejected() {
 
 #[test]
 fn privacy_route_with_dns_disabled_accepts_literal_ip() -> anyhow::Result<()> {
-    // Explicitly disabling DNS seeds opts into private routing; a literal
-    // IP fixed peer needs no resolution and stays supported.
     let layer = UserConfig {
         p2p: P2pOverrides {
             proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
@@ -692,8 +671,6 @@ fn privacy_route_with_dns_disabled_accepts_literal_ip() -> anyhow::Result<()> {
 
 #[test]
 fn hostname_connect_targets_are_rejected_with_privacy_route() {
-    // Ordinary hostnames resolve via `resolve()` on the dial path, bypassing
-    // any proxy/bridge, so they are refused while a privacy route stands.
     let proxy = SocketAddr::from(([127, 0, 0, 1], 9050));
     let sam = SocketAddr::from(([127, 0, 0, 1], 7656));
     for p2p in [
@@ -729,8 +706,6 @@ fn hostname_connect_targets_are_rejected_with_privacy_route() {
 
 #[test]
 fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> anyhow::Result<()> {
-    // Typed endpoints need no DNS: Tor/I2P names validate locally and dial
-    // through their route, so they stay supported with seeds disabled.
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [9u8; 32],
@@ -779,7 +754,6 @@ fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> anyhow::Res
     };
     assert_eq!(super::resolve(&[&i2p_routed])?.p2p.connect, vec![good_i2p]);
 
-    // A literal IP fixed peer alongside a privacy route needs no DNS either.
     let ip_routed = UserConfig {
         p2p: P2pOverrides {
             dns_seeds: Some(false),
@@ -872,17 +846,10 @@ fn rpc_rejects_missing_or_public_credentials() {
     ));
 }
 
-// ---- Named config-option coverage -------------------------------------
-//
-// Retained source precedence, absent nested overrides, and cross-field
-// validation are exercised here at the one resolver every input layer
-// feeds, so no adapter can bypass the named rules.
-
 fn resolved(layers: &[&UserConfig]) -> NodeConfig {
     super::resolve(layers).unwrap_or_else(|error| panic!("valid layered configuration: {error}"))
 }
 
-/// Reads the two halves of Basic authentication, failing on cookie auth.
 fn basic_auth(auth: &Auth) -> (String, String) {
     match auth {
         Auth::Basic { user, password } => (user.clone(), password.clone()),
@@ -949,22 +916,11 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     );
 }
 
-// ---- Unified validation engine ----------------------------------------
-//
-// The `kernel` feature is capability ("bitcoinkernel support is compiled
-// in"), not selection. `validation.engine` is the one authoritative engine
-// setting: it resolves once here, defaults to `native` in every build, and a
-// build without kernel support must reject `kernel` before any node state,
-// chainstate, or worker exists.
-
 #[test]
 fn validation_engine_defaults_to_native_and_layers_field_by_field() {
     let config = resolved(&[]);
     assert_eq!(config.validation.engine, ValidationEngine::Native);
 
-    // An explicit `native` setting resolves in every build. The
-    // lower-layer-wins claim needs a non-default engine to be observable and
-    // lives in the kernel-gated layering test below.
     let base = UserConfig {
         network: Some(NetworkSelection::Regtest),
         validation: ValidationOverrides {
@@ -996,11 +952,6 @@ fn validation_engine_kernel_is_supported_when_compiled() {
     assert_eq!(config.validation.engine, ValidationEngine::Kernel);
 }
 
-/// The two-layer absent case, observable only where `kernel` is a usable
-/// non-default value: the lower layer's engine survives a higher layer that
-/// omits the field, and a higher layer that names one wins. The always-on
-/// test above cannot show this — both `native` and the fallback land on the
-/// default.
 #[test]
 #[cfg(feature = "kernel")]
 fn validation_engine_layering_keeps_the_lower_layer_value() {

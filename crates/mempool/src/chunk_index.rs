@@ -1,46 +1,3 @@
-//! Maintained chunk order over the live pool.
-//!
-//! One owner of every cluster's exact linearization. `ChunkIndex` keeps, per
-//! component, the members in linearization order and the chunk boundaries,
-//! plus one global `BTreeSet` of [`ChunkKey`]s that orders every chunk of
-//! every component the way Core's block builder walks them. The exact min-cut
-//! solver in `fee_diagram` stays the only linearization engine; this module
-//! stores its output and orders it. The pool calls [`ChunkIndex::relinearize`]
-//! once per changed component and [`ChunkIndex::forget`] for every component
-//! id it frees, so the index never holds a stale or absorbed component.
-//!
-//! # Order of chunks
-//!
-//! Chunks sort by, in this order:
-//!
-//! 1. higher feerate first, compared exactly by cross-multiplication;
-//! 2. the equal-feerate chunk prefix weight, ascending;
-//! 3. the greatest member txid of the chunk, ascending;
-//! 4. component id, then ordinal inside the component.
-//!
-//! The prefix weight is Core's `m_main_equal_feerate_chunk_prefix_size`
-//! (`txgraph.cpp:502-519,1075-1128`): the summed charged weight of the
-//! component's chunks that share this chunk's feerate, from the first of
-//! them up to and including this chunk, in linearization order. Weighing the
-//! chunk alone is not enough. A linearization may emit a parent chunk and its
-//! child chunk at exactly the same feerate (parent 2000 sat over 800 WU, child
-//! 1000 sat over 400 WU); the lighter child would then sort before its parent
-//! and break dependency order for every consumer that walks the index. The
-//! prefix grows strictly along such a run, so within one component the key
-//! order is the linearization order, whatever the weights are. Chunks of
-//! different components that tie on feerate and prefix fall to the txid rule,
-//! Core's fallback order (`txmempool.cpp:183-186` orders by txid and
-//! `m_main_max_chunk_fallback` is the maximal member).
-//!
-//! The order is a total order: every comparison is lexicographic over exact
-//! orders (a total preorder on rationals, then `u64`, then txid, then ids),
-//! so it is transitive, and no two live chunks compare equal because the last
-//! two fields name the chunk.
-//!
-//! Equal-feerate chunks stay separate. Merging a run into one chunk would
-//! change what fits: selection and eviction keep skipping or taking whole
-//! chunks, as Core's builder does.
-
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -53,28 +10,20 @@ use smallvec::SmallVec;
 use crate::fee_diagram::{self, FeeWeight};
 use crate::{EntryId, Mempool, MempoolEntry};
 
-/// Component id local to the index; mirrors the pool's component arena ids.
 type ComponentId = u32;
 
-/// Heaviest chunk the solver represents: `FeeWeight` caps totals at `i32::MAX`.
 const MAX_CHUNK_WEIGHT: u32 = 0x7fff_ffff;
 
-/// Largest chunk fee the fallback chunk keeps, so key cross-products stay
-/// inside `i128`: `2^94 * 2^31 < 2^127`.
 const MAX_CHUNK_FEE: i128 = 1 << 94;
 
-/// One live member of a component as the pool hands it to the index, borrowed
-/// straight out of the entry arena.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MemberFacts<'a> {
     pub(crate) id: EntryId,
     pub(crate) entry: &'a MempoolEntry,
-    /// Direct in-pool parents of the entry.
     pub(crate) parents: &'a [EntryId],
 }
 
 impl MemberFacts<'_> {
-    /// Fee and weight the solver ranks this member by.
     fn fee_weight(&self) -> FeeWeight {
         FeeWeight {
             fee: self.entry.modified_fee(),
@@ -83,18 +32,11 @@ impl MemberFacts<'_> {
     }
 }
 
-/// Sort key of one chunk in the global order. See the module documentation
-/// for the fields' roles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ChunkKey {
-    /// Modified fee of the whole chunk.
     pub(crate) modified_fee: i128,
-    /// Charged weight of the whole chunk; at least 1.
     pub(crate) charged_weight: u64,
-    /// Charged weight of the equal-feerate run of this component up to and
-    /// including this chunk.
     pub(crate) prefix_weight: u64,
-    /// Greatest txid among the chunk's members.
     pub(crate) max_txid: Txid,
     pub(crate) component: ComponentId,
     pub(crate) ordinal: u32,
@@ -102,9 +44,6 @@ pub(crate) struct ChunkKey {
 
 impl Ord for ChunkKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Chunk totals are bounded by the solver (`FeeWeight::checked_add`
-        // keeps `fee * i32::MAX` inside `i128`) or by `MAX_CHUNK_FEE`, and a
-        // weight never exceeds `i32::MAX`, so both products fit.
         let ours = self.modified_fee * i128::from(other.charged_weight);
         let theirs = other.modified_fee * i128::from(self.charged_weight);
         theirs
@@ -122,9 +61,6 @@ impl PartialOrd for ChunkKey {
     }
 }
 
-/// Tracks Core's equal-feerate prefix while chunks append in linearization
-/// order. Linearizations emit non-increasing feerates, so equal-feerate
-/// chunks are adjacent.
 #[derive(Default)]
 struct PrefixRun {
     rate: Option<FeeWeight>,
@@ -132,7 +68,6 @@ struct PrefixRun {
 }
 
 impl PrefixRun {
-    /// Returns the prefix weight of a chunk with `total` appended next.
     fn extend(&mut self, total: FeeWeight) -> u64 {
         let weight = u64::from(total.weight);
         self.weight = match self.rate {
@@ -146,27 +81,20 @@ impl PrefixRun {
     }
 }
 
-/// One chunk of a component: where it ends in the member list and its key.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkSlot {
-    /// Exclusive end of the chunk inside `members`.
     pub(crate) end: usize,
     pub(crate) key: ChunkKey,
 }
 
-/// Everything the index stores for one live component.
 #[derive(Debug, Default)]
 pub(crate) struct ComponentState {
-    /// Members in linearization order, chunk by chunk, concatenated.
     pub(crate) members: SmallVec<[EntryId; 1]>,
-    /// Member txids in the same order.
     pub(crate) txids: SmallVec<[Txid; 1]>,
-    /// Chunks in linearization order; empty when the component is not live.
     pub(crate) chunks: SmallVec<[ChunkSlot; 1]>,
 }
 
 impl ComponentState {
-    /// A component of one transaction: one chunk, no solver run.
     pub(crate) fn singleton(component: ComponentId, member: &MemberFacts<'_>) -> Self {
         let mut state = Self::default();
         state.push_member(member);
@@ -180,9 +108,6 @@ impl ComponentState {
         state
     }
 
-    /// Linearizes a component of two or more transactions with the exact
-    /// solver. The solver's local order is txid order, so the result is a
-    /// function of the cluster's content, not of arena slot reuse.
     pub(crate) fn linearized(component: ComponentId, members: &[MemberFacts<'_>]) -> Self {
         let mut sorted = members.to_vec();
         sorted.sort_unstable_by_key(|member| member.entry.txid);
@@ -226,11 +151,6 @@ impl ComponentState {
         state
     }
 
-    /// The whole cluster as one chunk in dependency order, for a cluster the
-    /// solver refused. Admission bounds weights, fees, and cluster size well
-    /// inside what the solver accepts, so this is unreachable for pooled
-    /// entries; the component must still stay visible to selection and
-    /// eviction.
     fn dependency_ordered(
         component: ComponentId,
         sorted: &[MemberFacts<'_>],
@@ -253,7 +173,6 @@ impl ComponentState {
         self.txids.push(member.entry.txid);
     }
 
-    /// Closes the chunk made of the members pushed since the last close.
     fn close_chunk(&mut self, component: ComponentId, total: FeeWeight, run: &mut PrefixRun) {
         let start = self.chunks.last().map_or(0, |slot| slot.end);
         let max_txid = self.txids[start..]
@@ -275,8 +194,6 @@ impl ComponentState {
         });
     }
 
-    /// Closes one chunk over `members` with saturated totals, for entries the
-    /// solver cannot rank.
     fn close_fallback_chunk(&mut self, component: ComponentId, members: &[MemberFacts<'_>]) {
         let total = members.iter().fold(FeeWeight::default(), |total, member| {
             let next = member.fee_weight();
@@ -294,7 +211,6 @@ impl ComponentState {
         self.close_chunk(component, total, &mut PrefixRun::default());
     }
 
-    /// The member range of chunk `ordinal`.
     fn chunk_range(&self, ordinal: usize) -> core::ops::Range<usize> {
         let start = ordinal
             .checked_sub(1)
@@ -303,18 +219,10 @@ impl ComponentState {
     }
 }
 
-/// Read view of one indexed chunk, handed to selection and eviction while the
-/// caller holds the pool guard. Everything borrows the pool: nothing copies.
-///
-/// During block-template projection `confirmed` holds the entries the staged
-/// block confirms, and [`ChunkView::parents_of`] omits them so a surviving
-/// child does not require a confirmed parent in the candidate's selected set.
 #[derive(Clone, Copy)]
 pub struct ChunkView<'a> {
     pool: &'a Mempool,
-    /// Member entry ids in linearization order.
     pub members: &'a [EntryId],
-    /// Member txids in the same order.
     pub txids: &'a [Txid],
     /// Modified fee of the whole chunk: actual fees plus signed overlays.
     pub modified_fee: i128,
@@ -335,20 +243,16 @@ impl fmt::Debug for ChunkView<'_> {
 }
 
 impl<'a> ChunkView<'a> {
-    /// Number of transactions in the chunk.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.members.len()
     }
 
-    /// Returns whether the chunk holds no transaction. Indexed chunks never do.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 
-    /// The chunk's entries in linearization order: each member's pool id
-    /// paired with its borrowed entry.
     pub fn entries(&self) -> impl ExactSizeIterator<Item = (EntryId, &'a MempoolEntry)> + use<'a> {
         let pool = self.pool;
         self.members
@@ -356,20 +260,10 @@ impl<'a> ChunkView<'a> {
             .map(move |&member| (member, pool.chunk_member(member)))
     }
 
-    /// Whether `id` is confirmed by the staged block in this projected view.
-    /// Live views confirm nothing. Staged-confirmation parents skip the
-    /// selection-dependency check in [`ChunkView::parents_of`], but their
-    /// relative locks still evaluate at the staged confirmation height.
     pub fn is_staged_confirmed(&self, id: EntryId) -> bool {
         self.confirmed.is_some_and(|set| set.contains(&id))
     }
 
-    /// The direct in-pool parents of `member` that require in-block
-    /// selection, which may sit in this chunk or in an earlier chunk of the
-    /// same component. During projection parents the staged block confirms
-    /// are omitted, so surviving children do not require confirmed parents
-    /// in the candidate's selected set. Returns an iterator by value: no
-    /// filtered-slice allocation.
     pub fn parents_of(&self, member: EntryId) -> impl Iterator<Item = EntryId> + use<'a> {
         let pool = self.pool;
         let confirmed = self.confirmed;
@@ -380,21 +274,13 @@ impl<'a> ChunkView<'a> {
     }
 }
 
-/// Maintained chunk index over the pool's live components.
 #[derive(Debug, Default)]
 pub(crate) struct ChunkIndex {
-    /// Per-component state, indexed by component id; a component without
-    /// chunks is not live.
     components: Vec<ComponentState>,
     order: BTreeSet<ChunkKey>,
 }
 
 impl ChunkIndex {
-    /// Stores the freshly linearized order of one component, replacing its
-    /// previous chunks. `members` lists every live member of the component
-    /// in any order, borrowed from the entry arena; an empty list forgets the
-    /// component. The exact solver runs on the component only, so the work is
-    /// bounded by the cluster limits.
     pub(crate) fn relinearize(&mut self, component: ComponentId, members: &[MemberFacts<'_>]) {
         self.forget(component);
         let state = match members {
@@ -411,7 +297,6 @@ impl ChunkIndex {
         self.components[index] = state;
     }
 
-    /// Drops every chunk of a component id the pool freed or absorbed.
     pub(crate) fn forget(&mut self, component: ComponentId) {
         let Some(state) = self.components.get_mut(component_index(component)) else {
             return;
@@ -422,7 +307,6 @@ impl ChunkIndex {
         *state = ComponentState::default();
     }
 
-    /// Returns the number of live components.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn len(&self) -> usize {
@@ -432,16 +316,12 @@ impl ChunkIndex {
             .count()
     }
 
-    /// Returns whether the index holds no live component.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
 
-    /// Live members of one component in linearization order, or `None` when
-    /// the id names no live component. Projection partitions these survivors
-    /// without walking the whole arena: work stays bounded by the cluster.
     pub(crate) fn members_of(&self, component: ComponentId) -> Option<&[EntryId]> {
         let state = self.components.get(component_index(component))?;
         if state.chunks.is_empty() {
@@ -474,7 +354,6 @@ impl ChunkIndex {
         }
     }
 
-    /// Chunks from the highest feerate to the lowest: Core's builder order.
     pub(crate) fn chunks_descending<'a>(
         &'a self,
         pool: &'a Mempool,
@@ -482,7 +361,6 @@ impl ChunkIndex {
         self.order.iter().map(move |key| self.view(pool, key))
     }
 
-    /// Estimates the heap this index occupies, in bytes.
     #[must_use]
     pub(crate) fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
@@ -520,35 +398,16 @@ impl ChunkIndex {
     }
 }
 
-/// Owned projection of the chunk order after applying a removal plan.
-///
-/// Borrows the pool and stores only the relinearized affected components:
-/// untouched components are read from the maintained index at iteration
-/// time, so the work is the solver over the touched clusters plus one merge
-/// walk. The pool is borrowed, never cloned. `iter` merges both sources in
-/// [`ChunkKey`] order; this owner never implements `Iterator` itself because
-/// an iterator yielding borrows of its own owned storage is not expressible
-/// safely.
 #[derive(Debug)]
 pub struct ProjectedChunks<'a> {
     pool: &'a Mempool,
-    /// Entries the staged block confirms; surviving views omit them from
-    /// [`ChunkView::parents_of`].
     confirmed: HashSet<EntryId>,
-    /// Original component ids replaced by the side-linearized pieces.
     touched: HashSet<u32>,
-    /// Side-linearized surviving pieces of the touched components, each
-    /// solved exactly with its own fresh equal-feerate prefix run.
     pieces: Vec<ComponentState>,
-    /// Every projected chunk sorted by its key: highest feerate first.
     order: Vec<(ChunkKey, usize, usize)>,
 }
 
 impl<'a> ProjectedChunks<'a> {
-    /// Assembles the projection from already side-linearized pieces. The
-    /// caller partitioned every touched component into its surviving
-    /// connected pieces and solved each with the exact solver; this sorts
-    /// the resulting chunk keys once.
     pub(crate) fn new(
         pool: &'a Mempool,
         confirmed: HashSet<EntryId>,
@@ -571,9 +430,6 @@ impl<'a> ProjectedChunks<'a> {
         }
     }
 
-    /// Chunks in descending feerate order as if the plan had applied: the
-    /// untouched maintained chunks merged with the sorted projected chunks
-    /// by [`ChunkKey`]. Every view borrows this owner and the pool.
     pub fn iter(&self) -> impl Iterator<Item = ChunkView<'_>> + '_ {
         ProjectedChunksIter {
             pool: self.pool,
@@ -588,7 +444,6 @@ impl<'a> ProjectedChunks<'a> {
         }
     }
 
-    /// Returns whether the projected order holds no chunk.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.order.is_empty() && {
@@ -600,7 +455,6 @@ impl<'a> ProjectedChunks<'a> {
         }
     }
 
-    /// Returns the number of projected chunks: untouched plus relinearized.
     #[must_use]
     pub fn len(&self) -> usize {
         let index = self.pool.chunk_index();
@@ -613,14 +467,6 @@ impl<'a> ProjectedChunks<'a> {
     }
 }
 
-/// Cached live-head lookahead for the projection merge walk.
-///
-/// Single authoritative cache for the next untouched live key: `Unread` means
-/// the cursor has not been probed since the last consume, `Ready` holds the
-/// staged borrowed key, and `Exhausted` records that the live source holds no
-/// further untouched key. Peeks are `O(1)` once staged; the underlying cursor
-/// advances forward at most once per key, so projected yields never rescan
-/// the touched prefix. No allocation.
 #[derive(Clone, Copy, Debug)]
 enum StagedLive<'s> {
     Unread,
@@ -628,18 +474,12 @@ enum StagedLive<'s> {
     Exhausted,
 }
 
-/// Merge iterator over the untouched maintained chunks and the sorted
-/// projected chunks. Holds a forward cursor into each source and yields the
-/// smaller [`ChunkKey`] first, so the walk matches the maintained order.
 struct ProjectedChunksIter<'s> {
     pool: &'s Mempool,
     confirmed: &'s HashSet<EntryId>,
     touched: &'s HashSet<u32>,
     index: &'s ChunkIndex,
     live: alloc::collections::btree_set::Iter<'s, ChunkKey>,
-    /// Next live key already advanced past the touched prefix, cached as a
-    /// single authoritative [`StagedLive`] state. The cursor moves forward at
-    /// most once per key, so projected yields never rescan the touched prefix.
     staged_live: StagedLive<'s>,
     pieces: &'s [ComponentState],
     order: &'s [(ChunkKey, usize, usize)],
@@ -728,7 +568,6 @@ impl<'s> Iterator for ProjectedChunksIter<'s> {
     }
 }
 
-/// Slot of a component id in the per-component table.
 fn component_index(component: ComponentId) -> usize {
     usize::try_from(component).unwrap_or(usize::MAX)
 }

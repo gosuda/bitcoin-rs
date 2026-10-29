@@ -1,26 +1,4 @@
 //! Native Stratum V1 pool adapter.
-//!
-//! Two layers:
-//!
-//! * this module: the SV1 wire. Bounded line framing ([`LineBuffer`]), JSON-RPC
-//!   decode ([`decode_line`], [`ClientRequest`]), exact response and
-//!   notification encoders, the prevhash word swap, BIP310 parameter parsing,
-//!   decimal difficulty ([`Difficulty`]), explicit account resolution
-//!   ([`AccountResolver`]) and the accounting boundary ([`ShareLedger`]);
-//! * [`session`]: the per-connection state machine, the shared [`PoolCore`]
-//!   over [`crate::JobBook`], and the bounded TCP [`Server`].
-//!
-//! Division of ownership. The parent crate owns job projection, the coinbase
-//! split, extranonce allocation, the share predicate, stale and duplicate state,
-//! and block assembly. This adapter never hashes a header, never builds a
-//! coinbase, never compares a hash with a target. It owns what only SV1 has:
-//! framing, dialect, handshake order, BIP310 negotiation, per-session
-//! difficulty policy, deadlines, and connection bounds. It holds no keys, no
-//! wallet, no signer, and no money: payouts are the ledger's business.
-//!
-//! JSON goes through `sonic-rs`. Untrusted frames are bounded three ways before
-//! any value exists: line length ([`LineBuffer`]), nesting depth
-//! ([`MAX_JSON_DEPTH`]), and parameter count ([`MAX_PARAMS`]).
 #![forbid(unsafe_code)]
 
 mod session;
@@ -39,34 +17,18 @@ pub use session::{
     ServerConfig, ServerDeps, ServerEvent, SessionEnd, ShutdownReport,
 };
 
-/// Longest accepted JSON-RPC request id string.
 pub const MAX_ID_LEN: usize = 128;
-/// Longest accepted method name.
 pub const MAX_METHOD_LEN: usize = 64;
-/// Most parameters any SV1 request carries (`mining.submit` has six).
 pub const MAX_PARAMS: usize = 8;
-/// Longest accepted worker login.
 pub const MAX_LOGIN_LEN: usize = 128;
-/// Longest accepted worker password.
 pub const MAX_PASSWORD_LEN: usize = 128;
-/// Longest user agent kept from `mining.subscribe`; longer ones are truncated.
 pub const MAX_USER_AGENT_LEN: usize = 128;
-/// Longest `job_id` string a `mining.submit` may carry.
 pub const MAX_JOB_ID_LEN: usize = 64;
-/// Most `extranonce2` bytes a `mining.submit` may carry.
 pub const MAX_EXTRANONCE2_BYTES: usize = 32;
-/// Most extensions one `mining.configure` may name.
 pub const MAX_CONFIGURE_EXTENSIONS: usize = 16;
-/// Longest extension name in `mining.configure`.
 pub const MAX_EXTENSION_NAME_LEN: usize = 64;
-/// Deepest array/object nesting a frame may have. SV1 needs 3.
 pub const MAX_JSON_DEPTH: usize = 8;
-/// Most characters a difficulty may be written with.
 pub const MAX_DIFFICULTY_TEXT_LEN: usize = 20;
-
-// ---------------------------------------------------------------------------
-// Hex and byte order
-// ---------------------------------------------------------------------------
 
 fn nibble(byte: u8) -> Option<u8> {
     match byte {
@@ -77,18 +39,15 @@ fn nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Appends the lowercase hex of `bytes` to `out`.
 pub fn push_hex(out: &mut String, bytes: &[u8]) {
     out.push_str(&primitives_hex_encode(bytes));
 }
 
-/// Lowercase hex of `bytes`.
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
     primitives_hex_encode(bytes)
 }
 
-/// Decodes an even-length hex string of either case; `None` on any other byte.
 #[must_use]
 pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
     let (pairs, odd_tail) = text.as_bytes().as_chunks::<2>();
@@ -101,7 +60,6 @@ pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Parses `min_digits..=8` hex digits as one `u32`. No sign, no prefix.
 #[must_use]
 pub fn parse_u32_hex(text: &str, min_digits: usize) -> Option<u32> {
     if text.len() < min_digits.max(1) || text.len() > 8 {
@@ -129,7 +87,6 @@ pub fn prevhash_to_wire(internal: &[u8; 32]) -> String {
     encode_hex(&swap_words(internal))
 }
 
-/// Parent hash in internal byte order from SV1 `prevhash` text.
 #[must_use]
 pub fn prevhash_from_wire(text: &str) -> Option<[u8; 32]> {
     let bytes: [u8; 32] = decode_hex(text)?.try_into().ok()?;
@@ -142,8 +99,6 @@ pub fn wire_job_id(id: JobId) -> String {
     format!("{:08x}", id.get())
 }
 
-/// Native job id of SV1 `job_id` text; `None` unless it is exactly the text
-/// [`wire_job_id`] writes (so no job this adapter did not issue can parse).
 #[must_use]
 pub fn parse_wire_job_id(text: &str) -> Option<JobId> {
     if text.len() != 8
@@ -156,28 +111,20 @@ pub fn parse_wire_job_id(text: &str) -> Option<JobId> {
     parse_u32_hex(text, 8).map(JobId::new)
 }
 
-// ---------------------------------------------------------------------------
-// Wire errors
-// ---------------------------------------------------------------------------
-
 /// One SV1 error triple `[code, message, null]`. Messages are fixed text:
 /// nothing internal reaches a client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WireError {
-    /// Numeric code.
     pub code: i32,
-    /// Fixed message.
     pub message: &'static str,
 }
 
 impl WireError {
-    /// Builds an error.
     #[must_use]
     pub const fn new(code: i32, message: &'static str) -> Self {
         Self { code, message }
     }
 
-    /// The `[code, "message", null]` array.
     #[must_use]
     pub fn to_json(&self) -> String {
         format!("[{},{},null]", self.code, json_string(self.message))
@@ -194,7 +141,6 @@ impl fmt::Display for WireError {
 pub mod errors {
     use super::WireError;
 
-    /// Slush draft 20: other or unknown.
     pub const OTHER: i32 = 20;
     /// Slush draft 21: job not found (stale).
     pub const JOB_NOT_FOUND: i32 = 21;
@@ -202,100 +148,59 @@ pub mod errors {
     pub const DUPLICATE_SHARE: i32 = 22;
     /// Slush draft 23: low difficulty share.
     pub const LOW_DIFFICULTY: i32 = 23;
-    /// Slush draft 24: unauthorized worker.
     pub const UNAUTHORIZED_WORKER: i32 = 24;
-    /// Slush draft 25: not subscribed.
     pub const NOT_SUBSCRIBED: i32 = 25;
 
-    /// Frame is not JSON.
     pub const PARSE_ERROR: WireError = WireError::new(-32700, "Parse error");
-    /// Frame is JSON but not a request.
     pub const INVALID_REQUEST: WireError = WireError::new(-32600, "Invalid request");
-    /// Unknown method.
     pub const METHOD_NOT_FOUND: WireError = WireError::new(-32601, "Method not found");
-    /// Parameters of the wrong shape.
     pub const INVALID_PARAMS: WireError = WireError::new(-32602, "Invalid params");
-    /// `extranonce2` is not hex of a bounded length.
     pub const INVALID_EXTRANONCE2: WireError = WireError::new(-32602, "Invalid extranonce2");
-    /// `extranonce2` length differs from the one announced at subscribe.
     pub const INVALID_EXTRANONCE2_LENGTH: WireError =
         WireError::new(-32602, "Invalid extranonce2 length");
-    /// `ntime` is not eight hex digits.
     pub const INVALID_NTIME_FORMAT: WireError = WireError::new(-32602, "Invalid ntime");
-    /// `nonce` is not eight hex digits.
     pub const INVALID_NONCE_FORMAT: WireError = WireError::new(-32602, "Invalid nonce");
-    /// `version_bits` is not eight hex digits.
     pub const INVALID_VERSION_BITS_FORMAT: WireError =
         WireError::new(-32602, "Invalid version bits");
-    /// `version_bits` sent without a negotiated version-rolling mask.
     pub const UNEXPECTED_VERSION_BITS: WireError =
         WireError::new(-32602, "Unexpected version bits");
-    /// `version-rolling.mask` is not hex.
     pub const INVALID_VERSION_MASK: WireError =
         WireError::new(-32602, "Invalid version-rolling.mask");
-    /// Difficulty is not a plain positive decimal.
     pub const INVALID_DIFFICULTY: WireError = WireError::new(-32602, "Invalid difficulty");
 
-    /// Submit before `mining.subscribe`.
     pub const NOT_SUBSCRIBED_ERROR: WireError = WireError::new(NOT_SUBSCRIBED, "Not subscribed");
-    /// Submit or authorize outcome for an unknown or denied worker.
     pub const UNAUTHORIZED_WORKER_ERROR: WireError =
         WireError::new(UNAUTHORIZED_WORKER, "Unauthorized worker");
-    /// `mining.subscribe` twice.
     pub const ALREADY_SUBSCRIBED: WireError = WireError::new(OTHER, "Already subscribed");
-    /// `mining.configure` after work was sent.
     pub const CONFIGURE_TOO_LATE: WireError = WireError::new(OTHER, "Configure after work started");
-    /// More workers than one session may authorize.
     pub const TOO_MANY_WORKERS: WireError = WireError::new(OTHER, "Too many workers");
-    /// The pool has no free session slot.
     pub const POOL_AT_CAPACITY: WireError = WireError::new(OTHER, "Pool at capacity");
-    /// Extranonce rotation is not offered.
     pub const EXTRANONCE_SUBSCRIPTION_UNSUPPORTED: WireError =
         WireError::new(OTHER, "Extranonce subscription not supported");
-    /// Difficulty suggestion outside the pool's range.
     pub const DIFFICULTY_OUT_OF_RANGE: WireError = WireError::new(OTHER, "Difficulty out of range");
-    /// `version_bits` outside the negotiated mask.
     pub const VERSION_BITS_OUTSIDE_MASK: WireError =
         WireError::new(OTHER, "Version bits outside mask");
-    /// `ntime` outside the job window.
     pub const INVALID_NTIME: WireError = WireError::new(OTHER, "Invalid ntime");
-    /// The job holds its maximum number of shares.
     pub const JOB_SHARE_CAPACITY: WireError = WireError::new(OTHER, "Job share capacity reached");
-    /// The ledger refused the accepted share.
     pub const ACCOUNTING_UNAVAILABLE: WireError =
         WireError::new(OTHER, "Share accounting unavailable");
-    /// Share verdict that cannot occur on an open session.
     pub const INTERNAL: WireError = WireError::new(OTHER, "Internal error");
-    /// Job id never issued or already retired.
     pub const JOB_NOT_FOUND_ERROR: WireError = WireError::new(JOB_NOT_FOUND, "Job not found");
-    /// Job superseded.
     pub const STALE_SHARE: WireError = WireError::new(JOB_NOT_FOUND, "Stale share");
-    /// Already accepted.
     pub const DUPLICATE_SHARE_ERROR: WireError = WireError::new(DUPLICATE_SHARE, "Duplicate share");
-    /// Hash misses the session target.
     pub const LOW_DIFFICULTY_SHARE: WireError =
         WireError::new(LOW_DIFFICULTY, "Low difficulty share");
 }
 
-// ---------------------------------------------------------------------------
-// Bounded line framing
-// ---------------------------------------------------------------------------
-
 /// Framing failure; the connection must be closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
-    /// A line (or an unterminated tail) exceeds the limit.
     LineTooLong,
 }
 
-/// Extra bytes one [`LineBuffer::push`] may add beyond the line limit.
 const PUSH_SLACK: usize = 64 * 1024;
 
 /// Newline-delimited frame splitter with a hard memory bound.
-///
-/// Memory never exceeds `max_line + PUSH_SLACK` bytes plus the caller's push
-/// size: an unterminated tail longer than `max_line` is an error, so a client
-/// that streams without a `\n` cannot grow the buffer.
 #[derive(Debug)]
 pub struct LineBuffer {
     buf: Vec<u8>,
@@ -306,8 +211,6 @@ pub struct LineBuffer {
 }
 
 impl LineBuffer {
-    /// A buffer that rejects lines longer than `max_line` bytes (terminator
-    /// excluded).
     #[must_use]
     pub fn new(max_line: usize) -> Self {
         Self {
@@ -319,8 +222,6 @@ impl LineBuffer {
         }
     }
 
-    /// Appends received bytes. Drain [`Self::next_frame`] to `None` between
-    /// pushes.
     pub fn push(&mut self, data: &[u8]) -> Result<(), FrameError> {
         if self.poisoned {
             return Err(FrameError::LineTooLong);
@@ -334,20 +235,16 @@ impl LineBuffer {
         Ok(())
     }
 
-    /// Bytes received and not yet returned as frames.
     #[must_use]
     pub fn pending_len(&self) -> usize {
         self.buf.len() - self.start
     }
 
-    /// Whether an unterminated tail is buffered.
     #[must_use]
     pub fn has_partial(&self) -> bool {
         self.pending_len() > 0
     }
 
-    /// The next non-empty line without its `\n` or `\r\n`; `None` when only a
-    /// partial line remains. Empty lines are skipped.
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
         if self.poisoned {
             return Err(FrameError::LineTooLong);
@@ -358,7 +255,6 @@ impl LineBuffer {
                 .iter()
                 .position(|&byte| byte == b'\n');
             let Some(offset) = found else {
-                // Allow up to max_line + 1 bytes in unread in case a trailing \r is waiting for \n
                 if unread > self.max_line + 1 {
                     self.poisoned = true;
                     return Err(FrameError::LineTooLong);
@@ -398,28 +294,20 @@ impl LineBuffer {
     }
 }
 
-// ---------------------------------------------------------------------------
-// JSON-RPC decode
-// ---------------------------------------------------------------------------
-
-/// JSON text of a string value.
 #[must_use]
 pub fn json_string(text: &str) -> String {
     sonic_rs::to_string(text).unwrap_or_else(|_| String::from("\"\""))
 }
 
-/// A request id, kept as the exact JSON text to echo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestId(String);
 
 impl RequestId {
-    /// The JSON `null` id.
     #[must_use]
     pub fn null() -> Self {
         Self(String::from("null"))
     }
 
-    /// JSON text of the id.
     #[must_use]
     pub fn as_json(&self) -> &str {
         &self.0
@@ -442,22 +330,14 @@ fn request_id(value: Option<&Value>) -> Option<RequestId> {
     value.as_i64().map(|number| RequestId(number.to_string()))
 }
 
-/// One decoded client request. Parameters stay inside the parsed document;
-/// [`Request::params`] borrows them.
 pub struct Request {
-    /// Id to echo in the response.
     pub id: RequestId,
-    /// Whether the frame carried an `"id"` member. `false` is a JSON-RPC
-    /// notification: the server must process it without emitting any reply,
-    /// including errors and deferred share outcomes.
     pub has_id: bool,
-    /// Method name, at most [`MAX_METHOD_LEN`] bytes.
     pub method: String,
     document: Value,
 }
 
 impl Request {
-    /// Positional parameters, at most [`MAX_PARAMS`].
     #[must_use]
     pub fn params(&self) -> &[Value] {
         self.document
@@ -468,7 +348,6 @@ impl Request {
     }
 }
 
-/// Deliberately omits parameters: they can carry a password.
 impl fmt::Debug for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Request")
@@ -479,30 +358,20 @@ impl fmt::Debug for Request {
     }
 }
 
-/// A decoded frame.
 #[derive(Debug)]
 pub enum Incoming {
-    /// A request or notification from the miner. When [`Request::has_id`] is
-    /// `false` the frame is a notification and the session must emit nothing.
     Request(Request),
-    /// A response to a server request. This adapter sends none, so it is dropped.
     Response,
 }
 
-/// A frame that could not be decoded, with the id to answer under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeFailure {
-    /// Id to echo; `null` when the frame had no usable id.
     pub id: RequestId,
-    /// Error to send.
     pub error: WireError,
-    /// Whether a reply may be emitted. `false` is a notification without an
-    /// `"id"` member: the session must emit nothing, not even this error.
     pub has_id: bool,
 }
 
 impl DecodeFailure {
-    /// A failure that may be answered under `id`.
     fn new(id: RequestId, error: WireError) -> Self {
         Self {
             id,
@@ -511,7 +380,6 @@ impl DecodeFailure {
         }
     }
 
-    /// A failure for a notification without an `"id"` member: never emitted.
     fn notification(id: RequestId, error: WireError) -> Self {
         Self {
             id,
@@ -551,7 +419,6 @@ fn nesting_exceeds(line: &[u8], limit: usize) -> bool {
     false
 }
 
-/// Decodes one frame (no terminator).
 pub fn decode_line(line: &[u8]) -> Result<Incoming, DecodeFailure> {
     if nesting_exceeds(line, MAX_JSON_DEPTH) {
         return Err(DecodeFailure::new(RequestId::null(), errors::PARSE_ERROR));
@@ -567,7 +434,6 @@ pub fn decode_line(line: &[u8]) -> Result<Incoming, DecodeFailure> {
         };
         let has_id = object.get(&"id").is_some();
         let Some(id) = request_id(object.get(&"id")) else {
-            // An `"id"` member is present but unusable: answer under `null`.
             return Err(DecodeFailure::new(
                 RequestId::null(),
                 errors::INVALID_REQUEST,
@@ -622,21 +488,14 @@ pub fn decode_line(line: &[u8]) -> Result<Incoming, DecodeFailure> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Secrets, accounts, difficulty
-// ---------------------------------------------------------------------------
-
-/// A worker password. Not `Clone`, not `Display`; `Debug` prints nothing of it.
 pub struct Password(String);
 
 impl Password {
-    /// Wraps password text.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self(text.into())
     }
 
-    /// The password text. Callers must not log it.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
@@ -649,23 +508,16 @@ impl fmt::Debug for Password {
     }
 }
 
-/// Authentication failed. Carries no reason, so unknown account and wrong
-/// password are indistinguishable to the miner and to logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthDenied;
 
-/// Maps a `mining.authorize` login and password to an identity. There is no
-/// always-accepting implementation in this crate.
 pub trait AccountResolver: Send + Sync {
-    /// Resolves the credentials or denies them.
     fn resolve(&self, login: &str, password: &Password) -> Result<WorkerIdentity, AuthDenied>;
 }
 
-/// `account` or `account.rig` is not a valid login.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvalidAccount;
 
-/// Fixed in-memory account table: login is `account` or `account.rig`.
 #[derive(Default)]
 pub struct StaticAccountResolver {
     accounts: HashMap<String, Password>,
@@ -698,13 +550,11 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 impl StaticAccountResolver {
-    /// An empty table; every login is denied until accounts are added.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Adds `account` with `password`.
     pub fn with_account(mut self, account: &str, password: &str) -> Result<Self, InvalidAccount> {
         if !valid_account(account) || password.len() > MAX_PASSWORD_LEN {
             return Err(InvalidAccount);
@@ -746,21 +596,14 @@ impl AccountResolver for StaticAccountResolver {
     }
 }
 
-/// Why a difficulty text was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DifficultyError {
-    /// Not a plain decimal: sign, exponent, empty part, leading zero, or too long.
     Malformed,
-    /// Zero names no work.
     Zero,
-    /// Bounds are not `min <= initial <= max`.
     OutOfOrder,
 }
 
 /// A pool difficulty as plain decimal text plus the share target it names.
-///
-/// The target comes from `ShareTarget::from_pool_difficulty_decimal`, the
-/// common owner of difficulty-to-target arithmetic; no float is involved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Difficulty {
     text: String,
@@ -768,9 +611,6 @@ pub struct Difficulty {
 }
 
 impl Difficulty {
-    /// Parses `"16384"` or `"0.001"`: ASCII digits, an optional `.` with at
-    /// least one digit after it, no leading zero before the point, at most
-    /// [`MAX_DIFFICULTY_TEXT_LEN`] characters. The text is also valid JSON.
     pub fn parse(text: &str) -> Result<Self, DifficultyError> {
         if text.len() > MAX_DIFFICULTY_TEXT_LEN {
             return Err(DifficultyError::Malformed);
@@ -796,13 +636,11 @@ impl Difficulty {
         })
     }
 
-    /// The decimal text, exactly as sent in `mining.set_difficulty`.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
     }
 
-    /// The share target this difficulty names.
     #[must_use]
     pub fn target(&self) -> ShareTarget {
         self.target
@@ -819,7 +657,6 @@ pub struct DifficultyPolicy {
 }
 
 impl DifficultyPolicy {
-    /// Builds a policy; requires `min <= initial <= max` as difficulties.
     pub fn new(initial: &str, min: &str, max: &str) -> Result<Self, DifficultyError> {
         let policy = Self {
             initial: Difficulty::parse(initial)?,
@@ -832,84 +669,53 @@ impl DifficultyPolicy {
         Ok(policy)
     }
 
-    /// Difficulty a session starts at.
     #[must_use]
     pub fn initial(&self) -> &Difficulty {
         &self.initial
     }
 
-    /// Whether `difficulty` lies inside `[min, max]`. A larger difficulty is a
-    /// smaller target.
     #[must_use]
     pub fn contains(&self, difficulty: &Difficulty) -> bool {
         difficulty.target <= self.min.target && difficulty.target >= self.max.target
     }
 }
 
-// ---------------------------------------------------------------------------
-// Typed client requests
-// ---------------------------------------------------------------------------
-
-/// Parsed `mining.subscribe`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscribe {
-    /// Miner software, truncated to [`MAX_USER_AGENT_LEN`].
     pub user_agent: Option<String>,
 }
 
-/// Parsed `mining.authorize`.
 #[derive(Debug)]
 pub struct Authorize {
-    /// Worker login as sent.
     pub login: String,
-    /// Worker password; empty when absent.
     pub password: Password,
 }
 
-/// Parsed `mining.submit`; lexical checks only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Submit {
-    /// Worker login as sent.
     pub login: String,
-    /// Job id text.
     pub job_id: String,
-    /// Miner-chosen extranonce bytes.
     pub extranonce2: Vec<u8>,
-    /// Header time.
     pub ntime: u32,
-    /// Header nonce.
     pub nonce: u32,
-    /// BIP310 rolled bits, when the sixth parameter is present.
     pub version_bits: Option<u32>,
 }
 
-/// Parsed `mining.configure`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Configure {
-    /// Requested extension names, in request order.
     pub extensions: Vec<String>,
-    /// `version-rolling.mask`, present when `version-rolling` was requested.
     pub version_rolling_mask: Option<u32>,
-    /// `version-rolling.min-bit-count`, 0 when absent.
     pub version_rolling_min_bits: u32,
 }
 
-/// A method this adapter understands, or [`ClientRequest::Unknown`].
 #[derive(Debug)]
 pub enum ClientRequest {
-    /// BIP310 feature negotiation.
     Configure(Configure),
-    /// Session start.
     Subscribe(Subscribe),
-    /// Worker login.
     Authorize(Authorize),
-    /// Share submission.
     Submit(Submit),
-    /// NiceHash-dialect extranonce subscription.
     ExtranonceSubscribe,
-    /// Miner's preferred difficulty.
     SuggestDifficulty(Difficulty),
-    /// Any other method.
     Unknown,
 }
 
@@ -946,7 +752,6 @@ fn parse_subscribe(params: &[Value]) -> Result<Subscribe, WireError> {
     if params.len() > 2 {
         return Err(errors::INVALID_PARAMS);
     }
-    // Session-resumption id: validated for shape, never honoured.
     text_at(params, 1, MAX_USER_AGENT_LEN)?;
     let user_agent = match params.first() {
         None => None,
@@ -1044,8 +849,6 @@ fn parse_configure(params: &[Value]) -> Result<Configure, WireError> {
     })
 }
 
-/// The decimal text of a JSON number: integers verbatim, fractions through
-/// Rust's shortest round-trip `Display` (never an exponent). No arithmetic.
 fn number_text(value: &Value) -> Option<String> {
     if !value.is_number() {
         return None;
@@ -1066,7 +869,6 @@ fn parse_suggest(params: &[Value]) -> Result<Difficulty, WireError> {
 }
 
 impl ClientRequest {
-    /// Types a decoded request, or says which parameter is wrong.
     pub fn parse(request: &Request) -> Result<Self, WireError> {
         let params = request.params();
         match request.method.as_str() {
@@ -1087,10 +889,6 @@ impl ClientRequest {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encoders
-// ---------------------------------------------------------------------------
-
 #[must_use]
 fn encode_envelope(id: &RequestId, result_fragment: &str, error_fragment: &str) -> String {
     format!(
@@ -1107,20 +905,16 @@ pub fn encode_result(id: &RequestId, result_json: &str) -> String {
     encode_envelope(id, result_json, "null")
 }
 
-/// `{"id":ID,"result":null,"error":[code,"message",null]}\n`
 #[must_use]
 pub fn encode_error(id: &RequestId, error: &WireError) -> String {
     encode_envelope(id, "null", &error.to_json())
 }
 
-/// `{"id":ID,"result":false,"error":[code,"message",null]}\n`: a refused
-/// authorize or share.
 #[must_use]
 pub fn encode_reject(id: &RequestId, error: &WireError) -> String {
     encode_envelope(id, "false", &error.to_json())
 }
 
-/// `mining.set_difficulty` notification.
 #[must_use]
 pub fn encode_set_difficulty(difficulty: &Difficulty) -> String {
     format!(
@@ -1130,10 +924,6 @@ pub fn encode_set_difficulty(difficulty: &Difficulty) -> String {
 }
 
 /// `mining.notify` notification for `job`.
-///
-/// The parent hash is word-swapped; `coinb1`, `coinb2` and the merkle branch are
-/// the common owner's bytes verbatim; version, nbits and ntime are eight hex
-/// digits of the integer.
 #[must_use]
 pub fn encode_notify(job: &Job, clean_jobs: bool) -> String {
     let parent = Hash256::from(job.previous_block_hash()).to_le_bytes();

@@ -11,18 +11,7 @@ use crate::IndexWatermark;
 use crate::IndexWatermarks;
 
 impl Worker {
-    /// Persists the consumer cursor once the rows provably mirror the live
-    /// snapshot.
-    ///
-    /// The cursor is advisory: it lets a restarted or hint-starved consumer
-    /// trust its position and lets a new epoch invalidate it. It is written
-    /// only when the publisher snapshot names exactly the tip the rows
-    /// reached, so it can never describe rows the store does not hold. The
-    /// publisher briefly lags `applied_tip` inside one commit, so a disagreeing
-    /// snapshot simply skips the write; the next caught-up pass retries.
     pub(super) fn persist_chain_cursor(&self) -> Result<CursorCommit, DerivedIndexWorkerError> {
-        // The shared advisory cursor cannot claim alignment of a failed filter
-        // capability. Its own watermark remains the restart authority.
         if self.runtime.compact_filter_failure.read().is_some() {
             return Ok(CursorCommit::Settled);
         }

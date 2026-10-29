@@ -1,4 +1,3 @@
-//! Wire codec message round trips.
 use std::io::Cursor;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -60,10 +59,6 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
 
 type FrameBuilder = fn(usize) -> Result<Vec<u8>, PeerError>;
 
-/// Per-command decode caps (Core 31.1 `MAX_INV_SZ`, `MAX_ADDR_TO_SEND`,
-/// `MAX_LOCATOR_SZ`, `MAX_HEADERS_RESULTS`): a frame carrying exactly the
-/// cap decodes with every entry, and one entry more is refused with the
-/// command's protocol error before the entries are materialized.
 #[test]
 fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), PeerError> {
     let cases: [(&str, FrameBuilder, usize, &str); 8] = [
@@ -190,8 +185,6 @@ fn round_trips_compact_block_messages() -> Result<(), PeerError> {
     Ok(())
 }
 
-/// Hand-builds a `getblocktxn` payload from raw differential indexes, so a
-/// list the encoder would never produce still reaches the decoder.
 fn getblocktxn_frame(deltas: &[u64]) -> Result<Vec<u8>, PeerError> {
     let mut payload = bitcoin::consensus::encode::serialize(&BlockHash::from_byte_array([3u8; 32]));
     let count =
@@ -203,7 +196,6 @@ fn getblocktxn_frame(deltas: &[u64]) -> Result<Vec<u8>, PeerError> {
     message_frame(b"getblocktxn", &payload)
 }
 
-/// Decodes one hand-built `getblocktxn` frame to its absolute index list.
 fn decoded_getblocktxn(deltas: &[u64]) -> Result<Vec<u64>, PeerError> {
     let mut cursor = Cursor::new(getblocktxn_frame(deltas)?);
     let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
@@ -213,13 +205,6 @@ fn decoded_getblocktxn(deltas: &[u64]) -> Result<Vec<u64>, PeerError> {
     Ok(request.txs_request.indexes)
 }
 
-/// BIP152 encodes `getblocktxn` indexes differentially: the first is absolute
-/// and each later one is a delta from the previous absolute index, so a `0`
-/// delta names the next transaction rather than repeating one. The decoder
-/// yields increasing `u64` indexes and refuses an overflowing tail. Core 31.1
-/// guarantees differential order over `uint16_t` indexes (`blockencodings.h:23-54`,
-/// `net_processing.cpp:4333-4340`), so this is not decoder-range parity. Both decode
-/// an empty list; rejecting it in native dispatch is stricter than Core policy.
 #[test]
 fn getblocktxn_differential_indexes_decode_to_absolute_order() -> Result<(), PeerError> {
     assert_eq!(decoded_getblocktxn(&[1, 0, 0])?, vec![1, 2, 3]);

@@ -1,5 +1,3 @@
-//! Authenticated management-only, key-free pool accounting extensions.
-//!
 //! BRPR/BRPT bytes are the ledger's canonical codecs. Recording a receipt
 //! validates and persists an externally signed transaction; it never broadcasts it.
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
@@ -403,9 +401,6 @@ mod tests {
         }
     }
 
-    // Same legacy transaction fixture structure as the ledger suite: one
-    // non-null input, empty scriptSig, one exact payout output. No keys or
-    // signature-validity claim: the ledger validates payout shape and txid.
     fn legacy_payout_raw_tx() -> Vec<u8> {
         let mut raw = 2i32.to_le_bytes().to_vec();
         raw.push(1);

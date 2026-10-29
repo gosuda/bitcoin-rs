@@ -1,4 +1,3 @@
-//! Block sync smoke tests.
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -70,18 +69,6 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Headers and a rejected body must not publish applied progress. Delivering
-/// the correct frontier body later must also apply its already-staged child.
-///
-/// This is the smallest proof that spans inbound delivery -> authoritative
-/// apply/commit -> consumer publication on the success arm: `SYNC-02`,
-/// `SYNC-01` (admitted headers and applied state are separate authorities),
-/// and `SYNC-05` (consumers observe only committed outcomes). The rejection
-/// arm is narrower: the malformed body keeps `block_one`'s header, so the
-/// body/header binding check refuses it at pre-staging delivery — the test
-/// exercises no failed authoritative apply. It is a channel-fed, in-memory
-/// composition; it does **not** exercise live peer sockets, durable crash
-/// recovery, or eventual progress under real index contention.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -108,8 +95,6 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
         Arc::clone(&block_tree),
     );
     let handles = Arc::new(handles);
-    // This follower set still publishes the real RPC block log; only its
-    // optional ZMQ, index and mempool consumers are absent.
     let followers = bitcoin_rs_node::ChainFollowers::noop();
     let block_log = followers.block_log_reader();
     let sync = bitcoin_rs_node::sync::block_sync(
@@ -134,8 +119,6 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
         source: None,
         wire_response: true,
     })?;
-    // Check the header-only tick, then the rejected frontier with a valid
-    // successor. Neither may advance authoritative or consumer state.
     for bodies in [vec![], vec![malformed, block_two.clone()]] {
         for block in bodies {
             inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
@@ -163,11 +146,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
         }
     }
 
-    // Only resend the correct parent: success at height 2 also proves that
-    // the earlier successor survived while its frontier was unavailable.
     inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))?;
-    // Give this finite fixture bounded scheduling opportunities without
-    // requiring the parent and child to share one application batch or tick.
     for _ in 0..16 {
         sync.tick();
         if handles

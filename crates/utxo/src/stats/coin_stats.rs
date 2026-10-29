@@ -32,33 +32,26 @@ const PARALLEL_MUHASH_MAX_LANES: usize = 32;
 /// Exact byte length of the stable `CoinStats` encoding.
 pub const COIN_STATS_ENCODED_LEN: usize = 804;
 
-/// Why a `CoinStats::rewind_block` was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CoinStatsRewindError {
-    /// The stats are not at the block being disconnected.
     #[error("coinstats are at height {found}, not the disconnected height {expected}")]
     HeightMismatch { expected: u32, found: u32 },
-    /// The rewind would take `tx_count` below zero.
     #[error("rewind of {tx_delta} transactions exceeds the recorded count {tx_count}")]
     TxCountUnderflow { tx_count: u64, tx_delta: u64 },
 }
 
-/// Incremental UTXO set statistics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoinStats {
-    /// `MuHash3072` accumulator over live coins.
     pub muhash: MuHash3072,
     pub height: u32,
     /// Sum of live output values in satoshis.
     pub total_amount: u64,
-    /// Database-independent UTXO bogo-size.
     pub bogo_size: u64,
     pub tx_count: u64,
     pub utxo_count: u64,
 }
 
 impl CoinStats {
-    /// Creates empty stats.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -71,7 +64,6 @@ impl CoinStats {
         }
     }
 
-    /// Applies one created UTXO.
     pub fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         let encoded = coin_hash_bytes(op, txout, height, coinbase);
         self.muhash.insert(&encoded);
@@ -84,7 +76,6 @@ impl CoinStats {
         self.utxo_count = self.utxo_count.saturating_add(1);
     }
 
-    /// Applies one spent UTXO.
     pub fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         let encoded = coin_hash_bytes(op, txout, height, coinbase);
         self.muhash.remove(&encoded);
@@ -97,19 +88,11 @@ impl CoinStats {
         self.utxo_count = self.utxo_count.saturating_sub(1);
     }
 
-    /// Applies per-block height and transaction-count deltas.
     pub const fn finish_block(&mut self, height: u32, tx_delta: u64) {
         self.height = height;
         self.tx_count = self.tx_count.saturating_add(tx_delta);
     }
 
-    /// Reverses one [`Self::finish_block`]. Per-coin fields already follow the
-    /// UTXO undo through the listener; touching them here would double-count.
-    /// Nothing moves on refusal.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::check_rewind`].
     pub(crate) fn rewind_block(
         &mut self,
         disconnected_height: u32,
@@ -121,13 +104,6 @@ impl CoinStats {
         Ok(())
     }
 
-    /// [`Self::rewind_block`]'s checks without the move, so a disconnect can
-    /// refuse before the UTXO undo runs; returns the resulting `tx_count`.
-    ///
-    /// # Errors
-    ///
-    /// Stats not at `disconnected_height`; `tx_delta` exceeding `tx_count`
-    /// (a second rewind of the same block, which saturation would hide).
     pub(crate) fn check_rewind(
         &self,
         disconnected_height: u32,
@@ -147,7 +123,6 @@ impl CoinStats {
             })
     }
 
-    /// Serializes stats in a stable byte layout.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(COIN_STATS_ENCODED_LEN);
@@ -161,7 +136,6 @@ impl CoinStats {
         out
     }
 
-    /// Decodes one exact stable `CoinStats` encoding.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CoinStatsDecodeError> {
         let mut cursor = 0;
         let numerator = read_array::<384>(bytes, &mut cursor)?;
@@ -191,7 +165,6 @@ impl Default for CoinStats {
     }
 }
 
-/// Computes `CoinStats` statistics by scanning a stable view.
 pub fn scan_coin_stats(
     view: &crate::UtxoSetView<'_>,
     height: u32,
@@ -206,7 +179,6 @@ pub fn scan_coin_stats(
     Ok(accumulator.into_stats())
 }
 
-/// Owned `CoinStats` fold for a snapshot coin traversal.
 #[derive(Debug)]
 pub struct CoinStatsAccumulator {
     stats: CoinStats,
@@ -270,8 +242,6 @@ impl EncodedPreimageArena {
                 .min(PARALLEL_MUHASH_MAX_LANES)
                 .min(rayon::current_num_threads());
             let lane_len = self.ends.len().div_ceil(lane_count);
-            // Rayon collects scoped jobs before returning or propagating a panic,
-            // so no lane can retain arena slices after this flush.
             let partials: Vec<_> = (0..lane_count)
                 .into_par_iter()
                 .map(|lane| {
@@ -295,20 +265,16 @@ impl EncodedPreimageArena {
 }
 
 impl CoinStatsAccumulator {
-    /// Creates an accumulator that derives `CoinStats` and a `MuHash` trailer.
     #[must_use]
     pub(crate) fn with_muhash(height: u32) -> Self {
         Self::new(height, MuHashMode::Serial(Vec::new()))
     }
 
-    /// Creates an accumulator that buffers exact preimages and combines ordered
-    /// insert-only partial `MuHash` values for checkpoint traversals.
     #[must_use]
     pub fn with_parallel_muhash(height: u32) -> Self {
         Self::new(height, MuHashMode::Parallel(EncodedPreimageArena::new()))
     }
 
-    /// Creates an accumulator that derives `CoinStats` without hashing coins.
     #[must_use]
     pub(crate) fn without_muhash(height: u32) -> Self {
         Self::new(height, MuHashMode::Disabled)
@@ -326,7 +292,6 @@ impl CoinStatsAccumulator {
         }
     }
 
-    /// Finishes the fold and returns the derived statistics.
     #[must_use]
     pub fn into_stats(mut self) -> CoinStats {
         self.flush_parallel_muhash();
@@ -582,18 +547,14 @@ impl CoinStatsDelta {
     }
 }
 
-/// Decode error for persisted coinstats rows.
 #[derive(Debug, thiserror::Error)]
 pub enum CoinStatsDecodeError {
-    /// Encoded row ended before all fields were present.
     #[error("coinstats row is truncated")]
     Truncated,
-    /// Encoded row had trailing bytes after known fields.
     #[error("coinstats row has trailing bytes")]
     TrailingBytes,
 }
 
-/// UTXO listener that maintains [`CoinStats`].
 #[derive(Clone, Debug)]
 pub struct CoinStatsListener {
     state: Arc<Mutex<CoinStatsListenerState>>,
@@ -626,7 +587,6 @@ impl CoinStatsListenerState {
 }
 
 impl CoinStatsListener {
-    /// Creates a listener around initial stats.
     #[must_use]
     pub fn new(stats: CoinStats) -> Self {
         Self {
@@ -637,29 +597,21 @@ impl CoinStatsListener {
         }
     }
 
-    /// Returns a point-in-time copy of the current stats.
     #[must_use]
     pub fn snapshot(&self) -> CoinStats {
         self.state.lock().stats.clone()
     }
 
-    /// Resets the listener to new initial statistics.
     pub fn reset(&self, stats: CoinStats) {
         let mut guard = self.state.lock();
         guard.stats = stats;
         guard.scratch.clear();
     }
 
-    /// Applies a per-block delta to the wrapped stats.
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
         self.state.lock().stats.finish_block(height, tx_delta);
     }
 
-    /// Reverses one [`Self::finish_block`], for a disconnected block.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`CoinStats::rewind_block`]'s invariant failures.
     pub(crate) fn rewind_block(
         &self,
         disconnected_height: u32,
@@ -672,7 +624,6 @@ impl CoinStatsListener {
             .rewind_block(disconnected_height, parent_height, tx_delta)
     }
 
-    /// `CoinStats::check_rewind` against the current stats.
     pub fn check_rewind(
         &self,
         disconnected_height: u32,
@@ -770,7 +721,6 @@ impl CoinStatsListener {
         delta.apply_to(&mut state.stats);
     }
 
-    /// Returns the current `MuHash3072` snapshot trailer.
     pub(crate) fn muhash3072(&self) -> [u8; 384] {
         self.state.lock().stats.muhash.finalize()
     }
@@ -878,8 +828,6 @@ fn coin_hash_encoded_len(script_len: usize) -> usize {
 }
 
 #[cfg(test)]
-// A test pool that will not build has failed the test; panicking names the
-// reason. Matches the convention already used in `compress.rs`.
 #[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use crate::{SnapshotCoin, SnapshotCoinObserver};

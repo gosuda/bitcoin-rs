@@ -154,6 +154,9 @@ parking_lot = { version = ">=0.12.5, <0.13", default-features = false, features 
 crossbeam-channel  = { version = ">=0.5.15, <0.6", default-features = false, features = ["std"] }
 crossbeam-utils    = { version = ">=0.8.21, <0.9", default-features = false, features = ["std"] }
 
+# RPC listener readiness without an async runtime.
+mio = { version = ">=1.2.4, <2", default-features = false, features = ["os-poll", "net"] }
+
 # Rayon — no default features at all on 1.12; nothing to disable/add.
 rayon = { version = ">=1.12, <2" }
 
@@ -191,8 +194,11 @@ redb = { version = ">=4.1, <5", default-features = false }
 
 # --- Serialization / config ---------------------------------------------------
 serde      = { version = ">=1.0.225, <2",  default-features = false, features = ["derive", "std", "alloc"] }
-serde_json = { version = ">=1.0.117, <2", default-features = false, features = ["std", "raw_value"] }
-sonic-rs   = { version = ">=0.5, <0.6", default-features = false }
+# `sort_keys` makes constructed and mutated `Value` objects BTreeMap-backed, so
+# they serialize in sorted key order, as serde_json's BTreeMap-backed `Map` did.
+# Parsed trees keep document order. Without it, mutated objects serialize in
+# ahash order, which varies per process and breaks deterministic output.
+sonic-rs   = { version = ">=0.5, <0.6", default-features = false, features = ["sort_keys"] }
 # toml: the `serde` feature only exists in 1.x (0.8 uses serde unconditionally, so the
 # feature name is absent there). Floor must stay >=1 or publish picks 0.8 and fails.
 toml       = { version = ">=1, <2", default-features = false, features = ["parse", "display", "serde"] }

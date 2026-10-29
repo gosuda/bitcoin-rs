@@ -4,7 +4,6 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::Txid;
 
-/// A Bitcoin transaction outpoint in consensus byte layout.
 #[derive(
     Copy,
     Clone,
@@ -23,7 +22,6 @@ use crate::Txid;
 pub struct OutPoint {
     /// The referenced transaction id in little-endian consensus byte order.
     pub txid: Txid,
-    /// The referenced output index.
     pub vout: u32,
 }
 
@@ -32,14 +30,12 @@ const _: () = assert!(size_of::<Txid>() == 32);
 const _: () = assert!(align_of::<OutPoint>() == 1);
 
 impl OutPoint {
-    /// Constructs a new outpoint.
     #[must_use]
     pub const fn new(txid: Txid, vout: u32) -> Self {
         Self { txid, vout }
     }
 
     /// Bitcoin's null / coinbase prevout: an all-zero txid with `vout == u32::MAX`.
-    ///
     /// `OutPoint::default()` is the derived all-zero layout (`vout == 0`) and
     /// is not null.
     #[must_use]
@@ -47,9 +43,6 @@ impl OutPoint {
         Self::new(Txid::default(), u32::MAX)
     }
 
-    /// Returns true for the null / coinbase prevout.
-    ///
-    /// Consensus coinbase detection uses this predicate.
     #[must_use]
     pub fn is_null(self) -> bool {
         self.vout == u32::MAX && self.txid.as_bytes().iter().all(|&byte| byte == 0)

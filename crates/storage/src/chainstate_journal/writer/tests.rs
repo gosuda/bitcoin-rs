@@ -15,13 +15,6 @@ use super::super::record::{Coin, Mutation};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-/// The permanent writer tests implement the requirements in
-/// `docs/contracts/chainstate-journal-v1.md` (`chainstate-journal-writer/v1.0.0`).
-/// Requirement IDs are attached to each behavior group below; keep those
-/// references current when changing journal semantics.
-///
-/// Counts `flush()` calls and can fail them, proving JW-DUR-1:
-/// the head marker must never advance without a counted flush.
 struct CountingStore {
     flushes: AtomicU64,
     fail_flush: Mutex<bool>,

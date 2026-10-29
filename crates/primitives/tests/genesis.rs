@@ -1,6 +1,4 @@
 //! Native genesis blocks hash to the published per-network genesis identifiers
-//! and round-trip the Core `CreateGenesisBlock` serializations compiled into
-//! [`Network::genesis_block`].
 
 use bitcoin_rs_primitives::{Network, consensus_bytes};
 

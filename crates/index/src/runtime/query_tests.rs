@@ -24,8 +24,6 @@ struct ScanResponse {
     scan: PrefixScan,
 }
 
-/// Pages a fake's staged rows like the storage seam: sorted, deduplicated,
-/// seekable, and bounded with first-row-always-returned accounting.
 fn fake_family_page(
     scans: &[ScanResponse],
     cf: ColumnFamily,
@@ -217,12 +215,8 @@ struct FixtureConfig {
     retain_body: bool,
     scans: Vec<ScanResponse>,
     watermark: Option<IndexWatermark>,
-    /// Chained heads built on `block`, in order, for multi-height tests.
-    /// Empty for the historical single-block fixtures.
     extra_blocks: Vec<Block>,
-    /// Live coins to seed into the authoritative UTXO view, as
     /// `(outpoint, txout, coinbase, height)`. Empty leaves the engine
-    /// without a UTXO authority, as before.
     utxo_adds: Vec<(OutPoint, TxOut, bool, u32)>,
 }
 
@@ -625,8 +619,6 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
     Ok(())
 }
 
-/// Body source that fails every read with a cloned error, proving read
-/// failures surface as `Storage` rather than missing-body `Unavailable`.
 struct FailingBody {
     error: bitcoin_rs_chain::BlockBodyReadError,
 }
@@ -641,8 +633,6 @@ impl BlockBodySource for FailingBody {
     }
 }
 
-/// Body source that reports every body as absent, proving `Ok(None)` stays
-/// missing-body `Unavailable` rather than becoming `Storage`.
 struct MissingBody;
 
 impl BlockBodySource for MissingBody {
@@ -871,11 +861,6 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
 #[test]
 fn confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_query()
 -> Result<(), Box<dyn std::error::Error>> {
-    // One funding row and one spending row at the same height force two
-    // `resolve_block` calls for one `(height, hash)` inside a single public
-    // query: `funding_outputs_for` resolves the block for the funding row,
-    // then `spender_for` resolves the same block for the spending row. Both
-    // rows carry malformed positions so each falls back to the full-block path.
     let (block, outpoint, scripthash, spend_txid) = block_with_spending_transaction()?;
     let funding_txid = block.txs[0].txid();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -906,9 +891,6 @@ fn confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_quer
         utxo_adds: Vec::new(),
     })?;
 
-    // The counting body source (`SingleBlockBody::full_reads`) delegates to
-    // the real block bytes and counts `block_body` calls for this height and
-    // hash. A query-scoped memo hit skips the second fetch.
     let history = fixture.engine.confirmed_history(scripthash)?;
     assert_eq!(history.len(), 2);
     assert!(
@@ -923,8 +905,6 @@ fn confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_quer
     );
     assert_eq!(fixture.full_reads()?, 1);
 
-    // The memo lives and dies with its query budget, so a second public
-    // query for the same script must fetch the block body again.
     let second = fixture.engine.confirmed_history(scripthash)?;
     assert_eq!(second.len(), 2);
     assert_eq!(fixture.full_reads()?, 2);
@@ -996,10 +976,10 @@ fn child_block(parent: &Block, txs: Vec<Tx>) -> Result<Block, std::io::Error> {
     Ok(block)
 }
 
-/// Three-height chain paying one script: the genesis coinbase at height 0,
-/// two outputs at height 1 in descending txid block order, one output at
-/// height 2. Returns the genesis block, the two children, and the paid
-/// script's hash.
+/// Three-height chain paying one script: the genesis coinbase at height 0, two outputs
+/// at height 1 in descending txid block order, one output at height 2.
+///
+/// Returns the genesis block, the two children, and the paid
 fn paying_chain() -> Result<(Block, Vec<Block>, ScriptHash), std::io::Error> {
     let genesis = Network::Regtest.genesis_block();
     let script = genesis.txs[0].outputs[0].script_pubkey.clone();
@@ -1108,8 +1088,6 @@ fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::err
         utxo_adds: Vec::new(),
     })?;
 
-    // A complete scan with no rows proves the index holds nothing for this
-    // txid, so the value query answers None instead of Retry or Unavailable.
     assert_eq!(
         fixture.engine.outpoint_value(&OutPoint {
             txid: unknown,
@@ -1123,11 +1101,6 @@ fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::err
 #[test]
 fn funding_prefix_scan_ignores_outputs_paying_other_scripts()
 -> Result<(), Box<dyn std::error::Error>> {
-    // The funding row is filed under the requested scripthash's prefix, yet
-    // its positioned transaction pays a different script: the row is a
-    // prefix match only, exactly what an 8-byte prefix collision yields.
-    // `collect_funding_outputs` must keep it out via the full ScriptHash
-    // compare while the full-block fallback still finds the real output.
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let foreign = position_of_transaction(&block, 1)?;
     let funding_txid = block.txs[0].txid();
@@ -1164,10 +1137,6 @@ fn funding_prefix_scan_ignores_outputs_paying_other_scripts()
 
 #[test]
 fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), Box<dyn std::error::Error>> {
-    // Both live rows sit under the requested scripthash's prefix, but the
-    // authoritative coin behind `foreign` pays a different script: the exact
-    // script check in `unspent_outputs_for` must filter it while keeping the
-    // real coin.
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let real = OutPoint {
         txid: block.txs[0].txid(),
@@ -1219,10 +1188,6 @@ fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), Box<dyn s
 #[test]
 fn confirmed_history_orders_funding_rows_by_height_then_txid()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Funding rows arrive in non-ascending height order; the engine must
-    // return them sorted by the (height, txid) key from scripts.rs. Height 1
-    // holds two outputs in descending txid block order to pin the txid half
-    // of the key.
     let (genesis, chain, scripthash) = paying_chain()?;
     let mut funded: Vec<(u32, Txid)> = vec![(0, genesis.txs[0].txid())];
     for tx in &chain[1].txs {
@@ -1278,9 +1243,6 @@ fn confirmed_history_orders_funding_rows_by_height_then_txid()
 #[test]
 fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), Box<dyn std::error::Error>>
 {
-    // Live rows arrive in non-ascending height order; the engine must return
-    // them sorted by the (height, txid, vout) key from scripts.rs. Coin
-    // heights come from the seeded UTXO view, not the row keys.
     let (genesis, chain, scripthash) = paying_chain()?;
     let coin_value = genesis.txs[0].outputs[0].value.to_sat();
     let mut coins: Vec<(u32, OutPoint, TxOut)> = Vec::new();
@@ -1341,11 +1303,6 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), Box<dyn 
 #[test]
 fn confirmed_history_with_nonmatching_script_falls_back_per_height_and_stays_empty()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Hostile shape from the finding: one unauthenticated scripthash query
-    // fans out to full-block fallbacks at several candidate heights. The
-    // funding rows below are filed under the queried hash but carry malformed
-    // values, so every height falls back to a full-block decode that matches
-    // nothing; the memo holds at most one decoded block at a time.
     let (genesis, chain, _) = paying_chain()?;
     let foreign = ScriptHash::new(&Script::from_bytes(vec![0x51, 0x41, 0x42]));
     let fixture = QueryFixture::new(FixtureConfig {

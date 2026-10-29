@@ -1,31 +1,17 @@
 //! Native sigop counting over scripts, transactions, and blocks.
-//!
-//! Counting semantics follow Core: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
-//! cost 1, `OP_CHECKMULTISIG`/`OP_CHECKMULTISIGVERIFY` cost 20 under legacy
-//! counting or the preceding small-integer push value under accurate counting,
-//! data pushes are skipped, and a malformed push ends the count (Core's
-//! `if (!GetOp(pc, opcode)) break;`).
 
 use bitcoin_rs_primitives::Tx;
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
-/// Counts legacy sigops in a script (Core's `GetSigOpCount(false)`).
 fn count_legacy(script: &[u8]) -> u32 {
     count_script(script, false)
 }
 
-/// Counts script sigops with the BIP16/BIP141 accurate multisig rule.
-/// Only an immediately preceding `OP_1` through `OP_16` supplies the key count.
 pub fn count_accurate(script: &[u8]) -> u32 {
     count_script(script, true)
 }
 
-/// Counts segwit-v0 sigops for a witness program and witness stack.
-///
-/// A P2WPKH program costs exactly 1; a P2WSH program delegates to its
-/// witness script counted accurately (multisig charges its declared key
-/// count).
 pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
     if is_p2wpkh(script) {
         return 1;
@@ -38,8 +24,6 @@ pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
         .map_or(0, |witness_script| count_accurate(witness_script))
 }
 
-/// Counts the sigop cost visible without a UTXO set: legacy counts of every
-/// input's `scriptSig` and every output's `scriptPubKey`.
 pub fn count_tx_legacy(tx: &Tx) -> u32 {
     let mut count = 0_u32;
     for input in &tx.inputs {
@@ -109,11 +93,8 @@ mod tests {
         ]
         .concat();
 
-        // (name, script, legacy cost, accurate cost)
         let cases: [(&str, Vec<u8>, u32, u32); 7] = [
             (
-                // Core updates lastOpcode for every opcode, so OP_NOP (0x61)
-                // between the pushnum and the multisig loses the key count.
                 "a non-sigop opcode clearing the cached key count",
                 vec![pushnum(2), 0x61, opcode::OP_CHECKMULTISIG],
                 20,
@@ -160,8 +141,6 @@ mod tests {
                 "oracle: {name}"
             );
 
-            // A P2WSH spend counts its witness script accurately; anything that
-            // is not a witness program costs nothing.
             let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
             assert_eq!(count_segwit(&p2wsh, &[script]), accurate, "p2wsh: {name}");
         }

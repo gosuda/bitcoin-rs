@@ -14,29 +14,20 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
-/// Share of the connection pool kept open to sources other than the busiest
-/// one: a quarter, rounded down, so one source holds at most 96 of the
-/// default 128.
 const RESERVED_POOL_DIVISOR: usize = 4;
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 
-/// How long a wrong-credential answer waits before it is written, Core's
-/// brute-force deterrent (`httprpc.cpp:215-225`).
 const WRONG_CREDENTIALS_DELAY: Duration = Duration::from_millis(250);
 
-/// Most declared body bytes the unauthorized path reads after its answer.
-/// Bytes past this bound stay unread, so a peer that sends more may see a
-/// reset instead of a clean close.
 const MAX_DRAIN_BYTES: usize = 64 * 1_024;
 
-/// How long the drain may keep reading before the connection is closed
-/// under the peer.
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 
-const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+const ACCEPT_SHUTDOWN_CHECK: Duration = Duration::from_millis(20);
 
 const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 
@@ -44,15 +35,11 @@ const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
 
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
-/// Routes admitted by one listener, with an independent connection budget.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RpcSurface {
-    /// Historical combined JSON-RPC, REST and Esplora listener.
     #[default]
     Shared,
-    /// Authenticated JSON-RPC only.
     Management,
-    /// REST (when enabled) and both existing Esplora namespaces; no JSON-RPC.
     Public,
 }
 
@@ -74,24 +61,16 @@ impl RpcSurface {
     }
 }
 
-/// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
-    /// Bound TCP listener.
     pub listener: TcpListener,
-    /// Shared authentication policy.
     pub auth: Arc<Auth>,
-    /// Shared JSON-RPC handler.
     pub handler: Arc<Handler>,
-    /// Maximum concurrent worker connections.
     pub max_connections: usize,
-    /// Idle read timeout for each connection.
     pub idle_timeout: Duration,
-    /// Whether Bitcoin Core-compatible REST routes are enabled.
     pub rest_enabled: bool,
 }
 
 impl RpcServer {
-    /// Binds a new RPC server.
     pub fn bind<A: ToSocketAddrs>(
         address: A,
         auth: Arc<Auth>,
@@ -101,8 +80,6 @@ impl RpcServer {
         rest_enabled: bool,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(address)?;
-        // A binding owns its dispatcher cancellation latch. Rebinding the
-        // same Context must not reset a latch retained by old requests.
         let context = Arc::clone(handler.context());
         drop(handler);
         let handler = Arc::new(Handler::new(context));
@@ -118,17 +95,10 @@ impl RpcServer {
         })
     }
 
-    /// Returns the local socket address.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
     }
 
-    /// Runs the accept loop until `shutdown` is set to `true`.
-    ///
-    /// Polls non-blocking accept on a fixed cadence so the loop can observe
-    /// shutdown without parking on an open socket. Each accepted connection
-    /// is restored to blocking mode and handed to a bounded worker thread,
-    /// preserving the configured `idle_timeout` per connection.
     pub fn serve_with_shutdown(
         self,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
@@ -136,30 +106,36 @@ impl RpcServer {
         self.serve_surface_with_shutdown(shutdown, RpcSurface::Shared)
     }
 
-    /// Runs this listener with a closed route selection and its own budget.
-    /// The historical serving entrypoint retains the shared surface.
     pub fn serve_surface_with_shutdown(
         self,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         surface: RpcSurface,
     ) -> io::Result<()> {
-        self.serve_accept_loop(&shutdown.into(), surface, TcpListener::accept)
+        self.serve_accept_loop(&shutdown.into(), surface, mio::net::TcpListener::accept)
     }
 
     fn serve_accept_loop(
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,
         surface: RpcSurface,
-        mut accept: impl FnMut(&TcpListener) -> io::Result<(TcpStream, SocketAddr)>,
+        mut accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
         self.handler
             .configure_blocking_admission(per_source_limit(self.max_connections));
-        self.listener.set_nonblocking(true)?;
+        let mut readiness = mio::Poll::new()?;
+        let listener = self.listener.try_clone()?;
+        listener.set_nonblocking(true)?;
+        let mut listener = mio::net::TcpListener::from_std(listener);
+        readiness
+            .registry()
+            .register(&mut listener, mio::Token(0), mio::Interest::READABLE)?;
+        let mut events = mio::Events::with_capacity(1);
         let active = Arc::new(Mutex::new(ActiveConnections::default()));
         while !shutdown.is_triggered() {
-            match accept(&self.listener) {
+            match accept(&listener) {
                 Ok((stream, addr)) => {
+                    let stream: TcpStream = stream.into();
                     if let Err(error) = stream
                         .set_nonblocking(false)
                         .and_then(|()| self.handle_accept(&active, stream, addr.ip(), surface))
@@ -168,7 +144,14 @@ impl RpcServer {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(POLL_INTERVAL);
+                    while !shutdown.is_triggered() {
+                        match readiness.poll(&mut events, Some(ACCEPT_SHUTDOWN_CHECK)) {
+                            Ok(()) if !events.is_empty() => break,
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
                 Err(error) => match error.kind() {
                     io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted => {
@@ -176,20 +159,12 @@ impl RpcServer {
                     }
                     io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => return Err(error),
                     _ => {
-                        // Resource exhaustion (including EMFILE/ENFILE) and
-                        // pending network errors need not invalidate the listener.
-                        // Linux may report EOPNOTSUPP (Unsupported) for a new
-                        // connection, so that kind must also remain retryable.
-                        // Back off unknown OS errors too, avoiding a busy loop,
-                        // and recheck shutdown before the next accept attempt.
                         warn!(%error, "rpc accept failed; retrying after backoff");
-                        thread::sleep(POLL_INTERVAL);
+                        thread::sleep(ACCEPT_ERROR_BACKOFF);
                     }
                 },
             }
         }
-        // Drop cancels the new blocking RPC capabilities even when only this
-        // server stops; the chainstate and its process latch may remain live.
         Ok(())
     }
 
@@ -200,7 +175,6 @@ impl RpcServer {
         peer: IpAddr,
         surface: RpcSurface,
     ) -> io::Result<()> {
-        // Connection-local: a nodelay failure must not stop the accept loop.
         let mut stream = match prepare_http_socket(stream) {
             Ok(stream) => stream,
             Err(error) => {
@@ -241,11 +215,6 @@ impl RpcServer {
     }
 }
 
-/// The most connections one source address may hold: all but a quarter of
-/// the pool, rounded down, so the rest stays open to other sources. A source
-/// is an address, so every client behind loopback, a Docker gateway or a
-/// reverse proxy shares one and can still use most of the pool. Pools below
-/// four workers keep no share.
 fn per_source_limit(max_connections: usize) -> usize {
     max_connections - max_connections / RESERVED_POOL_DIVISOR
 }
@@ -322,14 +291,10 @@ impl Drop for RpcStop {
     }
 }
 
-/// Applies a single wall-clock budget across all socket reads for a request
-/// phase. A trickle of bytes cannot restart this deadline as with `SO_RCVTIMEO`.
 struct RequestDeadlineStream {
     stream: TcpStream,
     idle_timeout: Duration,
     deadline: Instant,
-    /// The socket read timeout last set, so an unchanged value costs no
-    /// extra syscall per read.
     applied_timeout: Option<Duration>,
 }
 
@@ -387,8 +352,6 @@ fn serve_connection(
         if handler.is_stopping() {
             return Ok(());
         }
-        // Waiting for the next request keeps the configured idle timeout;
-        // `read_request_head` starts the head budget at the request's first byte.
         reader.get_mut().reset_deadline(idle_timeout);
         let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
             Ok(Some(head)) => head,
@@ -408,9 +371,6 @@ fn serve_connection(
                 return Ok(());
             }
             Err(RequestReadError::Io(error)) => {
-                // The JSON-RPC parser renders `InvalidRequest` verbatim for
-                // Core compatibility; HTTP framing failures keep the local
-                // prefix this variant used to carry.
                 let rpc_error = RpcError::InvalidRequest("invalid request: malformed http request");
                 let response =
                     JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
@@ -430,18 +390,10 @@ fn serve_connection(
             surface,
             route: route.label(),
         };
-        // Reject a route outside this listener before authentication or body
-        // upload. Closing also prevents pipelined bytes crossing the boundary.
         if !surface.allows(&route) {
             write_not_found(reader.get_mut().socket_mut(), false)?;
             return Ok(());
         }
-        // Authentication runs from the head alone, before any body byte is
-        // read: a 16 MiB declared body without credentials gets its 401 at
-        // once instead of after its upload (Core `httprpc.cpp` checks inside
-        // the handler, after libevent has buffered the whole body). REST and
-        // Esplora stay unauthenticated, and framing errors keep the 400
-        // answer, so only the JSON-RPC route defers its body.
         if authenticate_json_rpc_head(auth, &mut reader, &head)? {
             return Ok(());
         }
@@ -493,12 +445,6 @@ fn serve_connection(
     }
 }
 
-/// Answers the unauthenticated head of a JSON-RPC request and reports that
-/// the connection is finished.
-///
-/// The 401 carries Core's challenge, content type, an empty body, and no
-/// `Date`; the connection is closed either way, so a client cannot hold the
-/// worker with pipelined requests it never authenticated for.
 fn authenticate_json_rpc_head(
     auth: &Auth,
     reader: &mut BufReader<RequestDeadlineStream>,
@@ -517,17 +463,10 @@ fn reject_unauthenticated_json_rpc(
     reader: &mut BufReader<RequestDeadlineStream>,
     head: &RequestHead,
 ) -> io::Result<()> {
-    // Present but wrong credentials are slowed before the answer, Core's
-    // brute-force deterrent (`httprpc.cpp:215-225`). Absent credentials
-    // answer at once: there is no secret to slow down.
     if head.authorization.is_some() {
         thread::sleep(WRONG_CREDENTIALS_DELAY);
     }
     write_unauthorized(reader.get_mut().socket_mut())?;
-    // No declared body means no peer bytes can belong to this request: close
-    // at once instead of holding a bounded-pool worker up to DRAIN_BUDGET.
-    // Otherwise discard only the declared body through the buffered reader,
-    // so a well-behaved client sees a clean close instead of a reset.
     if head.content_length == 0 {
         return Ok(());
     }
@@ -535,8 +474,6 @@ fn reject_unauthenticated_json_rpc(
     Ok(())
 }
 
-/// Writes the Core-shaped 401: a challenge, an empty HTML-typed body, and a
-/// close. No `Date` is emitted, and no JSON body is serialized.
 fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
     let header = "HTTP/1.1 401 Unauthorized\r\n\
                   WWW-Authenticate: Basic realm=\"jsonrpc\"\r\n\
@@ -548,12 +485,6 @@ fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
     stream.shutdown(std::net::Shutdown::Write)
 }
 
-/// Reads and discards the declared body bytes the peer announced, up to
-/// [`MAX_DRAIN_BYTES`] and for at most [`DRAIN_BUDGET`], then returns at EOF
-/// or on the first read failure. Reads go through the buffered reader, so
-/// body bytes already buffered past the head count toward the declared
-/// length and a fully buffered body costs no wait. The peer then sees a
-/// clean close rather than a reset for the bytes it already put on the wire.
 fn drain_request(reader: &mut BufReader<RequestDeadlineStream>, declared: usize) {
     reader.get_mut().reset_deadline(DRAIN_BUDGET);
     let mut remaining = declared.min(MAX_DRAIN_BYTES);
@@ -610,9 +541,6 @@ fn dispatch_http_request(
         HttpRoute::NotFound => {
             write_not_found(stream, keep_alive)?;
         }
-        // The head gate already answered every unauthenticated JSON-RPC
-        // request before its body was read; whatever survives it is
-        // authorized.
         HttpRoute::JsonRpc => {
             let response = handle_json(handler, &request.body);
             let keep_alive = keep_alive && !response.close;
@@ -629,8 +557,6 @@ fn dispatch_http_request(
     Ok(false)
 }
 
-// Authorization lives on the head, which the authentication gate consumes
-// before `read_request_body` runs; the completed request carries no copy.
 struct HttpRequest {
     method: String,
     path: String,
@@ -638,8 +564,6 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-/// Reads one request-head line with the remaining aggregate budget. The
-/// one-byte sentinel makes an unterminated oversized line fail before EOF.
 fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(String, usize)> {
     let mut line = String::new();
     let limit = u64::try_from(remaining + 1).unwrap_or(u64::MAX);
@@ -653,8 +577,6 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
     Ok((line, read))
 }
 
-/// Reads header lines until the blank terminator, enforcing the header size
-/// ceiling and capturing the three headers the demux consumes.
 fn read_headers(
     reader: &mut BufReader<RequestDeadlineStream>,
     mut header_bytes: usize,
@@ -693,8 +615,6 @@ fn read_headers(
             }
             content_length = Some(parsed);
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
-            // This server supports Content-Length framing only. Accepting
-            // both would leave body bytes to be interpreted as another request.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported transfer-encoding",
@@ -718,15 +638,11 @@ impl From<io::Error> for RequestReadError {
     }
 }
 
-/// The parts of a request the head carries: everything the routing and the
-/// authentication gate need, before any body byte is read.
 struct RequestHead {
     method: String,
     path: String,
     authorization: Option<String>,
     keep_alive: bool,
-    /// `POST` without a `Content-Length` never reaches this struct: it is a
-    /// framing error at the head.
     content_length: usize,
 }
 
@@ -780,8 +696,6 @@ fn read_request_head(
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
-    // A POST without Content-Length is a framing error: the JSON-RPC path is
-    // body-carrying by definition. Other methods reach the demux and 404 there.
     let content_length = match (method, content_length) {
         ("POST", None) => {
             return Err(
@@ -806,8 +720,6 @@ fn read_request_head(
     }))
 }
 
-/// Reads the body the authenticated head declared. `read_request_body` runs
-/// only after `authenticate_json_rpc_head` let the head through.
 fn read_request_body(
     reader: &mut BufReader<RequestDeadlineStream>,
     body_timeout: Duration,
@@ -826,10 +738,6 @@ fn read_request_body(
 
 const BODY_READ_CHUNK: usize = 8 * 1_024;
 
-/// Reads exactly `content_length` bytes into the empty `body`, which grows
-/// with the bytes received, as Bitcoin Core's HTTP server does: a declared but
-/// unsent body reserves little, and the buffer never exceeds `content_length`.
-/// A body that ends early is `UnexpectedEof`.
 fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) -> io::Result<()> {
     let mut chunk = [0_u8; BODY_READ_CHUNK];
     while body.len() < content_length {
@@ -845,8 +753,6 @@ fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) 
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
-        // Doubling capped at `content_length`; `read_to_end` would round a
-        // full body's capacity up to the next power of two.
         if body.capacity() - body.len() < read {
             body.try_reserve_exact(remaining.min(body.len().max(BODY_READ_CHUNK)))?;
         }
@@ -869,22 +775,10 @@ enum JsonRpcVersion {
 }
 
 impl JsonRpcVersion {
-    /// Classifies the envelope exactly as the pinned Core 31.1 parser does
-    /// (`src/rpc/request.cpp:206-224`).
-    ///
-    /// PRE: `request` is one decoded JSON-RPC request object.
-    /// POST: `V2` for `"jsonrpc":"2.0"`, `Legacy` for an absent field or the
-    ///   historical `"1.0"` form Core still accepts, and `InvalidRequest`
-    ///   (-32600) with Core's message for a non-string field or any other
-    ///   version string.
-    /// INVARIANT: classification never executes the method; a refused
-    ///   envelope is answered without dispatch.
     fn classify(request: &Value) -> Result<Self, RpcError> {
         let Some(version) = request.get("jsonrpc") else {
             return Ok(Self::Legacy);
         };
-        // Core treats an absent field like `null`; only explicit non-strings
-        // are refused (`request.cpp:213-216`).
         if version.is_null() {
             return Ok(Self::Legacy);
         }
@@ -892,8 +786,6 @@ impl JsonRpcVersion {
             return Err(RpcError::InvalidRequest("jsonrpc field must be a string"));
         };
         match version {
-            // Core keeps the historical `{"jsonrpc":"1.0"}` request form as
-            // legacy for backwards compatibility (`request.cpp:216-222`).
             "1.0" => Ok(Self::Legacy),
             "2.0" => Ok(Self::V2),
             _ => Err(RpcError::InvalidRequest("JSON-RPC version not supported")),
@@ -923,22 +815,12 @@ impl JsonRpcVersion {
     }
 
     /// HTTP status for a failing call in this dialect.
-    ///
-    /// Core answers legacy errors with an HTTP error status and v2 errors
-    /// with HTTP 200 (`src/httprpc.cpp:41-56`). Within the legacy dialect,
     /// `RPC_INVALID_REQUEST` maps to 400 and `RPC_METHOD_NOT_FOUND` to 404;
     /// every other code keeps 500.
     const fn error_status_for(self, error: &RpcError) -> u16 {
         self.error_status_for_code(error.code())
     }
 
-    /// The same mapping keyed by the error code, for callers that carry the
-    /// code rather than the error.
-    ///
-    /// For a v2 request only *dispatch* errors stay inside HTTP 200; an
-    /// envelope violation reaches Core's outer error path, which maps
-    /// `-32600` to HTTP 400 regardless of the version the parser had
-    /// already assigned (`src/httprpc.cpp:41-56`, `src/rpc/request.cpp:206-260`).
     const fn error_status_for_code(self, code: i64) -> u16 {
         match self {
             Self::Legacy => match code {
@@ -958,15 +840,7 @@ enum CallResponse {
     Reply {
         body: Value,
         version: JsonRpcVersion,
-        /// The failing call's error code, when this reply is an error.
-        ///
-        /// The legacy HTTP status depends on the code (400 for -32600, 404
-        /// for -32601), so the code travels with the reply.
         error_code: Option<i64>,
-        /// Whether the error is an envelope refusal raised by the parse
-        /// step itself. Core maps these `-32600`s to HTTP 400 without
-        /// consulting the negotiated dialect (`src/httprpc.cpp`), while a
-        /// method-level error keeps the dialect's own mapping.
         envelope_error: bool,
     },
     Notification,
@@ -982,8 +856,6 @@ impl CallResponse {
         }
     }
 
-    /// A reply for a refused envelope: Core raises `-32600` from
-    /// `JSONRPCRequest::parse` and answers HTTP 400 in either dialect.
     fn envelope_error(body: Value, version: JsonRpcVersion, error: &RpcError) -> Self {
         Self::Reply {
             body,
@@ -995,11 +867,6 @@ impl CallResponse {
 
     const fn http_status(&self) -> u16 {
         match self {
-            // The dialect code mapping is the single owner of every reply
-            // that carries a code, including envelope refusals: Core's
-            // outer error path maps the post-classification `-32600` to
-            // 400 through this arm in either dialect. The generic envelope
-            // arm below only covers the codeless case.
             Self::Reply {
                 version,
                 error_code: Some(code),
@@ -1028,27 +895,16 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
         }
     };
 
-    // The close decision is owned by `handle_decoded_json`, which sees the
-    // decoded envelope. Undecodable bodies name no method, so they never
-    // close; every decodable shape carries the flag computed below.
     handle_decoded_json(handler, &request)
 }
 
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
-    // Single owner of the close decision: a rejected long call must not
-    // retain the reserved ordinary slot through keep-alive.
-    // Batch/notification classification uses the same registry, and every
-    // return below carries this flag, so no caller overwrites it and a
-    // future `true` cannot be silently discarded.
     let close = request.as_array().map_or_else(
         || crate::registry::blocking_request(request),
         |requests| requests.iter().any(crate::registry::blocking_request),
     );
     if let Some(requests) = request.as_array() {
         if requests.is_empty() {
-            // Core: an empty batch still answers HTTP 200 with an empty
-            // result array (`httprpc.cpp` runs the batch reply path, which
-            // produces `[]` for no members).
             return JsonResponse {
                 close,
                 status: 200,
@@ -1070,9 +926,6 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
                 no_content_response()
             };
         }
-        // Core: "Batches never throw HTTP errors, they are always just
-        // included in HTTP OK responses" (`httprpc.cpp:200-201`). A
-        // per-member envelope or dispatch error stays inside the 200 batch.
         return JsonResponse {
             close,
             status: 200,
@@ -1081,10 +934,6 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
         };
     }
 
-    // A top-level value that is neither an object nor an array is Core's
-    // `RPC_PARSE_ERROR` "Top-level object parse error" (`httprpc.cpp`, the
-    // final `else` of `HTTPReq_JSONRPC`), HTTP 500 under the legacy
-    // mapping. Inside a batch the same value is a per-member -32600.
     if !request.is_object() {
         return legacy_error_response(
             &RpcError::TopLevelParse("Top-level object parse error"),
@@ -1111,20 +960,6 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
     }
 }
 
-/// Validates one request object's envelope, then dispatches it.
-///
-/// PRE: `request` is one decoded JSON-RPC request value (not a batch).
-/// POST: a reply or notification for that member. A malformed envelope is
-///   refused with `-32600` before the method is resolved or executed, using
-///   the pinned Core 31.1 rules: the `jsonrpc` field, when present, must be
-///   a string and must be `"1.0"` or `"2.0"`; `method` must be present and
-///   a string; `params`, when present, must be an array, an object, or
-///   `null` (`src/rpc/request.cpp:206-260`). A violation while classifying
-///   `jsonrpc` answers in the legacy dialect; a later violation keeps the
-///   already-assigned dialect's envelope but still takes the legacy HTTP
-///   status, matching Core's outer error path (`src/httprpc.cpp:189-194`).
-/// INVARIANT: an envelope error never executes the method, and a
-///   notification is only silent when its envelope was valid.
 fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     let id = request.get("id").cloned().unwrap_or_else(Value::new_null);
     if !request.is_object() {
@@ -1135,11 +970,6 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     let version = match JsonRpcVersion::classify(request) {
         Ok(version) => version,
         Err(error) => {
-            // Core raises -32600 from `JSONRPCRequest::parse`, before the
-            // claimed version is trusted, so the reply uses the legacy
-            // envelope (`request.cpp:206-224`) while the HTTP status stays
-            // the 400 every envelope refusal takes (`httprpc.cpp:41-56`).
-            // The error envelope still carries the request's `id`.
             let version = JsonRpcVersion::Legacy;
             return CallResponse::envelope_error(
                 version.error_response(&error, &id),
@@ -1148,8 +978,6 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
             );
         }
     };
-    // Core checks `isNull()` before `isStr()` (`request.cpp:228-232`), so
-    // an explicit `"method": null` is "Missing method".
     let Some(method) = request.get("method").filter(|method| !method.is_null()) else {
         let error = RpcError::InvalidRequest("Missing method");
         return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
@@ -1160,14 +988,10 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     };
     let null_params = Value::new_null();
     let params = request.get("params").unwrap_or(&null_params);
-    // Core accepts an array or object; `null` (and an absent field) means
-    // "no positional parameters". Any other JSON type is -32600.
     if !(params.is_array() || params.is_object() || params.is_null()) {
         let error = RpcError::InvalidRequest("Params must be an array or object");
         return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
     }
-    // Core canonicalizes absent or explicit-null params to an empty array
-    // before dispatch, so method defaults apply (`src/rpc/request.cpp:243-248`).
     let empty_params = json!([]);
     let params = if params.is_null() {
         &empty_params
@@ -1190,9 +1014,6 @@ fn legacy_error_response(error: &RpcError, id: &Value) -> JsonResponse {
     let version = JsonRpcVersion::Legacy;
     let status = version.error_status_for(error);
     JsonResponse {
-        // Undecodable bodies and top-level scalars name no method, so they
-        // never close; the flag stays here only because there is no decoded
-        // envelope for `handle_decoded_json` to classify.
         close: false,
         status,
         reason: reason_for_status(status),
@@ -1210,14 +1031,10 @@ const fn reason_for_status(status: u16) -> &'static str {
     }
 }
 
-/// A 204 drain that keeps the connection: the drained batch (or
-/// notification) named no blocking method.
 const fn no_content_response() -> JsonResponse {
     no_content_response_inner(false)
 }
 
-/// A 204 drain that also closes: the drained batch (or notification) named
-/// a blocking method, so the reserved slot must not survive keep-alive.
 const fn closing_no_content_response() -> JsonResponse {
     no_content_response_inner(true)
 }
@@ -1265,13 +1082,11 @@ fn write_status(
     stream.flush()
 }
 
-/// Splits an HTTP request target into its path and optional query string.
 fn split_path_query(path: &str) -> (&str, &str) {
     path.split_once('?')
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
 #[derive(Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
     RestPost {
@@ -1427,7 +1242,6 @@ fn write_response(
     stream.flush()
 }
 
-/// Applies the HTTP socket contract: disable Nagle once, before any bytes move.
 fn prepare_http_socket(stream: TcpStream) -> io::Result<TcpStream> {
     stream.set_nodelay(true)?;
     Ok(stream)
@@ -1451,9 +1265,6 @@ fn write_all_vectored(stream: &mut impl Write, header: &[u8], body: &[u8]) -> io
     Ok(())
 }
 
-/// Renders one HTTP response head as a string so it can share a single
-/// vectored write with its body: the same header bytes the response carries,
-/// materialized for the one-syscall emission path.
 fn render_response_head(head: &ResponseHead<'_>) -> String {
     let connection = if head.keep_alive {
         "keep-alive"

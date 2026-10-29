@@ -1,9 +1,6 @@
-//! Mainnet script verdicts against bitcoinkernel; opted-in fixtures also run
-//! the interpreter directly so the differential cannot dispatch kernel twice.
-//! Per-input scripts only; fixtures include every prevout and provenance.
-
 #![cfg(feature = "kernel")]
 
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +15,6 @@ use serde::Deserialize;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-// Engines use different error taxonomies; compare consensus accept/reject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
     Accept,
@@ -82,11 +78,9 @@ fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mutation {
     Pristine,
-    /// Invalidates a signature without changing its structural encoding.
     FlipSignatureBit,
     TruncateScriptSig,
     WrongSighashTypeByte,
-    /// Corrupts the final witness element, including taproot control blocks.
     TamperWitness,
     TruncateWitness,
 }
@@ -108,7 +102,6 @@ impl Mutation {
         }
     }
 
-    /// `None` means the mutation is inapplicable, never a no-op.
     fn apply(self, tx: &Tx) -> Option<Tx> {
         let mut tx = tx.clone();
         let applied = match self {
@@ -123,7 +116,6 @@ impl Mutation {
     }
 }
 
-/// First DER-signature push's `(payload_start, payload_len)`.
 fn der_sig_range(script: &[u8]) -> Option<(usize, usize)> {
     let mut cursor = 0usize;
     while let Some(&opcode) = script.get(cursor) {
@@ -232,7 +224,6 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
                 }
             }
             if element.len() == 64 {
-                // A 64-byte signature implicitly commits to SIGHASH_DEFAULT.
                 element.push(0x03);
                 mutated = true;
                 break;
@@ -309,8 +300,6 @@ fn vectors_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/scripts")
 }
 
-/// Loads the committed corpus; a missing directory, bad JSON, a txid mismatch
-/// or a prevout-count mismatch is an error, never a skip.
 fn load_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
     let dir = vectors_dir();
     let entries = std::fs::read_dir(&dir)
@@ -325,7 +314,7 @@ fn load_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
     for path in &paths {
         let text = std::fs::read_to_string(path)?;
         let file: FixtureFile =
-            serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+            sonic_rs::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
         fixtures.push(validate_fixture(file, path)?);
     }
     Ok(fixtures)
@@ -437,7 +426,6 @@ fn script_verdict_parity() -> TestResult {
                 fixture.class,
                 fixture.height,
             );
-            // Parse/precompute failures are not script rejection evidence.
             if mutation.expected() == Verdict::Reject {
                 assert!(
                     matches!(kernel, Err(ConsensusError::Script { .. })),

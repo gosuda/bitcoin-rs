@@ -25,7 +25,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: storage-footprint <offline-data-directory>".into());
     }
     let report = linux::measure(std::path::Path::new(&root))?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
+    println!("{}", sonic_rs::to_string_pretty(&report)?);
     Ok(())
 }
 

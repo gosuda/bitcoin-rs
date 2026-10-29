@@ -259,13 +259,13 @@ fn failed_anchor_consumption_exposes_no_claims_and_newer_confirmation_wins_retur
     );
 }
 
-fn collision_oracle() -> serde_json::Value {
-    serde_json::from_str(include_str!(
+fn collision_oracle() -> sonic_rs::Value {
+    sonic_rs::from_str(include_str!(
         "../../../tests/data/core-addrman-collisions-v31.1.json"
     ))
     .expect("independent Core output")
 }
-fn manager_from_collision_snapshot(row: &serde_json::Value) -> Manager {
+fn manager_from_collision_snapshot(row: &sonic_rs::Value) -> Manager {
     let mut manager = Manager::new([1; 4], false, None, NetGroups::default());
     manager.stored.secret =
         <[u8; 32]>::from_hex("41f758f2e5cc078d3795b4fc0cb60c2d735fa92cc020572bdc982dd2d564d11b")
@@ -316,7 +316,7 @@ fn manager_from_collision_snapshot(row: &serde_json::Value) -> Manager {
     manager.last_good = row["last_good"].as_u64().expect("good");
     manager
 }
-fn assert_collision_snapshot(manager: &Manager, row: &serde_json::Value) {
+fn assert_collision_snapshot(manager: &Manager, row: &sonic_rs::Value) {
     assert_eq!(
         u64::try_from(manager.stored.records.len()).expect("bounded count"),
         row["records"],
@@ -389,7 +389,7 @@ fn assert_collision_snapshot(manager: &Manager, row: &serde_json::Value) {
             .collect();
         slots.sort();
         assert_eq!(
-            serde_json::to_value(slots).expect("slots"),
+            sonic_rs::to_value(&slots).expect("slots"),
             entry["new_slots"]
         );
     }
@@ -568,9 +568,9 @@ fn current_anchors_obey_configured_map_and_orphan_shape_barriers() {
     assert_indexes(&prefix.state.lock());
     prefix.save();
     let current = fs::read(&path).expect("current");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&current[..current.len() - 32]).expect("JSON");
-    value["anchors"] = serde_json::json!([{"addr":"9.9.9.9:8333","confirmed_at":EPOCH}]);
+    let mut value: sonic_rs::Value =
+        sonic_rs::from_slice(&current[..current.len() - 32]).expect("JSON");
+    value["anchors"] = sonic_rs::json!([{"addr":"9.9.9.9:8333","confirmed_at":EPOCH}]);
     let malformed = fixture_bytes(&value);
     fs::write(&path, &malformed).expect("orphan anchor");
     let rejected = AddressBook::open(Some(base), [1; 4], false, None);
@@ -653,7 +653,7 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
     assert_indexes(&manager);
     assert!(
-        !serde_json::to_string(&manager.stored)
+        !sonic_rs::to_string(&manager.stored)
             .expect("stored")
             .contains("creation_id")
     );

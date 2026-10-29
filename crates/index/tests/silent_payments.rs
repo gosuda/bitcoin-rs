@@ -51,7 +51,7 @@ struct HexScript {
 }
 
 fn vectors() -> Result<Vec<Vector>> {
-    Ok(serde_json::from_str(include_str!(
+    Ok(sonic_rs::from_str(include_str!(
         "data/bip352-public-scan.json"
     ))?)
 }
@@ -87,8 +87,6 @@ fn vector_tx(vector: &Vector) -> Result<(Tx, Vec<Script>)> {
             value: Amount::from_sat(0),
         });
     }
-    // No-output negative cases still exercise input extraction/aggregation,
-    // rather than passing only because there was no candidate output.
     if tx.outputs.is_empty() {
         tx.outputs.push(TxOut {
             script_pubkey: [vec![0x51, 0x20], vec![0x11; 32]].concat().into(),
@@ -188,14 +186,9 @@ fn future_witness_excludes_transaction_but_malformed_program_does_not() -> Resul
     for len in [2_u8, 20, 32, 40] {
         for version in [0x52, 0x60] {
             let future_prog = [vec![version, len], vec![0x11; usize::from(len)]].concat();
-            // Native future witness program in prevout scriptPubKey excludes the transaction
-            // (matching BIP352 specification and Core GetSilentPaymentsPrevoutsSummary).
             scripts[1] = future_prog.clone().into();
             assert!(derive(&tx, &scripts)?.is_none());
 
-            // P2SH-wrapped future witness: P2SH scriptPubKey is derived from HASH160(redeem_script).
-            // It is not a witness program, so the input contributes no key (per BIP352 input list
-            // and Core GetSilentPaymentsPrevoutsSummary), but does not disqualify other eligible inputs.
             tx.inputs[1].script_sig = [vec![len + 2], future_prog.clone()].concat().into();
             let p2sh = p2sh_script(&future_prog);
             scripts[1] = p2sh.clone();
@@ -206,14 +199,10 @@ fn future_witness_excludes_transaction_but_malformed_program_does_not() -> Resul
     }
     let p2sh_script = last_p2sh_script.ok_or("p2sh script")?;
 
-    // A malformed native witness program in input 1 does not exclude the transaction,
-    // and input 0 remains eligible:
     let mut malformed_scripts = scripts.clone();
     malformed_scripts[1] = vec![0x52, 0x20, 0x11].into();
     assert!(derive(&tx, &malformed_scripts)?.is_some());
 
-    // When the only input is P2SH-wrapped future witness, the transaction has
-    // no eligible keys and produces None.
     let single_input_tx = Tx {
         version: 2,
         inputs: vec![tx.inputs[1].clone()],
@@ -338,7 +327,6 @@ fn retained_block_projection_is_hash_scoped_and_deterministic() -> Result {
     let replacement = block_tweaks(&view, true)?;
     assert_ne!(replacement.hash, first.hash);
     assert_eq!(replacement.transactions, first.transactions);
-    // Replaying the original body has no cache/cursor to recover or invalidate.
     view.block.header.nonce ^= 1;
     assert_eq!(block_tweaks(&view, true)?, first);
     view.spent.as_mut().map_err(|_| "spent")?[0].reverse();
@@ -417,7 +405,7 @@ fn pre_activation_witness_v1_spends_produce_no_tweaks_without_failing() -> Resul
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), 0),
-            witness: Witness::new(), // Pre-activation consensus allowed empty witness on v1
+            witness: Witness::new(),
             ..TxIn::default()
         }],
         outputs: vec![TxOut {
@@ -429,15 +417,11 @@ fn pre_activation_witness_v1_spends_produce_no_tweaks_without_failing() -> Resul
     let v1_prevout: Script = [vec![0x51, 0x20], vec![0x44; 32]].concat().into();
     let scripts = [Some(&v1_prevout)];
 
-    // Pre-activation: caller specifies taproot_active = false.
-    // Transaction produces no tweaks and block projection succeeds with empty tweaks.
     assert_eq!(transaction_tweak(&tx, &scripts, false)?, None);
     let view_inactive = view(tx.clone(), std::slice::from_ref(&v1_prevout));
     let tweaks_inactive = block_tweaks(&view_inactive, false)?;
     assert_eq!(tweaks_inactive.transactions.len(), 0);
 
-    // Post-activation: caller specifies taproot_active = true.
-    // The empty witness is now an invalid Taproot spend, failing as corrupt material.
     assert_eq!(
         transaction_tweak(&tx, &scripts, true),
         Err(TweakError::InvalidInput { input: 0 })

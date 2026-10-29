@@ -100,7 +100,6 @@ fn network_hash_ps_answers_on_the_applied_tip() -> Result<()> {
 }
 
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-06
 fn network_hash_ps_rejects_core_invalid_windows() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
     match mining.network_hash_ps(0, -1) {
@@ -291,9 +290,6 @@ fn shutdown_ends_long_poll_without_wake() -> Result<()> {
     let waiter =
         thread::spawn(move || mining_wait.get_block_template(template_request(Some(long_poll_id))));
     thread::sleep(Duration::from_millis(50));
-    // Bounded wait slices must observe the flag even without a direct wake:
-    // correctness does not depend on a wake notification, so the coordinator
-    // carries none.
     shutdown.store(true, Ordering::Release);
     let outcome = waiter
         .join()
@@ -387,9 +383,6 @@ fn last_candidate_counts_include_the_coinbase() -> Result<()> {
     Ok(())
 }
 
-/// Two threads looping `publish_generation` (tip path) and
-/// `publish_generation_from` (mempool path) must not deadlock within a 200 ms
-/// watchdog.
 #[test]
 fn concurrent_publish_generation_paths_do_not_deadlock() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -419,7 +412,6 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> Result<()> {
         let _ = seq_done_tx.send(());
     });
 
-    // 200 ms watchdog — if either thread is stuck, the joins below time out.
     thread::sleep(Duration::from_millis(200));
     stop.store(true, Ordering::Relaxed);
 
@@ -439,14 +431,10 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> Result<()> {
     Ok(())
 }
 
-/// `publish_generation_from` must not take the mempool read lock: holding the
-/// pool write lock and calling it must return immediately, not deadlock.
 #[test]
 fn publish_generation_from_does_not_take_mempool_lock() -> Result<()> {
     let (state, mining) = regtest_mining()?;
 
-    // Hold the mempool write lock for the duration of the call — a reentrant
-    // read would deadlock (parking_lot RwLock is not reentrant).
     let mempool = state.mempool();
     let _write_guard = mempool.write();
 
@@ -470,16 +458,10 @@ fn publish_generation_from_does_not_take_mempool_lock() -> Result<()> {
     Ok(())
 }
 
-/// A long-poll waiter must return in well under 1 s after a mempool-sequence
-/// wake, even when `mempool_update_wait` is non-zero. The waiter returns as
-/// soon as the published generation key differs from the waited key — no
-/// `LONG_POLL_SLICE` (1 s) recheck delay.
 #[test]
 fn long_poll_returns_quickly_on_mempool_sequence_wake() -> Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
 
-    // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
-    // before returning on a mempool-only change. The fix returns immediately.
     let mining = Arc::new(MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -503,10 +485,8 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> Result<()> {
     });
 
     started_rx.recv_timeout(Duration::from_secs(2))?;
-    // Scheduling aid only: the start signal does not prove entry into the wait.
     thread::sleep(Duration::from_millis(50));
 
-    // Advance the mempool sequence and wake via the lock-free path.
     advance_mempool_sequence(&state)?;
     let seq = state.mempool().read().sequence_number();
     let wake_start = std::time::Instant::now();
@@ -538,8 +518,6 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> Result<()> {
     Ok(())
 }
 
-/// CONTRACT: API-06 — getmininginfo's networkhashps mirrors the default
-/// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -553,29 +531,6 @@ fn network_hash_ps_matches_mining_info_default_window() -> Result<()> {
     Ok(())
 }
 
-// Priority-change generations.
-//
-// Every test below runs the real node, the real mempool gateway, the real
-// `MiningCoordinator`, and the real RPC `prioritisetransaction` /
-// `getblocktemplate` handlers; no coordinator or gateway is replaced. Two
-// independent pooled spends rank `high` over `low` until `low` is prioritised.
-//
-// What each group can and cannot fail:
-// - Template-content tests (`priority_change_replaces_the_cached_candidate...`)
-//   fail when the candidate identity omits the fee-priority component: the
-//   second template would be the cached, stale one.
-// - Pending-long-poll tests park the poll causally (`park_long_poll`) before
-//   anything is published, so a poll started after the change cannot pass.
-//   Their content assertions fail when the reply is the stale generation.
-//   They do not prove the notification: the coordinator re-derives the live
-//   generation every 1 s wait slice, so a lost notify only delays the same
-//   reply, and the 5 s ceiling is above that slice. No test here fails on a
-//   suppressed notify by design; the limit is recorded, not hidden.
-
-/// A priority change moves the fee-priority sequence but not the pool
-/// membership sequence. The generation must still change: the cached candidate
-/// of the old generation is not served, the template is rebuilt in the new
-/// order, and the pooled fees themselves do not move.
 #[test]
 fn priority_change_replaces_the_cached_candidate_for_an_unchanged_pool() -> Result<()> {
     let fx = priority_fixture()?;
@@ -630,10 +585,6 @@ fn priority_change_replaces_the_cached_candidate_for_an_unchanged_pool() -> Resu
     Ok(())
 }
 
-/// A long poll that is pending when `prioritisetransaction` succeeds returns
-/// the reordered template under the new generation id. The poll is proven
-/// parked before the change, so starting late cannot satisfy this test. It
-/// does not prove the notification (see the group comment).
 #[test]
 fn priority_change_returns_a_pending_long_poll_with_the_reordered_template() -> Result<()> {
     let fx = priority_fixture()?;
@@ -668,9 +619,6 @@ fn priority_change_returns_a_pending_long_poll_with_the_reordered_template() -> 
     Ok(())
 }
 
-/// An ordinary admission after a priority change still returns a pending long
-/// poll, keeps the fee-priority component of the generation, and keeps the
-/// prioritised ordering.
 #[test]
 fn admission_after_a_priority_change_returns_a_pending_long_poll_and_keeps_the_fee_component()
 -> Result<()> {
@@ -711,11 +659,6 @@ fn admission_after_a_priority_change_returns_a_pending_long_poll_and_keeps_the_f
     Ok(())
 }
 
-/// A miner still holding the id of the generation before a priority change is
-/// told at once: the pool changed, so its id is stale and the call must not
-/// wait. Deterministic: no wake is involved, only the identity. A candidate
-/// identity without the fee-priority component makes the stale id equal to the
-/// live one, and the call blocks until the ceiling.
 #[test]
 fn long_poll_on_the_pre_priority_id_returns_the_new_generation_without_waiting() -> Result<()> {
     let fx = priority_fixture()?;
@@ -734,11 +677,6 @@ fn long_poll_on_the_pre_priority_id_returns_the_new_generation_without_waiting()
     Ok(())
 }
 
-/// A legacy `{tip}{mempool_sequence}` id parses as fee revision zero, and
-/// every colon-form near miss fails at once instead of waiting on a
-/// generation that can never match. Each call runs under the `PROMPT`
-/// ceiling, so an id that wrongly parses (and would wait) fails the test
-/// rather than hanging it.
 #[test]
 fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -746,8 +684,6 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let id = current.candidate.template_id.as_str();
-    // No prioritisation has run, so the live fee revision is zero and the
-    // legacy shape without a suffix names the live generation exactly.
     assert!(
         !id.contains(':'),
         "precondition: the live id {id:?} carries no fee suffix"
@@ -759,7 +695,6 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
         format!("{tip}{sequence}x"),
         format!("{tip}-1:2"),
         format!("{tip}5:x"),
-        // A multibyte character straddling the tip/counter split.
         format!("{}é:1", "a".repeat(63)),
     ];
 
@@ -778,10 +713,6 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
             other => panic!("long-poll id {rejected_id:?} must be malformed, got {other:?}"),
         }
     }
-    // The legacy shape parses as fee revision zero: after a mempool change,
-    // polling the previous legacy id returns the new generation at once
-    // instead of failing as malformed. No wait is involved, so the check is
-    // synchronous.
     advance_mempool_sequence(&state)?;
     let membership = state.mempool().read().sequence_number();
     mining.publish_generation_from(membership);
@@ -794,14 +725,10 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
     Ok(())
 }
 
-/// `publish_fee_delta_generation` receives its sequence as an argument: like
-/// `publish_generation_from`, it must not take the mempool read lock, because
-/// the RPC handler and observers call it around pool mutations.
 #[test]
 fn publish_fee_delta_generation_does_not_take_mempool_lock() -> Result<()> {
     let (state, mining) = regtest_mining()?;
 
-    // A reentrant read would deadlock (parking_lot RwLock is not reentrant).
     let mempool = state.mempool();
     let _write_guard = mempool.write();
 
@@ -825,27 +752,6 @@ fn publish_fee_delta_generation_does_not_take_mempool_lock() -> Result<()> {
     Ok(())
 }
 
-// Staged-template durability proofs.
-//
-// Every test below runs the real node, the real mempool gateway, the real
-// `MiningCoordinator` attached through the production
-// `attach_mining_coordinator` path, and the real disk backend. The body's
-// store is the real store wrapped by the sync barrier
-// (`super::preparation_barrier`): while the gate holds the one armed sync,
-// the staged-tip hook has fired and the preparation worker can finish, but
-// the durable head has not advanced and nothing is published. Releasing the
-// gate lets the real sync and head batch complete. The guard lives inside
-// the `thread::scope` body, so a failed assertion releases the apply thread
-// before the scope joins it: no test here can hang another.
-//
-// A stale IBD latch would suppress staging, so the chains are seeded with
-// fresh-time blocks (same height-encoding coinbases as `seed_chain`, wall
-// clock timestamps): the first fresh tip latches IBD off, and every staged
-// block after it reaches the coordinator.
-
-/// Real node on a real disk backend with a fresh chain, two pooled mature
-/// spends (`low` ranks below `high`), and the coordinator attached through
-/// the production signal path.
 struct BarrierSetup {
     node: BarrierNode,
     mining: Arc<MiningCoordinator>,
@@ -870,7 +776,6 @@ fn barrier_setup() -> Result<BarrierSetup> {
     })
 }
 
-/// Transaction ids of a built template in candidate order.
 fn txids_of(template: &BlockTemplate) -> Vec<String> {
     template
         .candidate
@@ -880,9 +785,6 @@ fn txids_of(template: &BlockTemplate) -> Vec<String> {
         .collect()
 }
 
-/// A staged preparation must not publish before the durable commit: while the
-/// body sync is held and the worker has finished the staged tip, the applied
-/// tip and an ordinary template still reference the old parent.
 #[test]
 fn staged_preparation_does_not_publish_before_commit() -> Result<()> {
     let setup = barrier_setup()?;
@@ -901,7 +803,6 @@ fn staged_preparation_does_not_publish_before_commit() -> Result<()> {
         "precondition: high fee ranks over low"
     );
 
-    // The barrier block consumes `low`, leaving `high` for the next template.
     let block = fresh_tip_child(state, vec![setup.low.clone()])?;
     let new_hash = Hash256::from(block.block_hash());
 
@@ -960,8 +861,6 @@ fn staged_preparation_does_not_publish_before_commit() -> Result<()> {
     })
 }
 
-/// After the held commit lands, the first template on the new tip installs
-/// the prepared candidate `Arc`, and the survivors match the actual pool.
 #[test]
 fn prepared_candidate_installs_on_commit_with_arc_reuse() -> Result<()> {
     let setup = barrier_setup()?;
@@ -1035,17 +934,12 @@ fn prepared_candidate_installs_on_commit_with_arc_reuse() -> Result<()> {
     })
 }
 
-/// A fee-priority mutation committed while the sync is held invalidates the
-/// staged preparation: the post-commit template is a new candidate in the
-/// prioritised order, never the stale `Arc`.
 #[test]
 fn fee_priority_race_discards_stale_preparation() -> Result<()> {
     let setup = barrier_setup()?;
     let state = &setup.node.state;
     let gate = &setup.node.gate;
     let mining = &setup.mining;
-    // An empty tip child removes nothing, so only the fee race can refuse
-    // the prepared install.
     let block = fresh_tip_child(state, Vec::new())?;
     let new_hash = Hash256::from(block.block_hash());
 
@@ -1079,8 +973,6 @@ fn fee_priority_race_discards_stale_preparation() -> Result<()> {
             "precondition: the staged candidate ranks high over low"
         );
 
-        // The real `prioritisetransaction` path: gateway mutation plus the
-        // fee-generation publish, committed while the sync is still held.
         let handler = rpc_handler(state, mining.clone());
         let accepted = handler.dispatch(
             "prioritisetransaction",
@@ -1125,9 +1017,6 @@ fn fee_priority_race_discards_stale_preparation() -> Result<()> {
     })
 }
 
-/// Shutting down with staged work held neither installs nor publishes it and
-/// never hangs: the apply settles, GBT answers unavailable, and the prepared
-/// wait comes back empty.
 #[test]
 fn shutdown_with_staged_work_installs_nothing_and_answers_unavailable() -> Result<()> {
     let setup = barrier_setup()?;
@@ -1150,14 +1039,8 @@ fn shutdown_with_staged_work_installs_nothing_and_answers_unavailable() -> Resul
             "the commit never reached the body-store sync boundary"
         );
 
-        // Staging fired before the sync (the hook runs ahead of it); shut
-        // down with that work still unpublished.
         state.request_shutdown();
         gate.release();
-        // The commit tail owns the outcome past the UTXO commit: either the
-        // durable commit lands or the tail refuses it after shutdown — both
-        // are acceptable, and neither is asserted here. A worker panic is
-        // still a failure, so only the join layer is classified.
         let inner = apply
             .join()
             .map_err(|_| anyhow::anyhow!("barrier apply thread panicked"))?;
@@ -1173,9 +1056,6 @@ fn shutdown_with_staged_work_installs_nothing_and_answers_unavailable() -> Resul
                 .is_none(),
             "shutdown must release prepared waiters with nothing to install"
         );
-        // Commit or refusal stays unasserted, but the staged work itself must
-        // never have published: no template was served in this test, so any
-        // recorded candidate is the staged install leaking through.
         assert!(
             mining.mining_info()?.last_candidate.is_none(),
             "shutdown with staged work held must install nothing"

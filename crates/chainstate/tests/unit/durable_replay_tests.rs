@@ -86,11 +86,6 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// A boot-time replay of an already-committed gap must never fire the
-/// staged-tip hook: the gap's durable receipt already certifies it, so there
-/// is no speculative tip to prepare. The replay still lands exactly on the
-/// stored head. A replay path that staged speculative work would record a
-/// fire here.
 #[test]
 fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -129,9 +124,6 @@ fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
     Ok(())
 }
 
-/// Publication carries the count the durable receipt certified, never a
-/// tree-side re-derivation: a replay whose derived count cannot match the
-/// stored head still lands exactly on the head's facts.
 #[test]
 fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, child) = restored_chainstate()?;
@@ -141,8 +133,6 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
         Hash256::from(child.block_hash()),
         &consensus_bytes(&child),
     )?;
-    // The tree derives 1 (genesis) + 1 (the child's single transaction) = 2;
-    // the stored head certified a different total before the crash.
     let head = DurableHead {
         assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 7,
@@ -169,18 +159,9 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-// A crash-recovery replay must not re-run the live future-drift recheck: the
-// gap block passed the contextual gate at first connect and its durable head
-// receipt certifies it, so an operator clock rollback beyond the future
-// window after the commit must not turn the replay into a
-// `TimestampTooFarAhead` refusal that strands the node on the older state at
-// every boot.
 #[test]
 fn replay_gap_skips_the_live_future_drift_recheck() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, mut child) = restored_chainstate()?;
-    // Simulate the rollback: the header time is pushed far beyond the real
-    // clock plus the two-hour future window, so the real clock plays the part
-    // of a clock that moved back after the block committed legally.
     child.header.time = current_unix_seconds().saturating_add(4 * 60 * 60);
     bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut child.header)?;
     let bodies = Arc::new(MemoryBodies::default());
@@ -363,10 +344,6 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
     Ok(())
 }
 
-/// A certified body chain wider than one commit group replays to the durable
-/// head: recoverability is the body-identity and ancestry walk, not the gap
-/// width. The replay lands on the stored head and preserves its `commit_id`
-/// (`P3`).
 #[test]
 fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, first) = restored_chainstate()?;
@@ -480,8 +457,6 @@ fn committed_gap_must_descend_from_restored_tip() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// A replay failure inside the transition must close admission: the node
-/// cannot serve a chain the durable head does not yet certify.
 #[test]
 fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, mut child) = restored_chainstate()?;
@@ -489,9 +464,6 @@ fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error:
         .applied_tip
         .load_full()
         .ok_or("restored tip missing")?;
-    // The body hashes to its own header and descends from the restored tip,
-    // but its merkle root does not commit to its transactions, so the apply
-    // inside the replay transition refuses.
     child.header.merkle_root = Hash256::from_le_bytes(&[0x77; 32]);
     let child_hash = Hash256::from(child.block_hash());
     let bodies = Arc::new(MemoryBodies::default());

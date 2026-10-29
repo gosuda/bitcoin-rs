@@ -1,16 +1,11 @@
-//! Storage-owned journal framing and committed-range replay.
-
 use super::record::{FRAME_HEADER_LEN, JournalRecord, MAX_PAYLOAD_LEN, decode_record};
 use super::writer::{HeadMarker, read_head_bytes};
 use bitcoin_rs_primitives::encode::hex_encode;
 
-/// Fail-closed errors encountered while replaying the committed journal range.
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReplayError {
-    /// No durable head marker exists.
     #[error("no journal head marker")]
     NoHead,
-    /// The durable head marker cannot be decoded or authenticated.
     #[error("journal head marker unreadable: {0}")]
     HeadUnreadable(String),
     /// The journal's base is not the restored checkpoint tip: the generation
@@ -21,13 +16,11 @@ pub enum JournalReplayError {
     /// fail closed, never truncate the committed prefix.
     #[error("committed journal range is invalid: {0}")]
     CommittedRangeInvalid(String),
-    /// Header-chain rebuild rejected a journaled header: fail closed.
     #[error("header rebuild rejected: {0}")]
     HeaderRebuildRejected(String),
 }
 
 impl JournalReplayError {
-    /// Returns a stable machine-readable error reason.
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::NoHead => "no_head",
@@ -38,7 +31,6 @@ impl JournalReplayError {
         }
     }
 
-    /// Reports whether the failure indicates checksum damage.
     pub fn is_checksum_failure(&self) -> bool {
         match self {
             Self::HeadUnreadable(_) => true,
@@ -50,11 +42,6 @@ impl JournalReplayError {
     }
 }
 
-/// Reads and validates the committed range `(start..=head)` from the journal
-/// directory: every record decodes, crc32c passes, and the contiguity
-/// predicate (`record[i].height == record[i-1].height + 1` AND
-/// `record[i].prev_hash == record[i-1].block_hash`) holds, with the first
-/// record anchored to the checkpoint base tip.
 pub(crate) fn stream_committed_range(
     dir: &cap_std::fs::Dir,
     head: &HeadMarker,
@@ -238,33 +225,22 @@ pub(crate) fn stream_segment(
     Ok(record_count)
 }
 
-/// Checkpoint tip that must anchor journal replay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalReplayBase {
-    /// Checkpoint generation recorded in the journal head.
     pub generation: u64,
-    /// Checkpoint height.
     pub height: u32,
-    /// Checkpoint block hash in internal byte order.
     pub block_hash: [u8; 32],
-    /// Cumulative transaction count at the checkpoint tip.
     pub chain_tx_count: u64,
 }
 
-/// Journal frontier reconstructed after replaying committed records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayedHead {
-    /// Last replayed block height.
     pub height: u32,
-    /// Last replayed block hash in internal byte order.
     pub block_hash: [u8; 32],
-    /// Cumulative transaction count at the replayed head.
     pub chain_tx_count: u64,
-    /// Number of records applied during replay.
     pub record_count: u64,
 }
 
-/// Validates and applies the journal range committed by its durable head.
 pub fn replay_committed_range(
     dir: &cap_std::fs::Dir,
     base: JournalReplayBase,

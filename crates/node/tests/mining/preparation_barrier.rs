@@ -1,17 +1,3 @@
-//! Storage-sync barrier for the staged-template durability proof.
-//!
-//! [`BarrierBodies`] wraps the node's real body store, delegates every
-//! [`BlockBodyStore`] method to it, and holds only an armed next
-//! [`BlockBodyStore::sync`] on [`SyncGate`]. The durable commit tail
-//! (`sync_appended_blocks`, then the head batch) still runs against the real
-//! disk backend; the gate only delays it so the test can observe the staged
-//! preparation before the commit publishes. Every other sync passes through.
-//!
-//! Release is unwind-safe: hold [`SyncGate::release_guard`] inside the
-//! `thread::scope` body that runs the apply, so a failed assertion drops the
-//! guard and unblocks the apply thread before the scope joins it. All waits
-//! are bounded and report a missing boundary instead of hanging.
-
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -28,8 +14,6 @@ use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, Storag
 
 use super::support::current_tip;
 
-/// Deadlock bound for every barrier wait: a missed boundary fails the test,
-/// never hangs it. No timing behaviour is asserted.
 const BARRIER_BOUND: Duration = Duration::from_secs(10);
 
 struct GateState {
@@ -38,13 +22,6 @@ struct GateState {
     released: bool,
 }
 
-/// One-shot hold gate for the next body-store sync.
-///
-/// Linearizability is not needed across threads here: the gate only orders
-/// one apply thread past one armed sync behind one test thread. The mutex
-/// plus condvar gives that causal order; every wait loops on its predicate
-/// (`entered` / `released`) so a spurious wakeup can never release the apply
-/// or satisfy the test early.
 pub(crate) struct SyncGate {
     state: Mutex<GateState>,
     cvar: Condvar,
@@ -68,9 +45,6 @@ impl SyncGate {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Arms the next [`BlockBodyStore::sync`] to hold. Call before spawning
-    /// the apply; an apply that reaches sync before the arm would pass
-    /// through and the test would fail on `wait_entered` instead of hanging.
     pub(crate) fn arm(&self) {
         let mut state = self.lock_state();
         state.armed = true;
@@ -78,9 +52,6 @@ impl SyncGate {
         state.released = false;
     }
 
-    /// Holds the calling sync until [`Self::release`], exactly once per arm.
-    /// Called on the apply thread; unarmed syncs pass straight through to the
-    /// real store.
     fn hold(&self) {
         let mut state = self.lock_state();
         if !state.armed {
@@ -97,9 +68,6 @@ impl SyncGate {
         }
     }
 
-    /// Waits (bounded) until the armed sync is held. `false` means the
-    /// boundary was never reached: staging never fired, the apply failed
-    /// early, or the arm raced the spawn.
     pub(crate) fn wait_entered(&self, timeout: Duration) -> bool {
         let (state, _) = self
             .cvar
@@ -108,17 +76,12 @@ impl SyncGate {
         state.entered
     }
 
-    /// Releases a held sync. Idempotent: safe to call after the apply
-    /// finished and safe to repeat from the unwind guard.
     pub(crate) fn release(&self) {
         let mut state = self.lock_state();
         state.released = true;
         self.cvar.notify_all();
     }
 
-    /// Unwind-safe release: drop (or an explicit early drop after `release`)
-    /// unblocks the apply thread. Hold inside the `thread::scope` body so a
-    /// panicking assertion releases before the scope joins the apply thread.
     pub(crate) fn release_guard(&self) -> ReleaseGuard<'_> {
         ReleaseGuard { gate: self }
     }
@@ -134,12 +97,6 @@ impl Drop for ReleaseGuard<'_> {
     }
 }
 
-/// The real body store with one interceptable durability boundary.
-///
-/// Every method delegates to the inner store; only [`BlockBodyStore::sync`]
-/// consults the gate, and only while armed. Reads, appends, cursors, and the
-/// index flush are never gated, so the preparation worker and every other
-/// reader observe real store state throughout the hold.
 pub(crate) struct BarrierBodies {
     inner: Arc<dyn BlockBodyStore>,
     gate: Arc<SyncGate>,
@@ -203,8 +160,6 @@ impl BlockBodyStore for BarrierBodies {
         self.inner.load_block_body_bounded(height, hash, max_bytes)
     }
 
-    // Like the verification read above, the bounded verification read has
-    // real backend behavior and must delegate explicitly.
     fn load_block_body_for_verification_bounded(
         &self,
         height: u32,
@@ -267,18 +222,12 @@ impl BlockBodyStore for BarrierBodies {
     }
 }
 
-/// A node opened on a real disk backend whose next armed body sync holds.
-///
-/// The temp dir lives as long as the node; dropping both closes the store.
 pub(crate) struct BarrierNode {
     pub(crate) state: NodeState,
     pub(crate) gate: Arc<SyncGate>,
     _dir: tempfile::TempDir,
 }
 
-/// Opens a regtest node through the test-seam body-store entry with the sync
-/// barrier wrapped around the real store. The gate starts disarmed so genesis
-/// and seeding syncs pass through; each proof arms it for one commit.
 pub(crate) fn open_barrier_node() -> Result<BarrierNode> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
@@ -300,11 +249,6 @@ pub(crate) fn open_barrier_node() -> Result<BarrierNode> {
     })
 }
 
-/// Builds a one-coinbase child plus `txs` with the height-encoding coinbase
-/// `seed_chain` uses, so `seed_coinbase_spend_at` spends resolve against it.
-/// Time is caller-chosen: fresh-chain seeding and tip children pass the wall
-/// clock, keeping the published tip within the IBD recency window so the
-/// staged-tip hook fires.
 pub(crate) fn fresh_child(prev: Hash256, height: u32, time: u32, txs: Vec<Tx>) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
@@ -338,24 +282,16 @@ pub(crate) fn fresh_child(prev: Hash256, height: u32, time: u32, txs: Vec<Tx>) -
     Ok(block)
 }
 
-/// Returns the wall clock as a consensus timestamp, or fails when it no
-/// longer fits `u32`.
 pub(crate) fn wall_time() -> Result<u32> {
     u32::try_from(unix_time_secs())
         .map_err(|_| anyhow::anyhow!("wall clock {} out of u32 range", unix_time_secs()))
 }
 
-/// Builds a fresh-time child of the node's applied tip carrying `txs`.
 pub(crate) fn fresh_tip_child(state: &NodeState, txs: Vec<Tx>) -> Result<Block> {
     let tip = current_tip(state)?;
     fresh_child(tip.hash, tip.height + 1, wall_time()?, txs)
 }
 
-/// Applies genesis (when needed) then `count` fresh-time children with
-/// increasing timestamps landing on the wall clock. The tip ends within the
-/// IBD recency window, so the next commit's staged-tip hook fires; the
-/// height-encoding coinbases mature exactly like `seed_chain`'s for
-/// `seed_coinbase_spend_at` spends.
 pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256> {
     if state.chainstate().applied_tip_snapshot().is_none() {
         let genesis = Network::Regtest.genesis_block();
@@ -367,7 +303,6 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
     let mut tip = current_tip(state)?;
     for index in 1..=count {
         let height = tip.height + 1;
-        // Increasing by one interval per block, tip at the wall clock.
         let time = u32::try_from(now.saturating_sub(u64::from(count - index) * 600))
             .map_err(|_| anyhow::anyhow!("fresh seed time out of u32 range"))?;
         let block = fresh_child(tip.hash, height, time, Vec::new())?;
@@ -384,8 +319,6 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
     Ok(tip.hash)
 }
 
-/// Deadlock bound shared by the coordination proofs. A missed boundary fails
-/// the test; no timing behaviour is asserted.
 pub(crate) fn barrier_bound() -> Duration {
     BARRIER_BOUND
 }
@@ -419,8 +352,6 @@ impl BlockBodyStore for DivergentBodies {
 
 #[test]
 fn barrier_bodies_verification_read_uses_the_inner_verification_path() -> Result<()> {
-    // The trait default routes verification reads to `load_block_body`,
-    // which would return `plain` here; the override must surface `verified`.
     let bodies = BarrierBodies {
         inner: Arc::new(DivergentBodies {
             plain: vec![1],
@@ -437,9 +368,6 @@ fn barrier_bodies_verification_read_uses_the_inner_verification_path() -> Result
     Ok(())
 }
 
-/// The barrier forwards verification reads through the inner store's
-/// verification path, so framed corruption surfaces instead of degrading
-/// to an ordinary miss.
 #[test]
 fn barrier_preserves_inner_verification_corruption() {
     struct CorruptInner;

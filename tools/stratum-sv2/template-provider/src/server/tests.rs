@@ -33,7 +33,6 @@ use tokio::{
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 const DEADLINE: Duration = Duration::from_secs(5);
-/// Room a pool with a few outputs asks for; every test candidate has it to spare.
 const LOOSE: CoinbaseBudget = CoinbaseBudget {
     additional_size: 1000,
     additional_sigops: 1,
@@ -127,7 +126,6 @@ impl EmbeddedNode {
         }
     }
 
-    /// The unconstrained candidate, as the worker's wake would lead a session to.
     fn candidate(&self) -> Arc<Candidate> {
         let BlockTemplateResult::Template(template) = self
             .node
@@ -147,7 +145,6 @@ impl EmbeddedNode {
         template.candidate
     }
 
-    /// Mines `count` blocks to the node's own payout, moving the generation.
     async fn mine(&self, count: u32) -> Vec<GeneratedBlock> {
         let payout = self.candidate().coinbase.outputs[0]
             .script_pubkey
@@ -168,8 +165,6 @@ impl EmbeddedNode {
         .unwrap()
     }
 
-    /// Matures a coinbase and pools one spend of it, so the unconstrained
-    /// candidate carries exactly one transaction.
     async fn pool_one_spend(&self) {
         let generated = self.mine(101).await;
         let funding = self
@@ -313,7 +308,6 @@ async fn receive(reader: &mut NoiseTcpReadHalf) -> TemplateDistributionOwned {
         .into_owned()
 }
 
-/// Reads one complete job and returns its id.
 async fn receive_job(reader: &mut NoiseTcpReadHalf) -> u64 {
     let TemplateDistributionOwned::NewTemplate(template) = receive(reader).await else {
         panic!("expected NewTemplate");
@@ -324,7 +318,6 @@ async fn receive_job(reader: &mut NoiseTcpReadHalf) -> u64 {
     template.template_id
 }
 
-/// Asks for a job's transactions: their count, or `Err` for `template-not-found`.
 async fn transaction_count(
     reader: &mut NoiseTcpReadHalf,
     writer: &mut NoiseTcpWriteHalf,
@@ -351,7 +344,6 @@ async fn transaction_count(
     }
 }
 
-/// Solves `job` the way a pool would and returns the solution and the block hash.
 fn solve(job: &TemplateState) -> (SubmitSolutionOwned, BlockHash) {
     let mut block = job.candidate.into_unsolved_block().unwrap();
     solve_block(&mut block, 1_000_000).unwrap();
@@ -374,7 +366,6 @@ async fn submit(writer: &mut NoiseTcpWriteHalf, solution: SubmitSolutionOwned) {
     .unwrap();
 }
 
-/// The largest additional coinbase size, at one sigop, that `candidate` admits.
 fn headroom(candidate: &Candidate) -> u32 {
     let admits = |additional_size| {
         candidate
@@ -402,7 +393,6 @@ async fn partial_noise_frame_survives_a_job_refresh() -> TestResult {
     let embedded = EmbeddedNode::start(None).await;
     let hub = Hub::new();
     let (address, stop, session) = start_session(Arc::clone(&embedded.node), hub.clone()).await;
-    // A byte-transparent TCP proxy gates the remainder of one encrypted frame.
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
     let proxy_address = proxy_listener.local_addr()?;
     let (arm, arm_rx) = oneshot::channel();
@@ -458,15 +448,12 @@ async fn partial_noise_frame_survives_a_job_refresh() -> TestResult {
     tokio::task::yield_now().await;
     embedded.mine(1).await;
     hub.wake();
-    // Observe the refresh while the client frame is still incomplete.
     let second = receive_job(&mut reader).await;
     assert_ne!(second, first);
     release.send(()).unwrap();
-    // The superseded job answers from the shared history.
     assert!(
         matches!(receive(&mut reader).await, TemplateDistributionOwned::RequestTransactionDataSuccess(t) if t.template_id == first)
     );
-    // A subsequent complete record also decodes, checking continued alignment.
     assert_eq!(
         transaction_count(&mut reader, &mut writer, second).await,
         Ok(0)
@@ -485,8 +472,6 @@ async fn tight_budget_gets_a_fitting_job_and_budgets_stay_independent() -> TestR
     embedded.pool_one_spend().await;
     let unconstrained = embedded.candidate();
     assert_eq!(unconstrained.transactions.len(), 1);
-    // One byte beyond what the unconstrained candidate can spare: the case the
-    // provider used to refuse by closing the session.
     let tight = CoinbaseBudget {
         additional_size: headroom(&unconstrained) + 1,
         additional_sigops: 1,
@@ -508,8 +493,6 @@ async fn tight_budget_gets_a_fitting_job_and_budgets_stay_independent() -> TestR
     let loose_job = hub.lookup(loose_id).unwrap();
     assert!(tight_job.candidate.admits(tight).is_ok());
     assert!(loose_job.candidate.admits(LOOSE).is_ok());
-    // Room for the pool's outputs displaced the pooled spend only for the
-    // budget that needs it.
     assert!(tight_job.candidate.transactions.is_empty());
     assert_eq!(loose_job.candidate.transactions.len(), 1);
     assert_eq!(
@@ -520,8 +503,6 @@ async fn tight_budget_gets_a_fitting_job_and_budgets_stay_independent() -> TestR
         transaction_count(&mut reader_b, &mut writer_b, loose_id).await,
         Ok(1)
     );
-    // New constraints replace the job. An equal owner identity is the job the
-    // other session already holds, and the earlier job keeps its own meaning.
     constrain(&mut writer_a, LOOSE).await;
     assert_eq!(receive_job(&mut reader_a).await, loose_id);
     assert_eq!(
@@ -551,8 +532,6 @@ async fn pinned_job_outlives_peer_churn_and_evicted_ids_never_substitute() -> Te
     setup(&mut reader_a, &mut writer_a, LOOSE).await;
     let pinned = receive_job(&mut reader_a).await;
     let pinned_job = hub.lookup(pinned).unwrap();
-    // Another pool on tight budgets, each distinct and so each its own owner
-    // identity, issues more jobs than the shared history retains.
     let churn = u32::try_from(RETAINED_TEMPLATES).unwrap();
     let tight = |step: u32| CoinbaseBudget {
         additional_size: edge + step,
@@ -569,26 +548,21 @@ async fn pinned_job_outlives_peer_churn_and_evicted_ids_never_substitute() -> Te
     assert_eq!(hub.issued.lock().unwrap().len(), RETAINED_TEMPLATES);
     assert!(hub.lookup(pinned).is_none(), "peer churn evicted the job");
     assert!(hub.lookup(evicted).is_none());
-    // The pool's current job still answers although the history dropped it.
     assert_eq!(
         transaction_count(&mut reader_a, &mut writer_a, pinned).await,
         Ok(1)
     );
-    // The peer's own superseded job is gone: refused, and a solution for it is
-    // not applied to whichever job is newest.
     assert_eq!(
         transaction_count(&mut reader_b, &mut writer_b, evicted).await,
         Err(())
     );
     let height = embedded.node.snapshot().tip_height;
     submit(&mut writer_b, solve(&evicted_job).0).await;
-    // The session handles messages in order, so this reply follows the solution.
     assert_eq!(
         transaction_count(&mut reader_b, &mut writer_b, latest).await,
         Ok(0)
     );
     assert_eq!(embedded.node.snapshot().tip_height, height);
-    // A solution for the pinned job reaches consensus, not a silent drop.
     let (solution, hash) = solve(&pinned_job);
     submit(&mut writer_a, solution).await;
     assert_eq!(
@@ -626,9 +600,7 @@ async fn infeasible_budget_closes_only_its_session() -> TestResult {
     setup(&mut reader_a, &mut writer_a, LOOSE).await;
     setup(&mut reader_b, &mut writer_b, LOOSE).await;
     let id = receive_job(&mut reader_a).await;
-    // Equal owner identities are one retained job, not two.
     assert_eq!(receive_job(&mut reader_b).await, id);
-    // No coinbase fits this budget even in an empty block.
     constrain(
         &mut writer_b,
         CoinbaseBudget {
@@ -649,7 +621,6 @@ async fn infeasible_budget_closes_only_its_session() -> TestResult {
             .await?
             .is_err()
     );
-    // The other pool is untouched and still holds its job.
     assert!(!session_a.is_finished());
     assert_eq!(
         transaction_count(&mut reader_a, &mut writer_a, id).await,
@@ -675,15 +646,12 @@ async fn failed_delivery_leaves_the_previous_job_pinned() {
     });
     let (_reader, mut writer) = server.into_split();
     let hub = Hub::new();
-    // The pool holds a job in full before it disappears.
     let mut pin = None;
     let held = hub.issue(crate::tests::empty_candidate(1));
     push_template(&mut writer, &mut pin, Arc::clone(&held), LOOSE)
         .await
         .unwrap();
     assert!(Arc::ptr_eq(pin.as_ref().unwrap(), &held));
-    // Some later write must fail. Whichever of a job's two messages it hits,
-    // the pin stays on the last job delivered in full.
     drop(pool);
     let mut delivered = held.id;
     for parent in 2..=65 {
@@ -748,7 +716,6 @@ async fn session_shutdown_drains_a_running_native_submission() -> TestResult {
     assert_eq!(job.candidate.transactions.len(), 1);
     let (solution, hash) = solve(&job);
     submit(&mut writer, solution).await;
-    // This observer runs inside canonical block submission after mempool removal.
     tokio::time::timeout(DEADLINE, entered_rx).await??;
     stop.send_replace(true);
     assert!(

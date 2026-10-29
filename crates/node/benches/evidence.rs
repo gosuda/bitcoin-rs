@@ -1,32 +1,20 @@
-//! Recorded evidence for sync-pipeline measurements.
-//!
-//! Moved verbatim from the former `crates/node/src/metrics/evidence/` so the
-//! product-cell machinery lives with its only consumer; the shared identity
-//! types stay in `bitcoin_rs_node::metrics`.
 #![allow(dead_code, reason = "each consumer uses a different subset")]
 
 use anyhow::Result;
 use bitcoin_rs_node::metrics::EvidenceIdentity;
 
-/// Where a timed interval sits relative to the measured product.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntervalKind {
-    /// Inside the node process.
     Inside,
-    /// Outside the node process, for example harness setup.
     Outside,
-    /// A duration the domain defines without wall-clock placement.
     DomainDefined,
 }
 
-/// A half-open timed interval in nanoseconds on the run's clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Interval {
-    /// Placement of the interval.
     pub kind: IntervalKind,
-    /// Start offset.
     pub start_ns: u64,
     /// End offset, never before the start.
     pub end_ns: u64,
@@ -48,61 +36,40 @@ impl Interval {
     }
 }
 
-/// Why evidence was refused.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum EvidenceError {
-    /// A digest was not 64 lowercase hex characters.
     #[error("digest {0:?} is not 64 lowercase hex characters")]
     MalformedDigest(String),
-    /// The ledger text did not match the schema.
     #[error("ledger schema: {0}")]
     Schema(String),
-    /// A product sample named no corpus.
     #[error("product sample carries no corpus identity")]
     MissingCorpus,
-    /// An interval ended before it started.
     #[error("interval {0:?} ends before it starts")]
     InvertedInterval(Interval),
-    /// The two samples were not taken under one treatment.
     #[error("samples differ in path, owner or identity")]
     MismatchedTreatment,
-    /// The two intervals share instants.
     #[error("intervals {0:?} and {1:?} overlap; nested or concurrent work is not an addend")]
     OverlappingIntervals(Interval, Interval),
-    /// A summed counter exceeded `u64`.
     #[error("summed measurement overflows u64")]
     Overflow,
-    /// The cell is not declared in the ledger.
     #[error("cell {0:?} is not declared in the ledger")]
     UnknownCell(String),
 }
 
-/// One measurement of one cell by one owner.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
-    /// Ledger path the interval measures, for example `cell.wall`.
     pub path: String,
-    /// Component that owns the measured resources, for example `node`.
     pub owner: String,
-    /// Identity the sample was taken under.
     pub identity: EvidenceIdentity,
-    /// Timed interval the resources were consumed in.
     pub interval: Interval,
-    /// CPU time consumed, when the owner measured it.
     pub cpu_ns: Option<u64>,
-    /// Wall time consumed.
     pub elapsed_ns: u64,
-    /// Peak resident set, when the owner measured it.
     pub rss_peak_bytes: Option<u64>,
-    /// Bytes read plus written, when the owner measured it.
     pub io_bytes: Option<u64>,
-    /// Physical storage held at the end of the interval, when measured.
     pub storage_bytes: Option<u64>,
 }
 
-/// Combines two optional measurements; an absent side cannot silently absorb
-/// a present one, because that would collapse coverage into a number.
 fn combine(
     left: Option<u64>,
     right: Option<u64>,
@@ -123,10 +90,6 @@ impl Sample {
         self.interval.check()
     }
 
-    /// Adds two disjoint samples of the same owner and identity.
-    ///
-    /// Nested and concurrent intervals share instants, so their resources
-    /// were consumed once and cannot be added; extrema take the maximum.
     pub fn sum(&self, other: &Self) -> Result<Self, EvidenceError> {
         if self.path != other.path || self.owner != other.owner || self.identity != other.identity {
             return Err(EvidenceError::MismatchedTreatment);
@@ -162,39 +125,24 @@ impl Sample {
     }
 }
 
-/// One product cell and every sample ever recorded for it.
-///
-/// An empty history is the honest state of an unmeasured cell; it is kept,
-/// never dropped or defaulted.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cell {
-    /// Cell identifier from the ledger matrix.
     pub id: String,
-    /// Append-only sample history.
     pub samples: Vec<Sample>,
 }
 
-/// Schema tag every ledger and evidence file must carry.
 pub const LEDGER_SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
 
-/// The cell histories of `docs/benchmarks/hot-path-ledger.toml`.
-///
-/// Other top-level tables of that file belong to the attribution contract and
-/// pass through untouched; this type owns only what a run may append to.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ledger {
-    /// Must equal [`LEDGER_SCHEMA`].
     pub schema: String,
-    /// Every declared cell, measured or not.
     pub cells: Vec<Cell>,
-    /// Top-level attribution-contract tables owned outside the benchmark tool.
     #[serde(flatten)]
     pub contract: std::collections::BTreeMap<String, toml::Value>,
 }
 
 impl Ledger {
-    /// Parses ledger TOML and rejects any sample that lacks a full identity.
     pub fn parse(text: &str) -> Result<Self, EvidenceError> {
         let ledger: Self =
             toml::from_str(text).map_err(|error| EvidenceError::Schema(error.to_string()))?;
@@ -212,8 +160,6 @@ impl Ledger {
         Ok(ledger)
     }
 
-    /// Appends a sample to a declared cell. Repeats are kept: a second run is
-    /// evidence, not a correction.
     pub fn record(&mut self, cell: &str, sample: Sample) -> Result<(), EvidenceError> {
         sample.check()?;
         let cell = self
@@ -225,43 +171,29 @@ impl Ledger {
         Ok(())
     }
 
-    /// Renders the ledger as TOML.
     pub fn render(&self) -> Result<String, EvidenceError> {
         toml::to_string(self).map_err(|error| EvidenceError::Schema(error.to_string()))
     }
 }
 
-/// Samples a run must hold before its p99 may be read as a tail estimate
-/// (`HPA-13`: no trustworthy p99 from too few samples).
 pub const MIN_SAMPLES_FOR_P99: usize = 100;
 
-/// Order statistics of one raw sample set, in the samples' own unit.
-///
-/// The summary never replaces the raw samples; it is printed beside them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Quantiles {
-    /// Sample count the statistics were computed from.
     pub n: usize,
-    /// Median, linearly interpolated between adjacent order statistics.
     pub p50: u64,
-    /// 95th percentile, interpolated the same way.
     pub p95: u64,
-    /// 99th percentile, interpolated the same way.
     pub p99: u64,
-    /// Largest sample.
     pub max: u64,
 }
 
 impl Quantiles {
-    /// Computes p50/p95/p99/max of `samples`; `None` for an empty set, which
-    /// is a missing measurement, never a zero.
     #[must_use]
     pub fn of(samples: &[u64]) -> Option<Self> {
         let mut sorted = samples.to_vec();
         sorted.sort_unstable();
         let max = *sorted.last()?;
         let at = |percent: u64| -> u64 {
-            // Rank scaled by 100 keeps the interpolation exact in integers.
             let last_rank = u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX);
             let scaled = percent.saturating_mul(last_rank);
             let lower = usize::try_from(scaled / 100).unwrap_or(usize::MAX);
@@ -270,7 +202,6 @@ impl Quantiles {
             let high = sorted.get(lower + 1).copied().unwrap_or(low);
             let span = u128::from(high - low);
             let step = span * u128::from(remainder);
-            // Round half up on the interpolated step.
             low + u64::try_from((step + 50) / 100).unwrap_or(u64::MAX)
         };
         Some(Self {
@@ -282,7 +213,6 @@ impl Quantiles {
         })
     }
 
-    /// Whether `p99` rests on enough samples to be read as a tail estimate.
     #[must_use]
     pub const fn p99_supported(&self) -> bool {
         self.n >= MIN_SAMPLES_FOR_P99
@@ -331,7 +261,6 @@ mod tests {
         }
     }
 
-    /// Renders one measured cell and drops the line that carries `field`.
     fn ledger_without(field: &str) -> String {
         let mut ledger = Ledger::parse(LEDGER_TOML).expect("checked-in ledger");
         ledger.record(CELL, sample(0, 10)).expect("record");
@@ -361,7 +290,6 @@ mod tests {
                 "{field}: {error}"
             );
         }
-        // A corpus table is optional to the type and mandatory to the ledger.
         let error = Ledger::parse(&ledger_without("[cells.samples.identity.corpus]"))
             .expect_err("corpus-less sample");
         assert!(
@@ -428,9 +356,6 @@ mod tests {
     #[test]
     fn repeated_samples_and_empty_cells_survive_a_round_trip() {
         let mut ledger = Ledger::parse(LEDGER_TOML).expect("checked-in ledger");
-        // The checked-in ledger accumulates samples over time, so the test
-        // pins only its own deltas: the cell under test and the surviving
-        // empty cells, never the absolute measured-cell count.
         let measured_before = ledger
             .cells
             .iter()
@@ -485,7 +410,6 @@ mod tests {
         );
         assert!(!single.p99_supported());
 
-        // Ranks land on whole samples, so the statistics are the samples.
         let ranks: Vec<u64> = (0..=100).rev().collect();
         let exact = Quantiles::of(&ranks).expect("101 samples");
         assert_eq!(
@@ -499,7 +423,6 @@ mod tests {
                 .p99_supported()
         );
 
-        // Between samples the order statistic is interpolated, halves up.
         let spread = Quantiles::of(&[40, 10, 30, 20]).expect("four samples");
         assert_eq!(
             (spread.p50, spread.p95, spread.p99, spread.max),

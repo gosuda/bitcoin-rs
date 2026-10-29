@@ -1,4 +1,3 @@
-//! Prepared, all-or-nothing native package insertion over the existing pool.
 use super::{Mempool, PreparedInsert, fee_policy};
 use crate::rbf::LimitEnforcement;
 use crate::standardness::AcceptanceRejectReason;
@@ -14,8 +13,6 @@ pub(crate) struct PreparedPackage {
 }
 
 impl Mempool {
-    /// Plans one all-or-nothing package insertion. `now` is the wall-clock
-    /// second the rolling minimum fee is read at.
     pub(crate) fn prepare_package(
         &self,
         entries: Vec<MempoolEntry>,
@@ -69,8 +66,6 @@ impl Mempool {
         if self.limits.max_total_bytes != 0 && size > self.limits.max_total_bytes {
             return Err(MempoolError::Full.into());
         }
-        // Reused slots already have valid ids. Preflight the highest new slot,
-        // not just live membership, before the infallible insertion phase.
         if self
             .entries
             .capacity()
@@ -100,8 +95,6 @@ impl Mempool {
         }
         let inserts = entries
             .into_iter()
-            // The full package graph is verified once by finish_package.
-            // Batch entry-id allocation was preflighted above.
             .map(|entry| self.prepare_insert(entry, &HashSet::new(), LimitEnforcement::Deferred))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PreparedPackage {
@@ -119,9 +112,6 @@ impl Mempool {
             return Err(MempoolError::StalePolicy);
         }
         let mut changes = Vec::new();
-        // All fallible checks finished against the captured stamp. No partial
-        // package is ever visible outside this writer interval. Package fees
-        // pay for the group, so member rates are not fee-estimation samples.
         for entry in prepared.inserts {
             changes.extend(self.commit_insert(entry).changes);
         }

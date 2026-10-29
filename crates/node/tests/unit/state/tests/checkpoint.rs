@@ -1,13 +1,8 @@
 use super::*;
+use sonic_rs::JsonValueTrait as _;
 
 use bitcoin_rs_primitives::BlockPayload;
 
-/// Undo pruning must respect the durable tip, not the in-memory one.
-///
-/// The applied tip can run far ahead of the last clean checkpoint. Pruning
-/// undo to the in-memory tip deletes the record for the block the
-/// checkpoint names, and a crash then restores a chainstate that cannot
-/// disconnect its own tip.
 #[test]
 fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -37,10 +32,6 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         counted
     };
 
-    // The block-record log is rebuilt empty on every open, so before this
-    // change the count was unrecoverable after a restart: the applied tip
-    // came back from the checkpoint at its real height with nothing behind
-    // it to sum. The number now rides along with the tip.
     let resumed = NodeState::open(config, None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     assert!(
@@ -128,10 +119,10 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
     let _ = resumed.publish_checkpoint()?;
 
     let root = data_dir.join("chainstate-checkpoints");
-    let current: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("CURRENT"))?)?;
+    let current: sonic_rs::Value = sonic_rs::from_slice(&std::fs::read(root.join("CURRENT"))?)?;
     let directory = current
         .get("directory")
-        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.as_str())
         .ok_or_else(|| std::io::Error::other("CURRENT has no generation directory"))?;
     let snapshot_file = std::fs::File::open(root.join(directory).join("utxo-v4.dat"))?;
     let mut snapshot_reader = std::io::BufReader::new(snapshot_file);
@@ -212,9 +203,6 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
             bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
     scanned.tx_count = rolling.tx_count;
-    // The listener is attached only after checkpoint/journal restoration,
-    // then tracks subsequent live UTXO mutations without double-counting
-    // the restored snapshot.
     assert_eq!(
         rolling.total_amount, scanned.total_amount,
         "restored state must receive subsequent rolling UTXO notifications"
@@ -243,8 +231,6 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
     let _ = first.publish_checkpoint()?;
     drop(first);
 
-    // The first reopen discards the pre-checkpoint journal generation and
-    // initializes one whose authenticated base is the published checkpoint.
     let base = NodeState::open(config.clone(), None)?;
     assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
     let child = regtest_fixture::mined_regtest_child_at(genesis.block().block_hash(), 1)?;
@@ -280,7 +266,6 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn publish_checkpoint_returns_none_when_no_applied_tip() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);

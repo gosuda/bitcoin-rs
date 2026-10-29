@@ -4,7 +4,7 @@ mod fixture;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin_rs_e2e::{Kind, SpawnOptions};
-use serde_json::json;
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 #[test]
 fn native_taproot_spend_rules_match_pinned_core() {
@@ -67,8 +67,6 @@ fn compare_cases(
     let mut evidence = Vec::new();
     for case in cases(outpoint, &prevout) {
         let params = json!(["raw(51)", [serialize_hex(&case.tx)], false]);
-        // Proposal validation accepts consensus-valid annexes without conflating
-        // Core's mempool policy restrictions with its script verifier.
         let reference = core.rpc("generateblock", &params);
         let candidate = node.rpc("generateblock", &params);
         evidence.push(json!({"name":case.name,"tx":serialize_hex(&case.tx),"expected":case.accepted,"core":format!("{reference:?}"),"candidate":format!("{candidate:?}")}));
@@ -97,7 +95,7 @@ fn compare_cases(
     );
     std::fs::write(
         node.evidence.join(artifact),
-        serde_json::to_vec_pretty(&evidence).expect("evidence JSON"),
+        sonic_rs::to_vec_pretty(&evidence).expect("evidence JSON"),
     )
     .expect("evidence");
     core.stop().expect("Core stop");

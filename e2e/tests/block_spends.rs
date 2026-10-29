@@ -8,7 +8,7 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, TxIn, VarInt, Witness};
 use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::helpers::{funding_address, sign_p2pkh_inputs, signed_spend};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
-use serde_json::{Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, Value, json};
 
 fn indexed_options() -> SpawnOptions<'static> {
     SpawnOptions {
@@ -17,15 +17,13 @@ fn indexed_options() -> SpawnOptions<'static> {
     }
 }
 
-/// The complete object protects unsigned wire versions and all optional chain
-/// fields while exercising the same read consumer in each availability state.
 fn compare_raw_transaction(
     core: &mut ProcessNode,
     node: &mut ProcessNode,
     txid: &str,
     block: Option<&str>,
 ) -> Result<Value> {
-    let mut detailed = Value::Null;
+    let mut detailed = Value::new();
     for verbosity in [json!(true), json!(1), json!(2)] {
         let params = if let Some(block) = block {
             json!([txid, verbosity, block])
@@ -77,14 +75,12 @@ fn compare_raw_lookup_sources(
     explicit_without_flag
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("transaction object missing".into()))?
-        .remove("in_active_chain");
+        .remove(&"in_active_chain");
     compare_reply(
         "explicit and indexed raw transaction",
         &explicit_without_flag,
         &indexed,
     )?;
-    // Standard version 2 can enter both mempools without a policy override.
-    // The high-bit version above is covered through actual block admission.
     let (outpoint, prevout) = funds.confirmed_output(2)?;
     let mempool = signed_spend(outpoint, &prevout, 1000, Sequence::MAX)?;
     let mempool_id = mempool.compute_txid().to_string();
@@ -178,7 +174,6 @@ fn compare_formats(core: &mut ProcessNode, node: &mut ProcessNode, hash: &str) -
         node.http_get(&format!("{path}.hex"))?.body,
         core.http_get(&format!("{path}.hex"))?.body
     );
-    // Independently decode ordinary Bitcoin TxOuts, not the native undo codec.
     let rows = native_json.json()?;
     let rows = rows
         .as_array()
@@ -225,8 +220,6 @@ fn compare_uncertified_history(
     txid: &str,
     block: &str,
 ) -> Result<()> {
-    // Exact declared deviation: a later receipt no longer certifies the old
-    // branch. Its stored rows must not be promoted to trusted history.
     let native = node.rpc("getblock", &json!([block, 3]))?;
     let reference = core.rpc("getblock", &json!([block, 3]))?;
     assert_eq!(native["confirmations"], reference["confirmations"]);
@@ -239,12 +232,11 @@ fn compare_uncertified_history(
     assert!(native_raw.get("fee").is_none());
     assert!(native_raw["vin"][0].get("prevout").is_none());
     assert!(reference_raw.get("fee").is_some());
-    // The documented certification deviation affects only undo fields.
     let mut without_undo = reference_raw;
     without_undo
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("transaction object missing".into()))?
-        .remove("fee");
+        .remove(&"fee");
     for input in without_undo["vin"]
         .as_array_mut()
         .ok_or_else(|| Error::Protocol("inputs missing".into()))?
@@ -252,7 +244,7 @@ fn compare_uncertified_history(
         input
             .as_object_mut()
             .ok_or_else(|| Error::Protocol("input object missing".into()))?
-            .remove("prevout");
+            .remove(&"prevout");
     }
     compare_reply(
         "uncertified stale raw transaction",
@@ -371,8 +363,6 @@ fn undo_formats_same_block_inputs_stale_extent_and_restart() -> Result<()> {
 
 #[test]
 fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()> {
-    // Core's ordinary debug option rotates 64 KiB block files and permits
-    // pruning after height 100; the binary itself is the pinned release.
     let mut core = ProcessNode::spawn_with(
         Kind::Core,
         &SpawnOptions {
@@ -389,7 +379,6 @@ fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()>
     let spend = funds.signed_spend(1000, Sequence::MAX)?;
     let spend_id = spend.compute_txid().to_string();
     let spend_block = submit_common(&mut core, &mut node, &[serialize_hex(&spend)])?;
-    // Explicit-block verbosity 2 needs no txindex, including on prune nodes.
     let raw = compare_raw_transaction(&mut core, &mut node, &spend_id, Some(&spend_block))?;
     assert_eq!(raw["fee"], json!(0.000_01));
     for _ in 0..7 {
@@ -398,7 +387,6 @@ fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()>
     let old = core.rpc("getblockhash", &json!([1]))?;
     let genesis = core.rpc("getblockhash", &json!([0]))?;
     let tip = core.rpc("getbestblockhash", &json!([]))?;
-    // A clean checkpoint establishes the native pruner's recovery floor.
     let datadir = node.stop_keep_datadir()?;
     let mut node = ProcessNode::spawn_in_datadir(Kind::BitcoinRs, &opts, datadir)?;
     for process in [&mut core, &mut node] {

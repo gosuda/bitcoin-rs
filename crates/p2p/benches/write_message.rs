@@ -1,17 +1,3 @@
-//! Benchmarks for the p2p receive and send hot paths.
-//!
-//! `write_message` measures the end-to-end cost of emitting one message onto
-//! a real loopback socket (small `ping` vs a genesis-sized `block` payload)
-//! so transport changes such as write coalescing and `TCP_NODELAY` can be
-//! compared. Note: loopback has ~0 RTT, so Nagle/delayed-ACK latency effects
-//! from wide-area links are not visible here; this group captures syscall and
-//! serialization overhead.
-//!
-//! `compact_reconstruction` measures one receive-side BIP152 `cmpctblock`
-//! reconstruction in two stages: the short-ID scan over a resident pool,
-//! then — when the scan leaves transactions missing — the verified
-//! completion that delivers the block after the `getblocktxn` answer.
-
 use std::hint::black_box;
 use std::io::Read;
 use std::net::{TcpListener, TcpStream};
@@ -38,10 +24,6 @@ use bitcoin_rs_p2p::compact_blocks::{COMPACT_BLOCK_VERSION, Outcome};
 use bitcoin_rs_p2p::wire::{Message, write_message};
 use bitcoin_rs_p2p::{CompactBlockHints, Reconstruction};
 
-/// Open a connected loopback pair and drain the read side on a thread so the
-/// writer never blocks on a full socket buffer.
-// A fixture that fails to build has no degraded mode: an I/O error would be
-// timed as a fast early return and reported as a win.
 #[expect(clippy::expect_used, reason = "fixture setup must fail loudly")]
 fn connected_pair() -> (TcpStream, JoinHandle<()>) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("bind loopback");
@@ -56,17 +38,12 @@ fn connected_pair() -> (TcpStream, JoinHandle<()>) {
     (writer, drain)
 }
 
-// A fixture that fails to build has no degraded mode: a decode or write
-// error would be timed as a fast early return and reported as a win.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_write_message(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_message");
 
     let ping = Message::Ping(42);
 
-    // Build the regtest genesis as an exact payload so the benchmark
-    // exercises the same framing path as real block relay without a second
-    // parse or re-encode: one decode retains the frame bytes.
     let genesis = genesis_block(Network::Regtest);
     let genesis_bytes = serialize(&genesis);
     let payload = BlockPayload::from_raw(Bytes::from(genesis_bytes)).expect("decode genesis block");
@@ -85,8 +62,6 @@ fn bench_write_message(c: &mut Criterion) {
     group.finish();
 }
 
-/// A mempool-shaped hint source: an identity scan plus hash-indexed body
-/// lookups, so the timed cost is the reconstruction code and not the fixture.
 struct BenchHints {
     identities: Vec<(Txid, Wtxid)>,
     by_txid: HashMap<Txid, Tx>,
@@ -126,7 +101,6 @@ impl CompactBlockHints for BenchHints {
     }
 }
 
-/// A distinct, witness-free transaction keyed on `seed`.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_tx(seed: u32) -> Tx {
     let mut prevout = [0_u8; 32];
@@ -151,9 +125,6 @@ fn bench_tx(seed: u32) -> Tx {
     }
 }
 
-/// A block of `tx_count` transactions whose header commits to their
-/// transaction-ID merkle root, plus the registry `cmpctblock` a peer would
-/// send for it.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_cmpctblock(txs: &[Tx], nonce: u64) -> CmpctBlock {
     let mut native = Block {
@@ -183,8 +154,6 @@ fn bench_cmpctblock(txs: &[Tx], nonce: u64) -> CmpctBlock {
     }
 }
 
-/// The `blocktxn` a peer answers with: the bodies for the request's
-/// absolute indexes, taken from the block's own transactions.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_block_txn(request: &BlockTransactionsRequest, body: &[Tx]) -> BlockTxn {
     let transactions = request
@@ -206,10 +175,6 @@ fn bench_block_txn(request: &BlockTransactionsRequest, body: &[Tx]) -> BlockTxn 
     }
 }
 
-/// Times one receive-side BIP152 reconstruction in two stages: the
-/// short-ID scan over a resident pool, then — when the scan leaves
-/// transactions missing — the verified completion that delivers the block
-/// after the `getblocktxn` answer.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_compact_reconstruction(c: &mut Criterion) {
     let mut group = c.benchmark_group("compact_reconstruction");
@@ -220,17 +185,9 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
         let mut pool: Vec<Tx> = (1..=u32::try_from(decoys).expect("decoy count fits u32"))
             .map(|seed| bench_tx(seed + 1_000_000))
             .collect();
-        // The coinbase is a mandatory prefill and never needs a hint, so
-        // the `missing` transactions after it stay out of the pool: the
-        // reconstruction must then request exactly those indexes.
         pool.extend(body.iter().skip(1 + missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
-        // One untimed pipeline run proves the fixture completes: the first
-        // stage must request exactly the excluded transactions and the
-        // second must deliver the verified block. A fixture that regressed
-        // to `Fallback` would time a shorter early return and report a
-        // phantom win.
         let mut probe = Reconstruction::new();
         let first = probe.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, Instant::now());
         let reply = match first {

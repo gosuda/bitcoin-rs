@@ -1,17 +1,3 @@
-//! Stratum V2 pool adapter tests.
-//!
-//! Everything below the `host` is real: a fresh disposable authority key, a real
-//! `Noise_NX` handshake run by `noise_sv2`/`codec_sv2` on both ends, real
-//! encrypted frames, real regtest candidates from the node's own
-//! `assemble_candidate` over a mempool filled through the public
-//! `MempoolGateway::submit_transaction` path, and the real
-//! `bitcoin_rs_mining::pool::JobBook` as the one job
-//! and share predicate. The miner side is a minimal SV2 client built from the
-//! same crates (a hand-written client would only test itself).
-//!
-//! No socket is opened and no network daemon runs: `Connection` is sans-IO and
-//! the test moves its bytes.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -96,8 +82,6 @@ impl From<String> for TestError {
 
 type TestResult<T = ()> = Result<T, TestError>;
 
-// ---- fixtures: real regtest candidates --------------------------------------
-
 fn context(height: u32, parent: u8) -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[parent; 32]),
@@ -120,9 +104,6 @@ fn context(height: u32, parent: u8) -> CandidateContext {
 const COIN_VALUE_SAT: u64 = 1_000_000;
 const ADMISSION_TIME: u64 = 1_700_000_000;
 
-/// `OP_0 <sha256(OP_TRUE)>`: spent by the witness stack `[OP_TRUE]`, so the
-/// spending transaction carries witness data and its wtxid differs from its
-/// txid.
 fn wsh_true_script() -> Vec<u8> {
     let program: [u8; 32] = Sha256::digest([0x51_u8]).into();
     let mut script = vec![0x00, 0x20];
@@ -142,8 +123,6 @@ fn coin_outpoint(label: u8) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0)
 }
 
-/// One confirmed `P2WSH(OP_TRUE)` coin spent by one 1-in/1-out `P2WPKH`
-/// transaction at `2 + label` `sat/vB`.
 fn spend(label: u8) -> Tx {
     let mut tx = Tx {
         version: 2,
@@ -164,8 +143,6 @@ fn spend(label: u8) -> Tx {
     tx
 }
 
-/// A fixed confirmed coin set at a fixed tip, in the shape the node's chain
-/// adapter answers admission with.
 struct Coins(HashMap<OutPoint, TxOut>);
 
 impl AdmissionChain for Coins {
@@ -191,8 +168,6 @@ impl AdmissionChain for Coins {
     }
 }
 
-/// A real gateway holding `count` transactions admitted through the public
-/// `submit_transaction` path (script verification and policy included).
 fn admitted_gateway(count: u8) -> MempoolGateway {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -270,7 +245,6 @@ fn server_config() -> ServerConfig {
     )
 }
 
-/// A fresh disposable authority key pair; nothing here is ever a real key.
 fn fresh_authority() -> AuthorityKeypair {
     let secp = secp256k1::Secp256k1::new();
     let keypair = secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
@@ -279,8 +253,6 @@ fn fresh_authority() -> AuthorityKeypair {
         Zeroizing::new(keypair.secret_bytes()),
     )
 }
-
-// ---- the miner side ----------------------------------------------------------
 
 #[derive(Debug)]
 struct Received {
@@ -306,7 +278,6 @@ fn types(frames: &[Received]) -> Vec<u8> {
     frames.iter().map(|frame| frame.msg_type).collect()
 }
 
-/// Miner end of an established Noise transport.
 struct Client {
     enc: TransportEncryptState,
     dec: Option<TransportDecryptState>,
@@ -375,9 +346,6 @@ impl Client {
     }
 }
 
-/// Runs the miner's half of the handshake against `server`, feeding the
-/// server `chunk` bytes at a time. `pinned` is the authority key the miner
-/// trusts.
 fn handshake(
     server: &mut Connection,
     book: &mut JobBook,
@@ -432,7 +400,6 @@ fn handshake(
     })
 }
 
-/// The header fields a miner chooses for one share.
 #[derive(Clone, Copy)]
 struct ShareWork {
     job_id: u32,
@@ -441,7 +408,6 @@ struct ShareWork {
     version: u32,
 }
 
-/// Server, owner book, and miner wired together.
 struct Wire {
     conn: Connection,
     book: JobBook,
@@ -525,7 +491,6 @@ impl Wire {
         self.exchange(MESSAGE_TYPE_SETUP_CONNECTION, false, msg)
     }
 
-    /// `SetupConnection` that must succeed; returns the success flags.
     fn setup_mining(&mut self, flags: u32) -> u32 {
         let mut frames = self.setup(Protocol::MiningProtocol, 2, 2, flags);
         assert_eq!(types(&frames), vec![MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS]);
@@ -618,8 +583,6 @@ impl Wire {
         )
     }
 }
-
-// ---- reading what the server sent ---------------------------------------------
 
 struct Opened {
     channel_id: u32,
@@ -729,7 +692,6 @@ fn read_prev_hash(frames: &mut Vec<Received>) -> PrevHash {
     }
 }
 
-/// The error code of the single `SubmitShares.Error` in `frames`.
 fn share_error(frames: &mut Vec<Received>) -> (u32, u32, String) {
     let mut frame = take_type(frames, MESSAGE_TYPE_SUBMIT_SHARES_ERROR);
     assert!(frame.channel_msg);
@@ -751,7 +713,6 @@ fn accepted(events: Vec<Event>) -> bitcoin_rs_mining::pool::stratum::sv2::ShareE
         .unwrap_or_else(|| panic!("a share was accepted"))
 }
 
-/// First nonce whose header (at the job's `ntime`, under `version`) falls in `class`.
 fn find_nonce(job: &Job, extranonce_prefix: &[u8], version: u32, class: ShareClass) -> u32 {
     let (session, rolled) = extranonce_prefix.split_at(job.extranonce_layout().session_len());
     (0..u32::MAX)
@@ -765,17 +726,14 @@ fn find_nonce(job: &Job, extranonce_prefix: &[u8], version: u32, class: ShareCla
         .unwrap_or_else(|| panic!("a nonce of the wanted class exists"))
 }
 
-/// A nonce whose header meets the share target but not the network target.
 fn share_nonce(job: &Job, extranonce_prefix: &[u8], version: u32) -> u32 {
     find_nonce(job, extranonce_prefix, version, ShareClass::Share)
 }
 
-/// A nonce whose header meets the network target.
 fn block_nonce(job: &Job, extranonce_prefix: &[u8], version: u32) -> u32 {
     find_nonce(job, extranonce_prefix, version, ShareClass::Block)
 }
 
-/// One open standard channel with candidate A installed and announced.
 struct Standard {
     wire: Wire,
     opened: Opened,
@@ -788,11 +746,9 @@ fn standard_with_job() -> Standard {
         .book
         .install(candidate(100, 0xab, 2), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));
-    // Standard jobs only: every later job is delivered per channel.
     wire.setup_mining(FLAG_REQUIRES_STANDARD_JOBS);
     let mut frames = wire.open_standard(7, "alice.rig1", ALL_ONES);
     let opened = read_open_standard(&mut frames);
-    // The channel got the current job as its first message, then its prev hash.
     let job = read_std_job(&mut frames);
     assert_eq!(job.job_id, installed.job.id().get());
     read_prev_hash(&mut frames);
@@ -803,8 +759,6 @@ fn standard_with_job() -> Standard {
         job: installed.job,
     }
 }
-
-// ---- transport -----------------------------------------------------------------
 
 #[test]
 fn noise_handshake_authenticates_the_pool_to_a_pinned_miner() -> TestResult {
@@ -1005,8 +959,6 @@ fn limits_beyond_the_u24_wire_field_are_refused() {
     );
 }
 
-// ---- SetupConnection -----------------------------------------------------------
-
 #[test]
 fn setup_succeeds_and_advertises_only_what_it_supports() {
     let mut wire = Wire::new();
@@ -1184,8 +1136,6 @@ fn frames_of_an_unnegotiated_extension_are_discarded() {
     assert_eq!(wire.conn.session().ignored_extension_frames(), 1);
 }
 
-// ---- channels ------------------------------------------------------------------
-
 #[test]
 fn standard_channel_gets_a_future_job_then_the_prev_hash_that_activates_it() {
     let mut wire = Wire::new();
@@ -1261,7 +1211,6 @@ fn extended_channel_job_rebuilds_the_owners_merkle_root_from_the_wire_fields() {
     assert_eq!(job.path.len(), 2, "coinbase plus two transactions");
     assert_eq!(prev.job_id, job.job_id);
 
-    // Exactly what a miner does with the wire fields.
     let rolled = [9_u8, 9, 9, 9];
     let mut coinbase = job.prefix.clone();
     coinbase.extend_from_slice(&opened.prefix);
@@ -1419,8 +1368,6 @@ fn channel_ids_are_unique_and_distinct_from_the_group_id() {
     assert_eq!(wire.book.session_count(), 4);
 }
 
-// ---- shares ---------------------------------------------------------------------
-
 #[test]
 fn accepted_share_is_held_until_the_ledger_confirms_then_acknowledged() {
     let mut s = standard_with_job();
@@ -1470,7 +1417,6 @@ fn accepted_share_is_held_until_the_ledger_confirms_then_acknowledged() {
         "the header hash is the ledger idempotency key"
     );
 
-    // A ticket is single-use.
     assert!(
         !s.wire
             .conn
@@ -1630,7 +1576,7 @@ fn a_share_above_the_channel_target_is_difficulty_too_low() {
         .unwrap_or_else(|error| panic!("install: {error:?}"));
     wire.setup_mining(0);
     let mut tight = [0_u8; 32];
-    tight[8] = 1; // 2^64: no random header meets it
+    tight[8] = 1;
     let mut frames = wire.open_standard(1, "tight", tight);
     let opened = read_open_standard(&mut frames);
     assert_eq!(
@@ -1658,19 +1604,16 @@ fn stale_jobs_unknown_jobs_and_closed_channels_use_official_codes() {
     let version = s.job.version();
     let nonce = share_nonce(&s.job, &s.opened.prefix, version);
 
-    // A job id this channel was never sent.
     let mut frames =
         s.wire
             .submit_standard(s.opened.channel_id, 1, 999, nonce, s.job.ntime(), version);
     assert_eq!(share_error(&mut frames).2, "invalid-job-id");
 
-    // A channel that does not exist.
     let mut frames = s
         .wire
         .submit_standard(4242, 1, job_id, nonce, s.job.ntime(), version);
     assert_eq!(share_error(&mut frames).2, "invalid-channel-id");
 
-    // A new parent makes the job stale.
     let installed = s
         .wire
         .book
@@ -1710,7 +1653,6 @@ fn clean_jobs_send_a_future_job_and_a_prev_hash_but_a_refresh_does_not() {
     let version = s.job.version();
     let nonce = share_nonce(&s.job, &s.opened.prefix, version);
 
-    // Same parent, new mempool content: an active job, no prev hash.
     let refresh_candidate = candidate(100, 0xab, 1);
     let refreshed = s
         .wire
@@ -1733,7 +1675,6 @@ fn clean_jobs_send_a_future_job_and_a_prev_hash_but_a_refresh_does_not() {
         "active: ntime_start set"
     );
 
-    // The older job is still valid on the same parent: its blocks are still valid.
     s.wire.submit_standard(
         s.opened.channel_id,
         1,
@@ -1744,14 +1685,12 @@ fn clean_jobs_send_a_future_job_and_a_prev_hash_but_a_refresh_does_not() {
     );
     accepted(s.wire.events());
 
-    // Announcing the same installed job again sends nothing.
     s.wire
         .conn
         .announce(&refreshed)
         .unwrap_or_else(|error| panic!("announce: {error:?}"));
     assert!(s.wire.drain().is_empty());
 
-    // A job the owner reports as unchanged is not re-sent either.
     let unchanged = s
         .wire
         .book
@@ -1808,7 +1747,7 @@ fn ntime_below_the_announced_start_is_refused() {
 fn version_rolling_is_accepted_inside_the_mask_and_refused_outside_it() {
     let mut s = standard_with_job();
     let job_id = s.job.id().get();
-    let rolled_version = s.job.version() | 0x0000_2000; // BIP320 bit 13
+    let rolled_version = s.job.version() | 0x0000_2000;
     assert_eq!(BIP320_VERSION_MASK & 0x2000, 0x2000);
     let nonce = share_nonce(&s.job, &s.opened.prefix, rolled_version);
     s.wire.submit_standard(
@@ -1914,7 +1853,6 @@ fn unconfirmed_shares_are_bounded_and_a_busy_refusal_is_not_recorded() {
         .confirm_share(share.ticket)
         .unwrap_or_else(|error| panic!("confirm: {error:?}"));
     wire.drain();
-    // Not a duplicate: the busy refusal never reached the owner's duplicate set.
     wire.submit_standard(
         opened.channel_id,
         3,
@@ -1928,7 +1866,6 @@ fn unconfirmed_shares_are_bounded_and_a_busy_refusal_is_not_recorded() {
 
 #[test]
 fn expired_tickets_unburn_for_retry() {
-    // A zero deadline expires at the next poll, deterministically.
     let mut config = server_config();
     config.limits = Limits {
         pending_ack_timeout: Duration::ZERO,
@@ -1961,8 +1898,6 @@ fn expired_tickets_unburn_for_retry() {
         .expire_tickets(&mut wire.book, Instant::now());
     assert_eq!(expired, vec![share.ticket]);
     assert_eq!(wire.conn.session().pending_acks(), 0);
-    // The retry validates fresh instead of sticking at Duplicate, even
-    // though the first validation burned the key and nothing recorded it.
     wire.submit_standard(
         opened.channel_id,
         2,
@@ -1973,8 +1908,6 @@ fn expired_tickets_unburn_for_retry() {
     );
     accepted(wire.events());
 }
-
-// ---- close, cancel, retarget, reconnect --------------------------------------------
 
 #[test]
 fn peer_close_releases_the_session_and_cancels_pending_acknowledgements() {
@@ -2017,7 +1950,6 @@ fn peer_close_releases_the_session_and_cancels_pending_acknowledgements() {
         }]
     ));
 
-    // Cancelled: the ticket no longer acknowledges anything.
     assert!(
         !s.wire
             .conn
@@ -2025,7 +1957,6 @@ fn peer_close_releases_the_session_and_cancels_pending_acknowledgements() {
             .unwrap_or_else(|error| panic!("no-op: {error:?}"))
     );
     assert!(s.wire.drain().is_empty());
-    // And a later share on the closed channel is an invalid channel.
     let mut frames = s.wire.submit_standard(
         s.opened.channel_id,
         2,
@@ -2116,7 +2047,6 @@ fn update_channel_reflects_a_smaller_max_target_in_a_set_target() {
     assert_eq!(target.channel_id, s.opened.channel_id);
     assert_eq!(*target.maximum_target.as_array(), smaller);
 
-    // An update the channel already satisfies sends nothing.
     let frames = s.wire.exchange(
         MESSAGE_TYPE_UPDATE_CHANNEL,
         true,
@@ -2152,7 +2082,6 @@ fn a_host_retarget_is_sent_and_never_exceeds_the_miners_max_target() {
     let opened = read_open_standard(&mut frames);
     assert_eq!(opened.target, max_target);
 
-    // Above the miner's own maximum: refused.
     let easier =
         ShareTarget::from_le_bytes(ALL_ONES).unwrap_or_else(|error| panic!("nonzero: {error:?}"));
     assert!(matches!(
@@ -2160,7 +2089,6 @@ fn a_host_retarget_is_sent_and_never_exceeds_the_miners_max_target() {
         Err(Error::Session(SessionError::TargetAboveMaximum { .. }))
     ));
 
-    // The refusal did not kill the connection: a harder target is accepted.
     let mut harder = [0_u8; 32];
     harder[2] = 1;
     wire.conn
@@ -2183,7 +2111,6 @@ fn a_host_retarget_is_sent_and_never_exceeds_the_miners_max_target() {
     assert_eq!(info.target.to_le_bytes(), harder);
     assert_eq!(info.max_target.to_le_bytes(), max_target);
 
-    // Unknown channels are a host error, not a dead connection either.
     assert!(matches!(
         wire.conn.set_target(9_999, easier),
         Err(Error::Session(SessionError::UnknownChannel(9_999)))
@@ -2210,8 +2137,6 @@ fn reconnect_is_sent_and_new_channels_are_refused_afterwards() {
     let error: OpenMiningChannelError = parse(&mut frame);
     assert_eq!(error.error_code.as_utf8_or_hex(), "reconnect-requested");
 }
-
-// ---- group distribution ------------------------------------------------------------
 
 #[test]
 fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
@@ -2247,7 +2172,6 @@ fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
     assert_eq!(job.job_id, prev.job_id);
     assert_eq!(job.min_ntime, None);
 
-    // A standard channel works the group job with its own prefix.
     let owned = wire.job(job.job_id);
     let nonce = share_nonce(&owned, &standard.prefix, owned.version());
     wire.submit_standard(
@@ -2260,7 +2184,6 @@ fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
     );
     assert_eq!(accepted(wire.events()).channel_id, standard.channel_id);
 
-    // And so does the extended channel, rolling its own bytes.
     let rolled = [1_u8, 2, 3, 4];
     let mut full = extended.prefix.clone();
     full.extend_from_slice(&rolled);
@@ -2278,7 +2201,6 @@ fn a_connection_without_standard_jobs_gets_one_group_addressed_job() {
     );
     assert_eq!(accepted(wire.events()).channel_id, extended.channel_id);
 
-    // A same-parent refresh is a group-addressed active job without a prev hash.
     let refreshed = wire
         .book
         .install(candidate(100, 0xab, 1), Vec::new())
@@ -2333,8 +2255,6 @@ fn a_connection_requiring_standard_jobs_gets_one_job_per_channel() {
     );
     assert_eq!(first.version, second.version);
 }
-
-// ---- roles ---------------------------------------------------------------------------
 
 #[test]
 fn custom_jobs_are_answered_with_the_official_code_not_pretended() {
@@ -2401,8 +2321,6 @@ fn the_role_matrix_does_not_claim_what_is_not_built() {
 
 #[test]
 fn the_installed_fact_set_is_what_the_adapter_consumes() {
-    // Compile-time check of the contract used above: `Installed` exposes the
-    // job, `fresh`, `clean_jobs` and `invalidated`.
     fn contract(installed: &Installed) -> (bool, bool, usize, JobId) {
         (
             installed.fresh,
@@ -2443,12 +2361,8 @@ fn accepted_block_retirement_makes_second_same_job_submit_stale() {
             _ => None,
         })
         .unwrap_or_else(|| panic!("first winning nonce is a block candidate"));
-    // Session-level consequence only: this call stands in for the host's
-    // synchronous retire on `Applied`, whose wiring lives in the node's SV2
-    // `handle_events` and is not driven from this crate.
     s.wire.book.invalidate_active();
     drop(pending);
-    // A second, distinct winning nonce on the same job.
     let (session, rolled) = s
         .opened
         .prefix
@@ -2491,7 +2405,6 @@ fn accepted_block_retirement_makes_second_same_job_submit_stale() {
             ..
         }]
     ));
-    // A new parent job is accepted on the same connection.
     let installed = s
         .wire
         .book
@@ -2521,8 +2434,6 @@ fn unused_backend() -> MiningControlError {
     MiningControlError::Unavailable("not used by this test".into())
 }
 
-/// Controlled backend boundary: answers every submitted block with the
-/// source-verified stale-parent verdict and serves nothing else.
 struct StaleParentControl;
 
 impl MiningControl for StaleParentControl {
@@ -2564,10 +2475,6 @@ impl MiningControl for StaleParentControl {
     }
 }
 
-/// Session-level contract for a stale-parent receipt: the host answers the
-/// ticket with `stale-share`, the ticket retires, and the connection stays
-/// usable. Which receipts take this branch is decided by the node's SV2
-/// `handle_events`, not by this crate.
 #[test]
 fn stale_sibling_receipt_sends_stale_error_without_closing() {
     let mut s = standard_with_job();
@@ -2618,7 +2525,6 @@ fn stale_sibling_receipt_sends_stale_error_without_closing() {
         .reject_block(&submission, "stale-share")
         .unwrap_or_else(|error| panic!("repeat reject: {error:?}"));
     assert!(!retired, "block ticket retires with the error frame");
-    // A subsequent new job is still announced and usable.
     let installed = s
         .wire
         .book
@@ -2647,9 +2553,6 @@ fn stale_sibling_receipt_sends_stale_error_without_closing() {
 
 #[test]
 fn malformed_reject_code_preserves_the_pending_ticket() {
-    // A malformed host code must not drop the acknowledgement: `reject_share`
-    // validates `code_str` before removing the ticket, so the pending share
-    // survives `BadErrorCode` and the valid refusal still lands.
     let mut s = standard_with_job();
     let version = s.job.version();
     let nonce = share_nonce(&s.job, &s.opened.prefix, version);
@@ -2692,10 +2595,6 @@ fn malformed_reject_code_preserves_the_pending_ticket() {
 
 #[test]
 fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
-    // `SetupCompleted` plus `ChannelOpened` fill both event slots, so `submit`
-    // must fail with `Backlog` before `book.validate` records dedup state or
-    // inserts a pending ticket. (A single slot would already panic at open:
-    // `setup_mining` queues `SetupCompleted` before `ChannelOpened`.)
     let mut config = server_config();
     config.limits.max_pending_events = 2;
     config.limits.max_pending_acks = 8;
@@ -2710,7 +2609,6 @@ fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
     let job = read_std_job(&mut frames);
     assert_eq!(job.job_id, installed.job.id().get());
     read_prev_hash(&mut frames);
-    // Setup and open left both event slots occupied; do not drain them.
     assert_eq!(wire.conn.session().pending_acks(), 0);
     let version = installed.job.version();
     let nonce = share_nonce(&installed.job, &opened.prefix, version);
@@ -2722,8 +2620,6 @@ fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
         ntime: installed.job.ntime(),
         version,
     };
-    // Both event slots are occupied, so validation cannot proceed and no
-    // pending ack is left behind.
     assert!(matches!(
         wire.try_exchange(MESSAGE_TYPE_SUBMIT_SHARES_STANDARD, true, msg),
         Err(Error::Session(SessionError::Backlog { queue: "event", .. }))
@@ -2737,10 +2633,6 @@ fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
 
 #[test]
 fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
-    // A channel that missed its `SetNewPrevHash` (job frame landed while the
-    // prev-hash frame hit a full outbound queue) keeps a stale parent.
-    // A later refresh on the same parent is `Active` connection-wide, but that
-    // stale channel must still get `Future` plus `SetNewPrevHash`.
     use bitcoin_rs_mining::pool::stratum::sv2::{Frame, ProtocolSession};
     fn setup_frame(msg_type: u8, channel_msg: bool, payload: Vec<u8>) -> Frame {
         Frame {
@@ -2804,16 +2696,12 @@ fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
     };
     let opened_a = open(&mut session, &mut book, 7, "alice.rig1");
     let opened_b = open(&mut session, &mut book, 8, "bob.rig1");
-    // First parent: the second channel's prev-hash frame does not fit, so it
-    // holds the job inactive without a parent while the first is active.
     let first = book
         .install(candidate(100, 0xab, 2), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));
     assert!(session.announce(&first).is_err());
     let missed = session.take_frames();
     assert_eq!(missed.len(), 3);
-    // Same parent refresh: connection-wide `Active`, but the stale channel
-    // must converge via `Future` plus its missing parent.
     let second = book
         .install(candidate(100, 0xab, 3), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));
@@ -2867,10 +2755,6 @@ fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
 
 #[test]
 fn announce_without_fresh_still_delivers_a_missing_job_and_parent() {
-    // `announce` is driven by per-connection delivery state, not the owner's
-    // `fresh` flag: a channel opened before the install still converges on
-    // the current job and its activating `SetNewPrevHash` when the owner
-    // reports `fresh == false` (same template re-install).
     let mut wire = Wire::new();
     wire.setup_mining(FLAG_REQUIRES_STANDARD_JOBS);
     let mut frames = wire.open_standard(7, "late.rig1", ALL_ONES);
@@ -2881,7 +2765,6 @@ fn announce_without_fresh_still_delivers_a_missing_job_and_parent() {
         .install(candidate(100, 0xab, 2), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));
     assert!(first.fresh);
-    // Same template, time, and outputs: the owner reports nothing new.
     let second = wire
         .book
         .install(candidate(100, 0xab, 2), Vec::new())

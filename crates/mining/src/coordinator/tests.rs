@@ -1,7 +1,3 @@
-// CONTRACT: `crates/mining/README.md` owns the node-facing BIP22/BIP23
-// long-poll identity contract; `docs/contracts/external-api.md#API-11` owns
-// BIP22/BIP23 template capabilities, submitold, signet projection, template
-// rules, and the corresponding `getblocktemplate` long-poll surface.
 use super::*;
 use crate::control::BlockTemplate;
 use crate::control::MiningCapability;
@@ -224,11 +220,6 @@ fn long_poll_round_trips_template_id() {
 
 #[test]
 fn long_poll_rejects_non_ascii_split_boundary_without_panicking() {
-    // API-11 requires malformed longpollids, including invalid UTF-8 split
-    // boundaries, to be rejected without panicking. 63 ASCII bytes followed by
-    // a two-byte UTF-8 scalar puts byte 64 - the hex/sequence split point -
-    // inside that scalar; the fee revision keeps `split_once(':')` from
-    // rejecting first, so the slice guard itself is exercised.
     let malformed = format!("{}é:1", "0".repeat(63));
     assert_eq!(malformed.len(), 67);
     assert!(parse_long_poll_id(&malformed).is_none());
@@ -236,10 +227,6 @@ fn long_poll_rejects_non_ascii_split_boundary_without_panicking() {
 
 #[test]
 fn long_poll_rejects_malformed_components_without_panicking() {
-    // Colon-form near misses the revision loop does not cover: an empty
-    // membership sequence, a non-decimal membership sequence, and a signed
-    // membership sequence must all fail without panicking. (A leading `+`
-    // parses as decimal, so it is not a malformed case.)
     let tip_hex = Hash256::from_le_bytes(&[0x34; 32]).to_string_be();
     let cases = [
         format!("{tip_hex}:9"),
@@ -270,7 +257,6 @@ fn template_generation_race_classification_excludes_other_failures() {
     }
 }
 
-/// Applied tip behind a test-controlled cell.
 struct StaticTip(Mutex<Option<TipSnapshot>>);
 
 impl StaticTip {
@@ -285,9 +271,6 @@ impl AppliedTipSource for StaticTip {
     }
 }
 
-/// Pool counter double backing [`MempoolSnapshotSource`] for publication and
-/// snapshot-gate probes. `pool_reads` counts every pool-lock acquisition so
-/// tests can prove the sequence-based publishers never take one.
 struct StaticPool {
     counters: Mutex<(u64, u64)>,
     pool_reads: AtomicUsize,
@@ -326,11 +309,6 @@ impl MempoolSnapshotSource for StaticPool {
         }) {
             return Ok(None);
         }
-        // Real selection over an empty fixture pool: the solver walks the
-        // maintained chunk index and reserves the header and coinbase, so the
-        // body contents are produced, not echoed. The sequences are the live
-        // fixture counters read under the same check, mirroring the
-        // production adapter stamping the pool state it selected under.
         let fixture = Mempool::new(MempoolLimits::default());
         let mut body = select_template_body(&fixture, context, payout, budget)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
@@ -347,10 +325,6 @@ impl MempoolSnapshotSource for StaticPool {
     ) -> Result<PreparedTemplateBody, MiningControlError> {
         self.pool_reads.fetch_add(1, Ordering::Relaxed);
         let source_sequences = *self.counters.lock();
-        // Real projection over an empty fixture pool: the plan is empty and
-        // the predicted sequences advance past nothing, so the body is
-        // stamped with the live fixture counters exactly as the production
-        // adapter stamps the pool state it projected under.
         let fixture = Mempool::new(MempoolLimits::default());
         let plan = fixture.plan_block_removals(block);
         assert!(
@@ -390,7 +364,6 @@ impl MempoolSnapshotSource for StaticPool {
     }
 }
 
-/// Chain double that refuses every resolution: publication tests never assemble.
 struct UnresolvedChain;
 
 impl ChainContextSource for UnresolvedChain {
@@ -421,9 +394,6 @@ fn tip_snapshot(hash: Hash256) -> TipSnapshot {
     }
 }
 
-/// Chain double resolving every tip to a fixed regtest context echoing the
-/// tip hash, so assembly probes reach the pool selection gate instead of
-/// failing on context resolution first.
 struct ResolvedChain;
 
 impl ChainContextSource for ResolvedChain {
@@ -482,8 +452,6 @@ fn service_with_source(
     )
 }
 
-/// Failure-only deadline for the wake proof: generous enough that a healthy
-/// wake never approaches it, and never used as a latency threshold.
 const WAKE_PROOF_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
@@ -500,17 +468,10 @@ fn publish_fee_delta_generation_wakes_a_registered_waiter() {
         let service = Arc::clone(&service);
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
-            // The state mutex is held across the readiness signal and the
-            // condvar registration: the publisher can only acquire the mutex
-            // after `wait` atomically releases it with this thread parked, so
-            // wake registration provably precedes publication.
             let mut state = service.state.lock();
             let waited = state.published;
             let _ = ready_tx.send(());
             loop {
-                // Stop is checked before the predicate: the cleanup path's
-                // direct notify must terminate the waiter even when a mutated
-                // publisher already changed `published` without waking anyone.
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
@@ -518,8 +479,6 @@ fn publish_fee_delta_generation_wakes_a_registered_waiter() {
                     let _ = result_tx.send(state.published);
                     return;
                 }
-                // Unconditional wait: only a notify can wake this thread, so a
-                // suppressed fee-path notify is not masked by a timer recheck.
                 service.wake.wait(&mut state);
             }
         })
@@ -528,12 +487,8 @@ fn publish_fee_delta_generation_wakes_a_registered_waiter() {
         ready_rx.recv().is_ok(),
         "waiter exited before signalling readiness"
     );
-    // Real publisher on the real service: it must acquire the state mutex the
-    // parked waiter released, then notify the condvar.
     service.publish_fee_delta_generation(9);
     let Ok(published) = result_rx.recv_timeout(WAKE_PROOF_TIMEOUT) else {
-        // Suppressed-notify mutation: wake the parked thread directly so
-        // cleanup cannot hang, then fail.
         {
             let _guard = service.state.lock();
             stop.store(true, Ordering::SeqCst);
@@ -568,8 +523,6 @@ fn publish_fee_delta_generation_drops_a_stale_fee_revision() {
         CandidateKey::ordinary(newer),
         Arc::new(sample_candidate(tip, 5, 9, false, false)),
     );
-    // A delayed callback carrying the older revision must neither regress
-    // the published key nor invalidate the newer candidate.
     service.publish_fee_delta_generation(4);
     assert_eq!(
         service.state.lock().published,
@@ -591,7 +544,6 @@ fn sequence_based_publications_do_not_read_the_pool() {
     let tip = Hash256::from_le_bytes(&[0x26; 32]);
     let pool = Arc::new(StaticPool::new(5, 2));
     let service = service_with(Some(tip_snapshot(tip)), Arc::clone(&pool));
-    // Construction seeds the retained membership sequence with exactly one pool read.
     assert_eq!(pool.pool_reads.load(Ordering::Relaxed), 1);
     service.publish_generation_from(6);
     service.publish_fee_delta_generation(9);
@@ -625,12 +577,8 @@ fn fee_publication_preserves_the_published_membership_sequence() {
 fn membership_publication_invalidates_without_inventing_a_fee_revision() {
     let tip = Hash256::from_le_bytes(&[0x23; 32]);
     let service = service_with(Some(tip_snapshot(tip)), Arc::new(StaticPool::new(5, 2)));
-    // A membership-only notification carries no fee revision: with nothing
-    // published it publishes nothing and only wakes waiters.
     service.publish_generation_from(6);
     assert_eq!(published_key(&service), None);
-    // The fee publisher composes its key from the retained membership
-    // sequence without a pool read.
     service.publish_fee_delta_generation(9);
     assert_eq!(
         published_key(&service),
@@ -640,10 +588,6 @@ fn membership_publication_invalidates_without_inventing_a_fee_revision() {
             fee_delta_sequence: 9,
         })
     );
-    // A membership notification for the published sequence keeps the
-    // fee-carrying key; a newer sequence invalidates it instead of composing
-    // a key with an invented fee revision. The next template read captures
-    // both live pool revisions.
     service.publish_generation_from(5);
     assert_eq!(
         published_key(&service),
@@ -659,9 +603,6 @@ fn membership_publication_invalidates_without_inventing_a_fee_revision() {
 
 #[test]
 fn first_sequence_publication_seeds_from_the_construction_pool_state() {
-    // No tip applied: the published key falls back to the genesis anchor, and
-    // the retained membership component comes from the pool counters read at
-    // construction, never a zero fallback.
     let service = service_with(None, Arc::new(StaticPool::new(5, 2)));
     service.publish_fee_delta_generation(4);
     assert_eq!(
@@ -688,8 +629,6 @@ fn assemble_refuses_when_either_pool_counter_moves() {
         mempool_sequence: 5,
         fee_delta_sequence: 2,
     };
-    // Matching counters pass the selection gate and assemble a real candidate
-    // whose identity carries both sequences.
     let ordinary = CandidateKey::ordinary(key);
     let assembled = service
         .assemble_for_key(ordinary)
@@ -715,15 +654,9 @@ fn assemble_refuses_when_either_pool_counter_moves() {
         ),
         "a moved membership sequence must refuse assembly"
     );
-    // Direct assembly never caches: the cache fills only through the
-    // single-flight candidate path, so a refused selection leaves nothing behind.
     assert!(service.state.lock().cache.is_empty());
 }
 
-/// Pool double with a gated projected selection: the worker enters
-/// `select_template_after` and parks until the test releases it, so the
-/// same-key single-flight join is deterministic. Live selections are counted
-/// to prove a joined waiter never duplicates the finish.
 struct GatedPool {
     counters: Mutex<(u64, u64)>,
     entered_projection: AtomicBool,
@@ -749,10 +682,6 @@ impl GatedPool {
         self.release_projection.store(true, Ordering::SeqCst);
     }
 
-    /// Arms a panic inside the projected selection, so the test can prove
-    /// the worker's exit guard releases joined waiters. Checked on entry
-    /// and again when the projection gate releases, so the panic can land
-    /// while a waiter is already parked.
     fn arm_panic(&self) {
         self.panic_projection.store(true, Ordering::SeqCst);
     }
@@ -797,9 +726,6 @@ impl MempoolSnapshotSource for GatedPool {
             !self.panic_projection.load(Ordering::SeqCst),
             "adversarial worker panic inside the projected selection"
         );
-        // Bounded park: the test releases the gate; the deadline only fires
-        // on test failure, and proceeding then still terminates the worker so
-        // the service drop can join it.
         let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
         while !self.release_projection.load(Ordering::SeqCst) {
             if Instant::now() >= deadline {
@@ -847,8 +773,6 @@ impl MempoolSnapshotSource for GatedPool {
     }
 }
 
-/// Chain double resolving every tip like [`ResolvedChain`] while counting
-/// signalling-rule resolutions, so the metadata cache test observes hits.
 struct CountingChain {
     rules_calls: AtomicUsize,
 }
@@ -885,8 +809,6 @@ impl ChainContextSource for CountingChain {
     }
 }
 
-/// Failure-only deadline for a background preparation: generous enough that
-/// a healthy worker never approaches it, and never a latency threshold.
 fn wait_until_ready(service: &MiningService, target: Hash256) {
     let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
     loop {
@@ -909,7 +831,6 @@ fn wait_until_ready(service: &MiningService, target: Hash256) {
     }
 }
 
-/// The finished candidate the worker stored for `target`.
 fn ready_candidate(service: &MiningService, target: Hash256) -> Arc<Candidate> {
     let mailbox = service.prep.mailbox();
     match mailbox.active.as_ref() {
@@ -921,10 +842,6 @@ fn ready_candidate(service: &MiningService, target: Hash256) -> Arc<Candidate> {
     }
 }
 
-/// Blocks until a foreground join is registered on the mailbox condvar. The
-/// probe is incremented under the mailbox mutex before the wait releases it,
-/// so a later notify provably reaches the parked waiter; the deadline only
-/// fires on failure.
 fn wait_until_parked(service: &MiningService) {
     let deadline = Instant::now() + WAKE_PROOF_TIMEOUT;
     while service.prep.mailbox().parked_joins == 0 {
@@ -961,8 +878,6 @@ fn stage_tip_is_idempotent_and_publishes_nothing() {
     let block = Network::Regtest.genesis_block();
     service.stage_tip(&tip, &block);
     wait_until_entered(&pool);
-    // A repeated stage for the owned tip replaces nothing: the pending slot
-    // stays empty and the worker still runs its single projection.
     service.stage_tip(&tip, &block);
     assert!(service.prep.mailbox().pending.is_none());
     assert_eq!(
@@ -1058,9 +973,6 @@ fn empty_preparation_installs_against_matching_receipt() {
 
 #[test]
 fn empty_preparation_cannot_install_against_nonempty_receipt() {
-    // A delayed worker that selected post-removal state carries an empty
-    // expectation; it must not install against the nonempty actual receipt,
-    // and the foreground falls back to lazy assembly for the live key.
     let tip_hash = Hash256::from_le_bytes(&[0x65; 32]);
     let tip = tip_snapshot(tip_hash);
     let service = service_with_chain(
@@ -1119,9 +1031,6 @@ fn empty_preparation_cannot_install_against_nonempty_receipt() {
 
 #[test]
 fn fee_moved_preparation_discards_and_serves_live() {
-    // An unrelated prioritisation between staging and publication moves the
-    // live fee sequence off the predicted body: the install refuses and the
-    // reply reflects the live sequences, not the stale prediction.
     let tip_hash = Hash256::from_le_bytes(&[0x67; 32]);
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(StaticPool::new(5, 2));
@@ -1166,8 +1075,6 @@ fn matching_foreground_joins_running_preparation_without_duplicate_finish() {
     ));
     service.stage_tip(&tip, &Network::Regtest.genesis_block());
     wait_until_entered(&pool);
-    // The commit arrives while the worker still selects: the receipt is
-    // retained and the matching foreground joins the same flight.
     service.publish_block_generation(tip_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash,
@@ -1239,9 +1146,6 @@ fn shutdown_releases_a_preparation_waiter() {
 
 #[test]
 fn pending_stage_foreground_joins_without_duplicate_finish() {
-    // The worker is occupied with the first tip behind the closed gate while
-    // the second tip waits in the pending slot: a foreground request for the
-    // pending tip must join instead of running a duplicate lazy finish.
     let first_hash = Hash256::from_le_bytes(&[0x71; 32]);
     let second_hash = Hash256::from_le_bytes(&[0x72; 32]);
     let pool = Arc::new(GatedPool::new(5, 2));
@@ -1306,11 +1210,6 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
 
 #[test]
 fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
-    // A panic inside the projected selection unwinds through the worker's
-    // exit guard: a waiter already parked on the preparation releases and
-    // falls back to lazy assembly, while the unwind and the join payload
-    // are logged. The waiter parks before the panic lands: spawning it
-    // after would only prove the stopped mailbox, not the release.
     let tip_hash = Hash256::from_le_bytes(&[0x73; 32]);
     let pool = Arc::new(GatedPool::new(5, 2));
     let service = Arc::new(service_with_source(
@@ -1360,11 +1259,6 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
 
 #[test]
 fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
-    // The reachable race: the pool removal committed and the gateway observer
-    // woke a foreground, but the connect effects have not published the
-    // receipt yet. The live key equals the key the preparation predicted, so
-    // the foreground must join it on the mailbox condvar instead of running a
-    // duplicate lazy finish, then receive the very candidate the worker built.
     let tip_hash = Hash256::from_le_bytes(&[0x74; 32]);
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
@@ -1412,9 +1306,6 @@ fn ready_preparation_parks_until_the_receipt_and_serves_the_prepared_arc() {
 
 #[test]
 fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
-    // A same-tip prioritisation moved the live fee sequence off the
-    // preparation's prediction, and no receipt will ever arrive for it: the
-    // foreground must fall back at once, and the stale Ready stays in place.
     let tip_hash = Hash256::from_le_bytes(&[0x75; 32]);
     let tip = tip_snapshot(tip_hash);
     let pool = Arc::new(GatedPool::new(5, 2));
@@ -1441,8 +1332,6 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
         let _ = result_tx.send(foreground_service.candidate_for_key(key));
     });
     let Ok(outcome) = result_rx.recv_timeout(WAKE_PROOF_TIMEOUT) else {
-        // A wrongly parked foreground: release it through shutdown so the
-        // failure cannot hang the harness, then fail.
         shutdown.store(true, Ordering::SeqCst);
         let _ = foreground.join();
         panic!("a stale Ready parked a foreground that no receipt can ever release");
@@ -1473,11 +1362,6 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
 
 #[test]
 fn nonempty_preparation_installs_against_matching_receipt() {
-    // A worker that projected two removals and one cleared overlay predicts
-    // membership 5 + 2 and fee 2 + 1: the install matches the wrapping
-    // advances, the exact identities and reasons, and the live generation.
-    // The Ready state is installed by hand (no worker timing); the install
-    // path under test is identical to the worker-fed one.
     let tip_hash = Hash256::from_le_bytes(&[0x6c; 32]);
     let tip = tip_snapshot(tip_hash);
     let service = service_with(Some(tip), Arc::new(StaticPool::new(7, 3)));
@@ -1538,8 +1422,6 @@ fn signalling_rules_resolve_once_per_tip_and_height() -> TestResult {
     let chain = Arc::new(CountingChain {
         rules_calls: AtomicUsize::new(0),
     });
-    // One service over a shared tip cell: moving the tip must refresh the
-    // rules through the live path, not through a fresh empty cache.
     let tip_source = Arc::new(StaticTip(Mutex::new(Some(tip_snapshot(
         Hash256::from_le_bytes(&[0x6a; 32]),
     )))));

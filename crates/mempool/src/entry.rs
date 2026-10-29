@@ -5,17 +5,12 @@ use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
 #[cfg(test)]
 use bitcoin_rs_primitives::{LockTime, Script, Witness};
 
-/// Slot index for a pooled transaction. Removal allows the slot to be reused.
 pub type EntryId = u32;
 
-/// Transaction plus policy accounting used by mempool ordering and limits.
 #[derive(Clone, Debug)]
 pub struct MempoolEntry {
-    /// Transaction payload shared with downstream consumers.
     pub tx: Arc<Tx>,
-    /// Transaction id, hashed once at construction.
     pub txid: Txid,
-    /// Witness transaction id, reusing txid when no witness is present.
     pub wtxid: Wtxid,
     /// Policy-adjusted virtual transaction size in vbytes.
     pub vsize: u32,
@@ -31,51 +26,31 @@ pub struct MempoolEntry {
     pub fee_rate: u64,
     /// Signed mining-only fee adjustment for this transaction.
     pub fee_delta: i64,
-    /// Total virtual size of this entry and all unconfirmed ancestors.
     pub ancestor_size: u64,
-    /// Total actual fee of this entry and all unconfirmed ancestors.
     pub ancestor_fee: u64,
-    /// Total signed fee adjustment of this entry and all unconfirmed ancestors.
     pub ancestor_fee_delta: i128,
-    /// Total virtual size of this entry and all unconfirmed descendants.
     pub descendant_size: u64,
-    /// Total actual fee of this entry and all unconfirmed descendants.
     pub descendant_fee: u64,
-    /// Total signed fee adjustment of this entry and all unconfirmed descendants.
     pub descendant_fee_delta: i128,
     /// Mempool acceptance time in wall-clock seconds since the Unix epoch.
     pub time: u64,
-    /// Locally submitted body still awaiting a successful peer getdata response.
     pub unbroadcast: bool,
     /// Chain height at acceptance.
     pub height: u32,
     /// BIP141 sigop cost, counted against the resolved prevouts.
-    /// Admission supplies the resolved cost; callers without prevout facts use 0.
     pub sigop_cost: u32,
 }
 
 impl MempoolEntry {
-    /// Policy-charged weight in weight units: the larger of the consensus
-    /// weight and the sigop-adjusted weight, kept exact only while its vbyte
-    /// rounding equals `vsize` and otherwise `vsize * 4`.
-    ///
-    /// This is the weight that chunk feerates and cluster limits charge. It
-    /// stays unrounded so that a caller summing several entries rounds the sum
-    /// to vbytes once: summing each entry's `vsize` instead can overstate it,
-    /// since two 41 WU entries round to 11 vB each, while together they round
-    /// to `ceil(82 / 4)` = 21 vB.
     #[must_use]
     pub fn policy_weight(&self) -> u64 {
         crate::accounting::charged_weight(self.weight, self.vsize, self.sigop_cost)
     }
 
-    /// Builds a complete entry from the transaction and admission facts.
     #[must_use]
     pub fn new(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32, sigop_cost: u32) -> Self {
         let own_size = u64::from(vsize);
         let txid = tx.txid();
-        // BIP141: witness-free transactions have identical txid and wtxid.
-        // A stack containing an empty item still has witness serialization.
         let wtxid = if tx.has_witness() {
             tx.wtxid()
         } else {
@@ -114,7 +89,6 @@ impl MempoolEntry {
         i128::from(self.fee) + i128::from(self.fee_delta)
     }
 
-    /// Returns whether this transaction signals BIP-125 replaceability.
     #[must_use]
     pub fn is_replaceable(&self) -> bool {
         const RBF_FLAG_THRESHOLD: u32 = 0xFFFF_FFFE;
@@ -153,8 +127,6 @@ mod is_replaceable_tests {
         }
     }
 
-    /// No inputs means no signal, and the `any()` over an empty iterator must
-    /// not report one.
     #[test]
     fn is_replaceable_false_for_no_inputs() {
         let tx = Tx {
@@ -216,8 +188,6 @@ mod mining_metadata_tests {
         entry
     }
 
-    /// Two 41 WU entries round to 11 vB each but 21 vB together, so a caller
-    /// that sums `policy_weight` rounds once and gets the smaller figure.
     #[test]
     fn policy_weight_is_exact_so_a_sum_rounds_once() {
         let pair = [weighted_entry(41, 11, 0), weighted_entry(41, 11, 0)];
@@ -229,9 +199,7 @@ mod mining_metadata_tests {
 
     #[test]
     fn policy_weight_follows_sigops_and_trusts_a_mismatched_vsize() {
-        // Three sigops charge 60 WU, which rounds to the 15 vB the entry carries.
         assert_eq!(weighted_entry(41, 15, 3).policy_weight(), 60);
-        // A vsize that is not the rounded exact weight wins: 20 vB is 80 WU.
         assert_eq!(weighted_entry(41, 20, 0).policy_weight(), 80);
     }
 }
@@ -284,10 +252,6 @@ mod wire_metadata_tests {
         tx
     }
 
-    // BIP141, Specification / Transaction ID and Transaction size calculations;
-    // BIP144, Serialization. Golden digests and lengths were computed by a
-    // separate Python struct/hashlib wire encoder, not Tx's own methods.
-    // These are serialization fixtures, not admission-valid transactions.
     #[test]
     fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), Box<dyn std::error::Error>> {
         let expected_txid = Txid(Hash256::from_str_be(
@@ -355,8 +319,6 @@ mod wire_metadata_tests {
         Ok(())
     }
 
-    // MempoolEntry's vsize field is policy-adjusted; BIP141's rounded weight
-    // is a separate field. Metadata reuse must not overwrite policy inputs.
     #[test]
     fn policy_size_is_not_overwritten_by_bip141_size() {
         for mode in 0..7 {

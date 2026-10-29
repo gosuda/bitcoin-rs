@@ -1,4 +1,5 @@
 use super::*;
+use sonic_rs::JsonValueTrait as _;
 
 const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
 
@@ -44,8 +45,6 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
     config.storage.backend = crash_test_backend(config.storage.backend);
-    // Journal rewind disarms disconnect markers itself. These tests own the
-    // checkpoint-settlement path that remains when the journal cannot.
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -62,11 +61,11 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     ))?;
     state.publish_checkpoint()?;
 
-    let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
     let block_two = regtest_fixture::mined_regtest_child_at_time(
         block_one.block_hash(),
@@ -83,22 +82,16 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
         Hash256::from(block_two.block_hash()),
     )?;
 
-    let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
     assert!(current_after > current_before);
     Ok(())
 }
 
-/// A fork below the journal's checkpoint base invalidates the whole
-/// generation: the writer stays frozen and cannot disarm the marker itself.
-/// The disconnect-debt settlement must still publish the replacement
-/// checkpoint, compact a fresh base onto it, and reopen appends — the wedge
-/// where `freeze`/`compact` refused the invalidated writer left the marker
-/// armed and every later apply inconclusive until restart.
 #[test]
 fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -128,25 +121,24 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
     )?;
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block_two))?;
 
-    let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
 
-    // Forking at genesis crosses below the checkpoint base at height 1.
     crate::reorg::invalidate_block(
         &state.chainstate(),
         &state.chain_followers(),
         Hash256::from(block_one.block_hash()),
     )?;
 
-    let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
     assert!(
         current_after > current_before,
@@ -169,7 +161,6 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
         (0, Hash256::from(genesis.block_hash()))
     );
 
-    // The reopened journal tracks new applies on the rebuilt branch.
     let mut previous = genesis.block_hash();
     for height in 1..=2 {
         let replacement = regtest_fixture::mined_regtest_child_at_time(
@@ -288,11 +279,11 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block_one))?;
     state.publish_checkpoint()?;
 
-    let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_before = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
 
     let genesis_id = state
@@ -333,19 +324,15 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
         |_| {},
     )?;
 
-    let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+    let current_after = sonic_rs::from_slice::<sonic_rs::Value>(&std::fs::read(
         data_dir.join("chainstate-checkpoints/CURRENT"),
     )?)?
     .get("generation")
-    .and_then(serde_json::Value::as_u64)
+    .and_then(sonic_rs::JsonValueTrait::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
     assert!(current_after > current_before);
     Ok(())
 }
-
-// -----------------------------------------------------------------------
-// A2 cycle 3: witness is published only after CURRENT root fsync
-// -----------------------------------------------------------------------
 
 #[test]
 fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
@@ -360,7 +347,6 @@ fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     let tip = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
 
-    // Publish a checkpoint — witness must be written after Published.
     state.publish_checkpoint()?;
     let witness_path = data_dir.join("applied-tip-witness.json");
     assert!(
@@ -387,7 +373,6 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     config.storage.backend = crash_test_backend(config.storage.backend);
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
 
-    // Apply genesis and publish a checkpoint at height 0.
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
@@ -397,16 +382,13 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     let genesis_hex = config.network.genesis_block_hash().to_string_be();
     let stale_witness = bitcoin_rs_storage::recovery_evidence::AppliedTipWitness::new(
         genesis_hex,
-        1, // older epoch
+        1,
         5000,
         "cccc",
         1000,
     );
     bitcoin_rs_storage::recovery_evidence::write_witness(&data_dir, &stale_witness)?;
 
-    // Reopen: the checkpoint at height 0 is restored, the witness at
-    // 5000 triggers checkpoint-fallback detection. The warning store
-    // must carry the fallback warning — the restore must not be silent.
     let resumed = NodeState::open(config.clone(), None)?;
     let warnings = resumed.recovery_reporter().0.warnings();
     assert!(
@@ -426,9 +408,6 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     Ok(())
 }
 
-/// Builds the two-block fork fixture: applied genesis plus one mined child,
-/// a checkpoint published, and a sibling two-block fork known to the header
-/// tree with staged bodies.
 type ForkFixture = (
     tempfile::TempDir,
     NodeState,
@@ -488,8 +467,6 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     Ok((dir, state, parent, fork_bodies))
 }
 
-/// A completed switch holds its retention lease only for its own duration:
-/// the authority is back with pruning exactly once when it settles.
 #[test]
 fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
@@ -508,19 +485,11 @@ fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Old-branch history a prune already deleted refuses the switch before
-/// the first mutation: typed unavailable result, applied tip untouched,
-/// and no lease left behind (`RCV-08`).
 #[test]
 fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<()> {
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
     let handles = state.chainstate();
     let tip_before = handles.applied_tip().load_full().map(|tip| tip.hash);
-    // The reservation is made against the registry storage/pruning owns and
-    // node composition holds, while chainstate acquires through the
-    // `MandatoryRetention` capability composed from that same registry. The
-    // refusal below therefore proves the two observe one authority, by
-    // behaviour rather than by a runtime identity check.
     let reservation = state.storage.retention().reserve(5);
     reservation.commit(5);
 
@@ -541,14 +510,10 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
         tip_before
     );
     assert_eq!(state.storage.retention().active_leases(), 0);
-    // A refused lease must not close admission: nothing was mutated.
     assert!(handles.lock_transition().is_ok());
     Ok(())
 }
 
-/// Applies the regtest genesis plus `heights` mined children, publishing a
-/// checkpoint at `checkpoint_height` so later recovery and pruning use a real
-/// production checkpoint boundary.
 fn applied_regtest_chain(
     heights: u32,
     checkpoint_height: u32,
@@ -615,10 +580,6 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
             }
             let path = config.data_dir.join("blocks/blk00000.dat");
             let mut damaged = std::fs::read(&path)?;
-            // Keep the complete genesis frame and damage only the middle frame.
-            // Both it and the untouched successor are below the durable extent.
-            // The record header is magic(4) + body length(4) + height(4) +
-            // block hash(32) = 44 bytes; the length occupies bytes 4..8.
             let genesis_len = u32::from_le_bytes(damaged[4..8].try_into()?);
             let middle = 44 + usize::try_from(genesis_len)?;
             assert_eq!(&damaged[middle..middle + 4], b"BRSB");
@@ -652,9 +613,6 @@ fn startup_verification_refuses_a_corrupt_tip_body() -> anyhow::Result<()> {
     drop(state);
     let path = config.data_dir.join("blocks/blk00000.dat");
     let mut damaged = std::fs::read(&path)?;
-    // The last byte is the tip body's final payload byte, its coinbase lock
-    // time: far past the 44-byte record header, so the frame still validates
-    // and only the body's commitment to its header is wrong.
     *damaged
         .last_mut()
         .ok_or_else(|| anyhow::anyhow!("empty block file"))? ^= 0xff;
@@ -734,10 +692,6 @@ fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `RCV-02`: cold replay runs before the maintenance worker exists, so the
-/// recovery owner must compact a full journal and retry the refused block.
-/// The progress checkpoint is not completion: the sticky marker remains until
-/// a checkpoint at the fully recovered state retires it.
 #[test]
 fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<()> {
     let (_dir, state, mut config) = applied_regtest_chain(2, 1)?;
@@ -755,9 +709,6 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
     let marker = journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
     std::fs::write(&marker, b"force full validation\n")?;
 
-    // Start one byte below the retention limit. Genesis emits no journal
-    // record, block one crosses the limit, and block two is deterministically
-    // refused before mutation until recovery publishes a compaction base.
     let pressure = journal_dir.join("segment-9999999999.log");
     std::fs::OpenOptions::new()
         .write(true)
@@ -796,9 +747,6 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
         "recovery relief must compact the retained journal segments"
     );
 
-    // Crash/restart after progress compaction can leave a later segment at
-    // the exact retention limit. The sticky marker restarts from genesis,
-    // before any applied tip exists for checkpoint publication.
     drop(reopened);
     std::fs::OpenOptions::new()
         .write(true)
@@ -825,16 +773,12 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
     Ok(())
 }
 
-/// What one fork plan needs: the fork tip's node id, its staged bodies by
-/// hash, and its blocks in height order.
 type ForkPlan = (
     bitcoin_rs_chain::NodeId,
     HashMap<bitcoin_rs_primitives::Hash256, bitcoin_rs_primitives::BlockPayload>,
     Vec<(u32, bitcoin_rs_primitives::Hash256)>,
 );
 
-/// Mines a `depth`-block fork off the active chain at `fork_height` and
-/// inserts its headers, leaving its bodies for the caller's stager.
 fn plan_fork(
     state: &NodeState,
     fork_height: u32,
@@ -877,14 +821,8 @@ fn plan_fork(
     Ok((parent, bodies, ordered))
 }
 
-/// Pruning may delete what a future deep reorg needs; the reorg then
-/// refuses with the defined unavailable result and the node stays whole.
-/// A reorg whose ancestor survives pruning still switches exactly.
 #[test]
 fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyhow::Result<()> {
-    // Checkpoint at 320, then advance to 620. Pruning may delete history
-    // below the checkpoint's 288-block safety margin, while a reorg rooted
-    // above the checkpoint remains incrementally serviceable.
     let (_dir, state, _config) = applied_regtest_chain(620, 320)?;
     let (deep_tip, deep_bodies, _deep_order) = plan_fork(&state, 20, 2, 1_400_000_000)?;
     let (shallow_tip, shallow_bodies, _shallow_order) = plan_fork(&state, 400, 2, 1_500_000_000)?;
@@ -892,16 +830,12 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
 
-    // The completed prune deletes every row below height 30 (the line is
-    // the durable tip minus the 288-block margin) and records that line.
     service
         .prune_to_height(30)
         .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
     let handles = state.chainstate();
     assert_eq!(state.storage.retention().pruned_below(), 30);
 
-    // A reorg rooted below the recorded line needs deleted bodies; the
-    // retention lease is refused before the first mutation.
     let outcome = crate::reorg::switch_to_branch(
         &handles,
         &state.chain_followers(),
@@ -921,9 +855,6 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
     );
     assert_eq!(state.storage.retention().active_leases(), 0);
 
-    // A reorg rooted above both the prune line and checkpoint base still
-    // switches, disconnecting 220
-    // blocks exactly and reconnecting the fork.
     crate::reorg::switch_to_branch(
         &handles,
         &state.chain_followers(),
@@ -940,12 +871,8 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
     Ok(())
 }
 
-/// A deep reorg streams in bounded prefixes: the stager offers a window at
-/// a time, the switch commits each verified prefix, and the final coins,
-/// tip, and transaction count match an independently replayed reference.
 #[test]
 fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Result<()> {
-    // A 16-body stager window keeps every switch's connect side bounded.
     const STAGED_PREFIX: u32 = 16;
     let (_dir, state, _config) = applied_regtest_chain(320, 1)?;
     let (fork_tip, fork_bodies, ordered) = plan_fork(&state, 20, 300, 1_600_000_000)?;
@@ -955,8 +882,6 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
         .collect();
     let height_of = std::sync::Arc::new(height_of);
 
-    // The reference applies the winning branch linearly on top of the same
-    // deterministic first 20 blocks.
     let (_ref_dir, reference, _ref_config) = applied_regtest_chain(20, 1)?;
     for (height, hash) in &ordered {
         let block = fork_bodies
@@ -966,11 +891,6 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
     }
 
     let handles = state.chainstate();
-    // The rolling stager tracks fork progress through the connected-body
-    // callback, exactly like an external bounded stager holding staged
-    // forks: at most STAGED_PREFIX unapplied blocks are servable at once,
-    // and each committed connect frees room for the next suffix window
-    // inside the same switch.
     let served_through = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(20));
     let mut switches = 0_u32;
     loop {
@@ -1025,15 +945,8 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
     Ok(())
 }
 
-/// A checkpoint at height N with the journal and durable head advanced
-/// past it restores the exact pre-restart tip and `commit_id` on restart
-/// (`RCV-10`): the durable root is the recovery authority and the last
-/// checkpoint is only the replay base, so progress made since it stays
-/// recoverable with no periodic publisher running.
 #[test]
 fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::Result<()> {
-    // The checkpoint lands at height 1; blocks 2-4 exist only in the
-    // journal suffix and the durable head chain.
     let (_dir, state, config) = applied_regtest_chain(4, 1)?;
     let head = state
         .storage
@@ -1048,9 +961,6 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::
     assert_eq!(pre_tip.height, 4);
     drop(state);
 
-    // `NodeState::open` spawns no workers: this restart runs with periodic
-    // full-checkpoint publication disabled, recovery riding the stored
-    // checkpoint, the journal suffix, and the durable head.
     let reopened = NodeState::open(config.clone(), None)?;
     let landed = reopened
         .chainstate()
@@ -1071,8 +981,6 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::
         ResumeSource::Journal | ResumeSource::Checkpoint
     ));
 
-    // The replay caught the journal up: a second restart, still with no
-    // periodic publisher, lands on the same head untouched.
     drop(reopened);
     let second = NodeState::open(config, None)?;
     let landed = second

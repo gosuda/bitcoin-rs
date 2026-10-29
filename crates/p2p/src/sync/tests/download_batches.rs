@@ -274,8 +274,6 @@ fn inbound_peer_not_counted_toward_fanout_threshold() -> TestResult {
 
 #[test]
 fn low_chain_peer_not_counted_toward_fanout_threshold() -> TestResult {
-    // Outbound + witness, but its known chain does not reach past our
-    // applied tip (genesis, height 0): fails the height clause outright.
     let ineligible = synthetic_peer(test_addr(9220, 0)?, 0);
     assert_fallback_refused_to_candidate(ineligible)
 }

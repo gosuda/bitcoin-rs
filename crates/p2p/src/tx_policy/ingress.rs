@@ -1,35 +1,9 @@
-//! Bounded ingress for BIP331 `pkgtxns` bodies, contained in the transaction
-//! policy owner.
+//! Bounded ingress for BIP331 `pkgtxns` bodies, contained in the transaction policy
+//! owner.
 //!
-//! A `pkgtxns` body is accepted for admission in one fixed order, and every
-//! step before the last allocates nothing a peer controls:
-//!
-//! 1. [`plan_package_charge`] scans the still-encoded payload without
-//!    allocating. It rejects a count above the mempool's package bound from
-//!    the `CompactSize` prefix, accumulates each member's exact
-//!    [`Tx::weight`] against the package weight bound, and yields the member
-//!    wtxids and the decoded-heap lower bound in the same pass.
-//! 2. [`PeerTable::begin_package_resolution`] compares the plan against the
-//!    sent `getpkgtxns` claim of the exact [`PeerSource`].
-//! 3. [`PackageCapacity`] reserves the frame bytes and the planned decoded
-//!    bytes with one compare-and-add against a process-wide cap.
-//! 4. The still-encoded frame is queued on the node's one bounded ingress
-//!    channel as [`InboundBody::Package`].
-//!
-//! The single ingress consumer then takes the package by value and
-//! [`InboundPackage::open`] re-plans the frame (plan equality is exact),
-//! decodes it with `try_reserve_exact` at the planned sizes as the one
-//! decode-or-admit window, and reconciles the measured heap against the
-//! plan. The consumer ends in exactly one of
-//! [`PeerTable::package_response_rejected`] (the package never reached
-//! admission) or [`PeerTable::package_response_completed`] (the gateway
-//! answered, `Ok` or `Err`); each returns the capacity and releases the
-//! request claim through the one claim owner.
-//!
-//! The charge is a lower bound of the heap a decoded package owns, taken at
-//! the exact capacities the decoder requests. It is not a physical heap
-//! ceiling: allocator rounding is outside it, and no process allocator is
-//! made to refuse.
+//! The charge is a lower bound of the heap a decoded package owns, taken at the exact
+//! capacities the decoder requests. It is not a physical heap ceiling: allocator
+//! rounding is outside it, and no process allocator is made to refuse.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,85 +21,57 @@ use parking_lot::Mutex;
 use crate::packages::{MAX_GETPKGTXNS, combined_package_hash};
 use crate::{InboundTx, PeerSource, PeerTable, TxInventory};
 
-/// Decoded packages one connection may hold between acceptance and the end
-/// of admission.
 pub const MAX_DECODED_PACKAGES_PER_PEER: usize = 1;
 
-/// Smallest serialized input: outpoint, empty script length, sequence.
 const MIN_INPUT_LEN: u64 = 41;
-/// Smallest serialized output: value and empty script length.
 const MIN_OUTPUT_LEN: u64 = 9;
-/// Serialized outpoint length.
 const OUTPOINT_LEN: usize = 36;
 
-/// Widens a length; slice lengths always fit.
 fn wide(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
-/// `size_of::<T>()` as a heap-accounting quantity.
 fn slot<T>() -> u64 {
     wide(core::mem::size_of::<T>())
 }
 
-/// Why a `pkgtxns` body was not accepted, or not admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PackageRefusal {
-    /// The payload is not one well-formed package encoding.
     #[error("pkgtxns payload is malformed")]
     Malformed,
-    /// The payload carries no transaction.
     #[error("pkgtxns carries no transaction")]
     Empty,
-    /// The package has more members than mempool admission accepts.
     #[error("package exceeds the member bound")]
     OverCount,
-    /// The package exceeds the aggregate weight bound.
     #[error("package exceeds the weight bound")]
     OverWeight,
-    /// No awaiting request of this exact connection matches the body: it is
-    /// unsolicited, foreign, a duplicate, reordered, a different set, or late.
     #[error("package does not match an outstanding request")]
     Unsolicited,
-    /// The global package capacity cannot take the charge.
     #[error("package capacity exhausted")]
     Budget,
-    /// The connection already holds its one package.
     #[error("connection already holds a package")]
     PeerHeld,
-    /// The re-plan at the consumer differs from the accepted plan.
     #[error("package no longer matches its plan")]
     PlanMismatch,
-    /// The decoder could not obtain the planned allocation.
     #[error("package allocation refused")]
     Allocation,
 }
 
 impl PackageRefusal {
-    /// Whether the sender broke the protocol, as opposed to a body this node
-    /// merely declines to hold. Only a peer fault ends the connection.
     #[must_use]
     pub const fn is_peer_fault(self) -> bool {
         matches!(self, Self::Malformed | Self::Empty)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Capacity
-// ---------------------------------------------------------------------------
-
 #[derive(Debug)]
 struct CapacityState {
     cap: u64,
-    /// Bytes charged by live [`PackageCharge`]s. Rises only through
-    /// [`Self::try_add`], so it never exceeds `cap`.
     used: AtomicU64,
-    /// Connections holding a package; one slot per exact [`PeerSource`].
     held: Mutex<HashSet<PeerSource>>,
 }
 
 impl CapacityState {
-    /// Compare-and-add: takes `bytes` only while the total stays within `cap`.
     fn try_add(&self, bytes: u64) -> bool {
         self.used
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -144,17 +90,12 @@ impl CapacityState {
     }
 }
 
-/// The process-wide ledger of retained package bytes.
-///
-/// INVARIANT: `reserved() <= cap()` at every instant; each byte is owned by
-/// exactly one [`PackageCharge`], which returns it when dropped.
 #[derive(Clone, Debug)]
 pub struct PackageCapacity {
     state: Arc<CapacityState>,
 }
 
 impl PackageCapacity {
-    /// A ledger that never lets more than `cap` bytes be charged.
     #[must_use]
     pub fn new(cap: u64) -> Self {
         Self {
@@ -166,29 +107,21 @@ impl PackageCapacity {
         }
     }
 
-    /// The hard cap.
     #[must_use]
     pub fn cap(&self) -> u64 {
         self.state.cap
     }
 
-    /// Bytes currently charged.
     #[must_use]
     pub fn reserved(&self) -> u64 {
         self.state.used.load(Ordering::Acquire)
     }
 
-    /// Connections currently holding a package.
     #[must_use]
     pub fn held(&self) -> usize {
         self.state.held.lock().len()
     }
 
-    /// Takes the frame and decoded charges of one package for `source` with a
-    /// single compare-and-add, and claims `source`'s one package slot.
-    ///
-    /// POST: `Ok` holds both parts and the slot; any refusal charges nothing
-    /// and holds nothing.
     fn charge(
         &self,
         source: PeerSource,
@@ -219,7 +152,6 @@ impl PackageCapacity {
         ))
     }
 
-    /// A charge of nothing, for a refusal that still ends in the one release.
     fn nothing(&self) -> PackageCharge {
         PackageCharge {
             state: Arc::clone(&self.state),
@@ -229,11 +161,6 @@ impl PackageCapacity {
     }
 }
 
-/// The sole owner of `bytes` of [`PackageCapacity`], and of one connection's
-/// package slot when it is the decoded part of a package.
-///
-/// Dropping returns both: there is no other release, so an error, a full
-/// channel, a cancelled session or a dropped channel reclaims them.
 #[derive(Debug)]
 pub struct PackageCharge {
     state: Arc<CapacityState>,
@@ -242,18 +169,15 @@ pub struct PackageCharge {
 }
 
 impl PackageCharge {
-    /// Bytes this part owns.
     #[must_use]
     pub const fn bytes(&self) -> u64 {
         self.bytes
     }
 
-    /// Takes `extra` more bytes by compare-and-add. `false` charges nothing.
     fn top_up(&mut self, extra: u64) -> bool {
         if !self.state.try_add(extra) {
             return false;
         }
-        // The addition succeeded under the cap, so it cannot overflow.
         self.bytes = self.bytes.saturating_add(extra);
         true
     }
@@ -268,12 +192,6 @@ impl Drop for PackageCharge {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan
-// ---------------------------------------------------------------------------
-
-/// The outcome of [`plan_package_charge`]: everything the charge and the
-/// claim comparison need, for the frame it was computed from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackagePlan {
     count: usize,
@@ -283,33 +201,27 @@ pub struct PackagePlan {
 }
 
 impl PackagePlan {
-    /// The member wtxids in wire order.
     #[must_use]
     pub fn wtxids(&self) -> &[Wtxid] {
         self.wtxids.get(..self.count).unwrap_or(&[])
     }
 
-    /// The request subject: the last member.
     #[must_use]
     pub fn subject(&self) -> Wtxid {
         self.wtxids().last().copied().unwrap_or_default()
     }
 
-    /// Total consensus weight of the members.
     #[must_use]
     pub const fn weight(&self) -> u64 {
         self.weight
     }
 
-    /// Lower bound of the heap the decoded package owns, at the exact
-    /// capacities the decoder requests.
     #[must_use]
     pub const fn decoded_bytes(&self) -> u64 {
         self.decoded_bytes
     }
 }
 
-/// A forward cursor over one immutable payload.
 struct Reader<'a> {
     rest: &'a [u8],
 }
@@ -336,15 +248,12 @@ impl<'a> Reader<'a> {
         <[u8; N]>::try_from(self.take_len(N)?).map_err(|_| PackageRefusal::Malformed)
     }
 
-    /// A minimal `CompactSize`.
     fn compact(&mut self) -> Result<u64, PackageRefusal> {
         let (value, used) = varint::decode(self.rest).map_err(|_| PackageRefusal::Malformed)?;
         self.rest = self.rest.get(used..).ok_or(PackageRefusal::Malformed)?;
         Ok(value)
     }
 
-    /// Rejects a count whose minimal footprint exceeds what remains, before
-    /// any per-record work.
     fn require_count(&self, count: u64, minimum: u64) -> Result<(), PackageRefusal> {
         if count.saturating_mul(minimum) > wide(self.rest.len()) {
             return Err(PackageRefusal::Malformed);
@@ -361,15 +270,12 @@ fn varint_len(value: u64) -> u64 {
     wide(varint::encoded_len(value))
 }
 
-/// What the plan keeps of one scanned transaction.
 struct TxScan {
     weight: u64,
     heap: u64,
     wtxid: Wtxid,
 }
 
-/// Scans one transaction in the shapes `Tx::consensus_decode` accepts,
-/// without allocating.
 fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
     let image = reader.rest;
     reader.take_len(4)?;
@@ -377,8 +283,6 @@ fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
     let mut segwit = false;
     let mut legacy_empty = false;
     if inputs == 0 {
-        // Core reads a zero flag as the legacy empty-input form and `0x01` as
-        // the BIP144 marker; anything else is rejected.
         match reader.array::<1>()? {
             [0] => legacy_empty = true,
             [1] => {
@@ -390,7 +294,6 @@ fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
     }
     reader.require_count(inputs, MIN_INPUT_LEN)?;
 
-    // version + lock time, then every counted part below.
     let mut base = 8_u64.saturating_add(varint_len(inputs));
     let mut heap = 0_u64;
     for _ in 0..inputs {
@@ -421,7 +324,6 @@ fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
 
     let mut witness = 0_u64;
     if segwit {
-        // Marker and flag, then one stack per input.
         witness = 2;
         let mut any_item = false;
         for _ in 0..inputs {
@@ -437,7 +339,6 @@ fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
             }
             any_item |= items > 0;
         }
-        // The marker exists only to carry witness data (BIP144).
         if !any_item {
             return Err(PackageRefusal::Malformed);
         }
@@ -454,30 +355,18 @@ fn scan_tx(reader: &mut Reader<'_>) -> Result<TxScan, PackageRefusal> {
         .saturating_add(inputs.saturating_mul(slot::<TxIn>()))
         .saturating_add(outputs.saturating_mul(slot::<TxOut>()));
     Ok(TxScan {
-        // `Tx::weight`: `base * 3 + (base + witness)`.
         weight: base.saturating_mul(4).saturating_add(witness),
         heap,
         wtxid: Wtxid(double_sha256(consumed)),
     })
 }
 
-/// Plans the charge of one encoded `pkgtxns` payload.
-///
-/// PRE: `payload` is the frame exactly as received.
-/// POST: `Ok` means the payload is one exactly-consumed list of at most
-///   [`MAX_PACKAGE_COUNT`] well-formed transactions whose weights sum to at
-///   most [`MAX_PACKAGE_WEIGHT`]; the plan carries their wtxids and the heap
-///   their decoded form owns. Any other payload is a typed refusal.
-/// INVARIANT: allocates nothing and reserves nothing; work is bounded by
-///   the payload length.
 pub fn plan_package_charge(payload: &[u8]) -> Result<PackagePlan, PackageRefusal> {
     let mut reader = Reader::new(payload);
     let count = reader.compact()?;
     if count == 0 {
         return Err(PackageRefusal::Empty);
     }
-    // The codec's wire bound; beyond it the message is malformed, not merely
-    // too big for admission.
     if count > wide(MAX_GETPKGTXNS) {
         return Err(PackageRefusal::Malformed);
     }
@@ -509,11 +398,6 @@ pub fn plan_package_charge(payload: &[u8]) -> Result<PackagePlan, PackageRefusal
     Ok(plan)
 }
 
-/// The subject of an oversized `pkgtxns` body, for claim retirement: the last
-/// member's wtxid when the payload is a well-formed list of `1..=MAX_GETPKGTXNS`
-/// transactions, even when the count or weight exceeds admission. `None` for
-/// any malformed payload, which has no attributable claim to retire. Work is
-/// bounded by the payload length and allocates nothing.
 fn oversized_subject(payload: &[u8]) -> Option<Wtxid> {
     let mut reader = Reader::new(payload);
     let count = reader.compact().ok()?;
@@ -531,10 +415,6 @@ fn oversized_subject(payload: &[u8]) -> Option<Wtxid> {
     last
 }
 
-// ---------------------------------------------------------------------------
-// Decode
-// ---------------------------------------------------------------------------
-
 fn reserve_exact<T>(len: usize) -> Result<Vec<T>, PackageRefusal> {
     let mut vec = Vec::new();
     vec.try_reserve_exact(len)
@@ -542,7 +422,6 @@ fn reserve_exact<T>(len: usize) -> Result<Vec<T>, PackageRefusal> {
     Ok(vec)
 }
 
-/// A length-prefixed byte string in a buffer of exactly its length.
 fn read_bytes(reader: &mut Reader<'_>) -> Result<Vec<u8>, PackageRefusal> {
     let len = reader.compact()?;
     let bytes = reader.take(len)?;
@@ -616,8 +495,6 @@ fn decode_tx(reader: &mut Reader<'_>) -> Result<Tx, PackageRefusal> {
     })
 }
 
-/// Decodes a payload `plan` was computed from, requesting exactly the planned
-/// capacity for every buffer.
 fn decode_package(payload: &[u8], plan: &PackagePlan) -> Result<Vec<Tx>, PackageRefusal> {
     let mut reader = Reader::new(payload);
     if usize::try_from(reader.compact()?) != Ok(plan.count) {
@@ -625,7 +502,6 @@ fn decode_package(payload: &[u8], plan: &PackagePlan) -> Result<Vec<Tx>, Package
     }
     let mut txs = reserve_exact::<Tx>(plan.count)?;
     for _ in 0..plan.count {
-        // Within the reserved capacity: no reallocation.
         txs.push(decode_tx(&mut reader)?);
     }
     if !reader.is_empty() {
@@ -634,24 +510,12 @@ fn decode_package(payload: &[u8], plan: &PackagePlan) -> Result<Vec<Tx>, Package
     Ok(txs)
 }
 
-// ---------------------------------------------------------------------------
-// Package lifecycle
-// ---------------------------------------------------------------------------
-
-/// The frame's own bytes and the charge that pays for them. The charge is
-/// returned when the frame drops, and not before.
 #[derive(Debug)]
 struct RawFrame {
     payload: bytes::Bytes,
     _charge: PackageCharge,
 }
 
-/// The identity of one accepted body and the decoded part of its charge.
-///
-/// A token obliges its holder to end in exactly one of
-/// [`PeerTable::package_response_rejected`] and
-/// [`PeerTable::package_response_completed`]; neither can be skipped without
-/// leaving the request claim held until the hash becomes known.
 #[derive(Debug)]
 #[must_use = "a package token must end in package_response_rejected or package_response_completed"]
 pub struct PackageToken {
@@ -661,21 +525,17 @@ pub struct PackageToken {
 }
 
 impl PackageToken {
-    /// The connection that delivered the body.
     #[must_use]
     pub const fn source(&self) -> PeerSource {
         self.source
     }
 
-    /// The request subject the body answers.
     #[must_use]
     pub const fn subject(&self) -> Wtxid {
         self.subject
     }
 }
 
-/// A `pkgtxns` frame accepted for admission: still encoded, charged, and
-/// bound to its request. Exactly one exists per connection at a time.
 #[derive(Debug)]
 pub struct InboundPackage {
     token: PackageToken,
@@ -684,42 +544,25 @@ pub struct InboundPackage {
 }
 
 impl InboundPackage {
-    /// The connection that delivered the body.
     #[must_use]
     pub const fn source(&self) -> PeerSource {
         self.token.source
     }
 
-    /// The request subject the body answers.
     #[must_use]
     pub const fn subject(&self) -> Wtxid {
         self.token.subject
     }
 
-    /// The plan the body was accepted under.
     #[must_use]
     pub const fn plan(&self) -> &PackagePlan {
         &self.plan
     }
 
-    /// Gives the frame back and keeps the token, for a body that never
-    /// reached the consumer.
     pub fn into_token(self) -> PackageToken {
         self.token
     }
 
-    /// Re-plans, decodes and reconciles the body: the sole decode-or-admit
-    /// window, run by the single ingress consumer.
-    ///
-    /// PRE: `self` came from [`PeerTable::admit_package`].
-    /// POST: `Opened` owns the decoded transactions at exactly the planned
-    ///   capacities and the decoded charge; the frame charge is already
-    ///   returned. `Refused` returns the token for
-    ///   [`PeerTable::package_response_rejected`] with nothing decoded kept.
-    /// INVARIANT: measured heap is compared with the plan as a lower bound,
-    ///   never as an equality. An excess is topped up by compare-and-add and
-    ///   reported in [`OpenedPackage::overrun`]; a refused top-up refuses the
-    ///   package. The charge only ever rises through the cap check.
     pub fn open(self) -> PackageOpening {
         let Self {
             mut token,
@@ -756,25 +599,18 @@ impl InboundPackage {
     }
 }
 
-/// What [`InboundPackage::open`] produced.
 #[derive(Debug)]
 pub enum PackageOpening {
-    /// The body decoded at its planned size.
     Opened(OpenedPackage),
-    /// The body was refused; release its token as rejected.
     Refused(PackageRejection),
 }
 
-/// A refused body's token and the reason.
 #[derive(Debug)]
 pub struct PackageRejection {
-    /// The token to release with [`PeerTable::package_response_rejected`].
     pub token: PackageToken,
-    /// Why the body was refused.
     pub refusal: PackageRefusal,
 }
 
-/// A decoded package in its one admission window.
 #[derive(Debug)]
 pub struct OpenedPackage {
     token: PackageToken,
@@ -783,36 +619,28 @@ pub struct OpenedPackage {
 }
 
 impl OpenedPackage {
-    /// Bytes the measured heap exceeded the plan by, after the top-up.
     #[must_use]
     pub const fn overrun(&self) -> u64 {
         self.overrun
     }
 
-    /// The connection that delivered the body.
     #[must_use]
     pub const fn source(&self) -> PeerSource {
         self.token.source
     }
 
-    /// The decoded members, in the peer-supplied order.
     #[must_use]
     pub fn txs(&self) -> &[Tx] {
         &self.txs
     }
 
-    /// Hands the members to admission and keeps the token, which still owns
-    /// the decoded charge until [`PeerTable::package_response_completed`].
     pub fn into_parts(self) -> (PackageToken, Vec<Tx>) {
         (self.token, self.txs)
     }
 }
 
-/// One item of the node's bounded peer-body ingress channel.
 pub enum InboundBody {
-    /// A decoded `tx` body.
     Tx(InboundTx),
-    /// An encoded, charged `pkgtxns` body.
     Package(Box<InboundPackage>),
 }
 
@@ -844,31 +672,14 @@ impl From<InboundPackage> for InboundBody {
     }
 }
 
-/// What [`PeerTable::clear_package_claims`] found at teardown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageTeardown {
-    /// Package claims still recorded and now cleared.
     pub claims_cleared: usize,
-    /// Bytes still charged. Zero once every token has been dropped.
     pub bytes_reserved: u64,
-    /// Connections still holding a package. Zero with `bytes_reserved`.
     pub held: usize,
 }
 
 impl PeerTable {
-    /// Accepts one `pkgtxns` payload for admission: plan, compare, reserve.
-    ///
-    /// PRE: `payload` is the frame exactly as read from `source`; the caller
-    ///   has checked package negotiation and that transaction relay is open.
-    /// POST: `Ok` holds one claim in `Enqueued`, the frame and decoded charges
-    ///   and `source`'s package slot; the caller must queue the package and
-    ///   end in one release. A refusal holds nothing and mutates nothing,
-    ///   except that a body already compared and then refused for capacity
-    ///   releases its claim through [`Self::package_response_rejected`],
-    ///   and an oversized body retires `source`'s solicited claim so an
-    ///   alternate source is offered the request without waiting for expiry.
-    /// INVARIANT: nothing is decoded and nothing is reserved before the
-    ///   claim comparison succeeds.
     pub fn admit_package(
         &self,
         capacity: &PackageCapacity,
@@ -916,12 +727,6 @@ impl PeerTable {
         }
     }
 
-    /// Retires `source`'s solicited claim when its `pkgtxns` body is
-    /// oversized for admission. The body cannot be admitted, but leaving the
-    /// `Awaiting` claim until expiry would hold the request's in-flight slot
-    /// and block alternates; retiring offers the request promptly like any
-    /// other failure. Malformed bodies have no attributable subject and
-    /// retire nothing; a source without an `Awaiting` claim is a no-op.
     fn retire_oversized_solicitation(&self, source: PeerSource, payload: &[u8]) {
         let Some(subject) = oversized_subject(payload) else {
             return;
@@ -929,10 +734,6 @@ impl PeerTable {
         let key = super::Identity::Wtxid(subject.0);
         let now = std::time::Instant::now();
         let mut policy = self.tx_policy.lock();
-        // Only an `Awaiting` package claim owned by this source may retire
-        // here. An ordinary WTXID download for the same hash, another source's
-        // claim, or an already-`Enqueued` body must keep its owner and retry
-        // path; a forged oversized body must not release them.
         let awaiting = policy.requests.get(&key).is_some_and(|request| {
             request
                 .package
@@ -943,27 +744,19 @@ impl PeerTable {
         if !awaiting {
             return;
         }
-        // The claim's riding orphan parents fall back to `source`.
         let keys = policy.failed_with_parents(key, source, now);
         drop(policy);
         self.send_transaction_requests(now, None, Some(&keys), std::time::Instant::now);
     }
 
-    /// The sole pre-admission release: the body never reached the gateway
-    /// (capacity refusal, full or closed channel, cancellation, send failure,
-    /// decode refusal).
     pub fn package_response_rejected(&self, token: PackageToken, inventory: &dyn TxInventory) {
         self.release_token(token, inventory);
     }
 
-    /// The sole post-admission release: the gateway answered, `Ok` or `Err`.
     pub fn package_response_completed(&self, token: PackageToken, inventory: &dyn TxInventory) {
         self.release_token(token, inventory);
     }
 
-    /// Returns the decoded charge and the connection's slot, then retires the
-    /// `Enqueued` claim through its one owner. A claim already retired (the
-    /// hash became known meanwhile) makes the second step a no-op.
     fn release_token(&self, token: PackageToken, inventory: &dyn TxInventory) {
         let PackageToken {
             source,
@@ -974,9 +767,6 @@ impl PeerTable {
         self.release_package_claim(source, subject, inventory);
     }
 
-    /// Clears every package claim still recorded and reports what the
-    /// capacity still holds. Called last in node teardown, after the ingress
-    /// consumer has stopped and its channel has been dropped.
     pub fn clear_package_claims(&self, capacity: &PackageCapacity) -> PackageTeardown {
         let claims_cleared = self
             .tx_policy
@@ -1075,7 +865,6 @@ mod tests {
         assert_eq!(plan_package_charge(&[]), Err(PackageRefusal::Malformed));
         assert_eq!(plan_package_charge(&[0x00]), Err(PackageRefusal::Empty));
 
-        // Overcount: 26 txs.
         let txs: Vec<Tx> = (0..26).map(|i| sample_tx(1, i, 1_000)).collect();
         let payload = make_payload(&txs);
         assert_eq!(
@@ -1083,31 +872,28 @@ mod tests {
             Err(PackageRefusal::OverCount)
         );
 
-        // Over 100 txs is a wire malformation.
         let over_wire = varint::encode(101);
         assert_eq!(
             plan_package_charge(&over_wire),
             Err(PackageRefusal::Malformed)
         );
 
-        // Superfluous segwit marker without witness data.
-        let mut superfluous = vec![1]; // count = 1
-        superfluous.extend_from_slice(&1_u32.to_le_bytes()); // version = 1
-        superfluous.push(0); // input_count = 0 -> check flag
-        superfluous.push(1); // flag = 1 -> segwit
-        superfluous.push(1); // real input count = 1
-        superfluous.extend_from_slice(&[0; 36]); // outpoint
-        superfluous.push(0); // script_sig len = 0
-        superfluous.extend_from_slice(&[0xFF; 4]); // sequence
-        superfluous.push(0); // output count = 0
-        superfluous.push(0); // witness items = 0 -> any_item is false!
-        superfluous.extend_from_slice(&0_u32.to_le_bytes()); // lock_time
+        let mut superfluous = vec![1];
+        superfluous.extend_from_slice(&1_u32.to_le_bytes());
+        superfluous.push(0);
+        superfluous.push(1);
+        superfluous.push(1);
+        superfluous.extend_from_slice(&[0; 36]);
+        superfluous.push(0);
+        superfluous.extend_from_slice(&[0xFF; 4]);
+        superfluous.push(0);
+        superfluous.push(0);
+        superfluous.extend_from_slice(&0_u32.to_le_bytes());
         assert_eq!(
             plan_package_charge(&superfluous),
             Err(PackageRefusal::Malformed)
         );
 
-        // Trailing bytes.
         let mut trailing = make_payload(&[sample_tx(1, 1, 1_000)]).to_vec();
         trailing.push(0xFF);
         assert_eq!(
@@ -1118,8 +904,6 @@ mod tests {
 
     #[test]
     fn plan_refuses_overweight_package() {
-        // Two individually standard transactions (each ~210_000 WU) whose sum
-        // exceeds MAX_PACKAGE_WEIGHT (404_000 WU).
         let tx1 = sample_segwit_tx(2, 1, 1_000, vec![0; 210_000]);
         let tx2 = sample_segwit_tx(2, 2, 1_000, vec![0; 210_000]);
         assert!(tx1.weight() <= 400_000 && tx2.weight() <= 400_000);
@@ -1138,40 +922,33 @@ mod tests {
         let peer_a = source(1);
         let peer_b = source(2);
 
-        // peer_a charges 400 frame + 200 decoded = 600 total.
         let (frame_a, decoded_a) = capacity.charge(peer_a, 400, 200).expect("charge succeeds");
         assert_eq!(capacity.reserved(), 600);
         assert_eq!(capacity.held(), 1);
 
-        // peer_a cannot hold a second package concurrently.
         assert!(matches!(
             capacity.charge(peer_a, 50, 50),
             Err(PackageRefusal::PeerHeld)
         ));
 
-        // peer_b requests 300 frame + 200 decoded = 500 total, which would exceed cap 1000.
         assert!(matches!(
             capacity.charge(peer_b, 300, 200),
             Err(PackageRefusal::Budget)
         ));
         assert_eq!(capacity.reserved(), 600);
 
-        // Dropping frame_a releases frame bytes immediately.
         drop(frame_a);
         assert_eq!(capacity.reserved(), 200);
         assert_eq!(capacity.held(), 1);
 
-        // peer_b can now take 500 bytes.
         let (frame_b, decoded_b) = capacity.charge(peer_b, 300, 200).expect("charge succeeds");
         assert_eq!(capacity.reserved(), 700);
         assert_eq!(capacity.held(), 2);
 
-        // Dropping decoded_a releases the slot and bytes for peer_a.
         drop(decoded_a);
         assert_eq!(capacity.reserved(), 500);
         assert_eq!(capacity.held(), 1);
 
-        // peer_a can now take a new package.
         let (frame_a2, decoded_a2) = capacity
             .charge(peer_a, 100, 100)
             .expect("recharge succeeds");
@@ -1197,7 +974,6 @@ mod tests {
         let tx = sample_tx(1, 1, 10_000);
         let payload = make_payload(&[tx]);
 
-        // Peer has no awaiting request.
         let result = table.admit_package(&capacity, &inventory, peer, payload);
         assert_eq!(result.err(), Some(PackageRefusal::Unsolicited));
         assert_eq!(capacity.reserved(), 0);
@@ -1215,32 +991,27 @@ mod tests {
         let child = sample_tx(1, 2, 40_000);
         let subject = child.wtxid();
 
-        // The solicited `ancpkginfo` names parent then child (subject).
         assert!(table.request_package_info(peer, subject, &[]));
         assert!(table.request_package_transactions(peer, subject, vec![parent.wtxid(), subject]));
 
-        // Peer replies with reordered sequence [child, parent].
         let reordered_payload = make_payload(&[child.clone(), parent.clone()]);
         let err = table.admit_package(&capacity, &inventory, peer, reordered_payload);
         assert_eq!(err.err(), Some(PackageRefusal::Unsolicited));
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.held(), 0);
 
-        // Original claim is still Awaiting; foreign peer cannot adopt it.
         let foreign = source(2);
         let matching_payload = make_payload(&[parent.clone(), child.clone()]);
         let foreign_err =
             table.admit_package(&capacity, &inventory, foreign, matching_payload.clone());
         assert_eq!(foreign_err.err(), Some(PackageRefusal::Unsolicited));
 
-        // Matching payload from rightful peer succeeds.
         let admitted = table
             .admit_package(&capacity, &inventory, peer, matching_payload)
             .expect("admit succeeds");
         assert_eq!(capacity.held(), 1);
         assert!(capacity.reserved() > 0);
 
-        // Once enqueued, a duplicate send is refused.
         let duplicate_err =
             table.admit_package(&capacity, &inventory, peer, make_payload(&[parent, child]));
         assert!(matches!(
@@ -1248,7 +1019,6 @@ mod tests {
             Some(PackageRefusal::Unsolicited | PackageRefusal::PeerHeld)
         ));
 
-        // Release rejected returns the capacity and clears the claim.
         table.package_response_rejected(admitted.into_token(), &inventory);
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.held(), 0);
@@ -1277,11 +1047,9 @@ mod tests {
             .expect("admission succeeds");
         assert_eq!(capacity.held(), 1);
 
-        // Peer disconnects: enqueued body stays queued and held.
         table.transaction_peer_disconnected(peer, &inventory);
         assert_eq!(capacity.held(), 1);
 
-        // A replacement connection cannot adopt the claim.
         let replacement = PeerSource::for_test(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
         let rep_payload = make_payload(&[tx]);
         let rep_err = table.admit_package(&capacity, &inventory, replacement, rep_payload);
@@ -1291,7 +1059,6 @@ mod tests {
             "a replacement connection cannot release the queued claim"
         );
 
-        // Consumer opens and completes the package.
         let opening = inbound.open();
         let opened = match opening {
             PackageOpening::Opened(opened) => opened,
@@ -1301,7 +1068,6 @@ mod tests {
         assert_eq!(txs.len(), 1);
         table.package_response_completed(token, &inventory);
 
-        // Released: capacity is 0, held is 0.
         assert_eq!(capacity.reserved(), 0);
         assert_eq!(capacity.held(), 0);
         assert!(
@@ -1309,7 +1075,6 @@ mod tests {
             "the claim was released exactly once"
         );
 
-        // Teardown reports zero claims and zero residual bytes.
         let teardown = table.clear_package_claims(&capacity);
         assert_eq!(teardown.claims_cleared, 0);
         assert_eq!(teardown.bytes_reserved, 0);
@@ -1328,7 +1093,6 @@ mod tests {
         assert!(table.request_package_info(peer, stranded_subject, &[]));
         assert!(table.request_package_transactions(peer, stranded_subject, vec![stranded_subject]));
 
-        // Claim is Awaiting. Teardown clears it.
         let teardown = table.clear_package_claims(&capacity);
         assert_eq!(teardown.claims_cleared, 1);
         assert_eq!(teardown.bytes_reserved, 0);
@@ -1344,8 +1108,6 @@ mod tests {
         let charged = capacity.reserved();
         assert!(charged > 0);
 
-        // A body the consumer never released: teardown clears its claim and
-        // reports the bytes and the connection slot it still holds.
         let teardown = table.clear_package_claims(&capacity);
         assert_eq!(teardown.claims_cleared, 1);
         assert_eq!(teardown.bytes_reserved, charged);
@@ -1417,7 +1179,6 @@ mod tests {
         assert!(table.request_package_info(owner, subject, &[]));
         assert!(table.request_package_transactions(owner, subject, vec![parent.wtxid(), subject]));
 
-        // 26 members ending at the solicited subject: oversized for admission.
         let mut oversized: Vec<Tx> = (0..25u32).map(|i| sample_tx(3, i, 1_000)).collect();
         oversized.push(child.clone());
         let oversized_payload = make_payload(&oversized);
@@ -1427,7 +1188,6 @@ mod tests {
                 .err(),
             Some(PackageRefusal::OverCount)
         );
-        // The `Awaiting` claim retired: the right-sized body is now unsolicited.
         let right_sized = make_payload(&[parent.clone(), child.clone()]);
         assert_eq!(
             table
@@ -1436,8 +1196,6 @@ mod tests {
             Some(PackageRefusal::Unsolicited)
         );
 
-        // A forged oversized body from a stranger must not release an ordinary
-        // owner: solicit again, then send oversized from the stranger.
         assert!(table.request_package_info(owner, subject, &[]));
         assert!(table.request_package_transactions(owner, subject, vec![parent.wtxid(), subject]));
         assert_eq!(
@@ -1446,7 +1204,6 @@ mod tests {
                 .err(),
             Some(PackageRefusal::OverCount)
         );
-        // The owner's claim survives the stranger's forgery.
         let admitted = table
             .admit_package(&capacity, &inventory, owner, make_payload(&[parent, child]))
             .expect("owner claim survives a stranger oversized body");

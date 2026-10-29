@@ -1,12 +1,3 @@
-//! Maintained chunk order: oracle agreement, structural invariants, and
-//! regression pins.
-//!
-//! The pool's chunk index must match an independent from-scratch oracle after
-//! every mutation. The oracle linearizes each component with `fee_diagram`
-//! over txid-ordered members and applies the index key — rate, equal-feerate
-//! prefix weight, greatest member txid — without touching the maintained
-//! index, so agreement proves the incremental maintenance, not the solver.
-
 #![expect(clippy::expect_used)]
 
 use alloc::sync::Arc;
@@ -27,21 +18,11 @@ use crate::{
     EntryId, FeeDiagramError, MempoolEntry, MempoolError, MempoolLimits, ReplacementCandidate,
 };
 
-/// Nominal output count for `label`: deterministic, so the proptest can name
-/// a plausible vout of a tracked parent insert. The guess may overshoot the
-/// parent's real outputs, which exercises the spend index's beyond-count
-/// path; validity itself is pinned by `distinct_output_indices_link_by_vout`.
 fn label_outputs(label: u64) -> u32 {
     u32::try_from(label % 3).map_or(1, |residue| residue + 1)
 }
 
-/// Test-only Mempool helpers: the maintained order and its from-scratch
-/// oracle.
 impl Mempool {
-    /// Independent from-scratch oracle over txid-ordered members: linearizes
-    /// each component with the solver, then orders chunks by rate,
-    /// equal-feerate prefix weight, and greatest member txid — the same rule
-    /// the index implements, without touching the maintained index.
     pub(super) fn oracle_chunk_order(&self) -> Result<Vec<Vec<Txid>>, FeeDiagramError> {
         struct OracleChunk {
             fee: i128,
@@ -133,8 +114,6 @@ impl Mempool {
                 });
             }
         }
-        // Cluster totals stay far below the cross-product bound the key
-        // comparison relies on, so this exact ordering matches the index.
         all.sort_by(|left, right| {
             (right.fee * i128::from(left.weight))
                 .cmp(&(left.fee * i128::from(right.weight)))
@@ -144,16 +123,12 @@ impl Mempool {
         Ok(all.into_iter().map(|chunk| chunk.txids).collect())
     }
 
-    /// Every live entry txid in chunk order, the from-scratch-comparable order.
     pub(super) fn chunk_order(&self) -> Vec<Vec<Txid>> {
         self.chunks_by_feerate()
             .map(|chunk| chunk.txids.to_vec())
             .collect()
     }
 
-    /// After every mutation the maintained order must equal the from-scratch
-    /// solver over the same pool, chunk for chunk and member for member, and
-    /// the index must satisfy its structural invariants.
     pub(super) fn assert_index_matches_oracle(&self, stage: &str) {
         let maintained = self.chunk_order();
         let oracle = self
@@ -163,9 +138,6 @@ impl Mempool {
         self.assert_index_invariants();
     }
 
-    /// Structural invariants of the maintained index: chunks partition the
-    /// live entries, totals match the entries, every parent precedes its
-    /// child, and feerates never increase along the walk.
     fn assert_index_invariants(&self) {
         let mut seen = HashSet::new();
         let mut flattened: Vec<EntryId> = Vec::new();
@@ -210,8 +182,6 @@ impl Mempool {
     }
 }
 
-/// Test transaction: `label`-unique synthetic funding or the named spends,
-/// `outputs` anyone-can-spend outputs, one cluster-building shape.
 fn order_tx(label: u64, spends: &[(Txid, u32)], outputs: u32, sequence: Sequence) -> Tx {
     let mut seed = [0xC1_u8; 32];
     seed[..8].copy_from_slice(&label.to_le_bytes());
@@ -271,7 +241,6 @@ fn insert_ordered(
     txid
 }
 
-/// A single insertion indexes exactly one chunk.
 #[test]
 fn single_insertion_indexes_one_chunk() {
     let mut pool = order_pool();
@@ -281,8 +250,6 @@ fn single_insertion_indexes_one_chunk() {
     pool.assert_index_matches_oracle("a single insertion");
 }
 
-/// An equal-rate parent and child stay two chunks with the parent first: the
-/// prefix weight, not the raw chunk weight, breaks the tie.
 #[test]
 fn equal_rate_parent_sorts_before_its_child() -> Result<(), MempoolError> {
     let mut pool = order_pool();
@@ -296,7 +263,6 @@ fn equal_rate_parent_sorts_before_its_child() -> Result<(), MempoolError> {
     let mut child_entry = MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 1, 0);
     child_entry.weight = 400;
     pool.insert_entry(child_entry)?;
-    // Both chunks run at 2.5 sat/WU; the lighter child must not jump its parent.
     let oracle = pool.oracle_chunk_order()?;
     assert_eq!(
         oracle.len(),
@@ -311,8 +277,6 @@ fn equal_rate_parent_sorts_before_its_child() -> Result<(), MempoolError> {
     Ok(())
 }
 
-/// Children may spend any output index: links key on the full outpoint,
-/// including one past the parent's real outputs.
 #[test]
 fn distinct_output_indices_link_by_vout() {
     let mut pool = order_pool();
@@ -324,7 +288,6 @@ fn distinct_output_indices_link_by_vout() {
     pool.assert_index_matches_oracle("distinct vout links");
 }
 
-/// A negative overlay cannot push a transaction out of its cluster's index.
 #[test]
 fn negative_prioritise_keeps_the_cluster_indexed() {
     let mut pool = order_pool();
@@ -339,8 +302,6 @@ fn negative_prioritise_keeps_the_cluster_indexed() {
     pool.assert_index_matches_oracle("a negative overlay");
 }
 
-/// Confirming a block removes inclusions, sweeps conflicts with descendants,
-/// and keeps every surviving piece indexed.
 #[test]
 fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
     let mut pool = order_pool();
@@ -395,7 +356,6 @@ fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
         0,
     ))?;
 
-    // Confirming the parent mines it and keeps the child as a new root.
     let confirmed = order_tx(1, &[], 1, Sequence::MAX);
     let included = pool.remove_for_block(&[&confirmed], &[parent_txid], 3, 5);
     assert!(pool.contains_txid(&child_txid));
@@ -408,7 +368,6 @@ fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
     );
     pool.assert_index_matches_oracle("a block inclusion");
 
-    // A block spending the rival's funding conflicts the rival pair away.
     let conflict = order_tx(6, &[(other_out.txid, other_out.vout)], 1, Sequence::MAX);
     let conflict_txid = conflict.txid();
     let swept = pool.remove_for_block(&[&conflict], &[conflict_txid], 3, 6);
@@ -424,7 +383,6 @@ fn remove_for_block_confirms_and_conflicts() -> Result<(), MempoolError> {
     Ok(())
 }
 
-/// A BIP125 replacement retires the victim cluster and indexes the winner.
 #[test]
 fn rbf_replacement_keeps_the_index_current() -> Result<(), MempoolError> {
     let mut pool = order_pool();
@@ -461,8 +419,6 @@ fn rbf_replacement_keeps_the_index_current() -> Result<(), MempoolError> {
     Ok(())
 }
 
-/// A transaction spending outputs of two clusters merges them: the absorbed
-/// component's keys are forgotten and the joined cluster linearizes as one.
 #[test]
 fn merge_two_clusters_via_bridge_tx() {
     let mut pool = order_pool();
@@ -479,9 +435,6 @@ fn merge_two_clusters_via_bridge_tx() {
     pool.assert_index_matches_oracle("a cluster merge");
 }
 
-/// A cluster at the 64-member limit (a 32-deep spine with one leaf per spine
-/// node) keeps its exact order through overlays and a root confirmation that
-/// splits it; the 65th member is refused and leaves the index untouched.
 #[test]
 fn a_full_cluster_keeps_its_exact_order_through_mutations() {
     let mut pool = order_pool();
@@ -538,10 +491,6 @@ fn a_full_cluster_keeps_its_exact_order_through_mutations() {
 }
 
 proptest! {
-    /// After every mutation the maintained order must equal the from-scratch
-    /// solver: inserts (independent, chained, shared-parent, two-parent
-    /// bridge merges, multi-output), removals, inclusions, replacements,
-    /// positive and negative overlays, and wholesale clears.
     #[test]
     fn maintained_chunk_order_matches_the_from_scratch_solver(
         actions in prop::collection::vec(
@@ -558,22 +507,13 @@ proptest! {
         ),
     ) {
         let mut pool = order_pool();
-        // Actually inserted txids by label: recomputing a parent's txid is
-        // unsound because the txid covers the sequence, and inserts signal
-        // RBF while a recompute would use final. Only tracked inserts can
-        // link chained, shared-parent, and bridge-merge components.
         let mut inserted: HashMap<u64, Txid> = HashMap::new();
-        // A deterministic chained edge up front: label 1 must spend tracked
-        // label 0. Restoring txid recomputation misses this edge and fails
-        // the intended-edge pin below instead of silently losing coverage.
         let mut actions = actions;
         actions.insert(0, (1, Some(0), None, 3, 1, 0, 0));
         actions.insert(0, (0, None, None, 3, 1, 0, 0));
         for (label, parent_a, parent_b, fee_class, outputs, vout, op) in actions {
             let fees = [order_fee(label), 100, 50_000, 150_000, 1_000];
             let fee = fees[fee_class];
-            // Two optional parents: distinct pooled labels join components
-            // through the bridge, exercising the merge path.
             let mut spends = Vec::new();
             for parent_label in [parent_a, parent_b].into_iter().flatten() {
                 let Some(parent_txid) = inserted.get(&parent_label) else {
@@ -584,9 +524,6 @@ proptest! {
                     spends.push((*parent_txid, vout % slots));
                 }
             }
-            // Every intended resident parent must appear in the spends: a
-            // harness that recomputes parent txids instead of tracking them
-            // silently builds parentless transactions here.
             for parent_label in [parent_a, parent_b].into_iter().flatten() {
                 if let Some(parent_txid) = inserted.get(&parent_label) {
                     assert!(
@@ -595,11 +532,6 @@ proptest! {
                     );
                 }
             }
-            // Every non-insert action targets the resident body actually
-            // tracked for `label`, by its real txid; a label with no
-            // resident has nothing to act on. A freshly reconstructed
-            // transaction (this action's spends and outputs) is never the
-            // resident's identity.
             let resident = inserted.get(&label).copied();
             match op {
                 0..=4 => {
@@ -611,8 +543,6 @@ proptest! {
                     if admitted {
                         assert!(pool.contains_txid(&txid));
                         inserted.insert(label, txid);
-                        // The pool must hold the intended edges in one
-                        // component, not just the transactions side by side.
                         if !spends.is_empty() {
                             let child = pool.entry_id_by_txid(&txid);
                             for &(parent_txid, _) in &spends {
@@ -661,8 +591,6 @@ proptest! {
                     if let Some(txid) = resident
                         && let Some(entry) = pool.entry_by_txid(&txid)
                     {
-                        // The winner spends exactly the resident's actual
-                        // inputs, so it conflicts with that body and no other.
                         let held: Vec<(Txid, u32)> = entry
                             .tx
                             .inputs
@@ -750,9 +678,6 @@ fn apply_block(pool: &mut Mempool, block: &Block) {
     let _ = pool.remove_for_block(&refs, &ids, 3, 5);
 }
 
-/// Builds two equivalent pools with the same insert sequence, so the
-/// projection source never clones: the oracle pool applies the real removal
-/// from the same membership.
 fn twin_pools(build: impl Fn(&mut Mempool)) -> (Mempool, Mempool) {
     let mut first = order_pool();
     let mut second = order_pool();
@@ -820,10 +745,6 @@ fn assert_projection_matches_real(first: &Mempool, second: &mut Mempool, block: 
     second.assert_index_matches_oracle("real removal after projection");
 }
 
-/// A long run of touched chunks before the next untouched one: thirty-two
-/// confirmed parents leave high-fee surviving children, so the merge walks
-/// thirty-two projected pieces while the live cursor skips the whole
-/// touched prefix, then still yields the low-fee untouched chunk exactly.
 #[test]
 fn projected_long_touched_run_still_yields_the_untouched_tail() {
     const PAIRS: u64 = 32;
@@ -850,7 +771,6 @@ fn projected_long_touched_run_still_yields_the_untouched_tail() {
     assert_projection_matches_real(&first, &mut second, &block);
 }
 
-/// An empty plan projects the live order and leaves the pool untouched.
 #[test]
 fn projected_empty_plan_matches_live_order() {
     let (first, mut second) = twin_pools(|pool| {
@@ -864,8 +784,6 @@ fn projected_empty_plan_matches_live_order() {
     assert_projection_matches_real(&first, &mut second, &block);
 }
 
-/// A surviving child treats its block-included parent as confirmed: the
-/// projected parents omit it, so selection does not require it.
 #[test]
 fn projected_surviving_child_treats_confirmed_parent_as_selected() {
     let (first, mut second) = twin_pools(|pool| {
@@ -906,8 +824,6 @@ fn projected_surviving_child_treats_confirmed_parent_as_selected() {
     assert!(!second.contains_txid(&parent_txid));
 }
 
-/// Confirming the bridge parent splits its diamond children into independent
-/// pieces with their own prefix runs.
 #[test]
 fn projected_splitting_bridge_yields_independent_pieces() {
     let build = |pool: &mut Mempool| {
@@ -930,9 +846,6 @@ fn projected_splitting_bridge_yields_independent_pieces() {
     assert_projection_matches_real(&first, &mut second, &block);
 }
 
-/// Equal-rate parent and child keep their prefix order through projection:
-/// the lighter child never jumps its parent, and ties fall to the greatest
-/// member txid exactly as the live index orders them.
 #[test]
 fn projected_equal_rate_prefix_preserved() -> Result<(), MempoolError> {
     let build = |pool: &mut Mempool| -> Result<(), MempoolError> {
@@ -974,8 +887,6 @@ fn projected_equal_rate_prefix_preserved() -> Result<(), MempoolError> {
     Ok(())
 }
 
-/// A block conflict sweeps the rival cluster and its descendants with
-/// `Conflict`, and the projection matches the real sweep.
 #[test]
 fn projected_conflicts_and_descendants_match_real() -> Result<(), MempoolError> {
     let build = |pool: &mut Mempool| -> Result<OutPoint, MempoolError> {
@@ -1051,8 +962,6 @@ fn projected_conflicts_and_descendants_match_real() -> Result<(), MempoolError> 
     Ok(())
 }
 
-/// Prioritised fees project exactly, and the plan counts the overlays the
-/// block lifecycle clears.
 #[test]
 fn projected_prioritised_fees_and_cleared_overlays_match_real() {
     let mut first = order_pool();
@@ -1088,13 +997,6 @@ fn projected_prioritised_fees_and_cleared_overlays_match_real() {
 }
 
 proptest! {
-    /// Random pools and blocks: the projected stream equals the real removal
-    /// on an equivalent pool, chunk for chunk, with identical fees, weights,
-    /// and txid order. Blocks mix inclusions with fresh double-spends of
-    /// pooled inputs, pools carry signed overlays, and an independent oracle
-    /// rebuilt from pre-pool inputs plus descendant closure checks the exact
-    /// planned set, reasons, and cleared-overlay count without invoking the
-    /// production planner.
     #[test]
     fn projected_chunks_match_real_remove_for_block(
         actions in prop::collection::vec(
@@ -1111,18 +1013,10 @@ proptest! {
         block_picks in prop::collection::vec((0_u64..16, 0_u8..2), 0..6),
     ) {
         const DELTAS: [i64; 5] = [-15_000, -1_000, 100, 1_000, 15_000];
-        // A deterministic chained edge up front: label 1 must spend the
-        // tracked insert of label 0. Recomputing the parent's txid instead
-        // of tracking it drops this edge and fails the intended-edge pin in
-        // `build` rather than silently losing coverage.
         let mut actions = actions;
         actions.insert(0, (1, Some(0), 0, 1, 0));
         actions.insert(0, (0, None, 0, 2, 0));
         let build = |pool: &mut Mempool| {
-            // Actually inserted txids and output counts by label:
-            // recomputing a parent rebuilds a different transaction (the
-            // insert's spends and output count vary per action), so the
-            // rebuilt txid misses and the edge silently skips.
             let mut inserted: HashMap<u64, (Txid, u32)> = HashMap::new();
             for (label, parent, fee_class, outputs, vout) in &actions {
                 let fees = [order_fee(*label), 100, 50_000];
@@ -1143,9 +1037,6 @@ proptest! {
                     .is_ok()
                 {
                     inserted.insert(*label, (txid, *outputs));
-                    // The intended edge must exist in the pool: the child
-                    // lists its tracked resident parent directly, and a
-                    // parentless build is a harness defect, not a pass.
                     if let Some(parent_txid) = intended_parent {
                         let child_id = pool.entry_id_by_txid(&txid);
                         let parent_id = pool.entry_id_by_txid(&parent_txid);

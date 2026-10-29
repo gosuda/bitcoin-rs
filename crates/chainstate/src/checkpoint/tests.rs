@@ -1,5 +1,3 @@
-//! Checkpoint codec and immutable-publication regressions.
-
 use super::headers;
 
 use std::fs;
@@ -33,11 +31,11 @@ fn mutate_authenticated_artifact(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = data_dir.join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
-    let mut current: CurrentV1 = serde_json::from_slice(&fs::read(&current_path)?)?;
+    let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
 
     let generation = root.join(&current.directory);
     let manifest_path = generation.join(MANIFEST_FILE);
-    let mut manifest: CheckpointManifestV1 = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&fs::read(&manifest_path)?)?;
     let artifact_path = generation.join(artifact);
     let mut bytes = fs::read(&artifact_path)?;
     mutate(&mut bytes);
@@ -59,10 +57,10 @@ fn mutate_authenticated_artifact(
         }
         _ => return Err("unknown checkpoint artifact".into()),
     }
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     fs::write(&manifest_path, &manifest_bytes)?;
     current.manifest_sha256 = super::hex_encode(&Sha256::digest(&manifest_bytes));
-    fs::write(current_path, serde_json::to_vec(&current)?)?;
+    fs::write(current_path, sonic_rs::to_vec(&current)?)?;
     Ok(())
 }
 fn mutate_authenticated_manifest(
@@ -71,14 +69,14 @@ fn mutate_authenticated_manifest(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = data_dir.join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
-    let mut current: CurrentV1 = serde_json::from_slice(&fs::read(&current_path)?)?;
+    let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
     let manifest_path = root.join(&current.directory).join(MANIFEST_FILE);
-    let mut manifest: CheckpointManifestV1 = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    let mut manifest: CheckpointManifestV1 = sonic_rs::from_slice(&fs::read(&manifest_path)?)?;
     mutate(&mut manifest);
-    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     fs::write(&manifest_path, &manifest_bytes)?;
     current.manifest_sha256 = super::hex_encode(&Sha256::digest(&manifest_bytes));
-    fs::write(current_path, serde_json::to_vec(&current)?)?;
+    fs::write(current_path, sonic_rs::to_vec(&current)?)?;
     Ok(())
 }
 

@@ -56,6 +56,6 @@ parking_lot.workspace = true
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
-serde_json.workspace = true
+sonic-rs.workspace = true
 tempfile.workspace = true
 

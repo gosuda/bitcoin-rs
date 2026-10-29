@@ -1,12 +1,3 @@
-//! Typed, in-process embedding surface over the node lifecycle.
-//!
-//! Startup returns a fully owned node from `lifecycle`; this module
-//! does not assemble detached state, workers, and RPC context a second time.
-//!
-//! The async methods defer the node's synchronous work until polled. They do
-//! not create an executor or make blocking storage and lifecycle work async.
-//! Embedders control placement of that work on their own runtime.
-
 use bitcoin_rs_index::CapabilitySnapshot;
 use bitcoin_rs_index::IndexCapability;
 use bitcoin_rs_index::ScriptHash;
@@ -27,49 +18,28 @@ use crate::lifecycle::{NodeServices, TeardownMode, start_node};
 use crate::state::NodeState;
 use bitcoin_rs_chainstate::events::ChainSnapshot;
 
-/// Failure at the typed node boundary.
 #[derive(Debug, Error)]
 pub enum NodeError {
-    /// Configuration, storage, or service startup failed.
     #[error("node startup failed: {0}")]
     Startup(String),
-    /// The orderly shutdown path failed.
     #[error("node shutdown failed: {0}")]
     Shutdown(String),
-    /// A requested capability is disabled or cannot answer yet.
     #[error("node capability unavailable: {0}")]
     Unavailable(String),
-    /// A requested object is completely absent.
     #[error("node object not found: {0}")]
     NotFound(String),
-    /// Mempool admission rejected the broadcast transaction.
     #[error("transaction broadcast failed: {0}")]
     Broadcast(String),
-    /// Snapshot import, trust verification, or activation failed.
     #[error("snapshot activation failed: {0}")]
     Snapshot(String),
 }
 
-/// A running node owning its state, service graph, and RPC context.
-///
-/// Explicit shutdown consumes the node and reports failures. Drop stops an
-/// abandoned run through the same lifecycle without a clean-run checkpoint.
-///
-/// The data directory stays locked until the last handle to any of the node's
-/// stores is dropped, not merely until shutdown returns. A detached consumer
-/// that still holds one, such as an idle keep-alive RPC connection (closed at
-/// the RPC idle timeout), keeps the directory locked; opening it meanwhile
-/// fails with [`crate::DataDirLockError::InUse`], never with a storage-backend
-/// lock error.
 pub struct Node {
     pub(crate) state: NodeState,
     pub(crate) services: Option<NodeServices>,
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
-// Keep these async methods compatible with supported Clippy versions:
-// embedding defers synchronous work until polled, and the trait-impl lint
-// is newer than Rust 1.95.
 #[allow(
     unknown_lints,
     clippy::unused_async,
@@ -77,10 +47,6 @@ pub struct Node {
     reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
 )]
 impl Node {
-    /// Starts an owned node after configuration validation and crash recovery.
-    ///
-    /// The method drives synchronous node workers on the caller's task. It
-    /// neither installs process signal handlers nor creates an executor.
     pub async fn start(
         config: crate::NodeConfig,
         runtime: crate::RuntimeInputs,
@@ -88,18 +54,11 @@ impl Node {
         start_node(config, runtime, false).map_err(|error| NodeError::Startup(error.to_string()))
     }
 
-    /// Returns the current coherent, generation-stamped chain snapshot.
     #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
         self.state.chainstate().chain_snapshot()
     }
 
-    /// Borrows the existing node-owned mining control used by RPC.
-    ///
-    /// Calls are synchronous, including long polls and block validation;
-    /// embedders must place them on their blocking workers. The borrow cannot
-    /// outlive this node. Node shutdown cancels outstanding long polls through
-    /// the existing shutdown latch; no additional coordinator is constructed.
     pub fn mining_control(&self) -> Result<&dyn bitcoin_rs_mining::MiningControl, NodeError> {
         self.context
             .mining
@@ -108,7 +67,6 @@ impl Node {
             .ok_or_else(|| NodeError::Unavailable("mining control is not attached".to_owned()))
     }
 
-    /// Returns active and historical validation progress from the chainstate owner.
     pub fn chainstates_summary(
         &self,
     ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, NodeError> {
@@ -117,11 +75,6 @@ impl Node {
             .map_err(|error| NodeError::Unavailable(error.to_string()))
     }
 
-    /// Imports a pinned native v4 snapshot through the node's fenced activation boundary.
-    /// Portable Bitcoin Core v2 files use the `loadtxoutset` RPC.
-    /// Like startup, file reading and validation run synchronously when polled;
-    /// the caller chooses their runtime placement. Headers through the pinned
-    /// base must already have been admitted by ordinary header synchronization.
     pub async fn activate_assumeutxo_snapshot_file(
         &self,
         path: impl AsRef<std::path::Path>,
@@ -131,19 +84,16 @@ impl Node {
             .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
 
-    /// Returns the live txindex capability report.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
         bitcoin_rs_index::txindex_snapshot(Some(self.state.derived_index_status().as_ref()))
     }
 
-    /// Returns typed synchronization progress without touching RPC JSON.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
         self.context.chain.sync_progress()
     }
 
-    /// Returns a decoded block, distinguishing unknown from unavailable data.
     pub async fn block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>, NodeError> {
         let hash = Hash256::from(hash);
         let Some(record) = self.context.chain.block_by_hash(hash) else {
@@ -165,13 +115,6 @@ impl Node {
         Ok(Some(block))
     }
 
-    /// Resolves one confirmed transaction against a server-selected covered prefix.
-    ///
-    /// Synchronous bounded blocking read: the call runs the engine's bounded
-    /// scans plus body reads inline, creates no executor, and belongs on a
-    /// caller blocking worker. No mempool merge; confirmed index only.
-    /// Each call selects its own prefix; independent calls do not share an
-    /// anchor. A tx-only node serves this call without `ScriptHistory`.
     pub fn transaction_at_prefix(
         &self,
         txid: &Txid,
@@ -186,13 +129,6 @@ impl Node {
         adapter.transaction_at_prefix(txid)
     }
 
-    /// Resolves confirmed script history against a server-selected covered prefix.
-    ///
-    /// Synchronous bounded blocking read: the call runs the engine's bounded
-    /// scans plus body reads inline, creates no executor, and belongs on a
-    /// caller blocking worker. No mempool merge; confirmed index only.
-    /// Each call selects its own prefix; independent calls do not share an
-    /// anchor.
     pub fn script_history_at_prefix(
         &self,
         script: ScriptHash,
@@ -207,14 +143,6 @@ impl Node {
         adapter.script_history_at_prefix(script)
     }
 
-    /// Resolves the confirmed spender of an outpoint against a server-selected covered prefix.
-    ///
-    /// Synchronous bounded blocking read: the call runs the engine's bounded
-    /// scans plus body reads inline, creates no executor, and belongs on a
-    /// caller blocking worker. No mempool merge; confirmed index only.
-    /// Each call selects its own prefix; independent calls do not share an
-    /// anchor. `Ok` with `None` means no matching spend in range, not
-    /// globally unspent.
     pub fn spender_at_prefix(
         &self,
         outpoint: OutPoint,
@@ -229,11 +157,6 @@ impl Node {
         adapter.spender_at_prefix(outpoint)
     }
 
-    /// Resolves a transaction through the mempool, then the confirmed index.
-    ///
-    /// A disabled or unhealthy confirmed index is unavailable, not an answer
-    /// that the transaction does not exist. A complete negative lookup is
-    /// `NodeError::NotFound`.
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
         let pooled = self
             .state
@@ -255,13 +178,11 @@ impl Node {
         }
     }
 
-    /// Returns aggregate mempool information from one read snapshot.
     #[must_use]
     pub fn mempool_info(&self) -> MempoolStats {
         self.state.mempool_reader().read().stats()
     }
 
-    /// Returns a history-based fee estimate, or `None` with insufficient history.
     #[must_use]
     pub fn fee_estimate(&self, confirmation_target_blocks: u32) -> Option<FeeRate> {
         self.state
@@ -270,12 +191,6 @@ impl Node {
             .estimate_fee_rate(confirmation_target_blocks)
     }
 
-    /// Admits a transaction through the mempool gateway's local submission,
-    /// the operation RPC `sendrawtransaction` and Esplora broadcasts also call.
-    ///
-    /// The submission carries `sendrawtransaction`'s default fee-rate cap.
-    /// Policy checks and ordered publication belong to the gateway; embedding
-    /// does not insert directly into the pool or own another gateway.
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
         let chainstate = self.state.chainstate();
         let chain = ChainAdmissionView::new(
@@ -296,9 +211,6 @@ impl Node {
             .map_err(|error| NodeError::Broadcast(error.to_string()))
     }
 
-    /// Atomically admits a child-with-independent-parents package through the
-    /// shared gateway. Order is arbitrary; no package replacement or eviction.
-    /// Known members are idempotent and do not contribute to the fee aggregate.
     pub async fn broadcast_package(&self, txs: Vec<Tx>) -> Result<MutationResult, NodeError> {
         let chainstate = self.state.chainstate();
         let chain = ChainAdmissionView::new(
@@ -319,7 +231,6 @@ impl Node {
             .map_err(|error| NodeError::Broadcast(error.to_string()))
     }
 
-    /// Stops owned services, then publishes the clean-shutdown checkpoint.
     pub async fn shutdown(self) -> Result<(), NodeError> {
         self.shutdown_blocking()
     }
@@ -332,9 +243,6 @@ impl Node {
             .teardown(Some(&mut self.state), TeardownMode::CleanShutdown)
             .map_err(|error| NodeError::Shutdown(error.to_string()));
         self.services = None;
-        // Dropping self releases state and the RPC context's storage clones
-        // before this consuming operation returns, including on error. Clones
-        // a detached consumer still holds keep the data-dir lock; see `Node`.
         result
     }
 }
@@ -370,7 +278,6 @@ mod tests {
     use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
     use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
-    /// Polls synchronous node futures without adding an executor dependency.
     fn block_on<F: Future>(future: F) -> F::Output {
         use std::task::{Context, Poll, Waker};
 
@@ -432,7 +339,6 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[expect(
         clippy::too_many_lines,
         reason = "one live-node scenario proves single and package submissions share ordered gateway publication, including refusal and the direct-insertion control"
@@ -450,8 +356,6 @@ mod tests {
         ))
         .expect("embedded node starts");
 
-        // `P2WSH(OP_TRUE)`, spendable without fixture signature material;
-        // the spends below are this file's only consumers.
         let mut op_true_p2wsh = vec![0x00, 0x20];
         op_true_p2wsh.extend_from_slice(&[
             0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
@@ -516,7 +420,6 @@ mod tests {
         drop(events);
         publisher.sequence_events.lock().clear();
 
-        // Control: direct insertion cannot satisfy the gateway-publication test.
         let direct_tx = spending(direct_prevout);
         let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
         let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, unix_time_secs(), 1, 0);
@@ -530,8 +433,6 @@ mod tests {
             "a direct pool insertion must not satisfy the gateway publication assertion"
         );
 
-        // Refusal: an unknown prevout is refused with the gateway's policy
-        // reason verbatim, and nothing is inserted or published.
         let orphan = spending(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5C; 32])), 0));
         let orphan_txid = orphan.txid();
         let refusal = block_on(node.broadcast(orphan)).expect_err("an unknown prevout is refused");
@@ -550,8 +451,6 @@ mod tests {
             "a refused broadcast publishes nothing"
         );
 
-        // Native CPFP uses the same observer/admission owner, with parents
-        // published before the child even when the input order is reversed.
         let mut parent = spending(package_prevout);
         parent.outputs[0].value = Amount::from_sat(100_000);
         let parent_id = parent.txid();

@@ -133,14 +133,6 @@ fn replay_extends_checkpoint_state_and_returns_valid_tip() -> TestResult {
 #[test]
 fn replay_preserves_an_unknown_checkpoint_count() -> TestResult {
     let (mut tree, utxo, coin_stats, genesis_tip, _) = base_state()?;
-    // A non-genesis checkpoint that never learned its total: zero here
-    // means unknown, not empty. (A height-0 base with zero is
-    // genesis-empty and still counts its records, matching the journal
-    // writer.) The checkpoint loader accepts the unknown, so replay must
-    // carry it instead of rejecting the suffix back to checkpoint
-    // recovery; adding the suffix would fabricate a chain total, so
-    // unknown stays unknown while the tip, UTXO set, and coin stats
-    // still advance.
     let base_header = header(BlockHash(genesis_tip.hash), 2, 2);
     let base_hash = base_header.compute_hash().0;
     let base_id = tree.insert_node(
@@ -265,10 +257,6 @@ fn replay_counts_from_an_empty_genesis_and_rejects_overflow() -> TestResult {
     Ok(())
 }
 
-/// A checkpoint tree can already hold a replayed header: on the best-header
-/// ancestry above the applied tip, or on a retained side branch that a later
-/// reorg activated. Replay reuses that node rather than rejecting the journal,
-/// and still refuses one already marked invalid.
 #[test]
 fn replay_reuses_a_header_the_checkpoint_tree_already_holds() -> TestResult {
     let (mut tree, utxo, coin_stats, base_tip, _) = base_state()?;

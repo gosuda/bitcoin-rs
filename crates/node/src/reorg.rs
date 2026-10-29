@@ -1,5 +1,3 @@
-//! Node-owned coordination around authoritative chainstate reorgs.
-
 use std::sync::Arc;
 
 use crate::chain_effects::ChainFollowers;
@@ -10,14 +8,6 @@ use bitcoin_rs_chainstate::{ApplyError, Chainstate, ConnectOutcome, DisconnectOu
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
 use hashbrown::HashSet;
 
-/// Core's `MAX_DISCONNECTED_TX_POOL_BYTES`: the serialized-byte ceiling on
-/// the reorg re-admission candidate set.
-///
-/// Once the cap is hit the observer stops collecting for the rest of the
-/// reorg. Blocks stream oldest-first so parents arrive before their
-/// descendants; the candidates dropped are therefore the newest
-/// descendants, which later fail admission as missing inputs — that is the
-/// defined overload outcome, never a partially admitted family root.
 const MAX_DISCONNECTED_TX_BYTES: usize = 20_000_000;
 
 struct NodeReorgObserver<'a> {
@@ -77,30 +67,9 @@ impl ReorgObserver for NodeReorgObserver<'_> {
     }
 }
 
-/// Trims the pool back to its configured ceiling after a reorg settled.
-///
-/// PRE: the disconnect walk has committed and the resident sweep has run, so
-/// the pool holds exactly the settled resident set.
-/// POST: entries older than `MEMPOOL_EXPIRY_SECS` expire first, committing
-/// and publishing through the gateway under the reorg fence even when the
-/// pool is already inside its ceiling; then the pool is at or below its
-/// `max_total_bytes` ceiling, or the trim failed and settlement must be
-/// treated as incomplete. A pool already inside the ceiling skips only the
-/// size trim: no size-limit write lock, no empty mutation batch.
-/// INVARIANT: this is the only size trim one reorg performs. Each individual
-/// re-admission defers its own, so the walk cannot shed a transaction whose
-/// parent it has not committed yet. Core skips the size limit on the same
-/// re-acceptance path — `bypassLimits = true` on `AcceptToMemoryPool` — and
-/// bounds the pool once the new branch is active. Running the trim after the
-/// resident sweep keeps a transaction confirmed by that branch out of the
-/// eviction candidate set.
 fn trim_after_reorg(
     gateway: &bitcoin_rs_mempool::MempoolGateway,
 ) -> Result<(), bitcoin_rs_mempool::MempoolError> {
-    // Expire entries older than MEMPOOL_EXPIRY_SECS before the size check so
-    // a settled branch never retains stale transactions; expiry commits and
-    // publishes through the gateway like any other mutation and runs under
-    // the same reorg fence as the trim below.
     let _ = gateway.expire(
         bitcoin_rs_mempool::AdmissionOrigin::Reorg,
         bitcoin_rs_primitives::unix_time_secs(),
@@ -114,10 +83,6 @@ fn trim_after_reorg(
         .map(|_| ())
 }
 
-/// Settles one reorg outcome while the mempool fence is held. A settle that
-/// disconnected nothing leaves the pool untouched: `switch_to_branch` is
-/// polled while a heavier branch is still downloading, and the resident
-/// sweep costs a chain snapshot per resident entry.
 fn settle_node_reorg(
     handles: &Chainstate,
     observer: &mut NodeReorgObserver<'_>,
@@ -157,10 +122,6 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            // A failed sweep or trim marks settlement incomplete — but the
-            // fence must still close below: leaving the guard's odd
-            // generation live would refuse every stable admission until
-            // restart recovery.
             if gateway.remove_for_reorg(change, &chain).is_err()
                 || (reconsidered && trim_after_reorg(gateway).is_err())
             {
@@ -204,12 +165,6 @@ fn settle_checkpoint_debt<T>(
     }
 }
 
-/// Invalidates one block through chainstate while node-owned followers remain fenced.
-///
-/// On success returns chainstate's [`InvalidationOutcome`]: the hashes marked
-/// `Invalid`, which the caller purges from staged and download state after the
-/// transition has settled, and any valid tip the invalidation displaced onto
-/// another branch.
 pub fn invalidate_block(
     handles: &Chainstate,
     followers: &ChainFollowers,
@@ -229,7 +184,6 @@ pub fn invalidate_block(
     settle_checkpoint_debt(handles, outcome)
 }
 
-/// Switches the applied branch through chainstate while node-owned followers remain fenced.
 pub fn switch_to_branch<F, G>(
     handles: &Chainstate,
     followers: &ChainFollowers,

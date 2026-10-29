@@ -82,9 +82,6 @@ fn inbound_blocks_channel_is_bounded_against_flood() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     let tx = state.inbound_blocks_sender();
     let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    // No `tick` drains the channel in this unit test, so it fills to the
-    // bound; the block past the limit must be rejected rather than queued
-    // (the OOM-flood guard), proving backpressure engages at the producer.
     for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
         tx.try_send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
             .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));
@@ -180,10 +177,6 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result
 
 #[test]
 fn overlay_identity_dir_is_rooted_in_data_dir() -> anyhow::Result<()> {
-    // The P2P overlay keeps its onion/I2P keys under the node data dir, so an
-    // upgraded node reuses its existing identities and two data dirs never
-    // share one. The configured value stays a relative leaf; only the
-    // service config handed to P2P is rooted.
     let dir = tempfile::tempdir()?;
 
     let mut config_a = crate::NodeConfig::default_for_network(crate::Network::Regtest);

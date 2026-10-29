@@ -1,5 +1,4 @@
 //! BIP324 packet sealing and opening.
-//!
 //! A packet is the encrypted 3-byte contents length, then one header byte and
 //! the contents sealed together under the packet cipher, then the tag.
 
@@ -17,21 +16,16 @@ const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 /// Bytes a packet adds to its contents: length field, header byte and tag.
 const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
-/// A packet could not be sealed or opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum PacketError {
-    /// The contents do not fit the 3-byte length field.
     #[error("BIP324 packet contents of {0} bytes exceed the length field")]
     ContentsTooLarge(usize),
-    /// The sealed body is shorter than a header byte plus a tag.
     #[error("BIP324 sealed body of {0} bytes is shorter than its header and tag")]
     Truncated(usize),
-    /// The sealed body failed authentication.
     #[error(transparent)]
     AuthFailed(#[from] AuthFailed),
 }
 
-/// One direction's sending ciphers.
 #[derive(Debug)]
 pub(crate) struct SendCipher {
     length: FsChaCha20,
@@ -75,16 +69,12 @@ impl SendCipher {
     }
 }
 
-/// An authenticated packet body.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Opened<'a> {
-    /// The sender marked the packet a decoy.
     pub(crate) ignore: bool,
-    /// The decrypted contents.
     pub(crate) contents: &'a [u8],
 }
 
-/// One direction's receiving ciphers.
 #[derive(Debug)]
 pub(crate) struct RecvCipher {
     length: FsChaCha20,
@@ -107,8 +97,6 @@ impl RecvCipher {
         usize::from(field[0]) | (usize::from(field[1]) << 8) | (usize::from(field[2]) << 16)
     }
 
-    /// Authenticates and decrypts a sealed body (header, contents and tag) in
-    /// place.
     pub(crate) fn open<'a>(
         &mut self,
         aad: &[u8],

@@ -1,4 +1,3 @@
-//! BIP341 wire signature and native witness-program dispatch rules.
 #![expect(clippy::expect_used)]
 
 #[path = "support/taproot_spends.rs"]
@@ -132,7 +131,6 @@ fn inactive_taproot_and_wrapped_v1_keep_their_witness_rules() {
         Ok(true),
         "recognized native Taproot is inactive, not an unknown witness program"
     );
-    // No witness rules are active; neither annex nor Schnorr encoding is consulted.
     tx.input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x00]);
     assert_eq!(prepared(&tx, &prevout, VerifyFlags::NONE), Ok(true));
     assert_eq!(
@@ -202,8 +200,6 @@ fn op_success_overrides_stack_limits_and_final_truth_checks() {
     );
 }
 
-/// First accepted key-path spend: a real BIP341 signature over the fixture
-/// funding output, usable as-is for cache warm/cold comparisons.
 fn first_accepted_key_spend() -> (Tx, TxOut) {
     let prevout = output();
     let case = fixture::cases(outpoint(), &prevout)
@@ -284,9 +280,6 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
         Ok(true),
         "warmup"
     );
-    // The output value is committed by the BIP341 outputs digest
-    // (sha_outputs), so paying one more satoshi to the same output retargets
-    // the message without touching encodings.
     let mut retargeted = tx;
     let paid = retargeted.outputs[0].value.to_sat();
     retargeted.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(paid + 1);
@@ -302,10 +295,6 @@ fn signature_cache_warmed_still_rejects_mutated_sighash_input() {
     );
 }
 
-/// Key-path Default spend under a genuinely different key (seed 77; the shared
-/// fixture tree uses seed 37), signed by the rust-bitcoin oracle exactly as the
-/// bench and `verifier_boundaries.rs` do. Returns the oracle spend and its own
-/// funding prevout so the test proves both sources valid before transplant.
 fn accepted_spend_under_different_key() -> (bitcoin::Transaction, bitcoin::TxOut) {
     use bitcoin::secp256k1::{Keypair, Message as OracleMessage, Secp256k1, SecretKey};
     use bitcoin::sighash::{Prevouts, SighashCache as OracleCache, TapSighashType};
@@ -357,8 +346,6 @@ fn signature_cache_warmed_still_rejects_wrong_key_signature() {
         Ok(true),
         "warmup"
     );
-    // A real signature under a genuinely different x-only key: valid under its
-    // own funding prevout, but bound to another key and message.
     let (other_oracle, other_oracle_prevout) = accepted_spend_under_different_key();
     assert_ne!(
         other_oracle_prevout.script_pubkey.to_bytes(),

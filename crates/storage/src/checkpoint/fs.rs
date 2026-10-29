@@ -1,4 +1,3 @@
-//! Capability-scoped checkpoint directory and file operations.
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -8,27 +7,15 @@ use cap_fs_ext::{
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
-/// Marker filename containing the current datadir schema epoch.
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
-/// The node's lifetime data-directory lock file (`crates/node/src/state/
-/// data_dir_lock.rs`). It is ordinary schema-epoch-0 furniture: a fresh
-/// datadir may carry it before any marker exists.
 pub const DATA_DIR_LOCK_FILE: &str = ".lock";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
-// This serialized marker is the single source of truth for the current
-// persistent format epoch. Increment it for a schema-breaking storage change;
-// no converter or compatibility reader accompanies the bump.
 
-/// Opens a directory with ambient authority for initial datadir access.
 pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
     Dir::open_ambient_dir(path, ambient_authority())
 }
 
-/// Opens the current datadir epoch.
-///
-/// A non-empty directory without the marker is implicit epoch 0, rejected
-/// without modification. Older epochs require an explicit fresh resync.
 pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     match read_file(data, CURRENT_SCHEMA_FILE, 16) {
         Ok(bytes) => validate_current_schema(&bytes),
@@ -39,10 +26,6 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
                 let entry = entry?;
                 match entry.file_name().to_str() {
                     Some(name) if name == CURRENT_SCHEMA_TEMP_FILE => stale_temp = true,
-                    // A datadir that lost its marker to a crash may still
-                    // carry the node's lifetime lock; a regular lock file is
-                    // not evidence of an incompatible epoch-0 directory. Any
-                    // other file type under that name is.
                     Some(name) if name == DATA_DIR_LOCK_FILE => {
                         if !entry.file_type()?.is_file() {
                             has_other_entry = true;
@@ -182,8 +165,6 @@ impl CheckpointRoot {
     }
 }
 
-/// Whether [`rename_noreplace`] is available on this target. Callers that do
-/// expensive work before publishing consult it first so they can refuse early.
 pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -193,11 +174,6 @@ pub const HAS_ATOMIC_NOREPLACE_RENAME: bool = cfg!(any(
 
 /// Renames `from` to `to` inside `dir` in one filesystem step that fails with
 /// [`io::ErrorKind::AlreadyExists`] instead of replacing an existing `to`.
-///
-/// A prior existence check cannot provide this: another process can create
-/// `to` between the check and the rename and lose its file. Both names stay
-/// confined to `dir`: absolute paths, parent components, and separators are
-/// refused before the rename.
 #[cfg(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -211,7 +187,6 @@ pub fn rename_noreplace(dir: &Dir, from: &str, to: &str) -> io::Result<()> {
         .map_err(Into::into)
 }
 
-/// Platforms without an atomic no-replace rename refuse rather than replace.
 #[cfg(not(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -225,7 +200,6 @@ pub fn rename_noreplace(_dir: &Dir, _from: &str, _to: &str) -> io::Result<()> {
     ))
 }
 
-/// Creates a new regular file without following symlinks.
 pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -235,13 +209,6 @@ pub fn create_file(dir: &Dir, name: &str) -> io::Result<File> {
     dir.open_with(name, &options)
 }
 
-/// Opens a checkpoint entry for reading without blocking on FIFOs.
-///
-/// A plain read-only open waits for a writer when `name` resolves to a FIFO,
-/// so a substituted entry could stall the caller before any byte is read.
-/// Open nonblocking without following symlinks, then require the opened
-/// inode to be a regular file. `O_NONBLOCK` is a no-op for regular files,
-/// so `NotFound` and other I/O error kinds propagate unchanged.
 pub fn open_file(dir: &Dir, name: &str) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No).nonblock(true);
@@ -255,7 +222,6 @@ pub fn open_file(dir: &Dir, name: &str) -> io::Result<File> {
     Ok(file)
 }
 
-/// Reads a regular file and rejects content larger than `limit` bytes.
 pub fn read_file(dir: &Dir, name: &str, limit: u64) -> io::Result<Vec<u8>> {
     let mut file = open_file(dir, name)?;
     let length = file.metadata()?.len();
@@ -286,10 +252,7 @@ pub fn read_file(dir: &Dir, name: &str, limit: u64) -> io::Result<Vec<u8>> {
     target_os = "android",
     target_os = "redox"
 ))]
-/// Flushes a directory entry to durable storage where the platform supports it.
 pub fn sync_dir(dir: &Dir) -> io::Result<()> {
-    // cap-std directory capabilities use O_PATH on Linux; reopen "." read-only
-    // so fsync has an I/O-capable descriptor without leaving this capability.
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -299,12 +262,6 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-/// Flushes a directory entry to durable storage.
-///
-/// Windows flushes a directory handle only when it carries `GENERIC_WRITE`
-/// (`FlushFileBuffers` fails with `ERROR_ACCESS_DENIED` on a read-only
-/// handle), so the reopen requests write access. `maybe_dir` makes the
-/// open add `FILE_FLAG_BACKUP_SEMANTICS`, which directories require.
 pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     let mut options = OpenOptions::new();
     options
@@ -322,24 +279,11 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     target_os = "redox",
     windows
 )))]
-/// Returns success when the platform cannot fsync directory handles.
 pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
     Ok(())
 }
 
 /// Rejects any rename endpoint that could resolve outside the checkpoint root.
-///
-/// Raw `/` is rejected before `components()` because `Path` normalizes a
-/// trailing slash away (`"link/"` yields one `Normal` component) while
-/// `renameat` still treats it as a directory target and may follow a symlink
-/// planted inside the root. The remaining `components()` check then accepts
-/// exactly one `Normal` component, which rejects `.`, `..`, absolute roots,
-/// prefixes, and any other non-entry structure. Backslash stays a valid
-/// filename character on the Unix targets this method compiles for, so only
-/// `/` (and NUL/empty) is rejected at the byte layer. Both endpoints are
-/// validated so neither the source nor the destination can traverse, and the
-/// single-shot `renameat_with(NOREPLACE)` that follows keeps atomic
-/// publication without overwriting operator data.
 fn check_confined_endpoint(name: &str) -> io::Result<()> {
     fn invalid(name: &str, reason: &str) -> io::Error {
         io::Error::new(
@@ -380,7 +324,6 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             dir.remove_file(file_name)?;
         }
     }
-    // Windows refuses RemoveDirectory while a handle on the target is open.
     drop(dir);
     root.remove_dir(name)
 }

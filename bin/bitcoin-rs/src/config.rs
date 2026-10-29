@@ -1,9 +1,3 @@
-//! Process-input configuration for the `bitcoin-rs` binary.
-//!
-//! Owns the command-line, TOML, environment, and Bitcoin Core `bitcoin.conf`
-//! adapters together with their precedence. `node` only receives the resolved
-//! configuration and never opens these process-input sources.
-
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,17 +16,6 @@ use bitcoin_rs_node::{
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
 
-/// Expands the node option table into the command-line surface: one field per
-/// table row, carrying the row's clap attributes, plus the conversion of the
-/// parsed arguments into one configuration layer.
-///
-/// PRE: a row's `cli` column holds its complete clap attributes; a row the
-/// command line does not expose carries `#[arg(skip)]`.
-/// POST: `CliArgs` exposes exactly the flags the table names, and
-/// `into_user_config` writes each parsed value into its row's slot.
-/// INVARIANT: flag names, aliases, value parsers, and error strings come from
-/// the table, so the command line cannot drift from the other process-input
-/// surfaces. Meta flags that never reach `UserConfig` stay hand-written here.
 macro_rules! emit_cli {
     (
         fields {
@@ -72,23 +55,12 @@ macro_rules! emit_cli {
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
             /// Single regular Core-framed archive file for foreground offline import.
-            ///
-            /// Meta flag: never reaches `UserConfig`. All three import flags
-            /// must be present together to run the offline import; otherwise
-            /// the daemon runs. The file must be the custody archive pin
-            /// whose bytes equal the indexed logical stream by parity.
             #[arg(long)]
             pub(crate) corpus: Option<PathBuf>,
             /// Archive manifest binding the corpus identity and stop tip.
-            ///
-            /// Meta flag: never reaches `UserConfig`. Required with
-            /// `--corpus` and `--state` for the offline import.
             #[arg(long)]
             pub(crate) manifest: Option<PathBuf>,
             /// Output certified-state JSON for the offline import.
-            ///
-            /// Meta flag: never reaches `UserConfig`. Required with
-            /// `--corpus` and `--manifest` for the offline import.
             #[arg(long)]
             pub(crate) state: Option<PathBuf>,
             $(
@@ -107,7 +79,6 @@ macro_rules! emit_cli {
         }
 
         impl CliArgs {
-            /// Maps the parsed command line into one configuration layer.
             fn into_user_config(self) -> UserConfig {
                 UserConfig {
                     $( $fid: self.$fid, )*
@@ -122,8 +93,6 @@ macro_rules! emit_cli {
 
 bitcoin_rs_node::option_rows!(emit_cli);
 
-/// Resolves process inputs in ascending precedence: TOML, `bitcoin.conf`,
-/// environment, then command line.
 pub(crate) fn resolve(
     mut cli: CliArgs,
     vars: impl Iterator<Item = (OsString, OsString)>,
@@ -145,10 +114,6 @@ pub(crate) fn resolve(
     bitcoin_rs_node::resolve(&layer_refs)
 }
 
-/// Network used to select `[regtest]` / `[main]` sections in bitcoin.conf.
-///
-/// Resolved from TOML, environment, and CLI only. bitcoin.conf never chooses
-/// the network that selects its own sections.
 fn network_from_layers<'a>(layers: impl IntoIterator<Item = &'a UserConfig>) -> Network {
     let mut network = Network::Mainnet;
     for layer in layers {
@@ -176,8 +141,6 @@ fn user_config_from_toml(path: &Path) -> Result<UserConfig> {
     toml::from_str(&text).with_context(|| format!("failed to parse TOML config {}", path.display()))
 }
 
-/// Parses `path` into the `[global, selected]` layer pair for `network`,
-/// lowest precedence first.
 fn user_config_from_bitcoin_conf(path: &Path, network: Network) -> Result<[UserConfig; 2]> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read bitcoin.conf {}", path.display()))?;
@@ -225,14 +188,6 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2]> {
     }
 }
 
-/// Expands the option table into the `bitcoin.conf` key map: one arm per row
-/// that names a Core key.
-///
-/// PRE: a row's `conf` column holds its Core key name.
-/// POST: `apply_core_key` writes a recognized key into its row's slot.
-/// INVARIANT: the file's key names and target slots come from the table, so a
-/// key cannot drift from the option it sets. A Core key whose meaning has no
-/// row stays in `apply_core_exception`.
 macro_rules! emit_core_conf {
     (
         fields {
@@ -285,17 +240,6 @@ macro_rules! emit_core_conf {
 
 bitcoin_rs_node::option_rows!(emit_core_conf);
 
-/// Applies one `bitcoin.conf` value to an option-table slot.
-///
-/// PRE: `value` is the text after the key's equals sign.
-/// POST: the slot holds the value, or holds nothing where a numeric or
-/// boolean key carries no parseable value.
-/// INVARIANT: each impl matches Bitcoin Core's reading of its key type: a
-/// string or path is taken verbatim, a number is taken only when it parses,
-/// and a boolean takes Core's truth words and false words. Overlay routing
-/// keys (`proxy=`, `onion=`, `torcontrol` aside, `onlynet=`) fail instead of
-/// degrading silently: a mis-typed proxy or network restriction must never
-/// become direct, unrestricted dialing.
 trait CoreValue {
     fn apply(key: &str, value: &str, slot: &mut Self) -> Result<(), String>;
 }
@@ -391,9 +335,6 @@ impl CoreValue for Option<Vec<bitcoin_rs_node::options::PeerNetwork>> {
         Ok(())
     }
 }
-/// Sets the one Core key that no table row can express: `listen` is a boolean
-/// switch over the bind list, not an address, and only its false value is an
-/// override. Returns whether it consumed `key`.
 fn apply_core_exception(layer: &mut UserConfig, key: &str, value: &str) -> bool {
     if key != "listen" {
         return false;
@@ -456,7 +397,6 @@ mod tests {
         assert_eq!(config.storage.prune_target_mb, 900);
     }
 
-    /// Every Core key the option table names reaches the slot the table names.
     #[test]
     fn every_table_core_key_reaches_its_slot() {
         let layers = parse_for_network(
@@ -487,7 +427,6 @@ listen=0
         assert_eq!(global.p2p.listen, Some(Vec::new()));
     }
 
-    /// A number the file states in a form Core cannot read sets nothing.
     #[test]
     fn an_unparseable_core_number_sets_nothing() {
         let layers = parse_for_network("dbcache=large\nrest=maybe\n", Network::Regtest)
@@ -750,7 +689,6 @@ mod feature_option_tests {
         .indexes;
         assert_eq!(export.bundle_export.as_deref(), Some(Path::new("/srv/out")));
 
-        // A command-line request never overrides a conflicting environment one.
         let conflict = refusal(
             &["--txindex=true", "--index-bundle-import", "/srv/in"],
             &[("BITCOIN_RS_INDEX_BUNDLE_EXPORT", "/srv/out")],
@@ -775,8 +713,6 @@ mod feature_option_tests {
         }
     }
 
-    /// A one-shot restore or export is operator opt-in on the options the
-    /// table names; the Core-compatible file has no spelling for it.
     #[test]
     fn bitcoin_conf_cannot_request_a_bundle() {
         let layers = parse_for_network(

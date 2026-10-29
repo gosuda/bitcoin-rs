@@ -1,13 +1,4 @@
 //! Recovery-contract tests for the txindex worker (`docs/contracts/recovery.md`).
-//!
-//! Each test drives `Worker::reconcile_once` against an authoritative
-//! `BlockTree` plus applied tip and observes only the contract surface: the
-//! durable watermarks, the published `ReconcilePhase`, and the rollback
-//! evidence reported through the `IndexAheadSink` seam.
-//!
-//! The forward group-scheduling and undo-anchor tests (`IDX-06`, `IDX-07` in
-//! `docs/contracts/indexing.md`) share this harness; one drives the real
-//! `Worker::run` loop.
 
 use crate::reconcile::{ReconcileLeg, ReconcilePhase};
 use arc_swap::ArcSwapOption;
@@ -42,13 +33,8 @@ type BodyMap = HashMap<(u32, [u8; 32]), Vec<u8>>;
 
 struct MapBodyStore {
     bodies: Mutex<BodyMap>,
-    /// Undo records as the chainstate persists them; empty until a test
-    /// calls [`ForkFixture::persist_undo`].
     undo: Mutex<BodyMap>,
-    /// Undo reads that fail with a storage error instead of answering.
     undo_read_failures: Mutex<HashSet<(u32, [u8; 32])>>,
-    /// Shutdown is requested when a body read finds nothing, so a test can
-    /// stop the worker at the exact moment a body proves absent.
     stop_on_absent_body: Mutex<Option<Arc<DerivedIndexRuntime>>>,
 }
 
@@ -92,8 +78,6 @@ impl BlockBodyStore for MapBodyStore {
     }
 }
 
-/// Every output of the blocks connected so far, as the UTXO set the undo
-/// records are built against.
 #[derive(Default)]
 struct BranchCoins(Vec<bitcoin_rs_utxo::UtxoCoin>);
 
@@ -182,8 +166,6 @@ fn mine_block(prev_hash: Hash256, height: u32, extra: i64) -> (Block, Hash256) {
     (block, hash)
 }
 
-/// Genesis with two rival branches: `A` (`extra = 0`) and `B` (`extra = 1`),
-/// each `len` blocks long. Every body is present in the store.
 struct ForkFixture {
     tree: Arc<RwLock<BlockTree>>,
     bodies: Arc<MapBodyStore>,
@@ -230,7 +212,6 @@ impl ForkFixture {
         }
     }
 
-    /// Body-store key of the branch-`A` block at `height`; height 0 is genesis.
     fn a_key(&self, height: u32) -> (u32, [u8; 32]) {
         if height == 0 {
             return (0, self.genesis.to_le_bytes());
@@ -239,9 +220,6 @@ impl ForkFixture {
         (height, self.a[index].1.to_le_bytes())
     }
 
-    /// Removes the bodies of heights `0..=through` on branch `A`, as a node
-    /// that started from a snapshot at `through` lacks them. Returns them so
-    /// a test can restore the history.
     fn take_bodies(&self, through: u32) -> BodyMap {
         let mut bodies = self.bodies.bodies.lock();
         (0..=through)
@@ -256,9 +234,6 @@ impl ForkFixture {
         self.bodies.bodies.lock().extend(lost);
     }
 
-    /// Persists the undo record the chainstate would hold for every non-genesis
-    /// branch-`A` block, built with the UTXO contract from the outputs of the
-    /// blocks before it.
     fn persist_undo(&self) {
         let store = InMemoryUndoStore::default();
         let mut coins = BranchCoins::default();
@@ -319,7 +294,6 @@ struct Harness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     evidence: Arc<RecordedIndexAhead>,
-    /// The pruning authority this worker reads through.
     retention: Arc<RetentionRegistry>,
     worker: Worker,
 }
@@ -343,7 +317,6 @@ fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
         assert!(!harness.runtime.should_stop());
         assert!(harness.watermarks().compact_filters.is_none());
         assert!(harness.writer.consumer_cursor().expect("cursor").is_none());
-        // A later reorg still rolls back and catches up both body-only indexes.
         harness.set_tip(&fixture.tip(fixture.b[1]));
         harness.settle(&mut None);
         harness.assert_at(&fixture.tip(fixture.b[1]));
@@ -410,8 +383,6 @@ impl Harness {
         self.applied_tip.store(Some(Arc::clone(tip)));
     }
 
-    /// Runs passes until the worker reports `CaughtUp`, bounded so a
-    /// non-converging worker fails the test instead of hanging it.
     fn settle(&self, pending: &mut Option<PendingForward>) {
         for _ in 0..64 {
             match self.worker.reconcile_once(pending).expect("reconcile pass") {
@@ -441,9 +412,6 @@ impl Harness {
         assert_eq!(self.runtime.phase(), ReconcilePhase::FORWARD);
     }
 
-    /// The recorded `report_index_ahead` call, if any:
-    /// `(capability, index_height, tip_height, tip_hash_be, index_hash_be,
-    /// depth)`.
     fn index_ahead_call(&self) -> Option<(String, u32, u32, String, String, u32)> {
         self.evidence
             .calls
@@ -470,8 +438,6 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
         IndexCapabilities::HISTORICAL.with_compact_filters(true),
     );
     let a2 = f.tip(f.a[1]);
-    // Publish valid filter rows from the fixture's known spent script. The
-    // history store has bodies but no undo when the worker later rolls back.
     let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
     let mut batch = PreparedBatch::new(DEFAULT_BATCH_LIMITS);
     for identity in identities {
@@ -505,9 +471,6 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     assert!(!h.runtime.should_stop());
 }
 
-/// `RCV-04`: a watermark above the applied tip is an operator-visible
-/// rollback event — one warning and one durable marker per pass, naming the
-/// exact block identities on both sides — and the rows are rewound.
 #[test]
 fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     let f = ForkFixture::new(3);
@@ -519,7 +482,6 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Chainstate restored to an older checkpoint on the same branch.
     let a1 = f.tip(f.a[0]);
     h.set_tip(&a1);
     h.settle(&mut pending);
@@ -541,9 +503,6 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     }
 }
 
-/// `RCV-05`: a rollback deeper than the cutover resets the selected
-/// capabilities and rebuilds from genesis; the rebuild phase stays published
-/// until the reset capabilities reach the applied tip again.
 #[test]
 fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     let f = ForkFixture::new(3);
@@ -555,7 +514,6 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Depth 3 to the common ancestor (genesis) exceeds cutover 1.
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     let first = h.worker.reconcile_once(&mut pending).expect("reset pass");
@@ -575,16 +533,8 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 }
 
-/// The pruning authority, not the worker, decides whether absent history is
-/// permanent. A height the frontier names as deleted routes to a rebuild
-/// anchored at the first surviving row; a height the authority granted and
-/// the store cannot yet show is a wait.
 #[test]
 fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
-    // Pruned below the frontier: the owner says gone. The rollback hits the
-    // frontier, the capabilities reset, and the rebuild anchors at the first
-    // surviving height — then the forward leg actually converges on the new
-    // tip instead of stalling on rows that never return.
     let f = ForkFixture::new(3);
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
@@ -593,12 +543,8 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    // Commit the frontier at 2: heights below it are permanently gone.
     h.retention.reserve(2).commit(2);
 
-    // Move the tip to the rival branch. The rollback unwinds to height 1,
-    // where the frontier refuses the body read, so the owner routes the
-    // index to a rebuild anchored at height 1 on the B branch.
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
@@ -619,15 +565,10 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     );
     assert_eq!(watermarks.script_history, anchored);
 
-    // The leg converges: the rebuilt index covers the retained heights and
-    // reports the B tip, proving the anchor let it restart above the
-    // frontier rather than resetting forever.
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 
-    // Granted but absent: the owner says the history is retained, so the
-    // worker waits and keeps the rows it already derived.
     let f = ForkFixture::new(3);
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
@@ -652,7 +593,6 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     );
 }
 
-/// The watermark a capability holds once it has reached `tip`.
 fn at(tip: &TipSnapshot) -> IndexWatermark {
     IndexWatermark {
         height: tip.height,
@@ -660,8 +600,6 @@ fn at(tip: &TipSnapshot) -> IndexWatermark {
     }
 }
 
-/// Polls `ready` on a monotonic deadline; the wait is scheduling mechanics,
-/// not an assertion about duration.
 fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !ready() {
@@ -673,8 +611,6 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
-/// Requests worker shutdown when dropped, so a failing test cancels the run
-/// loop it owns instead of leaving it polling.
 struct StopOnDrop(Arc<DerivedIndexRuntime>);
 
 impl Drop for StopOnDrop {
@@ -683,10 +619,6 @@ impl Drop for StopOnDrop {
     }
 }
 
-/// Four `A` blocks on a node whose history prefix is gone: bodies `0..=2` are
-/// absent, `ScriptLive` is seeded at height 2, and the applied tip is height
-/// 4. The history families wait on their absent first body while `ScriptLive`
-/// has everything its own range needs. Returns the lost prefix.
 fn held_prefix() -> (ForkFixture, SeedCellHarness, BodyMap) {
     let f = ForkFixture::new(4);
     f.persist_undo();
@@ -706,9 +638,6 @@ fn held_prefix() -> (ForkFixture, SeedCellHarness, BodyMap) {
     (f, h, lost)
 }
 
-/// An absent body holds back only the capability group that needs it: the
-/// group ahead of it follows the tip, the worker waits instead of reporting
-/// caught-up or spinning, and the prefix arriving needs no reset.
 #[test]
 fn absent_prefix_body_holds_back_only_its_own_group() {
     let (f, h, lost) = held_prefix();
@@ -738,8 +667,6 @@ fn absent_prefix_body_holds_back_only_its_own_group() {
     assert_eq!(h.watermarks().script_live, Some(at(&a4)));
 }
 
-/// A stop requested while the absent body is read ends the pass: the ready
-/// group is not run after it.
 #[test]
 fn shutdown_after_an_absent_body_does_not_run_a_higher_group() {
     let (f, h, _lost) = held_prefix();
@@ -757,16 +684,11 @@ fn shutdown_after_an_absent_body_does_not_run_a_higher_group() {
     );
 }
 
-/// A deferred history grant is a wait, not an absent body: the group whose
-/// heights the owner has not reserved does not run around it.
 #[test]
 fn deferred_history_grant_does_not_run_a_higher_group() {
     let (f, h, _lost) = held_prefix();
     let mut pending = None;
 
-    // The reservation covers heights below 1, which defers the history
-    // group's grant at height 0. `ScriptLive` asks from height 3 and would be
-    // granted.
     let reservation = h.retention.reserve(1);
     assert!(matches!(
         h.worker.reconcile_once(&mut pending),
@@ -779,16 +701,11 @@ fn deferred_history_grant_does_not_run_a_higher_group() {
     assert_eq!(h.watermarks().script_live, Some(at(&f.tip(f.a[3]))));
 }
 
-/// One body withheld from the store, with the key needed to restore it.
 struct AbsentBody {
     key: (u32, [u8; 32]),
     body: Vec<u8>,
 }
 
-/// 300 `A` blocks: `ScriptLive` is seeded at height 290, the applied tip is
-/// height 300, and the body at height 280 is absent. The history families'
-/// first 256-body window is whole and the second is not, so their leg retains
-/// a prefix and then meets the absent body. Returns the withheld body.
 fn retained_prefix() -> (ForkFixture, SeedCellHarness, AbsentBody) {
     let f = ForkFixture::new(300);
     f.persist_undo();
@@ -816,9 +733,6 @@ fn retained_prefix() -> (ForkFixture, SeedCellHarness, AbsentBody) {
     (f, h, AbsentBody { key, body })
 }
 
-/// Rows retained ahead of an absent body wait for their deadline and commit
-/// even though the body never arrives. No other group runs while they are
-/// retained, and they never outlive a fence change.
 #[test]
 fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_change() {
     let (f, h, _absent) = retained_prefix();
@@ -826,8 +740,6 @@ fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_ch
     let a290 = Some(at(&f.tip(f.a[289])));
     let mut pending = None;
 
-    // The first window is admitted and the second meets the absent body: the
-    // prefix is retained for its deadline and the ready group does not run.
     assert!(matches!(
         h.worker.reconcile_once(&mut pending),
         Ok(ReconcileAction::Buffered)
@@ -837,8 +749,6 @@ fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_ch
     assert_eq!(retained.tx_lookup, None);
     assert_eq!(retained.script_live, a290);
 
-    // Another writer commits. The retained rows belong to a dead fence, so
-    // they are discarded and no group runs on the stale capture.
     let (fence, _) = h.writer.fenced_watermarks().expect("fence");
     h.writer
         .commit_consumer_cursor(fence, &h.worker.chain_events.cursor().to_bytes())
@@ -852,8 +762,6 @@ fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_ch
     assert_eq!(discarded.tx_lookup, None);
     assert_eq!(discarded.script_live, a290);
 
-    // Re-derived on the fresh fence, the prefix is retained again and then
-    // commits at its deadline.
     assert!(matches!(
         h.worker.reconcile_once(&mut pending),
         Ok(ReconcileAction::Buffered)
@@ -867,16 +775,12 @@ fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_ch
     assert_eq!(flushed.script_history, a279);
     assert_eq!(flushed.script_live, a290);
 
-    // Only then does the next pass reach the ready group.
     h.settle_stalled(&mut pending);
     let end = h.watermarks();
     assert_eq!(end.script_live, Some(at(&f.tip(f.a[299]))));
     assert_eq!(end.tx_lookup, a279);
 }
 
-/// Through the real run loop: the retained prefix commits at its deadline,
-/// the ready group follows the tip, and the worker, waiting only on its own
-/// quiet period, notices the absent body arriving without any wake.
 #[test]
 fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake() {
     let (f, mut h, absent) = retained_prefix();
@@ -906,7 +810,6 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     run.join().expect("worker thread").expect("worker run");
 }
 
-/// Forward `ScriptLive` follows its undo anchors. A missing or unreadable
 /// record resets only `ScriptLive`, which reseeds at the tip while its
 /// siblings keep their rows and finish from bodies alone.
 #[test]
@@ -939,7 +842,6 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             }
             Undo::Corrupt => {
                 if let Some(record) = f.bodies.undo.lock().get_mut(&key) {
-                    // An unsupported version byte can never decode.
                     record[0] ^= 0xff;
                 }
             }
@@ -970,9 +872,6 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     }
 }
 
-/// An anchor failure anywhere in a window is handled before any block is
-/// admitted, so it outranks a preparation failure at a lower height: the
-/// reset happens and no preparation error surfaces.
 #[test]
 fn anchor_failure_outranks_an_earlier_preparation_failure() {
     let f = ForkFixture::new(6);
@@ -981,7 +880,6 @@ fn anchor_failure_outranks_an_earlier_preparation_failure() {
     h.set_tip(&f.tip(f.a[1]));
     h.settle(&mut None);
 
-    // Height 3's body does not parse; height 5 has no undo record.
     f.bodies.bodies.lock().insert(f.a_key(3), vec![0; 10]);
     f.bodies.undo.lock().remove(&f.a_key(5));
     h.set_tip(&f.tip(f.a[5]));
@@ -993,8 +891,6 @@ fn anchor_failure_outranks_an_earlier_preparation_failure() {
     assert_eq!(h.watermarks().script_live, None);
 }
 
-/// Without an anchor failure, blocks admit in height order: the block before
-/// a preparation failure commits and the failure keeps its own error.
 #[test]
 fn preparation_failure_keeps_its_height_after_committed_successes() {
     let f = ForkFixture::new(6);
@@ -1004,7 +900,6 @@ fn preparation_failure_keeps_its_height_after_committed_successes() {
     h.settle(&mut None);
 
     f.bodies.bodies.lock().insert(f.a_key(4), vec![0; 10]);
-    // One row fills a batch, so each block commits as soon as it is admitted.
     h.worker.batch_limits = PreparedBatchLimits {
         max_rows: 1,
         max_bytes: BATCH_BYTE_LIMIT,
@@ -1025,8 +920,6 @@ fn preparation_failure_keeps_its_height_after_committed_successes() {
     assert_eq!(h.watermarks().script_live, committed);
 }
 
-/// An undo read that fails is not a missing record: the lowest-height anchor
-/// failure keeps its identity and `ScriptLive` is not reset.
 #[test]
 fn undo_read_failure_is_not_a_missing_undo() {
     let f = ForkFixture::new(5);
@@ -1035,7 +928,6 @@ fn undo_read_failure_is_not_a_missing_undo() {
     h.set_tip(&f.tip(f.a[1]));
     h.settle(&mut None);
 
-    // The read failure at height 4 decides over the missing record at 5.
     f.bodies.undo_read_failures.lock().insert(f.a_key(4));
     f.bodies.undo.lock().remove(&f.a_key(5));
     h.set_tip(&f.tip(f.a[4]));
@@ -1047,30 +939,18 @@ fn undo_read_failure_is_not_a_missing_undo() {
     assert_eq!(h.watermarks().script_live, Some(at(&f.tip(f.a[1]))));
 }
 
-/// Row 12 (P1 slice S3): a `ScriptLive` group `Pruned` at the seed take is
-/// terminal but scoped: the failure flag is set, `Wanted` is kept, the worker
-/// keeps running, and the other groups still progress. Replay progress clears
-/// the flag without any take; a later token clears it again and seeds without
-/// a history spin.
-///
-/// Needs the S2 worker dispatch (`seed_slot` / `SeedBundle`, the
-/// `script_live_failure` seam); the parent gates the union after S2 lands.
 #[test]
 fn script_live_pruned_terminal_keeps_worker_alive() {
     let f = ForkFixture::new(4);
     f.persist_undo();
     let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
-    // Converge at A1 with no token: replay covers the live family.
     h.set_tip(&f.tip(f.a[0]));
     let mut pending = None;
     h.settle(&mut pending);
     h.assert_at(&f.tip(f.a[0]));
 
-    // Prune everything below 3, then move the tip above the frontier.
     h.retention.reserve(3).commit(3);
     h.set_tip(&f.tip(f.a[2]));
-    // Bounded passes: never an error, never a global failure; the terminal
-    // flag must raise on the first pruned grant.
     let mut flagged = false;
     for _ in 0..16 {
         match h.worker.reconcile_once(&mut pending).expect("prune pass") {
@@ -1101,8 +981,6 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
         None,
         "live waits for a replacement artifact after the old view is reset"
     );
-    // Demand persists while flagged, and replay progress clears the flag
-    // without any take.
     assert!(h.cell.is_wanted(), "D keeps Wanted while flagged");
     let mut converged_once = false;
     for _ in 0..16 {
@@ -1124,7 +1002,6 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
     }
     assert!(converged_once, "other groups converge");
 
-    // A later token clears the flag and seeds without a history spin.
     let (token, _keep) = cell_seed_artifact(t.hash, t.height, 32);
     h.cell.want();
     assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
@@ -1137,12 +1014,8 @@ fn script_live_pruned_terminal_keeps_worker_alive() {
     h.assert_at(&t);
 }
 
-/// Row 14 (P1 slice S3): the first catch-up leg consumes the held seed lease
-/// instead of requesting a second one. Stalled legs put the pin back;
-/// durable progress past H releases it; at most one lease is ever live.
 #[test]
 fn seed_first_leg_consumes_held_lease() {
-    // Lease lifecycle discipline on a real registry first.
     let registry = Arc::new(RetentionRegistry::new());
     let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
     let lease = access.request_history(2).expect("grant at 2");
@@ -1154,8 +1027,6 @@ fn seed_first_leg_consumes_held_lease() {
     assert_eq!(registry.retention_floor(), None);
     assert_eq!(registry.active_leases(), 0);
 
-    // The worker leg consumes the bundle pin: take, stall with the pin held,
-    // then converge and release.
     let f = ForkFixture::new(4);
     f.persist_undo();
     let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
@@ -1164,7 +1035,6 @@ fn seed_first_leg_consumes_held_lease() {
     h.cell.want();
     assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
     h.set_tip(&f.tip(f.a[3]));
-    // Withhold the last body so the first leg stalls with the bundle held.
     let absent = f.a_key(3);
     let withheld = f
         .bodies
@@ -1221,9 +1091,6 @@ fn seed_first_leg_consumes_held_lease() {
     assert_eq!(h.retention.retention_floor(), None);
 }
 
-/// Worker harness with a real seed cell for the terminal-Pruned and
-/// held-lease proofs. Separate from `Harness` so the shared fixture stays
-/// untouched: S2 updates the shared literal when its fields land.
 struct SeedCellHarness {
     _index_dir: tempfile::TempDir,
     writer: Arc<dyn TxIndexWriter>,
@@ -1309,8 +1176,6 @@ impl SeedCellHarness {
         );
     }
 
-    /// Runs passes until `CaughtUp`, asserting the worker never errors, never
-    /// publishes global failure, and never holds more than one history pin.
     fn settle(&self, pending: &mut Option<PendingForward>) {
         for _ in 0..64 {
             assert!(
@@ -1327,9 +1192,6 @@ impl SeedCellHarness {
     }
 }
 
-/// Mints a real sealed artifact over `n` synthetic coins and keeps its
-/// directory alive. The witness binds the exact bytes; the file the strict
-/// load consumed is the descriptor that gets sealed.
 fn cell_seed_artifact(
     tip: Hash256,
     height: u32,

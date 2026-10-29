@@ -8,26 +8,19 @@ use crate::{types::ScriptHashRow, types::SpendingPrefixRow};
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
-/// Electrs-shaped block indexer backed by a workspace [`KvStore`].
-///
-/// Reads and format/watermark queries live here. Durable row mutation is
-/// owned exclusively by [`super::write::IndexWriter`].
 pub struct Indexer<S: KvStore> {
     pub(super) store: std::sync::Arc<S>,
 }
 
 impl<S: KvStore> Indexer<S> {
-    /// Creates an indexer over `store`.
     pub fn new(store: std::sync::Arc<S>) -> Self {
         Self { store }
     }
 
-    /// Loads the exact durable `TxIndex` watermark, or `None` for an empty v2 index.
     pub(super) fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {
         self.capability_watermark(IndexCapability::TxLookup)
     }
 
-    /// Loads one capability's exact durable watermark.
     pub fn capability_watermark(
         &self,
         capability: IndexCapability,
@@ -40,7 +33,6 @@ impl<S: KvStore> Indexer<S> {
             .transpose()
     }
 
-    /// Loads all independently durable capability watermarks.
     pub fn watermarks(&self) -> Result<IndexWatermarks, IndexError> {
         Ok(IndexWatermarks {
             tx_lookup: self.capability_watermark(IndexCapability::TxLookup)?,
@@ -50,13 +42,7 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
-    /// Iterates confirmed funding rows for `scripthash`.
-    ///
-    /// Returns every `HashPrefixRow` in `ColumnFamily::Funding` whose 8-byte
-    /// prefix matches, in store iteration order. The 4-byte height suffix is
     /// big-endian (format 5), so that order is chronological within a prefix.
-    /// The prefix is lossy: callers MUST resolve heights back to full
-    /// transactions via block storage to confirm scripthash identity.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
@@ -66,15 +52,6 @@ impl<S: KvStore> Indexer<S> {
         collect_prefix_rows(iter)
     }
 
-    /// Iterates live-output rows for `scripthash`.
-    ///
-    /// Returns the outpoint locators currently filed under the scripthash's
-    /// 8-byte scan prefix, decoded from [`ColumnFamily::ScriptLive`]. The
-    /// prefix is lossy exactly like `Funding`'s: two scripts may share it, so
-    /// callers MUST resolve each outpoint against authoritative UTXO state and
-    /// exact-check the resolved coin's full `script_pubkey` before serving it.
-    /// This scan is read-only by contract -- live deletion is always a
-    /// whole-key point delete, never a prefix-range operation.
     pub fn iter_live_outpoints(
         &self,
         scripthash: crate::ScriptHash,
@@ -101,15 +78,7 @@ impl<S: KvStore> Indexer<S> {
         Ok(outpoints)
     }
 
-    /// Iterates confirmed spending rows that spent `outpoint`.
-    ///
-    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the outpoint's
-    /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
-    /// prefix is lossy as above.
-    ///
-    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
     /// height suffix is big-endian (format 5), so prefix-range scans arrive
-    /// in chronological order.
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,

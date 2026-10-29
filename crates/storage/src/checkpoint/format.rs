@@ -29,8 +29,6 @@ pub(crate) fn valid_current_temp_name(name: &str) -> bool {
         })
 }
 
-/// Checkpoint-file network spelling. Core's `testnet` alias names
-/// [`Network::Testnet3`]. Evidence identity uses [`Network::identity_name`].
 pub fn network_name(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "mainnet",
@@ -41,7 +39,6 @@ pub fn network_name(network: Network) -> &'static str {
     }
 }
 
-/// Decodes exactly `2 * N` lowercase hexadecimal characters.
 pub fn decode_hex<const N: usize>(encoded: &str) -> Result<[u8; N], CheckpointError> {
     if encoded.len() != N.saturating_mul(2)
         || !encoded

@@ -1,42 +1,128 @@
 //! Structural comparator for the Core parity gate.
-//!
-//! Comparison is structural only, never JSON text: HTTP status, pinned
-//! headers, the exact member set of each JSON-RPC envelope, identifier echo
-//! by value, ordered batch elements, exact scalars, `f64` equality by
-//! `to_bits`, complete pinned error objects, and required key presence.
-//! Every position of a pinned response is classified exactly once — exact,
-//! bit-exact float, chain-bound, volatile, or declared gap — and a
-//! known-gap fixture may diverge from Core only at its declared paths.
-
-use serde_json::Value;
-use sonic_rs::JsonValueMutTrait as _;
+use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use super::fixture::{
     BodyCheck, BodyForm, Checks, Fixture, HeaderCheck, HeaderClass, HttpTuple, Relation,
 };
 
-/// Chain identity read from the live `NodeState` before the replay runs, so
-/// chain-bound keys compare against independently observed truth rather than
-/// against the response under test.
+/// Deserializes any JSON value for a field that sits inside an internally
+/// tagged enum.
+pub(crate) fn json_value<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct JsonSeed;
+
+    impl<'de> serde::de::DeserializeSeed<'de> for JsonSeed {
+        type Value = Value;
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(JsonVisitor)
+        }
+    }
+
+    struct JsonVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for JsonVisitor {
+        type Value = Value;
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("any JSON value")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Value, E>
+        where
+            E: serde::de::Error,
+        {
+            sonic_rs::Number::from_f64(value)
+                .map(Value::from)
+                .ok_or_else(|| E::custom("non-finite float in fixture"))
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Value, E> {
+            Ok(Value::from(value.as_str()))
+        }
+
+        fn visit_unit<E>(self) -> Result<Value, E> {
+            Ok(Value::from(()))
+        }
+
+        fn visit_none<E>(self) -> Result<Value, E> {
+            Ok(Value::from(()))
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut array = sonic_rs::Array::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(element) = seq.next_element_seed(JsonSeed)? {
+                array.push(element);
+            }
+            Ok(array.into_value())
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut object = sonic_rs::Object::new();
+            while let Some((key, value)) =
+                map.next_entry_seed(core::marker::PhantomData::<String>, JsonSeed)?
+            {
+                object.insert(&key, value);
+            }
+            Ok(object.into_value())
+        }
+    }
+
+    serde::de::DeserializeSeed::deserialize(JsonSeed, deserializer)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveChain {
-    /// Applied block count the harness mined.
     pub(crate) blocks: u64,
-    /// Header count, taken as the applied tip height; the seed chain carries
-    /// no headers-only lead.
     pub(crate) headers: u64,
-    /// Applied tip hash in RPC display form.
     pub(crate) best_block_hash: String,
 }
 
-/// One comparison failure with the exact structural position that diverged.
 #[derive(Debug)]
 pub(crate) struct Mismatch {
-    /// Fixture id the failure belongs to.
     pub(crate) fixture: String,
-    /// Structural position (`status`, `header Content-Type`, `result.blocks`, ...).
     pub(crate) position: String,
-    /// What diverged.
     pub(crate) why: String,
 }
 
@@ -48,54 +134,32 @@ impl core::fmt::Display for Mismatch {
 
 impl std::error::Error for Mismatch {}
 
-/// Envelope dialect of one JSON-RPC response element.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum EnvelopeVersion {
-    /// JSON-RPC 2.0: carries `jsonrpc:"2.0"`, success has `result` and no
-    /// `error`, error has `error` and no `result`.
     V2,
-    /// JSON-RPC 1.0 legacy: no `jsonrpc` member, `result` and `error` both
-    /// present with an explicit `null` on the unused side.
     Legacy,
 }
 
-/// Outcome class of one envelope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum Outcome {
-    /// Success envelope.
     Success,
-    /// Application-level error envelope.
     Error,
 }
 
-/// Per-result comparison policy: every key of the pinned Core result is
-/// classified exactly once — exact, bit-exact float, chain-bound, volatile,
-/// or declared gap — and the live result may not carry any unclassified key.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResultCheck {
-    /// The live result must additionally decode into the typed corepc v31
-    /// `GetBlockchainInfo` wire struct.
     pub(crate) typed_chaininfo: bool,
-    /// Keys compared for exact structural equality against Core.
     pub(crate) exact_keys: Vec<String>,
-    /// Numeric keys compared bit-exactly via `f64::to_bits`.
     pub(crate) f64_bits_keys: Vec<String>,
-    /// Keys compared against the independently read live chain identity.
     pub(crate) chain_bound_keys: Vec<String>,
-    /// Keys whose value is wall-clock or storage dependent (time,
-    /// mediantime, verificationprogress, ...): classified, type-checked,
-    /// deliberately not value-compared.
     pub(crate) volatile_keys: Vec<String>,
-    /// Declared divergence keys: the pinned current tuple carries the live
-    /// shape and live must equal it, while the pinned Core value differs.
     pub(crate) gap_keys: Vec<String>,
 }
 
 impl ResultCheck {
-    /// Every classified key, in declaration order per class.
     pub(crate) fn classes(&self) -> [(&'static str, &[String]); 5] {
         [
             ("exact", &self.exact_keys),
@@ -107,25 +171,18 @@ impl ResultCheck {
     }
 }
 
-/// Envelope-level check: member set, dialect, id echo, error code, and the
-/// result policy. The error `message` is always compared exactly.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EnvelopeCheck {
-    /// Envelope dialect.
     pub(crate) version: EnvelopeVersion,
-    /// Outcome class.
     pub(crate) outcome: Outcome,
-    /// Identifier that must be echoed exactly.
+    #[serde(deserialize_with = "json_value")]
     pub(crate) id: Value,
-    /// Numeric error code required when `outcome` is `Error`.
     pub(crate) error_code: Option<i64>,
-    /// Result policy.
     pub(crate) result: ResultCheck,
 }
 
 impl EnvelopeCheck {
-    /// The complete member set the envelope dialect prescribes.
     #[must_use]
     pub(crate) fn member_names(&self) -> Vec<&'static str> {
         match (self.version, self.outcome) {
@@ -135,7 +192,6 @@ impl EnvelopeCheck {
         }
     }
 
-    /// The `jsonrpc` member value the dialect prescribes, if any.
     #[must_use]
     pub(crate) fn jsonrpc_member(&self) -> Option<&'static str> {
         match self.version {
@@ -147,15 +203,6 @@ impl EnvelopeCheck {
 
 /// Compares one replayed live tuple against its fixture under the fixture's
 /// declared relation.
-///
-/// * `Exact`: the live tuple must match the pinned Core tuple structurally.
-/// * `KnownGap`: the live tuple must match the pinned *current* tuple
-///   structurally, and the Core tuple must differ from the current tuple at
-///   exactly the declared [`Fixture::gap_paths`] and nowhere else. No
-///   equality between Core and live is asserted.
-///
-/// # Errors
-/// One [`Mismatch`] naming the first structural divergence.
 pub(crate) fn compare(
     fixture: &Fixture,
     live: &HttpTuple,
@@ -196,10 +243,6 @@ pub(crate) fn compare(
     }
 }
 
-/// Collects the complete set of structural positions where the pinned Core
-/// tuple and the pinned current tuple differ: `status`, `headers.<name>`
-/// (volatile transport headers `date`/`connection` excluded), and recursive
-/// `body...` value paths.
 #[must_use]
 pub(crate) fn structural_diff_paths(core: &HttpTuple, current: &HttpTuple) -> Vec<String> {
     let mut paths = Vec::new();
@@ -250,17 +293,16 @@ pub(crate) fn structural_diff_paths(core: &HttpTuple, current: &HttpTuple) -> Ve
     paths
 }
 
-/// Recursively records every path at which two JSON values diverge.
 fn value_diff_paths(core: &Value, current: &Value, prefix: &str, paths: &mut Vec<String>) {
     if let (Some(core_object), Some(current_object)) = (core.as_object(), current.as_object()) {
         let names: std::collections::BTreeSet<&str> = core_object
             .iter()
-            .map(|(key, _)| key.as_str())
-            .chain(current_object.iter().map(|(key, _)| key.as_str()))
+            .map(|(key, _)| key)
+            .chain(current_object.iter().map(|(key, _)| key))
             .collect();
         for name in names {
             let child = format!("{prefix}.{name}");
-            match (core_object.get(name), current_object.get(name)) {
+            match (core_object.get(&name), current_object.get(&name)) {
                 (Some(core_value), Some(current_value)) => {
                     value_diff_paths(core_value, current_value, &child, paths);
                 }
@@ -344,15 +386,8 @@ fn compare_tuple(
             ),
         ));
     }
-    // Derived framing: Content-Length is not pinned data. A 204 must omit it;
-    // every other tuple with a known wire body length must carry exactly one
-    // ASCII-decimal header equal to that length.
     check_tuple_content_length(fixture, side, expected)?;
     check_tuple_content_length(fixture, side, live)?;
-    // Header membership is complete: every name on the pinned side and on
-    // the live side — the union — must be classified exactly once as
-    // exact, volatile, or gap (Content-Length is covered by the derived
-    // `body_length` class), and each class enforces its own rule.
     compare_headers(fixture, side, expected, live, &checks.headers)?;
 
     match (&expected.body, &checks.body, &live.body) {
@@ -405,7 +440,6 @@ fn compare_tuple(
     Ok(())
 }
 
-/// Case-insensitive single header lookup over a tuple's pinned headers.
 fn header_value<'a>(tuple: &'a HttpTuple, name: &str) -> Option<&'a str> {
     tuple
         .headers
@@ -414,10 +448,6 @@ fn header_value<'a>(tuple: &'a HttpTuple, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// Enforces the derived `Content-Length` invariant on one tuple. A 204 has no
-/// content and must omit the header; otherwise a known wire body length must
-/// carry exactly one matching ASCII-decimal header. When the length is not
-/// derivable (a JSON-body pinned tuple), the live side owns the check.
 fn check_tuple_content_length(
     fixture: &str,
     side: &str,
@@ -441,9 +471,6 @@ fn check_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".into()));
         }
-        // RFC 9110 §8.6 forbids Content-Length on 204, but libevent-era
-        // Core captures show `Content-Length: 0`. Accept both capture
-        // forms; the node's own omission is pinned by the negative probe.
         if let Some(value) = declared.first() {
             if *value != "0" || declared.len() != 1 {
                 return Err(fail(
@@ -475,10 +502,6 @@ fn check_tuple_content_length(
     }
 }
 
-/// Enforces the complete header classification: the union of pinned and
-/// live header names must each be classified exactly once, exact names must
-/// carry equal values, volatile names must be present on the live side (their
-/// value is wall-clock or connection dependent), and gap names must diverge.
 fn compare_headers(
     fixture: &str,
     side: &str,
@@ -491,11 +514,6 @@ fn compare_headers(
         position: format!("{side}.header {name}"),
         why,
     };
-    // Union of names, keyed case-insensitively, keeping the first wire
-    // spelling for display. Declared volatile names join the loop even when
-    // neither side carries one: the pinned Core capture may omit a
-    // transport header it never recorded, and the live reply must still be
-    // checked for it, or a missing header would pass by never being named.
     let mut names: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (name, _) in expected.headers.iter().chain(live.headers.iter()) {
         names
@@ -509,7 +527,6 @@ fn compare_headers(
     }
     for (lower, display) in names {
         if headers.body_length && lower == "content-length" {
-            // Already enforced per tuple by check_tuple_content_length.
             continue;
         }
         let Some(class) = headers.class_of(&lower) else {
@@ -542,9 +559,6 @@ fn compare_headers(
                 }
             }
             HeaderClass::Volatile => {
-                // The pinned tuple may omit a volatile header: a Core capture
-                // keeps only the headers its probe recorded. The live reply
-                // must still carry it, so the classification is not vacuous.
                 if live_value.is_none() {
                     return Err(need(
                         &display,
@@ -578,9 +592,6 @@ fn compare_headers(
     Ok(())
 }
 
-/// Compares a batch positionally: live element N against Core element N.
-/// Positional id equality is the ordering proof — a live response that
-/// reordered Core's elements fails on the id, before any deeper compare.
 fn compare_batch(
     fixture: &str,
     side: &str,
@@ -651,10 +662,8 @@ fn compare_batch(
     Ok(())
 }
 
-/// Compact re-serialization of a value for failure messages only; never
-/// used for comparison.
 fn value_repr(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_owned())
+    sonic_rs::to_string(value).unwrap_or_else(|_| "<unserializable>".to_owned())
 }
 
 fn compare_envelope(
@@ -671,9 +680,6 @@ fn compare_envelope(
         why,
     };
 
-    // The complete member set of the envelope is structural: the live
-    // element must carry exactly the members the dialect prescribes, no
-    // more, no fewer.
     let expected_members = envelope.member_names();
     let Some(object) = live.as_object() else {
         return Err(need(
@@ -681,7 +687,7 @@ fn compare_envelope(
             "response element is not a JSON object".into(),
         ));
     };
-    let live_members: Vec<&str> = object.iter().map(|(key, _)| key.as_str()).collect();
+    let live_members: Vec<&str> = object.iter().map(|(key, _)| key).collect();
     if live_members.len() != expected_members.len() {
         return Err(need(
             "envelope".into(),
@@ -753,11 +759,6 @@ fn compare_envelope(
     Ok(())
 }
 
-/// Compares the complete pinned error object: the live error must carry the
-/// same member set, every member must equal the pinned value, and the
-/// `message` text is compared exactly on every row. The legacy dialect
-/// additionally requires the explicit null `result` member, the v2 dialect
-/// its absence.
 fn compare_error(
     fixture: &str,
     side: &str,
@@ -771,7 +772,6 @@ fn compare_error(
     Ok(())
 }
 
-/// The error envelope must pin an error code and answer with exactly it.
 fn compare_error_code(
     fixture: &str,
     side: &str,
@@ -810,9 +810,6 @@ fn compare_error_code(
     Ok(())
 }
 
-/// The complete pinned error object: the live error must carry the same
-/// member set, every member must equal the pinned value, and the `message`
-/// text is compared exactly on every row.
 fn compare_error_members(
     fixture: &str,
     side: &str,
@@ -839,8 +836,8 @@ fn compare_error_members(
     let Some(live_object) = live.get("error").and_then(Value::as_object) else {
         return Err(need("error".into(), "error must be a JSON object".into()));
     };
-    let pinned_members: Vec<&str> = pinned_object.iter().map(|(key, _)| key.as_str()).collect();
-    let live_members: Vec<&str> = live_object.iter().map(|(key, _)| key.as_str()).collect();
+    let pinned_members: Vec<&str> = pinned_object.iter().map(|(key, _)| key).collect();
+    let live_members: Vec<&str> = live_object.iter().map(|(key, _)| key).collect();
     if live_members.len() != pinned_members.len() {
         return Err(need(
             "error".into(),
@@ -855,9 +852,6 @@ fn compare_error_members(
     Ok(())
 }
 
-/// One pinned error member: message text is always compared exactly, so a
-/// genuine wording divergence is a structured known gap declared at
-/// `body.error.message`, never a weakened comparison.
 fn compare_error_member(
     fixture: &str,
     side: &str,
@@ -895,8 +889,6 @@ fn compare_error_member(
     Ok(())
 }
 
-/// The dialect closing rule: a v2 error envelope must not also carry a
-/// result member; the legacy dialect requires the explicit null result.
 fn compare_error_dialect(
     fixture: &str,
     side: &str,
@@ -951,8 +943,6 @@ fn compare_result(
         .map(|object| object.iter().map(|(key, _)| key.to_owned()).collect())
         .unwrap_or_default();
 
-    // Every live key must be classified exactly once; an unclassified key is
-    // a structural divergence the fixture does not declare.
     let classified: std::collections::BTreeSet<&str> = checks
         .classes()
         .iter()
@@ -972,8 +962,6 @@ fn compare_result(
     Ok(())
 }
 
-/// Walks every classified key (exact, f64-bits, volatile, gap) and enforces
-/// its class rule against the compared side.
 fn compare_classified_keys(
     fixture: &str,
     side: &str,
@@ -988,8 +976,6 @@ fn compare_classified_keys(
     };
     for (class, keys) in checks.classes() {
         for key in keys {
-            // Chain-bound keys are handled by their own loop below against
-            // the independently read node state.
             if class == "chain-bound" {
                 continue;
             }
@@ -1011,7 +997,6 @@ fn compare_classified_keys(
     Ok(())
 }
 
-/// One classified key: dispatches on the class and enforces its rule.
 fn compare_classified_key(
     fixture: &str,
     side: &str,
@@ -1076,11 +1061,6 @@ fn compare_classified_key(
             }
         }
         "gap" => {
-            // The declared divergence position: live must answer with the
-            // pinned current-tuple value, which the compared side (the
-            // current tuple in gap mode) carries. Equality is still
-            // enforced — the divergence is Core-vs-current and is proven by
-            // `assert_divergence_exactly_at`.
             if !value_equal(live_value, core_value) {
                 return Err(need(
                     format!("result.{key}"),
@@ -1103,8 +1083,6 @@ fn compare_classified_key(
     Ok(())
 }
 
-/// Chain-bound keys compare against the independently read node state,
-/// never against the response under test.
 fn compare_chain_bound_keys(
     fixture: &str,
     side: &str,
@@ -1124,9 +1102,6 @@ fn compare_chain_bound_keys(
                 format!("result is missing the chain-bound key {key:?}"),
             ));
         };
-        // `blocks` and `headers` are JSON numbers, `bestblockhash` a JSON
-        // string; both compare against the live node state read before the
-        // replay, never against the response under test.
         let diverged = match key.as_str() {
             "blocks" => live_value.as_u64() != Some(chain.blocks),
             "headers" => live_value.as_u64() != Some(chain.headers),
@@ -1154,7 +1129,6 @@ fn compare_chain_bound_keys(
     Ok(())
 }
 
-/// Coarse JSON kind of a value, used to type-check volatile keys.
 fn json_kind(value: &Value) -> u8 {
     if value.is_null() {
         0
@@ -1162,7 +1136,7 @@ fn json_kind(value: &Value) -> u8 {
         1
     } else if value.is_number() {
         2
-    } else if value.is_string() {
+    } else if value.is_str() {
         3
     } else if value.is_array() {
         4
@@ -1171,21 +1145,8 @@ fn json_kind(value: &Value) -> u8 {
     }
 }
 
-/// Typed corepc v31 decode of a live `getblockchaininfo` body; a body that
-/// does not deserialize into the versioned wire struct fails the gate.
-///
-/// Keys this node's `getblockchaininfo` emits beyond Core 31.1's wire. Each
-/// declared extension carries its own behavior test; the typed decode strips
-/// exactly this set, so any other unlisted key — a renamed Core key or a
-/// second undeclared extension — still fails the strict decode.
 const CHAININFO_EXTENSION_KEYS: [&str; 1] = ["is_closed_for_recovery"];
 
-/// Decodes one `getblockchaininfo` result into the typed corepc v31 struct.
-/// Only [`CHAININFO_EXTENSION_KEYS`] are removed first; every remaining key
-/// must satisfy the versioned wire struct's strict field set.
-///
-/// # Errors
-/// Propagates the sonic-rs decode error.
 pub(crate) fn typed_getblockchain_info(
     body: &[u8],
 ) -> Result<corepc_types::v31::GetBlockchainInfo, sonic_rs::Error> {
@@ -1196,19 +1157,12 @@ pub(crate) fn typed_getblockchain_info(
     sonic_rs::from_slice(sonic_rs::to_string(&value)?.as_bytes())
 }
 
-/// Structural equality for JSON values: objects compare by complete member
-/// set and per-member equality, arrays by ordered elements, strings and
-/// booleans by value, integral numbers by value, and non-integral floating
-/// point numbers by `f64::to_bits`, so a decimal reformatting can never pass
-/// or fail a comparison.
 #[must_use]
 pub(crate) fn value_equal(a: &Value, b: &Value) -> bool {
     if let (Some(a), Some(b)) = (a.as_object(), b.as_object()) {
         return a.len() == b.len()
-            && a.iter().all(|(key, value)| {
-                b.get(key.as_str())
-                    .is_some_and(|other| value_equal(value, other))
-            });
+            && a.iter()
+                .all(|(key, value)| b.get(&key).is_some_and(|other| value_equal(value, other)));
     }
     if let (Some(a), Some(b)) = (a.as_array(), b.as_array()) {
         return a.len() == b.len()
@@ -1228,10 +1182,6 @@ pub(crate) fn value_equal(a: &Value, b: &Value) -> bool {
     if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
         return a == b;
     }
-    // Every numeric comparison is bitwise: equal bits or no equality. This
-    // is the Core float parity doctrine — value parity, never text parity —
-    // and it keeps clippy's float comparison ban satisfied without a
-    // tolerance that could mask a real divergence.
     match (a.as_f64(), b.as_f64()) {
         (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
         _ => false,

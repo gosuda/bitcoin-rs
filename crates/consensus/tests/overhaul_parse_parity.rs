@@ -1,4 +1,3 @@
-//! Consensus facts against rust-bitcoin and committed golden blocks.
 #![expect(clippy::expect_used, reason = "test assertions")]
 use std::str::FromStr;
 
@@ -130,9 +129,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             "height {height}: block weight"
         );
 
-        // Byte positions: the count prefix sits after the header, the spans
-        // tile the tree without gaps, and every span slices exactly the
-        // oracle's serialization of the same transaction.
         let spans = parsed.transaction_spans();
         assert_eq!(spans.len(), facts.tx_count(), "height {height}: span count");
         assert_eq!(
@@ -288,7 +284,6 @@ fn coinbase_witness_leaf_is_zero_for_commitment_only() {
         "production commitment check must accept the fixture"
     );
 
-    // BIP141 zeros the coinbase leaf, not the coinbase's stored wtxid.
     let oracle_leaves = std::iter::once(
         bitcoin::Txid::from_str(&"0".repeat(64)).expect("zero leaf"),
     )

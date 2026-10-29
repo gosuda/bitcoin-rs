@@ -1,205 +1,31 @@
 # Reference set contract
 
-A readable projection of the `[reference]` record in
-`crates/rpc/core-compat.toml` and its typed validation in
-`bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the parsed
-identity record used by the test and formal gates. It is not a separate
-registry and not a new public type.
-
-This page is a readable projection only. On conflict,
-`crates/rpc/core-compat.toml` governs the reference values and
-`bin/bitcoin-rs/tests/support/reference_set.rs` governs their typed validation.
-A version label alone is never custody.
+A readable projection of the `[reference]` record in `crates/rpc/core-compat.toml` and its typed validation in `bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the parsed identity record used by the test and formal gates, not a separate registry or new public type. On conflict, the manifest governs values and the parser governs validation. A version label alone is never custody: a reference MUST carry source and binary identities.
 
 ## Clauses
 
 ### `REF-01`: Manifest values and parser validation govern
-
-- The `[reference]` record in `crates/rpc/core-compat.toml` is the
-  machine-readable authority for reference identity values.
-- `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
-  enforces required identities, complete source commits, digest formats,
-  corpus presence, product versus kernel-tree separation, and audited
-  fingerprints of each complete source-and-artifact identity tuple. The RPC
-  corpus gate compiles this same test support module to validate its capture
-  provenance.
-- `docs/contracts/reference-set.md` is a readable projection. It does not
-  override the manifest values or parser validation on conflict.
-- A version label alone is never custody. A reference must carry source and
-  binary identities.
-
+The `[reference]` record is the machine-readable authority for reference identity values. `bin/bitcoin-rs/tests/support/reference_set.rs` enforces required identities, complete source commits, digest formats, corpus presence, product versus kernel-tree separation, and audited fingerprints of each source-and-artifact tuple; the RPC corpus gate compiles the same module to validate capture provenance.
 ### `REF-02`: Core 31.1 product reference
-
-The released Bitcoin Core 31.1 reference is the pinned product oracle,
-recorded under `[reference.release]` in the manifest:
-
-- `core_version = "31.1"` — a released `MAJOR.MINOR` product version
-- `git_tag = "v31.1"`
-- `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`
-- `target = "x86_64-linux-gnu"` — the canonical artifact, the one whose
-  `bitcoind` captured the checked-in fixtures
-- `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256`
-  `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`
-- `bitcoind_sha256`
-  `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
-- `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
-
-Additional platform artifacts live under `[[reference.release.platforms]]`
-rows of the same shape, each pinned by target (currently `arm64-apple-darwin`
-and `win64`) so the live lanes can run the same pinned Core release on other
-hosts. The canonical row is the fixture-capture platform and is never
-inferred from the host: fixture provenance always compares against the
-canonical `bitcoind_sha256`.
-
-This is the behavioral reference. No compatibility claim may be made against a
-version string or a source snapshot alone.
-
-The checked-in RPC captures retain their own `core_source_commit`,
-`core_binary_sha256`, version, regtest inputs, and allowed differences.
-`crates/rpc/tests/support/fixture.rs` compares that provenance to the selected
-release through the shared parser. Changing the reference leaves an old
-capture stale and fails its gate; it does not relabel the recorded response.
-The process harness separately hashes the actual executable before launch.
-The parser also fingerprints the complete release tuple using NUL-separated
-UTF-8 fields under the `bitcoin-rs/reference-release/v2` domain (product
-fields, then every artifact row in order). Consequently, a different but
-well-formed source commit or artifact digest is a custody mismatch, not a
-valid new reference.
-
+The released Bitcoin Core 31.1 reference is the pinned product oracle under `[reference.release]`: `core_version = "31.1"`, `git_tag = "v31.1"`, `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`, canonical `target = "x86_64-linux-gnu"` (the fixture-capture platform, never inferred from host), `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256 b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind_sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`, `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`. Extra `[[reference.release.platforms]]` rows of the same shape (`arm64-apple-darwin`, `win64`) run the same release on other hosts. Captures keep their own `core_source_commit`, `core_binary_sha256`, version, regtest inputs, and allowed differences, compared by `crates/rpc/tests/support/fixture.rs`; changing the reference stales old captures (gate fails, never relabels), and the harness hashes the live executable. The parser fingerprints the full tuple (NUL-separated UTF-8 fields, `bitcoin-rs/reference-release/v2`, product fields then artifacts in order): a different well-formed commit or digest is a custody mismatch. No claim against a version string or source snapshot alone.
 ### `REF-03`: Core 31.99.0 kernel tree evidence
-
-The kernel oracle is a development tree identity, not a released product,
-carried by the scalar keys of `[reference]` itself:
-
-- `core_version = "31.99.0"`
-- `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.3.2"`
-- `kernel_sys_crate = "libbitcoinkernel-sys"` at
-  `kernel_sys_crate_version = "0.4.1"`
-- `kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"`
-- `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`
-- `kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"`
-- `differential_harness = false`
-
-The published crate's `.cargo_vcs_info.json` identifies the vendor revision.
-Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44)
-records the Bitcoin Core revision in `git-subtree-split`. The reference gate
-checks the package digest against `Cargo.lock`; source and package identities
-are additionally covered by one NUL-separated, domain-separated
-`bitcoin-rs/reference-kernel/v1` fingerprint and must be reviewed together on
-an oracle upgrade. Build options remain owned by
-that pinned crate's `build.rs`, including its static `RelWithDebInfo` kernel
-build with wallet, daemon, tests, and IPC disabled.
-
-This identity is used only for differential evidence. It is not a policy pin,
-it is not a stable release, and it must never be read as the `REF-02` product
-reference.
-
+The kernel oracle is a development tree identity, not a released product, carried by scalar `[reference]` keys: `core_version = "31.99.0"`, `kernel_crate = "bitcoinkernel"` at `0.3.2`, `kernel_sys_crate = "libbitcoinkernel-sys"` at `0.4.1`, `kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"`, `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`, `kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"`, `differential_harness = false`. The published crate's `.cargo_vcs_info.json` identifies the vendor revision; its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44) records the Core revision in `git-subtree-split`. The gate checks the package digest against `Cargo.lock`; source and package identities share one NUL-separated `bitcoin-rs/reference-kernel/v1` fingerprint and upgrade together. Build options stay with that crate's `build.rs` (static `RelWithDebInfo` kernel build with wallet, daemon, tests, and IPC disabled). This identity is differential evidence only: not a policy pin, not a release, never the `REF-02` product reference.
 ### `REF-04`: Corpus identities
-
-The product corpora are defined in
-[`campaign-corpora.md`](campaign-corpora.md) and recorded as
-`[[reference.corpora]]` rows pinned by `id`, `stop_height`, and `stop_hash`:
-
-- `C150`: mainnet blocks `0 .. 150,000`; stop hash
-  `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`;
-  `muhash` `383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116`.
-  The C150 oracle is the first certified Core 31.1 `gettxoutsetinfo`
-  response at height 150,000.
-- `Cmodern`: mainnet blocks `0 .. 709,635`; stop hash
-  `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`;
-  `txouts` 75,903,651; `total_amount_sat` 1,887,251,879,232,217;
-  `muhash` `71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`.
-  The Cmodern oracle is the first certified Core 31.1 `gettxoutsetinfo`
-  response at height 709,635. A cell may not close on a guessed or recalled
-  UTXO total.
-
-`manifest_sha256` is optional until the archive exists. C150 (exported
-2026-09-07) and Cmodern (exported 2026-09-09) carry their exported digests.
-`corpus_custody()` in `bin/bitcoin-rs/tests/support/reference_set.rs` reports
-a corpus without one as `Blocked { missing: "manifest_sha256" }` rather than
-inventing a digest.
-
-Each corpus archive uses the Core-framed format with a manifest digest
-produced at export time. A length-prefixed diagnostic file is not a product
-corpus.
-
+Product corpora are defined in [`campaign-corpora.md`](campaign-corpora.md) and pinned as `[[reference.corpora]]` rows by `id`, `stop_height`, `stop_hash`: `C150` is mainnet blocks `0 .. 150,000` (stop hash `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`, `muhash 383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116`, first certified Core 31.1 `gettxoutsetinfo` at height 150,000); `Cmodern` is `0 .. 709,635` (stop hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, `txouts` 75,903,651, `total_amount_sat` 1,887,251,879,232,217, `muhash 71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`, first certified Core 31.1 `gettxoutsetinfo` response at 709,635). A cell MUST NOT close on a guessed or recalled UTXO total.
+`manifest_sha256` is optional until the archive exists (C150 exported 2026-09-07, Cmodern 2026-09-09); `corpus_custody()` reports a missing one as `Blocked { missing: "manifest_sha256" }`, never an invented digest. Each archive uses the Core-framed format with an export-time manifest digest; a length-prefixed diagnostic file is not a product corpus.
 ### `REF-06`: Formal tool identity
-
-- `name = "apalache-mc"` at `version = "0.62.2"`
-- `archive_sha256`
-  `7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2`
-- `jar_sha256`
-  `079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8`
-- Observed Java runtime: `26.0.2.1`
-
-This is an evidence tool pin. No checker run is claimed by this page.
-
+Evidence tool pin only (no checker run claimed): `name = "apalache-mc"` at `version = "0.62.2"`, `archive_sha256 7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2`, `jar_sha256 079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8`, observed Java runtime `26.0.2.1`.
 ### `REF-07`: Pinned mainnet stop and custody rule
-
-- The default unpruned full-tip storage campaign uses a pinned mainnet
-  stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
-  floating or unpinned. The benchmark campaign owns any 1 TB verdict, which
-  applies only to that pinned default lane; the offline snapshot defined by
-  [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it.
-- Missing identities, malformed commits or digests, unbound custody tuples,
-  and confused product identities are rejected with a typed `ReferenceError`
-  from
-  `bin/bitcoin-rs/tests/support/reference_set.rs`. The fixture gate rejects
-  stale capture provenance, and the process harness rejects missing binaries
-  or executable hashes that differ from the selected reference.
-- The 31.1 product reference and the 31.99.0 kernel tree are distinct. No
-  test may claim product parity against the kernel tree identity.
-- Known deviations are explicit. No status in the manifest upgrades to
-  `supported` while `differential_harness = false`.
-  - `REF-07a`: reply values are compared after successful transport; any
-    difference is behavioral evidence and is not transport success.
-  - `REF-07b`: startup reports and reaps an early child exit, including a
-    successful exit before readiness.
-  - `REF-07c`: readiness and each reference request are deadline-bounded;
-    expiration reports the deadline and reaps startup children.
-  - `REF-07d`: malformed HTTP, JSON, or P2P envelopes are transport/protocol
-    errors, not behavioral comparisons.
+The default unpruned full-tip storage campaign uses a pinned mainnet stop `(height, block_hash)` recorded by the run; no floating stop. The benchmark campaign owns any 1 TB verdict, which applies only to that pinned default lane; the offline snapshot in [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it. Missing identities, malformed commits or digests, unbound custody tuples, and confused product identities fail with typed `ReferenceError`; the fixture gate rejects stale capture provenance and the harness rejects missing binaries or executable hashes differing from the reference. The 31.1 product reference and the 31.99.0 kernel tree are distinct: no product-parity claim against the kernel identity, and no manifest status upgrades to `supported` while `differential_harness = false`.
+- `REF-07a`: reply values compare after successful transport; differences are behavioral evidence, not transport success.
+- `REF-07b`: startup reports and reaps an early child exit, including success before readiness.
+- `REF-07c`: readiness and each reference request are deadline-bounded; expiry reports the deadline and reaps startup children.
+- `REF-07d`: malformed HTTP, JSON, or P2P envelopes are transport or protocol errors, not behavioral comparisons.
 
 ## Proven by
 
-- `crates/rpc/core-compat.toml`: the machine-readable reference identity values.
-- `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
-  validation for those values.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only,
-  malformed, and well-formed-but-unbound identities, checks kernel package
-  custody, and pins `corpus_custody()` honesty.
-- `crates/rpc/tests/support/fixture.rs`: rejects missing or stale capture
-  provenance against the same selected release.
-
-- `bin/bitcoin-rs/tests/overhaul_process_harness.rs`: ordinary binary startup,
-  signed RPC admission/confirmation/query, missing/substituted reference,
-  deliberate reply difference, early exit, malformed response, and total
-  request-deadline controls (REF-07a–d). The RPC scenario verifies through
-  `getindexinfo` that txindex is disabled on both nodes before confirmed lookup.
-  `replacement_signaling_matches_pinned_core` verifies signal-independent
-  replacement and insufficient-fee rejection through real-process preview
-  and submission, with unchanged membership and sequence after preview or
-  rejected submission and truthful `fullrbf` reporting.
-- `bin/bitcoin-rs/tests/overhaul_process_p2p.rs`: the same signed transaction
-  enters each real binary through its loopback P2P listener, is observed in
-  its public mempool, and is confirmed by identical Core-mined block bytes.
-  RPC compares tip, transaction, and spent-output state; the candidate's
-  explorer HTTP status is checked against that public chain evidence. This
-  scenario alone enables the candidate's txindex and waits for public
-  `getindexinfo` to report synchronization at the confirming height under
-  one fixed deadline before querying confirmed explorer status. This is
-  not a claim to execute an independent Esplora server.
-- `e2e/src/process_peer.rs`: independent rust-bitcoin v1
-  framing, one deadline per handshake/transaction barrier, bounded frames,
-  message count and transcript, and socket custody. Fault cases cover
-  malformed/truncated frames, wrong network/checksum, oversized lengths,
-  fragmented responses, and cleanup after a connected-peer timeout.
-- `target/process-harness/run-*/`: `launch.json` records both loopback binds,
-  binary digest and arguments; `transcript.jsonl` records RPC/explorer calls;
-  `p2p.jsonl` records ordered wire attempts, completed sends and receives.
-  Both transcripts use the same process-relative `at_micros` clock. The
-  existing required PR test profile runs these scenarios without an opt-in
-  flag and preserves this directory as a CI artifact, including on failure.
+- `crates/rpc/core-compat.toml` (values) and `bin/bitcoin-rs/tests/support/reference_set.rs` (typed custody); `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (label-only, malformed, and well-formed-but-unbound identities; kernel package custody; `corpus_custody()` honesty); `crates/rpc/tests/support/fixture.rs` (capture provenance).
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs` (binary startup; signed RPC admission, confirmation, and query; missing or substituted reference; deliberate reply difference; early exit; malformed response; total request deadlines; `getindexinfo` proves txindex disabled on both nodes; `replacement_signaling_matches_pinned_core` with truthful `fullrbf`); `bin/bitcoin-rs/tests/overhaul_process_p2p.rs` (same signed transaction via loopback P2P into each binary, observed in public mempool, confirmed by identical Core-mined block bytes; tip, transaction, and spent-output compare; explorer HTTP checked against public chain evidence; candidate txindex enabled only here with public `getindexinfo` sync at the confirming height under one deadline; not an independent Esplora claim); `e2e/src/process_peer.rs` (independent rust-bitcoin framing, one deadline per handshake or transaction barrier, bounded frames, counts, transcript, socket custody; malformed, truncated, wrong-network, bad-checksum, oversized, fragmented, and post-timeout-cleanup faults); `target/process-harness/run-*/` (`launch.json` with binds, digest, and args; `transcript.jsonl`; `p2p.jsonl`; one process-relative `at_micros` clock; required PR profile runs without opt-in and preserves the directory as CI artifact, including on failure).
 
 ## Vocabulary
 

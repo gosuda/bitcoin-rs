@@ -1,11 +1,3 @@
-//! Caller-thread observability at the apply/window boundaries (OBS-02/OBS-06).
-//!
-//! The coinbase-only fixtures exercise stage timers, group publication, and
-//! window verification accounting on the caller thread. `with_local_recorder`
-//! does not observe Rayon workers: these assertions do not cover arbitrary
-//! worker emissions, spending transactions, or script-resolution sub-stages.
-//! The kept window histogram is recorded after the parallel verifier returns.
-
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{BlockPayload, Network};
@@ -21,7 +13,6 @@ use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 
 use crate::test_fixtures::{handles, seed_genesis};
 
-/// Retired names exercised by the coinbase-only single-block fixture.
 const RETIRED_APPLY_METRICS: &[&str] = &[
     "node.apply_block.contextual_header_seconds",
     "node.apply_block.pow_self_consistency_seconds",
@@ -34,7 +25,6 @@ const RETIRED_APPLY_METRICS: &[&str] = &[
     "node.utxo.listener.event_batches_seconds",
 ];
 
-/// Names the grouped-window fixture emitted before the #1195 boundary.
 const RETIRED_WINDOW_METRICS: &[&str] = &[
     "node.durable_head.group_sync_seconds",
     "node.durable_head.group_commit_seconds",
@@ -42,7 +32,6 @@ const RETIRED_WINDOW_METRICS: &[&str] = &[
     "node.window.checks_seconds",
 ];
 
-/// Captures the metric names a path registers, and nothing else.
 #[derive(Default)]
 struct NameRecorder {
     names: Arc<Mutex<HashSet<String>>>,
@@ -54,8 +43,6 @@ impl NameRecorder {
     }
 }
 
-/// Marks recorded values so a kept counter/histogram proves the recorder was
-/// live on the path under test.
 #[derive(Default)]
 struct NameCell {
     names: Arc<Mutex<HashSet<String>>>,
@@ -129,7 +116,6 @@ fn assert_names_absent(recorder: &NameRecorder, names: &[&str]) {
     }
 }
 
-/// Coinbase-only apply keeps caller-thread diagnostics off the metrics API.
 #[test]
 fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -154,7 +140,6 @@ fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
     Ok(())
 }
 
-/// Group publication and post-join window accounting stay on the caller thread.
 #[test]
 fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -190,16 +175,6 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
     Ok(())
 }
 
-/// Step-24 execution smoke: a real window commit emits the transition-hold
-/// and group-flush diagnostics on the caller thread.
-///
-/// Drives the production `begin_transition` + `connect_window` path on real
-/// regtest fixtures under the `ProfileFields` dispatch and asserts both
-/// `transition_held_us` and `flush_wait_us` arrive. The transition guard is
-/// dropped inside the capture closure so its `Drop` event reaches the same
-/// dispatch. This measures nothing, writes no ledger, and never touches
-/// `/proc/self/clear_refs`: the `VmHWM` performance gate is neither used nor
-/// bypassed, and no timing ratio or promotion is claimed.
 #[test]
 fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -236,7 +211,6 @@ fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// Records fields delivered by real tracing events on the apply caller thread.
 #[derive(Clone, Default)]
 struct ProfileFields(Arc<Mutex<HashSet<String>>>);
 
@@ -273,8 +247,6 @@ impl tracing::Subscriber for ProfileFields {
 }
 
 fn capture_profile<T>(fields: &ProfileFields, action: impl FnOnce() -> T) -> T {
-    // Two live dispatchers avoid tracing-core's single-dispatcher fast path:
-    // another test may first register these callsites without a subscriber.
     let _registration_guard = tracing::Dispatch::new(ProfileFields::default());
     let dispatch = tracing::Dispatch::new(fields.clone());
     tracing::dispatcher::with_default(&dispatch, action)

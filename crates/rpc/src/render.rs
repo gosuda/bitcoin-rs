@@ -1,44 +1,26 @@
-//! Canonical Bitcoin Core block and header JSON projections.
-//!
-//! Callers supply applied-chain facts. This module never queries node state and
-//! does not choose JSON-RPC versus REST transport policy.
-
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
 use sonic_rs::{Value, json};
 
 use crate::tx_render::transaction_json;
 
-/// Applied-chain facts required to project a header or block.
 #[derive(Debug)]
 pub(crate) struct BlockChainContext {
-    /// Height of this block on the applied chain when active; still reported
-    /// for known headers that are not active.
     pub height: u32,
-    /// Bitcoin Core confirmations: applied-tip depth, or `-1` when inactive.
     pub confirmations: i64,
-    /// Median time past for this block.
     pub mediantime: u32,
-    /// Difficulty derived from `nBits` using Core's calculation.
     pub difficulty: f64,
-    /// Lowercase hex chainwork through this block.
     pub chainwork_hex: String,
-    /// Transaction count reported by Core for header and block responses.
     pub n_tx: u32,
-    /// Hash of the next applied-chain block, when one exists.
     pub next_block_hash: Option<bitcoin_rs_primitives::BlockHash>,
 }
 
-/// Transaction array shape for `getblock` verbosity levels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BlockTxVerbosity {
-    /// Verbosity 1: array of txid strings.
     Ids,
-    /// Verbosity 2+: array of full transaction objects.
     Full,
 }
 
-/// Render a block using Bitcoin Core's verbose block shape.
 #[must_use]
 pub(crate) fn block_json(
     block: &Block,
@@ -71,16 +53,11 @@ pub(crate) fn block_json(
     value
 }
 
-/// Hex-encode a header using consensus serialization.
 #[must_use]
 pub(crate) fn header_hex(header: &Header) -> String {
     consensus_bytes(header).to_lower_hex_string()
 }
 
-/// Compute Bitcoin Core confirmations from applied-chain membership facts.
-///
-/// `on_active_chain` must already encode applied-chain membership for
-/// `block_height`. Height alone is insufficient after a reorg.
 #[must_use]
 pub(crate) fn confirmations(applied_height: u32, block_height: u32, on_active_chain: bool) -> i64 {
     if !on_active_chain || block_height > applied_height {
@@ -91,7 +68,6 @@ pub(crate) fn confirmations(applied_height: u32, block_height: u32, on_active_ch
         .saturating_add(1)
 }
 
-/// Render a block header using Bitcoin Core's verbose header shape.
 #[must_use]
 pub(crate) fn header_json(header: &Header, chain: &BlockChainContext) -> Value {
     let version = header.version;

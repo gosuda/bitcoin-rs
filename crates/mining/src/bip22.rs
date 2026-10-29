@@ -8,9 +8,6 @@ use crate::{MiningControlError, MiningError};
 
 const SIGOPS_LIMIT_REASON: &str = "bad-blk-sigops";
 
-/// BIP22 reason for a block whose parent is no longer the best tip. The node
-/// answers it for `ApplyError::PrevHashMismatch`; pool adapters read it as a
-/// stale sibling instead of a defective block.
 pub const STALE_PARENT_REASON: &str = "inconclusive-not-best-prevblk";
 
 /// Core `GetRejectReason` strings for consensus failures (API-19).
@@ -25,8 +22,6 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
         ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
         ConsensusError::SigopsLimit { .. } => SIGOPS_LIMIT_REASON,
-        // A 64-byte mutation is a coinbase-less body, so `submitblock` still
-        // reports Core's first-transaction rule (`validation.cpp:3960`).
         ConsensusError::EmptyBlock
         | ConsensusError::MissingCoinbase
         | ConsensusError::SixtyFourByteMutation => "bad-cb-missing",
@@ -50,7 +45,6 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
                 "BIP34" => "bad-cb-height",
                 "BIP68" | "BIP113" => "bad-txns-nonfinal",
                 "COINBASE_MATURITY" => "bad-txns-premature-spend-of-coinbase",
-                // Any other BIP rule keeps the flag-failure envelope.
                 _ => {
                     return CompactString::from(format!(
                         "block-script-verify-flag-failed ({bip}: {reason})"
@@ -67,7 +61,6 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
     })
 }
 
-/// Core `GetRejectReason` strings for header/chain failures (API-19).
 pub fn chain_reject_reason(error: &ChainError) -> CompactString {
     CompactString::from(match error {
         ChainError::InvalidPow { .. } => "high-hash",
@@ -80,8 +73,6 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
         ChainError::InvalidParent { .. } => "bad-prevblk",
         ChainError::KnownInvalidHeader { .. } => "duplicate-invalid",
         ChainError::DuplicateHeader { .. } => "duplicate",
-        // Core prints `bad-version(0x%08x)` with the rejected version's
-        // unsigned bit pattern (`src/validation.cpp:4112-4126`).
         ChainError::BadVersion { version, .. } => {
             return CompactString::from(format!(
                 "bad-version(0x{:08x})",

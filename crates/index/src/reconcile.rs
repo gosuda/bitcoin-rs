@@ -1,31 +1,20 @@
 //! Derived-index reconciliation state and policy over supplied authoritative chain facts.
-//!
-//! The index owner decides how durable derived state reaches consistency with a
-//! supplied active chain; agreement between index watermarks alone
-//! never proves query readiness.
 
 use bitcoin_rs_primitives::Hash256;
 
 use crate::{IndexCapabilities, IndexCapability};
 
-/// Durable consumer-cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
 pub(crate) const CURSOR_BYTE_LEN: usize = 52;
 
-/// Durable position of an index consumer relative to committed chain events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConsumerCursor {
-    /// Process epoch the consumed events belong to.
     pub epoch: u64,
-    /// Commit-counter value of the last consumed event.
     pub sequence: u64,
-    /// Height of the mirrored tip.
     pub height: u32,
-    /// Hash of the mirrored tip.
     pub hash: Hash256,
 }
 
 impl ConsumerCursor {
-    /// Encodes the durable representation in `CURSOR_BYTE_LEN` bytes.
     #[must_use]
     pub(crate) fn to_bytes(self) -> [u8; CURSOR_BYTE_LEN] {
         let mut bytes = [0_u8; CURSOR_BYTE_LEN];
@@ -37,12 +26,10 @@ impl ConsumerCursor {
     }
 }
 
-/// Canonical stale-branch depth used to choose rollback versus rebuild.
 pub(crate) mod block_tree {
     use bitcoin_rs_chain::{BlockTree, NodeId};
     use bitcoin_rs_primitives::Hash256;
 
-    /// Canonical stale-branch depth, with the decision owned by `index`.
     #[must_use]
     pub(crate) fn rollback_depth(
         tree: &BlockTree,
@@ -56,7 +43,6 @@ pub(crate) mod block_tree {
         Some(position_height.saturating_sub(ancestor_height))
     }
 
-    /// Whether `position` at `height` lies on the selected active chain.
     #[must_use]
     pub(crate) fn position_on_active_chain(
         tree: &BlockTree,
@@ -72,37 +58,23 @@ pub(crate) mod block_tree {
     }
 }
 
-/// Reconciliation leg one capability's rows are executing against the
-/// applied tip. Forward is the resting leg: a watermark that names the
-/// applied tip is ready; one below it is catching up.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ReconcileLeg {
-    /// Rows extend the active chain from the durable watermark.
     #[default]
     Forward,
-    /// Rows on an abandoned or ahead-of-tip branch are deleted block by
-    /// block from `from_height` down to the common ancestor `to_height`.
     RollingBack {
-        /// Height of the watermark being rewound.
         from_height: u32,
-        /// Height of the last block shared with the active chain.
         to_height: u32,
     },
-    /// The rows were reset and rebuild from genesis.
     Rebuilding,
 }
 
-/// Reconciliation legs of every capability the worker owns.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReconcilePhase([ReconcileLeg; 4]);
 
 impl ReconcilePhase {
-    /// Every capability moving forward.
     pub(crate) const FORWARD: Self = Self([ReconcileLeg::Forward; 4]);
 
-    /// Returns the phase with `leg` assigned to every capability in
-    /// `capabilities`.
-    ///
     /// INVARIANT: `legs[capability.index()]` is that capability's leg.
     #[must_use]
     pub(crate) fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
@@ -112,7 +84,6 @@ impl ReconcilePhase {
         self
     }
 
-    /// Capabilities whose rows are rebuilding from genesis.
     #[must_use]
     pub(crate) fn rebuilding(self) -> IndexCapabilities {
         IndexCapability::ALL
@@ -121,8 +92,6 @@ impl ReconcilePhase {
             .collect()
     }
 
-    /// Widest rollback in flight: the highest watermark being rewound and
-    /// the lowest common ancestor any capability rewinds to.
     #[must_use]
     pub(crate) fn rolling_back(self) -> Option<(u32, u32)> {
         self.0
@@ -137,8 +106,6 @@ impl ReconcilePhase {
             .reduce(|(from_a, to_a), (from_b, to_b)| (from_a.max(from_b), to_a.min(to_b)))
     }
 
-    /// Ends every rollback leg; rebuild legs persist until their rows reach
-    /// the applied tip.
     #[must_use]
     pub(crate) fn rollbacks_finished(self) -> Self {
         let finish = |leg| match leg {
@@ -149,12 +116,6 @@ impl ReconcilePhase {
     }
 }
 
-/// Coherent applied-tip position supplied by the authoritative chain owner.
-///
-/// The chain owner (node) implements this over its single-write snapshot
-/// publication; the index runtime reads the cursor wherever it previously read
-/// a publisher snapshot. The index does not own or advance these fields.
 pub trait ChainCursorSource: Send + Sync {
-    /// Returns the current consumer-visible chain cursor.
     fn cursor(&self) -> ConsumerCursor;
 }

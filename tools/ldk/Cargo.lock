@@ -179,8 +179,8 @@ dependencies = [
  "quanta 0.13.0",
  "rayon",
  "serde",
- "serde_json",
  "sha2",
+ "sonic-rs",
  "thiserror",
  "tracing",
 ]
@@ -206,16 +206,20 @@ dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-script",
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
  "bitcoin_hashes",
  "compact_str",
  "crossbeam-channel",
  "hashbrown 0.17.1",
+ "metrics",
  "parking_lot",
  "rayon",
  "serde",
  "sha2",
+ "sonic-rs",
+ "tempfile",
  "thiserror",
  "tracing",
  "zerocopy",
@@ -303,6 +307,7 @@ dependencies = [
  "serde",
  "sha2",
  "signal-hook",
+ "sonic-rs",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -332,9 +337,9 @@ dependencies = [
  "parking_lot",
  "rustix",
  "serde",
- "serde_json",
  "sha2",
  "smallvec",
+ "sonic-rs",
  "thiserror",
  "tracing",
 ]
@@ -344,6 +349,7 @@ name = "bitcoin-rs-primitives"
 version = "0.14.0"
 dependencies = [
  "bytemuck",
+ "bytes",
  "ruint",
  "serde",
  "sha2",
@@ -369,15 +375,16 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
+ "bytes",
  "compact_str",
  "corepc-types",
  "crossbeam-channel",
  "hashbrown 0.17.1",
  "metrics",
  "miniscript",
+ "mio",
  "parking_lot",
  "serde",
- "serde_json",
  "sha2",
  "sonic-rs",
  "thiserror",
@@ -412,8 +419,8 @@ dependencies = [
  "parking_lot",
  "rustix",
  "serde",
- "serde_json",
  "sha2",
+ "sonic-rs",
  "thiserror",
  "tracing",
 ]
@@ -1355,6 +1362,17 @@ dependencies = [
  "bech32",
  "bitcoin",
  "hex-conservative 1.3.0",
+]
+
+[[package]]
+name = "mio"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

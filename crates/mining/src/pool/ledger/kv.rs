@@ -327,8 +327,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
             })
         };
         let mut rows = BTreeMap::new();
-        // The snapshot iterator is lazy and ascending, so this single pass can stop at the
-        // end bound without reading the tail that follows it.
         for item in self.snapshot.iter_prefix(CF, &self.prefix)? {
             let (key, value) = item?;
             let logical = &key[self.prefix.len()..];
@@ -372,14 +370,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
         }
         Ok(result.into_iter())
     }
-    /// Greatest live row in key order without materializing the table. The snapshot reverse
-    /// seek is lazy, so a single lookup fetches the committed tail while the uncommitted
-    /// overlay contributes its greatest put by direct key comparison; tombstones decide
-    /// liveness and an overlay put shadows a committed row under the same key. Callers
-    /// that only need the tail (for example the newest share) never materialize the rows
-    /// before it. A reverse seek cannot see past a deleted committed tail, so the rare
-    /// case where the tail itself is staged for deletion falls back to an exact forward
-    /// merge that recovers the predecessor.
     pub(crate) fn last(&self) -> Result<Option<GuardPair<K, V>>, LedgerError> {
         let backend = self.snapshot.last_prefix(CF, &self.prefix)?;
         let changes = self.changes.borrow();
@@ -388,10 +378,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
             drop(changes);
             return self.last_scanned();
         }
-        // Greatest overlay put in this table. Table prefixes are `PREFIX + [tag]`, so the
-        // trailing tag plus one bounds the scan to this table's keys: the seek is
-        // logarithmic and never walks later tables. Tombstones delete without
-        // contributing a row, so only puts can win.
         let mut end = self.prefix.clone();
         match end.last_mut() {
             Some(tag) => {
@@ -417,7 +403,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
                 if staged < committed.as_slice() {
                     Some((committed, stored))
                 } else {
-                    // Equal keys shadow: the overlay put replaces the committed row.
                     Some((staged.to_vec(), put.to_vec()))
                 }
             }
@@ -429,8 +414,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
         })
         .transpose()
     }
-    /// Exact greatest live row via a forward merge. Only used when the committed tail is
-    /// staged for deletion, which a single reverse seek cannot see past.
     fn last_scanned(&self) -> Result<Option<GuardPair<K, V>>, LedgerError> {
         let changes = self.changes.borrow();
         let deleted = |key: &[u8]| changes.get(key).is_some_and(Option::is_none);
@@ -442,8 +425,6 @@ impl<K: Value, V: Value> Table<'_, K, V> {
             }
             last = Some((key, value));
         }
-        // Overlay puts sort after (or replace) the snapshot tail; overlay deletes were
-        // already skipped in the pass above, so only the highest put can win.
         for (key, value) in changes.iter().rev() {
             if !key.starts_with(&self.prefix) {
                 continue;
@@ -468,37 +449,16 @@ impl<K: Value, V: Value> Table<'_, K, V> {
 }
 
 impl<V: Value> Table<'_, u64, V> {
-    /// Bounded page after an exclusive `u64` cursor: at most `limit` live rows
-    /// in key order plus whether more remain. Uses a single
-    /// `scan_prefix_from_bounded` seek (`limit + 1` rows) so each page bounds
-    /// storage reads (no head collection, no tail read) and allocations
-    /// (at most `limit + 1` decoded rows). Linearizable seek; snapshot
-    /// isolation per read; idempotent callers retry from the returned cursor.
-    /// Read-only fast path: reconcile pages run on `begin_read` with an empty
-    /// overlay, so no BTreeMap materializes the whole table before
-    /// offset/limit. Returns `(rows, more)` where `more` means another page
-    /// exists after the last returned key.
     pub(crate) fn page_after(
         &self,
         after: Option<u64>,
         limit: usize,
     ) -> Result<(Vec<GuardPair<u64, V>>, bool), LedgerError> {
-        // Exclusive start as the least full key above `after`, per the store
-        // contract (`k` followed by one zero byte). `None` starts at the table
-        // prefix (first row). No lock is held across storage I/O: the scan is
-        // one bounded engine seek.
         let mut start = self.prefix.clone();
         if let Some(cursor) = after {
             start.extend_from_slice(&cursor.encode());
             start.push(0x00);
         }
-        // `limit + 1` detects `more` without a second seek. Finite per-row
-        // bound for `U64Unit`/`U64Bytes` (key 8 bytes + tiny value + overhead,
-        // `128` covers both): `max_bytes` stays `O(limit)`, never
-        // `usize::MAX`, so engine-side allocation is bounded too. Each row's
-        // codec already bounds its own size, so total allocations stay bounded
-        // by `limit + 1` rows. `saturating_add`/`saturating_mul` keep
-        // `usize::MAX` from wrapping.
         let want = limit.saturating_add(1);
         let max_bytes = want.saturating_mul(128);
         let scan = self.snapshot.scan_prefix_from_bounded(
@@ -511,18 +471,11 @@ impl<V: Value> Table<'_, u64, V> {
             },
         )?;
         let complete = scan.complete;
-        // `more` comes from the engine (`!complete`), not just length: with
-        // `limit = 0`, `want = 1` returns one row when any exists, so length
-        // alone would still report `more`, but `!complete` is exact when the
-        // engine withholds by either bound. Combine both: withheld or an extra
-        // row beyond `limit` means another page exists.
         let mut rows: Vec<GuardPair<u64, V>> = Vec::new();
         for (full_key, value) in scan.rows.into_iter() {
             if !full_key.starts_with(&self.prefix) {
                 break;
             }
-            // Read-only reconcile path has no overlay; point-check defensively
-            // without range materialization (still bounded by `want` lookups).
             if !self.changes.borrow().is_empty()
                 && let Some(staged) = self.changes.borrow().get(&full_key)
             {
@@ -553,12 +506,6 @@ impl<V: Value> Table<'_, u64, V> {
                 break;
             }
         }
-        // `complete == false` means the engine withheld rows by either bound;
-        // `rows.len() > limit` means an extra row beyond this page. Either
-        // implies another page. Truncate to `limit` before returning.
-        // Linearizable page decision; snapshot-isolated read; idempotent retry
-        // from the last key. Bounded per page with backoff on retry, never
-        // unbounded scans.
         let more = !complete || rows.len() > limit;
         if rows.len() > limit {
             rows.truncate(limit);

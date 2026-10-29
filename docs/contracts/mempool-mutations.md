@@ -1,490 +1,67 @@
 # Mempool mutations contract
 
-The single mutation gateway in front of the mempool, the records it emits,
-and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
-`crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
-`RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
-`crates/mempool/src/mutation.rs`; the ZMQ sequence observer
-in `crates/rpc/src/zmq.rs`. The gateway also owns transaction preparation
-and retries (`crates/mempool/src/admission.rs`) and its private orphan/reject
-state (`crates/mempool/src/orphan.rs`).
+The single mutation gateway in front of the mempool, the records it emits, and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` (`crates/mempool/src/gateway.rs`); `MutationResult`/`MutationOutcome`/`RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` (`crates/mempool/src/mutation.rs`); the ZMQ sequence observer (`crates/rpc/src/zmq.rs`). The gateway also owns transaction preparation and retries (`crates/mempool/src/admission.rs`) and its private orphan/reject state (`crates/mempool/src/orphan.rs`).
 
 ## Clauses
-
 ### `MPL-01`: Single mutation gateway ordering invariant
 
-- Every production mempool mutation routes through `MempoolGateway`. No
-  production code outside the gateway takes the mempool write lock; lookups
-  go through `MempoolGateway::read`.
-- Every publishing mutation flows through `commit`, in this exact order:
-  1. take the pool write lock,
-  2. mutate and assign per-change `mempool_sequence` values, then update
-     the gateway's orphan state and mark waiting children ready for parents
-     that remain in the committed pool,
-  3. while still holding the write lock, enqueue a non-empty
-     `MutationEnvelope` on the publish FIFO and elect a drainer if none
-     exists,
-  4. release the write lock and the publish-state lock,
-  5. the elected drainer pops batches one at a time — releasing the
-     publish-state lock before every observer call — and returns the
-     publish state to idle only once the queue is empty.
-- Commits serialize under the write lock and step 3 enqueues under that
-  same ownership, so the queue order is the commit order and the sequence
-  order. An observer never sees a later-committed batch before, or
-  interleaved with, an earlier one.
-- Publication is eventual, not synchronous. A nested or concurrent
-  mutation enqueues and returns while a drainer exists; its callback may
-  run after that call has returned. A slow observer delays later
-  publications, not the caller. It can never roll anything back or reorder
-  the stream. Sequences were assigned in step 2, so a lagging observer
-  still sees a gap-free, ordered stream.
-- The observer receives a `&MutationEnvelope` — the committed
-  `MutationResult` paired with the `AdmissionOrigin` that identifies how
-  the transaction entered the node (`Rpc`, `Esplora`, `Peer`, `Reorg`,
-  `Snapshot`, or `Block`). Snapshot restoration uses ordinary admission and
-  sequence assignment before external observers are attached; it does not
-  replay saved sequences or blanket relay notifications. The existing P2P
-  relay worker separately resumes saved pending initial broadcasts for
-  successfully re-admitted entries.
-  Proof: `snapshot::tests::restores_dependencies_priorities_and_gateway_publication`
-  and `tx_relay::tests::local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries` cover restored
-  publication and the Snapshot origin's relay suppression.
-  The gateway clones one `MutationResult` into the envelope for each
-  committed non-empty batch that has an observer attached, so it can both
-  enqueue publication and return the original result to the caller.
-  Publication of empty results or with an absent observer enqueues nothing,
-  allocates nothing, and spawns no thread. Internal admission-state updates
-  do not depend on an observer being present or making progress.
-- Observers are best-effort mirrors. Observer errors and panics never
-  affect the committed mutation. No gateway lock is held across an
-  observer call, so an observer may re-enter the gateway: a nested call
-  commits, enqueues, and returns immediately, and its publication
-  completes after the in-flight callback. The accepted-mutation mining
-  wake threads the last change's sequence into
-  `MempoolSequenceWake::publish_generation_from`, which invalidates an older
-  membership generation and wakes waiters without a mempool read. The next
-  template read captures membership and fee revisions together. Fee-priority
-  RPC changes pass the pool's committed fee revision to
-  `publish_fee_delta_generation()`.
-  `node` attaches that mining observer at gateway construction and the ZMQ
-  sequence observer as an extra named leg on the gateway's `CompositeObserver`.
-- Whether a leg wants accepted transaction bodies is a registration-time
-  fact (`BodyInterest`): `commit` loads the composite's atomic before
-  taking the pool write lock, so no observer code runs under any gateway
-  lock — neither to answer interest nor, per the clause above, at delivery.
-- Proof: `gateway::tests::concurrent_mutations_publish_in_sequence_order`
-  in `crates/mempool/src/gateway.rs` publishes 1,500 commit cycles from
-  parallel callers and checks the observed stream is gap-free commit order;
-  `gateway::tests::accepted_and_block_inclusion_events_arrive_in_commit_order`
-  checks accepted-then-removed publication order;
-  `gateway::tests::reentrant_observer_mutation_completes_with_callback_sequence_1_2`
-  checks a nested commit enqueues behind the in-flight callback.
+- Every production mempool mutation routes through `MempoolGateway`. No production code outside the gateway takes the mempool write lock; lookups go through `MempoolGateway::read`.
+- Every publishing mutation flows through `commit`, in this exact order: (1) take the pool write lock, (2) mutate and assign per-change `mempool_sequence` values, then update the gateway's orphan state and mark waiting children ready for parents that remain in the committed pool, (3) while still holding the write lock, enqueue a non-empty `MutationEnvelope` on the publish FIFO and elect a drainer if none exists, (4) release the write lock and the publish-state lock, (5) the elected drainer pops batches one at a time, releasing the publish-state lock before every observer call, and returns the publish state to idle only once the queue is empty.
+- Commits serialize under the write lock and step 3 enqueues under that same ownership, so the queue order is the commit order and the sequence order. An observer never sees a later-committed batch before, or interleaved with, an earlier one.
+- Publication is eventual, not synchronous. A nested or concurrent mutation enqueues and returns while a drainer exists; its callback may run after that call has returned. A slow observer delays later publications, not the caller. It can never roll anything back or reorder the stream. Sequences were assigned in step 2, so a lagging observer still sees a gap-free, ordered stream.
+- The observer receives a `&MutationEnvelope`: the committed `MutationResult` paired with the `AdmissionOrigin` (`Rpc`, `Esplora`, `Peer`, `Reorg`, `Snapshot`, or `Block`) identifying how the transaction entered the node. Snapshot restoration uses ordinary admission and sequence assignment before external observers are attached; it does not replay saved sequences or blanket relay notifications. The existing P2P relay worker separately resumes saved pending initial broadcasts for successfully re-admitted entries (proof: `snapshot::tests::restores_dependencies_priorities_and_gateway_publication`, `tx_relay::tests::local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries`). The gateway clones one `MutationResult` into the envelope for each committed non-empty batch with an attached observer, so it can both enqueue publication and return the original result. Publication of empty results or with an absent observer enqueues nothing, allocates nothing, and spawns no thread. Internal admission-state updates do not depend on an observer being present or making progress.
+- Observers are best-effort mirrors. Observer errors and panics never affect the committed mutation. No gateway lock is held across an observer call, so an observer may re-enter the gateway: a nested call commits, enqueues, and returns immediately, and its publication completes after the in-flight callback. The accepted-mutation mining wake threads the last change's sequence into `MempoolSequenceWake::publish_generation_from`, which invalidates an older membership generation and wakes waiters without a mempool read; the next template read captures membership and fee revisions together. Fee-priority RPC changes pass the pool's committed fee revision to `publish_fee_delta_generation()`. `node` attaches that mining observer at gateway construction and the ZMQ sequence observer as an extra named leg on the gateway's `CompositeObserver`.
+- Whether a leg wants accepted transaction bodies is a registration-time fact (`BodyInterest`): `commit` loads the composite's atomic before taking the pool write lock, so no observer code runs under any gateway lock, neither to answer interest nor at delivery.
+- Proof: `gateway::tests::concurrent_mutations_publish_in_sequence_order` (1,500 commit cycles from parallel callers; observed stream is gap-free commit order), `gateway::tests::accepted_and_block_inclusion_events_arrive_in_commit_order`, `gateway::tests::reentrant_observer_mutation_completes_with_callback_sequence_1_2`, all in `crates/mempool/src/gateway.rs`.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 
-- Every mutating `Mempool` method returns `MutationResult`: an ordered
-  `Vec<MutationChange>`, one change per affected transaction, in commit
-  order. Each change carries the txid and a `MutationOutcome`:
-  `Accepted`, or `Removed(RemovalReason)`.
-- `RemovalReason` is one of `BlockInclusion`, `Conflict`, `Replaced`,
-  `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
-- `RemovalReason::Expiry` records transactions whose insertion timestamp is
-  strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`),
-  removed along with their descendants. Normal submission plans capacity
-  against the post-expiry pool, then commits acceptance before expiry and
-  remaining capacity removals in the same writer interval and ordered batch.
-  Package insertion remains all-or-nothing, runs expiry after member inserts
-  using the max member entry time cutoff rather than wall-clock `now`, and
-  never capacity-evicts residents. Expiry also runs during reorg trim; preview operations
-  never expire entries. If expiry removes an admitted member, admission
-  returns a mempool-full error.
-- `Mempool::sequence_number` advances exactly once per emitted change while
-  the write lock is held. A failed insert, a no-op removal, and a clear of
-  an empty pool assign nothing.
-- Sequence assignment and in-batch lookup are modulo 2^64: assignment
-  wraps at `u64::MAX -> 0`, a non-empty batch reconstructs its
-  `sequence_base` from the advanced counter modulo 2^64, and
-  `MutationResult::sequence_of` returns the wrapped value for any
-  in-range index. A sequence of `0` is a valid committed value; only an
-  empty `MutationResult` carries no sequence.
-- Proof: `gateway::tests::sequence_base_matches_per_change_assignment`
-  in `crates/mempool/src/gateway.rs` checks the reconstructed base against
-  per-change assignment;
-  `gateway::tests::failed_insert_and_noop_remove_publish_nothing` checks a
-  failed insert and a no-op removal assign nothing and publish nothing.
-  The expiry/capacity ordering is covered by
-  `admission::tests::committed_admission_publishes_acceptance_before_expiry_atomically`,
-  `admission::tests::child_of_a_stale_parent_expires_with_it_and_is_refused_as_full`
-  in `crates/mempool/src/admission.rs`, and
-  `package::tests::native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope`
-  in `crates/mempool/src/package/tests.rs`.
+- Every mutating `Mempool` method returns `MutationResult`: an ordered `Vec<MutationChange>`, one change per affected transaction, in commit order. Each change carries the txid and a `MutationOutcome`: `Accepted`, or `Removed(RemovalReason)`.
+- `RemovalReason` is one of `BlockInclusion`, `Conflict`, `Replaced`, `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
+- `RemovalReason::Expiry` records transactions whose insertion timestamp is strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`), removed along with their descendants. Normal submission plans capacity against the post-expiry pool, then commits acceptance before expiry and remaining capacity removals in the same writer interval and ordered batch. Package insertion is all-or-nothing, runs expiry after member inserts using the max member entry time cutoff rather than wall-clock `now`, and never capacity-evicts residents. Expiry also runs during reorg trim; preview operations never expire entries. If expiry removes an admitted member, admission returns a mempool-full error.
+- `Mempool::sequence_number` advances exactly once per emitted change while the write lock is held. A failed insert, a no-op removal, and a clear of an empty pool assign nothing.
+- Sequence assignment and in-batch lookup are modulo 2^64: assignment wraps at `u64::MAX -> 0`, a non-empty batch reconstructs its `sequence_base` from the advanced counter modulo 2^64, and `MutationResult::sequence_of` returns the wrapped value for any in-range index. A sequence of `0` is a valid committed value; only an empty `MutationResult` carries no sequence.
+- Proof: `gateway::tests::sequence_base_matches_per_change_assignment`, `gateway::tests::failed_insert_and_noop_remove_publish_nothing` (both in `crates/mempool/src/gateway.rs`); `admission::tests::committed_admission_publishes_acceptance_before_expiry_atomically` and `admission::tests::child_of_a_stale_parent_expires_with_it_and_is_refused_as_full` (both in `crates/mempool/src/admission.rs`); `package::tests::native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope` (in `crates/mempool/src/package/tests.rs`).
 
 ### `MPL-03`: ZeroMQ sequence event payload mapping
 
-- `SequenceEvent::Added(Txid, seq)` publishes label `A` (`0x41`);
-  `SequenceEvent::Removed(Txid, seq)` publishes label `R` (`0x52`).
-- Body frame for `A`/`R`: reversed txid (32 bytes) + label byte (1) +
-  mempool sequence as little-endian u64 (8) = 41 bytes. The transport's own
-  4-byte counter stays in its separate trailing frame.
-- `BlockInclusion` emits no `R`: the block `C` event covers it. Every other
-  removal reason emits `R`. Accepted changes emit `A`. One event per change,
-  in commit order.
+- `SequenceEvent::Added(Txid, seq)` publishes label `A` (`0x41`); `SequenceEvent::Removed(Txid, seq)` publishes label `R` (`0x52`). Body frame for `A`/`R`: reversed txid (32 bytes) plus label byte (1) plus mempool sequence as little-endian u64 (8), 41 bytes total. The transport's own 4-byte counter stays in its separate trailing frame.
+- `BlockInclusion` emits no `R`: the block `C` event covers it. Every other removal reason emits `R`. Accepted changes emit `A`. One event per change, in commit order.
 
 ### `MPL-04`: Generation-validated admission and chain-change fencing
 
-- `MempoolGateway` carries a `chain_generation` atomic counter. Even values
-  mean the chain is stable and admission is open; odd values mean a chain
-  change (connect, disconnect, reorg, or snapshot activation) is in progress and admission is
-  closed. `stable_generation()` returns `Some(even)` when stable, `None`
-  when a chain change is active.
-- `begin_chain_change` takes the pool write lock, stores the next odd value,
-  and returns a `ChainChangeGuard` that owns the reservation. The guard has
-  no `Drop` that changes generation: dropping or unwinding without an
-  explicit `finish` leaves the generation odd — admission stays closed.
-  Only `finish` may compare-exchange the odd value to the reserved even value,
-  reopening admission. One guard covers one externally coherent chain operation.
-- Snapshot activation requires empty membership under the node-owned generation
-  fence. A populated pool is refused and the fence is settled without removing
-  transactions or operator fee deltas. Successful activation retains the existing
-  pool, prioritisation overlays (including absent txids), fee history, and orphans.
-  The gateway's `snapshot_changed` event invalidates chain-bound reject entries
-  and marks each resident witness identity ready once. Existing orphan residency
-  limits bound that pass, and the existing ready-identity set coalesces pending
-  work. No retry claim is consumed while the generation is odd; after settlement,
-  the normal retry driver checks the current coins, policy and announcer before
-  admission. Still-missing entries remain held without self-rescheduling. This
-  snapshot-wide wakeup is native policy;
-  [Core 31.1's tip notification](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/node/txdownloadman_impl.cpp#L92-L109)
-  only resets rejection filters. Activation emits no fabricated transaction removals. Neither
-  snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
-- The reorg owner settles both sync branch switches and RPC invalidation.
-  A clean refusal finishes at the fully committed disconnect/connect prefix,
-  after reconsidering its disconnected transactions under the odd generation.
-  Read-only planning or body-loading refusals also leave admission usable.
-  `ConnectFailed` caused by `ApplyError::UtxoCommit`, fatal disconnects and
-  stuck markers retain the odd generation; reorg must not reconsider
-  transactions or checkpoint possibly torn state. A failed `finish` is a
-  fatal invariant failure: retain the execution cause, close apply admission
-  and request shutdown rather than report success or retry the chain walk.
-- `submit_transaction` owns common preparation and four bounded attempts for
-  RPC and peer submissions. `submit_local_transaction` runs it for RPC,
-  Esplora and embedded broadcasts, answering current membership as success
-  with no changes; it takes a `LocalOrigin`, so peer, reorg and block
-  origins cannot reach it. `preview_transactions` uses the same policy and
-  script evaluator, with the same retry bound. Each attempt captures an even
-  chain generation and pool sequence before reading chain facts. Preparation
-  copies the input outputs under a pool read, then executes scripts without
-  any pool or lifecycle lock. `check_admission_state` is the one writer-side
-  validator: under its own lock the writer checks the fence's generation, the
-  captured membership sequence, and, where the attempt captured one, the
-  `PolicyStamp` that carries the enforced policy snapshot, all
-  `MempoolLimits`, and the fee-delta sequence. No other function compares
-  those admission tokens. The writer then checks the resident orphan claim
-  and duplicate identity, before using that verdict.
-  Policy values are compared directly because limits can change without a
-  membership sequence change; there is no second policy owner or shadow counter.
-  Stale approvals and stale rejections both retry with newly resolved facts.
-- Preview rechecks generation, sequence and policy before returning all rows.
-  It changes no membership, mutation sequence, fee-estimator history, orphan
-  or reject state, or observer output. It preserves the documented independent
-  row package behavior and earlier-offered output lookup; it is not atomic
-  package admission. RPC supplies maximum fee and renders the returned facts.
-  The maximum applies only after an admission-valid script result, matching
-  Core v31.1's `BroadcastTransaction` and `testmempoolaccept` ordering.
-- RPC duplicate submission remains an idempotent success, while preview
-  reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject
-  state. The writer validates every captured token before either transition.
-- Native package submission shares preview's batch input resolution and the
-  gateway's policy/script evaluator. A bounded child-with-independent-parents
-  package is ordered by the owner; duplicates and internal conflicts refuse.
-  Resident members and members positively confirmed by live-coin evidence are
-  excluded; only new members contribute to aggregate modified fees and pressure/relay
-  charges. A captured insertion plan preflights capacity and member inserts;
-  graph/TRUC/ephemeral-spend and script checks finish before the writer. The
-  single and package paths share structural entry validation and metadata
-  preparation; the native package checks cluster bounds on its combined graph
-  rather than repeating per-entry cluster checks. One captured entry vector feeds
-  both graph checks and the insertion plan. Native fee refusal uses
-  `MinRelayFeeNotMet`, pool failures retain `MempoolError`, and stale insertion
-  plans remain retryable rather than becoming replacement-policy refusals. The
-  writer revalidates the same generation, sequence and policy stamp, then
-  installs all members through the ordinary insertion funnel without registering
-  package members as fee-estimation samples, and publishes one ordered envelope.
-  Submission preserves the prepared consensus or policy error class; preview
-  keeps its existing rejection facts. Refusal changes no membership, sequence,
-  fee overlay, estimator or observer output. Four attempts bound stale facts.
-  It does not implement package RBF. RPC `submitpackage` uses this same atomic
-  owner for singletons and 1p1c, preserving independently accepted members
-  before reconsidering a fee-dependent pair. It captures resident/modified-fee
-  response facts under the same stamp and applies the RPC modified-feerate cap
-  before scripts; preview and native caller-cap semantics are unchanged.
-- Proof: `gateway::tests::chain_generation_starts_even_at_zero`,
-  `gateway::tests::explicit_finish_restores_even_generation`, and
-  `gateway::tests::chain_generation_overflow_fails_closed` in
-  `crates/mempool/src/gateway.rs` pin the even/odd/finish lifecycle;
-  `gateway::tests::stale_generation_rejects_without_mutation_or_publication`
-  and `gateway::tests::stale_mempool_sequence_rejects_without_mutation_or_publication`
-  check fenced submissions change nothing and publish nothing.
-- Proof: `package::tests::native_package_aggregates_cpfp_atomically_and_ignores_input_order`
-  in `crates/mempool/src/package/tests.rs` checks successful CPFP admission,
-  ordered publication and unchanged estimator history;
-  `package::tests::native_package_consensus_failures_match_single_submission`
-  checks script and overspend error parity for single and multi-member native
-  packages, unchanged preview facts and refusal without mutation.
-- Proof: `package::tests::rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview`,
-  `package::tests::rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice`,
-  and `package::tests::rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state`
-  in `crates/mempool/src/package/tests.rs` cover RPC package admission,
-  resident fee exclusion, and refusal without mutation.
-- Chain facts come through `AdmissionChain` as provisional inputs for a
-  submission attempt. The shared borrowed `ChainAdmissionView` in
-  `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
-  using one captured applied tip for height and MTP. It takes no additional
-  chain-transition lock: a stable reader holding that mutex must not spend
-  admission's retry budget. Authoritative chain changes are bracketed by
-  the gateway's generation fence; exact generation and pool-sequence
-  revalidation discards facts read across a change before they can determine
-  admission or peer lifecycle results. RPC and node's peer ingress use that
-  same view, with no gateway ownership, shadow version, or copied chain-state
-  model. A provider may return no snapshot to request a transient retry.
-  Peer/native package duplicate suppression uses positive live-coin evidence from
-  `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation
-  status unknown. RPC transaction-body cache membership supplies no such
-  evidence.
-- A resident orphan is identified by its witness transaction hash, as
-  [Core 31.1's orphanage](https://github.com/bitcoin/bitcoin/blob/v31.1/src/node/txorphanage.cpp)
-  does: one body per wtxid, plus the set of exact connection tokens that
-  announced it. A txid collision does not imply body identity, so two
-  witnesses of one txid reside together and each is retried on its own.
-- Peer orphan/reject transitions validate the same tokens before changing
-  state, under pool-then-lifecycle lock order. An accepted parent cannot
-  commit between the missing-input verdict and registration of its child.
-  The gateway stores orphan bodies, their announcer sets, parent indexes,
-  and ready claims as one ownership unit. Retention is bounded by both
-  count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA`
-  and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`; the resident weight counts
-  each wtxid once. Insertions, added announcers, and removals update it. When a
-  global bound is over, the pool drops one announcement of the peer with the
-  largest score, where the score is the largest share that peer takes of its
-  own announcement-count, announcement-weight, and latency allowance
-  (`DEFAULT_PEER_ANNOUNCEMENTS`, `DEFAULT_PEER_ANNOUNCEMENT_WEIGHT`,
-  `DEFAULT_PEER_LATENCY`), and a newer connection token wins an exact tie. A
-  peer's oldest announcement goes first, and work that is not ready for
-  reconsideration goes before work that is. A body leaves only with its last
-  announcer, so one peer cannot evict another peer's reserved usage and a peer
-  within its allowance is trimmed only after every peer over its own.
-  Announcing an existing body again keeps its FIFO position and first-seen
-  timestamp. The ingress poll applies the mempool-owned two-minute expiry and
-  drops announcements whose exact connection token is no longer live; a
-  same-address reconnect cannot inherit the old allocation, and a body with
-  another live announcer stays resident. These private defaults and indexes
-  have one owner; RPC missing-input rejections do not populate peer orphan
-  state. An out-of-range output index on a resident mempool parent is rejected
-  under the same token and retry-claim checks, rather than retained as an
-  orphan awaiting an impossible parent.
-- Orphan retention excludes null outpoints: a zero transaction hash with
-  output index `u32::MAX`, matching
-  [Core 31.1's `COutPoint::IsNull`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/primitives/transaction.h).
-  Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null.
-  Such unresolved inputs follow ordinary missing-parent requests and parent
-  indexing instead of being silently omitted from retry tracking.
-- For standard transactions, the gateway runs the consensus-owned
-  `verify_transaction_input_outpoints` check before missing-input policy can
-  retain a peer body. Duplicate inputs
-  and null outpoints in non-coinbase transactions reject as `Consensus` and
-  use transaction-scoped caching even when witness data is present or coins
-  are missing. Parent arrival or a different witness cannot repair these
-  failures. State and resident-claim guards still precede classification;
-  RPC failures do not populate peer caches. Standardness bounds the input
-  scan; nonstandard and oversized transactions keep their existing policy
-  verdicts without allocating its input set. Coinbase policy remains separate.
-- Recent rejects use one bounded FIFO with an identity scope for each hash.
-  Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
-  refusals additionally suppress the txid. Legacy inventory does not consult
-  witness-only refusals, including when a stripped body's wtxid equals its
-  txid. A witness-scoped refusal removes only the resident body with that
-  wtxid, preserving another witness of the same txid and its announcers; a
-  transaction-scoped refusal removes every resident variant of that txid.
-  Invalid output indexes on known mempool parents are transaction-scoped. This distinction
-  prevents a rejected witness from blocking another valid witness for the
-  same transaction, as described by
-  [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
-- The reconstruction extra pool is hint-only state owned by `MempoolGateway`.
-  It holds at most 100 wtxid-keyed bodies in FIFO order. A duplicate wtxid
-  insert is a no-op. A coinbase is refused. Only three classes fill it:
-  transactions removed as `Replaced` or `Descendant`, peer orphan-held
-  bodies, and peer policy-only rejects. Replaced bodies are captured before
-  the pool commit and inserted under the pool write lock after it succeeds.
-  Policy rejects must be strictly below 100 000 serialized bytes. Consensus
-  rejects never fill it. `MissingInputs` on null or invalid-outpoint bodies
-  is excluded. Policy evictions, block inclusions, reorg sweeps, and package
-  submissions never fill it. Orphan and policy-reject fills are peer-origin
-  only. Replacements fill from any origin. Entries are never admitted or
-  relayed by being retained: `get_tx`, `get_tx_by_wtxid`, `have_tx`, and the
-  `TxInventory` implementation are unchanged.
-- Compact reconstruction reads the pool then the ring through
-  `for_each_reconstruction_identity`, `reconstruction_tx_by_txid`, and
-  `reconstruction_tx_by_wtxid`. The `CompactBlockHints` trait is unchanged;
-  its `MempoolGateway` implementation delegates to them. Lock order is pool
-  then lifecycle then ring. The ring is a leaf mutex. Nothing is acquired
-  under it except the walk callback, which must not re-enter the gateway.
-  Body lookups never take the orphan lock. The walk skips ring identities
-  already resident in the pool. Version 1 matches by txid and version 2 by
-  wtxid. Two witness variants of one txid stay distinct. One identity present
-  in both pool and ring is a single claim, not a collision.
-- `retry_orphans` claims one bounded ready set only while generation is
-  stable. Each claim carries the body and the one announcer selected for it,
-  and the retry submits as that peer; it never infers a peer from the resident
-  body. Claimed bodies remain resident; transient retry exhaustion marks the
-  same wtxid ready again with a currently resident announcer, without changing
-  the body or its first-seen time, and without immediately consuming the same
-  work again. A claim whose body was removed is discarded. Ready claims are
-  deduplicated per wtxid and retire with their resident entry. Parent
-  readiness is internal commit work, not a best-effort mutation observer or an
-  ingress-channel delivery.
-- Node calls `chain_changed` after each committed connect/disconnect and
-  before releasing the `ChainTransition`, including changes with no mempool
-  mutation. It clears recent rejects and marks children of newly available
-  parents ready. Generation remains odd until the transition finishes, so
-  that notification cannot prematurely consume the ready work.
-- `reconsider_disconnected` re-admits transactions displaced by a reorg
-  through the shared submission evaluator — the same finality, BIP68,
-  coinbase-maturity and script checks an ingress submission gets — while
-  the node holds the `ChainChangeGuard` fence. Requests prepared
-  under the guard's reserved odd generation commit exactly where ordinary
-  submissions commit under the stable even value. The odd fence is derived
-  from the gateway's own `ChainChangeGuard`, never from a caller-supplied
-  generation token: a request carrying the active odd value under the
-  stable fence is refused, and a guard issued by a different gateway
-  admits nothing and sweeps nothing. Candidates arrive
-  parents before children; a refused candidate, and any later candidate
-  spending it or spending a txid an earlier commit removed, is withheld so
-  a refused parent never leaves a partial family. Commits publish with
-  `AdmissionOrigin::Reorg` and do not register with the fee estimator,
-  matching Core's `validForFeeEstimation=false` re-acceptance. Each
-  re-admission runs with `LimitEnforcement::Deferred`, the equivalent of
-  Core passing `bypassLimits=true` to `AcceptToMemoryPool` from the same
-  call: the mempool fee floor and the per-acceptance size trim do not
-  apply to it. Consensus and script verification, duplicate and
-  evicted-parent rejection, ancestry accounting, the replacement fee
-  rules, the BIP431/TRUC topology gates, the ephemeral-spend rule, and
-  the projected cluster limits still apply — Core's `bypassLimits` path
-  never skips `CalculateMemPoolAncestors`. After `remove_for_reorg`,
-  reorg trim invokes expiry before any early return; the settled
-  pool is trimmed once with `enforce_size_limit(AdmissionOrigin::Reorg,
-  max_total_bytes)`; that is the only size trim one reorg performs, and
-  it runs last so the walk cannot shed a parent before its child lands.
-  Node
-  streams disconnected bodies oldest-first and bounds the candidate set
-  at 20,000,000 serialized bytes (Core's
-  `MAX_DISCONNECTED_TX_POOL_BYTES`); once the cap is hit the newest
-  descendants are the ones dropped, and they later fail admission as
-  missing inputs — the defined overload outcome.
-- `remove_for_reorg` sweeps resident entries the current chain no longer
-  supports while the same guard is held: an input that is neither a live
-  coin nor a resident parent, an immature coinbase input, or
-  locktime/BIP68 no longer final at the next block. Each failure removes
-  the entry and its descendants as `Removed(Reorg)` in commit order; the
-  commit re-checks the exact odd generation so a moved fence removes
-  nothing.
+- `MempoolGateway` carries a `chain_generation` atomic counter. Even values mean the chain is stable and admission is open; odd values mean a chain change (connect, disconnect, reorg, or snapshot activation) is in progress and admission is closed. `stable_generation()` returns `Some(even)` when stable, `None` when a chain change is active.
+- `begin_chain_change` takes the pool write lock, stores the next odd value, and returns a `ChainChangeGuard` owning the reservation. The guard has no `Drop` that changes generation: dropping or unwinding without an explicit `finish` leaves the generation odd, so admission stays closed. Only `finish` may compare-exchange the odd value to the reserved even value, reopening admission. One guard covers one externally coherent chain operation.
+- Snapshot activation requires empty membership under the node-owned generation fence. A populated pool is refused and the fence is settled without removing transactions or operator fee deltas. Successful activation retains the existing pool, prioritisation overlays (including absent txids), fee history, and orphans. The gateway's `snapshot_changed` event invalidates chain-bound reject entries and marks each resident witness identity ready once. Existing orphan residency limits bound that pass, and the existing ready-identity set coalesces pending work. No retry claim is consumed while the generation is odd; after settlement, the normal retry driver checks the current coins, policy and announcer before admission. Still-missing entries remain held without self-rescheduling. This snapshot-wide wakeup is native policy (Core 31.1's tip notification only resets rejection filters). Activation emits no fabricated transaction removals. Neither snapshot activation nor ordinary reconnect/reorg recovery uses a wholesale reset.
+- The reorg owner settles both sync branch switches and RPC invalidation. A clean refusal finishes at the fully committed disconnect/connect prefix, after reconsidering its disconnected transactions under the odd generation. Read-only planning or body-loading refusals also leave admission usable. `ConnectFailed` caused by `ApplyError::UtxoCommit`, fatal disconnects and stuck markers retain the odd generation; reorg MUST NOT reconsider transactions or checkpoint possibly torn state. A failed `finish` is a fatal invariant failure: retain the execution cause, close apply admission and request shutdown rather than report success or retry the chain walk.
+- `submit_transaction` owns common preparation and four bounded attempts for RPC and peer submissions. `submit_local_transaction` runs it for RPC, Esplora and embedded broadcasts, answering current membership as success with no changes; it takes a `LocalOrigin`, so peer, reorg and block origins cannot reach it. `preview_transactions` uses the same policy and script evaluator, with the same retry bound. Each attempt captures an even chain generation and pool sequence before reading chain facts. Preparation copies the input outputs under a pool read, then executes scripts without any pool or lifecycle lock. `check_admission_state` is the one writer-side validator: under its own lock the writer checks the fence's generation, the captured membership sequence, and, where the attempt captured one, the `PolicyStamp` carrying the enforced policy snapshot, all `MempoolLimits`, and the fee-delta sequence. No other function compares those admission tokens. The writer then checks the resident orphan claim and duplicate identity, before using that verdict. Policy values are compared directly because limits can change without a membership sequence change; there is no second policy owner or shadow counter. Stale approvals and stale rejections both retry with newly resolved facts.
+- Preview rechecks generation, sequence and policy before returning rows. It changes no membership, mutation sequence, fee-estimator history, orphan or reject state, or observer output. It preserves the documented independent row package behavior and earlier-offered output lookup; it is not atomic package admission. RPC supplies maximum fee and renders the returned facts. The maximum applies only after an admission-valid script result, matching Core v31.1's `BroadcastTransaction` and `testmempoolaccept` ordering.
+- RPC duplicate submission remains an idempotent success, while preview reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject state. The writer validates every captured token before either transition.
+- Native package submission shares preview's batch input resolution and the gateway's policy/script evaluator. A bounded child-with-independent-parents package is ordered by the owner; duplicates and internal conflicts refuse. Resident members and members positively confirmed by live-coin evidence are excluded; only new members contribute to aggregate modified fees and pressure/relay charges. A captured insertion plan preflights capacity and member inserts; graph/TRUC/ephemeral-spend and script checks finish before the writer. The single and package paths share structural entry validation and metadata preparation; the native package checks cluster bounds on its combined graph rather than repeating per-entry cluster checks. One captured entry vector feeds both graph checks and the insertion plan. Native fee refusal uses `MinRelayFeeNotMet`, pool failures retain `MempoolError`, and stale insertion plans remain retryable rather than becoming replacement-policy refusals. The writer revalidates the same generation, sequence and policy stamp, then installs all members through the ordinary insertion funnel without registering package members as fee-estimation samples, and publishes one ordered envelope. Submission preserves the prepared consensus or policy error class; preview keeps its existing rejection facts. Refusal changes no membership, sequence, fee overlay, estimator or observer output. Four attempts bound stale facts. It does not implement package RBF. RPC `submitpackage` uses this same atomic owner for singletons and 1p1c, preserving independently accepted members before reconsidering a fee-dependent pair. It captures resident/modified-fee response facts under the same stamp and applies the RPC modified-feerate cap before scripts; preview and native caller-cap semantics are unchanged.
+- Proof: `gateway::tests::chain_generation_starts_even_at_zero`, `gateway::tests::explicit_finish_restores_even_generation`, `gateway::tests::chain_generation_overflow_fails_closed`, `gateway::tests::stale_generation_rejects_without_mutation_or_publication`, `gateway::tests::stale_mempool_sequence_rejects_without_mutation_or_publication` (all in `crates/mempool/src/gateway.rs`); `package::tests::native_package_aggregates_cpfp_atomically_and_ignores_input_order`, `package::tests::native_package_consensus_failures_match_single_submission`, `package::tests::rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview`, `package::tests::rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice`, `package::tests::rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state` (all in `crates/mempool/src/package/tests.rs`).
+- Chain facts come through `AdmissionChain` as provisional inputs for a submission attempt. The shared borrowed `ChainAdmissionView` in `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles, using one captured applied tip for height and MTP. It takes no additional chain-transition lock: a stable reader holding that mutex MUST NOT spend admission's retry budget. Authoritative chain changes are bracketed by the gateway's generation fence; exact generation and pool-sequence revalidation discards facts read across a change before they can determine admission or peer lifecycle results. RPC and node's peer ingress use that same view, with no gateway ownership, shadow version, or copied chain-state model. A provider may return no snapshot to request a transient retry. Peer/native package duplicate suppression uses positive live-coin evidence from `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation status unknown. RPC transaction-body cache membership supplies no such evidence.
+- A resident orphan is identified by its witness transaction hash, as Core 31.1's orphanage does: one body per wtxid, plus the set of exact connection tokens that announced it. A txid collision does not imply body identity, so two witnesses of one txid reside together and each is retried on its own.
+- Peer orphan/reject transitions validate the same tokens before changing state, under pool-then-lifecycle lock order. An accepted parent cannot commit between the missing-input verdict and registration of its child. The gateway stores orphan bodies, their announcer sets, parent indexes, and ready claims as one ownership unit. Retention is bounded by both count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA` and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`; the resident weight counts each wtxid once. Insertions, added announcers, and removals update it. When a global bound is over, the pool drops one announcement of the peer with the largest score, where the score is the largest share that peer takes of its own announcement-count, announcement-weight, and latency allowance (`DEFAULT_PEER_ANNOUNCEMENTS`, `DEFAULT_PEER_ANNOUNCEMENT_WEIGHT`, `DEFAULT_PEER_LATENCY`), and a newer connection token wins an exact tie. A peer's oldest announcement goes first, and work that is not ready for reconsideration goes before work that is. A body leaves only with its last announcer, so one peer cannot evict another peer's reserved usage and a peer within its allowance is trimmed only after every peer over its own. Announcing an existing body again keeps its FIFO position and first-seen timestamp. The ingress poll applies the mempool-owned two-minute expiry and drops announcements whose exact connection token is no longer live; a same-address reconnect cannot inherit the old allocation, and a body with another live announcer stays resident. These private defaults and indexes have one owner; RPC missing-input rejections do not populate peer orphan state. An out-of-range output index on a resident mempool parent is rejected under the same token and retry-claim checks, rather than retained as an orphan awaiting an impossible parent.
+- Orphan retention excludes null outpoints: a zero transaction hash with output index `u32::MAX`, matching Core 31.1's `COutPoint::IsNull`. Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null. Such unresolved inputs follow ordinary missing-parent requests and parent indexing instead of being silently omitted from retry tracking.
+- For standard transactions, the gateway runs the consensus-owned `verify_transaction_input_outpoints` check before missing-input policy can retain a peer body. Duplicate inputs and null outpoints in non-coinbase transactions reject as `Consensus` and use transaction-scoped caching even when witness data is present or coins are missing. Parent arrival or a different witness cannot repair these failures. State and resident-claim guards still precede classification; RPC failures do not populate peer caches. Standardness bounds the input scan; nonstandard and oversized transactions keep their existing policy verdicts without allocating its input set. Coinbase policy remains separate.
+- Recent rejects use one bounded FIFO with an identity scope for each hash. Witness-scoped refusals suppress only the checked wtxid; transaction-scoped refusals additionally suppress the txid. Legacy inventory does not consult witness-only refusals, including when a stripped body's wtxid equals its txid. A witness-scoped refusal removes only the resident body with that wtxid, preserving another witness of the same txid and its announcers; a transaction-scoped refusal removes every resident variant of that txid. Invalid output indexes on known mempool parents are transaction-scoped. This distinction prevents a rejected witness from blocking another valid witness for the same transaction, as described by BIP339.
+- The reconstruction extra pool is hint-only state owned by `MempoolGateway`. It holds at most 100 wtxid-keyed bodies in FIFO order. A duplicate wtxid insert is a no-op. A coinbase is refused. Only three classes fill it: transactions removed as `Replaced` or `Descendant`, peer orphan-held bodies, and peer policy-only rejects. Replaced bodies are captured before the pool commit and inserted under the pool write lock after it succeeds. Policy rejects MUST be strictly below 100,000 serialized bytes. Consensus rejects never fill it. `MissingInputs` on null or invalid-outpoint bodies is excluded. Policy evictions, block inclusions, reorg sweeps, and package submissions never fill it. Orphan and policy-reject fills are peer-origin only. Replacements fill from any origin. Entries are never admitted or relayed by being retained: `get_tx`, `get_tx_by_wtxid`, `have_tx`, and the `TxInventory` implementation are unchanged.
+- Compact reconstruction reads the pool then the ring through `for_each_reconstruction_identity`, `reconstruction_tx_by_txid`, and `reconstruction_tx_by_wtxid`. The `CompactBlockHints` trait is unchanged; its `MempoolGateway` implementation delegates to them. Lock order is pool then lifecycle then ring. The ring is a leaf mutex. Nothing is acquired under it except the walk callback, which MUST NOT re-enter the gateway. Body lookups never take the orphan lock. The walk skips ring identities already resident in the pool. Version 1 matches by txid and version 2 by wtxid. Two witness variants of one txid stay distinct. One identity present in both pool and ring is a single claim, not a collision.
+- `retry_orphans` claims one bounded ready set only while generation is stable. Each claim carries the body and the one announcer selected for it, and the retry submits as that peer; it never infers a peer from the resident body. Claimed bodies remain resident; transient retry exhaustion marks the same wtxid ready again with a currently resident announcer, without changing the body or its first-seen time, and without immediately consuming the same work again. A claim whose body was removed is discarded. Ready claims are deduplicated per wtxid and retire with their resident entry. Parent readiness is internal commit work, not a best-effort mutation observer or an ingress-channel delivery.
+- Node calls `chain_changed` after each committed connect/disconnect and before releasing the `ChainTransition`, including changes with no mempool mutation. It clears recent rejects and marks children of newly available parents ready. Generation remains odd until the transition finishes, so that notification cannot prematurely consume the ready work.
+- `reconsider_disconnected` re-admits transactions displaced by a reorg through the shared submission evaluator (the same finality, BIP68, coinbase-maturity and script checks an ingress submission gets) while the node holds the `ChainChangeGuard` fence. Requests prepared under the guard's reserved odd generation commit exactly where ordinary submissions commit under the stable even value. The odd fence is derived from the gateway's own `ChainChangeGuard`, never from a caller-supplied generation token: a request carrying the active odd value under the stable fence is refused, and a guard issued by a different gateway admits nothing and sweeps nothing. Candidates arrive parents before children; a refused candidate, and any later candidate spending it or spending a txid an earlier commit removed, is withheld so a refused parent never leaves a partial family. Commits publish with `AdmissionOrigin::Reorg` and do not register with the fee estimator, matching Core's `validForFeeEstimation=false` re-acceptance. Each re-admission runs with `LimitEnforcement::Deferred`, the equivalent of Core passing `bypassLimits=true` to `AcceptToMemoryPool` from the same call: the mempool fee floor and the per-acceptance size trim do not apply to it. Consensus and script verification, duplicate and evicted-parent rejection, ancestry accounting, the replacement fee rules, the BIP431/TRUC topology gates, the ephemeral-spend rule, and the projected cluster limits still apply. After `remove_for_reorg`, reorg trim invokes expiry before any early return; the settled pool is trimmed once with `enforce_size_limit(AdmissionOrigin::Reorg, max_total_bytes)`; that is the only size trim one reorg performs, and it runs last so the walk cannot shed a parent before its child lands. Node streams disconnected bodies oldest-first and bounds the candidate set at 20,000,000 serialized bytes (Core's `MAX_DISCONNECTED_TX_POOL_BYTES`); once the cap is hit the newest descendants are the ones dropped, and they later fail admission as missing inputs (the defined overload outcome).
+- `remove_for_reorg` sweeps resident entries the current chain no longer supports while the same guard is held: an input that is neither a live coin nor a resident parent, an immature coinbase input, or locktime/BIP68 no longer final at the next block. Each failure removes the entry and its descendants as `Removed(Reorg)` in commit order; the commit re-checks the exact odd generation so a moved fence removes nothing.
 
 ## Proven by
 
-- `crates/mempool/src/gateway.rs` (inline tests):
-  `input_structure_checks_follow_generation_and_sequence_guards`,
-  `input_structure_nonstandard_transactions_keep_policy_precedence`,
-  `accepted_and_block_inclusion_events_arrive_in_commit_order`,
-  `remove_for_block_publishes_removals_with_origins`,
-  `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent`,
-  `failed_insert_and_noop_remove_publish_nothing`,
-  `replacement_tags_direct_conflicts_and_descendants`,
-  `observer_panic_does_not_roll_back_the_mutation`,
-  `insert_reports_accepted_then_policy_evictions`,
-  `sequence_base_matches_per_change_assignment`,
-  `stable_generation_reads_even_values`,
-  `admit_write_gate_retries_when_the_stamp_moved_after_prepare`.
-- `crates/node/src/sync/tests/reorg_invalidation.rs` and
-  `branch_connect_mempool.rs`: permanent and mutated-body reorg outcomes preserve the
-  committed-prefix and invalidation semantics while the node owns
-  mempool/follower coordination.
-- `crates/chainstate/src/reorg.rs` owns body preflight, bounded mid-rollback
-  body reads, exact disconnect/connect, and typed coherent-vs-recovery
-  outcomes. Node's reorg observer owns mempool reconsideration and generation
-  settlement.
-- `crates/rpc/src/handlers/tx.rs` (inline tests):
-  admission retry rebuilds context after a transient rejection.
-- `crates/mempool/src/admission.rs` (inline tests):
-  `input_structure_duplicate_rejection_is_shared_across_witnesses`,
-  `input_structure_null_rejection_is_shared_across_witnesses`,
-  `input_structure_rpc_rejection_does_not_populate_peer_caches`,
-  `parent_commit_without_observers_retries_orphan_with_original_source`,
-  `chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work`,
-  `exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll`,
-  `parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake`,
-  `rpc_missing_inputs_does_not_create_peer_lifecycle_state`,
-  `coinbase_and_nonstandard_missing_transactions_are_not_held`,
-  `known_parent_invalid_output_is_rejected_without_orphan_retention`,
-  `orphan_retry_removes_known_invalid_outpoint_after_parent_arrival`,
-  `witness_rejection_preserves_valid_variant_and_legacy_inventory`,
-  `fresh_invalid_witness_preserves_a_different_resident_orphan_variant`,
-  `nonexistent_mempool_output_is_rejected_without_holding_or_mutating`,
-  `absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry`,
-  `stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan`,
-  `rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid`,
-  `rejected_stripped_body_does_not_suppress_its_valid_witness_variant`,
-  `zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint`,
-  `orphan_txid_does_not_suppress_txid_inventory_but_wtxid_does`,
-  `same_txid_different_witnesses_both_survive_and_retry_after_parent`,
-  `null_input_in_a_non_coinbase_transaction_is_not_held`,
-  `reconsider_disconnected_admits_parent_then_child_under_the_guard`,
-  `reconsider_disconnected_withholds_descendants_of_a_refused_parent`,
-  `reconsider_disconnected_refuses_a_script_failure`,
-  `reconsider_disconnected_does_not_register_with_the_estimator`,
-  `reconsider_disconnected_admits_below_floor_then_trims_once`,
-  `remove_for_reorg_sweeps_only_unsupported_residents`,
-  `remove_for_reorg_refuses_a_moved_generation`,
-  `reorg_methods_refuse_a_guard_from_another_gateway`,
-  `admission_state_accepts_only_the_current_generation`.
-- `crates/rpc/src/context.rs` (`admission_chain_tests`):
-  `stable_chainstate_reader_does_not_block_transaction_admission`,
-  `unconfirmed_transaction_is_admitted_from_a_peer`,
-  `confirmed_hint_requires_live_chain_outputs`,
-  `admission_chain_uses_current_handles_and_one_applied_tip`.
-- `crates/mempool/src/orphan.rs` (inline tests):
-  `zero_quota_retains_no_body_or_index`,
-  `witness_refresh_keeps_announce_order_and_announcer_set`,
-  `readiness_is_deduplicated_and_removed_with_eviction`,
-  `maintenance_expires_old_bodies_and_cleans_every_index`,
-  `maintenance_uses_exact_connection_identity`,
-  `witness_refresh_does_not_extend_expiry`,
-  `rejects_are_bounded_and_chain_reset_clears_both_indexes`,
-  `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
-  `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
-  `transaction_scoped_rejection_releases_the_resident_variants_weight`,
-  `same_wtxid_keeps_all_announcers_and_disconnect_removes_one`,
-  `eviction_trims_the_highest_peer_score_before_protected_peer`.
-- `crates/node/src/chain_effects.rs` (inline tests):
-  `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
-  `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`:
-  committed chain changes run the mempool chain-change lifecycle even when the
-  pool itself has no removal/insertion.
-- `crates/node/tests/unit/tx_ingress/tests.rs` (unit tests):
-  `retry_poll_evicts_an_orphan_after_its_connection_is_gone`.
-- `crates/rpc/src/zmq.rs`:
-  `admission_publishes_one_a_frame_with_core_payload_bytes`,
-  `policy_eviction_publishes_r_frames_in_commit_order`,
-  `block_inclusion_suppresses_r_frames`,
-  `policy_eviction_publishes_r_frames_with_contiguous_sequences`,
-  `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`,
-  `sequence_event_payload_uses_core_hash_orientation_and_label`.
-- `crates/node/tests/mining.rs`:
-  `publish_generation_from_does_not_take_mempool_lock`,
-  `concurrent_publish_generation_paths_do_not_deadlock`,
-  `long_poll_returns_quickly_on_mempool_sequence_wake`.
-- `crates/node/tests/tx_ingress_e2e.rs`:
-  `accepted_peer_tx_is_admitted_and_relayed_excluding_the_source`,
-  `below_min_relay_tx_is_rejected_recorded_and_never_relayed`
-  (peer tx over a real socket: dispatch filter, admission through the
-  observer-installed gateway, source-excluding relay), and
-  `full_relay_queue_does_not_block_peer_admission_or_mining_wake`
-  (actual ingress and gateway with a saturated relay queue).
+- `crates/mempool/src/gateway.rs` (inline tests): `input_structure_checks_follow_generation_and_sequence_guards`, `input_structure_nonstandard_transactions_keep_policy_precedence`, `accepted_and_block_inclusion_events_arrive_in_commit_order`, `remove_for_block_publishes_removals_with_origins`, `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent`, `failed_insert_and_noop_remove_publish_nothing`, `replacement_tags_direct_conflicts_and_descendants`, `observer_panic_does_not_roll_back_the_mutation`, `insert_reports_accepted_then_policy_evictions`, `sequence_base_matches_per_change_assignment`, `stable_generation_reads_even_values`, `admit_write_gate_retries_when_the_stamp_moved_after_prepare`.
+- `crates/node/src/sync/tests/reorg_invalidation.rs` and `branch_connect_mempool.rs`: permanent and mutated-body reorg outcomes preserve the committed-prefix and invalidation semantics while the node owns mempool/follower coordination. `crates/chainstate/src/reorg.rs` owns body preflight, bounded mid-rollback body reads, exact disconnect/connect, and typed coherent-vs-recovery outcomes. Node's reorg observer owns mempool reconsideration and generation settlement.
+- `crates/rpc/src/handlers/tx.rs` (inline tests): admission retry rebuilds context after a transient rejection.
+- `crates/mempool/src/admission.rs` (inline tests): `input_structure_duplicate_rejection_is_shared_across_witnesses`, `input_structure_null_rejection_is_shared_across_witnesses`, `input_structure_rpc_rejection_does_not_populate_peer_caches`, `parent_commit_without_observers_retries_orphan_with_original_source`, `chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work`, `exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll`, `parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake`, `rpc_missing_inputs_does_not_create_peer_lifecycle_state`, `coinbase_and_nonstandard_missing_transactions_are_not_held`, `known_parent_invalid_output_is_rejected_without_orphan_retention`, `orphan_retry_removes_known_invalid_outpoint_after_parent_arrival`, `witness_rejection_preserves_valid_variant_and_legacy_inventory`, `fresh_invalid_witness_preserves_a_different_resident_orphan_variant`, `nonexistent_mempool_output_is_rejected_without_holding_or_mutating`, `absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry`, `stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan`, `rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid`, `rejected_stripped_body_does_not_suppress_its_valid_witness_variant`, `zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint`, `orphan_txid_does_not_suppress_txid_inventory_but_wtxid_does`, `same_txid_different_witnesses_both_survive_and_retry_after_parent`, `null_input_in_a_non_coinbase_transaction_is_not_held`, `reconsider_disconnected_admits_parent_then_child_under_the_guard`, `reconsider_disconnected_withholds_descendants_of_a_refused_parent`, `reconsider_disconnected_refuses_a_script_failure`, `reconsider_disconnected_does_not_register_with_the_estimator`, `reconsider_disconnected_admits_below_floor_then_trims_once`, `remove_for_reorg_sweeps_only_unsupported_residents`, `remove_for_reorg_refuses_a_moved_generation`, `reorg_methods_refuse_a_guard_from_another_gateway`, `admission_state_accepts_only_the_current_generation`.
+- `crates/rpc/src/context.rs` (`admission_chain_tests`): `stable_chainstate_reader_does_not_block_transaction_admission`, `unconfirmed_transaction_is_admitted_from_a_peer`, `confirmed_hint_requires_live_chain_outputs`, `admission_chain_uses_current_handles_and_one_applied_tip`.
+- `crates/mempool/src/orphan.rs` (inline tests): `zero_quota_retains_no_body_or_index`, `witness_refresh_keeps_announce_order_and_announcer_set`, `readiness_is_deduplicated_and_removed_with_eviction`, `maintenance_expires_old_bodies_and_cleans_every_index`, `maintenance_uses_exact_connection_identity`, `witness_refresh_does_not_extend_expiry`, `rejects_are_bounded_and_chain_reset_clears_both_indexes`, `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`, `rejecting_another_witness_preserves_the_resident_body_and_ready_work`, `transaction_scoped_rejection_releases_the_resident_variants_weight`, `same_wtxid_keeps_all_announcers_and_disconnect_removes_one`, `eviction_trims_the_highest_peer_score_before_protected_peer`.
+- `crates/node/src/chain_effects.rs` (inline tests): `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`, `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry` (committed chain changes run the mempool chain-change lifecycle even when the pool itself has no removal/insertion).
+- `crates/node/tests/unit/tx_ingress/tests.rs` (unit tests): `retry_poll_evicts_an_orphan_after_its_connection_is_gone`.
+- `crates/rpc/src/zmq.rs`: `admission_publishes_one_a_frame_with_core_payload_bytes`, `policy_eviction_publishes_r_frames_in_commit_order`, `block_inclusion_suppresses_r_frames`, `policy_eviction_publishes_r_frames_with_contiguous_sequences`, `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`, `sequence_event_payload_uses_core_hash_orientation_and_label`.
+- `crates/node/tests/mining.rs`: `publish_generation_from_does_not_take_mempool_lock`, `concurrent_publish_generation_paths_do_not_deadlock`, `long_poll_returns_quickly_on_mempool_sequence_wake`.
+- `crates/node/tests/tx_ingress_e2e.rs`: `accepted_peer_tx_is_admitted_and_relayed_excluding_the_source`, `below_min_relay_tx_is_rejected_recorded_and_never_relayed` (peer tx over a real socket: dispatch filter, admission through the observer-installed gateway, source-excluding relay), and `full_relay_queue_does_not_block_peer_admission_or_mining_wake` (actual ingress and gateway with a saturated relay queue).

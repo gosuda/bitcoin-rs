@@ -1,7 +1,4 @@
 //! One scripted loopback wire peer for the live-sync scenarios.
-//!
-//! Regtest v70016, `NODE_NETWORK|WITNESS`, no compact relay. Witness
-//! inventory gets the full body, a plain `MSG_BLOCK` a witness-stripped one.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -18,69 +15,46 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{Block, Witness};
-use serde_json::json;
+use sonic_rs::json;
 
 use crate::error::{Error, Result};
 use crate::node::ProcessNode;
 use crate::process_peer::{FrameBuffer, decode_frame, is_soft_recv_error, read_frame};
 
-/// One decoded getdata frame: every item flattened to `(inv_type, hash)`.
 #[derive(Clone, Debug)]
 pub struct GetdataSeen {
-    /// Milliseconds since the peer connected when the frame arrived.
     pub at_ms: u64,
-    /// Flattened inventory items in wire order.
     pub items: Vec<(u32, String)>,
 }
 
-/// A scripted wire peer: it announces, serves, and records exactly what the
-/// node asked for.
 #[derive(Debug)]
 pub struct LivePeer {
     stream: TcpStream,
     journal: File,
-    /// Set once the journal rejects a write; later failures stay quiet.
     journal_broken: bool,
     t0: Instant,
-    /// Full blocks servable by hash.
     pub blocks: BTreeMap<bitcoin::BlockHash, Block>,
-    /// The exact reply to every inbound `getheaders`. `offer` with
-    /// `reveal_headers` appends to it; a script assigns it wholesale so
-    /// early discovery probes cannot leak headers the test withholds.
     pub headers: Vec<BlockHeader>,
-    /// Every decoded getdata frame in arrival order.
     pub getdata_seen: Vec<GetdataSeen>,
-    /// Inventory announcements observed from the node, including blocks.
     pub inventory_seen: Vec<Inventory>,
     /// Proactive BIP133 thresholds observed from the node (sat/kvB).
     pub fee_filters_seen: Vec<i64>,
-    /// `at_ms` of every getheaders frame, in arrival order.
     pub getheaders_at: Vec<u64>,
-    /// Bodies served stripped because the node asked `MSG_BLOCK`.
     pub stripped_served: usize,
-    /// Peer socket died (node disconnected or transport error).
     pub dropped: bool,
-    /// Bytes of an in-flight frame paused at a pump-slice deadline; the
-    /// next `recv` resumes them instead of reading a desynced offset.
     pending: FrameBuffer,
 }
 
 impl LivePeer {
-    /// Handshake a deep-chain peer: discovery probes fire and self-recover.
     pub fn connect(node: &ProcessNode, name: &str) -> Result<Self> {
         Self::connect_with_height(node, name, 10_000)
     }
 
-    /// Handshake with an advertised best-known height. `10_000` claims a
-    /// deep chain (discovery probes fire and self-recover a
-    /// pre-bootstrap-rejected batch); `0` keeps the wire quiet so a lone
-    /// `getheaders` can only be the staged-header recovery send.
     pub fn connect_with_height(node: &ProcessNode, name: &str, start_height: i32) -> Result<Self> {
         Self::connect_with_wtxid_relay(node, name, start_height, true)
     }
 
     /// Handshake with an explicit BIP339 profile for mixed txid/wtxid peers.
-    /// Existing callers advertise wtxid relay through `connect_with_height`.
     pub fn connect_with_wtxid_relay(
         node: &ProcessNode,
         name: &str,
@@ -90,9 +64,6 @@ impl LivePeer {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
-        // The journal lives inside the node's own run-* evidence dir, next to
-        // its transcript: unique per spawn, so concurrently running test
-        // binaries cannot overwrite or interleave one another's evidence.
         let journal = File::create(node.evidence.join(format!("{name}-peer.jsonl")))?;
         let mut peer = Self {
             stream,
@@ -129,9 +100,6 @@ impl LivePeer {
             ),
             0,
             format!("/{name}:0.1/"),
-            // Advertise the chain depth so the peer is immediately
-            // attractive for body requests once it demonstrates the tip
-            // with headers.
             start_height,
         );
         version.version = 70016;
@@ -160,20 +128,14 @@ impl LivePeer {
         Err(Error::Protocol("P2P handshake message limit".to_owned()))
     }
 
-    /// Register servable blocks and reveal their headers: the peer answers
-    /// every `getheaders` with the offered chain.
     pub fn offer_chain(&mut self, chain: &[Block]) {
         self.offer(chain, true);
     }
 
-    /// Register servable bodies only: headers are revealed solely through
-    /// the script-controlled [`Self::headers`] field or explicit `headers`
-    /// sends.
     pub fn offer_bodies(&mut self, chain: &[Block]) {
         self.offer(chain, false);
     }
 
-    /// Send a `headers` frame carrying exactly the headers of `blocks`.
     pub fn announce_headers(&mut self, blocks: &[Block], deadline: Instant) -> Result<()> {
         let headers = blocks.iter().map(|block| block.header).collect();
         self.send(NetworkMessage::Headers(headers), deadline)
@@ -188,13 +150,11 @@ impl LivePeer {
         }
     }
 
-    /// Milliseconds since the peer connected.
     #[must_use]
     pub fn at_ms(&self) -> u64 {
         u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Send one wire frame.
     pub fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<()> {
         let cmd = message.cmd().to_owned();
         let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
@@ -210,8 +170,6 @@ impl LivePeer {
         Ok(())
     }
 
-    /// Prove that all previously sent frames were processed and the connection
-    /// still accepts traffic, using the protocol's ping/pong barrier.
     pub fn ping_barrier(&mut self, nonce: u64, deadline: Instant) -> Result<()> {
         self.send(NetworkMessage::Ping(nonce), deadline)?;
         for _ in 0..128 {
@@ -226,7 +184,6 @@ impl LivePeer {
         ))
     }
 
-    /// Read one wire frame, marking the peer dropped on hard failures.
     fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage> {
         match read_frame(&mut self.stream, deadline, &mut self.pending) {
             Ok(frame) => {
@@ -244,8 +201,6 @@ impl LivePeer {
         }
     }
 
-    /// Serves one getdata item type-faithfully: witness inventory gets the
-    /// full body; a plain `MSG_BLOCK` gets a witness-stripped body.
     pub fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<()> {
         let (hash, stripped) = match item {
             Inventory::WitnessBlock(hash) | Inventory::CompactBlock(hash) => (*hash, false),
@@ -272,11 +227,6 @@ impl LivePeer {
         self.send(NetworkMessage::Block(body), deadline)
     }
 
-    /// Pump the connection for `dur`: decode every inbound frame, answer
-    /// Ping and every `getheaders` with the current `headers` (a real peer
-    /// behavior — repeated probes repeat the reply), record every getdata,
-    /// and hand each getdata to `serve` (a no-op closure turns this into
-    /// pure observation).
     pub fn pump(&mut self, dur: Duration, serve: &mut dyn FnMut(&mut Self, &[Inventory])) {
         let end = Instant::now() + dur;
         while Instant::now() < end && !self.dropped {
@@ -307,17 +257,12 @@ impl LivePeer {
                     let _ = self.send(NetworkMessage::Pong(nonce), end);
                 }
                 Ok(_) => {}
-                // Soft read timeouts inside a pump slice are not a
-                // disconnect — keep observing; hard failures mark the peer
-                // dropped and end the pump.
                 Err(error) if is_soft_recv_error(&error) => {}
                 Err(_) => break,
             }
         }
     }
 
-    /// Count of getdata items (across all frames) naming `hash` with the
-    /// `MSG_BLOCK` (non-witness) type.
     #[must_use]
     pub fn plain_block_requests(&self, hash: &bitcoin::BlockHash) -> usize {
         self.getdata_seen
@@ -327,8 +272,6 @@ impl LivePeer {
             .count()
     }
 
-    /// Count of getdata items (across all frames) naming `hash` regardless
-    /// of request type.
     #[must_use]
     pub fn requests_for(&self, hash: &bitcoin::BlockHash) -> usize {
         self.getdata_seen
@@ -338,7 +281,6 @@ impl LivePeer {
             .count()
     }
 
-    /// Every hash requested at least once, deduplicated, in first-seen order.
     #[must_use]
     pub fn requested_hashes(&self) -> Vec<String> {
         let mut seen = Vec::new();
@@ -354,8 +296,6 @@ impl LivePeer {
 
     fn log(&mut self, direction: &str, detail: &str) {
         let line = json!({"at_ms": self.at_ms(), "dir": direction, "detail": detail});
-        // The journal is the evidence for this transcript; a write that keeps
-        // failing must be loud, not swallowed.
         let result = writeln!(self.journal, "{line}").and_then(|()| self.journal.flush());
         if result.is_err() && !self.journal_broken {
             self.journal_broken = true;
@@ -368,8 +308,6 @@ impl LivePeer {
     }
 }
 
-/// `(inv_type, hash-display)` for an inventory item. Type codes follow the
-/// wire encoding: `MSG_BLOCK`=2, `MSG_WITNESS_BLOCK`=0x40000002.
 fn inv_item_desc(item: &Inventory) -> (u32, String) {
     match item {
         Inventory::Transaction(txid) => (0x0000_0001, txid.to_string()),
@@ -386,8 +324,6 @@ fn inv_item_desc(item: &Inventory) -> (u32, String) {
     }
 }
 
-/// Returns a copy of `block` with every input witness removed: the body a
-/// peer serves for a plain `MSG_BLOCK` getdata.
 fn strip_witnesses(block: &Block) -> Block {
     let mut stripped = block.clone();
     for tx in &mut stripped.txdata {
@@ -398,11 +334,6 @@ fn strip_witnesses(block: &Block) -> Block {
     stripped
 }
 
-/// Serves bodies type-faithfully until the applied tip reaches `height`.
-///
-/// Every observed height must stay at or above `min_height`, which callers set
-/// to a height already applied before the wait: a lower height is an
-/// observable rewind and fails the wait immediately.
 pub fn pump_until_tip(
     peer: &mut LivePeer,
     node: &mut ProcessNode,

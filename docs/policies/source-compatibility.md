@@ -1,115 +1,16 @@
-# Source and Toolchain Compatibility Policy
-
-This document defines the toolchain requirements, dependency management rules, semver commitments, and deprecation policies for `bitcoin-rs`.
-
-## 1. Scope and Authority
-
-This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
-
-## 2. Toolchain and Language Edition
-
-The repository development toolchain is selected by `rust-toolchain.toml`.
-Language edition and the compatibility floor are owned by the root `Cargo.toml`,
-with Clippy's compatibility behavior mirrored in `clippy.toml`.
-
-| Setting | Value | Configuration Source |
-| :--- | :--- | :--- |
-| Development Rust toolchain | `stable` | `rust-toolchain.toml` |
-| Minimum Supported Rust Version (MSRV) | `1.99.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
-| Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
-| Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
-
-### 2.1 MSRV Rules
-- All crates in the workspace must compile on Rust `1.99.0`.
-- MSRV increases only under these conditions:
-  1. A required upstream dependency bumps its MSRV floor beyond `1.99.0`.
-  2. A new standard library feature or compiler capability is strictly necessary for consensus correctness or performance.
-- An MSRV bump requires updating root `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`), and workspace documentation simultaneously. The repository development toolchain remains `stable`.
-
-## 3. Dependency Policy
-
-`bitcoin-rs` maintains a minimal dependency footprint to reduce build times, security surface, and binary size.
-
-### 3.1 Adding Dependencies
-- All `[dependencies]` and `[build-dependencies]` of member crates (`crates/*`) must be defined centrally in `Cargo.toml` under `[workspace.dependencies]`.
-- Member crates must inherit those using `{ workspace = true }`.
-- `[dev-dependencies]` are exempt. They do not reach the shipped binary, so a version skew between two crates' test harnesses cannot produce a runtime conflict, and centralizing them buys nothing. Workspace members inherit `tempfile` via `tempfile.workspace = true` from the `[workspace.dependencies]` entry `tempfile = ">=3.20.0, <4"`; that inheritance is intended, not drift.
-- Centralize a dev-dependency anyway when two crates must agree on a type that crosses between them in tests.
-- Do not add dependencies for functionality available in the Rust standard library or existing workspace crates.
-- Prohibited dependencies: `tokio`, `async-std`, or any async runtime. The node architecture uses a synchronous crossbeam-channel event loop. The embedding API (`crates/node/src/embed.rs`) exposes `async fn` signatures whose bodies are synchronous; the node never creates, enters, or retains a runtime, and the embedder supplies its own executor (`docs/contracts/embedding.md`, EMB-02). That contract does not add a runtime dependency and is not an exception to this rule.
-
-### 3.2 Major Version Bumps
-- Upgrading a workspace dependency to a new major version requires:
-  1. Audit of upstream security, performance, and API changes.
-  2. Compilation and verification across all retained storage backend features (`fjall`, `rocksdb`, `redb`).
-  3. Verification against the `kernel` consensus feature path.
-
-### 3.3 Lockfile and CI Reproducibility
-- `Cargo.lock` is committed and is part of the build identity. Normal CI lint, test, benchmark, and feature checks use `--locked`; a stale lockfile fails the job instead of being rewritten only inside the runner checkout.
-- Dependency-update changes may intentionally edit `Cargo.lock`, but validation after that edit still uses `--locked`.
-- The `minimal-versions` lane in `.github/workflows/main.yml` is the one intentional mutation lane: `cargo +nightly update -Zdirect-minimal-versions` rewrites the lockfile in its disposable checkout. Its subsequent compile uses `--locked` against that rewritten result.
-- Cargo subcommand wrappers with their own resolution behavior (`cargo fuzz`) are audited separately rather than treated as ordinary root-workspace Cargo invocations.
-
-### 3.4 TLS Provider and Transport Rules
-- If a TLS transport is added, use Rustls with default features disabled and a reviewed non-C crypto provider. Do not rely on adapter defaults to select the provider.
-- `deny.toml` enforces the dependency boundary. Keep the native-TLS/OpenSSL/platform-TLS families and disallowed Rustls provider/adaptor families complete so a transitive feature cannot reintroduce AWS-LC, ring, OpenSSL, or platform TLS.
-- Review both dependency features and transport configuration when changing a TLS path. A dependency ban alone does not establish correct certificate, protocol, timeout, or endpoint behavior.
-
-## 4. Workspace Versioning and Semver Commitment
-
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.14.0`).
-
-| Workspace Crate | Path | Description |
-| :--- | :--- | :--- |
-| `bitcoin-rs-primitives` | `crates/primitives` | Core types and byte primitives |
-| `bitcoin-rs-consensus` | `crates/consensus` | Block and transaction verification |
-| `bitcoin-rs-script` | `crates/script` | Script execution and evaluation |
-| `bitcoin-rs-storage` | `crates/storage` | Key-value store abstraction, implementations, and block/undo pruning |
-| `bitcoin-rs-utxo` | `crates/utxo` | In-memory UTXO set management, snapshots, and UTXO statistics / MuHash |
-| `bitcoin-rs-chain` | `crates/chain` | Block tree and chain index tracking |
-| `bitcoin-rs-index` | `crates/index` | Transaction and address indexing |
-| `bitcoin-rs-mempool` | `crates/mempool` | Memory pool transaction storage |
-| `bitcoin-rs-p2p` | `crates/p2p` | Peer-to-peer network protocol |
-| `bitcoin-rs-mining` | `crates/mining` | Block template construction |
-| `bitcoin-rs-rpc` | `crates/rpc` | JSON-RPC HTTP server |
-| `bitcoin-rs-node` | `crates/node` | Full node state machine and event loop |
-| `bitcoin-rs` | `bin/bitcoin-rs` | Command-line node binary |
-
-Active-tip waits add the required `ChainHandles::active_tip_wait` field to
-RPC composition. Callers supply the chain owner's read-only capability (or
-`None` when no active-tip wait service exists); no compatibility adapter is
-retained. `Handler::new` now creates service-local cancellation/admission state
-and is no longer a const constructor.
-
-### 4.1 Semver Rules
-- Semver compatibility is assessed between published releases, not between pull requests or intermediate development commits. Merging a pull request does not itself publish a release.
-- Unreleased APIs may change within the planned development version, including before the first public release. Such changes still update their contracts, callers, and tests together and follow the clean-cutover policy below; they do not require a fresh minor bump for each development change.
-- When preparing a `0.x.y` release, public API breaking changes relative to the latest published release require a minor version bump (e.g., `0.4.0` to `0.5.0`).
-- Patch releases (e.g., `0.4.0` to `0.4.1`) must contain only non-breaking bug fixes, performance optimizations, or internal refactoring relative to the previous published release.
-
-## 5. Anti-Shim Principle and Deprecation Policy
-
-### 5.1 The Anti-Shim Principle
-`bitcoin-rs` operates on a strict **clean cutover** principle. The project rejects:
-- Backward-compatibility shims.
-- Deprecated wrapper functions or type aliases.
-- Transitional configuration flags or legacy fallback paths.
-
-When a feature, algorithm, interface, or data layout changes, maintainers must remove the old code path completely in the same change-set.
-
-The native UTXO checkpoint reader is a clean-cutover boundary: `read_snapshot_strict_v4`
-accepts only complete version-4 snapshots and rejects versions 2 and 3. The
-node can rebuild or resynchronize chainstate, so no legacy reader is retained
-for this format. The distinct Bitcoin Core portable v2 input codec is not a
-legacy native-checkpoint reader. A future recovery exception would require an explicit
-maintainer decision and matching migration policy before adding a reader.
-
-### 5.2 RPC Deprecation Policy
-- `bitcoin-rs-rpc` does not provide deprecation windows or compatibility shims for RPC endpoints.
-- RPC methods match current Bitcoin Core JSON-RPC schemas directly (`crates/rpc/tests/core_compat.rs`).
-- If an RPC endpoint or field changes upstream or internally, `bitcoin-rs` updates or removes the method immediately in a clean cutover.
-
-### 5.3 On-Disk Format Deprecation Policy
-- On-disk storage schemas do not maintain backward-compatibility translation shims.
-- When key-value column families, block file encodings, or checkpoint formats change, the system does not convert old databases in place.
-- Datadir schema markers, resync requirements, and checkpoint commit/recovery semantics are defined by the canonical [datadir migration policy](db-migration.md). This policy does not duplicate those on-disk rules.
+# Source and toolchain compatibility policy
+## 1. Scope and authority
+Applies to every crate in `crates/*` and the node binary (`bin/bitcoin-rs`).
+## 2. Toolchain and language edition
+Toolchain is `stable` (`rust-toolchain.toml`); MSRV `1.99.0` (`Cargo.toml` `rust-version`, mirrored in `clippy.toml` `msrv`); edition `2024`; strict workspace lints enabled.
+All crates MUST compile on Rust `1.99.0`. MSRV rises only when a required upstream dependency forces it, or when a new std/compiler capability is strictly necessary for consensus correctness or performance. A bump updates `Cargo.toml`, `clippy.toml`, and docs together; the dev toolchain stays `stable`.
+## 3. Dependency policy
+Minimal footprint. All `[dependencies]`/`[build-dependencies]` of `crates/*` are defined centrally under `[workspace.dependencies]` and inherited via `{ workspace = true }`; `[dev-dependencies]` are exempt (no shipped-binary impact) except when two crates share test-crossing types (centralize then); `tempfile.workspace = true` inherits `tempfile = ">=3.20.0, <4"`. Never add what std or existing workspace crates provide. Forbidden: `tokio`, `async-std`, or any async runtime (synchronous crossbeam-channel event loop; `crates/node/src/embed.rs` `async fn` bodies are synchronous and the embedder supplies its executor per `docs/contracts/embedding.md` `EMB-02`). Major bumps require an upstream security/performance/API audit plus verification across `fjall`/`rocksdb`/`redb` and the `kernel` path. `Cargo.lock` is committed build identity: normal CI uses `--locked` (a stale lockfile fails); updates edit it intentionally, then validate with `--locked`; only the `minimal` and `maximum` range lanes in `.github/workflows/compatibility-campaign.yml` rewrite it via `scripts/check-dep-range.sh` (`minimal` pins oldest allowed versions with nightly `-Zdirect-minimal-versions`; `maximum` takes newest in-range with plain `cargo update`); both run in a scheduled throwaway checkout, never on PR checkouts. `cargo fuzz` resolution is audited separately. TLS: Rustls with default features disabled plus a reviewed non-C provider, never adapter defaults; `deny.toml` keeps the native-TLS/OpenSSL/platform-TLS and disallowed Rustls provider families complete; review dependency features and transport configuration together.
+## 4. Workspace versioning and semver commitment
+Single workspace version `[workspace.package] version` (currently `0.14.0`): `crates/primitives`, `crates/consensus`, `crates/script`, `crates/storage`, `crates/utxo`, `crates/chain`, `crates/index`, `crates/mempool`, `crates/p2p`, `crates/mining`, `crates/rpc`, `crates/node`, and `bin/bitcoin-rs`. Semver is assessed between published releases only; merging a PR never publishes a release. Unreleased APIs may still change (contracts, callers, and tests move together under clean cutover) without a fresh bump per change. For `0.x.y`, breaking changes vs the latest published release REQUIRE a minor bump; patches carry only non-breaking fixes, optimizations, or internal refactors. Active-tip waits added the required `ChainHandles::active_tip_wait` field (chain owner's read-only capability, or `None`); `Handler::new` is no longer const and builds service-local cancellation/admission state; no compatibility adapter is retained.
+## 5. Anti-shim principle and deprecation policy
+Strict clean cutover: no backward-compatibility shims, deprecated wrappers/aliases, transitional flags, or legacy fallbacks. A change removes the old code path completely in the same change-set. The native UTXO checkpoint reader is a clean-cutover boundary: `read_snapshot_strict_v4` accepts only complete version-4 snapshots and rejects versions 2 and 3 (the distinct Core portable v2 input codec is not a legacy native reader; a future exception needs an explicit maintainer decision plus migration policy).
+### 5.2 RPC deprecation policy
+`bitcoin-rs-rpc` provides no deprecation windows or shims; methods match current Core JSON-RPC schemas (`crates/rpc/tests/core_compat.rs`) and change by immediate clean cutover.
+### 5.3 On-disk format deprecation policy
+No backward-compatibility translation shims for storage schemas; old databases are never converted in place. Markers, resync, and checkpoint commit/recovery semantics are owned by the [datadir migration policy](db-migration.md) and not duplicated here.

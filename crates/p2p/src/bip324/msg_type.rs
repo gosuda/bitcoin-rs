@@ -38,7 +38,6 @@ const SHORT_IDS: [&str; 38] = [
     "getcfcheckpt",
     "cfcheckpt",
     "addrv2",
-    // IDs 29..=36 are undefined in BIP324.
     "",
     "",
     "",
@@ -56,8 +55,6 @@ const LONG_FORM: u8 = 0;
 /// Bytes of the command field that follows [`LONG_FORM`].
 const COMMAND_LEN: usize = 12;
 
-/// The packet contents carrying `payload` as a `command` message: its short ID
-/// when the BIP assigns one, the long form otherwise.
 pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {
     let name = command.as_ref();
     let short_id = SHORT_IDS
@@ -69,7 +66,6 @@ pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {
     if let Some(id) = short_id {
         contents.push(id);
     } else {
-        // `CommandString` holds at most 12 ASCII bytes.
         let mut field = [0u8; COMMAND_LEN];
         let len = name.len().min(COMMAND_LEN);
         field[..len].copy_from_slice(&name.as_bytes()[..len]);
@@ -192,11 +188,8 @@ mod tests {
         for id in u8::try_from(SHORT_IDS.len()).unwrap_or(u8::MAX)..=u8::MAX {
             assert_eq!(decode(&Bytes::from(vec![id, 1, 2])), None, "id {id}");
         }
-        // A long form cut short of its command field.
         assert_eq!(decode(&Bytes::from_static(b"\0ping")), None);
-        // A command field with bytes after its zero padding.
         assert_eq!(decode(&Bytes::from_static(b"\0ping\0\0\0\0\0\0\0x")), None);
-        // A long form whose command field is all padding names no type.
         assert_eq!(decode(&Bytes::from(vec![0u8; 1 + COMMAND_LEN + 4])), None);
     }
 }
