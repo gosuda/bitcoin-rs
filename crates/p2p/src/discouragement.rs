@@ -104,11 +104,9 @@ impl AutomaticPeerPolicy {
                         .contains(&PeerAddress::from(crate::EndpointHost::Ip(ip)))
                         || self.protected.iter().any(|subnet| subnet.contains(ip)))
             }
-            PeerEndpoint::TorV3 { .. } | PeerEndpoint::I2p { .. } => {
-                !self
-                    .discouraged
-                    .contains(&PeerAddress::from(endpoint.host()))
-            }
+            PeerEndpoint::TorV3 { .. } | PeerEndpoint::I2p { .. } => !self
+                .discouraged
+                .contains(&PeerAddress::from(endpoint.host())),
         }
     }
 }

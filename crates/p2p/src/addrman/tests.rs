@@ -20,7 +20,11 @@ fn book() -> Arc<AddressBook> {
 #[test]
 fn unproven_addresses_need_a_successful_outbound_handshake() {
     let book = book();
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 9, 10_000)],
+        10_000,
+    );
     assert!(!book.state.lock().stored.records[0].tried);
     book.queued(addr(1));
     book.attempted(addr(1), true, 10_001);
@@ -34,7 +38,11 @@ fn unproven_addresses_need_a_successful_outbound_handshake() {
 fn gossip_is_bounded_and_selection_respects_groups_pending_and_exclusion() {
     let book = book();
     for n in 1..200 {
-        book.learn_peer(crate::PeerRemote::Endpoint(addr(200)), &[(addr(n), 9, 10_000)], 10_000);
+        book.learn_peer(
+            crate::PeerRemote::Endpoint(addr(200)),
+            &[(addr(n), 9, 10_000)],
+            10_000,
+        );
     }
     assert!(book.len() <= 199);
     let picked = book
@@ -80,7 +88,11 @@ fn invalid_and_duplicate_addresses_do_not_create_records() {
         10_000,
     );
     assert_eq!(book.len(), 0);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000); 2], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 9, 10_000); 2],
+        10_000,
+    );
     assert_eq!(book.len(), 1);
 }
 
@@ -89,7 +101,11 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("peers.dat");
     let book = AddressBook::open(Some(path.clone()), [1; 4], false, None);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 9, 10_000)],
+        10_000,
+    );
     book.succeeded(addr(1), 9, 10_001);
     book.save();
     let restored = AddressBook::open(Some(path.clone()), [1; 4], false, None);
@@ -98,7 +114,11 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
     for corrupt in [b"truncated".to_vec(), vec![0; 40]] {
         fs::write(network_path(&path, [1; 4]), &corrupt).expect("corrupt fixture");
         let recovered = AddressBook::open(Some(path.clone()), [1; 4], false, None);
-        recovered.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(3), 9, 10_000)], 10_000);
+        recovered.learn_peer(
+            crate::PeerRemote::Endpoint(addr(2)),
+            &[(addr(3), 9, 10_000)],
+            10_000,
+        );
         recovered.save();
         assert_eq!(
             fs::read(network_path(&path, [1; 4])).expect("read"),
@@ -111,7 +131,11 @@ fn restart_roundtrip_and_corruption_preserves_operator_file() {
 fn promotion_collision_never_overwrites_a_proven_peer() {
     let book = book();
     let first = addr(1);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(first, 9, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(first, 9, 10_000)],
+        10_000,
+    );
     book.succeeded(first, 9, 10_001);
     let incumbent = book.state.lock().stored.records[0].clone();
     let challenger = {
@@ -122,7 +146,11 @@ fn promotion_collision_never_overwrites_a_proven_peer() {
             .find(|candidate| *candidate != first && manager.tried_slot(*candidate) == target)
             .expect("slot collision")
     };
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(3)), &[(challenger, 9, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(3)),
+        &[(challenger, 9, 10_000)],
+        10_000,
+    );
     book.succeeded(challenger, 9, 10_002);
     let manager = book.state.lock();
     assert!(
@@ -277,16 +305,28 @@ fn publication_retries_collisions_with_a_bound_and_preserves_unowned_temps() {
 fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     let dir = tempfile::tempdir().expect("dir");
     let book = AddressBook::open(Some(dir.path().join("peers.dat")), [1; 4], false, None);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 1, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 1, 10_000)],
+        10_000,
+    );
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 1, 9_999); 32], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 1, 9_999); 32],
+        10_000,
+    );
     assert_eq!(
         book.state.lock().revision,
         clean,
         "unchanged duplicate reports cannot schedule disk writes"
     );
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 8, 10_000)], 10_000);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 8, 10_000)],
+        10_000,
+    );
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -295,7 +335,11 @@ fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     book.succeeded(addr(1), 9, 10_001);
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 64, 10_001)], 10_001);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 64, 10_001)],
+        10_001,
+    );
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -303,7 +347,11 @@ fn duplicate_hearsay_only_dirties_persisted_fields_that_change() {
     );
     book.save();
     let clean = book.state.lock().saved_revision;
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, 13_602)], 13_602);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 9, 13_602)],
+        13_602,
+    );
     assert_ne!(
         book.state.lock().revision,
         clean,
@@ -375,7 +423,11 @@ fn gossip_cursor_cache_shared_across_projections() {
     book.set_addrv2_gossip(true, false);
     let tick = Instant::now();
     let legacy = book.gossip_at(10_000, tick);
-    assert_eq!(legacy.len(), 6, "gossip projects the shared cache overlay-inclusive");
+    assert_eq!(
+        legacy.len(),
+        6,
+        "gossip projects the shared cache overlay-inclusive"
+    );
     let cursor = book.state.lock().gossip_cursor;
     let v2 = book.gossip_addrv2_at(10_000, tick);
     assert_eq!(
@@ -1524,8 +1576,7 @@ fn mapped_alias_exact_connection_filter_does_not_block_distinct_endpoints() {
 #[test]
 fn overlay_identity_anonymous_tor_gossip_learns_nothing() {
     let book = book();
-    let anon =
-        crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(77));
+    let anon = crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(77));
     book.learn_peer(anon, &[(addr(1), 9, 10_000)], 10_000);
     assert_eq!(
         book.len(),
@@ -1605,8 +1656,7 @@ fn overlay_identity_no_loopback_proxy_ip_in_learn() {
         0,
         "loopback gossip addresses must never enter learn"
     );
-    let anon =
-        crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(78));
+    let anon = crate::PeerRemote::AnonymousTor(crate::ConnectionId::for_test_raw(78));
     book.learn_peer(anon, &[(addr(1), 9, 10_000)], 10_000);
     assert_eq!(
         book.len(),

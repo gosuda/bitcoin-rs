@@ -545,10 +545,12 @@ mod tests {
                 }
             }
         });
-        let transport = Arc::new(OverlayTransport::new(Arc::new(crate::overlay::OverlayConfig {
-            i2p_sam: Some(address),
-            ..crate::overlay::OverlayConfig::default()
-        })));
+        let transport = Arc::new(OverlayTransport::new(Arc::new(
+            crate::overlay::OverlayConfig {
+                i2p_sam: Some(address),
+                ..crate::overlay::OverlayConfig::default()
+            },
+        )));
         let old = Arc::new(AtomicBool::new(true));
         *transport.sam.write() = Some(Session {
             id: "old".into(),

@@ -295,11 +295,7 @@ impl LocatorCheck<'_> {
             )
         })?;
         let added = record.positions.len();
-        if self
-            .pending_positions
-            .saturating_add(added)
-            > super::MAX_RESTORE_POSITIONS
-        {
+        if self.pending_positions.saturating_add(added) > super::MAX_RESTORE_POSITIONS {
             return Err(IndexBundleError::RestoreTooLarge {
                 limit_positions: super::MAX_RESTORE_POSITIONS,
             });
@@ -344,12 +340,11 @@ impl LocatorCheck<'_> {
                 }
             }
         }
-        match self.bodies.block_tx_count(height, hash)? {
-            Some(count) => Ok(Some(count)),
-            None => {
-                self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
-                Ok(None)
-            }
+        if let Some(count) = self.bodies.block_tx_count(height, hash)? {
+            Ok(Some(count))
+        } else {
+            self.outcome = LocatorOutcome::Withheld(Withheld::BodyUnavailable { height });
+            Ok(None)
         }
     }
     ///
@@ -770,8 +765,8 @@ mod tests {
     /// fully so the digest comparison can outrank framing faults, while a
     /// trip returns `Cancelled` at once with no digest comparison.
     #[test]
-    fn invalid_tail_drain_polls_cancellation_per_bounded_chunk(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn invalid_tail_drain_polls_cancellation_per_bounded_chunk()
+    -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("tail.dat");
         // Several poll intervals plus a short tail: the final chunk is

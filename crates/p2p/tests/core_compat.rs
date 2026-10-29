@@ -1,7 +1,7 @@
 //! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
 
-use std::collections::BTreeSet;
 use bitcoin_rs_primitives::PeerEndpoint;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};

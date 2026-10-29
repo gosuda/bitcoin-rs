@@ -562,10 +562,7 @@ onlynet=onion,i2p
             conf_with_overlays.p2p.overlay.tor_control,
             Some(SocketAddr::from(([127, 0, 0, 1], 9052)))
         );
-        assert_eq!(
-            conf_with_overlays.p2p.overlay.tor_cookie.as_deref(),
-            None
-        );
+        assert_eq!(conf_with_overlays.p2p.overlay.tor_cookie.as_deref(), None);
         assert_eq!(
             conf_with_overlays.p2p.overlay.i2p_sam,
             Some(SocketAddr::from(([127, 0, 0, 1], 7656)))

@@ -22,15 +22,15 @@ use super::manifest::{
     BundleFamily, BundleIdentity, IndexBundleManifestV1, IndexMode, MANIFEST_FILE, TxLookupArtifact,
 };
 use super::{
-    BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, MAX_RESTORE_POSITIONS, io_error,
-    sync_dir,
-};
-use crate::types::{HASH_PREFIX_ROW_SIZE, HashPrefixRow, TxPosition, TxPositionValue, positions_are_valid};
-use crate::{
-    IndexCapability, IndexError, IndexWatermark, IndexWriteFence, TxIndexFamily,
+    BundleHost, ExportReport, IndexBundleError, IndexBundleRequest, MAX_RESTORE_POSITIONS,
+    io_error, sync_dir,
 };
 #[cfg(test)]
 use crate::TxIndexSnapshot;
+use crate::types::{
+    HASH_PREFIX_ROW_SIZE, HashPrefixRow, TxPosition, TxPositionValue, positions_are_valid,
+};
+use crate::{IndexCapability, IndexError, IndexWatermark, IndexWriteFence, TxIndexFamily};
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_storage::{PrefixScanLimit, StorageError};
 use std::cmp::Reverse;
@@ -442,17 +442,18 @@ const SORT_MERGE_FAN_IN: usize = 32;
 /// resolved file (keyed by sequence).
 fn write_framed(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<()> {
     out.write_all(key)?;
-    out.write_all(&(payload.len() as u64).to_le_bytes())?;
+    out.write_all(
+        &u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    )?;
     out.write_all(payload)
 }
 
 /// Reads one framed record, or `None` at a clean record boundary. A file
 /// that ends inside a key, length, or payload is corruption, never a clean
 /// end.
-fn read_framed(
-    reader: &mut impl Read,
-    key_len: usize,
-) -> io::Result<Option<(Vec<u8>, Vec<u8>)>> {
+fn read_framed(reader: &mut impl Read, key_len: usize) -> io::Result<Option<(Vec<u8>, Vec<u8>)>> {
     let mut key = vec![0_u8; key_len];
     match reader.read_exact(&mut key) {
         Ok(()) => {}
@@ -570,7 +571,7 @@ fn copy_sort_run(
     if cancelled() {
         return Err(IndexBundleError::Cancelled);
     }
-    let mut buf = [0_u8; IO_BUFFER_BYTES];
+    let mut buf = vec![0_u8; IO_BUFFER_BYTES];
     loop {
         let n = run.read(&mut buf).map_err(failed)?;
         if n == 0 {
@@ -603,7 +604,7 @@ fn merge_runs(
     }
     let mut readers: Vec<BufReader<&mut File>> = runs.iter_mut().map(BufReader::new).collect();
     let mut heads: Vec<Option<(Vec<u8>, Vec<u8>)>> = Vec::with_capacity(readers.len());
-    for reader in readers.iter_mut() {
+    for reader in &mut readers {
         heads.push(read_framed(reader, key_len).map_err(failed)?);
     }
     let mut heap: BinaryHeap<Reverse<(Vec<u8>, usize)>> = BinaryHeap::new();
@@ -638,7 +639,7 @@ fn merge_runs(
 fn encode_staged(key: &[u8; STAGED_KEY_LEN], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(STAGED_KEY_LEN + 8 + value.len());
     payload.extend_from_slice(key);
-    payload.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     payload.extend_from_slice(value);
     payload
 }
@@ -662,7 +663,11 @@ fn decode_staged(payload: &[u8]) -> Option<([u8; STAGED_KEY_LEN], &[u8])> {
 fn encode_resolved(height: u32, located: &[([u8; 32], TxPosition)]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(8 + located.len() * (32 + 6));
     payload.extend_from_slice(&height.to_le_bytes());
-    payload.extend_from_slice(&(located.len() as u64).to_le_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(located.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for (txid, position) in located {
         payload.extend_from_slice(txid);
         payload.extend_from_slice(position.as_bytes());
@@ -671,7 +676,9 @@ fn encode_resolved(height: u32, located: &[([u8; 32], TxPosition)]) -> Vec<u8> {
 }
 
 /// Splits one resolved payload back into its height and located pairs.
-fn decode_resolved(payload: &[u8]) -> Option<(u32, Vec<([u8; 32], TxPosition)>)> {
+type LocatedPairs = Vec<([u8; 32], TxPosition)>;
+
+fn decode_resolved(payload: &[u8]) -> Option<(u32, LocatedPairs)> {
     if payload.len() < 12 {
         return None;
     }
@@ -733,12 +740,7 @@ impl RowExporter<'_> {
         }
         external_sort(&mut staged, STAGED_SORT_KEY_LEN, self.path, cancelled)?;
         let mut resolved = self.resolve(&mut staged, rows, cancelled)?;
-        external_sort(
-            &mut resolved,
-            RESOLVED_SORT_KEY_LEN,
-            self.path,
-            cancelled,
-        )?;
+        external_sort(&mut resolved, RESOLVED_SORT_KEY_LEN, self.path, cancelled)?;
         self.emit(&mut resolved, rows, out, cancelled)
     }
 
@@ -751,7 +753,7 @@ impl RowExporter<'_> {
     fn charge_row(value: &[u8], height: u32, total: u64) -> Result<u64, IndexBundleError> {
         let positions = TxPositionValue::decode(value)
             .filter(|found| positions_are_valid(found))
-            .ok_or_else(|| IndexBundleError::SourceRow {
+            .ok_or(IndexBundleError::SourceRow {
                 height,
                 reason: "row carries no valid position list",
             })?;
@@ -878,13 +880,14 @@ impl RowExporter<'_> {
                 .into());
             };
             seen = seen.saturating_add(1);
-            let sequence_bytes: [u8; 8] = sort_key.get(4..12).and_then(|bytes| bytes.try_into().ok()).ok_or_else(
-                || {
+            let sequence_bytes: [u8; 8] = sort_key
+                .get(4..12)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
                     IndexError::from(StorageError::InvalidOperation(
                         "export staging carries a malformed sort key",
                     ))
-                },
-            )?;
+                })?;
             let sequence = u64::from_be_bytes(sequence_bytes);
             let (key, value) = decode_staged(&payload).ok_or_else(|| {
                 IndexError::from(StorageError::InvalidOperation(
@@ -904,7 +907,8 @@ impl RowExporter<'_> {
                 return Err(IndexBundleError::Cancelled);
             }
             self.locate(row, value)?;
-            positions = positions.saturating_add(self.located.len() as u64);
+            positions =
+                positions.saturating_add(u64::try_from(self.located.len()).unwrap_or(u64::MAX));
             if positions > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX) {
                 return Err(IndexBundleError::ExportTooLarge {
                     limit_positions: MAX_RESTORE_POSITIONS,
@@ -968,9 +972,7 @@ impl RowExporter<'_> {
                 })?;
             let sequence = u64::from_be_bytes(sequence_bytes);
             if sequence != expected {
-                let height = decode_resolved(&payload)
-                    .map(|(height, _)| height)
-                    .unwrap_or(u32::MAX);
+                let height = decode_resolved(&payload).map_or(u32::MAX, |(height, _)| height);
                 return Err(IndexBundleError::SourceRow {
                     height,
                     reason: "resolved rows lost their stored order",
@@ -1018,8 +1020,11 @@ impl RowExporter<'_> {
                 .take_while(|(candidate, _)| *candidate == txid)
                 .count();
             self.positions.clear();
-            self.positions
-                .extend(located[index..index + run].iter().map(|(_, position)| *position));
+            self.positions.extend(
+                located[index..index + run]
+                    .iter()
+                    .map(|(_, position)| *position),
+            );
             let added = u64::try_from(run).unwrap_or(u64::MAX);
             if self.positions_written.saturating_add(added)
                 > u64::try_from(MAX_RESTORE_POSITIONS).unwrap_or(u64::MAX)

@@ -16,7 +16,11 @@ fn v8_book_migrates_to_v9_with_backup_and_byte_identical_ip_records() {
     // IP record strings are identical in both schemas.
     let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     book.learn_dns("seed", &[target()], EPOCH);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(addr(1), 9, EPOCH)],
+        EPOCH,
+    );
     book.save();
     let v9_payload = fs::read(&path).expect("saved book");
     let mut value: serde_json::Value =
@@ -49,7 +53,11 @@ fn v8_book_migrates_to_v9_with_backup_and_byte_identical_ip_records() {
         key: [7u8; 32],
         port: 8333,
     };
-    migrated.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(tor, 9, EPOCH)], EPOCH);
+    migrated.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(tor, 9, EPOCH)],
+        EPOCH,
+    );
     migrated.save();
     let with_tor = stored_value(&path);
     assert!(
@@ -156,15 +164,27 @@ fn incoming_known_gossip_and_unknown_dns_merge_without_losing_observation() {
     let book = book();
     book.learn_dns("seed", &[target()], EPOCH);
     let revision = book.state.lock().revision;
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 0, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(target(), 0, EPOCH)],
+        EPOCH,
+    );
     assert_eq!(book.state.lock().stored.records[0].services, None);
     assert_eq!(
         book.state.lock().revision,
         revision,
         "zero-bit gossip and same-time ref refusal add no new information"
     );
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(3)), &[(target(), 1, EPOCH)], EPOCH);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(4)), &[(target(), 8, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(3)),
+        &[(target(), 1, EPOCH)],
+        EPOCH,
+    );
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(4)),
+        &[(target(), 8, EPOCH)],
+        EPOCH,
+    );
     assert_eq!(book.state.lock().stored.records[0].services, Some(9));
     book.learn_dns("seed", &[target()], EPOCH + 7200);
     assert_eq!(book.state.lock().stored.records[0].services, Some(9));
@@ -177,7 +197,11 @@ fn incoming_known_gossip_and_unknown_dns_merge_without_losing_observation() {
         "unknown incoming advertisement still refreshes known peer time"
     );
     let ip_origin = addr(5);
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(6)), &[(ip_origin, 9, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(6)),
+        &[(ip_origin, 9, EPOCH)],
+        EPOCH,
+    );
     book.succeeded(ip_origin, 9, EPOCH + 1);
     book.learn_dns("seed", &[ip_origin], EPOCH + 14_400);
     let manager = book.state.lock();
@@ -258,7 +282,6 @@ fn assert_preserved_invalid(base: &Path, path: &Path, bytes: &[u8]) {
     assert_eq!(fs::read(path).expect("untouched"), bytes);
 }
 
-
 #[test]
 fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     let directory = tempfile::tempdir().expect("directory");
@@ -268,7 +291,11 @@ fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     book.state.lock().stored.secret = [1; 32];
     book.learn_dns("seed", &[target()], EPOCH);
     let revision = book.state.lock().revision;
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 0, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(target(), 0, EPOCH)],
+        EPOCH,
+    );
     assert_eq!(book.state.lock().stored.records[0].services, None);
     assert_eq!(book.state.lock().revision, revision);
     assert_eq!(

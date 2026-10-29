@@ -457,7 +457,11 @@ fn sam_session_recovery(invalid_id: bool) {
         !replacement.is_cancelled(),
         "late old-epoch revocation cannot reach replacement"
     );
-    assert!(shared.peer_table.is_current(replacement.source(Some(endpoint))));
+    assert!(
+        shared
+            .peer_table
+            .is_current(replacement.source(Some(endpoint)))
+    );
     assert!(
         !shared.banned.is_discouraged(endpoint.address()),
         "local router loss is not remote misbehavior"

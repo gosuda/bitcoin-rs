@@ -1190,24 +1190,23 @@ mod tests {
     fn two_block_archive() -> TwoBlockArchive {
         use sha2::Digest as _;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-        let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
-            genesis.block_hash(),
-            1,
-        )
-        .expect("mine child");
+        let child =
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)
+                .expect("mine child");
         let blocks = vec![genesis, child];
         let magic = bitcoin_rs_primitives::Network::Regtest.magic();
         let mut corpus = Vec::new();
         let mut entries = Vec::new();
         let mut offset: u64 = 0;
         for (index, block) in blocks.iter().enumerate() {
-            let payload =
-                bitcoin_rs_primitives::BlockPayload::from_local(block.clone());
+            let payload = bitcoin_rs_primitives::BlockPayload::from_local(block.clone());
             let raw = payload.bytes();
             let mut framed = Vec::with_capacity(8 + raw.len());
             framed.extend_from_slice(&magic);
             framed.extend_from_slice(
-                &u32::try_from(raw.len()).expect("payload fits").to_le_bytes(),
+                &u32::try_from(raw.len())
+                    .expect("payload fits")
+                    .to_le_bytes(),
             );
             framed.extend_from_slice(raw);
             entries.push(format!(
@@ -1267,15 +1266,13 @@ mod tests {
         let state = dir.path().join("state.json");
         run_offline_import(offline_import_config(&data_dir), &corpus, &manifest, &state)
             .expect("fresh import succeeds");
-        let record =
-            read_full_validation_provenance(&data_dir).expect("provenance recorded");
+        let record = read_full_validation_provenance(&data_dir).expect("provenance recorded");
         assert_eq!(record.height, 1, "provenance binds the certified tip");
         assert!(
             record.tip_hash.eq_ignore_ascii_case(&archive.stop_hash),
             "provenance binds the certified tip hash"
         );
-        let text =
-            String::from_utf8(std::fs::read(&state).expect("read state")).expect("utf8");
+        let text = String::from_utf8(std::fs::read(&state).expect("read state")).expect("utf8");
         assert!(text.contains("\"height\": 1"), "state certifies height 1");
         assert!(
             text.contains(&archive.stop_hash),
@@ -1309,7 +1306,10 @@ mod tests {
         .expect("certified directory resumes");
         let text =
             String::from_utf8(std::fs::read(&resume_state).expect("read state")).expect("utf8");
-        assert!(text.contains("\"height\": 1"), "resume still certifies height 1");
+        assert!(
+            text.contains("\"height\": 1"),
+            "resume still certifies height 1"
+        );
         assert!(
             text.contains(&archive.stop_hash),
             "resume still certifies the archive tip"
@@ -1328,9 +1328,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join("node");
         {
-            let live =
-                crate::state::NodeState::open(offline_import_config(&data_dir), None)
-                    .expect("open node");
+            let live = crate::state::NodeState::open(offline_import_config(&data_dir), None)
+                .expect("open node");
             for block in &archive.blocks {
                 live.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
                     block.clone(),

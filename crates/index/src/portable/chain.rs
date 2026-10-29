@@ -10,7 +10,6 @@
 
 use super::artifact::CANCEL_POLL_RECORDS;
 use super::{IndexBundleError, Withheld};
-use std::collections::{HashMap, VecDeque};
 use crate::types::TxPosition;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, ChainTxCount, ChainWork, NodeId, NodeStatus, TipSnapshot,
@@ -18,6 +17,7 @@ use bitcoin_rs_chain::{
 use bitcoin_rs_primitives::{
     BlockHash, Hash256, Header, Tx, deserialize, layout::ParsedBlock, varint,
 };
+use std::collections::{HashMap, VecDeque};
 
 /// The applied-tip ancestry up to a bundle base, with the base's identity.
 ///
@@ -402,12 +402,11 @@ impl<'a> BodyReader<'a> {
             .source
             .block_body_metadata(height, BlockHash::from(hash))
         {
-            let count = u64::try_from(metadata.tx_count).map_err(|_| {
-                IndexBundleError::BodyRead {
+            let count =
+                u64::try_from(metadata.tx_count).map_err(|_| IndexBundleError::BodyRead {
                     height,
                     reason: "the transaction count does not fit u64".to_owned(),
-                }
-            })?;
+                })?;
             self.counts.insert((height, hash), count);
             return Ok(Some(count));
         }
@@ -478,7 +477,6 @@ impl<'a> BodyReader<'a> {
         Ok(self.bodies.front())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

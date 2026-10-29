@@ -146,10 +146,7 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders() -> TestResult {
     let old_source = current_source(&peers, peer);
 
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
-    peers.register(
-        peer,
-        PeerLease::new(replacement_tx),
-    );
+    peers.register(peer, PeerLease::new(replacement_tx));
 
     sync.tick();
 
@@ -411,10 +408,7 @@ fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let addr = test_addr(9767, 0)?;
     let _rx = connect_peer(&peers, synthetic_peer(addr, 5));
-    peers
-        .lease(addr)
-        .ok_or("peer missing from table")?
-        .cancel();
+    peers.lease(addr).ok_or("peer missing from table")?.cancel();
     assert!(
         peers
             .sessions()

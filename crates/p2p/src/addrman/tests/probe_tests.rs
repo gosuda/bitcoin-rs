@@ -165,7 +165,6 @@ fn connected_collision_good_uses_ip_not_port_but_not_linked_ipv6_group() {
     assert_eq!(state(&book, target()).last_success, EPOCH - 20_000);
 }
 
-
 #[test]
 fn anchors_consume_durably_and_return_original_metadata_only_before_dispatch() {
     let directory = tempfile::tempdir().expect("directory");
@@ -669,7 +668,11 @@ fn feelers_use_advertised_address_database_services_without_inventing_dns_bits()
         book.select(&[], &[], EPOCH, u64::MAX, |_| true),
         Some(target())
     );
-    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 1, EPOCH)], EPOCH);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(addr(2)),
+        &[(target(), 1, EPOCH)],
+        EPOCH,
+    );
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));
     book.state.lock().stored.records[0].services = Some(1024);
     assert_eq!(book.feeler(&[], &[], EPOCH, |_| true), Some(target()));

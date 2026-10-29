@@ -3095,9 +3095,7 @@ fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_p
     );
     assert!(fixture.sync.owns_body_fetch(alternate_source, x1));
     assert!(
-        fixture
-            .peers
-            .is_connected(fixture.owner),
+        fixture.peers.is_connected(fixture.owner),
         "a peer that lacks a body is not punished"
     );
 
@@ -3236,7 +3234,12 @@ fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
     // holder instead of alternating between the refusers.
     let now = Instant::now();
     assert!(
-        fixture.sync.scheduler.lock().body_unavailable.refuses(owner_source, x0, now),
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .body_unavailable
+            .refuses(owner_source, x0, now),
         "the first refusal survives the second under retention bounding"
     );
     assert!(
@@ -3384,9 +3387,7 @@ fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() 
         "no wake-up-paced getdata/notfound loop against the only peer"
     );
     assert!(
-        fixture
-            .peers
-            .is_connected(fixture.owner),
+        fixture.peers.is_connected(fixture.owner),
         "a peer that lacks a body is not disconnected"
     );
 

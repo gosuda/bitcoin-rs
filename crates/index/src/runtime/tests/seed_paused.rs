@@ -1087,11 +1087,10 @@ fn seed_mutation_check_digest_removal_fails() {
             base: tip_hash.to_le_bytes(),
         },
     );
-    let result =
-        artifact.for_each_coin_raw(
-            &mut |_: &OutPoint, _: &[u8]| Ok::<(), StorageError>(()),
-            &|| false,
-        );
+    let result = artifact.for_each_coin_raw(
+        &mut |_: &OutPoint, _: &[u8]| Ok::<(), StorageError>(()),
+        &|| false,
+    );
     assert!(
         matches!(result, Err(bitcoin_rs_utxo::RawSeedError::Integrity)),
         "only the digest comparison refuses a length-preserving flip"

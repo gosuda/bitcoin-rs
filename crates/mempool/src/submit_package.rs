@@ -321,13 +321,7 @@ impl MempoolGateway {
         chain: &dyn AdmissionChain,
     ) -> Result<MutationResult, SubmitError> {
         crate::package::check_structure(txs)?;
-        self.submit_package_atomic(
-            txs,
-            AdmissionOrigin::from(origin),
-            max_rate,
-            time,
-            chain,
-        )
+        self.submit_package_atomic(txs, AdmissionOrigin::from(origin), max_rate, time, chain)
     }
 
     /// Atomically submits a BIP331 ancestor package relayed by `source`: the

@@ -79,7 +79,6 @@ impl PeerRequest {
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
-
 }
 
 /// Per-peer availability view for one request build.
@@ -105,9 +104,7 @@ impl<'a> RefusalFilter<'a> {
     /// and its height contends for the cursor pin.
     pub(crate) fn keep(&mut self, hash: Hash256, height: u32) -> bool {
         if (self.is_refused)(hash) {
-            self.min_refused = Some(self.min_refused.map_or(height, |floor| {
-                floor.min(height)
-            }));
+            self.min_refused = Some(self.min_refused.map_or(height, |floor| floor.min(height)));
             false
         } else {
             true
@@ -1786,14 +1783,8 @@ impl DownloadWindow {
                 next_request_height,
             };
             if entries.is_empty()
-                && let Some(request) = self.clean_contiguous_peer_request(
-                    stager,
-                    source,
-                    chain_tip,
-                    tree,
-                    scan,
-                    refusals,
-                )
+                && let Some(request) = self
+                    .clean_contiguous_peer_request(stager, source, chain_tip, tree, scan, refusals)
             {
                 return Some(request);
             }

@@ -673,8 +673,8 @@ struct RecordingGatewayObserver {
     changes: parking_lot::Mutex<Vec<(u64, Hash256, MutationOutcome)>>,
 }
 
-    impl MempoolObserver for RecordingGatewayObserver {
-        fn on_mutation(&self, envelope: &MutationEnvelope) {
+impl MempoolObserver for RecordingGatewayObserver {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
         let result = &envelope.result;
         let mut changes = self.changes.lock();
         for (offset, change) in result.changes.iter().enumerate() {

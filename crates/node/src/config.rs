@@ -548,17 +548,11 @@ impl NodeConfig {
             "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
         );
         anyhow::ensure!(
-            !overlay
-                .onlynet
-                .contains(&PeerNetwork::Onion)
-                || onion_route,
+            !overlay.onlynet.contains(&PeerNetwork::Onion) || onion_route,
             "--onlynet=onion requires an onion route (--onion-proxy or --proxy)"
         );
         anyhow::ensure!(
-            !overlay
-                .onlynet
-                .contains(&PeerNetwork::I2p)
-                || overlay.i2p_sam.is_some(),
+            !overlay.onlynet.contains(&PeerNetwork::I2p) || overlay.i2p_sam.is_some(),
             "--onlynet=i2p requires an I2P SAM bridge (--i2p-sam)"
         );
         anyhow::ensure!(

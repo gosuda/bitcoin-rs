@@ -14,9 +14,9 @@ use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
-use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
 #[cfg(test)]
 use super::util::scan_descriptor_range;
+use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
 use bitcoin::hex::DisplayHex as _;
 
 use crate::context::{AppliedView, ChainControlError, Context, TxQueryError, TxUnavailableCause};

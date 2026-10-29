@@ -113,11 +113,7 @@ fn connect(
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
-    peers.publish_info(
-        addr,
-        &lease,
-        synthetic_peer(addr, start_height),
-    );
+    peers.publish_info(addr, &lease, synthetic_peer(addr, start_height));
     (addr, lease, rx)
 }
 
@@ -800,11 +796,7 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     let replacement_lease = PeerLease::new(replacement_tx);
     peers.register(addr, replacement_lease.clone());
-    peers.publish_info(
-        addr,
-        &replacement_lease,
-        synthetic_peer(addr, 100_000),
-    );
+    peers.publish_info(addr, &replacement_lease, synthetic_peer(addr, 100_000));
     let replacement = current_source(&peers, addr);
 
     sync.tick();
@@ -1028,9 +1020,7 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
         "a header below the floor must not reach the tree through a body either"
     );
     assert!(
-        rx.try_recv().is_err()
-            && !lease.is_cancelled()
-            && peers.is_connected(addr),
+        rx.try_recv().is_err() && !lease.is_cancelled() && peers.is_connected(addr),
         "a forwarded header sends nothing and blames no one"
     );
     Ok(())
@@ -1196,9 +1186,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let (addr, _lease, _rx) = connect(&peers, 9706, 100_000);
     let source = current_source(&peers, addr);
     assert_eq!(
-        peers
-            .info_of(addr)
-            .map(|info| info.best_known_height),
+        peers.info_of(addr).map(|info| info.best_known_height),
         Some(100_000)
     );
 

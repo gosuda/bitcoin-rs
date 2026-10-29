@@ -33,9 +33,10 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
         "the first getheaders must target the invalid peer"
     );
     assert!(
-        sync.scheduler.lock().header_request().is_some_and(
-            |request| request.source.endpoint == invalid_peer.endpoint()
-        ),
+        sync.scheduler
+            .lock()
+            .header_request()
+            .is_some_and(|request| request.source.endpoint == invalid_peer.endpoint()),
         "a pending getheaders must name the invalid peer before its batch arrives"
     );
 
@@ -69,11 +70,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult
     // Re-introduce a healthy peer; the next getheaders must rotate to it.
     let other_lease = crate::PeerLease::new(other_tx);
     peers.register(other_peer, other_lease.clone());
-    peers.publish_info(
-        other_peer,
-        &other_lease,
-        synthetic_peer(other_peer, 8),
-    );
+    peers.publish_info(other_peer, &other_lease, synthetic_peer(other_peer, 8));
     sync.tick();
     assert!(
         peers.is_connected(other_peer),
@@ -326,11 +323,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight() -> TestResult {
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(replacement_tx);
     peers.register(winner, lease.clone());
-    peers.publish_info(
-        winner,
-        &lease,
-        synthetic_peer(winner, 100),
-    );
+    peers.publish_info(winner, &lease, synthetic_peer(winner, 100));
     let replacement = lease.source(winner.endpoint());
     sync.on_peer_ready(replacement);
     assert!(
@@ -407,11 +400,7 @@ fn stall_eviction_does_not_disconnect_replacement_connection() -> TestResult {
     let (replacement_tx, _replacement_rx) = crate::test_support::message_channel();
     let replacement = PeerLease::new(replacement_tx);
     peers.register(staller, replacement.clone());
-    peers.publish_info(
-        staller,
-        &replacement,
-        synthetic_peer(staller, 200),
-    );
+    peers.publish_info(staller, &replacement, synthetic_peer(staller, 200));
     let evicted = selected.is_some_and(|owner| sync.peer_table.disconnect_source(owner));
 
     assert!(selected.is_some());

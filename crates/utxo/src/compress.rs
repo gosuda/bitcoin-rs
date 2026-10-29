@@ -186,7 +186,7 @@ pub(crate) fn encode_core_varint_array(mut value: u64) -> ([u8; 10], usize) {
 }
 
 /// Compares two vouts by Core's coins-DB key order: bytewise order of the
-/// subtract-one MSB VARINT encodings, which is the LevelDB cursor order that
+/// subtract-one MSB VARINT encodings, which is the `LevelDB` cursor order that
 /// defines Core's `HASH_SERIALIZED` commitment and dumptxoutset group order.
 ///
 /// This is NOT numeric order across a width transition: 2-byte max 16,511

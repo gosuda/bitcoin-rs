@@ -128,10 +128,7 @@ fn unowned_frontier_schedules_recovery_when_a_capable_peer_exists() {
     assert!(plan.schedule_bodies);
     assert_eq!(plan.no_progress, None);
     match plan.header_action {
-        HeaderAction::Probe(source) => assert_eq!(
-            source.endpoint,
-            addr_of(9001).endpoint()
-        ),
+        HeaderAction::Probe(source) => assert_eq!(source.endpoint, addr_of(9001).endpoint()),
         action => panic!("expected Probe, got {action:?}"),
     }
 }
@@ -311,10 +308,7 @@ fn probe_rotates_past_the_dead_pending_owner() {
     assert!(!frontier.header_request_live);
     match frontier.plan().header_action {
         HeaderAction::Probe(source) => {
-            assert_eq!(
-                source.endpoint,
-                addr_of(9001).endpoint()
-            );
+            assert_eq!(source.endpoint, addr_of(9001).endpoint());
             assert_ne!(source, dead_owner);
         }
         action => panic!("expected Probe, got {action:?}"),
@@ -331,10 +325,7 @@ fn non_serving_peers_are_never_probe_picks() {
         vec![non_serving, usable(9002, 100, None)],
     );
     match frontier.plan().header_action {
-        HeaderAction::Probe(source) => assert_eq!(
-            source.endpoint,
-            addr_of(9002).endpoint()
-        ),
+        HeaderAction::Probe(source) => assert_eq!(source.endpoint, addr_of(9002).endpoint()),
         action => panic!("expected Probe, got {action:?}"),
     }
 }
@@ -476,11 +467,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
     let (tx, rx) = crate::test_support::message_channel();
     let conn1 = PeerLease::new(tx);
     peers.register(staller, conn1.clone());
-    peers.publish_info(
-        staller,
-        &conn1,
-        synthetic_peer(staller, 200),
-    );
+    peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
 
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
@@ -501,9 +488,13 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
         .or_fail("regtest fixture block");
         let payload = BlockPayload::from_local(block);
         scheduler.window.seed_front_cadence_for_test(50, now);
-        scheduler
-            .stager
-            .insert(tail, None, payload, Some(conn1.source(staller.endpoint())), now);
+        scheduler.stager.insert(
+            tail,
+            None,
+            payload,
+            Some(conn1.source(staller.endpoint())),
+            now,
+        );
         scheduler
             .window
             .mark_received_from(tail, 80, Some(conn1.source(staller.endpoint())), now);
@@ -535,11 +526,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
     let (tx2, rx2) = crate::test_support::message_channel();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());
-    peers.publish_info(
-        staller,
-        &conn2,
-        synthetic_peer(staller, 200),
-    );
+    peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
 
     let owner = owner.ok_or_else(|| std::io::Error::other("missing stall owner"))?;
     assert!(

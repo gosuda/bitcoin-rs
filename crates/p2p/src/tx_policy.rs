@@ -2778,8 +2778,7 @@ mod tests {
         // The connection ends with its body queued: nothing is re-requested.
         table.transaction_peer_disconnected(a, &inventory);
         assert!(b_rx.try_recv().is_err());
-        let replacement =
-            PeerSource::for_test(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        let replacement = PeerSource::for_test(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
         assert!(!table.begin_package_resolution(replacement, subject, combined, &sequence));
         assert!(!table.release_package_claim(replacement, subject, &inventory));
         assert!(!table.begin_package_resolution(a, subject, combined, &sequence));

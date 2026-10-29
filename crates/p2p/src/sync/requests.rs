@@ -666,7 +666,16 @@ mod tests {
         let mut refusals = RefusalFilter::new(&never_refused);
         let request = window
             .next_peer_request(
-                &mut stager, owner, false, &chain_tip, 1, 10, 0, &tree, now, &mut refusals,
+                &mut stager,
+                owner,
+                false,
+                &chain_tip,
+                1,
+                10,
+                0,
+                &tree,
+                now,
+                &mut refusals,
             )
             .unwrap_or_else(|| panic!("window must plan the test prefix"));
         let (_, hash) = request

@@ -781,7 +781,10 @@ pub(crate) fn canonical(addr: PeerEndpoint) -> PeerEndpoint {
 }
 
 fn routable(addr: PeerEndpoint, allow_local: bool) -> bool {
-    if addr.port() == 0 && !matches!(addr.address(), crate::PeerAddress::I2p(_)) || addr.address().is_unspecified() || addr.address().is_multicast() {
+    if addr.port() == 0 && !matches!(addr.address(), crate::PeerAddress::I2p(_))
+        || addr.address().is_unspecified()
+        || addr.address().is_multicast()
+    {
         return false;
     }
     match addr.address() {
@@ -1704,7 +1707,6 @@ fn read_anchors<'de, D: serde::Deserializer<'de>>(
     }
     deserializer.deserialize_seq(Anchors)
 }
-
 
 fn validate_anchors(stored: &Stored) -> io::Result<()> {
     let mut anchors = HashSet::new();

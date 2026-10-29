@@ -871,11 +871,7 @@ fn failed_sweep_probe_requests_headers_from_live_peer_in_same_tick() -> TestResu
     let connected_at = now.checked_sub(MINIMUM_CONNECT_TIME).ok_or("connect age")?;
     let lease = PeerLease::new_connected_at(tx, connected_at);
     peers.register(dead, lease.clone());
-    peers.publish_info(
-        dead,
-        &lease,
-        synthetic_peer(dead, 5),
-    );
+    peers.publish_info(dead, &lease, synthetic_peer(dead, 5));
     let source = current_source(&peers, dead);
     let live_rx = connect_peer(&peers, synthetic_peer(live, 3));
 
@@ -942,11 +938,7 @@ fn failed_sweep_probe_reassigns_fresh_inflight_body_in_same_tick() -> TestResult
     let connected_at = now.checked_sub(MINIMUM_CONNECT_TIME).ok_or("connect age")?;
     let lease = PeerLease::new_connected_at(tx, connected_at);
     peers.register(dead, lease.clone());
-    peers.publish_info(
-        dead,
-        &lease,
-        synthetic_peer(dead, 5),
-    );
+    peers.publish_info(dead, &lease, synthetic_peer(dead, 5));
     let source = current_source(&peers, dead);
     let chain = sync.observe_chain_frontier();
     assert!(
@@ -1015,11 +1007,7 @@ fn a_failed_sweep_probe_restores_the_armed_record() {
         .expect("the test clock predates the connect age");
     let lease = PeerLease::new_connected_at(tx, connected_at);
     peers.register(addr, lease.clone());
-    peers.publish_info(
-        addr,
-        &lease,
-        synthetic_peer(addr, 0),
-    );
+    peers.publish_info(addr, &lease, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
     let frontier = sync.observe_frontier(sync.observe_chain_frontier(), t0);

@@ -112,15 +112,7 @@ fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotia
     let (client, _) = shared(false);
     let lease = lease();
     let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
-    run_outbound_handshake(
-        &mut peer,
-        7,
-        0,
-        &lease,
-        deadline(),
-        addr,
-        &client,
-    )?;
+    run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
     peer.send(&Message::Ping(41))?;
     read_until(&mut peer, &Message::Pong(41))
 }
@@ -203,11 +195,7 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(
-        addr,
-        dialer,
-        PeerRole::FullRelay,
-    );
+    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let published = loop {
         if let (Some(outbound), Some(inbound)) = (
@@ -247,11 +235,7 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let (dialer, dialer_table) = shared(true);
-    let dial = spawn_pinned_outbound_connection(
-        addr,
-        dialer,
-        PeerRole::FullRelay,
-    );
+    let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let dialed = loop {
         let dialed = dialer_table.infos();

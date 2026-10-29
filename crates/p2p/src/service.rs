@@ -6,8 +6,8 @@
 
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::io;
+use std::net::SocketAddr;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2110,11 +2110,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             ) {
                 for seed in &maintenance.seeds {
                     match crate::peer::DnsResolver::resolve(&resolver, seed) {
-                        Ok(addresses) => maintenance.address_book.learn_dns(
-                            seed,
-                            &addresses,
-                            now,
-                        ),
+                        Ok(addresses) => maintenance.address_book.learn_dns(seed, &addresses, now),
                         Err(error) => tracing::warn!(seed, %error, "DNS bootstrap unavailable"),
                     }
                 }
@@ -2912,7 +2908,11 @@ mod tests {
         for n in 1..100 {
             let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
             book.learn_dns("seed", &[addr], 10_000);
-            book.learn_peer(crate::PeerRemote::Endpoint(addr), &[(addr, 9, 10_000)], 10_000);
+            book.learn_peer(
+                crate::PeerRemote::Endpoint(addr),
+                &[(addr, 9, 10_000)],
+                10_000,
+            );
         }
         (
             AddressMaintenance {
@@ -3215,9 +3215,11 @@ mod tests {
         for n in 1..100 {
             let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
             maintenance.address_book.learn_dns("seed", &[addr], now);
-            maintenance
-                .address_book
-                .learn_peer(crate::PeerRemote::Endpoint(addr), &[(addr, 9, now)], now);
+            maintenance.address_book.learn_peer(
+                crate::PeerRemote::Endpoint(addr),
+                &[(addr, 9, now)],
+                now,
+            );
         }
         assert!(
             maintenance
@@ -4019,10 +4021,7 @@ mod tests {
         *service.workers.lock() = Some(Workers::default());
         assert!(service.workers.lock().is_some());
         service.shutdown();
-        assert!(
-            lease.is_cancelled(),
-            "shutdown must cancel live sessions"
-        );
+        assert!(lease.is_cancelled(), "shutdown must cancel live sessions");
         let restored =
             crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
         assert_eq!(restored.take_restart_anchors(now), vec![addr]);
@@ -5192,10 +5191,9 @@ mod tests {
         let service = i2p_service(bridge.addr);
         let (frames, _outbound) = crossbeam_channel::unbounded();
         let peer = crate::PeerLease::new(frames);
-        service.peer_table.register(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, 8334)),
-            peer.clone(),
-        );
+        service
+            .peer_table
+            .register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8334)), peer.clone());
 
         let observed = thread::scope(|scope| {
             let parked = service.overlay_addresses.lock();

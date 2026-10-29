@@ -248,11 +248,7 @@ impl PeerTable {
         if !activity.is_active() || lease.is_cancelled() {
             return None;
         }
-        Self::register_locked(
-            &mut entries,
-            addr,
-            Entry::fresh(lease.clone()),
-        );
+        Self::register_locked(&mut entries, addr, Entry::fresh(lease.clone()));
         Some(lease)
     }
 
@@ -469,11 +465,7 @@ impl PeerTable {
     /// the anonymous key derives from the lease, so only that connection
     /// can publish or be resolved through it.
     pub fn publish_info_unidentified(&self, lease: &PeerLease, info: PeerInfo) -> bool {
-        self.publish_info(
-            PeerRemote::AnonymousTor(lease.connection_id()),
-            lease,
-            info,
-        )
+        self.publish_info(PeerRemote::AnonymousTor(lease.connection_id()), lease, info)
     }
 
     /// Publishes handshake metadata for the connection `lease` refers to.
@@ -800,12 +792,9 @@ impl PeerTable {
     /// Returns announcement state for the current published connection.
     pub(crate) fn announcement_state(&self, source: PeerSource) -> Option<PeerAnnouncementState> {
         let entries = self.entries.read();
-        entries
-            .get(&PeerRemote::from(source))
-            .and_then(|entry| {
-                (entry.lease.is_current(source) && entry.info.is_some())
-                    .then_some(entry.announcement)
-            })
+        entries.get(&PeerRemote::from(source)).and_then(|entry| {
+            (entry.lease.is_current(source) && entry.info.is_some()).then_some(entry.announcement)
+        })
     }
 
     /// Reports whether the live published connection at `addr` requested
@@ -814,14 +803,12 @@ impl PeerTable {
     pub(crate) fn compact_relay_of(&self, addr: impl Into<PeerRemote>) -> bool {
         let addr = addr.into();
         let entries = self.entries.read();
-        entries
-            .get(&addr)
-            .is_some_and(|entry| {
-                entry
-                    .info
-                    .as_ref()
-                    .is_some_and(|info| info.compact_block_relay)
-            })
+        entries.get(&addr).is_some_and(|entry| {
+            entry
+                .info
+                .as_ref()
+                .is_some_and(|info| info.compact_block_relay)
+        })
     }
 
     /// Reports whether the live connection identified by `source` requested
@@ -864,10 +851,9 @@ impl PeerTable {
 
     /// Remove an unidentified session by its lease.
     pub fn remove_unidentified(&self, lease: &PeerLease) -> bool {
-        self.remove_if(
-            PeerRemote::AnonymousTor(lease.connection_id()),
-            |current| current.same_connection(lease),
-        )
+        self.remove_if(PeerRemote::AnonymousTor(lease.connection_id()), |current| {
+            current.same_connection(lease)
+        })
     }
 
     /// Removes and cancels the connection that stamped `source`. Returns
@@ -893,9 +879,7 @@ impl PeerTable {
 
     /// Removes and cancels the live connection at `addr` only when its identity is `id`.
     pub(crate) fn disconnect_connection(&self, addr: PeerEndpoint, id: ConnectionId) -> bool {
-        self.remove_if(addr.into(), |current| {
-            current.connection_id() == id
-        })
+        self.remove_if(addr.into(), |current| current.connection_id() == id)
     }
 
     /// Removes and cancels exactly the handshake-complete connection whose
@@ -2632,10 +2616,9 @@ mod tests {
 
     #[test]
     fn overlay_identity_remote_never_uses_proxy_ip() {
-        use crate::connection::PeerRemote;
         use crate::PeerEndpoint;
-        let loopback =
-            PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        use crate::connection::PeerRemote;
+        let loopback = PeerEndpoint::Ip(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
         let anon_id = crate::ConnectionId::for_test_raw(123);
         let anon = PeerRemote::AnonymousTor(anon_id);
         assert_eq!(

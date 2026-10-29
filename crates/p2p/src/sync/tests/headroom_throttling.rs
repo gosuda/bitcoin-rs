@@ -125,11 +125,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner() -> TestResult {
         .ok_or_else(|| std::io::Error::other("alternate peer info missing"))?;
     alternate_info.start_height = 0;
     alternate_info.best_known_height = 0;
-    assert!(peers.publish_info(
-        alternate,
-        &alternate_lease,
-        alternate_info
-    ));
+    assert!(peers.publish_info(alternate, &alternate_lease, alternate_info));
     assert!(peers.note_announced_tip(
         current_source(&peers, alternate),
         Hash256::from_le_bytes(expected[0].as_bytes()),
