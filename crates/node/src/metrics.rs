@@ -167,6 +167,10 @@ impl EvidenceIdentity {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep metric descriptions together in the process-wide registry"
+)]
 fn describe_node_metrics() {
     metrics::describe_counter!("node.event_loop.sync_ticks", "block sync ticks");
     metrics::describe_counter!(
