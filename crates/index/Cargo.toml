@@ -30,6 +30,7 @@ redb = [
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true
+bitcoin-rs-script.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-utxo.workspace = true
@@ -38,12 +39,15 @@ compact_str.workspace = true
 crossbeam-channel.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 bitcoin.workspace = true
 bitcoin_hashes.workspace = true
 secp256k1 = { workspace = true, optional = true }
 hashbrown.workspace = true
 zerocopy.workspace = true
 serde.workspace = true
+sonic-rs.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true

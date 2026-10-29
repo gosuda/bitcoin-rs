@@ -28,9 +28,10 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes, deserialize,
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, LockTime, OutPoint,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes,
 };
+use bytes::Bytes;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use bitcoin_rs_p2p::compact_blocks::{COMPACT_BLOCK_VERSION, Outcome};
@@ -63,12 +64,13 @@ fn bench_write_message(c: &mut Criterion) {
 
     let ping = Message::Ping(42);
 
-    // Build a native `Block` from the regtest genesis so the benchmark
-    // exercises the same consensus-encode path as real block relay.
+    // Build the regtest genesis as an exact payload so the benchmark
+    // exercises the same framing path as real block relay without a second
+    // parse or re-encode: one decode retains the frame bytes.
     let genesis = genesis_block(Network::Regtest);
     let genesis_bytes = serialize(&genesis);
-    let native_block = deserialize::<Block>(&genesis_bytes).expect("decode genesis block");
-    let block = Message::Block(native_block);
+    let payload = BlockPayload::from_raw(Bytes::from(genesis_bytes)).expect("decode genesis block");
+    let block = Message::Block(payload);
 
     group.bench_function("ping_8B_payload", |b| {
         let (mut stream, _drain) = connected_pair();

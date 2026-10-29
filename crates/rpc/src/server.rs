@@ -44,6 +44,36 @@ const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
 
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
+/// Routes admitted by one listener, with an independent connection budget.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RpcSurface {
+    /// Historical combined JSON-RPC, REST and Esplora listener.
+    #[default]
+    Shared,
+    /// Authenticated JSON-RPC only.
+    Management,
+    /// REST (when enabled) and both existing Esplora namespaces; no JSON-RPC.
+    Public,
+}
+
+impl RpcSurface {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Management => "management",
+            Self::Public => "public",
+        }
+    }
+
+    fn allows(self, route: &HttpRoute<'_>) -> bool {
+        match self {
+            Self::Shared => true,
+            Self::Management => matches!(route, HttpRoute::JsonRpc | HttpRoute::NotFound),
+            Self::Public => !matches!(route, HttpRoute::JsonRpc),
+        }
+    }
+}
+
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
     /// Bound TCP listener.
@@ -103,12 +133,23 @@ impl RpcServer {
         self,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> io::Result<()> {
-        self.serve_accept_loop(&shutdown.into(), TcpListener::accept)
+        self.serve_surface_with_shutdown(shutdown, RpcSurface::Shared)
+    }
+
+    /// Runs this listener with a closed route selection and its own budget.
+    /// The historical serving entrypoint retains the shared surface.
+    pub fn serve_surface_with_shutdown(
+        self,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        surface: RpcSurface,
+    ) -> io::Result<()> {
+        self.serve_accept_loop(&shutdown.into(), surface, TcpListener::accept)
     }
 
     fn serve_accept_loop(
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
         mut accept: impl FnMut(&TcpListener) -> io::Result<(TcpStream, SocketAddr)>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
@@ -121,7 +162,7 @@ impl RpcServer {
                 Ok((stream, addr)) => {
                     if let Err(error) = stream
                         .set_nonblocking(false)
-                        .and_then(|()| self.handle_accept(&active, stream, addr.ip()))
+                        .and_then(|()| self.handle_accept(&active, stream, addr.ip(), surface))
                     {
                         debug!(%error, "rpc connection setup failed");
                     }
@@ -157,6 +198,7 @@ impl RpcServer {
         active: &Arc<Mutex<ActiveConnections>>,
         stream: TcpStream,
         peer: IpAddr,
+        surface: RpcSurface,
     ) -> io::Result<()> {
         // Connection-local: a nodelay failure must not stop the accept loop.
         let mut stream = match prepare_http_socket(stream) {
@@ -168,6 +210,9 @@ impl RpcServer {
         };
         let should_accept = active.lock().admit(peer, self.max_connections);
         if !should_accept {
+            metrics::counter!("rpc.connections.rejected_total", "surface" => surface.label())
+                .increment(1);
+            stream.set_write_timeout(Some(self.idle_timeout))?;
             write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
             return Ok(());
         }
@@ -175,7 +220,9 @@ impl RpcServer {
         let permit = ConnectionPermit {
             active: Arc::clone(active),
             peer,
+            surface,
         };
+        metrics::gauge!("rpc.connections.active", "surface" => surface.label()).increment(1.0);
         let auth = Arc::clone(&self.auth);
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
@@ -185,7 +232,7 @@ impl RpcServer {
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
-                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
+                    serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
@@ -240,15 +287,34 @@ impl ActiveConnections {
 struct ConnectionPermit {
     active: Arc<Mutex<ActiveConnections>>,
     peer: IpAddr,
+    surface: RpcSurface,
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.lock().release(self.peer);
+        metrics::gauge!("rpc.connections.active", "surface" => self.surface.label()).decrement(1.0);
     }
 }
 
 struct RpcStop(Arc<Handler>);
+
+struct RequestTimer {
+    started: Instant,
+    surface: RpcSurface,
+    route: &'static str,
+}
+
+impl Drop for RequestTimer {
+    fn drop(&mut self) {
+        metrics::histogram!(
+            "rpc.http.request_seconds",
+            "surface" => self.surface.label(),
+            "route" => self.route,
+        )
+        .record(self.started.elapsed().as_secs_f64());
+    }
+}
 
 impl Drop for RpcStop {
     fn drop(&mut self) {
@@ -313,6 +379,7 @@ fn serve_connection(
     handler: &Handler,
     rest_enabled: bool,
     idle_timeout: Duration,
+    surface: RpcSurface,
 ) -> io::Result<()> {
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
@@ -327,7 +394,7 @@ fn serve_connection(
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
             Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled {
+                let response = if rest_enabled && surface != RpcSurface::Management {
                     crate::rest::getutxos_body_too_large()
                 } else {
                     crate::rest::not_found()
@@ -357,6 +424,18 @@ fn serve_connection(
                 return Err(error);
             }
         };
+        let route = classify(&head.method, &head.path);
+        let _request_timer = RequestTimer {
+            started: Instant::now(),
+            surface,
+            route: route.label(),
+        };
+        // Reject a route outside this listener before authentication or body
+        // upload. Closing also prevents pipelined bytes crossing the boundary.
+        if !surface.allows(&route) {
+            write_not_found(reader.get_mut().socket_mut(), false)?;
+            return Ok(());
+        }
         // Authentication runs from the head alone, before any body byte is
         // read: a 16 MiB declared body without credentials gets its 401 at
         // once instead of after its upload (Core `httprpc.cpp` checks inside
@@ -369,7 +448,7 @@ fn serve_connection(
         let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
             Ok(request) => request,
             Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled {
+                let response = if rest_enabled && surface != RpcSurface::Management {
                     crate::rest::getutxos_body_too_large()
                 } else {
                     crate::rest::not_found()
@@ -884,6 +963,11 @@ enum CallResponse {
         /// The legacy HTTP status depends on the code (400 for -32600, 404
         /// for -32601), so the code travels with the reply.
         error_code: Option<i64>,
+        /// Whether the error is an envelope refusal raised by the parse
+        /// step itself. Core maps these `-32600`s to HTTP 400 without
+        /// consulting the negotiated dialect (`src/httprpc.cpp`), while a
+        /// method-level error keeps the dialect's own mapping.
+        envelope_error: bool,
     },
     Notification,
 }
@@ -894,16 +978,37 @@ impl CallResponse {
             body,
             version,
             error_code: error.map(RpcError::code),
+            envelope_error: false,
+        }
+    }
+
+    /// A reply for a refused envelope: Core raises `-32600` from
+    /// `JSONRPCRequest::parse` and answers HTTP 400 in either dialect.
+    fn envelope_error(body: Value, version: JsonRpcVersion, error: &RpcError) -> Self {
+        Self::Reply {
+            body,
+            version,
+            error_code: Some(error.code()),
+            envelope_error: true,
         }
     }
 
     const fn http_status(&self) -> u16 {
         match self {
+            // The dialect code mapping is the single owner of every reply
+            // that carries a code, including envelope refusals: Core's
+            // outer error path maps the post-classification `-32600` to
+            // 400 through this arm in either dialect. The generic envelope
+            // arm below only covers the codeless case.
             Self::Reply {
                 version,
                 error_code: Some(code),
                 ..
             } => version.error_status_for_code(*code),
+            Self::Reply {
+                envelope_error: true,
+                ..
+            } => 400,
             Self::Reply { .. } | Self::Notification => 200,
         }
     }
@@ -923,24 +1028,33 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
         }
     };
 
-    let close = request.as_array().map_or_else(
-        || crate::registry::blocking_request(&request),
-        |requests| requests.iter().any(crate::registry::blocking_request),
-    );
-    let mut response = handle_decoded_json(handler, &request);
-    // A rejected long call must not retain the reserved ordinary slot through
-    // keep-alive. Batch/notification classification uses the same registry.
-    response.close = close;
-    response
+    // The close decision is owned by `handle_decoded_json`, which sees the
+    // decoded envelope. Undecodable bodies name no method, so they never
+    // close; every decodable shape carries the flag computed below.
+    handle_decoded_json(handler, &request)
 }
 
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
+    // Single owner of the close decision: a rejected long call must not
+    // retain the reserved ordinary slot through keep-alive.
+    // Batch/notification classification uses the same registry, and every
+    // return below carries this flag, so no caller overwrites it and a
+    // future `true` cannot be silently discarded.
+    let close = request.as_array().map_or_else(
+        || crate::registry::blocking_request(request),
+        |requests| requests.iter().any(crate::registry::blocking_request),
+    );
     if let Some(requests) = request.as_array() {
         if requests.is_empty() {
-            return legacy_error_response(
-                &RpcError::InvalidRequest("batch must not be empty"),
-                &Value::new_null(),
-            );
+            // Core: an empty batch still answers HTTP 200 with an empty
+            // result array (`httprpc.cpp` runs the batch reply path, which
+            // produces `[]` for no members).
+            return JsonResponse {
+                close,
+                status: 200,
+                reason: reason_for_status(200),
+                body: Some(json!([])),
+            };
         }
         let mut responses = Vec::with_capacity(requests.len());
         for request in requests {
@@ -950,29 +1064,50 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             }
         }
         if responses.is_empty() {
-            return no_content_response();
+            return if close {
+                closing_no_content_response()
+            } else {
+                no_content_response()
+            };
         }
         // Core: "Batches never throw HTTP errors, they are always just
         // included in HTTP OK responses" (`httprpc.cpp:200-201`). A
         // per-member envelope or dispatch error stays inside the 200 batch.
         return JsonResponse {
-            close: false,
+            close,
             status: 200,
             reason: reason_for_status(200),
             body: Some(json!(responses)),
         };
     }
 
+    // A top-level value that is neither an object nor an array is Core's
+    // `RPC_PARSE_ERROR` "Top-level object parse error" (`httprpc.cpp`, the
+    // final `else` of `HTTPReq_JSONRPC`), HTTP 500 under the legacy
+    // mapping. Inside a batch the same value is a per-member -32600.
+    if !request.is_object() {
+        return legacy_error_response(
+            &RpcError::TopLevelParse("Top-level object parse error"),
+            &Value::new_null(),
+        );
+    }
+
     let response = handle_single_json(handler, request);
     let status = response.http_status();
     match response {
         CallResponse::Reply { body, .. } => JsonResponse {
-            close: false,
+            close,
             status,
             reason: reason_for_status(status),
             body: Some(body),
         },
-        CallResponse::Notification => no_content_response(),
+        CallResponse::Notification => {
+            if close {
+                closing_no_content_response()
+            } else {
+                no_content_response()
+            }
+        }
     }
 }
 
@@ -995,30 +1130,33 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     if !request.is_object() {
         let error = RpcError::InvalidRequest("Invalid Request object");
         let version = JsonRpcVersion::Legacy;
-        return CallResponse::reply(version.error_response(&error, &id), version, Some(&error));
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
     }
     let version = match JsonRpcVersion::classify(request) {
         Ok(version) => version,
         Err(error) => {
-            // Core raises -32600 from `JSONRPCRequest::parse` while
-            // classifying `jsonrpc`, before the claimed version is
-            // assigned, so the reply and its HTTP status use the legacy
-            // dialect (`request.cpp:206-224`, `httprpc.cpp:41-56`). The
-            // error envelope still carries the request's `id`.
+            // Core raises -32600 from `JSONRPCRequest::parse`, before the
+            // claimed version is trusted, so the reply uses the legacy
+            // envelope (`request.cpp:206-224`) while the HTTP status stays
+            // the 400 every envelope refusal takes (`httprpc.cpp:41-56`).
+            // The error envelope still carries the request's `id`.
             let version = JsonRpcVersion::Legacy;
-            return CallResponse::reply(version.error_response(&error, &id), version, Some(&error));
+            return CallResponse::envelope_error(
+                version.error_response(&error, &id),
+                version,
+                &error,
+            );
         }
     };
-    // Core checks a null method before its string check, so an explicit
-    // `"method":null` is "Missing method" (`src/rpc/request.cpp:226-229`).
-    let method = request.get("method");
-    if method.is_none_or(Value::is_null) {
+    // Core checks `isNull()` before `isStr()` (`request.cpp:228-232`), so
+    // an explicit `"method": null` is "Missing method".
+    let Some(method) = request.get("method").filter(|method| !method.is_null()) else {
         let error = RpcError::InvalidRequest("Missing method");
-        return CallResponse::reply(version.error_response(&error, &id), version, Some(&error));
-    }
-    let Some(method) = method.and_then(Value::as_str) else {
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
+    };
+    let Some(method) = method.as_str() else {
         let error = RpcError::InvalidRequest("Method must be a string");
-        return CallResponse::reply(version.error_response(&error, &id), version, Some(&error));
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
     };
     let null_params = Value::new_null();
     let params = request.get("params").unwrap_or(&null_params);
@@ -1026,7 +1164,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     // "no positional parameters". Any other JSON type is -32600.
     if !(params.is_array() || params.is_object() || params.is_null()) {
         let error = RpcError::InvalidRequest("Params must be an array or object");
-        return CallResponse::reply(version.error_response(&error, &id), version, Some(&error));
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
     }
     // Core canonicalizes absent or explicit-null params to an empty array
     // before dispatch, so method defaults apply (`src/rpc/request.cpp:243-248`).
@@ -1052,6 +1190,9 @@ fn legacy_error_response(error: &RpcError, id: &Value) -> JsonResponse {
     let version = JsonRpcVersion::Legacy;
     let status = version.error_status_for(error);
     JsonResponse {
+        // Undecodable bodies and top-level scalars name no method, so they
+        // never close; the flag stays here only because there is no decoded
+        // envelope for `handle_decoded_json` to classify.
         close: false,
         status,
         reason: reason_for_status(status),
@@ -1069,9 +1210,21 @@ const fn reason_for_status(status: u16) -> &'static str {
     }
 }
 
+/// A 204 drain that keeps the connection: the drained batch (or
+/// notification) named no blocking method.
 const fn no_content_response() -> JsonResponse {
+    no_content_response_inner(false)
+}
+
+/// A 204 drain that also closes: the drained batch (or notification) named
+/// a blocking method, so the reserved slot must not survive keep-alive.
+const fn closing_no_content_response() -> JsonResponse {
+    no_content_response_inner(true)
+}
+
+const fn no_content_response_inner(close: bool) -> JsonResponse {
     JsonResponse {
-        close: false,
+        close,
         status: 204,
         reason: "No Content",
         body: None,
@@ -1142,6 +1295,33 @@ enum HttpRoute<'a> {
     },
     NotFound,
     JsonRpc,
+}
+
+impl HttpRoute<'_> {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Rest { .. } | Self::RestPost { .. } => "rest",
+            Self::EsploraGet {
+                surface: HttpSurface::EsploraPublic,
+                ..
+            }
+            | Self::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                ..
+            }
+            | Self::Preflight { .. } => "esplora_public",
+            Self::EsploraGet {
+                surface: HttpSurface::EsploraBackend,
+                ..
+            }
+            | Self::EsploraPost {
+                surface: HttpSurface::EsploraBackend,
+                ..
+            } => "esplora_backend",
+            Self::NotFound => "not_found",
+            Self::JsonRpc => "json_rpc",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

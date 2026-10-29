@@ -73,22 +73,31 @@ Accepted rows include captured modified `effective-feerate` and their wtxid.
 
 Generic script errors and some numeric RPC error codes remain intentional
 compatibility differences. The registry keeps its `Deviation` claim on
-`testmempoolaccept` while `submitpackage` stays `Unimplemented`; successful
-selected cases do not certify their entire surface.
+`testmempoolaccept` and scoped `submitpackage`; successful selected cases do
+not certify their entire surface.
 
 ## 5. Allowed differences and unsupported cases
 
 The machine-readable list lives in `crates/rpc/core-compat.toml` under `admission_profile`.
 
-- RPC `submitpackage` and package RBF submission remain unsupported;
-  the registry returns -32601 and Esplora `/txs/package` remains 404. Multi-row
+- RPC `submitpackage` supports one transaction or one parent followed by its
+  child. Independent successes are committed first; only fee/missing-input
+  failures are reconsidered as an atomic CPFP pair. Resident fees cannot pay
+  again. Responses use the pinned v31 `package_msg`, wtxid-keyed `tx-results`
+  and `replaced-transactions` shape, including partial success and
+  `other-wtxid`. `maxfeerate` caps each new member's modified feerate;
+  `maxburnamount` is a per-output guard run over the whole request before
+  any admission. Wider packages, replacement (including singleton replacement),
+  and package capacity eviction are explicitly refused. Native virtual-size
+  capacity and generic consensus/script/numeric rejection details remain
+  deviations. Esplora `/txs/package` remains 404. Multi-row
   `testmempoolaccept` follows Core's non-aggregating test mode. Under the selected
   positive relay floor a zero-fee ephemeral parent cannot enter alone. The
   zero-floor preview tests prove dust spending rules. Native
   `MempoolGateway::submit_local_package` supports bounded child-with-independent-
   parents CPFP with aggregate fees, atomic refusal and no replacement/capacity
   eviction; `package::tests::native_package_*` owns that evidence. Its policy
-  is not a claim of Core `submitpackage` compatibility.
+  is separate from the RPC's individual-first result contract.
 - The graph owner computes exact optimal dependency closures, and the pool
   keeps each cluster's linearization current at every mutation so mining and
   eviction read a maintained chunk index instead of re-solving. Core uses bounded,

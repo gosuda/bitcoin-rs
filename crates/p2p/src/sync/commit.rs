@@ -10,8 +10,7 @@ use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;
 use super::chain::WindowApplyDisposition;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{BlockPayload, Hash256};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -68,10 +67,10 @@ impl BlockSync {
         self.scheduler
             .lock()
             .window
-            .mark_peer_unresponsive(source.addr, Instant::now());
+            .mark_peer_unresponsive(source, Instant::now());
         metrics::counter!("node.sync.invalid_block_disconnects").increment(1);
         tracing::warn!(
-            peer_addr = %source.addr,
+            peer_addr = ?source.endpoint,
             %hash,
             "block sync: disconnected the connection that delivered a consensus-invalid block"
         );
@@ -161,24 +160,26 @@ impl BlockSync {
         while chunk_start < drained.len() {
             // Bounded by block count AND by bytes, so a window of tip-sized
             // blocks does not hold gigabytes just because the count allows it.
-            let chunk_end =
-                chunk_start
-                    .saturating_add(self.chain.window_len(
-                        &mut drained[chunk_start..].iter().map(|d| d.serialized.len()),
-                    ));
+            let chunk_end = chunk_start.saturating_add(
+                self.chain.window_len(
+                    &mut drained[chunk_start..]
+                        .iter()
+                        .map(|d| d.payload().bytes().len()),
+                ),
+            );
             let chunk = &drained[chunk_start..chunk_end];
-            // Borrowed, not cloned. `DrainedBlock` owns a whole block, so
-            // cloning one deep-copies every transaction and witness; doing that
-            // per block per window would spend the dispatch win on memcpy.
-            let blocks: Vec<&Block> = chunk.iter().map(|drained| &drained.block).collect();
-            let bodies: Vec<bytes::Bytes> = chunk
+            // Borrow the payloads in the same drained order; no per-window
+            // clone, block or body reconstruction is needed. The borrowed
+            // slice preserves the exact-serialization invariant: `payload.bytes()`
+            // is the canonical wire encoding, never re-encoded.
+            let payloads: Vec<&BlockPayload> = chunk
                 .iter()
-                .map(|drained| drained.serialized.clone())
+                .map(super::super::block_stager::DrainedBlock::payload)
                 .collect();
             // The window reports how far it got rather than just failing,
             // because only the committed prefix may be marked applied; the rest
             // has to go back on the stager untouched.
-            let committed = match self.chain.commit_window(&blocks, &bodies) {
+            let committed = match self.chain.commit_window(&payloads) {
                 Ok(applied) => applied,
                 Err(error) => {
                     let stopped = error.applied.min(chunk.len());

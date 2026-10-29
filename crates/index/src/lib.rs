@@ -8,6 +8,8 @@ pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 mod capabilities;
 /// Confirmed block indexing over the workspace key-value store.
 mod index;
+/// Portable, versioned index bundles: export and fenced restore of `TxLookup` rows.
+pub mod portable;
 /// Derived-index query contracts shared with surface adapters.
 pub mod query_api;
 /// Derived-index reconciliation phase and exact capability watermark alignment.
@@ -31,7 +33,7 @@ pub use index::{
     BasicFilter, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
     MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptLiveScan,
-    SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    SpentCoinScripts, TxIndexFamily, TxIndexPage, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use query_api::{
     CompactFilterQuery, DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource,

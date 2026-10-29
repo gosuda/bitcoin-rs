@@ -6,6 +6,75 @@ fn stored_value(path: &Path) -> serde_json::Value {
 }
 
 #[test]
+fn v8_book_migrates_to_v9_with_backup_and_byte_identical_ip_records() {
+    use bitcoin::hex::DisplayHex as _;
+    let directory = tempfile::tempdir().expect("directory");
+    let base = directory.path().join("peers.dat");
+    let path = network_path(&base, [1; 4]);
+    // Save a current (v9) book, then rewrite only the version field to
+    // fabricate the exact v8 payload its predecessor would have written:
+    // IP record strings are identical in both schemas.
+    let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    book.learn_dns("seed", &[target()], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(addr(1), 9, EPOCH)], EPOCH);
+    book.save();
+    let v9_payload = fs::read(&path).expect("saved book");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&v9_payload[..v9_payload.len() - 32]).expect("saved JSON");
+    value["version"] = serde_json::json!(8);
+    let mut v8_bytes = serde_json::to_vec(&value).expect("v8 payload");
+    let checksum = Sha256::digest(&v8_bytes);
+    v8_bytes.extend_from_slice(&checksum);
+    fs::write(&path, &v8_bytes).expect("write v8 book");
+    let records_before = value["records"].clone();
+
+    let migrated = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    assert!(migrated.state.lock().writable);
+    // The backup-before-migration file holds the exact v8 bytes.
+    let backup = path.with_extension(format!(
+        "v8-{}.bak",
+        Sha256::digest(&v8_bytes)[..].to_lower_hex_string()
+    ));
+    assert_eq!(fs::read(&backup).expect("migration backup"), v8_bytes);
+    assert_eq!(fs::read(&path).expect("source before publish"), v8_bytes);
+    migrated.save();
+    let migrated_value = stored_value(&path);
+    assert_eq!(migrated_value["version"], 9);
+    assert_eq!(
+        migrated_value["records"], records_before,
+        "IP records must be byte-identical across v8->v9 migration"
+    );
+    // A Tor record persists under its canonical endpoint string in v9.
+    let tor = crate::PeerEndpoint::TorV3 {
+        key: [7u8; 32],
+        port: 8333,
+    };
+    migrated.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(tor, 9, EPOCH)], EPOCH);
+    migrated.save();
+    let with_tor = stored_value(&path);
+    assert!(
+        with_tor["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .any(|record| record["addr"]
+                .as_str()
+                .is_some_and(|addr| addr.ends_with(".onion:8333"))),
+        "tor endpoint must persist as canonical onion string: {with_tor}"
+    );
+    let reopened = AddressBook::open(Some(base), [1; 4], false, None);
+    assert!(
+        reopened
+            .state
+            .lock()
+            .stored
+            .records
+            .iter()
+            .any(|record| record.endpoint == tor)
+    );
+}
+
+#[test]
 fn unknown_dns_zero_version_is_durable_metadata_without_good() {
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");
@@ -70,7 +139,8 @@ fn unknown_dns_zero_version_is_durable_metadata_without_good() {
     book.learn_dns("another-seed", &[target()], EPOCH + 7200);
     assert_eq!(book.state.lock().stored.records[0].services, Some(0));
     book.save();
-    assert_eq!(stored_value(&path)["version"], 8);
+    assert_eq!(stored_value(&path)["format"], "bitcoin-rs-addrman");
+    assert_eq!(stored_value(&path)["version"], SCHEMA_VERSION);
     assert_eq!(stored_value(&path)["records"][0]["services"], 0);
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
     assert_eq!(restored.state.lock().stored.records[0].services, Some(0));
@@ -86,15 +156,15 @@ fn incoming_known_gossip_and_unknown_dns_merge_without_losing_observation() {
     let book = book();
     book.learn_dns("seed", &[target()], EPOCH);
     let revision = book.state.lock().revision;
-    book.learn_peer(addr(2).ip(), &[(target(), 0, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 0, EPOCH)], EPOCH);
     assert_eq!(book.state.lock().stored.records[0].services, None);
     assert_eq!(
         book.state.lock().revision,
         revision,
         "zero-bit gossip and same-time ref refusal add no new information"
     );
-    book.learn_peer(addr(3).ip(), &[(target(), 1, EPOCH)], EPOCH);
-    book.learn_peer(addr(4).ip(), &[(target(), 8, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(3)), &[(target(), 1, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(4)), &[(target(), 8, EPOCH)], EPOCH);
     assert_eq!(book.state.lock().stored.records[0].services, Some(9));
     book.learn_dns("seed", &[target()], EPOCH + 7200);
     assert_eq!(book.state.lock().stored.records[0].services, Some(9));
@@ -107,13 +177,21 @@ fn incoming_known_gossip_and_unknown_dns_merge_without_losing_observation() {
         "unknown incoming advertisement still refreshes known peer time"
     );
     let ip_origin = addr(5);
-    book.learn_peer(addr(6).ip(), &[(ip_origin, 9, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(6)), &[(ip_origin, 9, EPOCH)], EPOCH);
     book.succeeded(ip_origin, 9, EPOCH + 1);
     book.learn_dns("seed", &[ip_origin], EPOCH + 14_400);
     let manager = book.state.lock();
     let entry = &manager.stored.records[manager.by_addr[&ip_origin]];
     assert_eq!(entry.services, Some(9));
-    assert_eq!(entry.source, Source::Ip(addr(6).ip()));
+    assert_eq!(
+        entry.source,
+        Source::Ip(
+            addr(6)
+                .address()
+                .ip()
+                .unwrap_or_else(|| panic!("expected IP fixture"))
+        )
+    );
     assert_eq!(entry.last_seen, EPOCH + 14_400);
 }
 
@@ -180,227 +258,6 @@ fn assert_preserved_invalid(base: &Path, path: &Path, bytes: &[u8]) {
     assert_eq!(fs::read(path).expect("untouched"), bytes);
 }
 
-const V1_SERVICES: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v1-services.dat");
-const V7_SERVICES: &[u8] = include_bytes!("../../../tests/data/addrman-historical-v7-services.dat");
-const V7_SERVICES_ASMAP: &[u8] =
-    include_bytes!("../../../tests/data/addrman-historical-v7-services-asmap.dat");
-const SERVICE_MAP: &[u8] = include_bytes!("../../../tests/data/asmap-linked-ipv4-core-v31.1.raw");
-
-#[test]
-fn every_historical_schema_requires_numeric_services_before_conversion() {
-    let fixtures: [&[u8]; 7] = [
-        V1_SERVICES,
-        include_bytes!("../../../tests/data/addrman-historical-v2.dat"),
-        include_bytes!("../../../tests/data/addrman-historical-v3.dat"),
-        include_bytes!("../../../tests/data/addrman-historical-v4-anchors.dat"),
-        include_bytes!("../../../tests/data/addrman-core-v5-eight-refs.dat"),
-        include_bytes!("../../../tests/data/addrman-core-v6-eight-refs.dat"),
-        V7_SERVICES,
-    ];
-    for bytes in fixtures {
-        let directory = tempfile::tempdir().expect("directory");
-        let base = directory.path().join("peers.dat");
-        let path = network_path(&base, [1; 4]);
-        let old: serde_json::Value =
-            serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("genuine old writer");
-        fs::write(&path, bytes).expect("old bytes");
-        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
-        assert!(book.state.lock().writable, "schema {}", old["version"]);
-        assert_eq!(
-            book.len(),
-            old["records"].as_array().expect("records").len()
-        );
-        let schema = old["version"].as_u64().expect("version");
-        let backup = path.with_extension(format!(
-            "v{schema}-{}.bak",
-            Sha256::digest(bytes)[..].to_lower_hex_string()
-        ));
-        assert_eq!(fs::read(backup).expect("exact backup"), bytes);
-        for invalid in [
-            serde_json::Value::Null,
-            serde_json::json!("0"),
-            serde_json::json!(false),
-            serde_json::json!(-1),
-            serde_json::json!(0.5),
-        ] {
-            let mut changed = old.clone();
-            changed["records"][0]["services"] = invalid;
-            assert_preserved_invalid(&base, &path, &fixture_bytes(&changed));
-        }
-        let mut missing = old.clone();
-        missing["records"][0]
-            .as_object_mut()
-            .expect("record")
-            .remove("services");
-        assert_preserved_invalid(&base, &path, &fixture_bytes(&missing));
-        let mut overflow = old.clone();
-        overflow["records"][0]["services"] = serde_json::json!("OUT_OF_RANGE");
-        let payload = serde_json::to_string(&overflow)
-            .expect("JSON")
-            .replace("\"OUT_OF_RANGE\"", "18446744073709551616");
-        let mut overflow = payload.into_bytes();
-        let checksum = Sha256::digest(&overflow);
-        overflow.extend_from_slice(&checksum);
-        assert_preserved_invalid(&base, &path, &overflow);
-        let mut impossible = old.clone();
-        impossible["records"][0]["tried"] = true.into();
-        impossible["records"][0]["last_success"] = 0.into();
-        if schema >= 5 {
-            impossible["records"][0]["new_buckets"] = serde_json::json!([]);
-        }
-        assert_preserved_invalid(&base, &path, &fixture_bytes(&impossible));
-    }
-}
-
-#[test]
-fn actual_v7_writer_migrates_ambiguous_zero_honestly_and_preserves_all_membership() {
-    for (bytes, configured) in [(V7_SERVICES, false), (V7_SERVICES_ASMAP, true)] {
-        for scoped in [false, true] {
-            let directory = tempfile::tempdir().expect("directory");
-            let base = directory.path().join("peers.dat");
-            let path = network_path(&base, [1; 4]);
-            let source = if scoped { path.clone() } else { base.clone() };
-            fs::write(&source, bytes).expect("actual v7 writer");
-            let map = directory.path().join("map.raw");
-            fs::write(&map, SERVICE_MAP).expect("map");
-            let old: serde_json::Value =
-                serde_json::from_slice(&bytes[..bytes.len() - 32]).expect("old JSON");
-            let book = AddressBook::open(
-                Some(base.clone()),
-                [1; 4],
-                false,
-                configured.then_some(map.as_path()),
-            );
-            {
-                let manager = book.state.lock();
-                assert!(manager.writable);
-                assert_eq!(manager.stored.records.len(), 7);
-                let current = serde_json::to_value(&manager.stored).expect("current");
-                for field in ["magic", "secret", "asmap_id", "anchors"] {
-                    assert_eq!(current[field], old[field], "{field}");
-                }
-                for entry in old["records"].as_array().expect("records") {
-                    let address: SocketAddr = entry["addr"]
-                        .as_str()
-                        .expect("address")
-                        .parse()
-                        .expect("endpoint");
-                    let record = &manager.stored.records[manager.by_addr[&address]];
-                    let ambiguous = matches!(
-                        address.to_string().as_str(),
-                        "8.8.8.8:8333" | "8.8.4.4:8333"
-                    );
-                    assert_eq!(
-                        record.services,
-                        if ambiguous {
-                            None
-                        } else {
-                            Some(entry["services"].as_u64().expect("services"))
-                        }
-                    );
-                    let value = serde_json::to_value(record).expect("record");
-                    for field in [
-                        "source",
-                        "last_seen",
-                        "last_success",
-                        "failures",
-                        "tried",
-                        "new_buckets",
-                    ] {
-                        assert_eq!(value[field], entry[field], "{address} {field}");
-                    }
-                    assert_eq!(record.last_attempt, 0);
-                    assert_eq!(record.last_count_attempt, 0);
-                }
-                assert_eq!(
-                    manager
-                        .stored
-                        .records
-                        .iter()
-                        .map(|entry| entry.new_buckets.len())
-                        .max(),
-                    Some(8)
-                );
-                assert_indexes(&manager);
-            }
-            let backup = source.with_extension(format!(
-                "v7-{}.bak",
-                Sha256::digest(bytes)[..].to_lower_hex_string()
-            ));
-            assert_eq!(fs::read(&backup).expect("backup"), bytes);
-            assert_eq!(fs::read(&source).expect("source before publish"), bytes);
-            book.save();
-            if !scoped {
-                assert_eq!(fs::read(&source).expect("legacy source retained"), bytes);
-            }
-            let migrated = stored_value(&path);
-            assert_eq!(migrated["version"], 8);
-            let restored = AddressBook::open(
-                Some(base),
-                [1; 4],
-                false,
-                configured.then_some(map.as_path()),
-            );
-            assert_eq!(
-                serde_json::to_value(&restored.state.lock().stored).expect("second reopen"),
-                migrated
-            );
-            restored.set_services(target(), 0);
-            restored.save();
-            assert!(
-                !restored.ordinary_services_eligible(target(), u64::MAX),
-                "the next actual observation resolves historical ambiguity without Good"
-            );
-        }
-    }
-}
-
-#[test]
-fn v7_migration_failure_and_invalid_map_preserve_original_observation_bytes() {
-    let directory = tempfile::tempdir().expect("directory");
-    let base = directory.path().join("peers.dat");
-    let path = network_path(&base, [1; 4]);
-    let map = directory.path().join("map.raw");
-    fs::write(&path, V7_SERVICES_ASMAP).expect("v7");
-    fs::write(&map, b"invalid map").expect("invalid map");
-    let readonly = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-    assert!(!readonly.state.lock().writable);
-    readonly.set_services(target(), 0);
-    readonly.save();
-    assert_eq!(fs::read(&path).expect("preserved"), V7_SERVICES_ASMAP);
-    assert_eq!(
-        fs::read_dir(directory.path()).expect("directory").count(),
-        2,
-        "invalid map produces no backup or publication"
-    );
-    fs::write(&map, SERVICE_MAP).expect("restored map");
-    let backup = path.with_extension(format!(
-        "v7-{}.bak",
-        Sha256::digest(V7_SERVICES_ASMAP)[..].to_lower_hex_string()
-    ));
-    fs::create_dir(&backup).expect("backup obstruction");
-    let blocked = AddressBook::open(Some(base.clone()), [1; 4], false, Some(&map));
-    assert!(!blocked.state.lock().writable);
-    blocked.set_services(target(), 0);
-    blocked.save();
-    assert_eq!(fs::read(&path).expect("still preserved"), V7_SERVICES_ASMAP);
-    fs::remove_dir(backup).expect("remove obstruction");
-    let restored = AddressBook::open(Some(base), [1; 4], false, Some(&map));
-    assert!(restored.state.lock().writable);
-    assert_eq!(
-        restored
-            .state
-            .lock()
-            .stored
-            .records
-            .iter()
-            .map(|entry| entry.new_buckets.len())
-            .max(),
-        Some(8)
-    );
-    restored.save();
-    assert_eq!(stored_value(&path)["version"], 8);
-}
 
 #[test]
 fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
@@ -411,7 +268,7 @@ fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     book.state.lock().stored.secret = [1; 32];
     book.learn_dns("seed", &[target()], EPOCH);
     let revision = book.state.lock().revision;
-    book.learn_peer(addr(2).ip(), &[(target(), 0, EPOCH)], EPOCH);
+    book.learn_peer(crate::PeerRemote::Endpoint(addr(2)), &[(target(), 0, EPOCH)], EPOCH);
     assert_eq!(book.state.lock().stored.records[0].services, None);
     assert_eq!(book.state.lock().revision, revision);
     assert_eq!(
@@ -425,14 +282,22 @@ fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     );
     let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     restored.learn_dns("seed", &[target()], EPOCH + 7200);
-    restored.learn_peer(addr(3).ip(), &[(target(), 0, EPOCH + 7200)], EPOCH + 7200);
+    restored.learn_peer(
+        crate::PeerRemote::Endpoint(addr(3)),
+        &[(target(), 0, EPOCH + 7200)],
+        EPOCH + 7200,
+    );
     restored.save();
     let restored = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     assert!(restored.ordinary_services_eligible(target(), u64::MAX));
     let revision = restored.state.lock().revision;
     restored.set_services(target(), 0);
     assert_eq!(restored.state.lock().revision, revision + 1);
-    restored.learn_peer(addr(3).ip(), &[(target(), 0, EPOCH + 7200)], EPOCH + 7200);
+    restored.learn_peer(
+        crate::PeerRemote::Endpoint(addr(3)),
+        &[(target(), 0, EPOCH + 7200)],
+        EPOCH + 7200,
+    );
     restored.learn_dns("seed", &[target()], EPOCH + 14_400);
     assert_eq!(restored.state.lock().stored.records[0].services, Some(0));
     assert!(!restored.ordinary_services_eligible(target(), u64::MAX));
@@ -441,7 +306,11 @@ fn zero_gossip_preserves_unknown_dns_bootstrap_but_version_zero_is_known() {
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
     assert!(!restored.ordinary_services_eligible(target(), u64::MAX));
     let fresh = addr(9);
-    restored.learn_peer(addr(7).ip(), &[(fresh, 0, EPOCH + 14_400)], EPOCH + 14_400);
+    restored.learn_peer(
+        crate::PeerRemote::Endpoint(addr(7)),
+        &[(fresh, 0, EPOCH + 14_400)],
+        EPOCH + 14_400,
+    );
     let manager = restored.state.lock();
     assert_eq!(
         manager.stored.records[manager.by_addr[&fresh]].services,

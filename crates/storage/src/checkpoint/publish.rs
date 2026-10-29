@@ -224,7 +224,7 @@ pub fn commit_publication(
         target_os = "android",
         target_os = "redox"
     ))]
-    root.rename_noreplace(&paths.staging, &paths.final_dir)?;
+    super::fs::rename_noreplace(root.dir(), &paths.staging, &paths.final_dir)?;
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRootSync)?;
     root.sync()?;

@@ -72,8 +72,8 @@ fn stale_invalid_headers_cannot_evict_or_clear_replacement() -> TestResult {
     let (new_tx, _new_rx) = crate::test_support::message_channel();
     let new = PeerLease::new(new_tx);
     table.register(addr, new.clone());
-    assert!(!table.disconnect_source(old.source(addr)));
-    assert!(table.is_current(new.source(addr)));
+    assert!(!table.disconnect_source(old.source(addr.endpoint())));
+    assert!(table.is_current(new.source(addr.endpoint())));
     assert!(!new.is_cancelled());
     Ok(())
 }

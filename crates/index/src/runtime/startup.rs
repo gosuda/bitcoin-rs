@@ -15,8 +15,9 @@ use super::Worker;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
 use crate::PreparedBatchLimits;
+use crate::portable::{BundleHost, BundleOutcome, IndexBundleError, Withheld};
 use crate::writer::TxIndexWriter;
-use crate::{IndexError, IndexWriter};
+use crate::{IndexCapability, IndexError, IndexWriter};
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
@@ -234,7 +235,7 @@ pub(super) fn open_and_run(
 
     let query_engine = Arc::new(DerivedIndexQueryEngine::new(
         Arc::clone(runtime),
-        open.reader,
+        Arc::clone(&open.reader),
         block_tree.clone(),
         applied_tip.clone(),
         body_source.clone(),
@@ -257,6 +258,57 @@ pub(super) fn open_and_run(
         return Ok(());
     }
 
+    // Rows without a `TxLookup` watermark exist only after an interrupted
+    // portable import. Clear them through the capability reset before the
+    // directive or any derivation runs; the engine already refuses the
+    // un-watermarked capability.
+    if spec.enabled.contains(IndexCapability::TxLookup)
+        && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
+            .map_err(DerivedIndexWorkerError::Index)?
+    {
+        tracing::warn!("cleared rows left by an interrupted portable index import");
+    }
+    let cancelled = || shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop();
+    let host = BundleHost {
+        writer: open.writer.as_ref(),
+        reader: open.reader.as_ref(),
+        block_tree,
+        applied_tip,
+        body_source: body_source.as_deref(),
+        enabled: spec.enabled,
+        cancelled: &cancelled,
+    };
+    // A refused request wrote nothing the index serves, so ordinary
+    // reconciliation proceeds and the operator reads the refusal in the log:
+    // a one-shot key left set, a lagging export, or a bad bundle must never
+    // keep the index from reaching the tip. Only writer or reader failures,
+    // which can leave the store uncertain, fail the worker. A failed import
+    // cleanup surfaces as `Index`, so partial rows never mix with derived
+    // rows on the way to readiness.
+    match crate::portable::run(&host, &spec.bundle) {
+        Ok(None) => {}
+        Ok(Some(outcome)) => log_bundle_outcome(&outcome),
+        Err(IndexBundleError::Cancelled) => return Err(DerivedIndexWorkerError::Stopped),
+        Err(IndexBundleError::Index(error)) => return Err(DerivedIndexWorkerError::Index(error)),
+        Err(IndexBundleError::Incomplete {
+            height,
+            expected,
+            actual,
+        }) => tracing::error!(
+            height,
+            expected,
+            actual,
+            "portable txindex bundle is incomplete; ordinary reconciliation proceeds"
+        ),
+        Err(error) => tracing::error!(
+            %error,
+            "portable txindex bundle request refused; ordinary reconciliation proceeds"
+        ),
+    }
+    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
+        return Ok(());
+    }
+
     let worker = Worker {
         runtime: Arc::clone(runtime),
         writer: open.writer,
@@ -272,11 +324,39 @@ pub(super) fn open_and_run(
         chain_events: Arc::clone(chain_events),
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
-        utxo: spec.utxo.clone(),
-        chain_transition: spec.chain_transition.clone(),
+        // The seed cell rides the spec into the worker; the bundle starts
+        // empty and the first take happens in `finish_reconcile_pass`.
+        // Bundle restore never consumes, clears, or replaces the cell.
+        seed_slot: spec.seed_slot.clone(),
+        seed_bundle: parking_lot::Mutex::new(None),
     };
 
     worker.run()
+}
+
+/// Reports how a bundle directive ended.
+fn log_bundle_outcome(outcome: &BundleOutcome) {
+    match outcome {
+        BundleOutcome::Exported(report) => tracing::info!(
+            height = report.base.height,
+            records = report.records,
+            bytes = report.bytes,
+            "exported portable txindex bundle"
+        ),
+        BundleOutcome::Restored(report) => tracing::info!(
+            height = report.base.height,
+            records = report.records,
+            rows = report.rows,
+            "restored portable txindex bundle; ordinary reconciliation continues from its base"
+        ),
+        BundleOutcome::RestoreWithheld(Withheld::NoBodySource) => tracing::warn!(
+            "portable txindex bundle not activated: no block body source to verify locators; ordinary backfill proceeds"
+        ),
+        BundleOutcome::RestoreWithheld(Withheld::BodyUnavailable { height }) => tracing::warn!(
+            height,
+            "portable txindex bundle not activated: a block body its locators need is unavailable; ordinary backfill proceeds"
+        ),
+    }
 }
 
 /// Opens the txindex store with a bounded deadline.
@@ -572,11 +652,35 @@ mod tests {
             open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
             utxo: None,
             chain_transition: None,
+            bundle: crate::portable::IndexBundleDirective::None,
+            seed_slot: None,
         };
         let result =
             open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);
         assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
         assert!(!path.exists());
         Ok(())
+    }
+
+    /// An incomplete bundle is a refusal: ordinary reconciliation proceeds
+    /// and backfill earns readiness. Only an `Index` error — including a
+    /// failed import cleanup that may have left partial rows — fails the
+    /// worker and stops readiness.
+    #[test]
+    fn incomplete_is_a_refusal_only_index_failures_stop_readiness() {
+        let refusal = IndexBundleError::Incomplete {
+            height: 7,
+            expected: 2,
+            actual: 1,
+        };
+        assert!(
+            !matches!(refusal, IndexBundleError::Index(_)),
+            "an incomplete bundle must not take the worker-failure path"
+        );
+        let fatal = IndexBundleError::Index(IndexError::InvalidWatermark);
+        assert!(
+            matches!(fatal, IndexBundleError::Index(_)),
+            "cleanup and writer failures must take the worker-failure path"
+        );
     }
 }

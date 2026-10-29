@@ -5,7 +5,9 @@ use hashbrown::HashSet;
 
 use crate::{
     Mempool,
-    standardness::{AcceptanceRejectReason, MAX_PACKAGE_COUNT, TxAcceptanceFact},
+    standardness::{
+        AcceptanceRejectReason, MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT, TxAcceptanceFact,
+    },
 };
 
 pub(crate) fn check_structure(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
@@ -18,7 +20,7 @@ pub(crate) fn check_structure(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> 
     let weight = txs
         .iter()
         .try_fold(0_u64, |sum, tx| sum.checked_add(tx.weight()));
-    if weight.is_none_or(|weight| weight > 404_000) {
+    if weight.is_none_or(|weight| weight > MAX_PACKAGE_WEIGHT) {
         return Err(AcceptanceRejectReason::PackageTooLarge);
     }
     let mut later: HashSet<_> = txs.iter().map(Tx::txid).collect();
@@ -54,6 +56,7 @@ pub(crate) fn unfinished(tx: &Tx) -> TxAcceptanceFact {
         weight: tx.weight(),
         sigop_cost: 0,
         base_fee: None,
+        modified_fee: None,
         effective_fee_rate: None,
         reject_reason: None,
     }
@@ -182,6 +185,14 @@ pub(crate) fn finish_package(
     };
     for (index, (job, request)) in prepared.iter_mut().zip(requests).enumerate() {
         job.verify_policy(request);
+        if let crate::gateway::AdmissionMode::PackageRpcSubmit(maximum) = mode
+            // Core's singleton PreChecks applies its own floor before the
+            // client cap. Multi-transaction caps precede aggregate fee checks.
+            && (txs.len() > 1
+                || aggregate_error != Some(AcceptanceRejectReason::MinRelayFeeNotMet))
+        {
+            job.check_package_max_feerate(maximum);
+        }
         if job.fact.allowed == Some(false) {
             facts.results[index] = job.fact.clone();
             return facts;
@@ -208,11 +219,17 @@ pub(crate) fn finish_package(
         Err(error) => {
             // Preserve the existing preview error surface. Native submission
             // reports pool/graph failures without pretending to run replacement.
-            facts.package_error = Some(if mode == crate::gateway::AdmissionMode::PackageSubmit {
-                AcceptanceRejectReason::Mempool(error.into_pool_error())
-            } else {
-                AcceptanceRejectReason::Replacement(error)
-            });
+            facts.package_error = Some(
+                if matches!(
+                    mode,
+                    crate::gateway::AdmissionMode::PackageSubmit
+                        | crate::gateway::AdmissionMode::PackageRpcSubmit(_)
+                ) {
+                    AcceptanceRejectReason::Mempool(error.into_pool_error())
+                } else {
+                    AcceptanceRejectReason::Replacement(error)
+                },
+            );
             return facts;
         }
     }

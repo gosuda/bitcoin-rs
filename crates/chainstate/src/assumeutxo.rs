@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::{Block, Hash256, Network};
+use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::error::{ApplyError, DisconnectError};
@@ -223,6 +224,20 @@ pub enum AssumeUtxoError {
     Utxo(#[from] bitcoin_rs_utxo::UtxoError),
 }
 
+impl From<StateVerifyError> for AssumeUtxoError {
+    fn from(error: StateVerifyError) -> Self {
+        match error {
+            StateVerifyError::Utxo(error) => Self::Utxo(error),
+            StateVerifyError::CommitmentMismatch { expected, actual } => {
+                Self::SnapshotCommitmentMismatch {
+                    expected,
+                    found: actual,
+                }
+            }
+        }
+    }
+}
+
 /// Summary of active and background chainstates for operator reporting (e.g. `getchainstates`).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChainstatesSummary {
@@ -282,6 +297,15 @@ pub struct AssumeUtxoManager {
     historical_undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     data_dir: PathBuf,
     historical_checkpoint_interval: u32,
+    /// Staged activation witness minted by the witnessed staging encode.
+    ///
+    /// Set only after the durable `Validating` commit succeeds; taken exactly
+    /// once by the post-start offer path on full success, and taken-and-dropped
+    /// on every error path so a stale witness can never pair with a later call.
+    /// Linearizability: one lock orders staging against concurrent takes; the
+    /// cell holds at most one witness. Consumers are idempotent: a missing
+    /// witness is a no-offer, never a retry of stale bytes.
+    pending_activation_mint: Mutex<Option<bitcoin_rs_utxo::V4Witness>>,
 }
 
 impl std::fmt::Debug for AssumeUtxoManager {
@@ -382,6 +406,7 @@ impl AssumeUtxoManager {
             historical_undo,
             data_dir,
             historical_checkpoint_interval: historical_checkpoint_interval.max(1),
+            pending_activation_mint: Mutex::new(None),
         };
         manager.recover_pending().inspect_err(|_| {
             manager.active_chainstate.fail_closed_for_recovery();
@@ -514,8 +539,11 @@ impl AssumeUtxoManager {
         )
     }
 
-    /// Activates decoded coins without coupling portable input to native recovery metadata.
-    /// Both format entry points retain the same compiled-anchor and durable checks.
+    /// Activates decoded coins that arrived without a proof (native v4 input).
+    /// The commitment and statistics are recomputed exactly once, under the
+    /// lifecycle lock; portable input uses [`Self::activate_verified_snapshot`]
+    /// and is not traversed again. Both entry points retain the same
+    /// compiled-anchor and durable checks.
     ///
     /// # Errors
     ///
@@ -534,44 +562,90 @@ impl AssumeUtxoManager {
         self.activate_pinned_snapshot(set, base_hash, pinned)
     }
 
-    // Only network-pinned metadata reaches this boundary in production. Tests
-    // use a small consensus-valid chain to exercise lifecycle transitions.
-    fn activate_pinned_snapshot(
+    /// Activates a state whose commitment and statistics were derived from its
+    /// own coins by the reader. The proof carries the base identity, so no
+    /// digest, hash or statistics are accepted beside it, and nothing is
+    /// recomputed over the set: the state was moved in and cannot have changed
+    /// since it was sealed. Only the compiled anchor for the proven height
+    /// decides trust.
+    ///
+    /// # Errors
+    ///
+    /// Rejects untrusted heights, mismatched block hashes, or mismatched
+    /// serialized UTXO commitments, then the same durable checks as
+    /// [`Self::activate_snapshot_state`].
+    pub fn activate_verified_snapshot(
         &self,
-        set: UtxoSet,
-        base_hash: Hash256,
-        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        state: VerifiedSnapshotState,
     ) -> Result<(), AssumeUtxoError> {
+        // The anchor resolves under the lifecycle guard, so the `pinned`
+        // reference `install_verified` pairs with the state was resolved
+        // from the same guarded epoch that `require_unactivated` checks.
         let _lifecycle = self.lifecycle.lock();
+        let pinned = self
+            .network
+            .assume_utxo_for_height(state.height())
+            .ok_or(AssumeUtxoError::UntrustedSnapshotHeight(state.height()))?;
+        self.require_unactivated()?;
+        self.install_verified(state, pinned)
+    }
+
+    fn require_unactivated(&self) -> Result<(), AssumeUtxoError> {
         if !matches!(self.status()?, AssumeUtxoDiskStatus::Uninitialized) {
             return Err(AssumeUtxoError::AlreadyActive);
         }
         if crate::recovery::requires_full_revalidation(&self.data_dir) {
             return Err(AssumeUtxoError::FullRevalidationRequired);
         }
+        Ok(())
+    }
+
+    // Only network-pinned metadata reaches this boundary in production. Tests
+    // use a small consensus-valid chain to exercise lifecycle transitions.
+    fn activate_pinned_snapshot(
+        &self,
+        set: UtxoSet,
+        base_hash: Hash256,
+        pinned: &AssumeUtxoData,
+    ) -> Result<(), AssumeUtxoError> {
+        let _lifecycle = self.lifecycle.lock();
+        self.require_unactivated()?;
         if pinned.block_hash != base_hash {
             return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
                 expected: pinned.block_hash,
                 found: base_hash,
             });
         }
-
         // Core's AssumeutxoHash is HASH_SERIALIZED, not MuHash. Derive it
         // from the owned imported coins; neither a caller nor a trailer can
         // assert the commitment on behalf of the verifier.
-        let (commitment, stats) = set.with_stable_view(|view| {
-            Ok::<_, bitcoin_rs_utxo::UtxoError>((
-                view.hash_serialized_3_at_height(pinned.height)?,
-                bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
-            ))
-        })?;
-        if commitment != pinned.hash_serialized {
-            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
-                expected: pinned.hash_serialized,
-                found: commitment,
+        let state = VerifiedSnapshotState::verify(set, pinned)?;
+        self.install_verified(state, pinned)
+    }
+
+    // The lifecycle lock is held by the caller. A state is a proof about one
+    // owned set; this compares its identity with the compiled anchor, then
+    // consumes it so no later holder can mutate what was proven.
+    fn install_verified(
+        &self,
+        state: VerifiedSnapshotState,
+        pinned: &AssumeUtxoData,
+    ) -> Result<(), AssumeUtxoError> {
+        if state.height() != pinned.height {
+            return Err(AssumeUtxoError::UntrustedSnapshotHeight(state.height()));
+        }
+        if state.base_hash() != pinned.block_hash {
+            return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
+                expected: pinned.block_hash,
+                found: state.base_hash(),
             });
         }
-
+        if state.hash_serialized() != pinned.hash_serialized {
+            return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
+                expected: pinned.hash_serialized,
+                found: state.hash_serialized(),
+            });
+        }
         let genesis_hash = self.network.genesis_block_hash();
         let new_status = AssumeUtxoDiskStatus::Validating {
             base_height: pinned.height,
@@ -584,7 +658,8 @@ impl AssumeUtxoManager {
             checkpoint: None,
         };
 
-        crate::assumeutxo_snapshot::write_coins(&self.data_dir, &set, pinned)?;
+        let (set, stats, staging_witness) =
+            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)?;
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 // Recheck under transition exclusion: disconnect/recovery may
@@ -609,6 +684,9 @@ impl AssumeUtxoManager {
                 )?;
                 Ok(())
             })?;
+        // Only after the durable commit succeeds does the staging witness
+        // become the pending activation mint. No offer happens here.
+        *self.pending_activation_mint.lock() = staging_witness;
 
         // 3. Create isolated historical chainstate with detached events
         let historical = self.active_chainstate.create_historical_counterpart(
@@ -631,14 +709,30 @@ impl AssumeUtxoManager {
     ///   retires historical chainstate, and persists [`AssumeUtxoDiskStatus::Finalized`].
     /// - On mismatch: fails closed immediately, sets both chainstates to closed,
     ///   persists [`AssumeUtxoDiskStatus::Failed`], and returns an error.
+    ///
+    /// Takes the staged activation witness exactly once.
+    ///
+    /// Success-path offer seals and offers it; every error path takes and
+    /// drops it, so a stale witness can never pair with a later call.
+    /// A later restart mints from the durable `Validating` state instead.
+    pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_utxo::V4Witness> {
+        self.pending_activation_mint.lock().take()
+    }
+
+    /// Connects one payload to the historical chainstate in the background.
+    ///
+    /// Genesis and base injections arrive as `from_local` payloads; replayed
+    /// stored bodies arrive as `from_raw` payloads. Exactness is owned by the
+    /// constructor; this boundary never re-encodes or re-compares. Causal
+    /// consistency: lifecycle lock orders historical progress; snapshot
+    /// isolation: durable status plus undo capture commit atomically.
     #[expect(
         clippy::too_many_lines,
         reason = "Keep the serialized lifecycle transition and its failure ordering together"
     )]
     pub fn step_historical(
         &self,
-        block: &Block,
-        serialized: Option<bytes::Bytes>,
+        payload: &BlockPayload,
     ) -> Result<ConnectOutcome, AssumeUtxoError> {
         let _lifecycle = self.lifecycle.lock();
         let historical = self
@@ -652,21 +746,23 @@ impl AssumeUtxoManager {
         let expected_prev = historical
             .applied_tip_snapshot()
             .map_or_else(Hash256::default, |tip| tip.hash);
-        if block.header.prev_blockhash.0 != expected_prev {
+        if payload.block().header.prev_blockhash.0 != expected_prev {
             return Err(ApplyError::PrevHashMismatch {
                 tip: expected_prev,
-                prev: block.header.prev_blockhash.0,
+                prev: payload.block().header.prev_blockhash.0,
             }
             .into());
         }
-        let archived = self.begin_historical(block, &historical).inspect_err(|_| {
-            self.active_chainstate.fail_closed_for_recovery();
-            historical.fail_closed_for_recovery();
-        })?;
+        let archived = self
+            .begin_historical(payload.block(), &historical)
+            .inspect_err(|_| {
+                self.active_chainstate.fail_closed_for_recovery();
+                historical.fail_closed_for_recovery();
+            })?;
 
         let result = {
             let transition = historical.lock_transition()?.into_transition();
-            transition.connect(block, serialized)
+            transition.connect(payload)
         };
         let outcome = match result {
             Err(ApplyError::HistoricalTargetHashMismatch {
@@ -723,7 +819,7 @@ impl AssumeUtxoManager {
                     pending: None,
                     checkpoint,
                 };
-                self.persist_status(updated, Some((block, &historical)))
+                self.persist_status(updated, Some((payload, &historical)))
                     .inspect_err(|_| {
                         self.active_chainstate.fail_closed_for_recovery();
                         historical.fail_closed_for_recovery();
@@ -762,7 +858,7 @@ impl AssumeUtxoManager {
                         base_hash,
                         validated_hash_serialized: actual_hash_serialized,
                     };
-                    self.persist_status(finalized, Some((block, &historical)))
+                    self.persist_status(finalized, Some((payload, &historical)))
                         .inspect_err(|_| {
                             self.active_chainstate.fail_closed_for_recovery();
                             historical.fail_closed_for_recovery();
@@ -822,13 +918,17 @@ impl AssumeUtxoManager {
 
     /// Replays a bounded retained prefix, distinguishing missing bodies from
     /// locally available work that exhausted this pass's replay budget.
+    ///
+    /// Linearizability: lifecycle lock in `step_historical` orders replay
+    /// against activation; idempotent: missing bodies report without mutating.
     pub fn advance_historical(&self) -> Result<HistoricalAdvance, AssumeUtxoError> {
         for _ in 0..8 {
             let Some((height, hash)) = self.next_historical_block()? else {
                 return Ok(HistoricalAdvance::Complete);
             };
             if height == 0 {
-                self.step_historical(&self.network.genesis_block(), None)?;
+                let genesis_payload = BlockPayload::from_local(self.network.genesis_block());
+                self.step_historical(&genesis_payload)?;
                 continue;
             }
             let bytes = match &self.active_chainstate.block_body_store {
@@ -838,12 +938,12 @@ impl AssumeUtxoManager {
             let Some(bytes) = bytes else {
                 return Ok(HistoricalAdvance::MissingBody { height, hash });
             };
-            let block: Block =
-                bitcoin_rs_primitives::deserialize(&bytes).map_err(anyhow::Error::from)?;
-            if block.block_hash().0 != hash {
+            let payload =
+                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?;
+            if payload.block().block_hash().0 != hash {
                 return Err(anyhow::anyhow!("historical archive body identity mismatch").into());
             }
-            self.step_historical(&block, Some(bytes::Bytes::from(bytes)))?;
+            self.step_historical(&payload)?;
         }
         if self.next_historical_block()?.is_some() {
             Ok(HistoricalAdvance::ReplayPending)
@@ -1084,8 +1184,8 @@ impl AssumeUtxoManager {
             let (_, hash) = self
                 .next_historical_block()?
                 .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
-            let block = if height == 0 {
-                self.network.genesis_block()
+            let payload = if height == 0 {
+                BlockPayload::from_local(self.network.genesis_block())
             } else {
                 let bytes = self
                     .active_chainstate
@@ -1094,9 +1194,9 @@ impl AssumeUtxoManager {
                     .ok_or_else(|| anyhow::anyhow!("missing historical body store"))?
                     .load_block_body(height, hash)?
                     .ok_or_else(|| anyhow::anyhow!("missing historical validation dependency"))?;
-                bitcoin_rs_primitives::deserialize(&bytes).map_err(anyhow::Error::from)?
+                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
             };
-            if block.block_hash().0 != hash {
+            if payload.block().block_hash().0 != hash {
                 return Err(
                     anyhow::anyhow!("historical validation dependency identity mismatch").into(),
                 );
@@ -1104,11 +1204,11 @@ impl AssumeUtxoManager {
             historical
                 .lock_transition()?
                 .into_transition()
-                .connect(&block, None)?;
+                .connect(&payload)?;
             self.historical_undo.remove_archived(height, hash);
         }
-        let block = if pending.height == 0 && pending.hash == self.network.genesis_block_hash() {
-            self.network.genesis_block()
+        let payload = if pending.height == 0 && pending.hash == self.network.genesis_block_hash() {
+            BlockPayload::from_local(self.network.genesis_block())
         } else {
             let bytes = self
                 .active_chainstate
@@ -1117,19 +1217,19 @@ impl AssumeUtxoManager {
                 .ok_or_else(|| anyhow::anyhow!("missing pending validation body store"))?
                 .load_staged_body(pending.height, pending.hash, pending.position)?
                 .ok_or_else(|| anyhow::anyhow!("missing pending validation body"))?;
-            bitcoin_rs_primitives::deserialize(&bytes).map_err(anyhow::Error::from)?
+            BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
         };
-        if block.block_hash().0 != pending.hash {
+        if payload.block().block_hash().0 != pending.hash {
             return Err(anyhow::anyhow!("pending validation body identity mismatch").into());
         }
-        self.step_historical(&block, None)?;
+        self.step_historical(&payload)?;
         Ok(())
     }
 
     fn persist_status(
         &self,
         mut status: AssumeUtxoDiskStatus,
-        historical_block: Option<(&Block, &Chainstate)>,
+        historical_block: Option<(&BlockPayload, &Chainstate)>,
     ) -> Result<(), AssumeUtxoError> {
         // The manager is the only bridge from historical validation to durable
         // history. This batch preserves the active tip and coin authority.
@@ -1163,11 +1263,7 @@ impl AssumeUtxoManager {
                 };
                 let position = match staged {
                     Some(position) => Some(position),
-                    None => store.stage_block_body(
-                        tip.height,
-                        tip.hash,
-                        &bitcoin_rs_primitives::consensus_bytes(block),
-                    )?,
+                    None => store.stage_block_body(tip.height, tip.hash, block.bytes())?,
                 };
                 store.sync()?;
                 if let Some(position) = position {
@@ -1277,7 +1373,10 @@ impl AssumeUtxoManager {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
         };
-        let reference = match crate::checkpoint::write_checkpoint_from_dir_at(
+        // Historical root never mints: the writer forces `None` there.
+        // Causal consistency: checkpoint publish is ordered under the
+        // lifecycle-held durable commit; idempotent: drop the witness.
+        let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
             &data,
             config,
             &historical.block_tree,
@@ -1287,8 +1386,8 @@ impl AssumeUtxoManager {
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )
-        .map_err(|error| anyhow::anyhow!("publish historical checkpoint: {error}"))?
-        {
+        .map_err(|error| anyhow::anyhow!("publish historical checkpoint: {error}"))?;
+        let reference = match write {
             crate::checkpoint::CheckpointWrite::Published { reference } => reference,
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
                 return Err(AssumeUtxoError::NoHistoricalChainstate);

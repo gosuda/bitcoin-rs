@@ -137,11 +137,5 @@ mod redb_impl;
 #[cfg(feature = "rocksdb")]
 mod rocksdb_impl;
 
-/// Converts a `usize` byte count to an `f64` metric value via `u64`.
-#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-pub(crate) fn metric_f64_from_usize(value: usize) -> f64 {
-    bitcoin_rs_primitives::u64_to_f64(u64::try_from(value).unwrap_or(u64::MAX))
-}
-
 pub mod chainstate_journal;
 pub mod checkpoint;

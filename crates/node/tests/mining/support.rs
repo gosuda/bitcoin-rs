@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, SubmitOutcome};
+use bitcoin_rs_mempool::{AdmissionOrigin, BodyInterest, MempoolEntry, SubmitOutcome};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, CoinbaseBudget, MempoolSequenceWake, MiningControl,
@@ -65,7 +65,11 @@ pub(crate) fn open_network(network: Network) -> Result<NodeFixture> {
 
 pub(crate) fn open_at_genesis(network: Network) -> Result<NodeFixture> {
     let fixture = open_network(network)?;
-    let _ = fixture.state.apply_block(&network.genesis_block())?;
+    let _ = fixture
+        .state
+        .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+            network.genesis_block(),
+        ))?;
     Ok(fixture)
 }
 
@@ -253,7 +257,6 @@ pub(crate) fn propose_block(
 }
 
 pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()> {
-    use bitcoin_rs_primitives::consensus_bytes;
     let genesis = Network::Regtest.genesis_block();
     let target = state
         .chainstate()
@@ -267,7 +270,10 @@ pub(crate) fn disconnect_applied(state: &NodeState, block: &Block) -> Result<()>
         &state.chainstate(),
         &state.chain_followers(),
         target,
-        |hash| (hash == block_hash).then(|| (body.clone(), consensus_bytes(&body).into())),
+        |hash| {
+            (hash == block_hash)
+                .then(|| bitcoin_rs_primitives::BlockPayload::from_local(body.clone()))
+        },
         |_| {},
     )
     .map_err(|error| anyhow::anyhow!("{error}"))
@@ -284,7 +290,7 @@ pub(crate) fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
 
 pub(crate) fn apply_genesis(state: &NodeState) -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
-    state.apply_block(&genesis)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
     Ok(())
 }
 
@@ -319,7 +325,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
-        state.apply_block(&block)?;
+        state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))?;
         tip = current_tip(state)?;
         assert_eq!(tip.height, height, "seed block must become the tip");
     }
@@ -507,7 +513,9 @@ pub(crate) fn mine_regtest_block(
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("mined block must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    state.apply_block(&block)?;
+    state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        block.clone(),
+    ))?;
     Ok(block)
 }
 
@@ -537,6 +545,7 @@ pub(crate) fn rpc_handler(state: &NodeState, mining_control: Arc<dyn MiningContr
         },
         indexes: IndexHandles::default(),
         network: NetworkHandles {
+            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             peer_table: state.peer_table(),
             p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),
@@ -864,7 +873,7 @@ pub(crate) fn wire_mining(state: &NodeState) -> Result<WiredMining> {
     signal.attach_sequence_wake(&wake);
     state
         .mempool_gateway()
-        .attach_observer_leg("mining-test", signal)
+        .attach_observer_leg("mining-test", signal, BodyInterest::Metadata)
         .map_err(anyhow::Error::msg)?;
     let handler = Arc::new(rpc_handler(state, control));
     Ok(WiredMining { mining, handler })
@@ -957,6 +966,8 @@ impl PriorityFixture {
     pub(crate) fn poll(&self, id: &str) -> Poll {
         let handler = Arc::clone(&self.wired.handler);
         let id = id.to_owned();
-        PendingPoll::spawn(self.state.shutdown(), move || gbt_view(&handler, Some(&id)))
+        PendingPoll::spawn(self.state.chainstate().shutdown_handle(), move || {
+            gbt_view(&handler, Some(&id))
+        })
     }
 }

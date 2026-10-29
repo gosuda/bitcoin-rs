@@ -891,7 +891,13 @@ mod tests {
 
     fn source() -> PeerToken {
         PeerToken {
-            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            )),
+            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 1],
+                8333,
+            ))),
             connection_id: 7,
         }
     }
@@ -2428,7 +2434,7 @@ mod tests {
         let observer = Arc::new(Observer(AtomicUsize::new(0)));
         let preview_gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
-            Some(observer.clone()),
+            Some((observer.clone(), crate::BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
@@ -3030,7 +3036,7 @@ mod tests {
         let leg: Arc<dyn crate::MempoolObserver> = observer.clone();
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
-            Some(leg),
+            Some((leg, crate::BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ))
@@ -3246,7 +3252,7 @@ mod tests {
         let leg: Arc<dyn crate::MempoolObserver> = log.clone();
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(limits))),
-            Some(leg),
+            Some((leg, crate::BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
@@ -3632,7 +3638,7 @@ mod tests {
         let leg: Arc<dyn crate::MempoolObserver> = log.clone();
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
-            Some(leg),
+            Some((leg, crate::BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
@@ -3658,7 +3664,7 @@ mod tests {
                             max_total_bytes: 100,
                             ..crate::MempoolLimits::default()
                         }))),
-                        Some(observer),
+                        Some((observer, crate::BodyInterest::Metadata)),
                         ValidationEngine::Native,
                         None,
                     );
@@ -3784,7 +3790,7 @@ mod tests {
                     max_total_bytes: 100,
                     ..crate::MempoolLimits::default()
                 }))),
-                Some(observer),
+                Some((observer, crate::BodyInterest::Metadata)),
                 ValidationEngine::Native,
                 None,
             ));

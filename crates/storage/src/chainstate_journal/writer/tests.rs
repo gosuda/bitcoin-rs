@@ -57,6 +57,16 @@ impl KvStore for CountingStore {
         Ok(Box::new(std::iter::empty()))
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        _cf: ColumnFamily,
+        _prefix: &[u8],
+        _start: &[u8],
+        _limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        unreachable!("unused in writer tests")
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }

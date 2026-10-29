@@ -12,6 +12,9 @@ pub mod chain_constants {
 
 /// Native consensus encoding and decoding for protocol types.
 pub mod encode;
+/// Typed logical peer endpoint identity (IP, Tor v3, I2P) and network destinations.
+pub mod endpoint;
+pub use endpoint::{EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork};
 /// Fixed-width 256-bit hash type.
 pub mod hash;
 /// Native block header type and header hash computation.
@@ -37,7 +40,7 @@ pub mod varint;
 /// Workspace release version constants for wire/RPC user-agent strings.
 pub mod version;
 
-pub use block::{Block, BlockBodyMetadata};
+pub use block::{Block, BlockBodyMetadata, BlockPayload};
 pub use encode::{
     ConsensusDecode, ConsensusEncode, DecodeError, Sink, consensus_bytes, deserialize,
 };

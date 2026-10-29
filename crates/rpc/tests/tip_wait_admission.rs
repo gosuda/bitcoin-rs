@@ -80,9 +80,9 @@ fn context() -> (Arc<Context>, Arc<Chainstate>, Arc<ObservableTipWait>) {
         )),
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     ));
-    chainstate
-        .apply_block(&Network::Regtest.genesis_block(), None)
-        .expect("genesis");
+    let genesis_payload =
+        bitcoin_rs_primitives::BlockPayload::from_local(Network::Regtest.genesis_block());
+    chainstate.apply_block(&genesis_payload).expect("genesis");
     let observable = ObservableTipWait::new(chainstate.clone());
     let mut ctx = Context::new();
     ctx.chain.applied_tip = chainstate.applied_tip_reader();

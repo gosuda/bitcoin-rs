@@ -50,6 +50,14 @@ product cell. A length-prefixed diagnostic file is not a product corpus.
   archive the REST exporter writes.
 - Archive bytes are not stored in git. A cell names the certified archive by
   the manifest digest produced at export time.
+- Indexed representation (harness parity only, not a new product corpus):
+  schema `bitcoin-rs-corpus-index-v1` locates the same verified logical byte
+  stream inside Core `blkNNNNN.dat` sources with per-source fingerprints,
+  exact order, logical digest/size, and stop-hash binding. Producer
+  `build_index_from_scan`/`IndexWriter` builds it; `verify_index` runs once
+  before `iter_indexed_framed` is fully exhausted. The offline comparator
+  harness accepts dual packed/indexed inputs and requires byte parity with
+  the packed archive. Product identities (C150/Cmodern pins) are unchanged.
 
 ### `CORP-03`: Validation posture
 
@@ -127,7 +135,14 @@ that height. No Cmodern cell may close on a guessed or recalled UTXO total.
 - `tools/campaign-corpus/test_corpus.py`
   (`python3 tools/campaign-corpus/test_corpus.py`) pins both identities, the
   eleven specials, C150 census zeros, Cmodern all-positive specials, Core
-  framing, manifest digest binding, and `assume_valid_height = 0`.
+  framing, manifest digest binding, and `assume_valid_height = 0`. Its
+  `IndexedParity` cases prove indexed logical bytes match the packed archive
+  with same-length, header-stable, order, truncation, and unsafe-name
+  refusals.
+- `tools/benchmark-campaign/test_offline_full_validation.py`
+  `IndexedParityHarnessTests` prove dual packed/indexed harness custody and
+  refusals (golden plus source, truncation, index-tamper, and post-load pin
+  refusals) without claiming a live campaign.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: G0 pin; rejects
   label-only, malformed, and well-formed-but-unbound identities, checks
   kernel package custody, and pins `corpus_custody()` honesty.

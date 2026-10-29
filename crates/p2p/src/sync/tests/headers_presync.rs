@@ -1,8 +1,8 @@
 //! Header-presync admission gating over the real headers drain.
 
+use crate::PeerRemote;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::net::SocketAddr;
 use std::time::Instant;
 
 use super::settlement_faults::deliver_headers;
@@ -105,12 +105,19 @@ fn connect(
     peers: &Arc<PeerTable>,
     port: u16,
     start_height: i32,
-) -> (SocketAddr, PeerLease, crate::test_support::MessageReceiver) {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+) -> (PeerRemote, PeerLease, crate::test_support::MessageReceiver) {
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+    ));
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
-    peers.publish_info(addr, &lease, synthetic_peer(addr, start_height));
+    peers.publish_info(
+        addr,
+        &lease,
+        synthetic_peer(addr, start_height),
+    );
     (addr, lease, rx)
 }
 
@@ -246,7 +253,6 @@ fn empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement() -> 
         headers: Vec::new(),
         source: Some(first),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     let answered = pending_request(&sync, first).ok_or("the empty reply lost its request")?;
@@ -303,7 +309,6 @@ fn empty_below_floor_reply_preserves_pacing_and_rotates_without_retirement() -> 
         headers: Vec::new(),
         source: Some(second),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     let answered = pending_request(&sync, second).ok_or("the empty answer lost its pacing gate")?;
@@ -355,7 +360,6 @@ fn unowned_below_floor_peer_receives_one_tracked_chain_sync_probe() -> TestResul
         headers: chain_on(&genesis, 0, PAGE),
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert_eq!(
@@ -796,7 +800,11 @@ fn replaced_connection_cannot_admit_queued_predecessor_headers() -> TestResult {
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
     let replacement_lease = PeerLease::new(replacement_tx);
     peers.register(addr, replacement_lease.clone());
-    peers.publish_info(addr, &replacement_lease, synthetic_peer(addr, 100_000));
+    peers.publish_info(
+        addr,
+        &replacement_lease,
+        synthetic_peer(addr, 100_000),
+    );
     let replacement = current_source(&peers, addr);
 
     sync.tick();
@@ -1000,7 +1008,6 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
             headers: vec![mine_header(genesis.compute_hash(), 5_000)],
             source: Some(source),
             wire_response: false,
-            body_fetch_owned: false,
         })
         .map_err(|err| std::io::Error::other(err.to_string()))?;
     sync.tick();
@@ -1021,7 +1028,9 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
         "a header below the floor must not reach the tree through a body either"
     );
     assert!(
-        rx.try_recv().is_err() && !lease.is_cancelled() && peers.is_connected(addr),
+        rx.try_recv().is_err()
+            && !lease.is_cancelled()
+            && peers.is_connected(addr),
         "a forwarded header sends nothing and blames no one"
     );
     Ok(())
@@ -1187,7 +1196,9 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let (addr, _lease, _rx) = connect(&peers, 9706, 100_000);
     let source = current_source(&peers, addr);
     assert_eq!(
-        peers.info_of(addr).map(|info| info.best_known_height),
+        peers
+            .info_of(addr)
+            .map(|info| info.best_known_height),
         Some(100_000)
     );
 
@@ -1203,7 +1214,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let session = peers
         .sessions()
         .into_iter()
-        .find(|session| session.addr == addr)
+        .find(|session| session.endpoint == addr.endpoint())
         .ok_or_else(|| std::io::Error::other("session vanished"))?;
     assert_eq!(
         session.headers_horizon,
@@ -1267,7 +1278,7 @@ fn assert_invalid_body_header_is_discarded(block: Block, port: u16) -> TestResul
     let (addr, _lease, _rx) = connect(&peers, port, 100_000);
     let source = current_source(&peers, addr);
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![crate::InboundBlock::from_decoded(block)];
+    let mut batch = vec![crate::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
     assert!(
@@ -1339,7 +1350,7 @@ fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
         vec![regtest_fixture::coinbase(3)],
     )?;
     let hash = Hash256::from(block.block_hash());
-    let mut batch = vec![crate::InboundBlock::from_decoded(block)];
+    let mut batch = vec![crate::InboundBlock::from_local(block)];
     batch[0].source = Some(source);
     assert_eq!(sync.buffer_received_block_chunk(&mut batch, None), 1);
 

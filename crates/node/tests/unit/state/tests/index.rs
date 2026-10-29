@@ -246,7 +246,9 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
     config.indexes.txindex = false;
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
     let state = NodeState::open(config, None)?;
-    let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
+    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        crate::Network::Regtest.genesis_block(),
+    ))?;
     assert!(
         state.script_index_query().is_none(),
         "disabled must not hand out a script-index query adapter"
@@ -263,7 +265,9 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
+    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        crate::Network::Regtest.genesis_block(),
+    ))?;
     let Some(query) = state.script_index_query() else {
         panic!("utxo mode must hand out a script-index query adapter")
     };
@@ -301,7 +305,9 @@ fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<
     config.indexes.script_index = crate::config::ScriptIndexMode::Full;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
+    let _ = state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+        crate::Network::Regtest.genesis_block(),
+    ))?;
     let Some(query) = state.script_index_query() else {
         panic!("full mode must hand out a script-index query adapter")
     };

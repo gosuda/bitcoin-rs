@@ -85,6 +85,26 @@ pub(super) fn sync_peer_candidate(
 pub(super) fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
     candidate.best_known_height > current.best_known_height
 }
+/// Body-serving peers for a multi-peer request scan, soft-blocked peers
+/// excluded unless every body server is soft-blocked: the scan must not
+/// truncate away healthy servers behind stalled ones, but a fully stalled
+/// set still makes progress through its last resort.
+fn body_request_peers(candidates: &[FanoutCandidate]) -> Vec<SyncPeer> {
+    let healthy: Vec<SyncPeer> = candidates
+        .iter()
+        .filter(|candidate| candidate.serves_bodies && !candidate.soft_blocked)
+        .map(|candidate| candidate.peer)
+        .collect();
+    if healthy.is_empty() {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.serves_bodies)
+            .map(|candidate| candidate.peer)
+            .collect()
+    } else {
+        healthy
+    }
+}
 
 /// Select the highest body-serving peer outside cooldown, using a soft-blocked
 /// peer only as a last resort so a reconnecting staller cannot reclaim the front.
@@ -379,7 +399,7 @@ impl BlockSync {
                 if self.peer_table.disconnect_source(owner) {
                     metrics::counter!("node.sync.staller_disconnects").increment(1);
                     tracing::warn!(
-                        peer_addr = %owner.addr,
+                        peer_addr = ?owner.endpoint,
                         next_apply_height,
                         "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
                     );
@@ -389,7 +409,7 @@ impl BlockSync {
                 if self.peer_table.disconnect_source(owner) {
                     metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
                     tracing::warn!(
-                        peer_addr = %owner.addr,
+                        peer_addr = ?owner.endpoint,
                         "block sync: peer missed the block request timeout; disconnecting and re-queueing its blocks"
                     );
                 }
@@ -485,11 +505,7 @@ impl BlockSync {
                 .map(|candidate| candidate.peer)
                 .collect()
         } else if request_peer_limit > 1 {
-            candidates
-                .iter()
-                .filter(|candidate| candidate.serves_bodies)
-                .map(|candidate| candidate.peer)
-                .collect()
+            body_request_peers(&candidates)
         } else {
             fallback_request_peer(&candidates, request_peer_limit)
         };
@@ -572,7 +588,12 @@ impl BlockSync {
             && frontier.chain.next_required.is_some())
         .then(|| self.chain.block_tree());
         let mut scheduler = self.scheduler.lock();
-        let SchedulerState { window, stager, .. } = &mut *scheduler;
+        let SchedulerState {
+            window,
+            stager,
+            body_unavailable,
+            ..
+        } = &mut *scheduler;
         // Purge state the old request branch left behind before the peer
         // budget is measured: `next_peer_request` is the only other place
         // a retarget runs, and a stale pending/staged set that fills the
@@ -589,9 +610,17 @@ impl BlockSync {
         {
             window.retarget_request_branch(stager, chain_tip, required.height, tree, now);
         }
+        // A connection that answered `notfound` for the required body is
+        // demoted to last resort for it, like an owner past its request
+        // timeout: the standard selection prefers a peer that can serve the
+        // body, and the request path still refuses to re-ask the demoted one
+        // before its retry interval ends. Conviction state is untouched.
+        let required_hash = frontier.chain.next_required.map(|body| body.hash);
         for candidate in &mut *candidates {
             candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.source, now)
-                || window.peer_in_staller_cooldown(candidate.peer.source.addr, now);
+                || window.peer_in_staller_cooldown(candidate.peer.source, now)
+                || required_hash
+                    .is_some_and(|hash| body_unavailable.refuses(candidate.peer.source, hash, now));
         }
         let cold_preferred = configure_request_mode(window, candidates, now);
         (
@@ -664,7 +693,7 @@ impl BlockSync {
         if self.peer_table.disconnect_source(source) {
             metrics::counter!("node.sync.chain_sync_disconnects").increment(1);
             tracing::warn!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 "block sync: peer brought no better chain within the sync timeout; disconnecting"
             );
         }
@@ -683,11 +712,56 @@ impl BlockSync {
 
 #[cfg(test)]
 mod tests {
+    use super::body_request_peers;
     use super::is_peer_fault;
+    use crate::connection::PeerSource;
+    use crate::download_window::FanoutCandidate;
+    use crate::download_window::SyncPeer;
     use bitcoin_rs_chain::{
         BlockTree, ChainError, NodeId, NodeStatus, accept_headers, compact_is_met_by,
     };
     use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+    use std::net::SocketAddr;
+    fn body_candidate_impl(port: u16, height: i32, soft_blocked: bool) -> FanoutCandidate {
+        FanoutCandidate {
+            peer: SyncPeer {
+                source: PeerSource::for_test(SocketAddr::from(([127, 0, 0, 1], port))),
+                best_known_height: height,
+            },
+            serves_bodies: true,
+            fanout_eligible: true,
+            soft_blocked,
+        }
+    }
+
+    fn healthy_body_candidate(port: u16, height: i32) -> FanoutCandidate {
+        body_candidate_impl(port, height, false)
+    }
+
+    fn soft_body_candidate(port: u16, height: i32) -> FanoutCandidate {
+        body_candidate_impl(port, height, true)
+    }
+
+    #[test]
+    fn multi_peer_body_scan_skips_soft_blocked_until_all_soft() {
+        let mixed = body_request_peers(&[
+            healthy_body_candidate(9001, 10),
+            soft_body_candidate(9002, 20),
+        ]);
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].best_known_height, 10);
+        assert_eq!(
+            mixed[0].source.endpoint,
+            Some(crate::PeerEndpoint::Ip(SocketAddr::from((
+                [127, 0, 0, 1],
+                9001
+            )))),
+        );
+
+        let all_soft =
+            body_request_peers(&[soft_body_candidate(9001, 10), soft_body_candidate(9002, 20)]);
+        assert_eq!(all_soft.len(), 2);
+    }
 
     #[test]
     fn header_contextual_refusals_blame_the_sender() {

@@ -12,6 +12,8 @@ dependency boundaries.
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
 - Workspace dependency gate in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`
+- `KvStore`, `KvSnapshot`, `PrefixScanLimit`, and `PrefixScan` in
+  `crates/storage/src/trait_.rs` (bounded prefix scans, `ARCH-02`)
 
 ## Layer model
 
@@ -86,6 +88,89 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   and storage abstractions exported by `bitcoin-rs-storage`.
 - Storage owns generic journal/checkpoint formats, filesystem operations and
   durability primitives. Its bounded `HistoryAccess` supplies optional consumers.
+- Bounded prefix scans: `scan_prefix_bounded` and `scan_prefix_from_bounded` on
+  `KvStore` and on `KvSnapshot` return a bounded part of one column family's
+  rows under a prefix.
+  - **Limit**: `PrefixScanLimit { max_rows: usize, max_bytes: usize }` bounds
+    one scan. `max_rows` caps the returned rows; zero returns no rows.
+    `max_bytes` caps the running total of returned key-plus-value bytes. The
+    first row is exempt from the cap: it is returned even when it alone exceeds
+    `max_bytes`, and its bytes count in the total. A later row is returned only
+    when the total including that row stays at or below `max_bytes`. With
+    `max_bytes` 10 and rows of 6 and 5 bytes, the first row is returned and the
+    second is refused. A row whose byte count overflows `usize` is refused.
+  - **Result**: `PrefixScan { rows: Vec<(Vec<u8>, Vec<u8>)>, complete: bool }`
+    holds the rows in key order.
+    `complete` is true only when the scan reached the end of the prefix with
+    no row refused by the limit. An implementation MUST NOT report
+    `complete = true` after it refused a row, so an incomplete result is never
+    presented as complete. A limit that exactly fits the matching rows is
+    complete. A zero-row limit is complete only when no row matches. A store
+    that cannot serve a scan MUST return an error, never an empty or falsely
+    complete scan.
+  - **Seek point**: `scan_prefix_from_bounded(cf, prefix, start, limit)` takes
+    an inclusive full-key `start`. Rows begin at the first key at or above the
+    greater of `start` and `prefix` in byte order and end where keys stop
+    beginning with `prefix`. A `start` before the prefix, including the empty
+    slice, begins at the first row of the prefix. A `start` past every key of
+    the prefix, including one that sorts after the prefix without beginning
+    with it, yields an empty, complete scan. A caller that resumes after
+    returned row `k` passes `k` followed by one zero byte, the least key above
+    `k`.
+  - **Required and defaulted methods**: `iter_prefix` and
+    `scan_prefix_from_bounded` are required on both traits. Neither has a
+    default body, so every `KvStore` and `KvSnapshot` implementation MUST
+    provide both. `scan_prefix_bounded` has a default body on both traits that
+    collects from `iter_prefix` under the same limit. Implementations MAY
+    override it. The four redb types (`RedbStore`,
+    `RedbSnapshot`, `RedbTxIndexStore`, `RedbTxIndexSnapshot`) override it and
+    apply the limit inside the scan; their `iter_prefix` materializes every
+    matching row. The fjall and RocksDB stores and snapshots use the default.
+  - **Backends**: fjall (`range`), RocksDB (`IteratorMode::From`), and redb
+    (`Table::range`) seek natively to the greater of `start` and `prefix`.
+    None collects the prefix and discards its head. A scan stops at the first
+    row the limit refuses, so it reads at most one row past the limit and
+    drops it.
+  - **Fixed-width txindex store**: `RedbTxIndexStore` and
+    `RedbTxIndexSnapshot` serve `TxConfirmed`, `Funding`, `Spending`,
+    `BlockHeaders`, `ScriptLive`, and `UtxoMeta`. For any other column family,
+    and for a prefix wider than a fixed-width family's key, they return
+    `StorageError::InvalidOperation` instead of an empty scan.
+  - **Snapshot reads**: a `KvSnapshot` scan reads the view captured by
+    `KvStore::snapshot`; rows committed after the snapshot are not visible to
+    it. Pages read through one snapshot read one view.
+  - **Bound**: a scan returns at most `max_rows` rows and at most the greater
+    of `max_bytes` and the first row's key-plus-value size in bytes. A single
+    oversized first row is returned whole. The limit applies to the returned
+    rows. It does not bound engine-internal reads or caches, or a transient
+    copy of the row it refuses: the fixed-width txindex value scan copies a
+    row's value before the limit can refuse that row.
+  - **Consumers**: `bitcoin-rs-index` calls `KvSnapshot::scan_prefix_bounded`
+    for its txid, scripthash, spending-outpoint, and live-output lookups
+    (`StoreTxIndexSnapshot::scan` and `live_rows`,
+    `crates/index/src/index/snapshot.rs`). `QueryBudget::next_scan_limit`
+    (`crates/index/src/runtime/query.rs`) derives each `PrefixScanLimit` from
+    the query's remaining row and byte budget. `accept_scan` and
+    `accept_live_scan` turn `complete = false` into
+    `TxUnavailableCause::PrefixScanTruncated` or `LivePrefixScanTruncated`
+    instead of returning a partial answer. The index capability reset
+    (`crates/index/src/index/state.rs`) calls `KvStore::scan_prefix_bounded`
+    under `RESET_SCAN_LIMIT` and deletes one page at a time. No production
+    code calls `scan_prefix_from_bounded`; storage tests do.
+  - Proof: `crates/storage/tests/bounded_prefix_scan.rs` tests
+    `fjall_bounded_prefix_scan`, `rocksdb_bounded_prefix_scan`, and
+    `redb_bounded_prefix_scan` (feature-gated; limit semantics, prefix
+    boundaries, seek positions, pages resumed without gaps, snapshot isolation,
+    oversized first row); `crates/storage/tests/redb_txindex.rs` tests
+    `txindex_fixed_prefix_boundaries_12`, `txindex_fixed_prefix_boundaries_80`,
+    `txindex_bounded_scan_empty_values`,
+    `txindex_continuation_seeks_every_fixed_width_family`,
+    `txindex_continuation_snapshot_is_point_in_time`, and
+    `txindex_unsupported_column_families_rejected`. These tests assert returned
+    rows, `complete`, and errors. The statement that a scan reads at most one
+    row past the limit rests on the code: `collect_bounded_prefix` and the
+    redb scan loops return at the first refused row. The `usize`-overflow
+    refusal rests on `push_bounded_row` (`checked_add`); no test covers it.
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
@@ -325,9 +410,13 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   or duplicate mutation authority.
 - `MempoolGateway` owns the process mempool handle; `NodeState::mempool` is a
   read/composition capability borrowed from that gateway, not a parallel
-  retained `Arc`. Gateway interning remains the public one-gateway-per-pool
-  enforcement boundary for test seams and downstream composition; production
-  constructs that same owner once. `NodeState` retains `PruneService` as a
+  retained `Arc`. Gateway interning remains the public one-gateway-per-pool-ledger
+  enforcement boundary for test seams and downstream composition: the ledger is
+  `bitcoin_rs_mempool::Mempool` (defined in `crates/mempool/src/pool.rs`, re-exported
+  at the crate root since `mod pool` is private), the entry
+  arena plus derived txid/wtxid/funding/spending/priority indexes held behind the
+  gateway's `Arc<RwLock<Mempool>>` handle; production constructs that same owner
+  once. `NodeState` retains `PruneService` as a
   node/storage mutation capability because it is created only after
   chainstate supplies prune authority and is handed to the later RPC
   lifecycle; it contains no duplicate block or transaction projection.
@@ -402,16 +491,40 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 - **Snapshot activation and pinned metadata**:
   Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
   Snapshot height and block hash must match pinned network metadata (`AssumeUtxoData`).
-  The manager consumes the imported set and computes its `hash_serialized_3` commitment;
-  caller-supplied digests and snapshot trailers do not establish trust. This is Core's
+  Trust is carried by `bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState`: one
+  owned `UtxoSet` sealed with the base hash, height, `hash_serialized_3` and
+  `CoinStats` derived from exactly those coins. Its fields are private, no accessor
+  lends the set (`UtxoSet::replace_from` mutates through `&self`), and only
+  `into_parts` releases the set, consuming the proof. Neither constructor accepts a
+  digest. `core_snapshot::read_verified` seals portable Core input after the
+  commitment of the staged record stream matched the compiled anchor, folding the
+  statistics from those authenticated records while they move into the hash table;
+  no statistics are computed for a mismatching file. The fold uses
+  `CoinStatsAccumulator::with_parallel_muhash`: the sealed stats equal an
+  independent scan under `to_bytes`, not necessarily under `PartialEq` on
+  `MuHash3072`. `VerifiedSnapshotState::verify`
+  recomputes the commitment from an owned set and scans statistics only after it
+  matched. `AssumeUtxoManager::activate_verified_snapshot` (portable `loadtxoutset`)
+  accepts only the state and does no second commitment pass or statistics scan.
+  `activate_snapshot_state` (native v4 embedding input, which arrives without a
+  proof) runs `verify` exactly once under the lifecycle lock, after the
+  untrusted-height, already-active, full-revalidation and base-hash refusals. Both
+  entries then compare the state's height, base hash and commitment with the
+  compiled `assume_utxo_for_height` anchor in one install step. Caller-supplied
+  digests and snapshot trailers do not establish trust. This is Core's
   `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
   active tip; it is independently checked during historical finalization. The base
   header must already exist at the pinned height, be valid, and be an ancestor
   of the current best-work header tip. The installer rechecks these facts under
   transition exclusion before the lifecycle commit. The snapshot base must carry
   strictly more cumulative work than the settled active tip; height alone does
-  not order competing branches. Coin statistics are rebuilt from
-  the imported coins, and the resolved header supplies chainwork. Installation and
+  not order competing branches. The installed coin statistics are the sealed
+  state's, derived once from the imported coins; archiving the set as native v4
+  for activation (`write_coins_sealed`) still walks the table to serialize it
+  but emits the sealed `stats.muhash.finalize()` trailer instead of refolding
+  MuHash. The recomputing `write_coins` remains as the test-only oracle for
+  proof-less crash fixtures. The
+  resolved header supplies chainwork. Installation and
   role changes serialize with chain transitions; failed validation publishes nothing.
 - **Compiled mainnet anchors and provenance**:
   `Network::Mainnet.assume_utxo_data()` supports heights 840,000, 880,000, 910,000,
@@ -429,6 +542,20 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   coverage uses a genuine Core-produced regtest-200 artifact. Compiled mainnet
   anchors alone do not establish hosted artifact availability, mainnet
   interoperability, or memory/throughput qualifications.
+  Portable input must keep Core's dump layout: one group per txid in strictly
+  increasing byte order with unique output indices, and the commitment is computed
+  over that staged stream. A file that repeats txid groups is refused before
+  activation (`SnapshotError::TransactionOrder`, RPC `-22`). Core 31.1 accepts
+  such a file built from the regtest-200 artifact: it reports `coins_loaded`
+  400 while `gettxoutsetinfo` shows 200 txouts with `hash_serialized_3`
+  `17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a`,
+  identical to the valid case. This is a recorded compatibility divergence, not
+  a stricter-safety claim. Matching Core would require the commitment and the
+  statistics fold to be taken over the de-duplicated coins view instead of the
+  stream; the trust rule itself is unchanged. No Core insert-path mechanism is
+  claimed here, only these recorded values.
+  The verified-state cutover is a single-verification ownership contract, not a
+  performance qualification: no performance gain is claimed.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target
@@ -575,6 +702,176 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
     (`TipReader`, `BlockTreeReader`), while worker orchestration belongs to
     `BlockSync`.
 
+## Current boundary and target design
+
+This section states what runs. In the graph, solid arrows are
+implemented. Ownership for the implemented behaviors lives in
+`ARCH-07` / `ARCH-07a`, `ARCH-05`, `ARCH-02`, `IDX-12` in
+[indexing](indexing.md) with the historical-prefix reads in
+[embedding](embedding.md), the retained rows below, and the `T1` /
+`T3` clauses below.
+
+```mermaid
+flowchart TD
+    BODY["raw block bodies + undo records"] -->|"undo records"| CS["chainstate: transition, durable write, publication (ARCH-07)"]
+    BP["BlockPayload: one immutable input"] -->|"apply input"| CS
+    CS -->|"mutates through one narrow contract (ARCH-07a)"| UTXO["canonical UTXO: authoritative spendability"]
+    CS -->|"commits"| HB["durable head batch: receipt"]
+    HB -->|"durable receipt precedes"| TIP["applied tip publication"]
+    TIP -->|"wakes on published tip (EVT-01)"| WORKER["existing async index worker (ARCH-05)"]
+    WORKER -->|"writes index rows incl. prefix coverage"| ROWS["index rows: ScriptLive + prefix coverage"]
+    ROWS -->|"rows join"| SL["ScriptLive strict live join"]
+    UTXO -->|"join consults via UtxoReader"| SL
+    SL -->|"serves"| LIVE["live outputs"]
+    CS -->|"writes early undo and body-locator metadata"| ER["active-store early rows (P4 retained; consolidation gated)"]
+    ROWS -->|"serves coverage rows"| HIST["typed historical-prefix query (P2 implemented)"]
+
+    WORKER -->|"T1 reads seed artifact when usable"| SNAP["verified immutable snapshot artifact (T1 implemented)"]
+    BODY -->|"T1 alternate source: replay complete retained history"| WORKER
+    WORKER -->|"T1 seeds rows outside live UTXO lock (else reports unavailable); never from live set or fresh checkpoint"| ROWS
+```
+
+### T1: snapshot-seeded ScriptLive outside the live UTXO lock (implemented)
+
+The seeder MUST run under the existing worker, retention, and
+reconciliation owners named in `ARCH-05` and `ARCH-07` / `ARCH-07b`,
+and MUST NOT hold the live UTXO lock while seeding. The seed source
+MUST be a verified immutable artifact when one is usable; otherwise the
+existing worker MUST replay complete retained history when that complete
+source is available under existing retention limits; when neither source
+suffices, the seed MUST report unavailability explicitly. The
+seed MUST NOT fall back to the live UTXO set and MUST NOT create a
+fresh checkpoint on demand. Ownership stays where it is today:
+activation roles and retention authority in `ARCH-07` / `ARCH-07b`,
+ScriptLive as a fixed-width family under `ARCH-02`. Comparison
+(reference only): Core keeps live reads on the coin cache independent
+of any index prefix
+([coins.cpp](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/src/coins.cpp#L68-L80));
+no snapshot-seeded index path was found in the inspected Core code.
+Proof: `crates/index/src/runtime/seed_paused_tests.rs`
+`seed_paused_write_permits_apply_and_retires_generation` (concurrent
+applies land while the seed stream holds its pin, then retire to zero
+leases), `catch_up_drops_subsumed_seed_lease_for_lower_start`
+(single-holder drain when the fresh grant subsumes the seed pin),
+`seed_reorg_below_h_rolls_back_through_pinned_undo` (sub-`H` reorg
+rewinds through the pinned undo; the missing-undo control resets),
+`seed_prune_while_paused_refuses_at_or_above_floor` (pruned history
+yields scoped terminal `Unavailable` while the worker stays alive), and
+`script_live_reset_reloads_watermarks_before_selection` (post-reset legs
+reload the fence before selection);
+`crates/index/src/runtime/recovery_tests.rs`
+`seed_first_leg_consumes_held_lease` (the first leg consumes the held
+bundle pin with at most one live lease) and
+`forward_script_live_follows_undo_present_missing_or_corrupt` (missing
+or corrupt undo resets only `ScriptLive`, then reseeds at the tip);
+`crates/index/src/runtime/query.rs`
+`covered_anchor_rejects_watermark_height_mismatch` (a watermark whose
+height disagrees with its hash retries instead of joining an uncovered
+prefix).
+
+### P2: typed historical-prefix query with scoped absence (implemented)
+
+Consistency and embedding usage are owned by `IDX-12` in
+[indexing](indexing.md) and the historical-prefix reads in
+[embedding](embedding.md); this clause states only the architecture
+boundary. Each call takes one immutable snapshot, derives the bounded
+common covered ancestor of its required capability watermarks and the
+published tip, reads only heights from the maximum required floor
+through that anchor on that chain, then rechecks the anchor against the
+active tip after the read. Each call takes its own DB snapshot and
+chooses its prefix independently; callers MUST NOT assume equal anchors
+across calls, even when coincident calls return the same prefix. Absence is scoped to that
+prefix, never a global negative. Full script history on a positive
+floor stays unproven because funding below the floor can hide in-range
+spends; the exact-outpoint spend lookup and the transaction lookup MAY
+report scoped absence after verifying the in-range rows. Strict
+ScriptLive reads and Core-compatible endpoints keep their current
+semantics: bounded scans under `ARCH-02` and `BlockUndoSource` reads
+with receipt, applied-hash, and lease revalidation under `ARCH-07`. The
+ancestry guard is a btcrs rule derived from the captured prefix. The
+pinned Core persistence guard is reference only: an index skips its
+persist unless its tip is an ancestor of the last flushed block
+([base.cpp](https://github.com/bitcoin/bitcoin/blob/a773e1e33b349dc819b5a0edc1c7a4839dc73b48/src/index/base.cpp#L277-L305));
+it describes no Core per-query behavior. An old-branch persisted cursor
+stays possible: strict reads refuse the stale watermark, while
+historical reads may serve the proved common prefix while the worker
+rewinds asynchronously.
+Proof: `crates/index/src/runtime/query_tests.rs`
+`historical_mixed_cap_script_anchors_at_sh_watermark` and
+`historical_mixed_cap_tx_anchors_at_tx_watermark` (each call anchors at
+its own required watermark), `historical_stale_watermark_anchors_at_fork_and_excludes_orphans`
+and `historical_deep_stale_branch_exhausts_shared_ancestry_budget` (fork
+anchor versus shared ancestry-budget exhaustion),
+`historical_full_history_positive_floor_is_unproven` and
+`historical_standalone_spender_scoped_none_above_floor` (positive-floor
+history split: full history unproven, exact-outpoint spend scoped),
+`historical_no_covered_prefix_for_reset_claim` (reset claim in the
+snapshot is `NoCoveredPrefix`, never `Retry`), and
+`historical_duplicate_txid_returns_earliest_verified_and_skips_stale`
+(earliest verified occurrence on the anchor chain).
+
+### T3: one private immutable BlockPayload in place of independent pairs (implemented)
+
+Callers that today take an independent decoded input and a raw input
+MUST instead take one immutable `BlockPayload` bound to the exact wire
+serialization. The fields are private (`block: Block` plus retained
+`bytes: bytes::Bytes`); read-only access is `block()` / `bytes()` plus
+the consuming `into_block()` for the proposal path, with no public
+mutable accessor and no unchecked pair constructor. Construction is
+codec-owned with no new parser: `from_raw` decodes once and retains the
+input bytes only on success (rejecting trailing bytes) for wire and
+stored-body ingress, `from_local` encodes once for locally assembled
+blocks, and `from_prefix` retains only the consumed prefix for the
+Core-compatible RPC `submitblock` trailing-acceptance boundary. The
+wire `Message::Block` carries the payload (single decode); the serving
+`Message::BlockPayload(Bytes)` envelope stays raw-only and encode-only
+with no decoded field. `InboundBlock` owns the one payload while peer/source and
+`forward_credit` stay outer; the stager MUST own one payload per entry
+until drain (`insert(payload)`); apply borrows that payload. Wire,
+storage, and RPC formats are unchanged.
+Ownership stays where it is
+today: the stager owns one payload per entry until drain, while the
+apply path in `ARCH-07` / `ARCH-07a` borrows that payload; no paired
+call shape remains, and the payload adds no new crate, layer, runtime,
+or parser.
+Proof: `crates/primitives/src/block.rs`
+`payload_from_raw_retains_exact_fixture_bytes` (single decode retains
+the exact wire bytes), `payload_from_raw_rejects_trailing_bytes` and
+`payload_from_raw_rejects_malformed_bytes` (trailing and malformed
+bytes are rejected at construction),
+`payload_from_prefix_returns_consumed_and_discards_remainder` (only the
+consumed prefix is retained for the `submitblock` boundary), and
+`payload_from_local_encodes_witness_block_exactly` (local assembly
+encodes once, witness-exact, with a `from_raw` roundtrip);
+`crates/p2p/src/wire.rs` `block_message_roundtrip_preserves_wire_payload`
+(single `BlockPayload::from_raw` decode carries the frame; raw bytes
+are preserved end to end) and
+`block_payload_writes_the_same_frame_as_decoded_block` (decoded and
+raw-only envelopes encode identically).
+
+### P4: retain current early rows until staged readers and recovery proof permit consolidation (implemented retention; consolidation gated)
+
+The current early undo and body-locator rows MUST stay until every
+staged serving reader, historical undo consumer, and recovery dependency
+has a replacement and the audit gate passes. Body bytes are appended
+once; only metadata is repeated. The UTXO cache stays deferred until a
+supported memory requirement is demonstrated. Explicit non-goals are no
+wholesale archive replacement, no second runtime, and no generic MVCC
+or copy-on-write. Comparison (reference only): the relational archive
+rebuilds historical wire bytes from a join instead of keeping raw
+blocks
+([architecture](https://github.com/reardencode/rbitcoin/blob/572e72c1ce0b1c16dcd7182872a1e9c0089afd6a/docs/architecture.md),
+[reconstruct](https://github.com/reardencode/rbitcoin/blob/572e72c1ce0b1c16dcd7182872a1e9c0089afd6a/crates/rbitcoin-query/src/reconstruct.rs));
+the raw-body choice kept here is the opposite.
+Proof: `crates/storage/tests/prune_then_reorg.rs`
+`prune_to_height_respects_an_active_retention_lease` (a live lease clamps
+the prune line; release lets it advance),
+`retention_lease_stops_the_prune_line_at_its_floor` (staged rows at or
+above the lease floor survive), and
+`history_request_between_planning_and_commit_is_refused` (a lease
+arriving after planning but before commit is refused, so it can never
+pin staged-away rows).
+
 ## Test and evidence isolation
 
 Default production builds contain no storage persistence fault slots,
@@ -621,6 +918,9 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
     including the P2P `SyncChain` adapter's, go through `BlockTreeReader`.
     The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
     production reader cannot reach the set `utxo::contract` mutates.
+- `crates/storage/tests/bounded_prefix_scan.rs` and
+  `crates/storage/tests/redb_txindex.rs`: bounded prefix scan limits, seek
+  points, completeness, and snapshot isolation (`ARCH-02`).
 - `crates/chainstate/tests/unit/apply/admission_tests.rs` and
   `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
   shutdown and coherent chain transaction-count publication. Checkpoint and

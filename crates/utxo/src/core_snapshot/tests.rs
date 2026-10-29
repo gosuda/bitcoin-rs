@@ -5,7 +5,10 @@ use std::io::{self, Cursor, Read};
 
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint, varint};
 
-use super::{Decoder, SnapshotError, SnapshotLimits, read_and_verify, read_metadata};
+use super::{
+    Decoder, SnapshotError, SnapshotLimits, read_and_verify, read_metadata, write_core_v2,
+};
+use crate::record::{OwnedUtxoOut, UtxoRecord};
 
 const CORE: &[u8] = include_bytes!("../../tests/fixtures/core-v2/core200.dat");
 
@@ -564,5 +567,570 @@ fn staged_records_sort_vouts_and_move_their_payloads_without_copying() {
     assert!(matches!(
         body(&group(1, &[1, 9, 1]), 3),
         Err(SnapshotError::DuplicateOutpoint { vout: 1 })
+    ));
+}
+
+#[test]
+fn writer_emits_byte_identical_core200_snapshot_and_roundtrips_read_and_verify() {
+    let loaded = read_and_verify(
+        &mut Cursor::new(CORE),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )
+    .expect("load fixture snapshot");
+
+    let mut written = Vec::new();
+    let report = loaded
+        .set
+        .with_stable_view(|view| {
+            write_core_v2(
+                view,
+                Network::Regtest,
+                loaded.metadata.base_block_hash,
+                loaded.anchor.height,
+                loaded.metadata.coins_count,
+                &mut written,
+                &|| false,
+            )
+        })
+        .expect("write_core_v2 succeeds");
+
+    assert_eq!(report.bytes, u64::try_from(CORE.len()).expect("fit"));
+    assert_eq!(report.coins, 200);
+    assert_eq!(report.txoutset_hash, loaded.hash_serialized);
+    assert_eq!(written.len(), CORE.len());
+    assert_eq!(written, CORE);
+
+    // Round-trip through read_and_verify
+    let reloaded = read_and_verify(
+        &mut Cursor::new(&written),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )
+    .expect("round-trip read_and_verify");
+    assert_eq!(reloaded.hash_serialized, loaded.hash_serialized);
+    assert_eq!(reloaded.metadata, loaded.metadata);
+    assert_eq!(reloaded.bytes_read, report.bytes);
+}
+
+#[test]
+fn writer_script_compression_encodes_odd_even_y_and_offcurve_fallback() {
+    let set = crate::UtxoSet::new();
+
+    let gx = hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    let even_y = hex("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+    let odd_y = hex("b7c52588d95c3b9aa25b0403f1eef75702e84bb7597aabe663b82f6f04ef2777");
+
+    let mut p2pk_even = vec![0x41, 0x04];
+    p2pk_even.extend_from_slice(&gx);
+    p2pk_even.extend_from_slice(&even_y);
+    p2pk_even.push(0xac);
+
+    let mut p2pk_odd = vec![0x41, 0x04];
+    p2pk_odd.extend_from_slice(&gx);
+    p2pk_odd.extend_from_slice(&odd_y);
+    p2pk_odd.push(0xac);
+
+    let mut p2pk_offcurve = p2pk_even.clone();
+    p2pk_offcurve[2..34].fill(0xff); // Not on curve
+
+    let mut p2pk_comp = vec![0x21, 0x02];
+    p2pk_comp.extend_from_slice(&gx);
+    p2pk_comp.push(0xac);
+
+    let mut p2pkh = vec![0x76, 0xa9, 0x14];
+    p2pkh.extend_from_slice(&[0x22; 20]);
+    p2pkh.extend_from_slice(&[0x88, 0xac]);
+
+    let mut p2sh = vec![0xa9, 0x14];
+    p2sh.extend_from_slice(&[0x33; 20]);
+    p2sh.push(0x87);
+
+    let scripts = [p2pk_even, p2pk_odd, p2pk_offcurve, p2pk_comp, p2pkh, p2sh];
+    for (i, script) in scripts.iter().enumerate() {
+        let mut txid_bytes = [0_u8; 32];
+        txid_bytes[0] = u8::try_from(i).expect("fit");
+        txid_bytes[1] = 0xaa;
+        let txid = Hash256::from_le_bytes(&txid_bytes);
+        let out = OwnedUtxoOut::new(0, 50_000_000, script.clone(), false, 1);
+        let record = UtxoRecord::from_owned_outputs(txid, &[out]).expect("record");
+        set.insert_snapshot_record(record);
+    }
+
+    let mut written = Vec::new();
+    let base_hash = Hash256::from_le_bytes(&[0x42; 32]);
+    let report = set
+        .with_stable_view(|view| {
+            write_core_v2(
+                view,
+                Network::Regtest,
+                base_hash,
+                100,
+                6,
+                &mut written,
+                &|| false,
+            )
+        })
+        .expect("write succeeds");
+    assert_eq!(report.coins, 6);
+
+    // Decode through Decoder and check each script matches original
+    let mut cursor = Cursor::new(&written);
+    let mut decoder = Decoder::new(&mut cursor, u64::try_from(written.len()).expect("fit"));
+    let meta = decoder.metadata().expect("meta");
+    assert_eq!(meta.coins_count, 6);
+    let (records, hash) = decoder
+        .coins(6, 100, SnapshotLimits::default())
+        .expect("coins");
+    assert_eq!(hash, report.txoutset_hash);
+    assert_eq!(records.len(), 6);
+    for (i, record) in records.iter().enumerate() {
+        let out = record.outputs().next().expect("out");
+        assert_eq!(out.script_pubkey, scripts[i].as_slice());
+    }
+}
+
+#[test]
+fn writer_cancellation_polls_every_5000_coins() {
+    let loaded = read_and_verify(
+        &mut Cursor::new(CORE),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )
+    .expect("fixture");
+
+    // Immediate stop returns Interrupted before writing anything
+    let mut written = Vec::new();
+    let res = loaded.set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+            loaded.metadata.coins_count,
+            &mut written,
+            &|| true,
+        )
+    });
+    assert!(matches!(res, Err(SnapshotError::Interrupted)));
+
+    // Set with > 5000 coins to verify 5000-coin polling
+    let large_set = crate::UtxoSet::new();
+    for i in 0..5_005_u32 {
+        let mut txid_bytes = [0_u8; 32];
+        txid_bytes[0] = u8::try_from(i & 0xff).expect("fit");
+        txid_bytes[1..5].copy_from_slice(&i.to_le_bytes());
+        let txid = Hash256::from_le_bytes(&txid_bytes);
+        let out = OwnedUtxoOut::new(0, 1000, vec![0x51], false, 1);
+        let record = UtxoRecord::from_owned_outputs(txid, &[out]).expect("record");
+        large_set.insert_snapshot_record(record);
+    }
+
+    let poll_called = std::cell::Cell::new(false);
+    let mut written_large = Vec::new();
+    let res_large = large_set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            100,
+            5005,
+            &mut written_large,
+            &|| {
+                // Return false on first check (initial poll), true on subsequent check
+                if poll_called.get() {
+                    true
+                } else {
+                    poll_called.set(true);
+                    false
+                }
+            },
+        )
+    });
+    assert!(matches!(res_large, Err(SnapshotError::Interrupted)));
+    assert!(poll_called.get());
+}
+
+#[test]
+fn writer_declared_coin_count_mismatch_fails_closed() {
+    let loaded = read_and_verify(
+        &mut Cursor::new(CORE),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )
+    .expect("fixture");
+
+    // Declaring fewer coins than actual (e.g. 100 declared, 200 actual)
+    let mut written = Vec::new();
+    let res_low = loaded.set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+            100,
+            &mut written,
+            &|| false,
+        )
+    });
+    assert!(matches!(
+        res_low,
+        Err(SnapshotError::DeclaredCoinCountMismatch {
+            declared: 100,
+            actual: 101
+        })
+    ));
+
+    // Declaring more coins than actual (e.g. 300 declared, 200 actual)
+    written.clear();
+    let res_high = loaded.set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+            300,
+            &mut written,
+            &|| false,
+        )
+    });
+    assert!(matches!(
+        res_high,
+        Err(SnapshotError::DeclaredCoinCountMismatch {
+            declared: 300,
+            actual: 200
+        })
+    ));
+}
+
+#[test]
+fn writer_io_failure_propagates_as_snapshot_error() {
+    struct FailingWriter {
+        fail_after: usize,
+        written: usize,
+    }
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written + buf.len() > self.fail_after {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "simulated write failure",
+                ))
+            } else {
+                self.written += buf.len();
+                Ok(buf.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let loaded = read_and_verify(
+        &mut Cursor::new(CORE),
+        Network::Regtest,
+        SnapshotLimits::default(),
+    )
+    .expect("fixture");
+
+    // Fail during header
+    let mut failing = FailingWriter {
+        fail_after: 20,
+        written: 0,
+    };
+    let res = loaded.set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+            loaded.metadata.coins_count,
+            &mut failing,
+            &|| false,
+        )
+    });
+    assert!(matches!(res, Err(SnapshotError::Io(_))));
+
+    // Fail during coin streaming
+    let mut failing_coins = FailingWriter {
+        fail_after: 100,
+        written: 0,
+    };
+    let res_coins = loaded.set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            loaded.metadata.base_block_hash,
+            loaded.anchor.height,
+            loaded.metadata.coins_count,
+            &mut failing_coins,
+            &|| false,
+        )
+    });
+    assert!(matches!(res_coins, Err(SnapshotError::Io(_))));
+}
+
+#[test]
+fn writer_rejects_output_with_max_vout_as_invalid_outpoint() {
+    let set = crate::UtxoSet::new();
+    let txid = Hash256::from_le_bytes(&[0x5a; 32]);
+    let out = OwnedUtxoOut::new(u32::MAX, 50_000_000, vec![0x51], false, 1);
+    let record =
+        UtxoRecord::from_owned_outputs(txid, &[out]).expect("UtxoRecord admits u32::MAX vout");
+    set.insert_snapshot_record(record);
+
+    let mut written = Vec::new();
+    let base_hash = Hash256::from_le_bytes(&[0x42; 32]);
+    let res = set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            base_hash,
+            100,
+            1,
+            &mut written,
+            &|| false,
+        )
+    });
+
+    let error = res.expect_err("write_core_v2 must reject output with vout u32::MAX");
+    match error {
+        SnapshotError::InvalidOutpoint { vout } => {
+            assert_eq!(vout, u64::from(u32::MAX));
+        }
+        other => panic!("expected InvalidOutpoint error, got {other:?}"),
+    }
+}
+
+#[test]
+fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
+    // Packed height/coinbase limit: height <= 0x7fff_ffff allows code <= u32::MAX.
+    // At height 0x7fff_ffff, coinbase=false yields 0xffff_fffe and coinbase=true yields 0xffff_ffff.
+    let max_height: u32 = 0x7fff_ffff;
+    let base_hash = Hash256::from_le_bytes(&[0x33; 32]);
+
+    for coinbase in [false, true] {
+        let set = crate::UtxoSet::new();
+        let txid = Hash256::from_le_bytes(&[if coinbase { 0x11 } else { 0x22 }; 32]);
+        let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], coinbase, max_height);
+        let record = UtxoRecord::from_owned_outputs(txid, &[out])
+            .expect("UtxoRecord admits valid max height");
+        set.insert_snapshot_record(record);
+
+        let mut written = Vec::new();
+        let report = set
+            .with_stable_view(|view| {
+                write_core_v2(
+                    view,
+                    Network::Regtest,
+                    base_hash,
+                    max_height,
+                    1,
+                    &mut written,
+                    &|| false,
+                )
+            })
+            .expect("write_core_v2 must accept max encodable height");
+
+        assert_eq!(report.coins, 1);
+        assert!(report.bytes > 51);
+
+        // Verify that the written stream decodes successfully and roundtrips the height and coinbase.
+        let (records, hash_serialized) = Decoder::new(&mut Cursor::new(&written[51..]), 1_000_000)
+            .coins(1, max_height, SnapshotLimits::default())
+            .expect("Decoder must accept snapshot written with max encodable height");
+
+        assert_eq!(records.len(), 1);
+        let outputs: Vec<_> = records[0].outputs().collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].height, max_height);
+        assert_eq!(outputs[0].coinbase, coinbase);
+        assert_eq!(report.txoutset_hash, hash_serialized);
+    }
+}
+
+#[test]
+fn writer_rejects_next_height_as_varint_overflow_for_both_coinbase_variants() {
+    // If bit 31 of height is set (height >= 0x8000_0000), (height << 1) exceeds u32::MAX
+    // for both coinbase=false (0x1_0000_0000) and coinbase=true (0x1_0000_0001).
+    // In Rust, the bit shift by 1 does not panic, but shifts out the high bit causing
+    // high-bit loss during commitment hashing, and creates an incompatible 64-bit Core VARINT.
+    // The writer must fail closed with VarIntOverflow.
+    let overflow_height: u32 = 0x8000_0000;
+    let base_hash = Hash256::from_le_bytes(&[0x44; 32]);
+
+    for coinbase in [false, true] {
+        let set = crate::UtxoSet::new();
+        let txid = Hash256::from_le_bytes(&[if coinbase { 0xaa } else { 0xbb }; 32]);
+        let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], coinbase, overflow_height);
+        let record = UtxoRecord::from_owned_outputs(txid, &[out])
+            .expect("UtxoRecord admits height with bit 31 set");
+        set.insert_snapshot_record(record);
+
+        let mut written = Vec::new();
+        let res = set.with_stable_view(|view| {
+            write_core_v2(
+                view,
+                Network::Regtest,
+                base_hash,
+                overflow_height,
+                1,
+                &mut written,
+                &|| false,
+            )
+        });
+
+        match res {
+            Err(SnapshotError::VarIntOverflow) => {}
+            other => panic!(
+                "expected VarIntOverflow for height 0x8000_0000 (coinbase={coinbase}), got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn writer_preserves_invalid_height_precedence_over_varint_overflow() {
+    // When output height exceeds base_height, InvalidHeight must take precedence
+    // over VarIntOverflow even when height >= 0x8000_0000.
+    let overflow_height: u32 = 0x8000_0000;
+    let base_height: u32 = 100;
+    let base_hash = Hash256::from_le_bytes(&[0x55; 32]);
+
+    let set = crate::UtxoSet::new();
+    let txid = Hash256::from_le_bytes(&[0xcc; 32]);
+    let out = OwnedUtxoOut::new(0, 50_000_000, vec![0x51], false, overflow_height);
+    let record = UtxoRecord::from_owned_outputs(txid, &[out])
+        .expect("UtxoRecord admits height with bit 31 set");
+    set.insert_snapshot_record(record);
+
+    let mut written = Vec::new();
+    let res = set.with_stable_view(|view| {
+        write_core_v2(
+            view,
+            Network::Regtest,
+            base_hash,
+            base_height,
+            1,
+            &mut written,
+            &|| false,
+        )
+    });
+
+    match res {
+        Err(SnapshotError::InvalidHeight {
+            height,
+            base_height: base,
+        }) => {
+            assert_eq!(height, overflow_height);
+            assert_eq!(base, base_height);
+        }
+        other => panic!("expected InvalidHeight error, got {other:?}"),
+    }
+}
+
+#[test]
+fn varint_key_order_spans_width_transition_at_16512() {
+    use core::cmp::Ordering;
+
+    use crate::compress::cmp_core_varint_key;
+    use crate::snapshot::SerializedUtxoHasher;
+
+    // Width boundaries of Core's subtract-one MSB VARINT.
+    assert_eq!(core_varint(16_511), vec![0xFF, 0x7F]);
+    assert_eq!(core_varint(16_512), vec![0x80, 0x80, 0x00]);
+    // Bytewise cursor order inverts numeric order across the transition.
+    assert_eq!(cmp_core_varint_key(16_512, 16_511), Ordering::Less);
+    assert_eq!(cmp_core_varint_key(16_511, 16_512), Ordering::Greater);
+    // Within one width numeric and key order agree.
+    assert_eq!(cmp_core_varint_key(0, 127), Ordering::Less);
+    assert_eq!(cmp_core_varint_key(128, 16_511), Ordering::Less);
+    assert_eq!(cmp_core_varint_key(16_512, 16_513), Ordering::Less);
+    assert_eq!(cmp_core_varint_key(5, 5), Ordering::Equal);
+
+    // Decoder stages file-numeric order into cursor order and commits there.
+    let bytes = group(7, &[16_511, 16_512]);
+    let (records, hash) = Decoder::new(&mut Cursor::new(bytes), 100_000)
+        .coins(2, 200, SnapshotLimits::default())
+        .expect("staged records");
+    assert_eq!(
+        records[0]
+            .outputs()
+            .map(|output| output.vout)
+            .collect::<Vec<_>>(),
+        vec![16_512, 16_511]
+    );
+    let txid_bytes = Hash256::from_le_bytes(&[7; 32]).to_le_bytes();
+    let staged: Vec<_> = records[0].outputs().collect();
+    let mut varint_feed = SerializedUtxoHasher::new();
+    for output in &staged {
+        varint_feed
+            .add(txid_bytes, *output, Some(200))
+            .expect("varint feed");
+    }
+    assert_eq!(varint_feed.finish(), hash);
+    let mut numeric_feed = SerializedUtxoHasher::new();
+    for output in staged.iter().rev() {
+        numeric_feed
+            .add(txid_bytes, *output, Some(200))
+            .expect("numeric feed");
+    }
+    assert_ne!(
+        numeric_feed.finish(),
+        hash,
+        "the transition must distinguish cursor order from numeric order"
+    );
+
+    // Writer emits cursor order; the file, the report and a re-decode agree.
+    let set = crate::UtxoSet::new();
+    let txid = Hash256::from_le_bytes(&[7; 32]);
+    let low = OwnedUtxoOut::new(16_511, 5_000_000_000, vec![0x51], true, 1);
+    let high = OwnedUtxoOut::new(16_512, 5_000_000_000, vec![0x51], true, 1);
+    let record = UtxoRecord::from_owned_outputs(txid, &[low, high]).expect("record");
+    set.insert_snapshot_record(record);
+    let base_hash = Hash256::from_le_bytes(&[0x77; 32]);
+    let mut written = Vec::new();
+    let report = set
+        .with_stable_view(|view| {
+            write_core_v2(
+                view,
+                Network::Regtest,
+                base_hash,
+                200,
+                2,
+                &mut written,
+                &|| false,
+            )
+        })
+        .expect("write succeeds");
+    // First emitted vout is 16,512 in CompactSize (FD 80 40), not 16,511.
+    assert_eq!(written[84..87], [0xFD, 0x80, 0x40]);
+    let mut cursor = Cursor::new(&written);
+    let mut decoder = Decoder::new(&mut cursor, u64::try_from(written.len()).expect("fit"));
+    decoder.metadata().expect("header");
+    let (emitted, emitted_hash) = decoder
+        .coins(2, 200, SnapshotLimits::default())
+        .expect("re-decode");
+    assert_eq!(
+        emitted[0]
+            .outputs()
+            .map(|output| output.vout)
+            .collect::<Vec<_>>(),
+        vec![16_512, 16_511]
+    );
+    assert_eq!(emitted_hash, report.txoutset_hash);
+    assert_eq!(emitted_hash, hash);
+    set.with_stable_view(|view| {
+        assert_eq!(view.hash_serialized_3().expect("stable-view hash"), hash);
+    });
+
+    // Duplicate detection survives the new order in both duplicate positions.
+    assert!(matches!(
+        body(&group(7, &[16_511, 16_511]), 2),
+        Err(SnapshotError::DuplicateOutpoint { vout: 16_511 })
+    ));
+    assert!(matches!(
+        body(&group(7, &[16_512, 16_511, 16_512]), 3),
+        Err(SnapshotError::DuplicateOutpoint { vout: 16_512 })
     ));
 }

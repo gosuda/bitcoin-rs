@@ -1,0 +1,5 @@
+SocksPort 0
+ORPort 127.0.0.1:__ORPORT__ IPv4Only
+DirPort 0
+ExitRelay 0
+ExitPolicy reject *:*

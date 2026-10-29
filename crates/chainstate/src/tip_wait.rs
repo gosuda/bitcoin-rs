@@ -98,15 +98,14 @@ impl ActiveTipWait for Chainstate {
 mod tests {
     use super::*;
     use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at;
-    use bitcoin_rs_primitives::{Hash256, Network};
+    use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
     use bitcoin_rs_utxo::UtxoSet;
     use std::sync::{atomic::AtomicBool, mpsc};
 
     fn owner() -> Chainstate {
         let owner = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
-        owner
-            .apply_block(&Network::Regtest.genesis_block(), None)
-            .expect("genesis");
+        let genesis_payload = BlockPayload::from_local(Network::Regtest.genesis_block());
+        owner.apply_block(&genesis_payload).expect("genesis");
         owner
     }
 
@@ -143,7 +142,8 @@ mod tests {
             );
             let child = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
                 .expect("child");
-            owner.apply_block(&child, None).expect("durable connect");
+            let child_payload = BlockPayload::from_local(child.clone());
+            owner.apply_block(&child_payload).expect("durable connect");
             let observed = rx
                 .recv_timeout(Duration::from_secs(1))
                 .expect("publication wake")
@@ -214,9 +214,11 @@ mod tests {
         );
         {
             let transition = owner.begin_transition().expect("transition");
-            transition.connect(&first, None).expect("first commit");
+            let first_payload = BlockPayload::from_local(first.clone());
+            transition.connect(&first_payload).expect("first commit");
             assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-            transition.connect(&second, None).expect("second commit");
+            let second_payload = BlockPayload::from_local(second.clone());
+            transition.connect(&second_payload).expect("second commit");
         }
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
@@ -236,7 +238,8 @@ mod tests {
             let transition = owner.begin_transition().expect("transition");
             transition.disconnect(&second).expect("disconnect second");
             transition.disconnect(&first).expect("disconnect first");
-            transition.connect(&first, None).expect("reconnect first");
+            let first_payload = BlockPayload::from_local(first);
+            transition.connect(&first_payload).expect("reconnect first");
         }
         assert!(
             rx.recv_timeout(Duration::from_millis(30)).is_err(),
@@ -275,8 +278,9 @@ mod tests {
         owner
             .admit_headers(&[child.header])
             .expect("header admission");
+        let historical_payload = BlockPayload::from_local(child);
         historical
-            .apply_block(&child, None)
+            .apply_block(&historical_payload)
             .expect("separate chainstate");
         historical.request_shutdown();
         owner.wake_waiters();
@@ -299,7 +303,8 @@ mod tests {
         let mut invalid = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("child");
         invalid.txs.clear();
-        assert!(owner.apply_block(&invalid, None).is_err());
+        let invalid_payload = BlockPayload::from_local(invalid.clone());
+        assert!(owner.apply_block(&invalid_payload).is_err());
         let notifier = owner.clone();
         let noise = std::thread::spawn(move || {
             for _ in 0..100 {
@@ -324,7 +329,8 @@ mod tests {
         let owner = owner();
         let first = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("first");
-        owner.apply_block(&first, None).expect("first commit");
+        let first_payload = BlockPayload::from_local(first.clone());
+        owner.apply_block(&first_payload).expect("first commit");
         let transition = owner.begin_transition().expect("transition");
         transition
             .disconnect(&first)
@@ -369,7 +375,8 @@ mod tests {
             let owner = owner();
             let first = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
                 .expect("first");
-            owner.apply_block(&first, None).expect("first commit");
+            let first_payload = BlockPayload::from_local(first.clone());
+            owner.apply_block(&first_payload).expect("first commit");
             let observer = owner.clone();
             let (tx, rx) = mpsc::channel();
             let waiter = std::thread::spawn(move || {
@@ -424,14 +431,16 @@ mod tests {
         let second = mined_regtest_child_at(first.block_hash(), 2).expect("second");
         let third = mined_regtest_child_at(second.block_hash(), 3).expect("third");
         let transition = owner.begin_transition().expect("transition");
-        transition.connect(&first, None).expect("first");
+        let first_payload = BlockPayload::from_local(first);
+        transition.connect(&first_payload).expect("first");
         let (rx, task) = spawn_wait(
             &owner,
             TipWaitCondition::Changed(None),
             Arc::new(AtomicBool::new(false)),
         );
         assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-        transition.connect(&second, None).expect("second");
+        let second_payload = BlockPayload::from_local(second);
+        transition.connect(&second_payload).expect("second");
         drop(transition);
         // Notify is only a test observation of parking, not publication.
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -440,7 +449,8 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
-        owner.apply_block(&third, None).expect("third");
+        let third_payload = BlockPayload::from_local(third);
+        owner.apply_block(&third_payload).expect("third");
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(1))
                 .expect("next publication")

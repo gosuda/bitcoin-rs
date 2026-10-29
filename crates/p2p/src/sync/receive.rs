@@ -109,7 +109,9 @@ impl BlockSync {
             }
         }
 
-        self.switch_branch_if_outweighed();
+        if let Some(demoted_tip) = self.switch_branch_if_outweighed() {
+            self.record_demoted_tip(demoted_tip);
+        }
         // The gate recheck runs after the branch switch so admissibility
         // reads the settled applied tip: a body on a winning branch that
         // just replaced the applied tip must not be judged against the old
@@ -154,7 +156,7 @@ impl BlockSync {
                 *apply_head_check = next_expected_hash
                     .as_ref()
                     .copied()
-                    .filter(|hash| *hash != Hash256::from(inbound.block.block_hash()));
+                    .filter(|hash| *hash != Hash256::from(inbound.payload().block().block_hash()));
             }
             blocks.push(inbound);
             *saw_block = true;
@@ -187,7 +189,7 @@ impl BlockSync {
     /// operations precede the scheduler lock to preserve the `PeerTable` ->
     /// scheduler ordering used elsewhere.
     fn discard_inadmissible_header_bodies(&self, invalid: &[(Hash256, Option<crate::PeerSource>)]) {
-        let blamed: Vec<std::net::SocketAddr> = invalid
+        let blamed: Vec<crate::PeerSource> = invalid
             .iter()
             .filter_map(|(_, source)| *source)
             .filter(|source| {
@@ -201,16 +203,15 @@ impl BlockSync {
                     false
                 }
             })
-            .map(|source| source.addr)
             .collect();
         let mut scheduler = self.scheduler.lock();
         for (hash, _) in invalid {
             scheduler.stager.discard(hash);
         }
-        for peer_addr in &blamed {
+        for source in &blamed {
             scheduler
                 .window
-                .mark_peer_unresponsive(*peer_addr, Instant::now());
+                .mark_peer_unresponsive(*source, Instant::now());
         }
         tracing::debug!(
             discarded = invalid.len(),
@@ -269,8 +270,10 @@ impl BlockSync {
                 HeaderAdmission::Accepted {
                     announced_tip: Some(tip_hash),
                     active_height,
+                    demoted_tip,
                     ..
                 } => {
+                    self.record_admitted_tips(demoted_tip, Some(tip_hash), source);
                     // A staged retry that now admits is the same
                     // announcement the headers drain credits — the
                     // delivering connection demonstrated the tip even if
@@ -413,7 +416,7 @@ impl BlockSync {
             let tree = self.chain.block_tree();
             let indexed_tip = Self::indexed_applied_ancestry_tip(&tree, &applied_tip);
             blocks.retain(|inbound| {
-                let hash = Hash256::from(inbound.block.block_hash());
+                let hash = Hash256::from(inbound.payload().block().block_hash());
                 let Some(node_id) = tree.lookup(hash) else {
                     return true;
                 };
@@ -451,7 +454,7 @@ impl BlockSync {
             let offered = blocks.len();
             let mut admission_plan = Vec::with_capacity(offered);
             blocks.retain(|inbound| {
-                let hash = Hash256::from(inbound.block.block_hash());
+                let hash = Hash256::from(inbound.payload().block().block_hash());
                 if scheduler.stager.contains(&hash) {
                     admission_plan.push(BodyAdmission::Staged);
                     return true;
@@ -503,7 +506,7 @@ impl BlockSync {
                 if matches!(admission, BodyAdmission::Staged) {
                     Ok(())
                 } else {
-                    self.chain.check_body_binding(&inbound.block)
+                    self.chain.check_body_binding(inbound.payload().block())
                 }
             })
             .collect();
@@ -522,11 +525,13 @@ impl BlockSync {
                 .drain(..)
                 .zip(admission_plan.into_iter().zip(binding_results))
             {
-                let hash = Hash256::from(inbound.block.block_hash());
+                let hash = Hash256::from(inbound.payload().block().block_hash());
                 let source = inbound.source;
                 // The body has left the ingress channel: release the delivering
-                // connection's unsolicited forwarding slot.
-                drop(inbound.forward_credit);
+                // connection's unsolicited forwarding slot. Consuming the
+                // inbound drops `forward_credit` here, before any staging.
+                let _ = inbound.forward_credit;
+                let payload = inbound.into_payload();
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
@@ -535,16 +540,16 @@ impl BlockSync {
                 // delivered transaction or witness bytes by itself.
                 if let Err(error) = binding_result {
                     metrics::counter!("node.sync.body_binding_drops").increment(1);
-                    let witness = inbound
-                        .block
+                    let witness = payload
+                        .block()
                         .txs
                         .first()
                         .and_then(|tx| tx.inputs.first())
                         .map(|input| &input.witness);
                     tracing::warn!(
                         %hash, %error, ?source,
-                        serialized_bytes = inbound.serialized.len(),
-                        transactions = inbound.block.txs.len(),
+                        serialized_bytes = payload.bytes().len(),
+                        transactions = payload.block().txs.len(),
                         coinbase_witness_items = witness.map_or(0, bitcoin_rs_primitives::Witness::len),
                         coinbase_witness_first_bytes = witness.and_then(|stack| stack.first()).map_or(0, Vec::len),
                         "block sync: body/header binding failed; rejecting delivery"
@@ -579,14 +584,7 @@ impl BlockSync {
                     refused_at_quota = refused_at_quota.saturating_add(1);
                     continue;
                 }
-                let staged = stager.insert(
-                    hash,
-                    next_expected_hash,
-                    inbound.block,
-                    inbound.serialized,
-                    source,
-                    now,
-                );
+                let staged = stager.insert(hash, next_expected_hash, payload, source, now);
                 if matches!(admission, BodyAdmission::Unrequested { gate_pending: true })
                     && matches!(staged, StagedBlock::Memory { .. })
                 {
@@ -704,6 +702,9 @@ impl BlockSync {
             self.peer_table.with_current(source_peer, || {
                 let mut scheduler = self.scheduler.lock();
                 for (hash, _, credit) in batch {
+                    // A delivered body proves the connection has it, so an
+                    // earlier `notfound` for the hash no longer applies.
+                    scheduler.body_unavailable.clear(source_peer, *hash);
                     match *credit {
                         DeliveryCredit::Duplicate => {
                             scheduler
@@ -746,8 +747,8 @@ impl BlockSync {
                         self.scheduler
                             .lock()
                             .window
-                            .mark_peer_unresponsive(source.addr, now);
-                        tracing::warn!(peer_addr = %source.addr, %hash, "block sync: peer served mutated block body; disconnecting");
+                            .mark_peer_unresponsive(source, now);
+                        tracing::warn!(peer_addr = ?source.endpoint, %hash, "block sync: peer served mutated block body; disconnecting");
                     }
                 }
             }

@@ -2,8 +2,9 @@
 //! the peer: the session reads nothing until the writer drains, answers in
 //! request order, and ends when the writer dies or the lease is cancelled.
 
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io::{self, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -45,6 +46,13 @@ pub(super) struct ScriptedChain {
 }
 
 impl ChainQuery for ScriptedChain {
+    fn stale_tip_announcement(
+        &self,
+        _tip: bitcoin_rs_primitives::Hash256,
+        _peer_tips: &[bitcoin_rs_primitives::Hash256],
+    ) -> Option<crate::dispatch::StaleTipHeaders> {
+        None
+    }
     fn headers_after(
         &self,
         _locator_hashes: &[BlockHash],
@@ -149,6 +157,14 @@ impl TxInventory for ScriptedTxs {
             .iter()
             .find(|tx| tx.wtxid().as_bytes() == wtxid.as_bytes())
             .cloned()
+    }
+
+    fn resident_ancestor_package(&self, _wtxid: Wtxid) -> Option<Vec<Wtxid>> {
+        None
+    }
+
+    fn resident_package(&self, _wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>> {
+        None
     }
 }
 
@@ -262,15 +278,20 @@ impl Served {
         aggregate: Option<&Arc<SharedOutboundBudget>>,
         writer: &WriterKind,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let client_stream = TcpStream::connect(listener.local_addr()?)?;
         let (server_stream, addr) = listener.accept()?;
         configure_peer_stream(&client_stream)?;
         configure_peer_stream(&server_stream)?;
-        let writer_socket = server_stream.try_clone()?;
         if let WriterKind::Production { write_timeout } = writer {
             server_stream.set_write_timeout(Some(*write_timeout))?;
         }
+        // Windows clones retain the timeout present at duplication time.
+        let writer_socket = server_stream.try_clone()?;
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let mut lease = PeerLease::new_with_budget(outbound_tx, true, budget);
@@ -328,7 +349,13 @@ impl Served {
         let session_lease = lease.clone();
         let (outcome_tx, outcome) = crossbeam_channel::bounded(1);
         let session = std::thread::spawn(move || {
-            let result = run_message_loop(&mut peer, addr, &session_lease, &shared, None);
+            let result = run_message_loop(
+                &mut peer,
+                addr,
+                &session_lease,
+                &shared,
+                None,
+            );
             let _ = outcome_tx.send(result);
         });
         Ok(Self {
@@ -459,9 +486,9 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     assert_eq!(
         received,
         vec![
-            Message::Block(block_a),
+            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_a)),
             Message::NotFound(vec![unknown_tx]),
-            Message::Block(block_b),
+            Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_b)),
             Message::Pong(7),
         ],
         "request order, the miss before the tail, and the waiting ping last"
@@ -734,7 +761,11 @@ fn a_drained_getdata_holds_reads_until_the_queue_can_take_a_reply() -> TestResul
 /// dead when a write fails: a peer that has gone away fails the second write.
 #[test]
 fn production_writer_marks_the_budget_dead_when_a_write_fails() -> TestResult {
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+    let listener = TcpListener::bind(
+        PeerEndpoint::from(([127, 0, 0, 1], 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let client = TcpStream::connect(listener.local_addr()?)?;
     let (server, addr) = listener.accept()?;
     drop(client);

@@ -186,6 +186,142 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
     Ok(())
 }
 
+/// A funded standard transaction on a fresh node: `(ctx, tx, raw hex)`.
+fn funded_standard_tx(
+    txid_byte: u8,
+    funded: u64,
+    output: u64,
+) -> Result<(Arc<Context>, Tx, String), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let prevout = fund_utxo(&ctx, txid_byte, funded);
+    let tx = make_tx(prevout, output, script);
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
+    Ok((ctx, tx, raw))
+}
+
+/// A funded `lncli sendcoins` on LND v0.21.4 backed by this node ends in
+/// `["<hex>", false]`. LND's btcwallet (`f2c79d77`) calls
+/// `SendRawTransaction(tx, false)`, and btcd's rpcclient (`1c55c7c1`) picks the
+/// argument shape from `getnetworkinfo.subversion`: it strips `/Satoshi:` and
+/// the trailing `/`, then string-compares to `0.19.0`. Core's
+/// `/Satoshi:31.1.0/` yields `["<hex>", 0.1]`; this node's
+/// `/bitcoin-rs:0.14.0/` sorts below `0.19.0` and yields the pre-0.19
+/// `allowhighfees` boolean. Refusing it as "maxfeerate must be a number" (-3)
+/// leaves the wallet transaction unpublished, so no `rawtx` ever follows.
+#[test]
+fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (ctx, tx, raw) = funded_standard_tx(0x50, 10_000, 9_000)?;
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let result = handler.dispatch("sendrawtransaction", &json!([raw.as_str(), false]))?;
+
+    assert_eq!(result.as_str(), Some(tx.txid().to_string().as_str()));
+    assert!(
+        ctx.mempool.gateway.read().contains_txid(&tx.txid()),
+        "the wallet transaction must be in the mempool, not only acknowledged"
+    );
+    Ok(())
+}
+
+/// The legacy `false` is the default ceiling, not an opt-out: an absurd fee
+/// is still refused. `true` is not accepted at all, so the guard cannot be
+/// switched off through a type Core refuses.
+#[test]
+fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
+-> Result<(), Box<dyn std::error::Error>> {
+    // 1 BTC in, 0.01 BTC out: a 0.99 BTC fee on a ~85 vbyte transaction.
+    let (ctx, tx, raw) = funded_standard_tx(0x51, 100_000_000, 1_000_000)?;
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let refused = handler
+        .dispatch("sendrawtransaction", &json!([raw.as_str(), false]))
+        .expect_err("allowhighfees=false keeps the default fee ceiling");
+    assert_eq!(refused.code(), RpcError::INVALID_PARAMS, "{refused:?}");
+    assert!(!ctx.mempool.gateway.read().contains_txid(&tx.txid()));
+
+    // Core's RPC_TYPE_ERROR, as for any boolean it receives.
+    let typed = handler
+        .dispatch("sendrawtransaction", &json!([raw.as_str(), true]))
+        .expect_err("allowhighfees=true is not accepted");
+    assert_eq!(typed.code(), -3, "{typed:?}");
+    assert!(!ctx.mempool.gateway.read().contains_txid(&tx.txid()));
+    Ok(())
+}
+
+/// Omitted, null, numeric and numeric-string ceilings keep Core's `maxfeerate`
+/// meaning, and everything that is neither an amount nor the legacy boolean
+/// is still refused before any admission.
+#[test]
+fn sendrawtransaction_fee_argument_keeps_core_amount_semantics()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (index, fee) in [json!(null), json!(0.1), json!("0.1"), json!(0)]
+        .into_iter()
+        .enumerate()
+    {
+        let byte = 0x60 + u8::try_from(index)?;
+        let (ctx, tx, raw) = funded_standard_tx(byte, 10_000, 9_000)?;
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let sent = handler.dispatch("sendrawtransaction", &json!([raw.as_str(), fee]))?;
+
+        assert_eq!(
+            sent.as_str(),
+            Some(tx.txid().to_string().as_str()),
+            "{fee:?}"
+        );
+        assert!(ctx.mempool.gateway.read().contains_txid(&tx.txid()));
+    }
+
+    // Core's RPC_TYPE_ERROR for a value that is not an amount at all;
+    // -32602 for amounts the ceiling grammar rejects.
+    let core_type_error = -3;
+    for (index, (fee, code)) in [
+        (json!([false]), Some(core_type_error)),
+        (json!({"maxfeerate": false}), Some(core_type_error)),
+        (json!(-0.1), Some(RpcError::INVALID_PARAMS)),
+        (json!(1.0), Some(RpcError::INVALID_PARAMS)),
+        (json!("false"), None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let byte = 0x70 + u8::try_from(index)?;
+        let (ctx, tx, raw) = funded_standard_tx(byte, 10_000, 9_000)?;
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let refused = handler
+            .dispatch("sendrawtransaction", &json!([raw.as_str(), fee]))
+            .expect_err("a fee argument that is not an amount stays refused");
+
+        if let Some(code) = code {
+            assert_eq!(refused.code(), code, "{fee:?}: {refused:?}");
+        }
+        assert!(
+            !ctx.mempool.gateway.read().contains_txid(&tx.txid()),
+            "{fee:?} must not admit anything"
+        );
+    }
+    Ok(())
+}
+
+/// The legacy boolean is a `sendrawtransaction` accommodation only: Core's
+/// `testmempoolaccept` takes an amount and still answers a type error.
+#[test]
+fn testmempoolaccept_still_refuses_a_boolean_maxfeerate() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (ctx, _tx, raw) = funded_standard_tx(0x80, 10_000, 9_000)?;
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let refused = handler
+        .dispatch("testmempoolaccept", &json!([[raw.as_str()], false]))
+        .expect_err("testmempoolaccept keeps Core's amount-only maxfeerate");
+
+    assert_eq!(refused.code(), -3, "{refused:?}");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // testmempoolaccept — real evaluation
 // ---------------------------------------------------------------------------

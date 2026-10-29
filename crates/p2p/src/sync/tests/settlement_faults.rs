@@ -50,7 +50,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestRe
     for block in fixture.blocks[1..6].iter().rev() {
         fixture
             .inbound_blocks_tx
-            .send(crate::InboundBlock::from_decoded(block.clone()))?;
+            .send(crate::InboundBlock::from_local(block.clone()))?;
     }
 
     fixture.sync.drain_inbound_blocks();
@@ -188,7 +188,10 @@ fn apply_cache_horizon_capped_by_pending_budget() -> TestResult {
 #[test]
 fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
-    let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let peer_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let source = crate::PeerSource::for_test(peer_addr);
     {
         let mut scheduler = sync.scheduler.lock();
@@ -217,10 +220,14 @@ fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
 #[test]
 fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
-    let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let peer_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let (stale_tx, _stale_rx) = crate::test_support::message_channel();
     let stale = PeerLease::new(stale_tx);
-    sync.peer_table.register(peer_addr, stale.clone());
+    sync.peer_table
+        .register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
     let replacement = current_source(&sync.peer_table, peer_addr);
     {
@@ -239,7 +246,7 @@ fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> TestResult {
         });
         scheduler.header_request_owner = Some(replacement);
     }
-    sync.on_peer_ready(stale.source(peer_addr));
+    sync.on_peer_ready(stale.source(peer_addr.endpoint()));
     sync.on_peer_ready(replacement);
     assert!(
         sync.scheduler
@@ -259,11 +266,18 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
         inbound_headers_tx,
         peers,
     } = header_sync_with_genesis()?;
-    let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let peer_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(peer_addr, lease.clone());
-    peers.publish_info(peer_addr, &lease, synthetic_peer(peer_addr, 8));
+    peers.publish_info(
+        peer_addr,
+        &lease,
+        synthetic_peer(peer_addr, 8),
+    );
     let tip_before = sync
         .chain
         .chain_tip()
@@ -276,7 +290,6 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
         source: Some(current_source(&peers, peer_addr)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
@@ -294,7 +307,7 @@ fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
             .scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(peer_addr, Instant::now()),
+            .peer_in_staller_cooldown(crate::PeerSource::for_test(peer_addr), Instant::now()),
         "local-clock rejection must not blame the peer"
     );
     Ok(())
@@ -338,7 +351,11 @@ fn same_address_registration_clears_getheaders_gate_and_routes_replacement() -> 
     let (new_tx, new_rx) = crate::test_support::message_channel();
     let new_lease = PeerLease::new(new_tx);
     peers.register(addr, new_lease.clone());
-    peers.publish_info(addr, &new_lease, synthetic_peer(addr, 8));
+    peers.publish_info(
+        addr,
+        &new_lease,
+        synthetic_peer(addr, 8),
+    );
     sync.tick();
 
     assert!(old_rx.try_recv().is_err());
@@ -412,7 +429,6 @@ pub(crate) fn deliver_headers(
         headers,
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     Ok(())
 }

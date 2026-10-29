@@ -40,13 +40,16 @@ compact_str.workspace = true
 hashbrown.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 sha2.workspace = true
 corepc-types.workspace = true
 anyhow.workspace = true
+bytes.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }

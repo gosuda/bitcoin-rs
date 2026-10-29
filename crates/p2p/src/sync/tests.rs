@@ -1,3 +1,4 @@
+use crate::PeerRemote;
 pub(crate) use crate::test_support::{OrFail, TestResult};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -12,7 +13,8 @@ use bitcoin_rs_chain::{
     BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+    consensus_bytes,
 };
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
@@ -38,6 +40,7 @@ use super::chain::{
     WindowApplyDisposition, WindowCommitError,
 };
 use super::receive::unrequested_body_admissible;
+use super::requests::BODY_UNAVAILABLE_RETRY;
 use super::{BlockSync, Inventory};
 use crate::block_stager::StagedBlock;
 use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
@@ -136,12 +139,8 @@ impl SyncChain for TestChain {
             }))
     }
 
-    fn connect_historical(
-        &self,
-        block: &Block,
-        _serialized: bytes::Bytes,
-    ) -> Result<(), SyncChainError> {
-        let hash = block.block_hash().0;
+    fn connect_historical(&self, payload: &BlockPayload) -> Result<(), SyncChainError> {
+        let hash = payload.block().block_hash().0;
         assert_eq!(
             self.historical.lock().pop_front().map(|(_, hash)| hash),
             Some(hash)
@@ -210,8 +209,9 @@ impl SyncChain for TestChain {
             bitcoin_rs_chain::current_unix_seconds(),
             bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
         ) {
-            Ok(node_ids) => {
-                let announced_tip = node_ids
+            Ok(admitted) => {
+                let announced_tip = admitted
+                    .ids
                     .last()
                     .and_then(|id| tree.node(*id).ok())
                     .map(|node| node.hash);
@@ -223,9 +223,10 @@ impl SyncChain for TestChain {
                             .and_then(|height| i32::try_from(height).ok())
                     });
                 HeaderAdmission::Accepted {
-                    accepted: node_ids.len(),
+                    accepted: admitted.ids.len(),
                     announced_tip,
                     active_height,
+                    demoted_tip: admitted.demoted_tip,
                 }
             }
             Err(error) => HeaderAdmission::Rejected(error),
@@ -256,14 +257,11 @@ impl SyncChain for TestChain {
         count
     }
 
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        _bodies: &[bytes::Bytes],
-    ) -> Result<usize, WindowCommitError> {
+    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
         let mut tree = self.block_tree.write();
         let mut applied = 0_usize;
-        for block in blocks {
+        for payload in payloads {
+            let block = payload.block();
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let scripted = *self.scripted_commit_failure.lock();
             let failure = match scripted {
@@ -296,7 +294,7 @@ impl SyncChain for TestChain {
             if !block.txs.is_empty() && block.txs.iter().skip(1).any(coinbase_shaped) {
                 let invalidated = tree
                     .invalidate_subtree(node_id)
-                    .map(Vec::into_boxed_slice)
+                    .map(|outcome| outcome.invalid.into_boxed_slice())
                     .unwrap_or_default();
                 return Err(WindowCommitError {
                     applied,
@@ -338,7 +336,7 @@ impl SyncChain for TestChain {
     fn switch_to_branch(
         &self,
         _target: NodeId,
-        _staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        _staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         let scripted = self.scripted_branch_switch.lock().take();
@@ -424,18 +422,14 @@ impl SyncChain for RefusingChain {
         self.0.window_len(serialized_sizes)
     }
 
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        bodies: &[bytes::Bytes],
-    ) -> Result<usize, WindowCommitError> {
-        self.0.commit_window(blocks, bodies)
+    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+        self.0.commit_window(payloads)
     }
 
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError> {
         self.0.switch_to_branch(target, staged_body, connected_body)
@@ -468,7 +462,6 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate() -> TestResult
             headers: vec![far_future_header(genesis.compute_hash(), 1)?],
             source: Some(a_source),
             wire_response: false,
-            body_fetch_owned: false,
         })?;
         sync.tick();
 
@@ -558,7 +551,10 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer() -> TestResult {
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -653,7 +649,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_101);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_101,
+    ));
     let mut relaying = synthetic_peer(addr, 100);
     relaying.compact_block_relay = true;
     let rx = connect_peer(&peers, relaying);
@@ -662,7 +661,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
 
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_102);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_102,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
     sync.tick();
     assert_flavor(&first_getdata(&rx), false);
@@ -677,7 +679,10 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult 
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_103);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        9_103,
+    ));
     let mut relaying = synthetic_peer(addr, 100);
     relaying.compact_block_relay = true;
     let rx = connect_peer(&peers, relaying);
@@ -723,7 +728,10 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     sync.tick();
@@ -752,7 +760,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
             .requeue_for_retry(&hash, height, Instant::now());
     }
 
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
@@ -787,7 +795,10 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
 
     sync.tick();
@@ -798,13 +809,9 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
     );
 
     let source = current_source(&peers, addr);
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block,
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block);
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
 
     let applied = applied_tip
@@ -856,7 +863,10 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
@@ -864,13 +874,9 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
     for block in [block2, block1] {
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        inbound_blocks_tx.send(crate::InboundBlock {
-            block,
-            serialized,
-            source: Some(source),
-            forward_credit: None,
-        })?;
+        let mut inbound = crate::InboundBlock::from_local(block);
+        inbound.source = Some(source);
+        inbound_blocks_tx.send(inbound)?;
     }
     // Whichever order the pass tries the carried headers, the second drain
     // admits whichever waited on the other's parent.
@@ -916,20 +922,19 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         inbound_headers_tx,
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
-    let serialized = bytes::Bytes::from(consensus_bytes(&block2));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block: block2.clone(),
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block2.clone());
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
     let Message::GetHeaders(_) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected recovery getheaders").into());
@@ -948,7 +953,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         headers: vec![block1.header, block2.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert_eq!(
@@ -967,13 +971,9 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
         "header admission must reconcile the staged child's height"
     );
 
-    let serialized = bytes::Bytes::from(consensus_bytes(&block1));
-    inbound_blocks_tx.send(crate::InboundBlock {
-        block: block1,
-        serialized,
-        source: Some(source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(block1);
+    inbound.source = Some(source);
+    inbound_blocks_tx.send(inbound)?;
     sync.tick();
     sync.tick();
     let applied = applied_tip
@@ -1119,7 +1119,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         assert_eq!(scheduler.window.pending_len(), 2);
         assert_eq!(
             scheduler.window.stalling_peer().map(|(addr, _)| addr),
-            Some(staller),
+            Some(staller.endpoint()),
             "the front-stripe owner must be the observed staller"
         );
     }
@@ -1135,7 +1135,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         sync.scheduler
             .lock()
             .window
-            .peer_in_staller_cooldown(staller, Instant::now()),
+            .peer_in_staller_cooldown(crate::PeerSource::for_test(staller), Instant::now()),
         "disconnected staller must enter the cooldown"
     );
     assert_no_getdata(&rxs[0])?;
@@ -1180,7 +1180,10 @@ fn clean_fast_path_caps_request_at_peer_height() -> TestResult {
             ..super::default_sync_budget(Network::Regtest)
         },
     );
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let rx = connect_peer(&peers, synthetic_peer(addr, 2));
 
     sync.tick();
@@ -1253,8 +1256,14 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         }
         .with_pending_timeout_override(Duration::ZERO),
     );
-    let stalled_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let healthy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+    let stalled_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
+    let healthy_addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8334,
+    ));
     let stalled_rx = connect_peer(&peers, synthetic_peer(stalled_addr, 100));
 
     sync.tick();
@@ -1272,7 +1281,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     // Deliver only the successor: it stages (waiting on block1, which the
     // stalled peer will never send) and exactly exhausts the staging byte
     // budget, closing the request gate.
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.drain_inbound_blocks();
     assert!(!{
         let scheduler = sync.scheduler.lock();
@@ -1329,7 +1338,10 @@ fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, Box<dyn st
         },
     );
 
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    let addr = PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        8333,
+    ));
     let outbound_rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
     Ok(DeterministicProxyFixture {
@@ -1386,12 +1398,10 @@ fn apply_cache_fixture(
 
 fn stage_body(sync: &BlockSync, block: &Block) {
     let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
-    let serialized = bytes::Bytes::from(consensus_bytes(block));
     sync.scheduler.lock().stager.insert(
         hash,
         None,
-        block.clone(),
-        serialized,
+        BlockPayload::from_local(block.clone()),
         None,
         Instant::now(),
     );
@@ -1406,7 +1416,7 @@ fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
 fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
     let hash = Hash256::from(block.block_hash());
     sync.buffer_received_block_chunk(
-        &mut vec![crate::InboundBlock::from_decoded(block)],
+        &mut vec![crate::InboundBlock::from_local(block)],
         Some(hash),
     );
     assert_eq!(sync.apply_buffered_blocks(Some(hash)), (1, 0));
@@ -1457,9 +1467,9 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> T
     // rewind onto it would be observable.
     let staged = sync.buffer_received_block_chunk(
         &mut vec![
-            crate::InboundBlock::from_decoded(blocks.remove(0)),
-            crate::InboundBlock::from_decoded(extra_coinbase),
-            crate::InboundBlock::from_decoded(follower),
+            crate::InboundBlock::from_local(blocks.remove(0)),
+            crate::InboundBlock::from_local(extra_coinbase),
+            crate::InboundBlock::from_local(follower),
         ],
         None,
     );
@@ -1521,9 +1531,9 @@ fn unrequested_body_admission_matches_core_acceptance() -> TestResult {
     let far_hash = Hash256::from(far_body.block_hash());
     let fork_hash = Hash256::from(fork_body.block_hash());
     let mut delivery = vec![
-        crate::InboundBlock::from_decoded(successor),
-        crate::InboundBlock::from_decoded(far_body),
-        crate::InboundBlock::from_decoded(fork_body),
+        crate::InboundBlock::from_local(successor),
+        crate::InboundBlock::from_local(far_body),
+        crate::InboundBlock::from_local(fork_body),
     ];
     sync.buffer_received_block_chunk(&mut delivery, None);
 
@@ -1823,8 +1833,9 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     // Model an active snapshot at height two, with ordinary work above it.
     chain.bootstrap_genesis();
     for block in &blocks[..2] {
+        let fixture_payload = BlockPayload::from_local(block.clone());
         chain
-            .commit_window(&[block], &[])
+            .commit_window(&[&fixture_payload])
             .map_err(|error| format!("fixture commit: {error:?}"))?;
     }
     chain
@@ -1845,12 +1856,9 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
     let mut corrupt = blocks[0].clone();
     corrupt.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
     for block in [corrupt, blocks[2].clone()] {
-        harness.inbound_blocks_tx.send(crate::InboundBlock {
-            serialized: bytes::Bytes::from(consensus_bytes(&block)),
-            block,
-            source: Some(source),
-            forward_credit: None,
-        })?;
+        let mut inbound = crate::InboundBlock::from_local(block);
+        inbound.source = Some(source);
+        harness.inbound_blocks_tx.send(inbound)?;
     }
     harness.sync.tick();
     assert!(chain.historical_connected.lock().is_empty());
@@ -1873,7 +1881,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .historical
             .lock()
             .window
-            .peer_in_staller_cooldown(addr, Instant::now())
+            .peer_in_staller_cooldown(crate::PeerSource::for_test(addr), Instant::now())
     );
     let retry_addr = test_addr(28001, 0)?;
     let retry_rx = connect_peer(&harness.peers, synthetic_peer(retry_addr, 3));
@@ -1889,12 +1897,9 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
             .try_iter()
             .any(|message| matches!(message, Message::GetData(_)))
     );
-    harness.inbound_blocks_tx.send(crate::InboundBlock {
-        block: blocks[0].clone(),
-        serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
-        source: Some(retry_source),
-        forward_credit: None,
-    })?;
+    let mut inbound = crate::InboundBlock::from_local(blocks[0].clone());
+    inbound.source = Some(retry_source);
+    harness.inbound_blocks_tx.send(inbound)?;
     harness.sync.tick();
     assert_eq!(
         *chain.historical_connected.lock(),
@@ -2016,7 +2021,7 @@ fn staged_count_wedge(
         );
     }
     for height in 3..=16_u32 {
-        blocks_tx.send(crate::InboundBlock::from_decoded(header_chain_block(
+        blocks_tx.send(crate::InboundBlock::from_local(header_chain_block(
             &expected, height,
         )?))?;
     }
@@ -2378,10 +2383,10 @@ fn assert_applied_genesis(
     Ok(())
 }
 
-pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
+pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: PeerRemote) -> PeerSource {
     peer_table.lease(addr).map_or_else(
         || panic!("test peer {addr} must be connected"),
-        |lease| lease.source(addr),
+        |lease| lease.source(addr.endpoint()),
     )
 }
 
@@ -2393,14 +2398,19 @@ fn test_frontier(sync: &BlockSync) -> super::ChainFrontier {
 fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     let (tx, _rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    let Some(endpoint) = info.endpoint else {
+        panic!("identified peer endpoint");
+    };
+    peer_table.register(endpoint, lease.clone());
+    peer_table.publish_info(endpoint, &lease, info);
 }
 /// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK` plus
 /// `NODE_WITNESS`, so it may serve block bodies at any height.
-pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+pub(crate) fn synthetic_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         addr,
+        endpoint: addr.endpoint(),
+        network: addr.network().into(),
         version: 70_016,
         wtxid_relay: false,
         relay_transactions: true,
@@ -2413,7 +2423,11 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         best_known_height: start_height,
         conn_time: 0,
         inbound: false,
-        addr_bind: addr,
+        addr_bind: crate::TransportRemote::new(
+            addr.endpoint()
+                .and_then(crate::PeerEndpoint::socket_addr)
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        ),
         time_offset: 0,
         counters: std::sync::Arc::new(crate::PeerCounters::default()),
         transport: crate::TransportProtocol::V1,
@@ -2422,7 +2436,7 @@ pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
 
 /// A peer that may not serve block bodies at all: inbound (attacker-chosen)
 /// and advertising no services.
-pub(crate) fn ineligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+pub(crate) fn ineligible_peer(addr: PeerRemote, start_height: i32) -> PeerInfo {
     PeerInfo {
         services: 0,
         inbound: true,
@@ -2433,11 +2447,29 @@ pub(crate) fn ineligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
 pub(crate) fn test_addr(
     base_port: usize,
     idx: usize,
-) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    Ok(SocketAddr::new(
+) -> Result<PeerRemote, Box<dyn std::error::Error>> {
+    Ok(PeerRemote::Endpoint(crate::PeerEndpoint::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         u16::try_from(base_port + idx)?,
-    ))
+    )))
+}
+
+/// The canonical sync-test anonymous peer: inbound Tor (`endpoint: None`,
+/// `network = Onion`), mirroring what the listener publishes for an
+/// unidentified session. Anonymous sessions schedule by exact connection
+/// identity, never by endpoint.
+pub(crate) fn connect_anonymous_peer(
+    peer_table: &Arc<PeerTable>,
+    mut info: PeerInfo,
+) -> crate::test_support::MessageReceiver {
+    let (tx, rx) = crate::test_support::message_channel();
+    let lease = PeerLease::new(tx);
+    info.endpoint = None;
+    info.network = crate::NetworkLabel::Onion;
+    info.inbound = true;
+    peer_table.register_unidentified(lease.clone());
+    assert!(peer_table.publish_info_unidentified(&lease, info));
+    rx
 }
 
 pub(crate) fn connect_peer(
@@ -2446,8 +2478,11 @@ pub(crate) fn connect_peer(
 ) -> crate::test_support::MessageReceiver {
     let (tx, rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
-    peer_table.register(info.addr, lease.clone());
-    peer_table.publish_info(info.addr, &lease, info);
+    let Some(endpoint) = info.endpoint else {
+        panic!("identified peer endpoint");
+    };
+    peer_table.register(endpoint, lease.clone());
+    peer_table.publish_info(endpoint, &lease, info);
     rx
 }
 
@@ -2675,6 +2710,85 @@ mod head_sync;
 mod limited_peers;
 mod stale_tip;
 
+/// A permanently failed connect hands the executor the valid tip its
+/// invalidation displaced, once: with the heavier branch invalid, the next
+/// call finds no outweighed branch and reports no tip.
+#[test]
+fn failed_branch_switch_reports_the_displaced_tip_once() -> TestResult {
+    let genesis = genesis_header();
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+    let side = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
+        .or_fail("regtest fixture header");
+    let side_id = tree.insert_node(Some(genesis_id), side, NodeStatus::HeaderValid)?;
+    let first = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
+        .or_fail("regtest fixture header");
+    let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::HeaderValid)?;
+    let second = regtest_fixture::mined_regtest_header(first.compute_hash(), 102)
+        .or_fail("regtest fixture header");
+    tree.insert_node(Some(first_id), second, NodeStatus::HeaderValid)?;
+    // A valid stale leaf that survives the invalidation: the displaced tip
+    // must be neither the applied tip nor part of the invalid subtree.
+    let other = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 201)
+        .or_fail("regtest fixture header");
+    tree.insert_node(Some(genesis_id), other, NodeStatus::HeaderValid)?;
+    let applied = {
+        let node = tree.node(side_id)?;
+        TipSnapshot {
+            tip_id: side_id,
+            chain_tx_count: node.chain_tx_count,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    let displaced = Hash256::from(other.compute_hash());
+    let invalidated = vec![
+        Hash256::from(first.compute_hash()),
+        Hash256::from(second.compute_hash()),
+    ];
+
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::from_pointee(applied));
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    ));
+    *chain.scripted_branch_switch.lock() = Some(ScriptedBranchSwitch {
+        connected: Vec::new(),
+        error: ReorgError::ConnectFailed {
+            disconnected: 1,
+            connected: 0,
+            hash: invalidated[0],
+            stopped_at: 0,
+            source: Box::new(bitcoin_rs_chainstate::ApplyError::Shutdown),
+            disposition: WindowApplyDisposition::Permanent,
+            invalidated: invalidated.into(),
+            demoted_tip: Some(displaced),
+        },
+    });
+    let (_inbound_headers_tx, inbound_headers_rx) = unbounded();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded();
+    let sync = BlockSync::new(
+        chain,
+        Arc::new(PeerTable::new()),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    );
+
+    assert!(sync.outweighed_branch_target().is_some());
+    assert_eq!(sync.switch_branch_if_outweighed(), Some(displaced));
+    assert_eq!(
+        sync.switch_branch_if_outweighed(),
+        None,
+        "the invalidated branch no longer outweighs the applied tip"
+    );
+    Ok(())
+}
+
 /// A sync loop over an applied chain whose commit fails on command for one
 /// hash, with block 2 announced and its body owed to one live connection.
 struct PunishmentFixture {
@@ -2710,7 +2824,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         blocks_rx,
         crate::sync::syncing_ibd_latch(),
     ));
-    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     let addr = test_addr(9770, 0)?;
@@ -2726,7 +2840,6 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         headers: vec![block2.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     Ok(PunishmentFixture {
@@ -2742,7 +2855,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
 
 /// Delivers the fixture's block 2 body from the connection that announced it.
 fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
-    let mut inbound = crate::InboundBlock::from_decoded(fixture.block2.clone());
+    let mut inbound = crate::InboundBlock::from_local(fixture.block2.clone());
     inbound.source = Some(fixture.source);
     fixture.blocks_tx.send(inbound)?;
     fixture.sync.tick();
@@ -2831,6 +2944,838 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
         !synced.sync.in_initial_block_download(),
         "telemetry must stay out of initial block download once the latch \
          has left it, even with headers ahead of the applied tip"
+    );
+    Ok(())
+}
+
+/// Two peers over a mined three-block header chain. `owner` advertises the
+/// taller chain, so the standard scheduler asks it first; `alternate` is the
+/// peer a released body must move to.
+struct NotFoundFixture {
+    sync: BlockSync,
+    peers: Arc<PeerTable>,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    blocks: Vec<Block>,
+    blocks_tx: InboundBlockSender,
+    owner: PeerRemote,
+    owner_rx: crate::test_support::MessageReceiver,
+    alternate: PeerRemote,
+    alternate_rx: Option<crate::test_support::MessageReceiver>,
+}
+
+impl NotFoundFixture {
+    /// The owner and the alternate both connected.
+    fn two_peers(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect(budget, true)
+    }
+
+    /// Only the owner connected: nobody else can serve a body it lacks.
+    fn owner_only(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect(budget, false)
+    }
+
+    fn connect(
+        budget: super::SyncBudget,
+        with_alternate: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(3)?;
+        install_budget(&sync, budget);
+        let owner = test_addr(9_810, 0)?;
+        let alternate = test_addr(9_810, 1)?;
+        let mut relaying = synthetic_peer(owner, 200);
+        relaying.compact_block_relay = true;
+        let owner_rx = connect_peer(&peers, relaying);
+        let alternate_rx =
+            with_alternate.then(|| connect_peer(&peers, synthetic_peer(alternate, 100)));
+        Ok(Self {
+            sync,
+            peers,
+            applied_tip,
+            blocks,
+            blocks_tx,
+            owner,
+            owner_rx,
+            alternate,
+            alternate_rx,
+        })
+    }
+
+    fn hash(&self, index: usize) -> Hash256 {
+        Hash256::from(self.blocks[index].block_hash())
+    }
+
+    fn inventory(&self, index: usize, compact: bool) -> Inventory {
+        let hash = bitcoin::BlockHash::from_byte_array(*self.hash(index).as_byte_array());
+        if compact {
+            Inventory::CompactBlock(hash)
+        } else {
+            Inventory::WitnessBlock(hash)
+        }
+    }
+
+    fn deliver(&self, source: PeerSource, index: usize) -> TestResult {
+        let mut inbound = crate::InboundBlock::from_local(self.blocks[index].clone());
+        inbound.source = Some(source);
+        self.blocks_tx.send(inbound)?;
+        Ok(())
+    }
+
+    fn applied_height(&self) -> Option<u32> {
+        self.applied_tip.load_full().map(|tip| tip.height)
+    }
+
+    fn alternate_getdata(&self) -> Vec<Inventory> {
+        self.alternate_rx
+            .as_ref()
+            .map_or_else(Vec::new, drain_getdata_items)
+    }
+
+    fn owner_getdata(&self) -> Vec<Inventory> {
+        drain_getdata_items(&self.owner_rx)
+    }
+}
+
+/// A window of one block with one request peer: nothing is pending between
+/// requests, so the tick's request scan visits only the highest-ranked peer.
+fn one_request_peer_budget() -> super::SyncBudget {
+    super::SyncBudget {
+        max_pending_blocks: 1,
+        max_peer_inflight: 1,
+        getdata_batch_limit: 1,
+        ..super::default_sync_budget(Network::Regtest)
+    }
+}
+
+/// Every `getdata` inventory vector queued on `rx`, in order; other traffic
+/// is skipped.
+fn drain_getdata_items(rx: &crate::test_support::MessageReceiver) -> Vec<Inventory> {
+    let mut items = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let Message::GetData(inventory) = message {
+            items.extend(inventory);
+        }
+    }
+    items
+}
+
+#[test]
+fn notfound_from_owner_replans_the_body_to_the_alternate_once_with_one_request_peer() -> TestResult
+{
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+
+    // The highest-ranked peer is asked for the first body, compact, alone.
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    // It answers `notfound`: the exact owner's request is released.
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+    assert!(!fixture.sync.owns_body_fetch(owner_source, x1));
+
+    // With one request peer per tick, the standard selection now picks the
+    // alternate; the unavailable owner is never polled for the body.
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert!(
+        fixture.owner_getdata().is_empty(),
+        "an owner that answered notfound is not asked again at wake-up pace"
+    );
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)]
+    );
+    assert!(fixture.sync.owns_body_fetch(alternate_source, x1));
+    assert!(
+        fixture
+            .peers
+            .is_connected(fixture.owner),
+        "a peer that lacks a body is not punished"
+    );
+
+    // The alternate supplies the body and the rest of the chain completes.
+    fixture.deliver(alternate_source, 0)?;
+    let mut requests: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..16 {
+        fixture.sync.tick();
+        if fixture.applied_height() == Some(3) {
+            break;
+        }
+        for (peer, rx, source) in [
+            (0, Some(&fixture.owner_rx), owner_source),
+            (1, fixture.alternate_rx.as_ref(), alternate_source),
+        ] {
+            let Some(rx) = rx else { continue };
+            for item in drain_getdata_items(rx) {
+                let (Inventory::CompactBlock(hash) | Inventory::WitnessBlock(hash)) = item else {
+                    return Err(std::io::Error::other("unexpected inventory flavor").into());
+                };
+                let hash = Hash256::from_le_bytes(hash.as_byte_array());
+                let index = (0..fixture.blocks.len())
+                    .find(|index| fixture.hash(*index) == hash)
+                    .ok_or("served an unknown body")?;
+                requests.push((peer, index));
+                fixture.deliver(source, index)?;
+            }
+        }
+    }
+    assert_eq!(fixture.applied_height(), Some(3), "sync must complete");
+    assert_eq!(
+        requests,
+        [(0, 1), (0, 2)],
+        "the released body was requested exactly once (from the alternate, above); \
+         the owner serves the later bodies"
+    );
+    Ok(())
+}
+
+#[test]
+fn notfound_owner_with_request_headroom_is_skipped_and_the_alternate_serves_the_released_body()
+-> TestResult {
+    let fixture = NotFoundFixture::two_peers(super::default_sync_budget(Network::Regtest))?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+
+    // The whole chain goes to the highest-ranked peer in one compact batch.
+    fixture.sync.tick();
+    assert_eq!(
+        fixture.owner_getdata(),
+        vec![
+            fixture.inventory(0, true),
+            fixture.inventory(1, true),
+            fixture.inventory(2, true)
+        ]
+    );
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+
+    // It lacks the first body only and keeps the other two in flight, so the
+    // request scan visits both peers and the owner's plan names the refused
+    // body.
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, fixture.hash(1)));
+    for _ in 0..3 {
+        fixture.sync.tick();
+    }
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)],
+        "the alternate is asked for exactly the released body, once"
+    );
+
+    fixture.deliver(alternate_source, 0)?;
+    fixture.deliver(owner_source, 1)?;
+    fixture.deliver(owner_source, 2)?;
+    for _ in 0..4 {
+        fixture.sync.tick();
+        if fixture.applied_height() == Some(3) {
+            break;
+        }
+    }
+    assert_eq!(fixture.applied_height(), Some(3), "sync must complete");
+    Ok(())
+}
+
+#[test]
+fn two_refusing_peers_do_not_starve_a_lower_ranked_holder() -> TestResult {
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    // A lower-ranked third peer holds the body both higher-ranked peers
+    // lack. A budget-bounded ledger would let the second refusal evict the
+    // first, so the scheduler would alternate between the refusers and never
+    // reach this holder; retention-bounded records demote both refusers.
+    let holder = test_addr(9_810, 2)?;
+    let holder_rx = connect_peer(&fixture.peers, synthetic_peer(holder, 90));
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let holder_source = current_source(&fixture.peers, holder);
+    let x0 = fixture.hash(0);
+
+    // The highest-ranked peer is asked first and answers `notfound`.
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+    assert_eq!(drain_getdata_items(&holder_rx), Vec::<Inventory>::new());
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+
+    // The second-ranked peer is asked next — not the demoted owner — and it
+    // answers `notfound` too.
+    fixture.sync.tick();
+    assert_eq!(
+        fixture.owner_getdata(),
+        Vec::<Inventory>::new(),
+        "a peer that answered notfound is not re-asked while its record lives"
+    );
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)]
+    );
+    assert_eq!(drain_getdata_items(&holder_rx), Vec::<Inventory>::new());
+    assert!(
+        fixture
+            .sync
+            .block_not_found(alternate_source, &[fixture.inventory(0, true)])
+    );
+
+    // Both refusals are retained, so the scan reaches the lower-ranked
+    // holder instead of alternating between the refusers.
+    let now = Instant::now();
+    assert!(
+        fixture.sync.scheduler.lock().body_unavailable.refuses(owner_source, x0, now),
+        "the first refusal survives the second under retention bounding"
+    );
+    assert!(
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .body_unavailable
+            .refuses(alternate_source, x0, now),
+        "the second refusal is recorded"
+    );
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert_eq!(
+        fixture.owner_getdata(),
+        Vec::<Inventory>::new(),
+        "neither refuser is re-asked before the retry interval"
+    );
+    assert_eq!(
+        fixture.alternate_getdata(),
+        Vec::<Inventory>::new(),
+        "neither refuser is re-asked before the retry interval"
+    );
+    assert_eq!(
+        drain_getdata_items(&holder_rx),
+        vec![fixture.inventory(0, false)],
+        "the lower-ranked holder is asked exactly once"
+    );
+    assert!(fixture.sync.owns_body_fetch(holder_source, x0));
+    for peer in [fixture.owner, fixture.alternate, holder] {
+        assert!(
+            fixture.peers.is_connected(peer),
+            "a peer that lacks a body is not punished"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn notfound_only_releases_for_the_exact_current_owner_session() -> TestResult {
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+    let now = Instant::now();
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+
+    // A connection that does not own the request cannot release it, and is
+    // not remembered for it.
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(alternate_source, &[fixture.inventory(0, true)])
+    );
+    // The owner answering for a body nobody asked it for changes nothing.
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(1, true)])
+    );
+    // Vectors that are not block vectors are left to their own lifecycles.
+    let txid = bitcoin::Txid::from_byte_array([7; 32]);
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[Inventory::Transaction(txid)])
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+    {
+        let scheduler = fixture.sync.scheduler.lock();
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(alternate_source, x1, now)
+        );
+        assert!(!scheduler.body_unavailable.refuses(owner_source, x1, now));
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(owner_source, fixture.hash(1), now)
+        );
+    }
+
+    // A same-address replacement is a different connection: neither the
+    // retired session's late notfound nor the replacement's own releases the
+    // predecessor's request.
+    let replacement_rx = connect_peer(&fixture.peers, synthetic_peer(fixture.owner, 200));
+    let replacement_source = current_source(&fixture.peers, fixture.owner);
+    assert_ne!(replacement_source, owner_source);
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)]),
+        "a retired session cannot release"
+    );
+    assert!(
+        !fixture
+            .sync
+            .block_not_found(replacement_source, &[fixture.inventory(0, true)]),
+        "a replacement cannot release its predecessor's request"
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+    {
+        let scheduler = fixture.sync.scheduler.lock();
+        assert!(!scheduler.body_unavailable.refuses(owner_source, x1, now));
+        assert!(
+            !scheduler
+                .body_unavailable
+                .refuses(replacement_source, x1, now)
+        );
+    }
+
+    // Ordinary session reconciliation hands the dead session's request to
+    // the standard scheduler: the replacement carries no inherited refusal.
+    fixture.sync.tick();
+    assert_eq!(
+        drain_getdata_items(&replacement_rx),
+        vec![fixture.inventory(0, false)]
+    );
+    assert_eq!(fixture.alternate_getdata(), Vec::<Inventory>::new());
+    Ok(())
+}
+
+#[test]
+fn notfound_only_peer_is_retried_after_the_interval_and_not_starved_or_polled() -> TestResult {
+    let fixture = NotFoundFixture::owner_only(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, true)];
+
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+
+    // Nobody else can serve the body, and the owner is the last resort for
+    // it: nothing is sent and the owner is neither convicted nor starved
+    // forever.
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert!(
+        fixture.owner_getdata().is_empty(),
+        "no wake-up-paced getdata/notfound loop against the only peer"
+    );
+    assert!(
+        fixture
+            .peers
+            .is_connected(fixture.owner),
+        "a peer that lacks a body is not disconnected"
+    );
+
+    // The retry interval is measured on the monotonic clock: once it has
+    // passed, the owner is asked exactly once more.
+    let aged = Instant::now()
+        .checked_sub(BODY_UNAVAILABLE_RETRY + Duration::from_secs(1))
+        .ok_or("monotonic clock is younger than the retry interval")?;
+    fixture
+        .sync
+        .scheduler
+        .lock()
+        .body_unavailable
+        .note(owner_source, x1, aged);
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+
+    // A second notfound starts a fresh interval.
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    for _ in 0..3 {
+        fixture.sync.tick();
+    }
+    assert_eq!(fixture.owner_getdata(), Vec::<Inventory>::new());
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+
+    // The record belongs to the connection: it leaves with it.
+    assert!(fixture.peers.disconnect_source(owner_source));
+    fixture.sync.tick();
+    assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    Ok(())
+}
+
+#[test]
+fn delivering_the_body_ends_the_notfound_demotion() -> TestResult {
+    let fixture = NotFoundFixture::owner_only(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, true)];
+
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+
+    // A peer that answered notfound and then delivers the body anyway shows
+    // it has the body: the delivery ends the record.
+    fixture.deliver(owner_source, 0)?;
+    fixture.sync.tick();
+    assert!(!fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    Ok(())
+}
+
+#[test]
+fn notfound_releases_a_deferred_owned_fetch_only_for_its_exact_owner() -> TestResult {
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+    let notfound = [fixture.inventory(0, false)];
+
+    // A compact follow-up the owner was asked for before the header attached:
+    // the deferred ownership mark is the only record of the request.
+    assert!(
+        fixture
+            .sync
+            .enqueue_owned_body_fetch(owner_source, x1, || true)
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    assert!(
+        !fixture.sync.block_not_found(alternate_source, &notfound),
+        "a connection that does not own the fetch cannot release it"
+    );
+    assert!(fixture.sync.owns_body_fetch(owner_source, x1));
+
+    assert!(fixture.sync.block_not_found(owner_source, &notfound));
+    assert!(
+        !fixture.sync.owns_body_fetch(owner_source, x1),
+        "the exact owner's notfound drops its deferred mark"
+    );
+    assert!(fixture.sync.scheduler.lock().body_unavailable.refuses(
+        owner_source,
+        x1,
+        Instant::now()
+    ));
+    assert!(
+        !fixture.sync.block_not_found(owner_source, &notfound),
+        "a second notfound finds nothing left to release"
+    );
+    Ok(())
+}
+
+/// Chain stub that runs one scripted action the next time the block tree is
+/// read: the deterministic way to land a wire event between a resolve's
+/// snapshot and its install.
+struct TreeReadHook {
+    chain: Arc<TestChain>,
+    on_next_tree_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl SyncChain for TreeReadHook {
+    fn network(&self) -> Network {
+        self.chain.network()
+    }
+
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, BlockTree> {
+        let action = self.on_next_tree_read.lock().take();
+        if let Some(action) = action {
+            action();
+        }
+        self.chain.block_tree()
+    }
+
+    fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.chain.chain_tip()
+    }
+
+    fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.chain.applied_tip()
+    }
+
+    fn bootstrap_genesis(&self) {
+        self.chain.bootstrap_genesis();
+    }
+
+    fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
+        self.chain.admit_headers(headers)
+    }
+
+    fn minimum_chain_work(&self) -> ChainWork {
+        self.chain.minimum_chain_work()
+    }
+
+    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+        self.chain.check_body_binding(block)
+    }
+
+    fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+        self.chain.window_len(serialized_sizes)
+    }
+
+    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError> {
+        self.chain.commit_window(payloads)
+    }
+
+    fn switch_to_branch(
+        &self,
+        target: NodeId,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
+        connected_body: &mut dyn FnMut(Hash256),
+    ) -> Result<(), ReorgError> {
+        self.chain
+            .switch_to_branch(target, staged_body, connected_body)
+    }
+}
+
+#[test]
+fn notfound_landing_inside_a_deferred_fetch_resolve_still_releases_the_exact_owner_mark()
+-> TestResult {
+    let (mut tree, blocks) = mined_chain(2, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let test_chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::new(ArcSwapOption::empty()),
+        Arc::clone(&block_tree),
+    ));
+    let hooked = Arc::new(TreeReadHook {
+        chain: test_chain,
+        on_next_tree_read: Mutex::new(None),
+    });
+    let peers = Arc::new(PeerTable::new());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
+    let chain: Arc<dyn SyncChain> = hooked.clone();
+    let sync = Arc::new(BlockSync::new(
+        chain,
+        Arc::clone(&peers),
+        headers_rx,
+        blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    ));
+    let declining = test_addr(9_840, 0)?;
+    let bystander = test_addr(9_840, 1)?;
+    let _declining_rx = connect_peer(&peers, synthetic_peer(declining, 100));
+    let _bystander_rx = connect_peer(&peers, synthetic_peer(bystander, 100));
+    let declining_source = current_source(&peers, declining);
+    let bystander_source = current_source(&peers, bystander);
+    let declined = Hash256::from(blocks[0].block_hash());
+    let kept = Hash256::from(blocks[1].block_hash());
+    assert!(sync.enqueue_owned_body_fetch(declining_source, declined, || true));
+    assert!(sync.enqueue_owned_body_fetch(bystander_source, kept, || true));
+
+    // The owner's `notfound` lands after the resolve snapshot and before its
+    // install: the mark is still in the scheduler, so the answer matches it.
+    let matched = Arc::new(Mutex::new(false));
+    let action_sync = Arc::clone(&sync);
+    let action_matched = Arc::clone(&matched);
+    *hooked.on_next_tree_read.lock() = Some(Box::new(move || {
+        let notfound = Inventory::CompactBlock(bitcoin::BlockHash::from_byte_array(
+            *declined.as_byte_array(),
+        ));
+        *action_matched.lock() = action_sync.block_not_found(declining_source, &[notfound]);
+    }));
+    sync.resolve_owned_body_fetches();
+
+    assert!(
+        *matched.lock(),
+        "a notfound during resolution must match the exact owner's mark"
+    );
+    assert!(
+        !sync.owns_body_fetch(declining_source, declined),
+        "the stale snapshot must not re-create a request the owner declined"
+    );
+    assert!(
+        sync.scheduler
+            .lock()
+            .body_unavailable
+            .refuses(declining_source, declined, Instant::now()),
+        "the answer is recorded against the exact owner"
+    );
+    assert!(
+        sync.owns_body_fetch(bystander_source, kept),
+        "a mark nobody released still resolves"
+    );
+
+    // Nothing re-installs the declined request on a later resolve.
+    sync.resolve_owned_body_fetches();
+    assert!(!sync.owns_body_fetch(declining_source, declined));
+    Ok(())
+}
+
+#[test]
+fn retired_generation_cannot_install_a_resolved_deferred_fetch_snapshot() -> TestResult {
+    let fixture = punishment_fixture()?;
+    let hash = Hash256::from_le_bytes(&[0x91; 32]);
+    assert!(
+        fixture
+            .sync
+            .enqueue_owned_body_fetch(fixture.source, hash, || true)
+    );
+    // Resolution has already produced (source, hash, height), but has not
+    // published it. Retire that generation while leaving its deferred mark
+    // present, as happens before the next scheduler session sweep.
+    assert!(fixture.peers.disconnect_source(fixture.source));
+    let addr = test_addr(9770, 0)?;
+    let _replacement_rx = connect_peer(&fixture.peers, synthetic_peer(addr, 2));
+    let replacement = current_source(&fixture.peers, addr);
+    assert_ne!(replacement, fixture.source);
+    assert!(
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .owned_body_fetches
+            .contains(&(fixture.source, hash))
+    );
+
+    fixture
+        .sync
+        .install_resolved_owned_body_fetch(fixture.source, hash, 2);
+
+    let scheduler = fixture.sync.scheduler.lock();
+    assert_eq!(scheduler.window.pending_owner(&hash), None);
+    assert!(
+        !scheduler
+            .owned_body_fetches
+            .contains(&(fixture.source, hash))
+    );
+    assert!(
+        !scheduler
+            .body_unavailable
+            .refuses(replacement, hash, Instant::now()),
+        "session invalidation must not fabricate a notfound for its replacement"
+    );
+    Ok(())
+}
+
+#[test]
+fn unavailable_body_ledger_is_bounded_exact_source_and_expires() {
+    use super::requests::UnavailableBodies;
+
+    let first = PeerSource::for_test(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_820));
+    let second = PeerSource::for_test(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_821));
+    let hash = |byte: u8| Hash256::from_le_bytes(&[byte; 32]);
+    let base = Instant::now();
+    let mut ledger = UnavailableBodies::new();
+
+    // Retention-bounded, not budget-bounded: every live record is kept, so a
+    // small pending budget can no longer evict another peer's live answer.
+    ledger.note(first, hash(1), base);
+    ledger.note(first, hash(2), base + Duration::from_secs(1));
+    ledger.note(second, hash(3), base + Duration::from_secs(2));
+    let now = base + Duration::from_secs(2);
+    assert!(
+        ledger.refuses(first, hash(1), now),
+        "live records are retained regardless of pending-budget pressure"
+    );
+    assert!(ledger.refuses(first, hash(2), now));
+    assert!(ledger.refuses(second, hash(3), now));
+    assert!(
+        !ledger.refuses(second, hash(2), now),
+        "records are keyed by exact connection"
+    );
+
+    ledger.clear(first, hash(2));
+    assert!(!ledger.refuses(first, hash(2), now));
+    ledger.retain_owned_by(|source| *source != second);
+    assert!(!ledger.refuses(second, hash(3), now));
+
+    ledger.note(first, hash(4), now);
+    assert!(ledger.refuses(first, hash(4), now));
+    assert!(
+        ledger.refuses(
+            first,
+            hash(4),
+            now + BODY_UNAVAILABLE_RETRY.saturating_sub(Duration::from_millis(1)),
+        ),
+        "a record refuses until the interval has passed"
+    );
+    assert!(
+        !ledger.refuses(first, hash(4), now + BODY_UNAVAILABLE_RETRY),
+        "a record older than the interval refuses nothing"
+    );
+}
+
+#[test]
+fn small_pending_budget_keeps_live_records_for_other_peers() -> TestResult {
+    // The window only ever holds one pending block, but the availability
+    // ledger is retention-bounded: two refusers alternating must not evict
+    // each other's live records and starve the replanned body.
+    let fixture = NotFoundFixture::two_peers(one_request_peer_budget())?;
+    let owner_source = current_source(&fixture.peers, fixture.owner);
+    let alternate_source = current_source(&fixture.peers, fixture.alternate);
+    let x1 = fixture.hash(0);
+    let now = Instant::now();
+
+    fixture.sync.tick();
+    assert_eq!(fixture.owner_getdata(), vec![fixture.inventory(0, true)]);
+    assert!(
+        fixture
+            .sync
+            .block_not_found(owner_source, &[fixture.inventory(0, true)])
+    );
+
+    // The released body is replanned to the alternate, which refuses it too.
+    for _ in 0..4 {
+        fixture.sync.tick();
+    }
+    assert_eq!(
+        fixture.alternate_getdata(),
+        vec![fixture.inventory(0, false)]
+    );
+    assert!(
+        fixture
+            .sync
+            .block_not_found(alternate_source, &[fixture.inventory(0, false)])
+    );
+
+    // Both live refusal records survive despite the one-block budget, so a
+    // lower-ranked holder would still be asked instead of a refuser.
+    let scheduler = fixture.sync.scheduler.lock();
+    assert!(
+        scheduler.body_unavailable.refuses(owner_source, x1, now),
+        "the first refuser's live record survives the second refusal"
+    );
+    assert!(
+        scheduler
+            .body_unavailable
+            .refuses(alternate_source, x1, now),
+        "the second refuser's live record is kept"
     );
     Ok(())
 }

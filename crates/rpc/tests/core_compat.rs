@@ -30,7 +30,9 @@ use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningCapability,
     MiningControl, MiningControlError, MiningInfo, TemplateMutation,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, client_version};
+use bitcoin_rs_p2p::FEATURE_VERSION;
+use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
+use bitcoin_rs_primitives::{BlockPayload, Hash256, Network, client_version, consensus_bytes};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, json};
@@ -179,6 +181,9 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// The `protocolversion` Bitcoin Core 31.1 reports and advertises.
+const CORE_31_1_PROTOCOL_VERSION: u32 = 70_016;
+
 #[test]
 fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
@@ -189,9 +194,34 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
         network.version,
         usize::try_from(client_version()).unwrap_or(usize::MAX)
     );
-    assert_eq!(network.protocol_version, 70016);
+    assert_eq!(
+        network.protocol_version,
+        usize::try_from(PROTOCOL_VERSION).unwrap_or(usize::MAX),
+        "getnetworkinfo reports the advertised wire protocol version"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION, FEATURE_VERSION,
+        "documented deviation from Core 31.1's 70016: the BIP434 feature-negotiation threshold"
+    );
+    assert_eq!(
+        PROTOCOL_VERSION,
+        CORE_31_1_PROTOCOL_VERSION + 1,
+        "the one protocol version above Core 31.1's, and only that"
+    );
     assert_eq!(network.connections, 0);
-    assert_eq!(network.networks.len(), 3);
+    assert_eq!(
+        network
+            .networks
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>(),
+        ["ipv4", "ipv6", "onion", "i2p"]
+    );
+    for row in &network.networks[2..] {
+        assert!(row.limited);
+        assert!(!row.reachable);
+        assert_eq!(row.proxy, "");
+    }
     assert_eq!(network.warnings, Vec::<String>::new());
 
     let peers: corepc_types::v31::GetPeerInfo =
@@ -326,7 +356,10 @@ impl MiningControl for CompatMiningControl {
         Ok(mining_fixture::canned_info())
     }
 
-    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit_block(
+        &self,
+        _payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Accepted)
     }
 
@@ -457,5 +490,102 @@ fn primitive_responses_stay_primitives() -> Result<(), Box<dyn std::error::Error
         )?,
         json!(true)
     );
+    Ok(())
+}
+
+/// API-15 cooked boundary: `submitblock` hex carrying trailing bytes after
+/// the block truncates to the consumed prefix and submits that truncated
+/// payload. The submitter records the retained bytes so the test proves the
+/// remainder was discarded, not re-encoded or persisted.
+#[test]
+fn submitblock_truncates_trailing_bytes_to_consumed_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    #[derive(Default)]
+    struct RecordingSubmit {
+        submitted: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+
+    impl MiningControl for RecordingSubmit {
+        fn get_block_template(
+            &self,
+            _request: BlockTemplateRequest,
+        ) -> Result<BlockTemplateResult, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn submit_block(
+            &self,
+            payload: BlockPayload,
+        ) -> Result<BlockValidationResult, MiningControlError> {
+            *self
+                .submitted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(payload.bytes().to_vec());
+            Ok(BlockValidationResult::Accepted)
+        }
+
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn publish_generation(&self) {}
+
+        fn publish_fee_delta_generation(&self, _fee_delta_sequence: u64) {}
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+
+        fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Err(MiningControlError::Unavailable("not wired".into()))
+        }
+    }
+
+    let genesis = Network::Regtest.genesis_block();
+    let canonical = consensus_bytes(&genesis);
+    let mut hex = String::with_capacity(canonical.len() * 2 + 4);
+    for byte in &canonical {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex.push_str("ffff");
+
+    let control: Arc<RecordingSubmit> = Arc::new(RecordingSubmit::default());
+    let handler = Handler::new(Arc::new(
+        Context::new().with_mining_control(control.clone()),
+    ));
+    let result = handler.dispatch("submitblock", &json!([hex]))?;
+    assert!(
+        result.is_null(),
+        "trailing bytes after the block must be accepted as Accepted: {result:?}"
+    );
+    assert_eq!(
+        control
+            .submitted
+            .lock()
+            .map_or(None, |guard| (*guard).clone()),
+        Some(canonical),
+        "the submitted payload must retain exactly the consumed prefix"
+    );
+
+    // Bytes that cannot start a block still fail exactly like Core.
+    let error = match handler.dispatch("submitblock", &json!(["zz"])) {
+        Err(error) => error,
+        Ok(_) => return Err("undecodable hex was accepted".into()),
+    };
+    assert_eq!(error.to_string(), "Block decode failed");
+    // Core `-22` (`RpcError::CORE_DESERIALIZATION_ERROR`, crate-internal):
+    // undecodable blocks fail deserialization exactly like Core.
+    assert_eq!(error.code(), -22);
     Ok(())
 }

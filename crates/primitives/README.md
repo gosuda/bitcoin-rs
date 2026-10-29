@@ -24,5 +24,8 @@ the Bitcoin network constants re-exported as `Network`. The `version` module pub
 `PKG_VERSION` and `USER_AGENT`, the workspace release constants carried in wire and
 RPC user-agent strings.
 
+`endpoint` defines logical IP, Tor v3 and I2P destinations (`PeerAddress`,
+`PeerEndpoint`, `PeerNetwork`), independent of the sockets carrying peer traffic.
+
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

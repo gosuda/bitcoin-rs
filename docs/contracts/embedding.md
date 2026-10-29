@@ -1,7 +1,12 @@
 # Embedded node lifecycle
 
 The typed in-process surface over the node lifecycle: `Node::start`,
-typed reads, gateway broadcast, consuming shutdown. The daemon runner is
+typed reads (`Node::snapshot`, `Node::sync_progress`, `Node::capabilities`,
+`Node::tx_by_id`, `Node::block_by_hash`, `Node::block_header`,
+`Node::mempool_info`, `Node::fee_estimate`, `Node::chainstates_summary`, and
+the settled chain-feed reads `Node::settled_snapshot`,
+`Node::subscribe_chain`/`Node::poll_chain`, `Node::pin_chain`/`Node::replay_chain`),
+gateway broadcast, consuming shutdown. The daemon runner is
 the first embedder — there is one lifecycle implementation, not two.
 
 ## Invariants
@@ -12,7 +17,7 @@ the first embedder — there is one lifecycle implementation, not two.
   an RPC context for a caller to assemble. `StartupGuard::finish` transfers
   ownership only after every service has started. Both callers stop through
   `lifecycle.rs::NodeServices::teardown`: request shutdown and wake
-  the event loop; join the event loop and RPC listener; stop metrics; join
+  the event loop; join the event loop and all configured RPC/HTTP listeners; stop metrics; join
   P2P core, ingress, and relay workers; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
   On every stop path — including `StartupGuard` rollback — the
@@ -69,10 +74,16 @@ the first embedder — there is one lifecycle implementation, not two.
   No production path mutates the pool outside the gateway. Owner:
   `crates/node/src/embed.rs`; gateway invariants:
   [mempool-mutations.md](mempool-mutations.md).
-- **EMB-06 — TxLookup gating is honest.** `tx_by_id` answers from the
-  mempool and the direct cache first; confirmed lookup requires the
-  index: a disabled index is `NodeError::Unavailable`, a proven-absent
-  transaction is `NodeError::NotFound`. Owner: `crates/node/src/embed.rs`.
+- **EMB-06: TxLookup gating is honest.** `Node::tx_by_id`
+  (`crates/node/src/embed.rs`) answers from the mempool first through
+  `MempoolReader::read` into `Mempool::transaction_by_txid`
+  (`crates/mempool/src/reader.rs`, `crates/mempool/src/pool.rs`), then from
+  the confirmed index through `NodeState::esplora_derived_index_query`
+  (`crates/node/src/state.rs`) into `DerivedIndexQuery::transaction`
+  (`crates/index/src/query_api.rs`, adapted by `DerivedIndexQueryAdapter` in
+  `crates/index/src/runtime.rs`): a disabled index is
+  `NodeError::Unavailable`, a proven-absent transaction is
+  `NodeError::NotFound`. Owner: `crates/node/src/embed.rs`.
 - **EMB-07 — Shutdown consumes.** `Node::shutdown(self)` runs the ordered
   sequence exactly once and publishes the clean checkpoint; a node
   started on the same data dir afterwards resumes from that checkpoint.
@@ -158,29 +169,119 @@ worker without `test-seam` or an internal RPC client.
 
 ## Readiness
 
-`block_header(hash)` copies header, height and big-endian cumulative work from
-the block-tree owner without requiring a retained body. `broadcast_package`
+`Node::block_header(hash)` (`crates/node/src/chain_feed.rs`) copies header,
+height and big-endian cumulative work from
+the block-tree owner without requiring a retained body. `Node::broadcast_package`
 routes bounded native child-with-independent-parents CPFP through
-`MempoolGateway::submit_local_package` with the ordinary fee cap; it does not
-enable RPC `submitpackage` or implement package RBF. Settled polling, opaque
+`MempoolGateway::submit_local_package` with the ordinary fee cap. RPC
+`submitpackage` uses the same atomic owner with its scoped individual-first
+contract in [POL-02](mempool-policy.md#pol-02-one-admission-owner-and-admission-mode)
+and [POL-05](mempool-policy.md#pol-05-replacement-cluster-and-package-policy);
+neither interface implements package RBF. Settled polling, opaque
 replay targets, positional steps, gap/restart recovery and work bounds are
-owned by `EVT-06` in [chain-events.md](chain-events.md). `snapshot()` retains its
+owned by `EVT-06` in [chain-events.md](chain-events.md). `Node::snapshot()` retains its
 live applied-tip semantics; callers needing follower settlement use
-`settled_snapshot()` or `pin_chain()`.
+`Node::settled_snapshot()` or `Node::pin_chain()`.
 
 `Node::start` returns after storage is open, recovery is done, and every
-service thread is spawned; `snapshot()`/`sync_progress()` at that point
+service thread is spawned; `Node::snapshot()`/`Node::sync_progress()` at that point
 reflect the resumed applied tip. There is no separate ready flag and no
 sleep-based readiness: the snapshot is the readiness fact.
 
+## Historical prefix reads
+
+Three synchronous `Node` operations expose the confirmed-index prefix
+contract owned by [`IDX-12`](indexing.md#idx-12-historical-prefix-queries-one-shot-server-selected).
+Consistency rules (anchor selection, floors, freshness, errors) live there;
+this section covers only how embedders call the operations.
+
+```rust
+impl Node {
+    pub fn transaction_at_prefix(&self, txid: &Txid)
+        -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError>;
+    pub fn script_history_at_prefix(&self, script: ScriptHash)
+        -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError>;
+    pub fn spender_at_prefix(&self, outpoint: OutPoint)
+        -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError>;
+}
+```
+
+`AtPrefix<T>` carries the qualifying prefix with the answer:
+`prefix.floor`, `prefix.height`, and the full chain hash `prefix.hash`, plus
+`answer` (`Some((height, tx))` with `floor <= height <= prefix.height` for a
+found transaction, `ScriptIndexSnapshot` for history, `Some(record)` for a
+found spend). The types are `bitcoin_rs_index::query_api` types; that module
+is already public and nothing here is re-exported. `Txid`, `Tx`, and
+`OutPoint` are `bitcoin_rs_primitives` types; `ScriptHash`,
+`ScriptIndexSnapshot`, and `SpendingRecord` keep their existing index paths.
+
+- Execution: these are synchronous bounded blocking reads on the calling
+  thread: gating, the bounded ancestry walk, and body reads all happen inside
+  the call. They create no executor, future, or promise, and there is nothing
+  to `.await`. Embedders place them on a blocking worker the same way they
+  place other blocking reads. The existing `async` `Node` methods
+  (`tx_by_id`, `block_by_hash`, `broadcast`, and the rest) are unchanged and
+  are not a pattern for these calls.
+- Per-call coverage: `transaction_at_prefix` needs `TxLookup` only and
+  works on tx-only nodes; the two script operations need `ScriptHistory`.
+  Each call returns its own prefix from its own required capabilities: a tx
+  call and a script call against skewed watermarks anchor at different
+  heights, and composing them means comparing the returned prefixes, not
+  assuming one shared anchor.
+- What answers mean: absence is scoped to `[prefix.floor, prefix.height]`
+  on `chain(prefix.hash)`: a `None` tx or spender answer reports no verified
+  record in that range, not global absence, unspentness, or existence. No
+  mempool contents are merged into historical answers; callers that also want
+  unconfirmed state read the mempool paths separately.
+- Positive floors: a pruned prefix stays visible in the type: full script
+  history refuses a positive floor with
+  `Unavailable(Shared(HistoryUnproven { floor }))`, because funding below the
+  floor can hide in-range spends, while a standalone spend lookup over its
+  exact `OutPoint` may return a scoped `None`. See `IDX-12` for the shared
+  funding-dependency context.
+- Failures are typed, not textual: `Retry` means the chain or index moved
+  under the read, so reissue the call for a fresh prefix. `Unavailable(cause)`
+  names the covering gap (`NoCoveredPrefix`, `AncestryBudgetExhausted`,
+  `PrefixBelowFloor`, or a shared budget/body/capability cause); match the
+  variant, never the rendered string. `Storage` reports a durable read
+  failure. Strict `ScriptLive` reads and current Core RPC behavior are
+  unchanged by these operations.
+- Calling shape: handle the prefix with the answer and the typed error at
+  the call site; confirmed history never needs the mempool-first ladder that
+  exact-tip `tx_by_id` uses:
+  ```rust
+  use bitcoin_rs_index::query_api::{AtPrefix, HistoricalQueryError};
+
+  match node.transaction_at_prefix(&txid) {
+      Ok(AtPrefix { prefix, answer }) => {
+          // `prefix.floor`, `prefix.height`, and `prefix.hash` qualify
+          // `answer`: Some((height, tx)) with height in range, or scoped
+          // absence in [prefix.floor, prefix.height].
+          let _ = (prefix, answer);
+      }
+      // Chain or index progress moved under the read; reissue the call.
+      Err(HistoricalQueryError::Retry) => {}
+      // NoCoveredPrefix, AncestryBudgetExhausted, PrefixBelowFloor, or a
+      // shared budget/body/capability cause; match the variant.
+      Err(HistoricalQueryError::Unavailable(_)) => {}
+      // Durable read failure.
+      Err(HistoricalQueryError::Storage(_)) => {}
+  }
+  ```
+  The arms above carry the caller policy as comments; only the matched
+  variants and the prefix-qualified answer are load-bearing here.
+
 ## Error behavior
 
-Errors at the typed boundary are `NodeError`: `Startup` (configuration,
-storage, recovery, or service-bind failure, with rollback as described
-above), `Shutdown` (join or checkpoint failure — reported only by
-consuming shutdown, never by Drop), `Unavailable` (a capability cannot
-answer), `NotFound` (a proven-absent object), and `Broadcast` (policy
-rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
+Errors at the typed lifecycle, readiness, typed reads (`tx_by_id` and
+`block_by_hash`, EMB-06), mining, and broadcast boundary are
+`NodeError`: `Startup` (configuration, storage, recovery, or service-bind
+failure, with rollback as described above), `Shutdown` (join or checkpoint
+failure, reported only by consuming shutdown, never by Drop), `Unavailable`
+(a capability cannot answer), `NotFound` (a proven-absent object), and
+`Broadcast` (policy rejection). The historical prefix reads above are outside
+that sentence: they return `HistoricalQueryError`, as documented in their own
+section. Daemon `run()` exposes teardown failures as `anyhow` errors.
 
 ## Proof
 

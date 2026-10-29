@@ -21,14 +21,16 @@ fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     let second = accept_headers(
         &mut tree,
         &headers[40..],
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
 
     assert_eq!(first.len(), 40);
     assert_eq!(second.len(), 60);
@@ -225,7 +227,8 @@ fn duplicate_genesis_in_overlapping_batch_returns_original_ids_and_inserts_only_
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     assert_eq!(first.len(), 2);
     let genesis_id = first[0];
     let first_child_id = first[1];
@@ -239,7 +242,8 @@ fn duplicate_genesis_in_overlapping_batch_returns_original_ids_and_inserts_only_
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
 
     assert_eq!(second.len(), 5, "one returned id per input header");
     assert_eq!(
@@ -290,7 +294,8 @@ fn duplicate_equal_work_competing_child_returns_original_id_and_does_not_reorg()
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     assert_eq!(first.len(), 2);
     let active_tip_id = first[1];
 
@@ -316,7 +321,8 @@ fn duplicate_equal_work_competing_child_returns_original_id_and_does_not_reorg()
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     assert_eq!(second.len(), 1);
     let competing_id = second[0];
     assert_ne!(
@@ -345,7 +351,8 @@ fn duplicate_equal_work_competing_child_returns_original_id_and_does_not_reorg()
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     assert_eq!(third.len(), 1);
     assert_eq!(
         third[0], competing_id,
@@ -376,7 +383,8 @@ fn invalid_unknown_suffix_after_duplicate_inputs_propagates_consensus_error_with
         Network::Regtest,
         current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?;
+    )?
+    .ids;
     let genesis_id = first[0];
     let first_child_id = first[1];
     let tip_before = tree.tip().ok_or("missing tip after first batch")?;

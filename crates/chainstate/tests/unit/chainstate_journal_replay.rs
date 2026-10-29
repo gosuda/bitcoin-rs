@@ -264,3 +264,40 @@ fn replay_counts_from_an_empty_genesis_and_rejects_overflow() -> TestResult {
     }
     Ok(())
 }
+
+/// A checkpoint tree can already hold a replayed header: on the best-header
+/// ancestry above the applied tip, or on a retained side branch that a later
+/// reorg activated. Replay reuses that node rather than rejecting the journal,
+/// and still refuses one already marked invalid.
+#[test]
+fn replay_reuses_a_header_the_checkpoint_tree_already_holds() -> TestResult {
+    let (mut tree, utxo, coin_stats, base_tip, _) = base_state()?;
+    let next_header = header(BlockHash(base_tip.hash), 2, 2);
+    let existing = tree.insert_node(Some(base_tip.tip_id), next_header, NodeStatus::HeaderValid)?;
+    let record = JournalRecord {
+        height: 1,
+        block_hash: next_header.compute_hash().0.to_le_bytes(),
+        prev_hash: base_tip.hash.to_le_bytes(),
+        block_tx_count: 2,
+        coin_stats_height_delta: 1,
+        raw_header: raw_header(&next_header),
+        mutations: Vec::new(),
+    };
+    let tree_len = tree.len();
+
+    let replayed = replay_records(vec![record.clone()], tree, utxo, coin_stats, base_tip)?;
+
+    assert_eq!(replayed.applied_tip.tip_id, existing);
+    assert_eq!(replayed.tree.len(), tree_len);
+    assert_eq!(replayed.applied_tip.chain_tx_count.to_wire(), 3);
+    assert_eq!(replayed.tree.node(existing)?.chain_tx_count.to_wire(), 3);
+
+    let (mut tree, utxo, coin_stats, base_tip, _) = base_state()?;
+    let invalid = tree.insert_node(Some(base_tip.tip_id), next_header, NodeStatus::HeaderValid)?;
+    tree.invalidate_subtree(invalid)?;
+    assert!(matches!(
+        replay_records(vec![record], tree, utxo, coin_stats, base_tip),
+        Err(JournalReplayError::HeaderRebuildRejected(_))
+    ));
+    Ok(())
+}

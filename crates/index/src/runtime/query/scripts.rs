@@ -1,7 +1,7 @@
 //! Script history, spending, and live-view reads under the shared snapshot gate.
 
 use super::{
-    DerivedIndexQueryEngine, OutPoint, QueryBudget, ScriptHash, ScriptHistoryRecord,
+    DerivedIndexQueryEngine, OutPoint, QueryBudget, ReadPrefix, ScriptHash, ScriptHistoryRecord,
     ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx,
     TxIndexScanRow, TxIndexSnapshot, TxQueryError, TxUnavailableCause, Txid,
 };
@@ -65,7 +65,7 @@ impl DerivedIndexQueryEngine {
     fn funding_outputs_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<Vec<(Txid, u32, u64, u32)>, TxQueryError> {
@@ -73,7 +73,10 @@ impl DerivedIndexQueryEngine {
         let mut outputs = Vec::new();
         for row in rows {
             let height = row.row.height();
-            let hash = self.resolve_hash_at_height(height, tip)?;
+            if !prefix.covers(height) {
+                continue;
+            }
+            let hash = self.resolve_hash_at_height(height, prefix)?;
             let Some(positions) = Self::validated_positions(&row.value) else {
                 let block = self.resolve_block(budget, height, hash)?;
                 for transaction in &block.txs {
@@ -112,10 +115,9 @@ impl DerivedIndexQueryEngine {
     pub(super) fn spender_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-        floor: u32,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
         let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
@@ -125,7 +127,10 @@ impl DerivedIndexQueryEngine {
                 continue;
             }
             last_height = Some(height);
-            let hash = self.resolve_hash_at_height(height, tip)?;
+            if !prefix.covers(height) {
+                continue;
+            }
+            let hash = self.resolve_hash_at_height(height, prefix)?;
             if let Some(positions) = Self::validated_positions(&row.value) {
                 for &position in positions {
                     let Some(transaction) =
@@ -145,7 +150,7 @@ impl DerivedIndexQueryEngine {
                 }
             }
         }
-        Self::none_below_floor(floor, "script history")
+        Self::scoped_absence(prefix, "script history")
     }
 
     fn spending_input(
@@ -170,17 +175,18 @@ impl DerivedIndexQueryEngine {
     pub(super) fn history_snapshot_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
-        floor: u32,
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        if floor > 0 {
+        if prefix.floor > 0 {
             return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::HistoryUnproven { floor },
+                TxUnavailableCause::HistoryUnproven {
+                    floor: prefix.floor,
+                },
             ));
         }
-        let funding_outputs = self.funding_outputs_for(snapshot, tip, budget, scripthash)?;
+        let funding_outputs = self.funding_outputs_for(snapshot, prefix, budget, scripthash)?;
 
         let mut history = Vec::with_capacity(funding_outputs.len());
         let mut funding = Vec::with_capacity(funding_outputs.len());
@@ -193,7 +199,7 @@ impl DerivedIndexQueryEngine {
                 vout,
             });
             let outpoint = OutPoint { txid, vout };
-            if let Some(spender) = self.spender_for(snapshot, tip, budget, &outpoint, floor)? {
+            if let Some(spender) = self.spender_for(snapshot, prefix, budget, &outpoint)? {
                 history.push(ScriptHistoryRecord {
                     txid: spender.txid,
                     height: spender.height,
@@ -217,23 +223,24 @@ impl DerivedIndexQueryEngine {
     pub(super) fn confirmed_history_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
-        tip: &TipSnapshot,
+        prefix: &ReadPrefix,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
-        floor: u32,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
-        if floor > 0 {
+        if prefix.floor > 0 {
             return Err(TxQueryError::Unavailable(
-                TxUnavailableCause::HistoryUnproven { floor },
+                TxUnavailableCause::HistoryUnproven {
+                    floor: prefix.floor,
+                },
             ));
         }
-        let funding_outputs = self.funding_outputs_for(snapshot, tip, budget, scripthash)?;
+        let funding_outputs = self.funding_outputs_for(snapshot, prefix, budget, scripthash)?;
 
         let mut history = Vec::with_capacity(funding_outputs.len());
         for (txid, vout, _value, height) in funding_outputs {
             history.push(ScriptHistoryRecord { txid, height });
             let outpoint = OutPoint { txid, vout };
-            if let Some(spender) = self.spender_for(snapshot, tip, budget, &outpoint, floor)? {
+            if let Some(spender) = self.spender_for(snapshot, prefix, budget, &outpoint)? {
                 history.push(ScriptHistoryRecord {
                     txid: spender.txid,
                     height: spender.height,

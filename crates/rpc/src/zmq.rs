@@ -6,7 +6,7 @@
 //! transported.
 
 #[cfg(feature = "zmq")]
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 
@@ -14,8 +14,6 @@ use bitcoin_rs_primitives::{Hash256, Txid};
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 #[cfg(feature = "zmq")]
 use core::fmt;
-#[cfg(feature = "zmq")]
-use hashbrown::HashSet;
 #[cfg(feature = "zmq")]
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -263,6 +261,22 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawtx(&self, _bytes: &[u8]) {}
 }
 
+/// Publish one `hashtx` notification per newly admitted transaction id.
+///
+/// The sole caller is [`MempoolSequenceObserver`]'s `Accepted` arm, which
+/// passes each committed `Accepted` change's txid in mutation order.
+/// Rejected submissions, already-known (duplicate) admissions, and removals
+/// never reach this helper: duplicates and refusals commit nothing, and
+/// block-inclusion removals publish nothing.
+pub fn publish_admitted_hashtx(
+    publisher: &dyn ZmqPublisher,
+    txids: impl IntoIterator<Item = Txid>,
+) {
+    for txid in txids {
+        publisher.publish_hashtx(txid);
+    }
+}
+
 #[cfg(feature = "zmq")]
 struct EndpointSocket {
     endpoint: String,
@@ -320,19 +334,14 @@ impl SocketZmqPublisher {
         validate_endpoint_configs(&deduped_configs)?;
         let context = zmq::Context::new();
         let mut endpoints = Vec::new();
-        let mut bound_endpoints = HashSet::<String>::new();
         let mut hashblock_endpoints = Vec::new();
         let mut hashtx_endpoints = Vec::new();
         let mut rawblock_endpoints = Vec::new();
         let mut rawtx_endpoints = Vec::new();
         let mut sequence_endpoints = Vec::new();
         let mut notifiers = Vec::new();
-        let mut seen_notifiers = HashSet::<(ZmqTopic, String)>::new();
 
         for endpoint_config in &deduped_configs {
-            if !bound_endpoints.insert(endpoint_config.endpoint.clone()) {
-                bail!("duplicate ZMQ endpoint {}", endpoint_config.endpoint);
-            }
             let hwm = endpoint_config.effective_hwm();
             let socket = context.socket(zmq::PUB).context("create ZMQ PUB socket")?;
             socket
@@ -357,9 +366,6 @@ impl SocketZmqPublisher {
                 socket: Mutex::new(socket),
             });
             for &topic in &endpoint_config.topics {
-                if !seen_notifiers.insert((topic, endpoint_config.endpoint.clone())) {
-                    continue;
-                }
                 notifiers.push(ZmqNotifier {
                     topic,
                     endpoint: endpoint_config.endpoint.clone(),
@@ -509,10 +515,11 @@ fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
     host.contains(':') && tail.starts_with(':') && tail.len() > 1
 }
 
-/// Publishes committed mempool mutations as Core `sequence` `A`/`R` events.
+/// Publishes committed admissions as `hashtx`, `rawtx`, and Core `sequence`
+/// `A` events, and removals as `sequence` `R` events.
 ///
-/// Install on the [`bitcoin_rs_mempool::MempoolGateway`] observer slot only
-/// when a `--zmq-pub-sequence` endpoint is configured.
+/// Install on the [`bitcoin_rs_mempool::MempoolGateway`] observer slot when
+/// ZMQ notifications are configured. Raw bodies are retained only for `rawtx`.
 pub struct MempoolSequenceObserver {
     publisher: std::sync::Arc<dyn ZmqPublisher>,
 }
@@ -535,6 +542,7 @@ impl MempoolSequenceObserver {
 
 impl bitcoin_rs_mempool::MempoolObserver for MempoolSequenceObserver {
     fn on_mutation(&self, envelope: &bitcoin_rs_mempool::MutationEnvelope) {
+        use bitcoin_rs_primitives::encode::consensus_bytes;
         let result = &envelope.result;
         for (offset, change) in result.changes.iter().enumerate() {
             let Some(sequence) = result.sequence_of(offset) else {
@@ -543,6 +551,17 @@ impl bitcoin_rs_mempool::MempoolObserver for MempoolSequenceObserver {
             let txid = Txid(change.txid);
             match change.outcome {
                 bitcoin_rs_mempool::MutationOutcome::Accepted => {
+                    // Core's `TransactionAddedToMempool` notifies `hashtx`
+                    // and `rawtx` for every admission, then `sequence` `A`.
+                    self.publisher.publish_hashtx(txid);
+                    if self.publisher.wants_rawtx()
+                        && let Some((_, tx)) = envelope
+                            .accepted_transactions
+                            .iter()
+                            .find(|(index, _)| *index == offset)
+                    {
+                        self.publisher.publish_rawtx(&consensus_bytes(tx.as_ref()));
+                    }
                     self.publisher
                         .publish_sequence(SequenceEvent::Added(txid, sequence));
                 }
@@ -957,6 +976,9 @@ mod manifest_tests {
     #[derive(Default)]
     struct RecordingPublisher {
         sequence_bodies: parking_lot::Mutex<Vec<Vec<u8>>>,
+        capture_rawtx: bool,
+        raw_bodies: parking_lot::Mutex<Vec<Vec<u8>>>,
+        hashtx: parking_lot::Mutex<Vec<Txid>>,
     }
 
     impl core::fmt::Debug for RecordingPublisher {
@@ -970,7 +992,7 @@ mod manifest_tests {
             true
         }
         fn wants_rawtx(&self) -> bool {
-            false
+            self.capture_rawtx
         }
         fn wants_rawblock(&self) -> bool {
             false
@@ -979,9 +1001,13 @@ mod manifest_tests {
             Vec::new()
         }
         fn publish_hashblock(&self, _hash: Hash256) {}
-        fn publish_hashtx(&self, _txid: Txid) {}
+        fn publish_hashtx(&self, txid: Txid) {
+            self.hashtx.lock().push(txid);
+        }
         fn publish_rawblock(&self, _bytes: &[u8]) {}
-        fn publish_rawtx(&self, _bytes: &[u8]) {}
+        fn publish_rawtx(&self, bytes: &[u8]) {
+            self.raw_bodies.lock().push(bytes.to_vec());
+        }
         fn publish_sequence(&self, event: SequenceEvent) {
             self.sequence_bodies.lock().push(sequence_payload(event));
         }
@@ -1022,18 +1048,226 @@ mod manifest_tests {
         bitcoin_rs_mempool::MempoolGateway,
         std::sync::Arc<RecordingPublisher>,
     ) {
-        use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver};
+        use bitcoin_rs_mempool::{
+            BodyInterest, Mempool, MempoolGateway, MempoolLimits, MempoolObserver,
+        };
         use parking_lot::RwLock;
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
         let observer: std::sync::Arc<dyn MempoolObserver> =
             std::sync::Arc::new(MempoolSequenceObserver::new(publisher.clone()));
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(observer),
+            Some((observer, BodyInterest::Bodies)),
             bitcoin_rs_consensus::ValidationEngine::Native,
             None,
         );
         (gateway, publisher)
+    }
+
+    #[cfg(feature = "zmq")]
+    #[test]
+    fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> anyhow::Result<()> {
+        struct EmptyChain;
+        impl bitcoin_rs_mempool::AdmissionChain for EmptyChain {
+            fn snapshot(
+                &self,
+                _: &bitcoin_rs_primitives::Tx,
+            ) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
+                Some(bitcoin_rs_mempool::ChainAdmissionSnapshot::default())
+            }
+        }
+        use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits};
+        use bitcoin_rs_primitives::encode::consensus_bytes;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir()?;
+        let address = format!("ipc://{}", dir.path().join("admission.sock").display());
+        let publisher = Arc::new(SocketZmqPublisher::bind(&[ZmqEndpointConfig {
+            endpoint: address.clone(),
+            topics: vec![ZmqTopic::HashTx, ZmqTopic::RawTx, ZmqTopic::Sequence],
+            hwm: Some(100),
+        }])?);
+        let context = zmq::Context::new();
+        let subscriber = context.socket(zmq::SUB)?;
+        subscriber.set_subscribe(b"")?;
+        subscriber.set_rcvtimeo(3_000)?;
+        subscriber.connect(&address)?;
+        // A block sequence probe establishes the subscription before admission.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            publisher.publish_sequence(SequenceEvent::Connected(Hash256::from_le_bytes(&[0; 32])));
+            if subscriber.poll(zmq::POLLIN, 25)? != 0 {
+                subscriber.recv_multipart(0)?;
+                break;
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "ZMQ subscription timed out"
+            );
+        }
+        while subscriber.poll(zmq::POLLIN, 50)? != 0 {
+            subscriber.recv_multipart(0)?;
+        }
+        let observer = Arc::new(MempoolSequenceObserver::new(publisher));
+        let gateway = MempoolGateway::new(
+            Arc::new(parking_lot::RwLock::new(Mempool::new(
+                MempoolLimits::default(),
+            ))),
+            Some((observer, bitcoin_rs_mempool::BodyInterest::Bodies)),
+            bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
+        );
+        let tx = sequence_tx(91);
+        let expected = consensus_bytes(&tx);
+        gateway.insert_entry(AdmissionOrigin::Rpc, sequence_entry(&tx))?;
+        let announced = subscriber.recv_multipart(0)?;
+        assert_eq!(announced[0].as_slice(), b"hashtx");
+        assert_eq!(
+            announced[1],
+            reversed_hash_body(*tx.txid().as_bytes()),
+            "hashtx carries the admitted txid in wire byte order"
+        );
+        assert_eq!(announced[2], 0_u32.to_le_bytes());
+        let raw = subscriber.recv_multipart(0)?;
+        assert_eq!(raw[0].as_slice(), b"rawtx");
+        assert_eq!(raw[1], expected);
+        // Per-topic transport counters (`ZmqTopic::index`): the warm-up loop above
+        // publishes `SequenceEvent::Connected`, which advances only the `Sequence`
+        // counter (index 4). This is the first `rawtx` publish, so the `RawTx`
+        // counter (index 3) is still 0 here.
+        assert_eq!(raw[2], 0_u32.to_le_bytes());
+        let added = subscriber.recv_multipart(0)?;
+        assert_eq!(added[0].as_slice(), b"sequence");
+        assert_eq!(added[1], expected_sequence_body(&tx.txid(), b'A', 1));
+        assert!(matches!(
+            gateway.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, 2, &EmptyChain),
+            Ok(bitcoin_rs_mempool::SubmitOutcome::AlreadyKnown),
+        ));
+        let refused = sequence_tx(93);
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::new(refused),
+                AdmissionOrigin::Rpc,
+                None,
+                2,
+                &EmptyChain
+            ),
+            Err(bitcoin_rs_mempool::SubmitError::Policy(_)),
+        ));
+        assert_eq!(subscriber.poll(zmq::POLLIN, 100)?, 0);
+        assert_eq!(gateway.read().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rawtx_disabled_does_not_retain_admission_bodies() {
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits, MempoolObserver,
+        };
+        #[derive(Default)]
+        struct CaptureCheck(parking_lot::Mutex<Vec<bitcoin_rs_mempool::MutationEnvelope>>);
+        impl MempoolObserver for CaptureCheck {
+            fn on_mutation(&self, envelope: &bitcoin_rs_mempool::MutationEnvelope) {
+                self.0.lock().push(envelope.clone());
+            }
+        }
+        let publisher = std::sync::Arc::new(RecordingPublisher::default());
+        let observer = std::sync::Arc::new(MempoolSequenceObserver::new(publisher));
+        let capture = std::sync::Arc::new(CaptureCheck::default());
+        let composite = bitcoin_rs_mempool::CompositeObserver::new();
+        // Rawtx disabled: neither leg registers body interest, so the commit
+        // retains nothing even though the sequence leg would publish rawtx
+        // had a subscriber been present at delivery.
+        composite.add_leg("zmq", observer, bitcoin_rs_mempool::BodyInterest::Metadata);
+        composite.add_leg(
+            "capture",
+            capture.clone(),
+            bitcoin_rs_mempool::BodyInterest::Metadata,
+        );
+        assert!(!composite.wants_bodies(), "no leg registered body interest");
+        let gateway = MempoolGateway::new(
+            std::sync::Arc::new(parking_lot::RwLock::new(Mempool::new(
+                MempoolLimits::default(),
+            ))),
+            Some((
+                std::sync::Arc::new(composite),
+                bitcoin_rs_mempool::BodyInterest::Metadata,
+            )),
+            bitcoin_rs_consensus::ValidationEngine::Native,
+            None,
+        );
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&sequence_tx(92)))
+            .expect("admitted without rawtx");
+        let envelopes = capture.0.lock();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].accepted_transactions, Vec::new());
+        assert_eq!(envelopes[0].result.len(), 1);
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    #[test]
+    fn mixed_package_changes_publish_only_their_indexed_admitted_bodies() {
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, MempoolObserver, MutationChange, MutationEnvelope, MutationOutcome,
+            MutationResult, RemovalReason,
+        };
+        use bitcoin_rs_primitives::encode::consensus_bytes;
+        use std::sync::Arc;
+        let first = Arc::new(sequence_tx(185));
+        let second = Arc::new(sequence_tx(186));
+        let removed = sequence_tx(187);
+        let publisher = Arc::new(RecordingPublisher {
+            capture_rawtx: true,
+            ..RecordingPublisher::default()
+        });
+        let observer = MempoolSequenceObserver::new(publisher.clone());
+        let envelope = MutationEnvelope {
+            origin: AdmissionOrigin::Rpc,
+            result: MutationResult {
+                changes: vec![
+                    MutationChange {
+                        txid: Hash256::from(removed.txid()),
+                        outcome: MutationOutcome::Removed(RemovalReason::Replaced),
+                    },
+                    MutationChange {
+                        txid: Hash256::from(first.txid()),
+                        outcome: MutationOutcome::Accepted,
+                    },
+                    MutationChange {
+                        txid: Hash256::from(first.txid()),
+                        outcome: MutationOutcome::Removed(RemovalReason::PolicyEviction),
+                    },
+                    MutationChange {
+                        txid: Hash256::from(second.txid()),
+                        outcome: MutationOutcome::Accepted,
+                    },
+                ],
+                sequence_base: 41,
+            },
+            accepted_transactions: vec![(1, first.clone()), (3, second.clone())],
+        };
+        observer.on_mutation(&envelope);
+        assert_eq!(
+            *publisher.raw_bodies.lock(),
+            vec![
+                consensus_bytes(first.as_ref()),
+                consensus_bytes(second.as_ref()),
+            ]
+        );
+        assert_eq!(
+            *publisher.hashtx.lock(),
+            vec![first.txid(), second.txid()],
+            "every admission notifies hashtx, as Core does"
+        );
+        assert_eq!(
+            *publisher.sequence_bodies.lock(),
+            vec![
+                expected_sequence_body(&removed.txid(), b'R', 41),
+                expected_sequence_body(&first.txid(), b'A', 42),
+                expected_sequence_body(&first.txid(), b'R', 43),
+                expected_sequence_body(&second.txid(), b'A', 44),
+            ]
+        );
     }
 
     #[test]
@@ -1112,7 +1346,7 @@ mod manifest_tests {
                 max_total_bytes: 150,
                 ..MempoolLimits::default()
             }))),
-            Some(observer),
+            Some((observer, bitcoin_rs_mempool::BodyInterest::Bodies)),
             bitcoin_rs_consensus::ValidationEngine::Native,
             None,
         );
@@ -1141,8 +1375,8 @@ mod manifest_tests {
     // would scatter the arrange-act-assert across helpers with no reuse.
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
-            AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
-            MempoolObserver,
+            AdmissionOrigin, BodyInterest, CompositeObserver, Mempool, MempoolGateway,
+            MempoolLimits, MempoolObserver,
         };
         use bitcoin_rs_mining::FakeMiningControl;
         use bitcoin_rs_mining::MempoolSequenceWake;
@@ -1162,11 +1396,15 @@ mod manifest_tests {
         composite.add_leg(
             "sequence",
             std::sync::Arc::new(MempoolSequenceObserver::new(publisher.clone())),
+            BodyInterest::Bodies,
         );
-        composite.add_leg("mining", signal);
+        composite.add_leg("mining", signal, BodyInterest::Metadata);
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(std::sync::Arc::new(composite) as std::sync::Arc<dyn MempoolObserver>),
+            Some((
+                std::sync::Arc::new(composite) as std::sync::Arc<dyn MempoolObserver>,
+                BodyInterest::Bodies,
+            )),
             bitcoin_rs_consensus::ValidationEngine::Native,
             None,
         );

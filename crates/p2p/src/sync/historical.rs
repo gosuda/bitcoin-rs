@@ -11,7 +11,8 @@ use super::BlockSync;
 use super::chain::HistoricalAdvance;
 use crate::block_stager::StagedBlock;
 use crate::download_window::{
-    BlockDownloadPolicy, DownloadWindow, SyncBudget, servable_floor, serves_requested_height,
+    BlockDownloadPolicy, DownloadWindow, RefusalFilter, SyncBudget, servable_floor,
+    serves_requested_height,
 };
 use crate::{BlockStager, InboundBlock, Message};
 
@@ -85,10 +86,7 @@ impl BlockSync {
                 self.request_historical(height, Instant::now());
                 return;
             };
-            if let Err(error) = self
-                .chain
-                .connect_historical(&staged.block, staged.serialized)
-            {
+            if let Err(error) = self.chain.connect_historical(staged.payload()) {
                 tracing::warn!(%error, "historical validation stopped");
                 self.historical.lock().clear();
                 return;
@@ -107,14 +105,15 @@ impl BlockSync {
         };
         // PeerTable -> historical is the ingress lock order. Snapshot all
         // peer data before holding download state, and stamp via send_then.
+        // Source-keyed live-session snapshot: anonymous (`endpoint: None`)
+        // sessions participate identically to addressed ones.
         let live = self
             .peer_table
-            .infos()
+            .usable_peers()
             .into_iter()
-            .filter_map(|info| {
-                self.peer_table
-                    .ready_source(info.addr)
-                    .map(|source| (source, info))
+            .filter_map(|session| {
+                let info = session.info?;
+                Some((session.lease.source(session.endpoint), info))
             })
             .collect::<Vec<_>>();
         let mut peers = live
@@ -147,13 +146,29 @@ impl BlockSync {
                 chainwork: base.chainwork,
                 chain_tx_count: base.chain_tx_count,
             };
+            // Snapshot this peer's refused hashes before taking the
+            // historical lock: the scheduler lock is never held together
+            // with it, so the per-entry filter reads a copy.
+            let refused = self
+                .scheduler
+                .lock()
+                .body_unavailable
+                .refused_hashes(*source, now);
             let request = {
                 let mut historical = self.historical.lock();
                 let HistoricalDownload { window, stager, .. } = &mut *historical;
                 // Back off corrupt deliveries even if this is our only peer.
-                if window.peer_in_staller_cooldown(source.addr, now) {
+                if window.peer_in_staller_cooldown(*source, now) {
                     continue;
                 }
+                // Bodies `source` already answered `notfound` for are
+                // excluded while the batch is built, exactly as the
+                // foreground path does: the scan plans around them and pins
+                // the cursor at the lowest refused height, so a later pass
+                // plans the same blocks again for another peer, or for this
+                // one once the retry interval has passed.
+                let is_refused = |hash| refused.contains(&hash);
+                let mut refusals = RefusalFilter::new(&is_refused);
                 window.next_peer_request(
                     stager,
                     *source,
@@ -164,12 +179,14 @@ impl BlockSync {
                     servable_floor(info, &policy),
                     &tree,
                     now,
+                    &mut refusals,
                 )
             };
             drop(tree);
             let Some(request) = request else {
                 continue;
             };
+
             let inventory = request
                 .entries()
                 .map(|(_, hash)| {
@@ -189,7 +206,7 @@ impl BlockSync {
     /// Consumes owned historical bodies; returns foreground deliveries intact.
     pub(super) fn receive_historical(&self, inbound: InboundBlock) -> Option<InboundBlock> {
         let _work = self.historical_work.lock();
-        let hash = inbound.block.block_hash().0;
+        let hash = inbound.payload().block().block_hash().0;
         let Some(source) = inbound.source else {
             return Some(inbound);
         };
@@ -200,41 +217,47 @@ impl BlockSync {
             return None;
         }
         let now = Instant::now();
-        if let Err(error) = self.chain.check_body_binding(&inbound.block) {
+        if let Err(error) = self.chain.check_body_binding(inbound.payload().block()) {
             tracing::warn!(%error, "historical body rejected");
             let mut historical = self.historical.lock();
             historical.window.reject_delivery(hash, Some(source), now);
-            historical.window.mark_peer_unresponsive(source.addr, now);
+            historical.window.mark_peer_unresponsive(source, now);
             return None;
         }
-        let mut historical = self.historical.lock();
-        let HistoricalDownload {
-            window,
-            stager,
-            next_expected,
-            ..
-        } = &mut *historical;
-        match stager.insert(
-            hash,
-            *next_expected,
-            inbound.block,
-            inbound.serialized,
-            Some(source),
-            now,
-        ) {
-            StagedBlock::Memory { bytes, dropped } => {
-                window.mark_received_from(hash, bytes, Some(source), now);
-                for hash in dropped {
+        {
+            let mut historical = self.historical.lock();
+            let HistoricalDownload {
+                window,
+                stager,
+                next_expected,
+                ..
+            } = &mut *historical;
+            let _ = inbound.forward_credit;
+            match stager.insert(
+                hash,
+                *next_expected,
+                inbound.into_payload(),
+                Some(source),
+                now,
+            ) {
+                StagedBlock::Memory { bytes, dropped } => {
+                    window.mark_received_from(hash, bytes, Some(source), now);
+                    for hash in dropped {
+                        window.requeue_for_retry(&hash, None, now);
+                    }
+                }
+                StagedBlock::AlreadyStaged => {
+                    window.release_pending(&hash, now);
+                }
+                StagedBlock::DroppedForRetry { hash } => {
                     window.requeue_for_retry(&hash, None, now);
                 }
             }
-            StagedBlock::AlreadyStaged => {
-                window.release_pending(&hash, now);
-            }
-            StagedBlock::DroppedForRetry { hash } => {
-                window.requeue_for_retry(&hash, None, now);
-            }
         }
+        // A delivered body proves the connection has it, so an earlier
+        // `notfound` for the hash no longer applies. The historical lock is
+        // released first: the two locks are never held together.
+        self.scheduler.lock().body_unavailable.clear(source, hash);
         None
     }
 }

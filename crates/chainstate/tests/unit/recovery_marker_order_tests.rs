@@ -38,14 +38,14 @@ fn arm_full_revalidation_marker(data_dir: &Path) {
 fn genesis_tip() -> Result<(RwLock<BlockTree>, TipSnapshot), Box<dyn std::error::Error>> {
     let genesis = NETWORK.genesis_block().header;
     let mut tree = BlockTree::new();
-    let ids = accept_headers(
+    let accepted = accept_headers(
         &mut tree,
         core::slice::from_ref(&genesis),
         NETWORK,
         bitcoin_rs_chain::current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
     )?;
-    let tip_id = ids[0];
+    let tip_id = accepted.ids[0];
     let node = tree.node(tip_id)?;
     let tip = TipSnapshot {
         tip_id,
@@ -119,7 +119,10 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     // bypasses the checkpoint entirely rather than just skipping an absent one.
     let (tree, tip) = genesis_tip()?;
     let store = bitcoin_rs_storage::checkpoint::open_data_dir(data_dir)?;
-    checkpoint::write_checkpoint_from_dir(
+    // Validation paths never mint: the witnessed writer's second return is
+    // dropped here. `let _` accepts the tuple once publication starts
+    // returning `(CheckpointWrite, Option<V4Witness>)`.
+    let _ = checkpoint::write_checkpoint_from_dir(
         &store,
         checkpoint_config(),
         &tree,

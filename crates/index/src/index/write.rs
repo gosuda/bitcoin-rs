@@ -5,14 +5,14 @@ use super::{
     capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
     capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
-    prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::PendingRows,
-    rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate,
-    state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE, state::IndexWriteFence,
-    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
-    state::resume_capability_reset,
+    prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
+    rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
+    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
+    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
+    state::ensure_fence_live, state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
-use bitcoin_rs_storage::{ColumnFamily, KvStore};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
 /// Mutation-only handle for durable prepared `TxIndex` writes.
 pub struct IndexWriter<S: KvStore> {
@@ -110,10 +110,17 @@ impl<S: KvStore> IndexWriter<S> {
     /// A missing live watermark with leftover rows is treated as an
     /// interrupted seed: `ScriptLive` is reset before any new row is
     /// written so a later watermark cannot advertise a stale view.
+    ///
+    /// `cancelled` is polled at entry, every 4,096 emitted rows, and before
+    /// the final watermark commit; a trip returns
+    /// [`IndexError::Cancelled`] with no watermark stamped. A cancelled
+    /// prefix is cleared by the retry's opening reset, and the caller keeps
+    /// its artifact and lease for that retry.
     pub(crate) fn seed_script_live_stream<F>(
         &self,
         mut produce: F,
         seed_tip: IndexWatermark,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<usize, IndexError>
     where
         F: FnMut(
@@ -121,6 +128,9 @@ impl<S: KvStore> IndexWriter<S> {
         ) -> Result<(), IndexError>,
     {
         const SEED_BATCH_ROWS: usize = 4_096;
+        if cancelled() {
+            return Err(IndexError::Cancelled);
+        }
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
@@ -134,7 +144,7 @@ impl<S: KvStore> IndexWriter<S> {
         if fence.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
-        let mut written = 0;
+        let mut written: usize = 0;
         let mut batch = self.indexer.store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
@@ -162,9 +172,15 @@ impl<S: KvStore> IndexWriter<S> {
                 );
                 in_batch = 0;
             }
+            if written.is_multiple_of(SEED_BATCH_ROWS) && cancelled() {
+                return Err(IndexError::Cancelled);
+            }
             Ok(())
         };
         produce(&mut add)?;
+        if cancelled() {
+            return Err(IndexError::Cancelled);
+        }
         batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,
@@ -177,6 +193,34 @@ impl<S: KvStore> IndexWriter<S> {
         );
         commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
         Ok(written)
+    }
+
+    /// Clears an interrupted `ScriptLive` seed before genesis replay.
+    ///
+    /// Ordinary commits stamp the live watermark with every batch, and an
+    /// artifact seed clears this family before writing, so rows without a
+    /// watermark exist only after an interrupted seed. Forward replay would
+    /// publish its watermark over those mixed rows, so the replay entry
+    /// clears them first. Returns whether anything was reset.
+    pub(crate) fn reset_interrupted_script_live_seed(&self) -> Result<bool, IndexError> {
+        if self.watermarks()?.script_live.is_some() {
+            return Ok(false);
+        }
+        // One bounded row decides the probe: any `ScriptLive` row without a
+        // watermark is leftover from an interrupted seed.
+        let probe = self.indexer.store.scan_prefix_bounded(
+            ColumnFamily::ScriptLive,
+            &[],
+            PrefixScanLimit {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        if probe.rows.is_empty() {
+            return Ok(false);
+        }
+        self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+        Ok(true)
     }
 
     /// Seeds `ScriptLive` from an iterator of compact locators.
@@ -200,7 +244,118 @@ impl<S: KvStore> IndexWriter<S> {
                 Ok(())
             },
             seed_tip,
+            &|| false,
         )
+    }
+
+    /// Imports verified `TxLookup` rows and block identities for a portable
+    /// bundle restore.
+    ///
+    /// `produce` emits every row of the bundle. Each bounded batch is an
+    /// ordinary fenced write: reset state, ordinary revision, and every
+    /// capability watermark must still match the capture, so a lost fence is
+    /// [`IndexError::StaleIndexState`] or [`IndexError::ResetInProgress`]. The
+    /// `TxLookup` watermark and coverage floor are written only in the final
+    /// commit, after `produce` has returned, so an error, crash, or aborted
+    /// source leaves the capability un-watermarked (and therefore
+    /// `Unavailable`) with partial rows the caller resets.
+    ///
+    /// An existing `TxLookup` watermark is never reset or overwritten:
+    /// the import refuses with [`IndexError::WatermarkMismatch`] naming it.
+    /// Leftover rows without a watermark are an interrupted earlier attempt
+    /// and are cleared through the capability reset before any row is written.
+    ///
+    /// Returns the number of `TxLookup` rows written.
+    pub(crate) fn import_tx_lookup_stream<F>(
+        &self,
+        mut produce: F,
+        base: IndexWatermark,
+        floor: u32,
+    ) -> Result<usize, IndexError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
+        ) -> Result<(), IndexError>,
+    {
+        const IMPORT_BATCH_ROWS: usize = 65_536;
+        const IMPORT_BATCH_BYTES: usize = 8 << 20;
+        let refuse_populated = |fence: &IndexWriteFence| match fence.watermarks.tx_lookup {
+            Some(actual) => Err(IndexError::WatermarkMismatch {
+                expected: None,
+                actual: Some(actual),
+            }),
+            None => Ok(()),
+        };
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_populated(&existing)?;
+        // Recapture after the reset: the claim advances the fence, so a
+        // pre-reset capture cannot commit.
+        self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
+        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_populated(&fence)?;
+        let mut written = 0_usize;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        let mut in_batch = 0_usize;
+        let mut in_bytes = 0_usize;
+        let mut add = |row: PortableImportRow<'_>| -> Result<(), IndexError> {
+            match row {
+                PortableImportRow::Header(header) => {
+                    // Block headers are shared identity: another capability
+                    // may have committed this height already, and the reset
+                    // keeps them when any cursor remains. Rewriting every
+                    // covered header would turn each restore into a full
+                    // 800k-key rewrite; a point lookup per header skips the
+                    // covered ones with no extra memory.
+                    if self
+                        .indexer
+                        .store
+                        .get(ColumnFamily::BlockHeaders, header)?
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
+                    batch.put(ColumnFamily::BlockHeaders, header, &[]);
+                    in_bytes = in_bytes.saturating_add(header.len());
+                }
+                PortableImportRow::TxLookup { row, value } => {
+                    batch.put(ColumnFamily::TxConfirmed, &row.to_db_row(), value);
+                    in_bytes = in_bytes
+                        .saturating_add(crate::HASH_PREFIX_ROW_SIZE)
+                        .saturating_add(value.len());
+                    written += 1;
+                }
+            }
+            in_batch += 1;
+            if in_batch >= IMPORT_BATCH_ROWS || in_bytes >= IMPORT_BATCH_BYTES {
+                let next = self.indexer.store.new_batch();
+                let old = std::mem::replace(&mut batch, next);
+                commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
+                fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+                refuse_populated(&fence)?;
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION_VALUE,
+                );
+                in_batch = 0;
+                in_bytes = 0;
+            }
+            Ok(())
+        };
+        produce(&mut add)?;
+        put_selected_watermarks(&mut batch, IndexCapabilities::TX_LOOKUP, Some(base));
+        crate::index::capability::put_selected_floors(
+            &mut batch,
+            IndexCapabilities::TX_LOOKUP,
+            floor,
+        );
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
+        Ok(written)
     }
 
     /// Marks selected derived rows unavailable, deletes them in bounded batches,
@@ -236,7 +391,7 @@ impl<S: KvStore> IndexWriter<S> {
     /// cannot prove absence below it answer `Unavailable` rather than `None`.
     ///
     /// `capabilities` must name only history-derived indexes: `ScriptLive`
-    /// reseeds from the authoritative UTXO view, so anchoring it would
+    /// reseeds from an immutable artifact or retained history, so anchoring it would
     /// publish a live watermark with no rows behind it.
     pub(crate) fn anchor_watermark(
         &self,
@@ -317,13 +472,15 @@ impl<S: KvStore> IndexWriter<S> {
         parent_hash.copy_from_slice(&header[4..36]);
         rows.sort();
         let row_count = rows.total();
-        let encoded_bytes = rows.encoded_bytes()?;
+        let family_bytes = rows.encoded_bytes_by_family()?;
+        let encoded_bytes = family_bytes.total()?;
         Ok(PreparedBlock {
             height,
             hash,
             parent_hash,
             row_count,
             encoded_bytes,
+            family_bytes,
             capabilities,
             rows,
         })
@@ -413,6 +570,7 @@ impl<S: KvStore> IndexWriter<S> {
         } else {
             [0; 32]
         };
+        let batch_family_bytes = batch.family_bytes();
         let mut merged = PendingRows::default();
         let mut last = None;
         let block_count = batch.len();
@@ -467,6 +625,7 @@ impl<S: KvStore> IndexWriter<S> {
             &fence,
             store_batch,
         )?;
+        record_family_byte_histograms(&batch_family_bytes);
         Ok(final_watermark)
     }
 
@@ -635,6 +794,25 @@ impl<S: KvStore> IndexWriter<S> {
     }
 }
 
+/// One verified row of a portable `TxLookup` import.
+pub(crate) enum PortableImportRow<'a> {
+    /// The 80-byte header identity of an active-chain block at or below the
+    /// bundle base, so ordinary rollback can unseat the base later.
+    Header(&'a [u8; crate::types::HEADER_ROW_SIZE]),
+    /// One `TxConfirmed` row and its packed `TxPosition` value.
+    TxLookup {
+        /// Stored key: txid prefix and big-endian height.
+        row: crate::types::HashPrefixRow,
+        /// Sorted, packed positions of every transaction filed under the key.
+        value: &'a [u8],
+    },
+}
+
+/// The compiled on-disk index format number a portable bundle must carry.
+pub(crate) const fn index_format_version() -> u32 {
+    u32::from_le_bytes(FORMAT_VERSION_VALUE)
+}
+
 fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
     for cf in [
         ColumnFamily::TxConfirmed,
@@ -650,4 +828,50 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
         }
     }
     Ok(false)
+}
+
+/// Metric name for per-family planned write bytes histogram.
+///
+/// Records logical pre-coalescing planned bytes for row families present in a
+/// prepared batch. Excludes engine-internal overhead, write-ahead logs, and
+/// device-level physical storage writes.
+pub(crate) const FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM: &str = "index.family_planned_write_bytes";
+/// Label key distinguishing row families in [`FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM`].
+pub(crate) const FAMILY_LABEL: &str = "family";
+
+pub(crate) const FAMILY_TX_LOOKUP: &str = "tx_lookup";
+pub(crate) const FAMILY_SCRIPT_HISTORY: &str = "script_history";
+pub(crate) const FAMILY_SCRIPT_LIVE: &str = "script_live";
+pub(crate) const FAMILY_HEADERS: &str = "headers";
+pub(crate) const FAMILY_FILTERS: &str = "filters";
+
+fn metric_f64_from_usize(val: usize) -> f64 {
+    bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).unwrap_or(u64::MAX))
+}
+
+/// Emits one histogram observation per index family present with non-zero planned bytes in a committed batch.
+///
+/// Observations reflect the sum of prepared rows before multi-block coalescing (logical planned bytes),
+/// and do not measure actual emitted batch writes or physical storage I/O.
+pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
+    if family_bytes.tx_lookup > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_TX_LOOKUP)
+            .record(metric_f64_from_usize(family_bytes.tx_lookup));
+    }
+    if family_bytes.script_history > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_HISTORY)
+            .record(metric_f64_from_usize(family_bytes.script_history));
+    }
+    if family_bytes.script_live > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_SCRIPT_LIVE)
+            .record(metric_f64_from_usize(family_bytes.script_live));
+    }
+    if family_bytes.headers > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_HEADERS)
+            .record(metric_f64_from_usize(family_bytes.headers));
+    }
+    if family_bytes.filters > 0 {
+        metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_FILTERS)
+            .record(metric_f64_from_usize(family_bytes.filters));
+    }
 }

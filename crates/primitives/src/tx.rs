@@ -107,6 +107,33 @@ impl Tx {
     pub fn vsize(&self) -> u64 {
         Self::vsize_from_weight(self.weight())
     }
+
+    /// Returns the heap bytes allocated for this transaction's inputs, outputs,
+    /// scripts, and witness stacks, including spare capacity.
+    ///
+    /// Excludes inline `Tx` struct overhead (which is counted in `Block::txs`
+    /// capacity or on the stack) and allocator metadata/rounding.
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        let mut total = self
+            .inputs
+            .capacity()
+            .saturating_mul(core::mem::size_of::<TxIn>())
+            .saturating_add(
+                self.outputs
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<TxOut>()),
+            );
+        for input in &self.inputs {
+            total = total
+                .saturating_add(input.script_sig.retained_heap_bytes())
+                .saturating_add(input.witness.retained_heap_bytes());
+        }
+        for output in &self.outputs {
+            total = total.saturating_add(output.script_pubkey.retained_heap_bytes());
+        }
+        total
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +235,54 @@ mod tests {
 
         // Without the garbage the same bytes decode cleanly.
         assert_eq!(deserialize::<Tx>(&consensus_bytes(&tx)), Ok(tx));
+    }
+
+    #[test]
+    fn tx_retained_heap_bytes_tracks_inputs_outputs_scripts_witnesses() {
+        let empty_tx = Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: crate::LockTime::ZERO,
+        };
+        assert_eq!(empty_tx.retained_heap_bytes(), 0);
+
+        let mut inputs = Vec::with_capacity(3);
+        let mut script_bytes = Vec::with_capacity(50);
+        script_bytes.extend_from_slice(&[0x04; 20]);
+        let mut wit_item = Vec::with_capacity(100);
+        wit_item.extend_from_slice(&[0x05; 32]);
+        let mut wit_stack = Vec::with_capacity(4);
+        wit_stack.push(wit_item);
+
+        inputs.push(TxIn {
+            previous_output: OutPoint::default(),
+            script_sig: crate::Script::from_bytes(script_bytes),
+            sequence: crate::Sequence::MAX,
+            witness: crate::Witness::from_stack(wit_stack),
+        });
+
+        let mut outputs = Vec::with_capacity(5);
+        let mut spk_bytes = Vec::with_capacity(70);
+        spk_bytes.extend_from_slice(&[0x51; 34]);
+        outputs.push(TxOut {
+            value: crate::Amount::from_sat(100_000),
+            script_pubkey: crate::Script::from_bytes(spk_bytes),
+        });
+
+        let tx = Tx {
+            version: 2,
+            inputs,
+            outputs,
+            lock_time: crate::LockTime::ZERO,
+        };
+
+        let expected = 3 * core::mem::size_of::<TxIn>()
+            + 50
+            + 4 * core::mem::size_of::<Vec<u8>>()
+            + 100
+            + 5 * core::mem::size_of::<TxOut>()
+            + 70;
+        assert_eq!(tx.retained_heap_bytes(), expected);
     }
 }

@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::ValidationEngine;
-use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256};
+use bitcoin_rs_primitives::{BlockBodyMetadata, BlockPayload, Hash256};
 use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::{BlockFilePosition, BodyExtent, BoundedReadError, StorageError};
 use std::io::{Read, Write};
@@ -25,6 +25,82 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
     config.p2p.listen.clear();
     config.observability.metrics_bind = None;
     config
+}
+
+#[test]
+fn split_rpc_listeners_start_and_join_through_node_services() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let management_address = management.local_addr()?;
+    let public_address = public.local_addr()?;
+    let mut config = isolated_config(dir.path());
+    config.rpc.bind = management_address;
+    config.rpc.public_bind = Some(public_address);
+    drop((management, public));
+    let node = start_node(config, RuntimeInputs::default(), false)?;
+    assert_eq!(
+        node.services
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing node services"))?
+            .rpc_threads
+            .len(),
+        2
+    );
+    for (address, request, expected) in [
+        (
+            public_address,
+            "OPTIONS /api/tx HTTP/1.1\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 204 No Content",
+        ),
+        (
+            management_address,
+            "POST / HTTP/1.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 401 Unauthorized",
+        ),
+    ] {
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(WITNESS_BOUND))?;
+        stream.write_all(request.as_bytes())?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        assert!(response.starts_with(expected), "{response}");
+    }
+    node.shutdown_blocking()?;
+    let _management = std::net::TcpListener::bind(management_address)?;
+    let _public = std::net::TcpListener::bind(public_address)?;
+    Ok(())
+}
+
+#[test]
+fn public_bind_failure_rolls_back_management_binding_and_node_state() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = management.local_addr()?;
+    let mut config = isolated_config(dir.path());
+    config.rpc.bind = address;
+    config.rpc.public_bind = Some(public.local_addr()?);
+    drop(management);
+    let error = start_node(config.clone(), RuntimeInputs::default(), false)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("occupied public bind must fail startup"))?;
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "failed to bind public HTTP listener at {}",
+            public.local_addr()?
+        )
+    );
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::AddrInUse)
+    );
+    let _management = std::net::TcpListener::bind(address)?;
+    let _reopened = NodeState::open(config, None)?;
+    Ok(())
 }
 
 #[test]
@@ -126,13 +202,15 @@ fn verifychain_arguments_select_the_check_core_asks_for() {
 fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block_hash();
+    let mut previous = genesis.block().block_hash();
     for height in 1..=3 {
-        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?;
+        let block = BlockPayload::from_local(
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+        );
         state.apply_block(&block)?;
-        previous = block.block_hash();
+        previous = block.block().block_hash();
     }
     let control = RpcChainControl {
         handles: state.chainstate(),
@@ -163,7 +241,9 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> anyho
 
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
-    state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
+    state.apply_block(&BlockPayload::from_local(
+        bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+    ))?;
     assert_eq!(
         state
             .chainstate()
@@ -234,7 +314,9 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> anyhow::Result<()
 }
 
 fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
-    state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
+    state.apply_block(&BlockPayload::from_local(
+        bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+    ))?;
     let _ = state.publish_checkpoint()?;
     let current = state
         .data_dir()
@@ -266,7 +348,7 @@ fn disabled_zmq_still_seals_the_observer_slot() {
         Arc::new(bitcoin_rs_mempool::CompositeObserver::new());
     let gateway = Arc::new(bitcoin_rs_mempool::MempoolGateway::new(
         pool,
-        Some(observer),
+        Some((observer, bitcoin_rs_mempool::BodyInterest::Metadata)),
         ValidationEngine::Native,
         None,
     ));
@@ -492,7 +574,7 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
     let config = isolated_config(&temp.path().join("startup-rollback"));
     let state = NodeState::open(config.clone(), None)?;
     let (current, previous) = seed_checkpoint(&state)?;
-    let shutdown_flag = state.shutdown();
+    let shutdown_flag = state.chainstate().shutdown_handle();
     let exited = Arc::new(AtomicBool::new(false));
     let worker_exited = Arc::clone(&exited);
     let worker = std::thread::spawn(move || {
@@ -955,13 +1037,15 @@ fn assert_socket_error(response: &str, message: &str) -> anyhow::Result<()> {
 }
 
 fn apply_regtest_chain(state: &NodeState) -> anyhow::Result<()> {
-    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
-    let mut previous = genesis.block_hash();
+    let mut previous = genesis.block().block_hash();
     for height in 1..=3 {
-        let block = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?;
+        let block = BlockPayload::from_local(
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(previous, height)?,
+        );
         state.apply_block(&block)?;
-        previous = block.block_hash();
+        previous = block.block().block_hash();
     }
     Ok(())
 }
@@ -975,8 +1059,9 @@ fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
         state.config().mining.payout_script.clone(),
     ));
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;
-    let (_context, server) = bind_rpc(state, &mining_control, state.block_body_source()?)?;
-    Ok(server)
+    let mut bindings = bind_rpc(state, &mining_control, state.block_body_source()?)?;
+    assert_eq!(bindings.listeners.len(), 1);
+    Ok(bindings.listeners.remove(0).0)
 }
 
 #[test]
@@ -995,7 +1080,10 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Resul
     let addr = server.local_addr()?;
 
     gate.arm();
-    let mut witness = ServedWitness::new(state.shutdown(), Some(Arc::clone(&gate)));
+    let mut witness = ServedWitness::new(
+        state.chainstate().shutdown_handle(),
+        Some(Arc::clone(&gate)),
+    );
     witness.serve(server, state.shutdown_reader())?;
     witness.send(addr)?;
 

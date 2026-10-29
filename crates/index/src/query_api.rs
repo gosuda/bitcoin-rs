@@ -1,11 +1,11 @@
 //! Derived-index query contract: typed errors, progress info, and the
 //! object-safe read traits the RPC surface and node composition consume.
 //!
-//! These are index-owned contracts — answers are complete only at a durable
-//! watermark equal to the applied tip. `bitcoin_rs_rpc::context` re-exports
-//! them under its historical paths.
+//! Strict queries require a durable watermark equal to the applied tip.
+//! Historical answers name their interval through [`AtPrefix`](crate::query_api::AtPrefix).
+//! `bitcoin_rs_rpc::context` retains its existing strict-query re-exports.
 
-use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::{IndexCapability, ScriptHash};
@@ -89,6 +89,9 @@ pub enum TxUnavailableCause {
     WorkerStopped,
     /// The compact-filter worker reported a failure.
     CompactFilterFailed(CompactString),
+    /// The `ScriptLive` view is unavailable while its scoped seed/replay outage persists.
+    /// Carries the stored worker reason verbatim; no new wire text beyond that reason.
+    ScriptLiveUnavailable(CompactString),
     /// A required authority handle is absent (UTXO view, chain-transition lock,
     /// `ScriptLive` locator). `detail` is the existing static refusal text.
     MissingAuthority(&'static str),
@@ -121,6 +124,7 @@ impl core::fmt::Display for TxUnavailableCause {
             Self::CapabilityDisabled(capability) => f.write_str(capability.disabled_message()),
             Self::WorkerFailed(message)
             | Self::CompactFilterFailed(message)
+            | Self::ScriptLiveUnavailable(message)
             | Self::Other(message) => f.write_str(message),
             Self::WorkerStopped => f.write_str("txindex worker stopped"),
             Self::MissingAuthority(detail) => f.write_str(detail),
@@ -128,6 +132,97 @@ impl core::fmt::Display for TxUnavailableCause {
                 write!(f, "block body missing for txindex query at height {height}")
             }
             Self::FilterDataMissing => f.write_str("compact filter data is missing"),
+        }
+    }
+}
+
+/// Server-selected covered prefix proving a historical answer.
+///
+/// `floor` is the lowest provable height (`0` means genesis, positive means a
+/// pruned prefix). `height` is the anchor height and `hash` the full chain
+/// hash at that height on `chain(anchor)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoveredPrefix {
+    /// Lowest provable height for this call.
+    pub floor: u32,
+    /// Anchor height: the common covered ancestor.
+    pub height: u32,
+    /// Full chain hash at the anchor height.
+    pub hash: Hash256,
+}
+
+/// Historical answer qualified by the prefix it was proven against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AtPrefix<T> {
+    /// Prefix the answer was proven against.
+    pub prefix: CoveredPrefix,
+    /// Confirmed-only answer scoped to `[floor, anchor]` on `chain(anchor)`.
+    pub answer: T,
+}
+
+/// Failure from a server-selected historical query.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum HistoricalQueryError {
+    /// The query raced chain or index progress and should be retried.
+    #[error("historical index query raced chain or index progress; retry")]
+    Retry,
+    /// The historical query cannot currently prove a complete answer.
+    #[error("historical index query unavailable: {0}")]
+    Unavailable(HistoricalUnavailableCause),
+    /// Durable index storage failed.
+    #[error("historical index storage error: {0}")]
+    Storage(CompactString),
+}
+
+/// Why a historical query could not prove a complete answer.
+///
+/// Matchers MUST use the variant, never the rendered text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoricalUnavailableCause {
+    /// Wrapped exact-tip cause: row, scan, body, capability, worker,
+    /// lifecycle, and pruned-prefix refusals keep their identical variant.
+    Shared(TxUnavailableCause),
+    /// A required watermark is absent in the snapshot (reset claim or
+    /// rebuild in progress). Unavailable so rebuilds do not spin on `Retry`.
+    NoCoveredPrefix {
+        /// Capability whose watermark is absent.
+        capability: IndexCapability,
+    },
+    /// A required watermark names a stale branch deeper than the shared
+    /// bounded ancestry budget. Present but too deep, distinct from absent.
+    AncestryBudgetExhausted {
+        /// Capability whose watermark is too deep.
+        capability: IndexCapability,
+        /// Watermark height that could not be joined within budget.
+        watermark_height: u32,
+    },
+    /// The derived anchor lies below the maximum consumed floor.
+    PrefixBelowFloor {
+        /// Maximum consumed floor for the call.
+        floor: u32,
+    },
+}
+
+impl core::fmt::Display for HistoricalUnavailableCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Shared(cause) => core::fmt::Display::fmt(cause, f),
+            Self::NoCoveredPrefix { capability } => write!(
+                f,
+                "historical index has no covered prefix for {}",
+                capability.name()
+            ),
+            Self::AncestryBudgetExhausted {
+                capability,
+                watermark_height,
+            } => write!(
+                f,
+                "historical index ancestry budget exhausted for {} at height {watermark_height}",
+                capability.name()
+            ),
+            Self::PrefixBelowFloor { floor } => {
+                write!(f, "historical index prefix below floor {floor}")
+            }
         }
     }
 }
@@ -239,136 +334,4 @@ pub trait ScriptIndexQuery: Send + Sync {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression guard for the byte-identical wire-text constraint: every
-    /// variant must render the exact refusal text the crate emitted before
-    /// the typed-cause retag. A later edit that drifts wire text fails here.
-    fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
-        for (cause, expected) in cases {
-            assert_eq!(cause.to_string(), expected, "{cause:?}");
-        }
-    }
-
-    #[test]
-    fn fixed_unavailable_causes_render_pinned_wire_text() {
-        assert_renders(vec![
-            (
-                TxUnavailableCause::RowBudgetExhausted,
-                "txindex query work budget exhausted",
-            ),
-            (
-                TxUnavailableCause::RowBudgetExceeded,
-                "txindex query work budget exceeded",
-            ),
-            (
-                TxUnavailableCause::PrefixScanTruncated,
-                "txindex prefix scan truncated",
-            ),
-            (
-                TxUnavailableCause::LivePrefixScanTruncated,
-                "txindex live prefix scan truncated",
-            ),
-            (
-                TxUnavailableCause::BodyReadBudgetExhausted,
-                "txindex query body budget exhausted",
-            ),
-            (
-                TxUnavailableCause::BodyBudgetExceeded,
-                "txindex query body budget exceeded",
-            ),
-            (TxUnavailableCause::WorkerStopped, "txindex worker stopped"),
-            (
-                TxUnavailableCause::FilterDataMissing,
-                "compact filter data is missing",
-            ),
-            (
-                TxUnavailableCause::CapabilityDisabled(IndexCapability::TxLookup),
-                "txindex is disabled",
-            ),
-            (
-                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
-                "script history is disabled",
-            ),
-            (
-                TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive),
-                "script live is disabled",
-            ),
-            (
-                TxUnavailableCause::CapabilityDisabled(IndexCapability::CompactFilters),
-                "blockfilterindex is disabled",
-            ),
-        ]);
-    }
-
-    #[test]
-    fn carried_unavailable_causes_render_pinned_wire_text() {
-        assert_renders(vec![
-            (
-                TxUnavailableCause::PrunedPrefixUnproven {
-                    family: "transaction index",
-                    floor: 100,
-                },
-                "transaction index coverage starts at height 100; the pruned prefix is unproven",
-            ),
-            (
-                TxUnavailableCause::PrunedPrefixUnproven {
-                    family: "script history",
-                    floor: 7,
-                },
-                "script history coverage starts at height 7; the pruned prefix is unproven",
-            ),
-            (
-                TxUnavailableCause::HistoryUnproven { floor: 5 },
-                "script history coverage starts at height 5; history cannot be proven complete",
-            ),
-            (
-                TxUnavailableCause::WorkerFailed("injected worker failure".into()),
-                "injected worker failure",
-            ),
-            (
-                TxUnavailableCause::WorkerFailed("txindex worker failed".into()),
-                "txindex worker failed",
-            ),
-            (
-                TxUnavailableCause::CompactFilterFailed("filter worker broke".into()),
-                "filter worker broke",
-            ),
-            (
-                TxUnavailableCause::MissingAuthority(
-                    "chain transition authority missing for ScriptLive",
-                ),
-                "chain transition authority missing for ScriptLive",
-            ),
-            (
-                TxUnavailableCause::MissingAuthority(
-                    "authoritative UTXO view is unavailable for ScriptLive",
-                ),
-                "authoritative UTXO view is unavailable for ScriptLive",
-            ),
-            (
-                TxUnavailableCause::MissingAuthority(
-                    "ScriptLive locator is absent from authoritative UTXO",
-                ),
-                "ScriptLive locator is absent from authoritative UTXO",
-            ),
-            (
-                TxUnavailableCause::BlockBodyMissing { height: 9 },
-                "block body missing for txindex query at height 9",
-            ),
-            (
-                TxUnavailableCause::Other("txindex is opening".into()),
-                "txindex is opening",
-            ),
-            (
-                TxUnavailableCause::WorkerFailed("txindex is unavailable".into()),
-                "txindex is unavailable",
-            ),
-            (
-                TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
-                "txindex was abandoned at shutdown",
-            ),
-        ]);
-    }
-}
+mod tests;

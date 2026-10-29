@@ -1,5 +1,102 @@
 use super::*;
 
+use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::block_body::BlockBodyStore;
+use parking_lot::Mutex;
+
+#[derive(Default)]
+struct Bodies {
+    bodies: Mutex<HashMap<(u32, Hash256), Vec<u8>>>,
+}
+
+impl BlockBodyStore for Bodies {
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.bodies.lock().insert((height, hash), body.to_vec());
+        Ok(())
+    }
+
+    fn load_block_body(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.bodies.lock().get(&(height, hash)).cloned())
+    }
+
+    fn sync(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+type MaturedBodyStore = (
+    Chainstate,
+    Vec<Block>,
+    HashMap<Hash256, BlockPayload>,
+    Arc<Bodies>,
+);
+
+/// Matures the shared 101-block fixture on store-backed handles so a reorg
+/// test can route one body through the durable path: staged payloads are
+/// always well-formed by construction, and only the store maps a
+/// constructor failure to `BodyDecode`.
+fn matured_chain_with_body_store() -> Result<MaturedBodyStore, Box<dyn std::error::Error>> {
+    let (_, main, _) = matured_chain(101)?;
+    let genesis = Network::Regtest.genesis_block();
+    let mut tree = BlockTree::new();
+    let mut parent = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+    for block in &main {
+        parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
+    }
+    let bodies_store = Arc::new(Bodies::default());
+    let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
+    let handles =
+        bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
+            network: Network::Regtest,
+            block_tree: tree,
+            restored_applied_tip: None,
+            utxo: Arc::new(UtxoSet::new()),
+            coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
+                bitcoin_rs_utxo::stats::CoinStats::default(),
+            )),
+            chain_events: Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
+            block_body_store: Some(bodies_store.clone()),
+            undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
+            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            // This fixture drives chainstate alone: nothing reads through the
+            // other role, so the domain it mints loses nothing when only the
+            // mutation role is taken from it.
+            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
+            assume_valid_height: 0,
+            validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
+            script_cache: None,
+            journal: None,
+            capture_rawtx: false,
+            capture_block_bytes: true,
+            retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::clone(&retention)),
+            history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+                retention,
+                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(288),
+            ),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
+        });
+    handles.apply_block(&BlockPayload::from_local(genesis))?;
+    for block in &main {
+        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
+    }
+    let bodies = main
+        .iter()
+        .map(|block| {
+            (
+                Hash256::from_le_bytes(block.block_hash().as_bytes()),
+                BlockPayload::from_local(block.clone()),
+            )
+        })
+        .collect();
+    Ok((handles, main, bodies, bodies_store))
+}
+
 #[test]
 fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +137,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         }
         bodies.insert(
             Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+            BlockPayload::from_local(block.clone()),
         );
         fork.push(block);
     }
@@ -141,9 +238,10 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         NodeStatus::HeaderValid,
     )?;
     for block in [&invalid, &descendant] {
+        let staged = (*block).clone();
         bodies.insert(
-            Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            ((*block).clone(), bytes::Bytes::from(consensus_bytes(block))),
+            Hash256::from_le_bytes(staged.block_hash().as_bytes()),
+            BlockPayload::from_local(staged),
         );
     }
 
@@ -214,10 +312,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     )?;
     bodies.insert(
         Hash256::from_le_bytes(invalid.block_hash().as_bytes()),
-        (
-            invalid.clone(),
-            bytes::Bytes::from(consensus_bytes(&invalid)),
-        ),
+        BlockPayload::from_local(invalid),
     );
 
     // The old body passes preflight and the disconnect-side reload, then
@@ -288,10 +383,9 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
-    // The staged body names another header's hash: the plan must refuse
-    // before touching chainstate.
-    bodies.insert(target_hash, (wrong, wrong_bytes));
+    // The staged payload decodes to another header's block: the plan must
+    // refuse with BodyHashMismatch before touching chainstate.
+    bodies.insert(target_hash, BlockPayload::from_local(wrong));
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,
@@ -321,10 +415,10 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 }
 
 #[test]
-fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
--> Result<(), Box<dyn std::error::Error>> {
+fn branch_switch_rejects_malformed_body_before_mutation() -> Result<(), Box<dyn std::error::Error>>
+{
     use bitcoin_rs_primitives::Script;
-    let (handles, main, mut bodies) = matured_chain(101)?;
+    let (handles, main, bodies, bodies_store) = matured_chain_with_body_store()?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
     let applied_before = applied_tip
@@ -348,28 +442,36 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    let mut wrong_coinbase = regtest_fixture::coinbase(101);
-    wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
-    let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
-    // The staged block names the planned hash but its preserved bytes
-    // serialize a different block — the reorg plan must refuse before
-    // touching chainstate.
-    let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
-    bodies.insert(target_hash, (target, wrong_bytes));
+    // Truncate the target's canonical bytes and persist them in the durable
+    // store: the staged callback answers None for the planned hash, so the
+    // reorg loader falls through to the store, decodes only the bytes, and
+    // maps the constructor failure to BodyDecode before touching chainstate.
+    let mut malformed = BlockPayload::from_local(target).bytes().clone();
+    malformed.truncate(malformed.len() - 1);
+    bodies_store
+        .persist_block_body(101, target_hash, &malformed)
+        .map_err(|error| {
+            std::io::Error::other(format!("malformed fixture must persist: {error:?}"))
+        })?;
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,
         &followers,
         target_id,
-        |hash| bodies.get(&hash).cloned(),
+        |hash| {
+            if hash == target_hash {
+                return None;
+            }
+            bodies.get(&hash).cloned()
+        },
         |_| {},
     );
     assert!(
         matches!(
             outcome,
-            Err(crate::reorg::ReorgError::BodyBytesMismatch { height: 101, .. })
+            Err(crate::reorg::ReorgError::BodyDecode { height: 101, .. })
         ),
-        "mismatched preserved bytes must refuse before mutation, got {outcome:?}"
+        "malformed body bytes must refuse before mutation, got {outcome:?}"
     );
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.hash),

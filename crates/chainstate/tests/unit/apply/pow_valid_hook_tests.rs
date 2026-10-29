@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin_rs_chain::regtest_fixture::{
     merkle_root, mine_block_to_declared_target, mined_regtest_child_at as mined_child,
 };
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::ApplyError;
@@ -42,7 +42,7 @@ fn pow_valid_hook_fires_once_for_tip_child_commit() -> Result<(), Box<dyn std::e
     assert!(calls.lock().expect("hook calls").is_empty());
 
     let child = mined_child(genesis_tip.hash.into(), 1)?;
-    let outcome = handles.apply_block(&child, None)?;
+    let outcome = handles.apply_block(&BlockPayload::from_local(child.clone()))?;
     assert_eq!(outcome.height, 1);
     let fired = calls.lock().expect("hook calls").clone();
     assert_eq!(fired.len(), 1, "one early fire per committed tip child");
@@ -63,7 +63,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> Result<(), Box<dyn
     for height in 1..=3 {
         let tip = handles.applied_tip_snapshot().ok_or("tip")?;
         let block = mined_child(tip.hash.into(), height)?;
-        handles.apply_block(&block, None)?;
+        handles.apply_block(&BlockPayload::from_local(block))?;
     }
     assert_eq!(handles.applied_tip_snapshot().ok_or("tip")?.height, 3);
     calls.lock().expect("hook calls").clear();
@@ -71,7 +71,7 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> Result<(), Box<dyn
     // A fork off genesis: its parent is not the published tip, so the hook
     // must not fire whether the fork stages or is refused.
     let stale = mined_child(genesis_tip.hash.into(), 1)?;
-    let _ = handles.apply_block(&stale, None);
+    let _ = handles.apply_block(&BlockPayload::from_local(stale));
     assert!(
         calls.lock().expect("hook calls").is_empty(),
         "a stale-parent block never announces early"
@@ -105,7 +105,8 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> Result<(), Box<dyn
         merkle_root(&falling.txs).ok_or("merkle root of non-empty block")?;
     mine_block_to_declared_target(&mut falling)
         .map_err(|error| format!("regrind overspend block: {error:?}"))?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&falling, None);
+    let failed: Result<_, ApplyError> =
+        handles.apply_block(&BlockPayload::from_local(falling.clone()));
     assert!(
         matches!(
             failed,
@@ -154,7 +155,7 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> Result<(), Box<dyn st
         merkle_root(&non_final.txs).ok_or("merkle root of non-empty block")?;
     mine_block_to_declared_target(&mut non_final)
         .map_err(|error| format!("regrind non-final block: {error:?}"))?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&non_final, None);
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(non_final));
     assert!(
         matches!(
             failed,
@@ -184,7 +185,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
     let mut tip_hash = seed_genesis(&handles)?.hash;
     for height in 1..=499 {
         let block = mined_child(tip_hash.into(), height)?;
-        handles.apply_block(&block, None)?;
+        handles.apply_block(&BlockPayload::from_local(block.clone()))?;
         tip_hash = Hash256::from(block.block_hash());
     }
     assert_eq!(handles.applied_tip_snapshot().ok_or("tip")?.height, 499);
@@ -205,7 +206,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
         merkle_root(&violating.txs).ok_or("merkle root of non-empty block")?;
     mine_block_to_declared_target(&mut violating)
         .map_err(|error| format!("regrind violating block: {error:?}"))?;
-    let failed: Result<_, ApplyError> = handles.apply_block(&violating, None);
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(violating));
     assert!(
         matches!(
             failed,
@@ -241,7 +242,7 @@ fn hook_installation_after_a_clone_is_visible_through_both_handles()
     seed_genesis(&handles)?;
     let tip = handles.applied_tip_snapshot().ok_or("tip")?;
     let child = mined_child(tip.hash.into(), 1)?;
-    handles.apply_block(&child, None)?;
+    handles.apply_block(&BlockPayload::from_local(child.clone()))?;
     let fired = calls.lock().expect("hook calls").clone();
     assert_eq!(fired.len(), 1, "the clone-installed hook must announce");
     assert_eq!(fired[0].0, Hash256::from(child.block_hash()));

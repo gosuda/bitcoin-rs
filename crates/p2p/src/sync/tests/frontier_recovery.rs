@@ -25,7 +25,7 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestR
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks {
-        incoming.send(crate::InboundBlock::from_decoded(block))?;
+        incoming.send(crate::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -81,7 +81,6 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
         source: Some(current_source(&peers, first)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
     assert!(first_rx.try_recv().is_err());
@@ -115,9 +114,9 @@ fn staged_successors_behind_a_rejected_frontier_still_probe() -> TestResult {
         blocks[0].block_hash(),
         "altering body transaction bytes must retain the header-derived hash"
     );
-    incoming.send(crate::InboundBlock::from_decoded(malformed_frontier))?;
-    incoming.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
-    incoming.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
+    incoming.send(crate::InboundBlock::from_local(malformed_frontier))?;
+    incoming.send(crate::InboundBlock::from_local(blocks[1].clone()))?;
+    incoming.send(crate::InboundBlock::from_local(blocks[2].clone()))?;
 
     sync.tick();
 
@@ -147,7 +146,10 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders() -> TestResult {
     let old_source = current_source(&peers, peer);
 
     let (replacement_tx, replacement_rx) = crate::test_support::message_channel();
-    peers.register(peer, PeerLease::new(replacement_tx));
+    peers.register(
+        peer,
+        PeerLease::new(replacement_tx),
+    );
 
     sync.tick();
 
@@ -264,7 +266,10 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick() -> TestResult {
 
     sync.tick();
     assert!(
-        !peers.sessions().iter().any(|session| session.addr == low),
+        !peers
+            .sessions()
+            .iter()
+            .any(|session| session.endpoint == low.endpoint()),
         "the failed probe source must be evicted instead of lingering table-resident",
     );
 
@@ -282,8 +287,8 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick() -> TestResult {
         sync.scheduler
             .lock()
             .header_request()
-            .map(|request| request.source.addr),
-        Some(high),
+            .map(|request| request.source.endpoint),
+        Some(high.endpoint()),
         "the fallback owner must hold the pending request"
     );
     assert!(high_rx.try_recv().is_err());
@@ -323,8 +328,8 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback() -> TestRe
         sync.scheduler
             .lock()
             .header_request()
-            .map(|request| request.source.addr),
-        Some(live),
+            .map(|request| request.source.endpoint),
+        Some(live.endpoint()),
         "the lower live peer must own the fallback request"
     );
     assert!(live_rx.try_recv().is_err());
@@ -374,15 +379,18 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick() -> TestResult 
 
     sync.tick();
     assert!(
-        !peers.sessions().iter().any(|session| session.addr == dead),
+        !peers
+            .sessions()
+            .iter()
+            .any(|session| session.endpoint == dead.endpoint()),
         "the dead peer session must not survive into the next tick",
     );
     assert_ne!(
         sync.scheduler
             .lock()
             .header_request()
-            .map(|request| request.source.addr),
-        Some(dead),
+            .map(|request| request.source.endpoint),
+        Some(dead.endpoint()),
         "the pending request must not be keyed to the dead addr",
     );
     let request = next_getheaders(&live_rx)?;
@@ -403,11 +411,22 @@ fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let addr = test_addr(9767, 0)?;
     let _rx = connect_peer(&peers, synthetic_peer(addr, 5));
-    peers.lease(addr).ok_or("peer missing from table")?.cancel();
-    assert!(peers.sessions().iter().any(|session| session.addr == addr));
+    peers
+        .lease(addr)
+        .ok_or("peer missing from table")?
+        .cancel();
+    assert!(
+        peers
+            .sessions()
+            .iter()
+            .any(|session| session.endpoint == addr.endpoint())
+    );
     sync.tick();
     assert!(
-        !peers.sessions().iter().any(|session| session.addr == addr),
+        !peers
+            .sessions()
+            .iter()
+            .any(|session| session.endpoint == addr.endpoint()),
         "the reconciler must sweep cancelled-lease sessions",
     );
     Ok(())
@@ -532,7 +551,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
     for block in blocks.into_iter().take(3) {
-        incoming.send(crate::InboundBlock::from_decoded(block))?;
+        incoming.send(crate::InboundBlock::from_local(block))?;
     }
     sync.tick();
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
@@ -550,7 +569,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     )
     .or_fail("regtest fixture block");
     let orphan_hash = Hash256::from(orphan.block_hash());
-    let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
+    let mut inbound = vec![crate::InboundBlock::from_local(orphan)];
     assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);
     assert!(sync.scheduler.lock().stager.contains(&orphan_hash));
 

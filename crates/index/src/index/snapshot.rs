@@ -11,6 +11,26 @@ use crate::{
 use bitcoin_rs_primitives::{OutPoint, Txid};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
 
+/// One persisted `TxIndex` row family that [`TxIndexSnapshot::scan_family_page`]
+/// pages.
+///
+/// `ScriptHistory` occurrences are intentionally absent: that family has no
+/// qualified portable layout yet, and a variant is added only with its codec.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TxIndexFamily {
+    /// Confirmed-transaction rows: `txid prefix (8) || height (4, BE)` keys
+    /// carrying packed `TxPosition` values.
+    TxConfirmed,
+}
+
+impl TxIndexFamily {
+    const fn column_family(self) -> ColumnFamily {
+        match self {
+            Self::TxConfirmed => ColumnFamily::TxConfirmed,
+        }
+    }
+}
+
 /// One typed row from a `TxIndex` prefix scan, including its raw value.
 #[derive(Debug)]
 pub struct TxIndexScanRow {
@@ -28,6 +48,17 @@ pub struct TxIndexScan {
     /// Encoded key and value bytes returned by storage.
     pub encoded_bytes: usize,
     /// Whether storage returned the complete matching prefix.
+    pub complete: bool,
+}
+
+/// One bounded page of a `TxIndex` family in ascending stored-key order.
+#[derive(Debug)]
+pub struct TxIndexPage {
+    /// Parsed rows of this page in ascending stored-key order.
+    pub rows: Vec<TxIndexScanRow>,
+    /// Whether the family ends with this page. With a positive `max_rows`
+    /// limit, a page that is not complete is always non-empty, so callers
+    /// advance with the last returned key until `complete`.
     pub complete: bool,
 }
 
@@ -53,6 +84,19 @@ pub trait TxIndexSnapshot: Send + Sync {
         &self,
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError>;
+    /// Scans one bounded page of `family` in ascending stored-key order.
+    ///
+    /// `start_after = None` starts at the family head; otherwise the page
+    /// begins at the first key strictly above `start_after`. Backends seek
+    /// the snapshot to the cursor, so no family-sized copy is made on any
+    /// backend. A malformed key or a storage failure ends the page with an
+    /// error.
+    fn scan_family_page(
+        &self,
+        family: TxIndexFamily,
+        start_after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexPage, IndexError>;
     /// Loads one capability's coverage floor: the first height its committed
     /// rows cover. `0` means complete coverage from genesis.
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
@@ -130,6 +174,42 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
 
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
         crate::index::capability::read_coverage_floor(self.snapshot.as_ref(), capability)
+    }
+
+    fn scan_family_page(
+        &self,
+        family: TxIndexFamily,
+        start_after: Option<&[u8]>,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexPage, IndexError> {
+        // Resume after `cursor` with `cursor || 0x00`: stored keys are
+        // fixed-width, so the suffixed key is the least key strictly above
+        // `cursor`. No `start_after` begins at the family head.
+        let start: Vec<u8> = match start_after {
+            Some(cursor) => {
+                let mut start = Vec::with_capacity(cursor.len().saturating_add(1));
+                start.extend_from_slice(cursor);
+                start.push(0);
+                start
+            }
+            None => Vec::new(),
+        };
+        let scan =
+            self.snapshot
+                .scan_prefix_from_bounded(family.column_family(), &[], &start, limit)?;
+        let mut rows = Vec::with_capacity(scan.rows.len());
+        for (key, value) in scan.rows {
+            if key.len() != crate::HASH_PREFIX_ROW_SIZE {
+                return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
+            }
+            let row = zerocopy::FromBytes::read_from_bytes(&key)
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            rows.push(TxIndexScanRow { row, value });
+        }
+        Ok(TxIndexPage {
+            rows,
+            complete: scan.complete,
+        })
     }
 
     fn transaction_rows(

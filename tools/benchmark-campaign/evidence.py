@@ -120,6 +120,9 @@ def _publish_result(result: JsonObject, output: Path) -> None:
     if sys.platform != "linux":
         raise ContractError("publication requires Linux O_TMPFILE support")
     at_empty_path = getattr(os, "AT_EMPTY_PATH", 0x1000)
+    # ``canonical_bytes`` would recurse into a hostile nest before any limit
+    # applies; validate the depth first so oversized input fails closed here.
+    _validate_json_depth(result, "result")
     payload = canonical_bytes(result) + b"\n"
     try:
         directory = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)

@@ -21,13 +21,11 @@ use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
 use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::{BlockSync, SchedulerState};
-use super::{MAX_DEFERRED_OWNED_FETCHES, defer_owned_body_fetch};
 use crate::InboundHeaders;
 use crate::Message;
 use crate::PeerSource;
 use crate::download_window::SyncPeer;
 use crate::peer_info::PeerInfo;
-use crate::wire::PROTOCOL_VERSION;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
@@ -63,7 +61,6 @@ impl BlockSync {
             headers,
             source,
             wire_response,
-            body_fetch_owned,
         }) = self.inbound_headers_rx.try_recv()
         {
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
@@ -96,16 +93,19 @@ impl BlockSync {
             if !feeds_live_sync
                 && let Some((tip_hash, active_height)) = self.known_batch_outcome(&headers)
             {
+                // A known batch displaces nothing, but its newest header can
+                // be a stale branch tip the retainer has not seen.
+                self.record_admitted_tips(None, Some(tip_hash), source);
                 if let Some(source) = source {
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
                     credit_refresh_needed = true;
-                    if wire_response && !body_fetch_owned {
+                    // The compact path may already own this body through
+                    // `enqueue_owned_body_fetch`; a second window request
+                    // would duplicate the fetch it already issued.
+                    if wire_response && !self.owns_body_fetch(source, tip_hash) {
                         direct_fetch.push((source, tip_hash));
                     }
-                }
-                if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
                 }
                 continue;
             }
@@ -114,25 +114,47 @@ impl BlockSync {
             // network's minimum chain work is retained by that connection's
             // download-twice header sync; only headers the committed phase
             // releases — and batches at or above the threshold — reach
-            // admission here.
+            // admission here. Snapshot the tip so a rejection that still
+            // committed a higher-work prefix can preserve the tip it
+            // displaced (see `demoted_tip_after_rejection`).
+            let pre_tip = self.chain.chain_tip().map(|tip| tip.hash);
             let Some(admission) =
                 self.route_headers_batch(&headers, source, wire_response, batch_len)
             else {
-                if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
-                }
                 continue;
             };
+            // A rejected batch can still have inserted a valid higher-work
+            // prefix and moved the tip; the `Err` reports no displacement, so
+            // infer it from the tip movement and retain the old tip for
+            // stale-tip relay instead of losing it.
+            if matches!(&admission, HeaderAdmission::Rejected(_)) {
+                let demoted = bitcoin_rs_chain::header_sync::demoted_tip_after_rejection(
+                    &self.chain.block_tree(),
+                    pre_tip,
+                );
+                if let Some(demoted) = demoted {
+                    self.record_demoted_tip(demoted);
+                }
+            }
             match admission {
                 HeaderAdmission::Accepted {
                     accepted,
                     announced_tip,
                     active_height,
+                    demoted_tip,
                 } => {
+                    // The tip this batch displaced and the batch's own tip
+                    // are the stale-tip relay's candidates; the retainer
+                    // re-reads the tree for every fact it ranks by.
+                    self.record_admitted_tips(demoted_tip, announced_tip, source);
                     if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
                         self.peer_table
                             .note_announced_tip(source, tip_hash, active_height);
-                        if wire_response && !body_fetch_owned {
+                        // Same owned-fetch guard as the known-batch path: skip
+                        // the direct fetch when the compact path already owns
+                        // the body so one announcement never issues two
+                        // `getdata` requests for the same hash.
+                        if wire_response && !self.owns_body_fetch(source, tip_hash) {
                             direct_fetch.push((source, tip_hash));
                         }
                     }
@@ -152,13 +174,13 @@ impl BlockSync {
                             self.scheduler
                                 .lock()
                                 .window
-                                .mark_peer_unresponsive(source.addr, Instant::now());
-                            blamed_peer = Some(source.addr);
+                                .mark_peer_unresponsive(source, Instant::now());
+                            blamed_peer = Some(source.endpoint);
                         }
                     }
                     if let Some(peer_addr) = blamed_peer {
                         tracing::warn!(
-                            peer_addr = %peer_addr,
+                            peer_addr = ?peer_addr,
                             received = batch_len,
                             %error,
                             "block sync: peer served invalid headers; disconnecting",
@@ -210,9 +232,6 @@ impl BlockSync {
                     // silently losing the announcement.
                     self.request_ancestry_after_refusal(source, &error);
                 }
-            }
-            if body_fetch_owned {
-                self.note_owned_body_fetch(source, headers.last());
             }
         }
         if credit_refresh_needed {
@@ -473,7 +492,7 @@ impl BlockSync {
         for source in expired {
             self.peer_table.disconnect_source(source);
             self.clear_headers_sync_for(source);
-            tracing::debug!(peer_addr = %source.addr, "block sync: header sync request timed out");
+            tracing::debug!(peer_addr = ?source.endpoint, "block sync: header sync request timed out");
         }
     }
 
@@ -484,109 +503,106 @@ impl BlockSync {
             .is_none_or(|tip| tip.chainwork < minimum_work)
     }
 
-    /// Records a body fetch the window does not own — the compact outcome
-    /// that forwarded this header already issued a `getblocktxn` or a
-    /// fallback `getdata` for the tip body — as pending under `source`, so
-    /// `next_peer_request` does not schedule a duplicate getdata for the
-    /// freshly admitted tip. A tip that has not attached yet is retained in
-    /// `SchedulerState::owned_body_fetches` and resolved once ancestry
-    /// admits it; without retention a gap batch would let the window
-    /// schedule a second fetch in parallel with the pending compact one.
-    fn note_owned_body_fetch(
-        &self,
-        source: Option<PeerSource>,
-        header: Option<&bitcoin_rs_primitives::Header>,
-    ) {
-        let (Some(source), Some(header)) = (source, header) else {
-            return;
-        };
-        // A stale source names a dead connection: its compact fetch died
-        // with it, and marking the body pending under that address would
-        // suppress scheduling from the live replacement until expiry.
-        if !self.peer_table.is_current(source) {
-            return;
-        }
-        let hash = Hash256::from(header.compute_hash());
-        let height = {
-            let tree = self.chain.block_tree();
-            tree.lookup(hash)
-                .and_then(|id| tree.node(id).ok().map(|node| node.height))
-        };
-        let mut scheduler = self.scheduler.lock();
-        let Some(height) = height else {
-            defer_owned_body_fetch(&mut scheduler, source, hash);
-            return;
-        };
-        let SchedulerState { window, stager, .. } = &mut *scheduler;
-        if !window.mark_owned_fetch(stager, source, hash, height, Instant::now()) {
-            defer_owned_body_fetch(&mut scheduler, source, hash);
-        }
-    }
-
     /// Resolves deferred owned-fetch marks now that this drain may have
     /// admitted the ancestry their tips were waiting on.
+    ///
+    /// PRE: runs on the sync thread, outside every lock.
+    /// POST: a mark whose header is in the tree and whose connection is
+    ///   current becomes a window pending (or stays a mark when the window
+    ///   refuses it, or another connection already owns the hash); a mark
+    ///   whose connection left is dropped; a mark whose header is unknown
+    ///   stays.
+    /// INVARIANT: a mark is the proof of a matched outstanding request, so
+    ///   it never leaves the scheduler while it resolves. The tree and peer
+    ///   table reads run on a snapshot outside the scheduler lock. Each
+    ///   install holds exact-source peer authority across the scheduler lock
+    ///   and rechecks its mark under the same lock hold that installs it:
+    ///   a mark released since the snapshot (the exact owner's `notfound`, a
+    ///   session sweep, an eviction) installs nothing, so a stale snapshot
+    ///   can never re-create a request the owner already declined. A
+    ///   `notfound` that lands anywhere in the resolve therefore finds the
+    ///   mark or, after the install, the window pending it became.
     pub(super) fn resolve_owned_body_fetches(&self) {
-        let deferred = {
-            let mut scheduler = self.scheduler.lock();
+        let snapshot = {
+            let scheduler = self.scheduler.lock();
             if scheduler.owned_body_fetches.is_empty() {
                 return;
             }
-            std::mem::take(&mut scheduler.owned_body_fetches)
+            scheduler.owned_body_fetches.clone()
         };
-        let mut unresolved = Vec::with_capacity(deferred.len());
-        let mut resolved = Vec::with_capacity(deferred.len());
+        let mut dead = Vec::new();
+        let mut resolved = Vec::with_capacity(snapshot.len());
         {
             let tree = self.chain.block_tree();
-            for (source, hash) in deferred {
+            for (source, hash) in snapshot {
                 // A stale source names a dead connection: its fetch died
                 // with it, so the mark must neither settle a staged body's
                 // gate nor mark it pending under the dead owner.
                 if !self.peer_table.is_current(source) {
+                    dead.push((source, hash));
                     continue;
                 }
                 let height = tree
                     .lookup(hash)
                     .and_then(|id| tree.node(id).ok().map(|node| node.height));
-                match height {
-                    Some(height) => resolved.push((source, hash, height)),
-                    None => unresolved.push((source, hash)),
+                if let Some(height) = height {
+                    resolved.push((source, hash, height));
                 }
             }
         }
-        let mut scheduler = self.scheduler.lock();
-        let now = Instant::now();
-        let SchedulerState {
-            window,
-            stager,
-            owned_body_fetches,
-            ..
-        } = &mut *scheduler;
+        self.scheduler
+            .lock()
+            .owned_body_fetches
+            .retain(|mark| !dead.contains(mark));
         for (source, hash, height) in resolved {
+            self.install_resolved_owned_body_fetch(source, hash, height);
+        }
+    }
+
+    /// Publishes a resolved snapshot only while its exact connection and its
+    /// authoritative deferred mark are both still live. Lock order is peer
+    /// table then scheduler, matching request publication and `notfound`.
+    pub(super) fn install_resolved_owned_body_fetch(
+        &self,
+        source: PeerSource,
+        hash: Hash256,
+        height: u32,
+    ) {
+        let current = self.peer_table.with_current(source, || {
+            let mut scheduler = self.scheduler.lock();
+            let SchedulerState {
+                window,
+                stager,
+                owned_body_fetches,
+                ..
+            } = &mut *scheduler;
+            // Recheck under the lock that installs: a mark released since the
+            // snapshot is gone and must not become a pending request.
+            let Some(index) = owned_body_fetches
+                .iter()
+                .position(|mark| *mark == (source, hash))
+            else {
+                return;
+            };
             // A refusal leaves the fetch in flight: keep the deferred mark so
             // the delivered body still classifies as requested. So does a
             // hash already pending under a different owner — `mark_owned_fetch`
             // resolves it without recording this owner, and dropping the mark
             // would disown the second connection's in-flight fetch.
-            if !window.mark_owned_fetch(stager, source, hash, height, now)
-                || window
+            let installed = window.mark_owned_fetch(stager, source, hash, height, Instant::now())
+                && window
                     .pending_owner(&hash)
-                    .is_some_and(|owner| owner != source)
-            {
-                unresolved.push((source, hash));
+                    .is_none_or(|owner| owner == source);
+            if installed {
+                owned_body_fetches.remove(index);
             }
+        });
+        if !current {
+            self.scheduler
+                .lock()
+                .owned_body_fetches
+                .retain(|mark| *mark != (source, hash));
         }
-        // Unresolved marks predate anything recorded during this resolve:
-        // they merge back ahead of the queue in their original order, and the
-        // cap then drops the newest marks — the same oldest-first policy
-        // `defer_owned_body_fetch` applies.
-        let mut merged = unresolved;
-        for mark in owned_body_fetches.drain(..) {
-            if !merged.contains(&mark) {
-                merged.push(mark);
-            }
-        }
-        merged.truncate(MAX_DEFERRED_OWNED_FETCHES);
-        *owned_body_fetches = merged;
     }
 
     /// `(announced_tip, active_height)` when every header in `headers` is
@@ -625,7 +641,7 @@ impl BlockSync {
             .peer_table
             .sessions()
             .iter()
-            .find(|session| session.addr == source.addr)
+            .find(|session| session.endpoint == source.endpoint)
             .map_or(i32::MAX, |session| {
                 headers_target_height(session.headers_horizon, session.info.as_ref())
             });
@@ -647,8 +663,8 @@ impl BlockSync {
                         .as_ref()
                         .is_some_and(|info| info.services & required == required)
             })
-            .min_by_key(|session| session.addr)
-            .map(|session| session.lease.source(session.addr));
+            .min_by_key(|session| session.endpoint)
+            .map(|session| session.lease.source(session.endpoint));
         self.request_headers_from(source);
     }
 
@@ -721,7 +737,7 @@ impl BlockSync {
                             .is_some_and(|info| *height > info.best_known_height)
                     });
                     (needs_prune || credit.is_some())
-                        .then(|| (session.lease.source(session.addr), credit, keep))
+                        .then(|| (session.lease.source(session.endpoint), credit, keep))
                 })
                 .collect()
         };
@@ -813,7 +829,7 @@ impl BlockSync {
         let outcome = self.send_getheaders(source, our_height, target_height, locator);
         if outcome == GetheadersOutcome::Sent {
             tracing::debug!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 "block sync: sent idle-frontier capability probe"
             );
         }
@@ -871,7 +887,7 @@ impl BlockSync {
         );
         if outcome == GetheadersOutcome::Sent {
             tracing::debug!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 "block sync: sent chain-sync eviction probe"
             );
         }
@@ -930,7 +946,7 @@ impl BlockSync {
         let now = Instant::now();
         if self.has_pending_getheaders(source, locator_tip_hash, target_height, now) {
             tracing::trace!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 our_height,
                 target_height,
                 "block sync: getheaders already pending",
@@ -941,10 +957,12 @@ impl BlockSync {
             .into_iter()
             .map(|hash| bitcoin::BlockHash::from_byte_array(*hash.as_byte_array()))
             .collect();
-        let msg = Message::GetHeaders(GetHeadersMessage::new(
-            locator_hashes,
-            bitcoin::BlockHash::all_zeros(),
-        ));
+        let getheaders = GetHeadersMessage::new(locator_hashes, bitcoin::BlockHash::all_zeros());
+        // The wire version of `getheaders` is the rust-bitcoin protocol
+        // constant (70001), independent of the version this node advertises
+        // in `version`; log the field that is actually sent.
+        let getheaders_version = getheaders.version;
+        let msg = Message::GetHeaders(getheaders);
         // `send_then` holds the connection's identity through the enqueue
         // and the pending stamp under one table authority, so a replacement
         // slipping in between cannot leave a request registered to a dead
@@ -989,14 +1007,14 @@ impl BlockSync {
                 // then-current locator. The peer stays connected and keeps
                 // its sync state.
                 tracing::debug!(
-                    peer_addr = %source.addr,
+                    peer_addr = ?source.endpoint,
                     "block sync: getheaders deferred; node outbound budget is full"
                 );
                 return GetheadersOutcome::Failed;
             }
             Err(crate::OutboundRefusal::Closed(_)) => {
                 tracing::warn!(
-                    peer_addr = %source.addr,
+                    peer_addr = ?source.endpoint,
                     "block sync: outbound channel disconnected"
                 );
                 // The send failure means this connection is gone: evict it so
@@ -1011,10 +1029,10 @@ impl BlockSync {
             }
         }
         tracing::debug!(
-            peer_addr = %source.addr,
+            peer_addr = ?source.endpoint,
             our_height,
             target_height,
-            protocol_version = PROTOCOL_VERSION,
+            getheaders_version,
             "block sync: sent getheaders"
         );
         GetheadersOutcome::Sent
@@ -1221,8 +1239,16 @@ impl BlockSync {
     /// INVARIANT: the block-tree read guard is released before the caller
     ///   enters ordinary admission.
     fn body_carried_header_needs_admission(&self, headers: &[Header]) -> bool {
+        // A stale-tip announcement arrives as a multi-header batch on the
+        // identified peer with `wire_response = false`: it must not bypass
+        // the minimum-work hold the way a blanket `true` would. A fully
+        // valid, well-linked page on a known parent defers below the floor
+        // (the caller returns `None` and retries after the wire sync commits
+        // it); any break in the page needs direct admission so the error —
+        // and the peer fault it carries — is reported instead of silently
+        // deferred.
         let [header] = headers else {
-            return true;
+            return self.stale_tip_page_needs_admission(headers);
         };
         let tree = self.chain.block_tree();
         let Some(parent_id) = tree.lookup(Hash256::from(header.prev_blockhash)) else {
@@ -1236,6 +1262,65 @@ impl BlockSync {
                     &tree,
                     parent_id,
                     header,
+                    network,
+                    bitcoin_rs_chain::current_unix_seconds(),
+                    bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+                )
+            })
+            .is_err()
+    }
+
+    /// Whether a multi-header non-wire page (a stale-tip announcement)
+    /// needs direct admission rather than deferring below the work floor.
+    ///
+    /// PRE: `headers` holds more than one header.
+    /// POST: `true` when the page is broken — unknown first parent, unmet
+    ///   proof of work, broken prev-to-hash linkage, or a contextually
+    ///   invalid first header — so direct admission reports the error and
+    ///   carries the peer fault; `false` when the page is a fully valid,
+    ///   well-linked chain on a known, valid parent, in which case the
+    ///   caller defers it below the floor instead of admitting past the
+    ///   minimum-work hold.
+    /// INVARIANT: reads only the block tree; later headers build on earlier
+    ///   batch headers the tree does not yet hold, so only the first
+    ///   header faces the contextual check — a later contextual break
+    ///   defers safely without entering the tree, while a high-work page
+    ///   (anchor `None`) admits directly through the caller either way.
+    fn stale_tip_page_needs_admission(&self, headers: &[Header]) -> bool {
+        if headers.len() <= 1 {
+            return true;
+        }
+        let tree = self.chain.block_tree();
+        let network = self.chain.network();
+        let Some(first_parent) = tree.lookup(Hash256::from(headers[0].prev_blockhash)) else {
+            return true;
+        };
+        if tree
+            .node(first_parent)
+            .is_ok_and(|node| node.status == NodeStatus::Invalid)
+        {
+            return true;
+        }
+        // Declared `bits` honesty and prev-to-hash continuity across the
+        // whole page: a pasted tail of genuine headers after a break must
+        // not read as valid.
+        if headers.iter().any(|header| {
+            let hash = Hash256::from(header.compute_hash());
+            validate_pow(header, hash, network).is_err()
+        }) || headers.windows(2).any(|pair| {
+            Hash256::from(pair[1].prev_blockhash) != Hash256::from(pair[0].compute_hash())
+        }) {
+            return true;
+        }
+        // First-header contextual gate (the only one whose parent the tree
+        // holds). A failure here needs admission to fault the peer.
+        let hash = Hash256::from(headers[0].compute_hash());
+        validate_pow(&headers[0], hash, network)
+            .and_then(|()| {
+                bitcoin_rs_chain::validate_contextual_header(
+                    &tree,
+                    first_parent,
+                    &headers[0],
                     network,
                     bitcoin_rs_chain::current_unix_seconds(),
                     bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
@@ -1367,7 +1452,7 @@ impl BlockSync {
             .peer_table
             .sessions()
             .iter()
-            .find(|session| session.addr == source.addr)
+            .find(|session| session.endpoint == source.endpoint)
             .map_or(i32::MAX, |session| {
                 headers_target_height(session.headers_horizon, session.info.as_ref())
             });
@@ -1386,7 +1471,7 @@ impl BlockSync {
     fn settle_presync_fault(&self, source: PeerSource, error: HeaderSyncError) {
         if !error.is_peer_fault() {
             tracing::debug!(
-                peer_addr = %source.addr,
+                peer_addr = ?source.endpoint,
                 %error,
                 "block sync: header presync gave up on a possibly reorged continuation",
             );
@@ -1398,10 +1483,10 @@ impl BlockSync {
             self.scheduler
                 .lock()
                 .window
-                .mark_peer_unresponsive(source.addr, Instant::now());
+                .mark_peer_unresponsive(source, Instant::now());
         }
         tracing::warn!(
-            peer_addr = %source.addr,
+            peer_addr = ?source.endpoint,
             %error,
             "block sync: peer failed header presync validation; disconnecting",
         );
@@ -1444,4 +1529,386 @@ fn presync_salt() -> [u8; 16] {
     let mut salt = [0_u8; 16];
     bitcoin::secp256k1::rand::thread_rng().fill_bytes(&mut salt);
     salt
+}
+
+#[cfg(test)]
+mod stale_tip_routing_tests {
+    //! Low-work, partial-prefix, and duplicate-fetch regressions for
+    //! stale-tip batches: identified-peer, non-wire batches take the same
+    //! minimum-work/fault hold as ordinary headers, preserve a displaced
+    //! tip on rejection, and never double-fetch an owned body.
+
+    use super::super::BlockSync;
+    use super::super::chain::HeaderAdmission;
+    use super::super::chain::SyncChain;
+    use super::super::chain::SyncChainError;
+    use super::super::chain::WindowCommitError;
+    use bitcoin_rs_chain::TipSnapshot;
+    use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
+    use bitcoin_rs_primitives::{Hash256, Header, Network};
+    use parking_lot::RwLockReadGuard;
+    use std::sync::Arc;
+
+    struct RoutingStubChain {
+        tree: parking_lot::RwLock<BlockTree>,
+        network: Network,
+        floor: ChainWork,
+        applied: parking_lot::RwLock<Option<Arc<TipSnapshot>>>,
+    }
+
+    impl RoutingStubChain {
+        fn with_floor(tree: BlockTree, floor: ChainWork) -> Self {
+            let applied = tree.tip();
+            Self {
+                tree: parking_lot::RwLock::new(tree),
+                network: Network::Regtest,
+                floor,
+                applied: parking_lot::RwLock::new(applied),
+            }
+        }
+    }
+
+    impl SyncChain for RoutingStubChain {
+        fn network(&self) -> Network {
+            self.network
+        }
+
+        fn block_tree(&self) -> RwLockReadGuard<'_, BlockTree> {
+            self.tree.read()
+        }
+
+        fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
+            self.tree.read().tip()
+        }
+
+        fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
+            self.applied.read().clone()
+        }
+
+        fn bootstrap_genesis(&self) {}
+
+        fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
+            let mut tree = self.tree.write();
+            match bitcoin_rs_chain::accept_headers(
+                &mut tree,
+                headers,
+                self.network,
+                bitcoin_rs_chain::current_unix_seconds(),
+                bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            ) {
+                Ok(admitted) => {
+                    let announced_tip = admitted
+                        .ids
+                        .last()
+                        .and_then(|id| tree.node(*id).ok())
+                        .map(|node| node.hash);
+                    let active_height = tree.tip().zip(announced_tip).and_then(|(tip, hash)| {
+                        tree.active_height_of(tip.tip_id, hash)
+                            .and_then(|h| i32::try_from(h).ok())
+                    });
+                    HeaderAdmission::Accepted {
+                        accepted: admitted.ids.len(),
+                        announced_tip,
+                        active_height,
+                        demoted_tip: admitted.demoted_tip,
+                    }
+                }
+                Err(error) => HeaderAdmission::Rejected(error),
+            }
+        }
+
+        fn minimum_chain_work(&self) -> ChainWork {
+            self.floor
+        }
+
+        fn check_body_binding(
+            &self,
+            _block: &bitcoin_rs_primitives::Block,
+        ) -> Result<(), SyncChainError> {
+            Ok(())
+        }
+
+        fn window_len(&self, _serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+            0
+        }
+
+        fn commit_window(
+            &self,
+            _payloads: &[&bitcoin_rs_primitives::BlockPayload],
+        ) -> Result<usize, WindowCommitError> {
+            Ok(0)
+        }
+
+        fn switch_to_branch(
+            &self,
+            _target: bitcoin_rs_chain::NodeId,
+            _staged_body: &mut dyn FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
+            _connected_body: &mut dyn FnMut(Hash256),
+        ) -> Result<(), bitcoin_rs_chainstate::reorg::ReorgError> {
+            Ok(())
+        }
+    }
+
+    fn routing_sync(
+        tree: BlockTree,
+        floor: ChainWork,
+    ) -> (
+        BlockSync,
+        Arc<crate::PeerTable>,
+        crossbeam_channel::Sender<crate::InboundHeaders>,
+    ) {
+        let peers = Arc::new(crate::PeerTable::new());
+        let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
+        let (_blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let chain: Arc<dyn SyncChain> = Arc::new(RoutingStubChain::with_floor(tree, floor));
+        let sync = BlockSync::new(
+            chain,
+            Arc::clone(&peers),
+            headers_rx,
+            blocks_rx,
+            crate::sync::syncing_ibd_latch(),
+        );
+        (sync, peers, headers_tx)
+    }
+
+    fn connected_peer(
+        peers: &Arc<crate::PeerTable>,
+        port: u16,
+        best_height: i32,
+    ) -> (crate::PeerSource, crate::test_support::MessageReceiver) {
+        let (tx, rx) = crate::test_support::message_channel();
+        let lease = crate::PeerLease::new(tx);
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        let endpoint = crate::PeerEndpoint::Ip(addr);
+        peers.register(endpoint, lease.clone());
+        let info = crate::peer_info::PeerInfo {
+            addr: endpoint.into(),
+            endpoint: Some(endpoint),
+            network: endpoint.net(),
+            version: 70016,
+            wtxid_relay: false,
+            relay_transactions: true,
+            compact_block_relay: false,
+            send_headers: false,
+            services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
+                | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
+            user_agent: String::from("/test/"),
+            start_height: best_height,
+            best_known_height: best_height,
+            conn_time: 0,
+            inbound: false,
+            addr_bind: crate::TransportRemote::new(addr),
+            time_offset: 0,
+            counters: Arc::new(crate::PeerCounters::default()),
+            transport: crate::TransportProtocol::V1,
+        };
+        peers.publish_info(endpoint, &lease, info);
+        (lease.source_ip(addr), rx)
+    }
+
+    fn regtest_tree_with_main() -> BlockTree {
+        let mut tree = BlockTree::new();
+        let genesis = Network::Regtest.genesis_block();
+        tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("genesis inserts: {error}"));
+        let mut prev = genesis.block_hash();
+        let mut tip_id = tree
+            .lookup(Hash256::from(prev))
+            .unwrap_or_else(|| panic!("genesis indexed"));
+        for height in 1..=2_u32 {
+            let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, height)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+            prev = header.compute_hash();
+            tip_id = tree
+                .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
+                .unwrap_or_else(|error| panic!("main header inserts: {error}"));
+        }
+        tree
+    }
+
+    /// A valid low-work multi-header stale-tip page defers below the floor
+    /// instead of admitting past the minimum-work hold; a broken page needs
+    /// direct admission so the fault is reported.
+    #[test]
+    fn low_work_stale_tip_page_defers_while_broken_page_admits() {
+        let tree = regtest_tree_with_main();
+        let floor = ChainWork::from_be_bytes([0xFF_u8; 32]);
+        let (sync, _peers, _headers_tx) = routing_sync(tree, floor);
+        let genesis_prev = Network::Regtest.genesis_block().block_hash();
+        let first = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(genesis_prev, 101)
+            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        let second =
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_header(first.compute_hash(), 102)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        let valid_page = [first, second];
+        // Below the floor with a known parent: the valid page is complete
+        // and well-linked, so it defers rather than bypassing the hold.
+        assert!(
+            sync.presync_anchor(&valid_page).is_some(),
+            "the fixture page must sit below the raised floor"
+        );
+        assert!(
+            !sync.body_carried_header_needs_admission(&valid_page),
+            "a valid low-work stale-tip page must defer, not admit past the hold"
+        );
+        // A broken page (unmet proof of work) needs admission to fault.
+        let mut broken = valid_page;
+        broken[1].nonce = broken[1].nonce.wrapping_add(1).wrapping_mul(7919);
+        // The grind above almost surely breaks the target; if it somehow
+        // still meets it, flip bits to force the failure deterministically.
+        if bitcoin_rs_chain::validate_pow(
+            &broken[1],
+            Hash256::from(broken[1].compute_hash()),
+            Network::Regtest,
+        )
+        .is_ok()
+        {
+            broken[1].bits = bitcoin_rs_primitives::CompactTarget::from_consensus(0x1d00_ffff);
+        }
+        assert!(
+            sync.body_carried_header_needs_admission(&broken),
+            "a broken stale-tip page must admit so the fault is reported"
+        );
+    }
+
+    /// A rejected batch whose valid prefix displaced the tip preserves the
+    /// old tip through the drain's tip-movement wiring instead of losing it.
+    ///
+    /// Drives a stale-tip-style batch (identified peer, non-wire) through
+    /// `drain_inbound_headers`: the above-floor prefix moves the tip, the
+    /// garbage tail rejects, and the retainer must hold the pre-batch tip.
+    /// Deleting the drain's `Rejected -> record_demoted_tip` wiring leaves
+    /// the retainer empty and fails this test.
+    #[test]
+    fn partial_prefix_rejection_preserves_demoted_tip() {
+        let tree = regtest_tree_with_main();
+        let floor = ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work());
+        let (sync, peers, headers_tx) = routing_sync(tree, floor);
+        let (source, _rx) = connected_peer(&peers, 18445, 3);
+        let pre_tip = sync
+            .chain
+            .chain_tip()
+            .unwrap_or_else(|| panic!("tree has a tip"))
+            .hash;
+        let genesis_prev = Network::Regtest.genesis_block().block_hash();
+        let mut batch = Vec::new();
+        let mut prev = genesis_prev;
+        for height in [101_u32, 102, 103] {
+            let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, height)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+            prev = header.compute_hash();
+            batch.push(header);
+        }
+        let garbage = bitcoin_rs_primitives::BlockHash::from(
+            bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xFF_u8; 32]),
+        );
+        batch.push(
+            bitcoin_rs_chain::regtest_fixture::mined_regtest_header(garbage, 104)
+                .unwrap_or_else(|error| panic!("fixture mines: {error}")),
+        );
+        headers_tx
+            .send(crate::InboundHeaders {
+                headers: batch,
+                source: Some(source),
+                wire_response: false,
+            })
+            .unwrap_or_else(|error| panic!("queue stale-tip batch: {error}"));
+        sync.drain_inbound_headers();
+        let moved = sync
+            .chain
+            .chain_tip()
+            .unwrap_or_else(|| panic!("tree has a tip"))
+            .hash;
+        assert_ne!(
+            moved, pre_tip,
+            "the above-floor prefix must move the tip before the tail fails"
+        );
+        let fresh =
+            crate::PeerSource::for_test(std::net::SocketAddr::from(([127, 0, 0, 1], 18499)));
+        let pending = sync.stale_tips().pending_for(fresh, |_| true);
+        assert!(
+            pending.contains(&pre_tip),
+            "the drain must retain the displaced tip for stale relay, got {pending:?}"
+        );
+    }
+
+    /// A body the compact path already owns is never direct-fetched twice:
+    /// both drain branches gate on `owns_body_fetch`.
+    ///
+    /// Drives a linear-extension announcement through
+    /// `drain_inbound_headers` with the tip body pre-owned by the announcer:
+    /// the drain must resolve the owned mark and send no `getdata` for it.
+    /// A control announcement without ownership must fetch, proving the
+    /// test exercises the real direct-fetch path. Deleting either drain
+    /// guard turns the owned case into a fetch and fails.
+    #[test]
+    fn duplicate_fetch_skips_owned_body() {
+        let tree = regtest_tree_with_main();
+        let floor = ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work());
+        let (sync, peers, headers_tx) = routing_sync(tree, floor);
+        // Owned case: linear extension at height 3, pre-owned by announcer.
+        let (source, rx) = connected_peer(&peers, 18446, 3);
+        let tip = sync
+            .chain
+            .chain_tip()
+            .unwrap_or_else(|| panic!("tree has a tip"));
+        let prev = bitcoin_rs_primitives::BlockHash::from(tip.hash);
+        let header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 3)
+            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        let tip_hash = Hash256::from(header.compute_hash());
+        assert!(
+            sync.enqueue_owned_body_fetch(source, tip_hash, || true),
+            "the compact follow-up publishes ownership"
+        );
+        headers_tx
+            .send(crate::InboundHeaders {
+                headers: vec![header],
+                source: Some(source),
+                wire_response: true,
+            })
+            .unwrap_or_else(|error| panic!("queue owned announcement: {error}"));
+        sync.drain_inbound_headers();
+        assert!(
+            sync.owns_body_fetch(source, tip_hash),
+            "the owned mark must survive the drain that admitted its header"
+        );
+        let mut saw_getdata = false;
+        while let Ok(message) = rx.try_recv() {
+            if matches!(message, crate::Message::GetData(_)) {
+                saw_getdata = true;
+            }
+        }
+        assert!(
+            !saw_getdata,
+            "the owned body must not be direct-fetched twice"
+        );
+        // Control: a fresh announcement without ownership must fetch,
+        // proving this test drives the real direct-fetch path.
+        let (control_source, control_rx) = connected_peer(&peers, 18447, 4);
+        let tip = sync
+            .chain
+            .chain_tip()
+            .unwrap_or_else(|| panic!("tree has a tip"));
+        let prev = bitcoin_rs_primitives::BlockHash::from(tip.hash);
+        let control_header = bitcoin_rs_chain::regtest_fixture::mined_regtest_header(prev, 4)
+            .unwrap_or_else(|error| panic!("fixture mines: {error}"));
+        headers_tx
+            .send(crate::InboundHeaders {
+                headers: vec![control_header],
+                source: Some(control_source),
+                wire_response: true,
+            })
+            .unwrap_or_else(|error| panic!("queue control announcement: {error}"));
+        sync.drain_inbound_headers();
+        let mut control_saw_getdata = false;
+        while let Ok(message) = control_rx.try_recv() {
+            if matches!(message, crate::Message::GetData(_)) {
+                control_saw_getdata = true;
+            }
+        }
+        assert!(
+            control_saw_getdata,
+            "the unowned control announcement must direct-fetch its body"
+        );
+    }
 }

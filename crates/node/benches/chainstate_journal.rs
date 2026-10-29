@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail, ensure};
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
+use bitcoin_rs_primitives::BlockPayload;
 use serde::{Deserialize, Serialize};
 
 const RECORDS: u32 = 10_000;
@@ -42,7 +43,10 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     let config = test_config(data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config, None)?;
-    state.apply_block(&genesis)?;
+    // Locally assembled genesis: one encode retains the exact bytes. Replay
+    // order, checkpoint gate, and tip assertions stay identical.
+    let genesis_payload = BlockPayload::from_local(genesis.clone());
+    state.apply_block(&genesis_payload)?;
     ensure!(
         state.publish_checkpoint()?.is_some(),
         "checkpoint must publish at genesis before the 10k replay"
@@ -52,7 +56,8 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     for height in 1..=RECORDS {
         let block = regtest_fixture::mined_regtest_child_at(previous, height)?;
         previous = block.block_hash();
-        state.apply_block(&block)?;
+        let payload = BlockPayload::from_local(block);
+        state.apply_block(&payload)?;
     }
     drop(state);
 

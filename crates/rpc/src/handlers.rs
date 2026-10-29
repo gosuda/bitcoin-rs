@@ -127,6 +127,10 @@ impl Handler {
                 })
             })
             .transpose()?;
+        // Registration sits after registry resolution and blocking-quota
+        // acquisition, so unknown or refused methods never appear as
+        // active; the guard removes this call's entry on every exit path.
+        let _active = self.ctx.active_calls.begin(method);
         let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
         match handler {
             crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
@@ -662,10 +666,9 @@ mod registry_tests {
             Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
         ));
         chainstate
-            .apply_block(
-                &bitcoin_rs_primitives::Network::Regtest.genesis_block(),
-                None,
-            )
+            .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
+                bitcoin_rs_primitives::Network::Regtest.genesis_block(),
+            ))
             .expect("genesis");
         let mut ctx = Context::new();
         ctx.chain.applied_tip = chainstate.applied_tip_reader();

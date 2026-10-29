@@ -45,6 +45,10 @@ pub(super) struct Report {
     namespaces: BTreeMap<String, Bytes>,
 }
 
+/// Datadirs are only a few levels deep; the cap keeps a mis-pointed root
+/// from recursing without bound and exhausting the stack.
+const MAX_DEPTH: u32 = 32;
+
 pub(super) fn measure(root: &Path) -> io::Result<Report> {
     let metadata = fs::symlink_metadata(root)?;
     if !metadata.is_dir() {
@@ -58,7 +62,7 @@ pub(super) fn measure(root: &Path) -> io::Result<Report> {
         namespaces: BTreeMap::new(),
     };
     let mut seen = HashSet::new();
-    visit(root, ".", metadata.dev(), mount, &mut seen, &mut report)?;
+    visit(root, ".", metadata.dev(), mount, &mut seen, &mut report, 0)?;
     Ok(report)
 }
 
@@ -85,6 +89,7 @@ fn visit(
     mount: u64,
     seen: &mut HashSet<(u64, u64)>,
     report: &mut Report,
+    depth: u32,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !(metadata.is_dir() || metadata.is_file())
@@ -109,10 +114,17 @@ fn visit(
         .or_default()
         .add(&metadata)?;
     if metadata.is_dir() {
-        // Stable order gives cross-namespace hard links a deterministic owner.
-        let mut entries = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
+        if depth >= MAX_DEPTH {
+            return Err(io::Error::other(format!(
+                "directory nesting exceeds {MAX_DEPTH} at {}",
+                path.display()
+            )));
+        }
+        // Entries stream one at a time so a wide directory is never
+        // materialized in memory. Totals are order-independent; a
+        // cross-namespace hard link's bytes follow first-visit order.
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
             let name;
             let child_namespace = if namespace == "." {
                 // Each top-level entry is its own namespace, including loose files.
@@ -124,7 +136,15 @@ fn visit(
             } else {
                 namespace
             };
-            visit(&entry.path(), child_namespace, device, mount, seen, report)?;
+            visit(
+                &entry.path(),
+                child_namespace,
+                device,
+                mount,
+                seen,
+                report,
+                depth + 1,
+            )?;
         }
     }
     Ok(())
@@ -151,10 +171,42 @@ mod tests {
             report.totals.allocated_bytes,
             (root.blocks() + data.blocks()) * 512
         );
-        assert_eq!(report.namespaces["a"].apparent_bytes, data.len());
-        assert_eq!(report.namespaces["a"].allocated_bytes, data.blocks() * 512);
-        assert_eq!(report.namespaces["b"].apparent_bytes, 0);
-        assert_eq!(report.namespaces["b"].allocated_bytes, 0);
+        // Entries stream in readdir order, so either namespace may own the
+        // shared inode; exactly one of them must, and totals stay exact.
+        assert_eq!(
+            report.namespaces["a"].apparent_bytes + report.namespaces["b"].apparent_bytes,
+            data.len()
+        );
+        assert_eq!(
+            report.namespaces["a"].allocated_bytes + report.namespaces["b"].allocated_bytes,
+            data.blocks() * 512
+        );
+        assert!(
+            (report.namespaces["a"].apparent_bytes == data.len()
+                && report.namespaces["b"].apparent_bytes == 0)
+                || (report.namespaces["b"].apparent_bytes == data.len()
+                    && report.namespaces["a"].apparent_bytes == 0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nesting_beyond_max_depth_is_refused() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut parent = dir.path().to_path_buf();
+        for level in 0..=MAX_DEPTH {
+            parent = parent.join(format!("level{level}"));
+            fs::create_dir(&parent)?;
+        }
+        fs::write(parent.join("data"), b"too deep")?;
+        let failure = match measure(dir.path()) {
+            Ok(_) => return Err(io::Error::other("deep nesting was accepted")),
+            Err(failure) => failure,
+        };
+        assert!(
+            failure.to_string().contains("nesting exceeds"),
+            "unexpected error: {failure}"
+        );
         Ok(())
     }
 

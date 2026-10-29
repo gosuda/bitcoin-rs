@@ -1,6 +1,11 @@
 //! Native block type and block-level hashing helpers.
 
-use crate::{BlockHash, Header, Tx, Txid, encode::ConsensusEncode};
+use bytes::Bytes;
+
+use crate::{
+    BlockHash, Header, Tx, Txid,
+    encode::{ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, deserialize},
+};
 
 /// A Bitcoin block in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,6 +60,99 @@ impl Block {
             .unwrap_or(u64::MAX)
             .saturating_mul(3)
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
+    }
+
+    /// Returns the total heap bytes allocated for this block's transaction vector,
+    /// transactions, inputs, outputs, scripts, and witness stacks, including spare capacity.
+    ///
+    /// Excludes the inline `Block` struct itself, any separate serialized raw byte buffer,
+    /// and allocator metadata or size-class rounding.
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        let mut total = self
+            .txs
+            .capacity()
+            .saturating_mul(core::mem::size_of::<Tx>());
+        for tx in &self.txs {
+            total = total.saturating_add(tx.retained_heap_bytes());
+        }
+        total
+    }
+}
+
+/// Exact wire/storage block payload: one decoded [`Block`] plus the exact bytes it carries.
+///
+/// `BlockPayload` owns one decoded [`Block`] plus the exact bytes it carries. Raw ingress
+/// claims decode once via [`BlockPayload::from_raw`]; locally assembled blocks encode once
+/// via [`BlockPayload::from_local`]; the Core-compatible RPC submit path keeps its
+/// ignore-trailing-bytes semantics via [`BlockPayload::from_prefix`]. It introduces no
+/// unchecked pair constructor, no generic buffer, no new parser, and no shared-pointer
+/// wrapper. Cloning is by value: the `Block` is cloned and the `Bytes` handle is shared
+/// by reference count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockPayload {
+    block: Block,
+    bytes: Bytes,
+}
+
+impl BlockPayload {
+    /// Decodes `raw` once through the existing consensus decode and retains the input bytes.
+    ///
+    /// Trailing bytes are rejected with [`DecodeError::TrailingBytes`]. No re-encode
+    /// comparison is performed; canonicality is inherited from the existing
+    /// `ParsedBlock`/`deserialize` contract as it stands today.
+    pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
+        let block = deserialize::<Block>(&raw)?;
+        Ok(Self { block, bytes: raw })
+    }
+
+    /// Encodes `block` once through the existing consensus encoder and retains that encoding.
+    pub fn from_local(block: Block) -> Self {
+        let bytes = Bytes::from(consensus_bytes(&block));
+        Self { block, bytes }
+    }
+
+    /// Decodes one block from the front of `raw`, retaining only the consumed prefix bytes.
+    ///
+    /// Runs the one existing decode shared with [`BlockPayload::from_raw`] through a
+    /// borrow of `raw`, copies the consumed prefix into an exact-sized buffer, and
+    /// returns the consumed length. The ignored `submitblock` suffix allocation is
+    /// released rather than retained behind the prefix, and nothing is
+    /// re-encoded. This exists only for the Core-compatible RPC `submitblock` boundary,
+    /// which ignores
+    /// bytes after the block; every other boundary uses [`BlockPayload::from_raw`] or
+    /// [`BlockPayload::from_local`].
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Owning raw releases the ignored submitblock suffix after copying the consumed prefix"
+    )]
+    pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
+        let mut reader: &[u8] = &raw;
+        let block = Block::consensus_decode(&mut reader)?;
+        let consumed = raw.len() - reader.len();
+        let bytes = Bytes::copy_from_slice(&raw[..consumed]);
+        Ok((Self { block, bytes }, consumed))
+    }
+
+    /// Borrows the decoded block.
+    #[must_use]
+    pub fn block(&self) -> &Block {
+        &self.block
+    }
+
+    /// Borrows the exact retained bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
+    /// Consumes the payload, returning the decoded block and discarding the retained bytes.
+    ///
+    /// Exists for the block-template proposal path, which dry-validates the decoded block
+    /// and never persists bytes.
+    #[must_use]
+    pub fn into_block(self) -> Block {
+        self.block
     }
 }
 
@@ -203,5 +301,323 @@ mod tests {
             Err(DecodeError::TrailingBytes { remaining: 1 })
         );
         Ok(())
+    }
+
+    fn read_test_fixture(name: &str) -> Result<Vec<u8>> {
+        let local = format!("tests/testdata/{name}");
+        if let Ok(bytes) = std::fs::read(&local) {
+            return Ok(bytes);
+        }
+        let manifest = format!("{}/tests/testdata/{name}", env!("CARGO_MANIFEST_DIR"));
+        Ok(std::fs::read(manifest)?)
+    }
+
+    #[test]
+    fn retained_heap_bytes_empty_and_excess_txs_capacity() {
+        assert_eq!(Block::default().retained_heap_bytes(), 0);
+
+        let mut block = Block::default();
+        block.txs.reserve_exact(10);
+        assert_eq!(block.retained_heap_bytes(), 10 * core::mem::size_of::<Tx>());
+    }
+
+    #[test]
+    fn retained_heap_bytes_genesis_fixture_matches_independent_calculation() -> Result<()> {
+        let bytes = read_test_fixture("0.bin")?;
+        let block = deserialize::<Block>(&bytes)?;
+
+        // Independently derive expected value directly from vector capacities.
+        let independent = block.txs.capacity() * core::mem::size_of::<Tx>()
+            + block
+                .txs
+                .iter()
+                .map(|tx| {
+                    let in_caps = tx.inputs.capacity() * core::mem::size_of::<TxIn>();
+                    let out_caps = tx.outputs.capacity() * core::mem::size_of::<TxOut>();
+                    let in_payloads: usize = tx
+                        .inputs
+                        .iter()
+                        .map(|input| {
+                            input.script_sig.capacity()
+                                + input.witness.capacity() * core::mem::size_of::<Vec<u8>>()
+                                + input.witness.iter().map(Vec::capacity).sum::<usize>()
+                        })
+                        .sum();
+                    let out_payloads: usize = tx
+                        .outputs
+                        .iter()
+                        .map(|output| output.script_pubkey.capacity())
+                        .sum();
+                    in_caps + out_caps + in_payloads + out_payloads
+                })
+                .sum::<usize>();
+
+        assert_eq!(block.retained_heap_bytes(), independent);
+
+        // Genesis fixture has 1 tx, 1 input (77-byte script_sig), 1 output (67-byte script_pubkey).
+        let expected_literal = core::mem::size_of::<Tx>()
+            + core::mem::size_of::<TxIn>()
+            + core::mem::size_of::<TxOut>()
+            + 77
+            + 67;
+        assert_eq!(block.retained_heap_bytes(), expected_literal);
+        Ok(())
+    }
+
+    #[test]
+    fn retained_heap_bytes_fixture_363731_matches_independent_calculation() -> Result<()> {
+        let bytes = read_test_fixture("363731.bin")?;
+        let block = deserialize::<Block>(&bytes)?;
+
+        let independent = block.txs.capacity() * core::mem::size_of::<Tx>()
+            + block
+                .txs
+                .iter()
+                .map(|tx| {
+                    let in_caps = tx.inputs.capacity() * core::mem::size_of::<TxIn>();
+                    let out_caps = tx.outputs.capacity() * core::mem::size_of::<TxOut>();
+                    let in_payloads: usize = tx
+                        .inputs
+                        .iter()
+                        .map(|input| {
+                            input.script_sig.capacity()
+                                + input.witness.capacity() * core::mem::size_of::<Vec<u8>>()
+                                + input.witness.iter().map(Vec::capacity).sum::<usize>()
+                        })
+                        .sum();
+                    let out_payloads: usize = tx
+                        .outputs
+                        .iter()
+                        .map(|output| output.script_pubkey.capacity())
+                        .sum();
+                    in_caps + out_caps + in_payloads + out_payloads
+                })
+                .sum::<usize>();
+
+        assert_eq!(block.retained_heap_bytes(), independent);
+
+        // 363731 has 1883 txs, 3748 inputs (431,845 scriptSig bytes), 4265 outputs (106,226 scriptPubKey bytes).
+        // On 64-bit systems with size_of::<usize>() == 8:
+        // 1883 * 56 + 3748 * 88 + 4265 * 32 + 431,845 + 106,226 = 1,109,823 bytes.
+        if core::mem::size_of::<usize>() == 8 {
+            assert_eq!(block.retained_heap_bytes(), 1_109_823);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_heap_bytes_synthetic_witness_heavy_capacity_variations() {
+        let mut script_sig_0 = Vec::with_capacity(60);
+        script_sig_0.extend_from_slice(&[0xaa; 10]);
+
+        let mut wit_item_0 = Vec::with_capacity(128);
+        wit_item_0.extend_from_slice(&[0x01; 32]);
+        let mut wit_item_1 = Vec::with_capacity(256);
+        wit_item_1.extend_from_slice(&[0x02; 64]);
+        let mut witness_stack_0 = Vec::with_capacity(4);
+        witness_stack_0.push(wit_item_0);
+        witness_stack_0.push(wit_item_1);
+
+        let mut wit_item_2 = Vec::with_capacity(80);
+        wit_item_2.extend_from_slice(&[0x03; 33]);
+        let mut witness_stack_1 = Vec::with_capacity(3);
+        witness_stack_1.push(wit_item_2);
+
+        let mut inputs = Vec::with_capacity(5);
+        inputs.push(TxIn {
+            previous_output: OutPoint::default(),
+            script_sig: crate::Script::from_bytes(script_sig_0),
+            sequence: crate::Sequence::MAX,
+            witness: crate::Witness::from_stack(witness_stack_0),
+        });
+        inputs.push(TxIn {
+            previous_output: OutPoint::default(),
+            script_sig: crate::Script::new(),
+            sequence: crate::Sequence::MAX,
+            witness: crate::Witness::from_stack(witness_stack_1),
+        });
+
+        let mut spk_0 = Vec::with_capacity(75);
+        spk_0.extend_from_slice(&[0x51; 34]);
+        let mut spk_1 = Vec::with_capacity(110);
+        spk_1.extend_from_slice(&[0x00; 22]);
+        let mut outputs = Vec::with_capacity(4);
+        outputs.push(TxOut {
+            value: crate::Amount::from_sat(50_000),
+            script_pubkey: crate::Script::from_bytes(spk_0),
+        });
+        outputs.push(TxOut {
+            value: crate::Amount::from_sat(60_000),
+            script_pubkey: crate::Script::from_bytes(spk_1),
+        });
+
+        let tx = Tx {
+            version: 2,
+            inputs,
+            outputs,
+            lock_time: crate::LockTime::ZERO,
+        };
+
+        let mut txs = Vec::with_capacity(3);
+        txs.push(tx);
+
+        let mut block = Block {
+            header: Header::default(),
+            txs,
+        };
+
+        let expected_txs_buf = 3 * core::mem::size_of::<Tx>();
+        let expected_inputs_buf = 5 * core::mem::size_of::<TxIn>();
+        let expected_outputs_buf = 4 * core::mem::size_of::<TxOut>();
+        let expected_input_0_scripts = 60 + 4 * core::mem::size_of::<Vec<u8>>() + 128 + 256;
+        let expected_input_1_scripts = 3 * core::mem::size_of::<Vec<u8>>() + 80;
+        let expected_output_scripts = 75 + 110;
+
+        let expected_tx = expected_inputs_buf
+            + expected_outputs_buf
+            + expected_input_0_scripts
+            + expected_input_1_scripts
+            + expected_output_scripts;
+        let expected_block = expected_txs_buf + expected_tx;
+
+        assert_eq!(block.txs[0].retained_heap_bytes(), expected_tx);
+        assert_eq!(block.retained_heap_bytes(), expected_block);
+
+        // Verifying spare capacity accounting when reserving extra capacity in txs:
+        block.txs.reserve_exact(7);
+        let extra_txs_cap = block.txs.capacity() - 3;
+        let expected_after_reserve = expected_block + extra_txs_cap * core::mem::size_of::<Tx>();
+        assert_eq!(block.retained_heap_bytes(), expected_after_reserve);
+    }
+
+    #[test]
+    fn payload_from_raw_retains_exact_fixture_bytes() -> Result<()> {
+        use super::BlockPayload;
+
+        let bytes = read_test_fixture("363731.bin")?;
+        let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes.clone()))?;
+
+        // Full decoded-block equality and byte-exact retention, never hash-only.
+        assert_eq!(payload.bytes().as_ref(), bytes.as_slice());
+        assert_eq!(payload.block(), &deserialize::<Block>(&bytes)?);
+        assert_eq!(crate::encode::consensus_bytes(payload.block()), bytes);
+        assert_eq!(payload.into_block(), deserialize::<Block>(&bytes)?);
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_raw_rejects_trailing_bytes() -> Result<()> {
+        use super::BlockPayload;
+
+        let mut bytes = read_test_fixture("0.bin")?;
+        assert!(BlockPayload::from_raw(bytes::Bytes::from(bytes.clone())).is_ok());
+        bytes.push(0xFF);
+
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::from(bytes)),
+                Err(DecodeError::TrailingBytes { remaining: 1 })
+            ),
+            "exactly one trailing byte must be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_raw_rejects_malformed_bytes() {
+        use super::BlockPayload;
+
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::new()),
+                Err(DecodeError::EndOfData { .. })
+            ),
+            "empty input must fail, not decode to a default block"
+        );
+        assert!(
+            matches!(
+                BlockPayload::from_raw(bytes::Bytes::from(vec![0x01_u8; 100])),
+                Err(DecodeError::EndOfData { .. })
+            ),
+            "truncated body must fail instead of materializing a short block"
+        );
+    }
+
+    #[test]
+    fn payload_from_prefix_returns_consumed_and_discards_remainder() -> Result<()> {
+        use super::BlockPayload;
+
+        let mut bytes = read_test_fixture("0.bin")?;
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
+
+        let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(bytes.clone()))?;
+
+        // Consumed length is exactly the block; retained bytes exclude the remainder.
+        assert_eq!(consumed, bytes.len() - 3);
+        assert_eq!(payload.bytes().as_ref(), &bytes[..consumed]);
+        assert_eq!(payload.block(), &deserialize::<Block>(&bytes[..consumed])?);
+        assert_eq!(payload.bytes().len(), consumed);
+
+        // A large ignored submitblock suffix is released: only the consumed
+        // prefix is retained, byte for byte.
+        let mut padded = read_test_fixture("0.bin")?;
+        padded.extend_from_slice(&vec![0xA5; 1 << 20]);
+        let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(padded.clone()))?;
+        assert_eq!(consumed, padded.len() - (1 << 20));
+        assert_eq!(payload.bytes().len(), consumed);
+        assert_eq!(payload.bytes().as_ref(), &padded[..consumed]);
+
+        // Exact input with no remainder consumes everything.
+        let exact = read_test_fixture("363731.bin")?;
+        let exact_len = exact.len();
+        let (payload, consumed) = BlockPayload::from_prefix(bytes::Bytes::from(exact.clone()))?;
+        assert_eq!(consumed, exact_len);
+        assert_eq!(payload.bytes().as_ref(), exact.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_from_local_encodes_witness_block_exactly() -> Result<()> {
+        use super::BlockPayload;
+
+        let block = block_with_tx(witness_tx(
+            vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
+        ));
+        let payload = BlockPayload::from_local(block.clone());
+
+        let expected = crate::encode::consensus_bytes(&block);
+        assert_eq!(payload.bytes().as_ref(), expected.as_slice());
+        assert_eq!(payload.block(), &block);
+        // Witness material is byte-identical in the retained encoding.
+        assert!(
+            payload.bytes().windows(64).any(|w| w == [0x21_u8; 64]),
+            "retained bytes must carry the full witness item"
+        );
+        // Strict re-decode of the retained bytes reproduces the full block value.
+        let roundtrip = BlockPayload::from_raw(payload.bytes().clone())?;
+        assert_eq!(roundtrip.block(), &block);
+        assert_eq!(roundtrip.bytes(), payload.bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn payload_witness_identity_is_byte_exact_not_txid_only() {
+        use super::BlockPayload;
+
+        // Same base transaction with different witness items: identical txids but
+        // different consensus bytes. Identity must come from bytes, not txid.
+        let left = block_with_tx(witness_tx(vec![vec![0x11_u8; 32]].into()));
+        let right = block_with_tx(witness_tx(vec![vec![0x22_u8; 32]].into()));
+        assert_eq!(left.txs[0].txid(), right.txs[0].txid());
+
+        let left_payload = BlockPayload::from_local(left.clone());
+        let right_payload = BlockPayload::from_local(right.clone());
+        assert_ne!(
+            left_payload.bytes().as_ref(),
+            right_payload.bytes().as_ref()
+        );
+        assert_ne!(left_payload.block(), right_payload.block());
+        assert_eq!(left_payload.block(), &left);
+        assert_eq!(right_payload.block(), &right);
     }
 }

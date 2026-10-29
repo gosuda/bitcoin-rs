@@ -1,4 +1,5 @@
-//! Core31.1 IP netgroups. Classification never rewrites a dial endpoint.
+//! Core31.1 IP and overlay netgroups. Classification never rewrites a dial endpoint.
+use bitcoin_rs_primitives::PeerAddress;
 use std::net::{IpAddr, Ipv4Addr};
 
 pub(crate) fn canonical_ip(ip: IpAddr) -> IpAddr {
@@ -68,9 +69,16 @@ pub(crate) enum NetworkClass {
     Unroutable,
     Ipv4,
     Ipv6,
+    Onion,
+    I2p,
 }
 
-pub(crate) fn network_class(ip: IpAddr) -> NetworkClass {
+pub(crate) fn network_class(address: impl Into<PeerAddress>) -> NetworkClass {
+    let ip = match address.into() {
+        PeerAddress::Ip(ip) => ip,
+        PeerAddress::Onion(_) => return NetworkClass::Onion,
+        PeerAddress::I2p(_) => return NetworkClass::I2p,
+    };
     if !routable(ip) {
         NetworkClass::Unroutable
     } else if linked_ipv4(ip).is_some() {
@@ -156,7 +164,12 @@ impl NetGroups {
         self.identity
     }
 
-    pub(crate) fn group(&self, ip: IpAddr) -> Vec<u8> {
+    pub(crate) fn group(&self, address: impl Into<PeerAddress>) -> Vec<u8> {
+        let ip = match address.into() {
+            PeerAddress::Ip(ip) => ip,
+            PeerAddress::Onion(key) => return vec![4, key[0] | 15],
+            PeerAddress::I2p(key) => return vec![5, key[0] | 15],
+        };
         // Core applies ASMap only to IPv4/IPv6 network classes; local and
         // unroutable IPs keep the prefix owner's unclassified group.
         let asn = if self.bytes.is_empty() || !routable(ip) {
@@ -330,6 +343,26 @@ pub(crate) const LINKED_ASMAP: &[u8] =
 mod tests {
     use super::*;
 
+    #[test]
+    fn overlay_groups_use_address_prefixes() {
+        let groups = NetGroups::default();
+        for (address, class, group) in [
+            (
+                PeerAddress::Onion([0x12; 32]),
+                NetworkClass::Onion,
+                vec![4, 0x1f],
+            ),
+            (
+                PeerAddress::I2p([0x23; 32]),
+                NetworkClass::I2p,
+                vec![5, 0x2f],
+            ),
+        ] {
+            assert_eq!(network_class(address), class);
+            assert_eq!(groups.group(address), group);
+        }
+    }
+
     // The bytes and expected addresses/ASNs are copied unchanged from Bitcoin
     // Core v31.1 src/test/netbase_tests.cpp::asmap_test_vectors (MIT).
     #[test]
@@ -357,7 +390,7 @@ mod tests {
             ("ffff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", 824_019),
         ] {
             assert_eq!(
-                interpret(CORE_ASMAP, address.parse().expect("IP")),
+                interpret(CORE_ASMAP, address.parse::<IpAddr>().expect("IP")),
                 Some(expected),
                 "{address}"
             );
@@ -407,7 +440,7 @@ mod tests {
             "2002:102:304:9999:9999:9999:9999:9999",
             "2001:0:9999:9999:9999:9999:FEFD:FCFB",
         ] {
-            let ip = encoded.parse().expect("Core vector");
+            let ip = encoded.parse::<IpAddr>().expect("Core vector");
             assert_eq!(NetGroups::default().group(ip), vec![1, 1, 2]);
         }
         // A Core-generated map maps native IPv6 to 64500, while linked IPv4
@@ -421,7 +454,7 @@ mod tests {
             "::ffff:0:808:808",
             "2001:0:0:0:0:0:f7f7:f7f7",
         ] {
-            let ip = encoded.parse().expect("linked vector");
+            let ip = encoded.parse::<IpAddr>().expect("linked vector");
             assert_eq!(interpret(LINKED_ASMAP, ip), Some(64501), "{encoded}");
             assert_eq!(prefix_group(ip), vec![1, 8, 8]);
         }
@@ -431,11 +464,17 @@ mod tests {
             assert_eq!(interpret(LINKED_ASMAP, ip), Some(64500));
         }
         assert_eq!(
-            interpret(LINKED_ASMAP, "8.8.1.1".parse().expect("IPv4")),
+            interpret(
+                LINKED_ASMAP,
+                "8.8.1.1".parse::<std::net::IpAddr>().expect("IPv4")
+            ),
             Some(15169)
         );
         assert_eq!(
-            interpret(LINKED_ASMAP, "9.9.9.9".parse().expect("IPv4")),
+            interpret(
+                LINKED_ASMAP,
+                "9.9.9.9".parse::<std::net::IpAddr>().expect("IPv4")
+            ),
             Some(19281)
         );
     }
@@ -469,7 +508,7 @@ mod tests {
             ("fe80:1::1", NetworkClass::Ipv6),
         ] {
             assert_eq!(
-                network_class(address.parse().expect("Core IP case")),
+                network_class(address.parse::<IpAddr>().expect("Core IP case")),
                 expected,
                 "{address}"
             );

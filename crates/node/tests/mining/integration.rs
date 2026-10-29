@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bitcoin::hex::DisplayHex;
-use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope, MutationOutcome};
+use bitcoin_rs_mempool::{BodyInterest, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
     encode::double_sha256,
@@ -338,7 +338,7 @@ fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Re
     assert!(Arc::ptr_eq(gateway.pool(), &state.mempool()));
     assert_eq!(gateway.engine(), state.config().validation.engine);
     gateway
-        .attach_observer_leg("test-recorder", observer.clone())
+        .attach_observer_leg("test-recorder", observer.clone(), BodyInterest::Metadata)
         .unwrap_or_else(|error| panic!("the node installs an observer slot to extend: {error}"));
     let parent = seed_coinbase_spend();
     let parent_txid = parent.txid();

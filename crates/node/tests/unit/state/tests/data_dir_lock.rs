@@ -323,7 +323,7 @@ fn index_open_spec_and_opened_store_each_keep_the_directory_locked() -> anyhow::
     config.indexes.txindex = true;
     let guard: bitcoin_rs_storage::StoreGuard = Arc::new(DataDirLock::acquire(dir.path())?);
 
-    let spec = crate::state::build_derived_index_open_spec(&config, 32 << 20, 1, &guard)?
+    let spec = crate::state::build_derived_index_open_spec(&config, 32 << 20, 1, &guard, None)?
         .ok_or_else(|| anyhow::anyhow!("an enabled txindex must yield an open spec"))?;
     drop(guard);
     assert_directory_locked(dir.path());

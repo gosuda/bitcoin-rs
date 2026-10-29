@@ -2,9 +2,10 @@
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
 use bitcoin_rs_p2p::{ListenerExtras, NetworkActivity, PeerTable};
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::error::Error;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -49,7 +50,11 @@ impl Drop for ServeGuard {
 
 #[test]
 fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -100,7 +105,11 @@ fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn serve_returns_without_accepting_when_flag_preset() -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
 
     let shutdown = Arc::new(AtomicBool::new(true));
     let listener_shutdown = Arc::clone(&shutdown);

@@ -24,7 +24,6 @@ use bitcoin::{
 use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
 
 use crate::IndexCapabilities;
-use crate::IndexCapability;
 
 use bitcoin_rs_primitives::Hash256;
 
@@ -377,12 +376,6 @@ impl Harness {
         let evidence = RecordedIndexAhead::new();
         let reporter: Arc<dyn IndexAheadSink> = evidence.clone();
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
-        let utxo = enabled
-            .contains(IndexCapability::ScriptLive)
-            .then(|| bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new())));
-        let chain_transition = enabled
-            .contains(IndexCapability::ScriptLive)
-            .then(|| bitcoin_rs_chain::TransitionDomain::new().stable_read());
         let retention = Arc::new(RetentionRegistry::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
@@ -399,8 +392,8 @@ impl Harness {
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover,
-            utxo,
-            chain_transition,
+            seed_slot: None,
+            seed_bundle: parking_lot::Mutex::new(None),
         };
         Self {
             _index_dir: index_dir,
@@ -428,20 +421,6 @@ impl Harness {
             }
         }
         panic!("worker did not converge");
-    }
-
-    /// Runs passes until the worker reports `Stalled`, bounded so a hot
-    /// `Progressed` loop fails the test. `CaughtUp` is a failure too: this is
-    /// for states where some capability is still owed rows.
-    fn settle_stalled(&self, pending: &mut Option<PendingForward>) {
-        for _ in 0..16 {
-            match self.worker.reconcile_once(pending).expect("reconcile pass") {
-                ReconcileAction::Stalled => return,
-                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
-                ReconcileAction::CaughtUp => panic!("a capability still owed rows is caught up"),
-            }
-        }
-        panic!("worker kept progressing instead of waiting");
     }
 
     fn watermarks(&self) -> IndexWatermarks {
@@ -708,14 +687,21 @@ impl Drop for StopOnDrop {
 /// absent, `ScriptLive` is seeded at height 2, and the applied tip is height
 /// 4. The history families wait on their absent first body while `ScriptLive`
 /// has everything its own range needs. Returns the lost prefix.
-fn held_prefix() -> (ForkFixture, Harness, BodyMap) {
+fn held_prefix() -> (ForkFixture, SeedCellHarness, BodyMap) {
     let f = ForkFixture::new(4);
     f.persist_undo();
-    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_AND_SCRIPTS);
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
     let lost = f.take_bodies(2);
-    h.set_tip(&f.tip(f.a[1]));
+    let tip = f.tip(f.a[1]);
+    let (artifact, _keep) = cell_seed_artifact(tip.hash, tip.height, 32);
+    h.cell.want();
+    assert_eq!(
+        h.cell.offer(artifact),
+        bitcoin_rs_utxo::OfferOutcome::Stored
+    );
+    h.set_tip(&tip);
     h.settle_stalled(&mut None);
-    assert_eq!(h.watermarks().script_live, Some(at(&f.tip(f.a[1]))));
+    assert_eq!(h.watermarks().script_live, Some(at(&tip)));
     h.set_tip(&f.tip(f.a[3]));
     (f, h, lost)
 }
@@ -803,12 +789,18 @@ struct AbsentBody {
 /// height 300, and the body at height 280 is absent. The history families'
 /// first 256-body window is whole and the second is not, so their leg retains
 /// a prefix and then meets the absent body. Returns the withheld body.
-fn retained_prefix() -> (ForkFixture, Harness, AbsentBody) {
+fn retained_prefix() -> (ForkFixture, SeedCellHarness, AbsentBody) {
     let f = ForkFixture::new(300);
     f.persist_undo();
-    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_AND_SCRIPTS);
-    h.set_tip(&f.tip(f.a[289]));
-    // Seeds `ScriptLive` at height 290 before any body is read.
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let tip = f.tip(f.a[289]);
+    let (artifact, _keep) = cell_seed_artifact(tip.hash, tip.height, 32);
+    h.cell.want();
+    assert_eq!(
+        h.cell.offer(artifact),
+        bitcoin_rs_utxo::OfferOutcome::Stored
+    );
+    h.set_tip(&tip);
     assert!(matches!(
         h.worker.reconcile_once(&mut None),
         Ok(ReconcileAction::Progressed)
@@ -830,7 +822,7 @@ fn retained_prefix() -> (ForkFixture, Harness, AbsentBody) {
 #[test]
 fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_change() {
     let (f, h, _absent) = retained_prefix();
-    let a255 = Some(at(&f.tip(f.a[254])));
+    let a279 = Some(at(&f.tip(f.a[278])));
     let a290 = Some(at(&f.tip(f.a[289])));
     let mut pending = None;
 
@@ -871,15 +863,15 @@ fn retained_prefix_commits_before_any_group_switch_and_never_outlives_a_fence_ch
         Ok(ReconcileAction::Progressed)
     ));
     let flushed = h.watermarks();
-    assert_eq!(flushed.tx_lookup, a255);
-    assert_eq!(flushed.script_history, a255);
+    assert_eq!(flushed.tx_lookup, a279);
+    assert_eq!(flushed.script_history, a279);
     assert_eq!(flushed.script_live, a290);
 
     // Only then does the next pass reach the ready group.
     h.settle_stalled(&mut pending);
     let end = h.watermarks();
     assert_eq!(end.script_live, Some(at(&f.tip(f.a[299]))));
-    assert_eq!(end.tx_lookup, a255);
+    assert_eq!(end.tx_lookup, a279);
 }
 
 /// Through the real run loop: the retained prefix commits at its deadline,
@@ -893,7 +885,7 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     let writer = Arc::clone(&h.writer);
     let runtime = Arc::clone(&h.runtime);
     let watermarks = move || writer.fenced_watermarks().expect("watermarks").1;
-    let a255 = Some(at(&f.tip(f.a[254])));
+    let a279 = Some(at(&f.tip(f.a[278])));
     let a300 = Some(at(&f.tip(f.a[299])));
 
     let worker = h.worker;
@@ -902,7 +894,7 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
 
     wait_until("the prefix commit and the ready group", || {
         let marks = watermarks();
-        marks.tx_lookup == a255 && marks.script_live == a300
+        marks.tx_lookup == a279 && marks.script_live == a300
     });
     f.bodies.bodies.lock().insert(absent.key, absent.body);
     wait_until("the history families to catch up", || {
@@ -928,8 +920,14 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     for undo in [Undo::Present, Undo::Missing, Undo::Corrupt] {
         let f = ForkFixture::new(5);
         f.persist_undo();
-        let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_AND_SCRIPTS);
+        let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
+        let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
+        h.cell.want();
+        assert_eq!(
+            h.cell.offer(artifact),
+            bitcoin_rs_utxo::OfferOutcome::Stored
+        );
         h.set_tip(&a2);
         h.settle(&mut None);
 
@@ -959,6 +957,12 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             assert_eq!(reset.script_live, None, "ScriptLive is reset");
             assert_eq!(reset.tx_lookup, Some(at(&a2)), "siblings keep their rows");
             assert_eq!(reset.script_history, Some(at(&a2)));
+            let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
+            h.cell.want();
+            assert_eq!(
+                h.cell.offer(artifact),
+                bitcoin_rs_utxo::OfferOutcome::Stored
+            );
         }
         h.settle(&mut pending);
         h.assert_at(&a5);
@@ -1041,4 +1045,331 @@ fn undo_read_failure_is_not_a_missing_undo() {
         Err(DerivedIndexWorkerError::Storage(_))
     ));
     assert_eq!(h.watermarks().script_live, Some(at(&f.tip(f.a[1]))));
+}
+
+/// Row 12 (P1 slice S3): a `ScriptLive` group `Pruned` at the seed take is
+/// terminal but scoped: the failure flag is set, `Wanted` is kept, the worker
+/// keeps running, and the other groups still progress. Replay progress clears
+/// the flag without any take; a later token clears it again and seeds without
+/// a history spin.
+///
+/// Needs the S2 worker dispatch (`seed_slot` / `SeedBundle`, the
+/// `script_live_failure` seam); the parent gates the union after S2 lands.
+#[test]
+fn script_live_pruned_terminal_keeps_worker_alive() {
+    let f = ForkFixture::new(4);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    // Converge at A1 with no token: replay covers the live family.
+    h.set_tip(&f.tip(f.a[0]));
+    let mut pending = None;
+    h.settle(&mut pending);
+    h.assert_at(&f.tip(f.a[0]));
+
+    // Prune everything below 3, then move the tip above the frontier.
+    h.retention.reserve(3).commit(3);
+    h.set_tip(&f.tip(f.a[2]));
+    // Bounded passes: never an error, never a global failure; the terminal
+    // flag must raise on the first pruned grant.
+    let mut flagged = false;
+    for _ in 0..16 {
+        match h.worker.reconcile_once(&mut pending).expect("prune pass") {
+            ReconcileAction::CaughtUp
+            | ReconcileAction::Progressed
+            | ReconcileAction::Buffered
+            | ReconcileAction::Stalled => {}
+        }
+        assert!(!h.runtime.should_stop(), "worker stays alive");
+        assert!(
+            h.runtime.failure_message().is_none(),
+            "no global worker failure"
+        );
+        if h.runtime.script_live_failure().is_some() {
+            flagged = true;
+        }
+    }
+    assert!(flagged, "pruned frontier raises terminal unavailable");
+    let t = f.tip(f.a[2]);
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(at(&t)),
+        "other groups progress"
+    );
+    assert_eq!(h.watermarks().script_history, Some(at(&t)));
+    assert_eq!(
+        h.watermarks().script_live,
+        None,
+        "live waits for a replacement artifact after the old view is reset"
+    );
+    // Demand persists while flagged, and replay progress clears the flag
+    // without any take.
+    assert!(h.cell.is_wanted(), "D keeps Wanted while flagged");
+    let mut converged_once = false;
+    for _ in 0..16 {
+        match h.worker.reconcile_once(&mut pending).expect("replay pass") {
+            ReconcileAction::CaughtUp
+            | ReconcileAction::Progressed
+            | ReconcileAction::Buffered
+            | ReconcileAction::Stalled => {}
+        }
+        assert!(!h.runtime.should_stop(), "worker stays alive");
+        assert!(
+            h.runtime.failure_message().is_none(),
+            "no global worker failure"
+        );
+        if h.watermarks().tx_lookup == Some(at(&t)) && h.watermarks().script_history == Some(at(&t))
+        {
+            converged_once = true;
+        }
+    }
+    assert!(converged_once, "other groups converge");
+
+    // A later token clears the flag and seeds without a history spin.
+    let (token, _keep) = cell_seed_artifact(t.hash, t.height, 32);
+    h.cell.want();
+    assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
+    h.settle(&mut pending);
+    assert!(
+        h.runtime.script_live_failure().is_none(),
+        "take clears the flag"
+    );
+    assert_eq!(h.watermarks().script_live, Some(at(&t)));
+    h.assert_at(&t);
+}
+
+/// Row 14 (P1 slice S3): the first catch-up leg consumes the held seed lease
+/// instead of requesting a second one. Stalled legs put the pin back;
+/// durable progress past H releases it; at most one lease is ever live.
+#[test]
+fn seed_first_leg_consumes_held_lease() {
+    // Lease lifecycle discipline on a real registry first.
+    let registry = Arc::new(RetentionRegistry::new());
+    let access = HistoryAccess::new(Arc::clone(&registry), RetentionBudget::Depth(288));
+    let lease = access.request_history(2).expect("grant at 2");
+    assert_eq!(lease.floor(), Some(2));
+    assert_eq!(registry.active_leases(), 1);
+    lease.advance(4);
+    assert_eq!(lease.floor(), Some(4), "progress moves the pin");
+    drop(lease);
+    assert_eq!(registry.retention_floor(), None);
+    assert_eq!(registry.active_leases(), 0);
+
+    // The worker leg consumes the bundle pin: take, stall with the pin held,
+    // then converge and release.
+    let f = ForkFixture::new(4);
+    f.persist_undo();
+    let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+    let h_tip = f.tip(f.a[1]);
+    let (token, _keep) = cell_seed_artifact(h_tip.hash, h_tip.height, 32);
+    h.cell.want();
+    assert_eq!(h.cell.offer(token), bitcoin_rs_utxo::OfferOutcome::Stored);
+    h.set_tip(&f.tip(f.a[3]));
+    // Withhold the last body so the first leg stalls with the bundle held.
+    let absent = f.a_key(3);
+    let withheld = f
+        .bodies
+        .bodies
+        .lock()
+        .remove(&absent)
+        .expect("withheld body");
+    let mut pending = None;
+    let first = h.worker.reconcile_once(&mut pending).expect("take");
+    assert!(
+        !matches!(first, ReconcileAction::CaughtUp),
+        "take plus seed never completes the pass"
+    );
+    assert!(h.cell.take().is_none(), "one take consumes the token");
+    assert_eq!(
+        h.watermarks().script_live,
+        Some(at(&h_tip)),
+        "seed commits H before the first leg"
+    );
+    let lease_floor = {
+        let guard = h.worker.seed_bundle.lock();
+        let bundle = guard.as_ref().expect("bundle held");
+        bundle.lease.as_ref().expect("pin held").floor()
+    };
+    assert_eq!(
+        lease_floor,
+        Some(h_tip.height),
+        "the first leg runs under the held pin"
+    );
+    assert_eq!(h.retention.active_leases(), 1);
+    for _ in 0..16 {
+        match h.worker.reconcile_once(&mut pending).expect("stalled leg") {
+            ReconcileAction::CaughtUp
+            | ReconcileAction::Progressed
+            | ReconcileAction::Buffered
+            | ReconcileAction::Stalled => {}
+        }
+        assert!(
+            h.retention.active_leases() <= 1,
+            "stalled legs put the single pin back, never a second one"
+        );
+        assert!(h.runtime.failure_message().is_none());
+        assert!(
+            h.worker.seed_bundle.lock().is_some(),
+            "stalls keep the bundle instead of re-taking"
+        );
+    }
+    f.bodies.bodies.lock().insert(absent, withheld);
+    h.settle(&mut pending);
+    let t = f.tip(f.a[3]);
+    assert_eq!(h.watermarks().script_live, Some(at(&t)));
+    h.assert_at(&t);
+    assert_eq!(h.retention.active_leases(), 0, "progress past H releases");
+    assert_eq!(h.retention.retention_floor(), None);
+}
+
+/// Worker harness with a real seed cell for the terminal-Pruned and
+/// held-lease proofs. Separate from `Harness` so the shared fixture stays
+/// untouched: S2 updates the shared literal when its fields land.
+struct SeedCellHarness {
+    _index_dir: tempfile::TempDir,
+    writer: Arc<dyn TxIndexWriter>,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    runtime: Arc<DerivedIndexRuntime>,
+    retention: Arc<RetentionRegistry>,
+    cell: bitcoin_rs_utxo::SeedOfferCell,
+    worker: Worker,
+}
+
+impl SeedCellHarness {
+    fn new(fixture: &ForkFixture, enabled: IndexCapabilities) -> Self {
+        let index_dir = tempfile::tempdir().expect("index dir");
+        let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
+        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
+            crate::IndexWriter::open(store, 1).expect("index writer open"),
+        ));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
+        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
+        let reporter: Arc<dyn IndexAheadSink> = RecordedIndexAhead::new();
+        let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
+        let retention = Arc::new(RetentionRegistry::new());
+        let cell: bitcoin_rs_utxo::SeedOfferCell = Arc::new(bitcoin_rs_utxo::SeedSlot::new());
+        let worker = Worker {
+            runtime: Arc::clone(&runtime),
+            writer: Arc::clone(&writer),
+            applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
+            block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&fixture.tree)),
+            body_store: Some(body_store),
+            history: HistoryAccess::new(Arc::clone(&retention), RetentionBudget::Depth(288)),
+            batch_limits: DEFAULT_BATCH_LIMITS,
+            enabled,
+            chain_events: Arc::new(TestChainCursor),
+            reporter,
+            wake_rx,
+            quiet_period: Duration::ZERO,
+            batch_delay: Duration::ZERO,
+            rollback_rebuild_cutover: u32::MAX,
+            seed_slot: Some(cell.clone()),
+            seed_bundle: parking_lot::Mutex::new(None),
+        };
+        Self {
+            _index_dir: index_dir,
+            writer,
+            applied_tip,
+            runtime,
+            retention,
+            cell,
+            worker,
+        }
+    }
+
+    fn set_tip(&self, tip: &Arc<TipSnapshot>) {
+        self.applied_tip.store(Some(Arc::clone(tip)));
+    }
+
+    fn settle_stalled(&self, pending: &mut Option<PendingForward>) {
+        for _ in 0..16 {
+            match self.worker.reconcile_once(pending).expect("reconcile pass") {
+                ReconcileAction::Stalled => return,
+                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
+                ReconcileAction::CaughtUp => panic!("a capability still owed rows is caught up"),
+            }
+        }
+        panic!("worker kept progressing instead of waiting");
+    }
+
+    fn watermarks(&self) -> IndexWatermarks {
+        self.writer.fenced_watermarks().expect("watermarks").1
+    }
+
+    fn assert_at(&self, tip: &TipSnapshot) {
+        let expected = Some(IndexWatermark {
+            height: tip.height,
+            hash: tip.hash.to_le_bytes(),
+        });
+        let watermarks = self.watermarks();
+        assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
+        assert_eq!(
+            watermarks.script_history, expected,
+            "script_history watermark"
+        );
+    }
+
+    /// Runs passes until `CaughtUp`, asserting the worker never errors, never
+    /// publishes global failure, and never holds more than one history pin.
+    fn settle(&self, pending: &mut Option<PendingForward>) {
+        for _ in 0..64 {
+            assert!(
+                self.retention.active_leases() <= 1,
+                "single live history pin at every instant"
+            );
+            match self.worker.reconcile_once(pending).expect("reconcile pass") {
+                ReconcileAction::CaughtUp => return,
+                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
+                ReconcileAction::Stalled => panic!("worker stalled"),
+            }
+        }
+        panic!("worker did not converge");
+    }
+}
+
+/// Mints a real sealed artifact over `n` synthetic coins and keeps its
+/// directory alive. The witness binds the exact bytes; the file the strict
+/// load consumed is the descriptor that gets sealed.
+fn cell_seed_artifact(
+    tip: Hash256,
+    height: u32,
+    n: u64,
+) -> (bitcoin_rs_utxo::VerifiedSnapshotArtifact, tempfile::TempDir) {
+    let set = bitcoin_rs_utxo::UtxoSet::new();
+    let mut changes = bitcoin_rs_utxo::contract::BlockChanges::default();
+    for i in 0..n {
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&i.to_le_bytes());
+        let txid = Hash256::from_le_bytes(&bytes);
+        changes.add(bitcoin_rs_utxo::contract::UtxoAdd::new(
+            bitcoin_rs_primitives::OutPoint::new(txid.into(), 0),
+            bitcoin_rs_primitives::TxOut {
+                value: bitcoin_rs_primitives::Amount::from_sat(1_000 + i),
+                script_pubkey: vec![0x51].into(),
+            },
+            false,
+            height,
+        ));
+    }
+    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &tip).expect("commit coins");
+    let mut bytes = Vec::new();
+    let (_, (), witness) =
+        bitcoin_rs_utxo::write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())
+            .expect("witnessed encode");
+    let witness = witness.expect("valid encode mints a witness");
+    let dir = tempfile::tempdir().expect("artifact dir");
+    let path = dir.path().join("seed-v4.dat");
+    std::fs::write(&path, &bytes).expect("stage artifact");
+    let mut file = std::fs::File::open(&path).expect("open artifact");
+    let (_, (), read_witness) =
+        bitcoin_rs_utxo::read_snapshot_strict_v4_witnessed(&mut file, ()).expect("decode");
+    assert_eq!(read_witness.sha256(), witness.sha256());
+    let artifact = bitcoin_rs_utxo::VerifiedSnapshotArtifact::seal(
+        file,
+        read_witness,
+        bitcoin_rs_utxo::SeedProvenance::AssumeUtxoArchive {
+            base: tip.to_le_bytes(),
+        },
+    );
+    (artifact, dir)
 }
