@@ -6,7 +6,7 @@ This document owns the two synchronization lanes of the target node: offline rep
 
 | Lane | Boundary | Owner path | Comparator |
 |---|---|---|---|
-| Offline replay | spawn to durable clean exit over a hash-pinned Core-framed archive | `bounded ingress -> parse once -> contextual preparation -> parallel proof -> ordered durable commit -> coherent publication` | [`offline-full-validation.md`](offline-full-validation.md) |
+| Offline replay | spawn to durable clean exit over a hash-pinned Core-framed archive (harness also proves dual packed/indexed parity, still `planned_not_executed` live) | `bounded ingress -> parse once -> contextual preparation -> parallel proof -> ordered durable commit -> coherent publication` | [`offline-full-validation.md`](offline-full-validation.md) |
 | Live IBD, loopback | start to pinned stop over deterministic loopback peers, no public nodes | `P2pService` download window plus the same commit spine | [`p2p-loopback.md`](p2p-loopback.md) |
 
 Both lanes run under full validation (`--assume-valid-height 0`), strict-Rust cryptography, default unpruned fjall, optional indexes off, on the final artifact. Every run records the six sample identities and the pinned stop identity. Restart and reorg recovery to each intermediate committed ancestor is exercised in the same lanes (T12, T13).

@@ -4,11 +4,13 @@
 //! acts on it. The node supplies chain read/query and inbound event sinks, but
 //! does not construct listener, dial, DNS, or fixed-peer workers itself.
 
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,6 +21,8 @@ use crossbeam_channel::{Receiver, Sender, TrySendError};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
+
+mod pinned;
 
 use crate::listener::ListenerError;
 
@@ -67,7 +71,8 @@ const MAX_PARKED_DIALS: usize = 64;
 #[derive(Clone, Debug)]
 pub struct P2pServiceConfig {
     /// Addresses on which inbound P2P connections are accepted.
-    pub listen_addrs: Vec<SocketAddr>,
+    pub listen_addrs: Vec<std::net::SocketAddr>,
+
     /// Network message-start bytes.
     pub magic: Magic,
     /// Auxiliary peer-book base/legacy path. The owner adds the P2P magic to
@@ -103,6 +108,12 @@ pub struct P2pServiceConfig {
     ///
     /// [`ConnectionShared::v2_transport`]: crate::listener::ConnectionShared::v2_transport
     pub v2_transport: bool,
+    /// The opt-in relay capabilities connections offer: BIP331 ancestor
+    /// package relay and BIP332 stale-tip relay. Both are off by default; a
+    /// peer relays packages or stale tips only after both sides negotiate it.
+    /// The value is final: the node resolves any network policy before it
+    /// reaches the service, and nothing below re-checks the network.
+    pub relay_offers: crate::RelayOffers,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     pub outbound_block_relay_slots: usize,
@@ -110,6 +121,10 @@ pub struct P2pServiceConfig {
     pub outbound_queue_limit: usize,
     /// Inbound block queue capacity.
     pub inbound_block_queue_limit: usize,
+    /// Overlay transports (Tor/I2P): proxies, Tor control, SAM bridge,
+    /// key persistence paths, and the onlynet restriction. Default
+    /// disables every overlay.
+    pub overlay: crate::overlay::OverlayConfig,
 }
 
 impl Default for P2pServiceConfig {
@@ -132,6 +147,8 @@ impl Default for P2pServiceConfig {
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             v2_transport: false,
+            relay_offers: crate::RelayOffers::default(),
+            overlay: crate::overlay::OverlayConfig::default(),
         }
     }
 }
@@ -166,6 +183,23 @@ impl P2pServiceConfig {
             .saturating_sub(self.outbound_full_relay_slots)
             .saturating_sub(self.outbound_block_relay_slots)
     }
+
+    /// Hands the per-connection settings to one start epoch's shared wiring.
+    ///
+    /// PRE: `shared` was built by `ConnectionShared::new` for this start.
+    /// POST: every connection cloned from `shared` reads the configured
+    ///   inbound capacity, services, transport choice, and relay-feature
+    ///   switches.
+    /// INVARIANT: this is the only place the service configuration reaches
+    ///   these `ConnectionShared` fields, and each switch maps to exactly its
+    ///   own field.
+    fn apply_to(&self, shared: &mut crate::listener::ConnectionShared) {
+        shared.max_inbound = self.max_inbound();
+        shared.local_services = self.local_services;
+        shared.v2_transport = self.v2_transport;
+        shared.relay_offers = self.relay_offers;
+        shared.dial_routes = self.overlay.dial_routes();
+    }
 }
 
 /// Errors returned while starting P2P workers.
@@ -180,6 +214,9 @@ pub enum P2pServiceError {
     /// A listener could not bind or run.
     #[error(transparent)]
     Listener(#[from] ListenerError),
+    /// An overlay transport (Tor control, SAM session) could not start.
+    #[error("p2p overlay setup: {0}")]
+    Overlay(io::Error),
 }
 
 /// Errors returned when joining P2P workers after shutdown.
@@ -202,6 +239,9 @@ pub enum P2pJoinError {
 /// Errors returned by RPC-facing P2P control operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum P2pControlError {
+    /// Destination network excluded by routing configuration.
+    #[error("destination network disabled")]
+    NetworkDisabled,
     /// The destination is covered by an active manual ban.
     #[error("destination is banned")]
     Banned,
@@ -213,11 +253,82 @@ pub enum P2pControlError {
     Closed,
 }
 
-#[derive(Default)]
 struct Workers {
+    shutdown: Arc<AtomicBool>,
+    session_cancel: Arc<AtomicBool>,
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
     bootstrap: Option<JoinHandle<()>>,
+    overlay_threads: Vec<JoinHandle<()>>,
+    sam_session: Option<Arc<crate::sam::SamSession>>,
+}
+
+impl Default for Workers {
+    fn default() -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            session_cancel: Arc::new(AtomicBool::new(false)),
+            listeners: Vec::new(),
+            outbound: None,
+            bootstrap: None,
+            overlay_threads: Vec::new(),
+            sam_session: None,
+        }
+    }
+}
+
+impl Workers {
+    fn new(shutdown: Arc<AtomicBool>, session_cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            shutdown,
+            session_cancel,
+            listeners: Vec::new(),
+            outbound: None,
+            bootstrap: None,
+            overlay_threads: Vec::new(),
+            sam_session: None,
+        }
+    }
+
+    fn cancel(&self, peer_table: &crate::PeerTable, addresses: &Mutex<Vec<crate::PeerEndpoint>>) {
+        self.session_cancel.store(true, Ordering::Release);
+        self.shutdown.store(true, Ordering::Release);
+        peer_table.cancel_all();
+        if let Some(session) = &self.sam_session {
+            session.close();
+        }
+        addresses.lock().clear();
+    }
+
+    fn join_all(&mut self) {
+        for handle in self.overlay_threads.drain(..) {
+            let _ = handle.join();
+        }
+        for handle in self.listeners.drain(..) {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.outbound.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.bootstrap.take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Cancels and joins one epoch.
+    ///
+    /// PRE: the caller holds the service's worker slot. Cancellation also
+    ///   cancels every peer in the table and clears the overlay addresses,
+    ///   and both outlive an epoch, so no later epoch may have been
+    ///   published yet.
+    fn teardown(
+        &mut self,
+        peer_table: &crate::PeerTable,
+        addresses: &Mutex<Vec<crate::PeerEndpoint>>,
+    ) {
+        self.cancel(peer_table, addresses);
+        self.join_all();
+    }
 }
 
 /// One queued request to dial an outbound address, with the origin that
@@ -233,7 +344,7 @@ struct Workers {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutboundDial {
     /// The address to dial.
-    pub addr: SocketAddr,
+    pub addr: PeerEndpoint,
     /// Whether the operator asked for this address by name.
     pub manual: bool,
     purpose: DialPurpose,
@@ -249,7 +360,7 @@ enum DialPurpose {
 impl OutboundDial {
     /// A dial the seed list or the address book produced.
     #[must_use]
-    pub const fn auto(addr: SocketAddr) -> Self {
+    pub const fn auto(addr: PeerEndpoint) -> Self {
         Self {
             addr,
             manual: false,
@@ -259,7 +370,7 @@ impl OutboundDial {
 
     /// A dial the operator pinned with `--connect` or `addnode`.
     #[must_use]
-    pub const fn pinned(addr: SocketAddr) -> Self {
+    pub const fn pinned(addr: PeerEndpoint) -> Self {
         Self {
             addr,
             manual: true,
@@ -285,6 +396,7 @@ pub struct BannedReader {
     inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     discouraged: Arc<Mutex<crate::discouragement::DiscouragedPeers>>,
     protected: Arc<[crate::IpSubnet]>,
+    routing: Arc<crate::overlay::OverlayConfig>,
 }
 
 impl BannedReader {
@@ -304,6 +416,7 @@ impl BannedReader {
                 crate::discouragement::DiscouragedPeers::default(),
             )),
             protected: protected.into(),
+            routing: Arc::new(crate::overlay::OverlayConfig::default()),
         }
     }
 
@@ -320,24 +433,30 @@ impl BannedReader {
             discouraged,
             protected: Arc::clone(&self.protected),
             now,
+            routing: Arc::clone(&self.routing),
         }
     }
 
-    /// Whether operator configuration protects this actual socket address.
+    /// Whether operator configuration protects this logical remote IP.
     #[must_use]
-    pub fn is_noban(&self, ip: std::net::IpAddr) -> bool {
-        self.protected.iter().any(|subnet| subnet.contains(ip))
+    pub fn is_noban(&self, ip: impl Into<crate::PeerAddress>) -> bool {
+        ip.into()
+            .ip()
+            .is_some_and(|ip| self.protected.iter().any(|subnet| subnet.contains(ip)))
     }
 
     /// Exact-IP ephemeral avoidance, kept separate from the manual ban view.
     #[must_use]
-    pub fn is_discouraged(&self, ip: std::net::IpAddr) -> bool {
-        !self.is_noban(ip) && self.discouraged.lock().contains(ip, Instant::now())
+    pub fn is_discouraged(&self, ip: impl Into<crate::PeerAddress>) -> bool {
+        {
+            let ip = ip.into();
+            !self.is_noban(ip) && self.discouraged.lock().contains(ip, Instant::now())
+        }
     }
 
     // Only current, typed remote violations at the connection boundary call this.
-    pub(crate) fn discourage(&self, ip: std::net::IpAddr) {
-        self.discouraged.lock().insert(ip, Instant::now());
+    pub(crate) fn discourage(&self, ip: impl Into<crate::PeerAddress>) -> bool {
+        self.discouraged.lock().insert(ip, Instant::now())
     }
 
     /// Acquires a shared read lock on the ban list.
@@ -347,8 +466,10 @@ impl BannedReader {
 
     /// Returns whether the given IP is banned at the given time.
     #[must_use]
-    pub fn is_banned(&self, ip: std::net::IpAddr, now: SystemTime) -> bool {
-        crate::subnet::is_banned(&self.inner.read(), ip, now)
+    pub fn is_banned(&self, ip: impl Into<crate::PeerAddress>, now: SystemTime) -> bool {
+        ip.into()
+            .ip()
+            .is_some_and(|ip| crate::subnet::is_banned(&self.inner.read(), ip, now))
     }
 
     /// Returns an empty fixture reader for tests.
@@ -367,14 +488,17 @@ impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
 
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
+    overlay: Arc<crate::overlay::OverlayTransport>,
     config: P2pServiceConfig,
     shutdown: bitcoin_rs_chain::LatchReader,
-    worker_shutdown: Arc<AtomicBool>,
+    worker_shutdown: Mutex<Arc<AtomicBool>>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
     banned: BannedReader,
     address_book: Arc<crate::addrman::AddressBook>,
-    added_nodes: Arc<RwLock<Vec<SocketAddr>>>,
+    added_nodes: Arc<RwLock<Vec<PeerEndpoint>>>,
+    /// Current fixed-peer resolution, published only by the resolver worker.
+    fixed_destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     outbound_tx: Sender<OutboundDial>,
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
@@ -391,6 +515,14 @@ pub struct P2pService {
     /// at every start, so inbound, outbound, and manual connections of one
     /// node draw from one aggregate.
     shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
+    /// Overlay service endpoints (onion service, I2P destination) the
+    /// service currently publishes, for `getnetworkinfo` reporting.
+    overlay_addresses: Arc<Mutex<Vec<crate::PeerEndpoint>>>,
+    /// `shutdown` calls so far. It survives the per-start epoch tokens that
+    /// `start` replaces, so a `start` that read it before taking the worker
+    /// slot sees every later `shutdown`, even one that is still waiting for
+    /// that slot.
+    stop_requests: AtomicU64,
 }
 
 impl std::fmt::Debug for P2pService {
@@ -419,20 +551,26 @@ impl P2pService {
             config.allow_local_addresses,
             config.asmap_path.as_deref(),
         );
-        let banned = BannedReader::with_protection(
+        let overlay = Arc::new(crate::overlay::OverlayTransport::new(Arc::new(
+            config.overlay.clone(),
+        )));
+        let mut banned = BannedReader::with_protection(
             Arc::new(RwLock::new(Vec::new())),
             config.noban_subnets.clone(),
         );
+        banned.routing = Arc::clone(&overlay.config);
         Self {
+            overlay,
             config,
             address_book,
             shutdown: shutdown.into(),
-            worker_shutdown: Arc::new(AtomicBool::new(false)),
+            worker_shutdown: Mutex::new(Arc::new(AtomicBool::new(false))),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
             session_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             banned,
             added_nodes: Arc::new(RwLock::new(Vec::new())),
+            fixed_destinations: Arc::new(RwLock::new(Vec::new())),
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             inbound_headers_tx,
@@ -441,7 +579,32 @@ impl P2pService {
             inbound_blocks_rx: Mutex::new(Some(inbound_blocks_rx)),
             workers: Mutex::new(None),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
+            overlay_addresses: Arc::new(Mutex::new(Vec::new())),
+            stop_requests: AtomicU64::new(0),
         }
+    }
+
+    /// Overlay service endpoints currently published (onion service,
+    /// I2P destination), as typed endpoint identities.
+    #[must_use]
+    pub fn overlay_addresses(&self) -> Vec<crate::PeerEndpoint> {
+        self.overlay_addresses.lock().clone()
+    }
+
+    /// SOCKS credential isolation policy.
+    pub fn proxy_randomize_credentials(&self) -> bool {
+        self.config.overlay.randomize_credentials
+    }
+
+    /// Current configured routing and live operational state by remote network.
+    pub fn network_states(&self) -> Vec<crate::OverlayNetworkState> {
+        self.overlay.states(&self.peer_table)
+    }
+
+    /// Resolve a manually supplied destination through its configured route.
+    pub fn resolve_peer(&self, endpoint: &str) -> io::Result<Vec<PeerEndpoint>> {
+        self.overlay
+            .resolve(endpoint, &|| self.shutdown.is_triggered())
     }
 
     /// Returns the aggregate outbound queued-byte budget this service's
@@ -456,6 +619,13 @@ impl P2pService {
     ///
     /// The node gives the service only read-only chain serving and event
     /// delivery hooks. Worker construction and teardown remain P2P-owned.
+    ///
+    /// The worker slot is held from the occupancy check until the epoch is
+    /// published or, on failure, until its teardown has finished. A failed
+    /// epoch therefore cannot cancel peers or clear overlay addresses that a
+    /// later `start` published, because that `start` cannot take the slot
+    /// before the failed teardown is over. Lock order is the one `shutdown`
+    /// already uses: slot, then peer table, SAM session, and address list.
     pub fn start(
         &self,
         chain_query: Option<&Arc<dyn crate::ChainQuery + 'static>>,
@@ -463,17 +633,63 @@ impl P2pService {
         peer_ready: &Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
         extras: crate::listener::ListenerExtras,
     ) -> Result<(), P2pServiceError> {
+        // Read before the slot is taken: a `shutdown` that increments the
+        // counter after this point cancels this start, whether or not it
+        // has reached the slot yet.
+        let stop_baseline = self.stop_requests.load(Ordering::Acquire);
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);
         }
 
+        let epoch_shutdown = Arc::new(AtomicBool::new(false));
         let session_cancel = Arc::new(AtomicBool::new(false));
         *self.session_cancel.lock() = Arc::clone(&session_cancel);
-        self.worker_shutdown.store(false, Ordering::Release);
+        *self.worker_shutdown.lock() = Arc::clone(&epoch_shutdown);
 
+        let mut workers = Workers::new(Arc::clone(&epoch_shutdown), Arc::clone(&session_cancel));
+
+        match self.start_workers(
+            &mut workers,
+            stop_baseline,
+            chain_query,
+            sync_wake_tx,
+            peer_ready,
+            extras,
+        ) {
+            Ok(()) => {
+                *slot = Some(workers);
+                Ok(())
+            }
+            Err(error) => {
+                // Still under the slot: this teardown cancels every peer and
+                // clears the overlay addresses, which are shared across
+                // epochs, so no replacement epoch may exist yet.
+                workers.teardown(&self.peer_table, &self.overlay_addresses);
+                Err(error)
+            }
+        }
+    }
+
+    fn start_workers(
+        &self,
+        workers: &mut Workers,
+        stop_baseline: u64,
+        chain_query: Option<&Arc<dyn crate::ChainQuery + 'static>>,
+        sync_wake_tx: Option<&Sender<()>>,
+        peer_ready: &Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
+        extras: crate::listener::ListenerExtras,
+    ) -> Result<(), P2pServiceError> {
+        self.config.overlay.validate()?;
         let mut bound_listeners = Vec::with_capacity(self.config.listen_addrs.len());
         for addr in &self.config.listen_addrs {
+            if !self
+                .config
+                .overlay
+                .allows(PeerEndpoint::from(*addr).address().network())
+            {
+                continue;
+            }
             let listener = crate::listener::bind_listener(*addr)?;
             tracing::info!(addr = %addr, "p2p listener bound");
             bound_listeners.push((*addr, listener));
@@ -485,7 +701,7 @@ impl P2pService {
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
                 &self.network_active,
             ))),
-            session_cancel,
+            Arc::clone(&workers.session_cancel),
             Some(Arc::clone(peer_ready)),
             self.config.magic,
             self.inbound_headers_tx.clone(),
@@ -494,68 +710,45 @@ impl P2pService {
             sync_wake_tx.cloned(),
             extras,
         );
-        shared.max_inbound = self.config.max_inbound();
-        shared.local_services = self.config.local_services;
-        shared.v2_transport = self.config.v2_transport;
+        self.config.apply_to(&mut shared);
+        shared.overlay = Arc::clone(&self.overlay);
         shared.address_book = Some(Arc::clone(&self.address_book));
+        self.address_book.set_addrv2_gossip(
+            self.config.overlay.tor_configured(),
+            self.config.overlay.i2p_configured(),
+        );
         shared = shared.with_shared_outbound(&self.shared_outbound);
 
-        let mut listeners = Vec::with_capacity(bound_listeners.len());
+        let worker_shutdown = self.worker_shutdown.lock().clone();
+        workers
+            .listeners
+            .extend(self.overlay.start(&shared, &worker_shutdown)?);
         for (listener_addr, listener) in bound_listeners {
-            let shutdown = Arc::clone(&self.worker_shutdown);
+            let shutdown = Arc::clone(&workers.shutdown);
             let shared = shared.clone();
-            let handle = match thread::Builder::new()
+            let handle = thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
-                .spawn(move || crate::listener::serve(listener, shutdown, shared))
-            {
-                Ok(handle) => handle,
-                Err(error) => {
-                    self.rollback_startup(listeners, None);
-                    return Err(error.into());
-                }
-            };
-            listeners.push(handle);
+                .spawn(move || crate::listener::serve(listener, shutdown, shared))?;
+            workers.listeners.push(handle);
         }
 
+        // Snapshot the fully populated dial routes (SAM session included)
+        // before `shared` moves into the outbound worker: overlay
+        // configuration never changes after this start.
+        let routes = crate::RouteTable::from_routes(&shared.dial_routes);
         let dial_allowance = shared.block_sync.clone();
-        let outbound = match self.spawn_outbound_worker(shared) {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.rollback_startup(listeners, None);
-                return Err(error.into());
-            }
-        };
-        let bootstrap = match self.spawn_bootstrap_worker(dial_allowance, chain_query.cloned()) {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.rollback_startup(listeners, Some(outbound));
-                return Err(error.into());
-            }
-        };
-        *slot = Some(Workers {
-            listeners,
-            outbound: Some(outbound),
-            bootstrap,
-        });
-        Ok(())
-    }
+        let outbound = self.spawn_outbound_worker(shared, &workers.shutdown)?;
+        workers.outbound = Some(outbound);
 
-    fn rollback_startup(
-        &self,
-        listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
-        outbound: Option<JoinHandle<()>>,
-    ) {
-        // Leave the start-scoped token asserted. Retrying start installs a
-        // new token; resetting this one would un-cancel leftover workers.
-        self.session_cancel.lock().store(true, Ordering::Release);
-        self.worker_shutdown.store(true, Ordering::Release);
-        self.peer_table.cancel_all();
-        for handle in listeners {
-            let _ = handle.join();
-        }
-        if let Some(handle) = outbound {
-            let _ = handle.join();
-        }
+        let bootstrap = self.spawn_bootstrap_worker(
+            dial_allowance,
+            chain_query.cloned(),
+            &workers.shutdown,
+            routes,
+        )?;
+        workers.bootstrap = bootstrap;
+
+        Ok(())
     }
 
     #[expect(
@@ -565,12 +758,14 @@ impl P2pService {
     fn spawn_outbound_worker(
         &self,
         shared: crate::listener::ConnectionShared,
+        shutdown: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, io::Error> {
         let address_book = Arc::clone(&self.address_book);
         let manual_nodes = Arc::clone(&self.added_nodes);
+        let fixed_destinations = Arc::clone(&self.fixed_destinations);
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
-        let shutdown = Arc::clone(&self.worker_shutdown);
+        let shutdown = Arc::clone(shutdown);
         let process_shutdown = self.shutdown.clone();
         let full_relay_slots = self.config.outbound_full_relay_slots;
         let block_relay_slots = self.config.outbound_block_relay_slots;
@@ -580,19 +775,22 @@ impl P2pService {
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
-                let mut active: HashMap<SocketAddr, ActiveOutbound> = HashMap::new();
+                let mut active: HashMap<PeerEndpoint, ActiveOutbound> = HashMap::new();
                 // Automatic dials that arrived while the automatic cap was
                 // full, retried in order once a slot opens.
                 let mut parked: VecDeque<OutboundDial> = VecDeque::new();
                 let mut handles = Vec::new();
+                let mut pinned = pinned::PinnedPeers::default();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 let mut next_feeler = Instant::now() + feeler_delay(bitcoin::secp256k1::rand::thread_rng().next_u64());
                 while !shutdown.load(Ordering::Acquire)
                     && !shared.session_cancel.load()
                     && !process_shutdown.is_triggered()
                 {
-                    reap_finished_outbound_connections(&mut active, &mut handles, &address_book);
                     let now = Instant::now();
+                    for endpoint in reap_finished_outbound_connections(&mut active, &mut handles, &address_book) {
+                        pinned.finished(endpoint, now);
+                    }
                     if now >= next_extra_peer_check {
                         next_extra_peer_check = now + EXTRA_PEER_CHECK_INTERVAL;
                         retire_extra_full_relay_connection(
@@ -645,6 +843,17 @@ impl P2pService {
                         let manual = manual_nodes.read();
                         spawn_feeler(&shared, &address_book, &manual, &mut active, &mut handles, max_peer_connections);
                     }
+                    {
+                        let manual = manual_nodes.read();
+                        let fixed = fixed_destinations.read();
+                        let mut configured = manual.clone();
+                        configured.extend_from_slice(&fixed);
+                        for endpoint in pinned.due(&configured, &active, &peer_table, now) {
+                            spawn_outbound_dial(&OutboundDial::pinned(endpoint), &shared, &mut active, &mut handles,
+                                full_relay_slots, block_relay_slots, extra_dial, max_peer_connections);
+                            if !active.contains_key(&endpoint) { pinned.finished(endpoint, now); }
+                        }
+                    }
                     let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
                     let Ok(dial) = received else {
                         if matches!(
@@ -667,6 +876,8 @@ impl P2pService {
                         continue;
                     }
                     let manual = manual_nodes.read();
+                    let fixed = fixed_destinations.read();
+                    if dial.manual && (is_manual_endpoint(&manual, dial.addr) || is_manual_endpoint(&fixed, dial.addr)) { continue; }
                     if !dial.manual && is_manual_endpoint(&manual, dial.addr) {
                         defer_rejected_dial(&dial, &address_book, &active);
                         continue;
@@ -690,32 +901,34 @@ impl P2pService {
         &self,
         block_sync: Option<Arc<crate::sync::BlockSync>>,
         chain_query: Option<Arc<dyn crate::ChainQuery>>,
+        shutdown: &Arc<AtomicBool>,
+        routes: crate::RouteTable,
     ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
-            let shutdown = Arc::clone(&self.worker_shutdown);
+            let shutdown = Arc::clone(shutdown);
             let network_active = Arc::clone(&self.network_active);
-            let peer_table = Arc::clone(&self.peer_table);
-            let outbound_tx = self.outbound_tx.clone();
+            let destinations = Arc::clone(&self.fixed_destinations);
             let endpoints = self.config.fixed_peers.clone();
+            let overlay = Arc::clone(&self.overlay);
             return thread::Builder::new()
                 .name("bitcoin-rs-fixed-peer-bootstrap".to_owned())
                 .spawn(move || {
-                    run_fixed_peer_bootstrap(
+                    run_fixed_peer_resolution(
                         shutdown,
                         network_active,
-                        peer_table,
-                        outbound_tx,
+                        destinations,
                         endpoints,
+                        overlay,
                     );
                 })
                 .map(Some);
         }
-        let shutdown = Arc::clone(&self.worker_shutdown);
+        let shutdown = Arc::clone(shutdown);
         let network_active = Arc::clone(&self.network_active);
         let peer_table = Arc::clone(&self.peer_table);
         let outbound_tx = self.outbound_tx.clone();
         let port = self.config.dns_port;
-        let seeds = if self.config.dns_seeds_enabled {
+        let seeds = if self.config.dns_seeds_enabled && self.config.overlay.local_dns_allowed() {
             self.config.dns_seeds.clone()
         } else {
             Vec::new()
@@ -735,6 +948,7 @@ impl P2pService {
             address_book: Arc::clone(&self.address_book),
             banned: self.banned_reader(),
             manual_nodes: Arc::clone(&self.added_nodes),
+            routes,
         };
         thread::Builder::new()
             .name("bitcoin-rs-address-maintenance".to_owned())
@@ -744,13 +958,24 @@ impl P2pService {
 
     /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
+        // Counted first: a `start` in progress holds the worker slot below,
+        // and its overlay startup polls this counter, so this is what lets
+        // it abort instead of making this call wait out its budget.
+        self.stop_requests.fetch_add(1, Ordering::AcqRel);
+        // Capture before cancelling: `anchor_peers` excludes cancelled leases,
+        // so cancelling first would leave nothing to persist for restart.
         let demonstrated = anchor_peers(&self.peer_table, &self.address_book);
+        if let Some(workers) = self.workers.lock().as_mut() {
+            workers.cancel(&self.peer_table, &self.overlay_addresses);
+        }
+        self.worker_shutdown.lock().store(true, Ordering::Release);
+        self.session_cancel.lock().store(true, Ordering::Release);
+        self.overlay_addresses.lock().clear();
         if !demonstrated.is_empty() {
             self.address_book
                 .remember_anchors(&demonstrated, crate::addrman::now());
         }
-        self.session_cancel.lock().store(true, Ordering::Release);
-        self.worker_shutdown.store(true, Ordering::Release);
+
         self.peer_table
             .set_network_active(&self.network_active, false);
         self.address_book
@@ -767,18 +992,24 @@ impl P2pService {
     /// Joins listener and outbound workers. Bootstrap is joined separately so
     /// node teardown can keep that drain after the bounded subsystem wait.
     pub fn join_core_workers(&self) -> Result<(), P2pJoinError> {
-        let (listeners, outbound) = {
+        let (listeners, outbound, overlay_threads) = {
             let mut slot = self.workers.lock();
             let Some(workers) = slot.as_mut() else {
                 return Ok(());
             };
             let listeners = std::mem::take(&mut workers.listeners);
             let outbound = workers.outbound.take();
+            let overlay_threads = std::mem::take(&mut workers.overlay_threads);
             if workers.bootstrap.is_none() {
                 *slot = None;
             }
-            (listeners, outbound)
+            (listeners, outbound, overlay_threads)
         };
+        for handle in overlay_threads {
+            if handle.join().is_err() {
+                tracing::error!("p2p overlay worker panicked");
+            }
+        }
         let mut first_error = None;
         for handle in listeners {
             match handle.join() {
@@ -871,6 +1102,12 @@ impl P2pService {
         Arc::clone(&self.peer_table)
     }
 
+    /// Resolved overlay transport configuration for this service.
+    #[must_use]
+    pub fn overlay_config(&self) -> &crate::overlay::OverlayConfig {
+        &self.config.overlay
+    }
+
     /// Base service flags. Handshakes and RPC add `COMPACT_FILTERS` only
     /// while the optional filter index is healthy and caught up.
     #[must_use]
@@ -925,13 +1162,16 @@ impl P2pService {
 
     /// Returns configured addnode add addresses.
     #[must_use]
-    pub fn added_nodes(&self) -> Vec<SocketAddr> {
+    pub fn added_nodes(&self) -> Vec<PeerEndpoint> {
         self.added_nodes.read().clone()
     }
 
     /// Applies Core-like addnode state and requests a connection.
-    pub fn add_node(&self, addr: SocketAddr, persist: bool) -> Result<(), P2pControlError> {
-        if crate::subnet::is_banned(&self.banned.read(), addr.ip(), SystemTime::now()) {
+    pub fn add_node(&self, addr: PeerEndpoint, persist: bool) -> Result<(), P2pControlError> {
+        if !self.overlay.config.allows(addr.address().network()) {
+            return Err(P2pControlError::NetworkDisabled);
+        }
+        if self.banned.is_banned(addr.address(), SystemTime::now()) {
             return Err(P2pControlError::Banned);
         }
         if persist {
@@ -952,13 +1192,40 @@ impl P2pService {
     }
 
     /// Removes one configured addnode add address.
-    pub fn remove_node(&self, addr: SocketAddr) {
+    pub fn remove_node(&self, addr: PeerEndpoint) {
         self.added_nodes.write().retain(|current| *current != addr);
     }
 
     /// Disconnects any active connection with the given address.
-    pub fn disconnect(&self, addr: SocketAddr) -> bool {
+    pub fn disconnect(&self, addr: impl Into<crate::PeerRemote>) -> bool {
         self.peer_table.disconnect(addr)
+    }
+
+    /// Disconnects the handshake-complete connection at `addr`, the sessions
+    /// `getpeerinfo` lists. A vacant address and a session still handshaking
+    /// both answer `false` without mutation.
+    pub fn disconnect_ready(&self, addr: crate::PeerEndpoint) -> bool {
+        self.peer_table.disconnect_ready(addr)
+    }
+
+    /// Disconnects exactly the handshake-complete connection whose
+    /// process-unique node id is `node_id`, the value `getpeerinfo.id`
+    /// reports.
+    ///
+    /// This is identity selection, and it is the only correct way to act on a
+    /// peer a caller has already named: an address can be taken over by a
+    /// replacement connection, an id cannot. Anonymous inbound overlay
+    /// sessions have no address to name and are reachable through this path
+    /// alone.
+    pub fn disconnect_ready_node_id(&self, node_id: u64) -> bool {
+        self.peer_table.disconnect_ready_node_id(node_id)
+    }
+
+    /// Disconnects the handshake-complete connection at `addr` only when it is
+    /// the one whose node id is `node_id`; a same-address replacement is left
+    /// alone.
+    pub fn disconnect_ready_node_id_at(&self, addr: crate::PeerEndpoint, node_id: u64) -> bool {
+        self.peer_table.disconnect_ready_node_id_at(addr, node_id)
     }
 
     /// Queues an automatic dial for the stale-tip slot-cap unit test.
@@ -966,7 +1233,7 @@ impl P2pService {
     #[cfg(test)]
     pub(crate) fn test_queue_automatic_dial(
         &self,
-        addr: SocketAddr,
+        addr: PeerEndpoint,
     ) -> Result<(), crossbeam_channel::SendError<OutboundDial>> {
         self.outbound_tx.send(OutboundDial::auto(addr))
     }
@@ -993,7 +1260,7 @@ impl P2pService {
 fn defer_rejected_dial(
     dial: &OutboundDial,
     book: &crate::addrman::AddressBook,
-    active: &HashMap<SocketAddr, ActiveOutbound>,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
 ) {
     if dial.manual
         || active.iter().any(|(addr, running)| {
@@ -1012,8 +1279,8 @@ fn defer_rejected_dial(
 
 fn finish_outbound_epoch(
     parked: VecDeque<OutboundDial>,
-    active: &HashMap<SocketAddr, ActiveOutbound>,
-    handles: Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
+    handles: Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
     book: &crate::addrman::AddressBook,
 ) {
     for dial in parked {
@@ -1029,10 +1296,11 @@ fn finish_outbound_epoch(
 }
 
 fn reap_finished_outbound_connections(
-    active: &mut HashMap<SocketAddr, ActiveOutbound>,
-    handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
+    active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
+    handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
     book: &crate::addrman::AddressBook,
-) {
+) -> Vec<PeerEndpoint> {
+    let mut finished = Vec::new();
     let mut index = 0;
     while index < handles.len() {
         if !handles[index].1.is_finished() {
@@ -1040,8 +1308,12 @@ fn reap_finished_outbound_connections(
             continue;
         }
         let (addr, handle) = handles.swap_remove(index);
-        if active.remove(&addr).is_some_and(|dial| !dial.manual) {
-            book.unqueue(addr);
+        if let Some(dial) = active.remove(&addr) {
+            if dial.manual {
+                finished.push(addr);
+            } else {
+                book.unqueue(addr);
+            }
         }
         match handle.join() {
             Ok(Ok(())) => tracing::debug!(addr = %addr, "p2p outbound connection exited cleanly"),
@@ -1051,6 +1323,7 @@ fn reap_finished_outbound_connections(
             Err(_) => tracing::warn!(addr = %addr, "p2p outbound connection panicked"),
         }
     }
+    finished
 }
 
 /// Use the existing outbound owner for one bounded probe; a feeler bypasses
@@ -1058,9 +1331,9 @@ fn reap_finished_outbound_connections(
 fn spawn_feeler(
     shared: &crate::listener::ConnectionShared,
     book: &crate::addrman::AddressBook,
-    manual: &[SocketAddr],
-    active: &mut HashMap<SocketAddr, ActiveOutbound>,
-    handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
+    manual: &[PeerEndpoint],
+    active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
+    handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
     max_peer_connections: usize,
 ) {
     if active.values().any(|entry| entry.feeler)
@@ -1077,13 +1350,14 @@ fn spawn_feeler(
         .sessions()
         .into_iter()
         .filter(|session| !session.lease.is_cancelled())
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let mut addresses: Vec<_> = active.keys().copied().collect();
     addresses.extend_from_slice(&connected);
     let policy = shared.banned.automatic_snapshot(SystemTime::now());
+    let routes = crate::RouteTable::from_routes(&shared.dial_routes);
     let Some(addr) = book.feeler(&addresses, &connected, crate::addrman::now(), |addr| {
-        !is_manual_endpoint(manual, addr) && policy.allows(addr.ip())
+        !is_manual_endpoint(manual, addr) && policy.allows(addr.address())
     }) else {
         return;
     };
@@ -1108,7 +1382,7 @@ fn spawn_feeler(
 
 /// Compare endpoint identities using the address book's canonical spelling.
 /// Keep the configured spelling in the operator-owned list itself.
-fn is_manual_endpoint(manual: &[SocketAddr], addr: SocketAddr) -> bool {
+fn is_manual_endpoint(manual: &[PeerEndpoint], addr: PeerEndpoint) -> bool {
     let addr = crate::addrman::canonical(addr);
     manual
         .iter()
@@ -1127,13 +1401,73 @@ fn wait_for_shutdown(shutdown: &AtomicBool, delay: Duration) -> bool {
     true
 }
 
+fn bootstrap_fixed_peer_endpoints<R, I>(
+    network_active: &AtomicBool,
+    peer_table: &crate::PeerTable,
+    outbound_tx: &Sender<OutboundDial>,
+    endpoints: &[String],
+    mut resolve: R,
+) where
+    R: FnMut(&str) -> io::Result<I>,
+    I: IntoIterator<Item = SocketAddr>,
+{
+    'endpoints: for endpoint in endpoints {
+        if !network_active.load(Ordering::Acquire) {
+            break 'endpoints;
+        }
+        // Typed endpoints dial without any DNS: an onion/I2P fixed peer
+        // reaches `connect_peer_stream` and fails transport-unavailable
+        // there, never a system-DNS lookup or a direct-TCP fallback.
+        // Malformed overlay names are rejected locally and MUST NOT fall
+        // through to system DNS resolution.
+        match crate::endpoint::classify_endpoint(endpoint) {
+            crate::endpoint::ClassifiedEndpoint::Valid(parsed) => {
+                if peer_table.is_connected(parsed) || !network_active.load(Ordering::Acquire) {
+                    continue;
+                }
+                if outbound_tx.try_send(OutboundDial::pinned(parsed)).is_err() {
+                    break 'endpoints;
+                }
+            }
+            crate::endpoint::ClassifiedEndpoint::InvalidOverlay => {
+                tracing::warn!(
+                    endpoint,
+                    "fixed peer rejected: invalid overlay name must not resolve via DNS"
+                );
+            }
+            crate::endpoint::ClassifiedEndpoint::NonOverlay => {
+                let addresses = match resolve(endpoint.as_str()) {
+                    Ok(addresses) => addresses,
+                    Err(error) => {
+                        tracing::warn!(endpoint, %error, "fixed peer resolution failed");
+                        continue;
+                    }
+                };
+                for addr in addresses {
+                    if peer_table.is_connected(crate::PeerEndpoint::Ip(addr))
+                        || !network_active.load(Ordering::Acquire)
+                    {
+                        continue;
+                    }
+                    if outbound_tx
+                        .try_send(OutboundDial::pinned(crate::PeerEndpoint::Ip(addr)))
+                        .is_err()
+                    {
+                        break 'endpoints;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[expect(clippy::needless_pass_by_value)]
-fn run_fixed_peer_bootstrap(
+fn run_fixed_peer_resolution(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
-    peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<OutboundDial>,
+    destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     endpoints: Vec<String>,
+    overlay: Arc<crate::overlay::OverlayTransport>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         if !network_active.load(Ordering::Acquire) {
@@ -1142,32 +1476,23 @@ fn run_fixed_peer_bootstrap(
             }
             continue;
         }
-        'endpoints: for endpoint in &endpoints {
-            if !network_active.load(Ordering::Acquire) {
-                break 'endpoints;
-            }
-            let addresses = match endpoint.as_str().to_socket_addrs() {
-                Ok(addresses) => addresses,
-                Err(error) => {
-                    tracing::warn!(endpoint, %error, "fixed peer resolution failed");
-                    continue;
-                }
-            };
-            for addr in addresses {
-                if peer_table.is_connected(addr) || !network_active.load(Ordering::Acquire) {
-                    continue;
-                }
-                if outbound_tx.try_send(OutboundDial::pinned(addr)).is_err() {
-                    break 'endpoints;
-                }
+        let mut resolved = Vec::new();
+        for endpoint in &endpoints {
+            match overlay.resolve(endpoint, &|| {
+                shutdown.load(Ordering::Acquire) || !network_active.load(Ordering::Acquire)
+            }) {
+                Ok(addresses) => resolved.extend(addresses),
+                Err(error) => tracing::warn!(endpoint, %error, "fixed peer resolution failed"),
             }
         }
+        // Resolution owns desired destinations; the outbound drain owns all
+        // connection eligibility, active handles and retry timing.
+        *destinations.write() = resolved;
         if wait_for_shutdown(&shutdown, Duration::from_secs(2)) {
             break;
         }
     }
 }
-
 /// Chooses the role of one dial, pinned or automatic.
 ///
 /// PRE: `dial` is a dequeued outbound request; the remaining arguments are
@@ -1183,7 +1508,7 @@ fn run_fixed_peer_bootstrap(
 fn dial_outbound_role(
     dial: &OutboundDial,
     peer_table: &crate::PeerTable,
-    pending: &HashMap<SocketAddr, ActiveOutbound>,
+    pending: &HashMap<PeerEndpoint, ActiveOutbound>,
     full_relay_slots: usize,
     block_relay_slots: usize,
     extra_full_relay: bool,
@@ -1220,9 +1545,12 @@ fn count_address_failure(
         .filter(|session| {
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     book.count_failure(&outbound, maximum)
 }
@@ -1232,8 +1560,8 @@ fn count_address_failure(
 fn spawn_outbound_dial(
     dial: &OutboundDial,
     shared: &crate::listener::ConnectionShared,
-    active: &mut HashMap<SocketAddr, ActiveOutbound>,
-    handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
+    active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
+    handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
     full_relay_slots: usize,
     block_relay_slots: usize,
     extra_dial: bool,
@@ -1251,12 +1579,14 @@ fn spawn_outbound_dial(
             book.ordinary_services_eligible(dial.addr, depth)
         });
     let allowed = if dial.manual {
-        !shared.banned.is_banned(dial.addr.ip(), SystemTime::now())
+        !shared
+            .banned
+            .is_banned(dial.addr.address(), SystemTime::now())
     } else {
         shared
             .banned
             .automatic_snapshot(SystemTime::now())
-            .allows(dial.addr.ip())
+            .allows(dial.addr.address())
     };
     if !shared.activity.is_active() || shared.session_cancel.load() || !services_allowed || !allowed
     {
@@ -1270,7 +1600,8 @@ fn spawn_outbound_dial(
         .keys()
         .any(|addr| crate::addrman::canonical(*addr) == dial.addr)
         || peer_table.sessions().iter().any(|session| {
-            !session.lease.is_cancelled() && crate::addrman::canonical(session.addr) == dial.addr
+            !session.lease.is_cancelled()
+                && session.addr.endpoint().map(crate::addrman::canonical) == Some(dial.addr)
         })
     {
         // A manual request cannot release a queued automatic request's claim.
@@ -1357,7 +1688,7 @@ fn spawn_outbound_dial(
 ///   assigned full relay by the caller and never reaches this chooser.
 fn next_outbound_role(
     peer_table: &crate::PeerTable,
-    pending: &HashMap<SocketAddr, ActiveOutbound>,
+    pending: &HashMap<PeerEndpoint, ActiveOutbound>,
     full_relay_slots: usize,
     block_relay_slots: usize,
     extra_full_relay: bool,
@@ -1375,7 +1706,11 @@ fn next_outbound_role(
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
                 && !session.lease.is_manual()
-                && !pending.get(&session.addr).is_some_and(|entry| entry.feeler)
+                && !session
+                    .addr
+                    .endpoint()
+                    .and_then(|addr| pending.get(&addr))
+                    .is_some_and(|entry| entry.feeler)
         })
         .collect();
     let connected_full = census
@@ -1395,7 +1730,9 @@ fn next_outbound_role(
                 !outbound.manual
                     && !outbound.feeler
                     && outbound.role == want
-                    && !census.iter().any(|session| session.addr == **addr)
+                    && !census
+                        .iter()
+                        .any(|session| session.addr.endpoint() == Some(**addr))
             })
             .count()
     };
@@ -1440,9 +1777,11 @@ fn retire_extra_full_relay_connection(
     }) else {
         return;
     };
-    if peer_table.disconnect_connection(session.addr, session.lease.connection_id()) {
+    if session.endpoint.is_some_and(|endpoint| {
+        peer_table.disconnect_connection(endpoint, session.lease.connection_id())
+    }) {
         tracing::info!(
-            peer_addr = %session.addr,
+            peer_addr = ?session.endpoint,
             "p2p retiring the extra full-relay connection: the tip is moving again"
         );
     }
@@ -1499,14 +1838,14 @@ fn newest_excess_full_relay(
         .find(|session| {
             now.saturating_duration_since(session.lease.connected_at())
                 >= crate::download_window::MINIMUM_CONNECT_TIME
-                && !is_downloading(session.lease.source(session.addr))
+                && !is_downloading(session.lease.source(session.endpoint))
         })
         .cloned()
 }
 
 fn dial_has_capacity(
     dial: &OutboundDial,
-    active: &HashMap<SocketAddr, ActiveOutbound>,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
     total: usize,
     blocks: usize,
     extra: bool,
@@ -1523,7 +1862,7 @@ fn dial_has_capacity(
 }
 
 fn has_automatic_outbound_capacity(
-    active: &HashMap<SocketAddr, ActiveOutbound>,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
     active_limit: usize,
     extra_dial: bool,
 ) -> bool {
@@ -1547,14 +1886,18 @@ struct AddressMaintenance {
     chain_query: Option<Arc<dyn crate::ChainQuery>>,
     address_book: Arc<crate::addrman::AddressBook>,
     banned: BannedReader,
-    manual_nodes: Arc<RwLock<Vec<SocketAddr>>>,
+    manual_nodes: Arc<RwLock<Vec<crate::PeerEndpoint>>>,
+    /// Immutable snapshot of the local dial routes, taken after overlay
+    /// startup. Selection denies unroutable endpoints before any worker,
+    /// thread, or address-book claim is spent.
+    routes: crate::RouteTable,
 }
 
 fn park_automatic_dial(
     parked: &mut VecDeque<OutboundDial>,
     dial: OutboundDial,
     book: &crate::addrman::AddressBook,
-    active: &HashMap<SocketAddr, ActiveOutbound>,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
 ) -> bool {
     if parked.len() >= MAX_PARKED_DIALS {
         defer_rejected_dial(&dial, book, active);
@@ -1576,12 +1919,15 @@ fn ready_address_count(peer_table: &crate::PeerTable, book: &crate::addrman::Add
                 && !session.lease.is_manual()
                 && !session.lease.is_cancelled()
                 && session.info.is_some()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
         .count()
 }
 
-fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) -> Vec<SocketAddr> {
+fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) -> Vec<PeerEndpoint> {
     table
         .sessions()
         .into_iter()
@@ -1592,9 +1938,12 @@ fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) ->
                 && session.lease.role() == crate::PeerRole::BlockRelayOnly
                 && session.info.is_some()
                 && !session.demonstrated_tips.is_empty()
-                && !book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect()
 }
 
@@ -1602,9 +1951,9 @@ fn anchor_peers(table: &crate::PeerTable, book: &crate::addrman::AddressBook) ->
 /// bounded channel and eligibility policy as automatic dialing.
 fn queue_restart_anchors(
     maintenance: &AddressMaintenance,
-    anchors: &mut VecDeque<SocketAddr>,
-    attempting: &mut Option<SocketAddr>,
-    active: &mut Vec<SocketAddr>,
+    anchors: &mut VecDeque<PeerEndpoint>,
+    attempting: &mut Option<PeerEndpoint>,
+    active: &mut Vec<PeerEndpoint>,
     now: u64,
 ) -> usize {
     if maintenance.shutdown.load(Ordering::Acquire)
@@ -1621,9 +1970,12 @@ fn queue_restart_anchors(
                 && !session.lease.is_manual()
                 && session.lease.role() == crate::PeerRole::BlockRelayOnly
                 && session.info.is_some()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     if let Some(addr) = *attempting
         && maintenance.address_book.anchor_eligible(addr, &[], now)
@@ -1657,7 +2009,7 @@ fn queue_restart_anchors(
             || !maintenance
                 .address_book
                 .ordinary_services_eligible(addr, depth)
-            || !policy.allows(addr.ip())
+            || !policy.allows(addr.address())
         {
             maintenance.address_book.return_restart_anchor(addr, now);
             continue;
@@ -1689,6 +2041,10 @@ fn queue_restart_anchors(
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One maintenance loop owns anchor, collision, DNS, and candidate passes in lock order"
+)]
 fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let resolver = crate::peer::SystemDnsResolver::new(maintenance.port);
     // Give a populated book one cooldown to establish a connection before
@@ -1707,8 +2063,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
         let tick_time = SystemTime::now();
         let now = tick_time
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+            .map_or(0, |duration| duration.as_secs());
         let ready_count = ready_address_count(&maintenance.peer_table, &maintenance.address_book);
         if maintenance.network_active.load(Ordering::Acquire) {
             if !anchors_taken && maintenance.block_slots > 0 {
@@ -1728,7 +2083,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 .sessions()
                 .into_iter()
                 .filter(|session| !session.lease.is_cancelled())
-                .map(|session| session.addr)
+                .filter_map(|session| session.addr.endpoint())
                 .collect();
             let policy = maintenance.banned.automatic_snapshot(tick_time);
             {
@@ -1741,7 +2096,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 maintenance
                     .address_book
                     .resolve_collisions(&connected, now, |addr| {
-                        !is_manual_endpoint(&manual, addr) && policy.allows(addr.ip())
+                        !is_manual_endpoint(&manual, addr) && policy.allows(addr.address())
                     });
             }
             // A fresh but unreachable book must not permanently suppress seed
@@ -1755,7 +2110,11 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             ) {
                 for seed in &maintenance.seeds {
                     match crate::peer::DnsResolver::resolve(&resolver, seed) {
-                        Ok(addresses) => maintenance.address_book.learn_dns(seed, &addresses, now),
+                        Ok(addresses) => maintenance.address_book.learn_dns(
+                            seed,
+                            &addresses,
+                            now,
+                        ),
                         Err(error) => tracing::warn!(seed, %error, "DNS bootstrap unavailable"),
                     }
                 }
@@ -1767,9 +2126,12 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 .filter(|session| {
                     !session.lease.is_cancelled()
                         && !session.lease.is_inbound()
-                        && !maintenance.address_book.is_feeler(session.addr)
+                        && !session
+                            .addr
+                            .endpoint()
+                            .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
                 })
-                .map(|session| session.addr)
+                .filter_map(|session| session.addr.endpoint())
                 .collect();
             let reserved = queue_restart_anchors(
                 maintenance,
@@ -1839,16 +2201,19 @@ fn queue_address_candidates(
     let mut active: Vec<_> = sessions
         .iter()
         .filter(|session| !session.lease.is_cancelled())
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let grouped: Vec<_> = sessions
         .iter()
         .filter(|session| {
             !session.lease.is_cancelled()
                 && !session.lease.is_inbound()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let automatic: Vec<_> = sessions
         .iter()
@@ -1856,9 +2221,12 @@ fn queue_address_candidates(
             !session.lease.is_cancelled()
                 && !session.lease.is_inbound()
                 && !session.lease.is_manual()
-                && !maintenance.address_book.is_feeler(session.addr)
+                && !session
+                    .addr
+                    .endpoint()
+                    .is_some_and(|addr| maintenance.address_book.is_feeler(addr))
         })
-        .map(|session| session.addr)
+        .filter_map(|session| session.addr.endpoint())
         .collect();
     let occupied = automatic.len() + maintenance.address_book.pending_count_excluding(&automatic);
     let needed = (maintenance.target + extra).saturating_sub(occupied + reserved_anchors);
@@ -1876,7 +2244,7 @@ fn queue_address_candidates(
         let Some(addr) = maintenance
             .address_book
             .select(&active, &grouped, now, depth, |addr| {
-                !is_manual_endpoint(&manual, addr) && policy.allows(addr.ip())
+                !is_manual_endpoint(&manual, addr) && policy.allows(addr.address())
             })
         else {
             break;
@@ -1901,7 +2269,9 @@ fn queue_address_candidates(
 mod tests {
     use super::*;
     use crate::PeerSource;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use bitcoin_rs_primitives::PeerEndpoint;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn feeler_poisson_delay_matches_actual_core_uniform_vectors() {
@@ -1922,9 +2292,60 @@ mod tests {
     }
 
     #[test]
+    fn relay_feature_switches_default_off_and_reach_connections_independently() {
+        let (headers, _) = crossbeam_channel::bounded(1);
+        let (blocks, _) = crossbeam_channel::bounded(1);
+        let mut shared = crate::listener::ConnectionShared::new(
+            Arc::new(crate::PeerTable::new()),
+            BannedReader::fixture_empty(),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::new(
+                AtomicBool::new(true),
+            ))),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Magic::REGTEST,
+            headers,
+            blocks,
+            None,
+            None,
+            crate::listener::ListenerExtras::default(),
+        );
+        P2pServiceConfig::default().apply_to(&mut shared);
+        assert_eq!(shared.relay_offers, crate::RelayOffers::default());
+
+        for offers in [
+            crate::RelayOffers {
+                package_relay: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers {
+                stale_tip_relay: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers {
+                stale_tip_relay: true,
+                stale_tip_prefers_blocks: true,
+                ..crate::RelayOffers::default()
+            },
+            crate::RelayOffers::default(),
+        ] {
+            P2pServiceConfig {
+                relay_offers: offers,
+                ..P2pServiceConfig::default()
+            }
+            .apply_to(&mut shared);
+            assert_eq!(shared.relay_offers, offers);
+        }
+    }
+
+    #[test]
     fn start_fails_when_listener_cannot_bind() {
-        let occupied =
-            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("occupy port");
+        let occupied = TcpListener::bind(
+            PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )
+        .expect("occupy port");
         let addr = occupied.local_addr().expect("local_addr");
         let service = P2pService::new(
             P2pServiceConfig {
@@ -1993,11 +2414,43 @@ mod tests {
     }
 
     #[test]
+    fn overlay_workers_are_retained_for_join_and_rollback() {
+        let dir = tempfile::tempdir().expect("identity dir");
+        let mut config = P2pServiceConfig::default();
+        config.overlay.onion_proxy = Some(SocketAddr::from(([127, 0, 0, 1], 19051)));
+        config.overlay.tor_control = Some(SocketAddr::from(([127, 0, 0, 1], 19052)));
+        config.overlay.identity_dir = dir.path().to_path_buf();
+        let service = P2pService::new(config, Arc::new(AtomicBool::new(false)));
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("overlay start succeeds");
+        {
+            let workers = service.workers.lock();
+            let workers = workers.as_ref().expect("workers installed");
+            assert_eq!(
+                workers.listeners.len(),
+                1,
+                "overlay.start handles must be retained for rollback and join"
+            );
+        }
+        service.shutdown();
+        service.join().expect("join waits for overlay teardown");
+    }
+
+    #[test]
     fn network_activity_transition_cancels_leases_only_when_disabled() {
         let table = crate::PeerTable::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
-        table.register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)), lease.clone());
+        table.register(
+            PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333)),
+            lease.clone(),
+        );
         let flag = AtomicBool::new(true);
 
         table.set_network_active(&flag, true);
@@ -2017,11 +2470,11 @@ mod tests {
         let table = crate::PeerTable::new();
         let (manual_tx, _manual_rx) = crossbeam_channel::unbounded();
         table.register(
-            SocketAddr::from(([127, 0, 0, 1], 1)),
+            PeerEndpoint::from(([127, 0, 0, 1], 1)),
             PeerLease::new_manual(manual_tx, PeerRole::FullRelay),
         );
         let mut pending = HashMap::from([(
-            SocketAddr::from(([127, 0, 0, 1], 2)),
+            PeerEndpoint::from(([127, 0, 0, 1], 2)),
             ActiveOutbound {
                 feeler: false,
 
@@ -2029,7 +2482,7 @@ mod tests {
                 manual: true,
             },
         )]);
-        let automatic_dial = OutboundDial::auto(SocketAddr::from(([127, 0, 0, 1], 3)));
+        let automatic_dial = OutboundDial::auto(PeerEndpoint::from(([127, 0, 0, 1], 3)));
 
         assert_eq!(
             dial_outbound_role(&automatic_dial, &table, &pending, 1, 1, false),
@@ -2042,7 +2495,7 @@ mod tests {
         );
 
         pending.insert(
-            SocketAddr::from(([127, 0, 0, 1], 4)),
+            PeerEndpoint::from(([127, 0, 0, 1], 4)),
             ActiveOutbound {
                 feeler: false,
 
@@ -2070,7 +2523,7 @@ mod tests {
 
         let (full_tx, _full_rx) = crossbeam_channel::unbounded();
         table.register(
-            SocketAddr::from(([127, 0, 0, 1], 1)),
+            PeerEndpoint::from(([127, 0, 0, 1], 1)),
             PeerLease::new(full_tx),
         );
         assert!(
@@ -2090,7 +2543,7 @@ mod tests {
 
         let (block_tx, _block_rx) = crossbeam_channel::unbounded();
         table.register(
-            SocketAddr::from(([127, 0, 0, 1], 2)),
+            PeerEndpoint::from(([127, 0, 0, 1], 2)),
             PeerLease::new_block_relay(block_tx),
         );
         assert!(
@@ -2107,10 +2560,10 @@ mod tests {
         use crate::peer_info::PeerRole;
 
         let table = crate::PeerTable::new();
-        let mut pending: HashMap<SocketAddr, ActiveOutbound> = HashMap::new();
+        let mut pending: HashMap<PeerEndpoint, ActiveOutbound> = HashMap::new();
         for port in 1..=8_u16 {
             pending.insert(
-                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerEndpoint::from(([127, 0, 0, 1], port)),
                 ActiveOutbound {
                     feeler: false,
 
@@ -2128,7 +2581,7 @@ mod tests {
         );
         for port in 9..=10_u16 {
             pending.insert(
-                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerEndpoint::from(([127, 0, 0, 1], port)),
                 ActiveOutbound {
                     feeler: false,
 
@@ -2152,9 +2605,9 @@ mod tests {
         use crate::peer_info::PeerRole;
 
         let table = crate::PeerTable::new();
-        let mut pending: HashMap<SocketAddr, ActiveOutbound> = HashMap::new();
+        let mut pending: HashMap<PeerEndpoint, ActiveOutbound> = HashMap::new();
         for port in 1..=5_u16 {
-            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let addr = PeerEndpoint::from(([127, 0, 0, 1], port));
             let (tx, _rx) = crossbeam_channel::unbounded();
             table.register(addr, PeerLease::new(tx));
             pending.insert(
@@ -2182,8 +2635,8 @@ mod tests {
         use crate::download_window::MINIMUM_CONNECT_TIME;
         use crate::peer_info::PeerRole;
 
-        fn addr(port: u16) -> SocketAddr {
-            SocketAddr::from(([127, 0, 0, 1], port))
+        fn addr(port: u16) -> PeerEndpoint {
+            PeerEndpoint::from(([127, 0, 0, 1], port))
         }
 
         let now = Instant::now();
@@ -2223,7 +2676,7 @@ mod tests {
             .expect("three full-relay peers are one extra");
         assert_eq!(
             excess.addr,
-            addr(6),
+            crate::PeerRemote::Endpoint(addr(6)),
             "the newest aged connection is the one"
         );
         assert_eq!(excess.lease.role(), PeerRole::FullRelay);
@@ -2235,8 +2688,9 @@ mod tests {
         assert_eq!(
             newest_excess_full_relay(&table, 2, now, |_| false)
                 .expect("the pinned connection is not a candidate")
-                .addr,
-            excess.addr,
+                .endpoint
+                .expect("identified excess peer"),
+            excess.endpoint.expect("identified excess peer"),
             "the newest automatic connection stays the victim while a pinned one is newer"
         );
     }
@@ -2247,7 +2701,7 @@ mod tests {
         use crate::peer_info::PeerRole;
 
         let table = crate::PeerTable::new();
-        let addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 1));
         let (tx, _rx) = crossbeam_channel::unbounded();
         table.register(addr, PeerLease::new(tx));
 
@@ -2261,7 +2715,7 @@ mod tests {
         assert!(
             matches!(
                 dial_outbound_role(
-                    &OutboundDial::pinned(SocketAddr::from(([127, 0, 0, 1], 2))),
+                    &OutboundDial::pinned(PeerEndpoint::from(([127, 0, 0, 1], 2))),
                     &table,
                     &HashMap::new(),
                     1,
@@ -2279,8 +2733,8 @@ mod tests {
         use crate::connection::PeerLease;
         use crate::download_window::MINIMUM_CONNECT_TIME;
 
-        fn addr(port: u16) -> SocketAddr {
-            SocketAddr::from(([127, 0, 0, 1], port))
+        fn addr(port: u16) -> PeerEndpoint {
+            PeerEndpoint::from(([127, 0, 0, 1], port))
         }
 
         let now = Instant::now();
@@ -2309,7 +2763,7 @@ mod tests {
         table.register(addr(4), downloading);
         let source = table
             .lease(addr(4))
-            .map(|lease| lease.source(addr(4)))
+            .map(|lease| lease.source(Some(addr(4))))
             .expect("the downloading excess peer is registered");
 
         assert!(
@@ -2320,7 +2774,7 @@ mod tests {
             newest_excess_full_relay(&table, 2, now, |_| false)
                 .expect("the aged excess peer is eligible")
                 .addr,
-            addr(4),
+            crate::PeerRemote::Endpoint(addr(4)),
             "the same peer is the victim once its download completes"
         );
     }
@@ -2331,8 +2785,8 @@ mod tests {
         use crate::download_window::MINIMUM_CONNECT_TIME;
         use crate::peer_info::PeerRole;
 
-        fn addr(port: u16) -> SocketAddr {
-            SocketAddr::from(([127, 0, 0, 1], port))
+        fn addr(port: u16) -> PeerEndpoint {
+            PeerEndpoint::from(([127, 0, 0, 1], port))
         }
 
         let now = Instant::now();
@@ -2366,7 +2820,7 @@ mod tests {
             newest_excess_full_relay(&table, 2, now, |_| false)
                 .expect("three automatic connections are one extra")
                 .addr,
-            addr(4),
+            crate::PeerRemote::Endpoint(addr(4)),
             "a real automatic excess still retires its newest aged peer"
         );
     }
@@ -2380,8 +2834,8 @@ mod tests {
             },
             Arc::new(AtomicBool::new(false)),
         );
-        let addr1: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
-        let addr2: SocketAddr = "127.0.0.2:8333".parse().expect("addr");
+        let addr1: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
+        let addr2: PeerEndpoint = "127.0.0.2:8333".parse().expect("addr");
 
         assert!(service.add_node(addr1, true).is_ok());
         assert_eq!(service.added_nodes().as_slice(), &[addr1]);
@@ -2409,7 +2863,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         service.set_network_active(false);
-        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
         assert!(service.add_node(addr, true).is_ok());
         assert_eq!(service.added_nodes().as_slice(), &[addr]);
         assert!(service.outbound_rx.lock().try_recv().is_err());
@@ -2428,14 +2882,14 @@ mod tests {
             banned_until: None,
             reason: String::new(),
         });
-        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
         assert_eq!(service.add_node(addr, true), Err(P2pControlError::Banned));
         assert_eq!(service.added_nodes().as_slice(), &[]);
         assert!(service.outbound_rx.lock().try_recv().is_err());
     }
     #[test]
     fn parked_overflow_releases_the_address_for_another_selection() {
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
         let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         book.learn_dns("seed", &[address], 10_000);
         book.queued(address);
@@ -2456,9 +2910,9 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(16);
         let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         for n in 1..100 {
-            let addr = SocketAddr::from(([8, n, 1, 1], 8333));
+            let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
             book.learn_dns("seed", &[addr], 10_000);
-            book.learn_peer(addr.ip(), &[(addr, 9, 10_000)], 10_000);
+            book.learn_peer(crate::PeerRemote::Endpoint(addr), &[(addr, 9, 10_000)], 10_000);
         }
         (
             AddressMaintenance {
@@ -2475,6 +2929,7 @@ mod tests {
                 chain_query: None,
                 address_book: book,
                 banned: BannedReader::fixture_empty(),
+                routes: crate::RouteTable::default(),
             },
             rx,
         )
@@ -2519,10 +2974,10 @@ mod tests {
     #[test]
     fn block_relay_readiness_counts_for_dns_without_refreshing_gossip_time() {
         let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
-        let full = SocketAddr::from(([8, 1, 1, 1], 8333));
+        let full = PeerEndpoint::from(([8, 1, 1, 1], 8333));
         book.learn_dns("seed", &[full], 5000);
         let block = (2..=255)
-            .map(|n| SocketAddr::from(([8, n, 1, 1], 8333)))
+            .map(|n| PeerEndpoint::from(([8, n, 1, 1], 8333)))
             .find(|peer| {
                 book.learn_dns("seed", &[*peer], 5000);
                 book.len() == 2
@@ -2538,7 +2993,9 @@ mod tests {
             };
             table.register(addr, lease.clone());
             let info = crate::PeerInfo {
-                addr,
+                addr: crate::PeerRemote::Endpoint(addr),
+                endpoint: Some(addr),
+                network: addr.net(),
                 version: 70016,
                 wtxid_relay: false,
                 relay_transactions: true,
@@ -2550,7 +3007,10 @@ mod tests {
                 best_known_height: 0,
                 conn_time: 0,
                 inbound: false,
-                addr_bind: addr,
+                addr_bind: crate::TransportRemote::new(
+                    addr.socket_addr()
+                        .unwrap_or_else(|| panic!("expected IP fixture")),
+                ),
                 time_offset: 0,
                 counters: Arc::new(crate::PeerCounters::default()),
                 transport: crate::TransportProtocol::V1,
@@ -2570,9 +3030,11 @@ mod tests {
         for (addr, expected) in [(full, 5000), (block, 5000)] {
             let timestamp = response
                 .iter()
-                .find(|(_, advertised)| advertised.socket_addr().ok() == Some(addr))
+                .find(|advertised| {
+                    advertised.socket_addr().ok().map(PeerEndpoint::from) == Some(addr)
+                })
                 .expect("advertised")
-                .0;
+                .time;
             assert_eq!(
                 timestamp, expected,
                 "active connections never refresh gossip timestamp"
@@ -2588,14 +3050,14 @@ mod tests {
         assert!(count_address_failure(&table, 1, &book));
         let (tx, _) = crossbeam_channel::bounded(1);
         let automatic = crate::PeerLease::new(tx.clone());
-        table.register(SocketAddr::from(([8, 1, 1, 1], 8333)), automatic);
+        table.register(PeerEndpoint::from(([8, 1, 1, 1], 8333)), automatic);
         assert!(!count_address_failure(&table, 125, &book));
         assert!(count_address_failure(&table, 2, &book));
         let same_group = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
-        table.register(SocketAddr::from(([8, 1, 2, 2], 8333)), same_group);
+        table.register(PeerEndpoint::from(([8, 1, 2, 2], 8333)), same_group);
         assert!(!count_address_failure(&table, 125, &book));
         let manual = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
-        table.register(SocketAddr::from(([8, 2, 1, 1], 8333)), manual.clone());
+        table.register(PeerEndpoint::from(([8, 2, 1, 1], 8333)), manual.clone());
         assert!(
             table
                 .sessions()
@@ -2607,17 +3069,17 @@ mod tests {
             "Core counts established TCP sessions before handshake publication"
         );
         manual.cancel();
-        let probe = SocketAddr::from(([9, 4, 1, 1], 8333));
+        let probe = PeerEndpoint::from(([9, 4, 1, 1], 8333));
         assert!(book.queued_feeler(probe));
         let probe_lease = register_ready_block_peer(&table, probe);
         assert!(!count_address_failure(&table, 125, &book));
         assert!(count_address_failure(&table, 2, &book));
         assert_eq!(ready_address_count(&table, &book), 0);
-        assert_eq!(anchor_peers(&table, &book), Vec::<SocketAddr>::new());
+        assert_eq!(anchor_peers(&table, &book), Vec::<PeerEndpoint>::new());
         table.remove_current(probe, &probe_lease);
         book.unqueue(probe);
         table.register(
-            SocketAddr::from(([8, 3, 1, 1], 8333)),
+            PeerEndpoint::from(([8, 3, 1, 1], 8333)),
             crate::PeerLease::new_inbound(tx),
         );
         assert!(
@@ -2639,11 +3101,11 @@ mod tests {
         let table = crate::PeerTable::new();
         let (tx, _) = crossbeam_channel::bounded(1);
         table.register(
-            "8.8.0.1:8333".parse().expect("peer"),
+            "8.8.0.1:8333".parse::<PeerEndpoint>().expect("peer"),
             crate::PeerLease::new(tx.clone()),
         );
         table.register(
-            "9.9.0.1:8333".parse().expect("same ASN"),
+            "9.9.0.1:8333".parse::<PeerEndpoint>().expect("same ASN"),
             crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay),
         );
         assert!(
@@ -2653,7 +3115,9 @@ mod tests {
         assert!(count_address_failure(&table, 2, &book));
         let independent = crate::PeerLease::new_manual(tx.clone(), crate::PeerRole::FullRelay);
         table.register(
-            "8.8.1.1:8333".parse().expect("independent ASN"),
+            "8.8.1.1:8333"
+                .parse::<PeerEndpoint>()
+                .expect("independent ASN"),
             independent.clone(),
         );
         assert!(
@@ -2670,7 +3134,7 @@ mod tests {
         assert!(count_address_failure(&table, 125, &book));
         independent.cancel();
         table.register(
-            "8.8.1.2:8333".parse().expect("inbound"),
+            "8.8.1.2:8333".parse::<PeerEndpoint>().expect("inbound"),
             crate::PeerLease::new_inbound(tx),
         );
         assert!(!count_address_failure(&table, 125, &book));
@@ -2681,7 +3145,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let base = dir.path().join("peers.dat");
         let book = crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None);
-        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let addr = PeerEndpoint::from(([127, 0, 0, 1], 8333));
         book.learn_dns("seed", &[addr], 10_000);
         let tick = Instant::now();
         let mut next = tick + Duration::from_mins(15);
@@ -2700,12 +3164,13 @@ mod tests {
         assert_eq!(
             crate::addrman::AddressBook::open(Some(base.clone()), [1; 4], true, None)
                 .gossip(20_000)[0]
-                .0,
+                .time,
             10_000
         );
         book.save();
         assert_eq!(
-            crate::addrman::AddressBook::open(Some(base), [1; 4], true, None).gossip(20_000)[0].0,
+            crate::addrman::AddressBook::open(Some(base), [1; 4], true, None).gossip(20_000)[0]
+                .time,
             20_000,
             "shutdown and anchor-consumption barriers bypass the periodic throttle"
         );
@@ -2724,7 +3189,13 @@ mod tests {
         );
         let reader = service.banned_reader();
         reader.discourage(ip);
-        assert!(reader.is_noban("::ffff:8.8.8.8".parse().expect("mapped ip")));
+        assert!(
+            reader.is_noban(
+                "::ffff:8.8.8.8"
+                    .parse::<std::net::IpAddr>()
+                    .expect("mapped ip")
+            )
+        );
         assert!(reader.automatic_snapshot(SystemTime::now()).allows(ip));
         service.set_ban(crate::BannedSubnet {
             subnet: protected,
@@ -2742,11 +3213,11 @@ mod tests {
         let (maintenance, queue) = maintenance_fixture(4);
         let now = crate::addrman::now();
         for n in 1..100 {
-            let addr = SocketAddr::from(([8, n, 1, 1], 8333));
+            let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
             maintenance.address_book.learn_dns("seed", &[addr], now);
             maintenance
                 .address_book
-                .learn_peer(addr.ip(), &[(addr, 9, now)], now);
+                .learn_peer(crate::PeerRemote::Endpoint(addr), &[(addr, 9, now)], now);
         }
         assert!(
             maintenance
@@ -2770,7 +3241,7 @@ mod tests {
             queue.is_empty(),
             "regular selection must apply the policy snapshot"
         );
-        let address = SocketAddr::from(([8, 1, 1, 1], 8333));
+        let address = PeerEndpoint::from(([8, 1, 1, 1], 8333));
         maintenance.address_book.succeeded(address, 9, now);
         maintenance.address_book.remember_anchors(&[address], now);
         let mut anchors: VecDeque<_> = maintenance.address_book.take_restart_anchors(now).into();
@@ -2855,7 +3326,7 @@ mod tests {
         assert_eq!(rx.len(), 3, "the live session and its claim count once");
         let (tx, _rx) = crossbeam_channel::unbounded();
         maintenance.peer_table.register(
-            SocketAddr::from(([9, 9, 1, 1], 8333)),
+            PeerEndpoint::from(([9, 9, 1, 1], 8333)),
             crate::PeerLease::new_manual(tx, crate::PeerRole::FullRelay),
         );
         maintenance.target = 5;
@@ -2911,7 +3382,7 @@ mod tests {
             },
             Arc::new(AtomicBool::new(false)),
         );
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
         let now = crate::addrman::now();
         service.address_book.learn_dns("seed", &[address], now);
         service.address_book.queued(address);
@@ -2987,7 +3458,7 @@ mod tests {
         );
         let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         shared.address_book = Some(book.clone());
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
         book.queued(address);
         let mut active = HashMap::from([(
             address,
@@ -3027,7 +3498,7 @@ mod tests {
             handles.push((address, thread::spawn(|| Ok(()))));
             let deadline = Instant::now() + Duration::from_secs(5);
             while !handles.is_empty() && Instant::now() < deadline {
-                reap_finished_outbound_connections(&mut active, &mut handles, &book);
+                let _ = reap_finished_outbound_connections(&mut active, &mut handles, &book);
                 thread::sleep(Duration::from_millis(1));
             }
             assert_eq!(handles.len(), 0);
@@ -3041,7 +3512,7 @@ mod tests {
         let table = crate::PeerTable::new();
         let mut leases = Vec::new();
         for port in 1..=4_u16 {
-            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, port));
             let (sender, _receiver) = crossbeam_channel::unbounded();
             let lease = match port {
                 1 | 2 => crate::PeerLease::new_block_relay(sender),
@@ -3056,7 +3527,9 @@ mod tests {
             );
             let info = crate::PeerInfo::outbound_from_version(
                 address,
-                address,
+                address
+                    .socket_addr()
+                    .unwrap_or_else(|| panic!("expected IP fixture")),
                 &version,
                 10_000,
                 10_000,
@@ -3066,7 +3539,7 @@ mod tests {
             assert!(table.publish_info(address, &lease, info));
             if port != 1 {
                 assert!(table.note_announced_tip(
-                    lease.source(address),
+                    lease.source(Some(address)),
                     bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
                     Some(2)
                 ));
@@ -3075,16 +3548,16 @@ mod tests {
         }
         assert_eq!(
             anchor_peers(&table, &book),
-            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 2))]
+            vec![PeerEndpoint::from((Ipv4Addr::LOCALHOST, 2))]
         );
         leases[1].cancel();
-        assert_eq!(anchor_peers(&table, &book), Vec::<SocketAddr>::new());
+        assert_eq!(anchor_peers(&table, &book), Vec::<PeerEndpoint>::new());
     }
 
     #[test]
     fn anchor_dials_prefer_block_slots_without_displacing_manual_roles() {
         let table = crate::PeerTable::new();
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
         let anchor = OutboundDial {
             addr: address,
             manual: false,
@@ -3132,8 +3605,8 @@ mod tests {
         maintenance.outbound_tx = sender;
         let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         maintenance.address_book = Arc::clone(&book);
-        let first: SocketAddr = "8.1.1.1:8333".parse().expect("first");
-        let other: SocketAddr = "9.2.1.1:8333".parse().expect("other");
+        let first: PeerEndpoint = "8.1.1.1:8333".parse().expect("first");
+        let other: PeerEndpoint = "9.2.1.1:8333".parse().expect("other");
         for addr in [first, other] {
             book.learn_dns("seed", &[addr], 10_000);
             book.succeeded(addr, 9, 10_001);
@@ -3176,7 +3649,7 @@ mod tests {
             10_003,
         );
         assert_eq!(receiver.try_recv().expect("diverse second").addr, other);
-        assert_eq!(anchors, VecDeque::<SocketAddr>::new());
+        assert_eq!(anchors, VecDeque::<PeerEndpoint>::new());
         // A queued but never accepted anchor is returned, not discarded.
         book.defer_anchor(other);
         book.return_restart_anchors(10_004);
@@ -3250,7 +3723,7 @@ mod tests {
         for n in 1..100 {
             maintenance.address_book.learn_dns(
                 "seed",
-                &[SocketAddr::from(([8, n, 1, 1], 8333))],
+                &[PeerEndpoint::from(([8, n, 1, 1], 8333))],
                 now,
             );
         }
@@ -3270,8 +3743,8 @@ mod tests {
             "unproven probe candidates exist"
         );
         for n in 1..100 {
-            maintenance.manual_nodes.write().push(SocketAddr::new(
-                Ipv4Addr::new(8, n, 1, 1).to_ipv6_mapped().into(),
+            maintenance.manual_nodes.write().push(PeerEndpoint::new(
+                std::net::IpAddr::V6(Ipv4Addr::new(8, n, 1, 1).to_ipv6_mapped()),
                 8333,
             ));
         }
@@ -3286,7 +3759,7 @@ mod tests {
             queue.try_recv().is_err(),
             "anchor selection must honor mapped manual pins"
         );
-        assert_eq!(anchors, VecDeque::<SocketAddr>::new());
+        assert_eq!(anchors, VecDeque::<PeerEndpoint>::new());
         let (headers, _) = crossbeam_channel::bounded(1);
         let (blocks, _) = crossbeam_channel::bounded(1);
         // An inactive transport makes a regression fail locally before any TCP
@@ -3329,15 +3802,43 @@ mod tests {
                 .manual_nodes
                 .read()
                 .iter()
-                .all(SocketAddr::is_ipv6),
+                .all(PeerEndpoint::is_ipv6),
             "operator spelling is retained"
         );
         assert!(
-            !is_manual_endpoint(&pins, SocketAddr::new(anchor.ip(), 8334)),
+            !is_manual_endpoint(&pins, PeerEndpoint::new(anchor.address(), 8334)),
             "a different port is a different endpoint"
         );
     }
-    fn register_ready_block_peer(table: &crate::PeerTable, addr: SocketAddr) -> crate::PeerLease {
+    #[test]
+    fn onlynet_prefilter_selects_no_forbidden_network_dial() {
+        let (mut maintenance, queue) = maintenance_fixture(4);
+        maintenance.routes.onlynet = vec![crate::NetworkLabel::Onion];
+        let now = 10_000;
+        queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
+        assert!(
+            queue.try_recv().is_err(),
+            "an IP-heavy book under onlynet=onion must queue no ordinary dial"
+        );
+        let book = &maintenance.address_book;
+        let anchor = book
+            .select(&[], &[], now, u64::MAX, |_| true)
+            .expect("eligible ordinary candidate");
+        book.succeeded(anchor, 9, now);
+        book.remember_anchors(&[anchor], now);
+        assert_eq!(book.take_restart_anchors(now), vec![anchor]);
+        assert!(
+            book.anchor_eligible(anchor, &[], now),
+            "the anchor would otherwise be selectable"
+        );
+        let mut anchors = VecDeque::from(vec![anchor]);
+        queue_restart_anchors(&maintenance, &mut anchors, &mut None, &mut Vec::new(), now);
+        assert!(
+            queue.try_recv().is_err(),
+            "anchor selection must honor the route prefilter"
+        );
+    }
+    fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> crate::PeerLease {
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_block_relay(sender);
         let version = crate::handshake::version_message(
@@ -3348,7 +3849,8 @@ mod tests {
         );
         let info = crate::PeerInfo::outbound_from_version(
             addr,
-            addr,
+            addr.socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
             &version,
             10_000,
             10_000,
@@ -3357,7 +3859,7 @@ mod tests {
         table.register(addr, lease.clone());
         assert!(table.publish_info(addr, &lease, info));
         assert!(table.note_announced_tip(
-            lease.source(addr),
+            lease.source(Some(addr)),
             bitcoin_rs_primitives::Hash256::from_le_bytes(&[7; 32]),
             Some(1)
         ));
@@ -3372,9 +3874,9 @@ mod tests {
             maintenance.block_slots = 1;
             let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
             maintenance.address_book = Arc::clone(&book);
-            let first: SocketAddr = "8.1.1.1:8333".parse().expect("first");
-            let second: SocketAddr = "9.2.1.1:8333".parse().expect("second");
-            let full: SocketAddr = "11.3.1.1:8333".parse().expect("ordinary full relay");
+            let first: PeerEndpoint = "8.1.1.1:8333".parse().expect("first");
+            let second: PeerEndpoint = "9.2.1.1:8333".parse().expect("second");
+            let full: PeerEndpoint = "11.3.1.1:8333".parse().expect("ordinary full relay");
             for addr in [first, second, full] {
                 book.learn_dns("seed", &[addr], 10_000);
             }
@@ -3460,8 +3962,8 @@ mod tests {
 
     #[test]
     fn a_queued_anchor_waits_for_its_block_slot_without_blocking_a_full_slot() {
-        let first: SocketAddr = "8.1.1.1:8333".parse().expect("first");
-        let second: SocketAddr = "9.2.1.1:8333".parse().expect("second");
+        let first: PeerEndpoint = "8.1.1.1:8333".parse().expect("first");
+        let second: PeerEndpoint = "9.2.1.1:8333".parse().expect("second");
         let busy = HashMap::from([(
             first,
             ActiveOutbound {
@@ -3494,7 +3996,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_publishes_captured_anchors_without_a_maintenance_worker_or_join() {
+    fn shutdown_captures_anchors_before_cancelling_workers() {
         let directory = tempfile::tempdir().expect("directory");
         let path = directory.path().join("peers.dat");
         let service = P2pService::new(
@@ -3506,13 +4008,47 @@ mod tests {
             },
             Arc::new(AtomicBool::new(false)),
         );
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333));
+        let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
         let now = crate::addrman::now();
         service.address_book.learn_dns("fixture", &[addr], now);
         service.address_book.succeeded(addr, 9, now);
-        let _lease = register_ready_block_peer(&service.peer_table, addr);
-        assert!(service.workers.lock().is_none());
+        let lease = register_ready_block_peer(&service.peer_table, addr);
+        // Install an epoch so `shutdown` runs its worker-cancellation path
+        // (`cancel_all`); without it the anchor capture is never racing a
+        // cancel and the test would pass even with the old ordering.
+        *service.workers.lock() = Some(Workers::default());
+        assert!(service.workers.lock().is_some());
         service.shutdown();
+        assert!(
+            lease.is_cancelled(),
+            "shutdown must cancel live sessions"
+        );
+        let restored =
+            crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
+        assert_eq!(restored.take_restart_anchors(now), vec![addr]);
+    }
+
+    #[test]
+    fn shutdown_captures_anchors_before_cancelling_worker_leases() {
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("peers.dat");
+        let service = P2pService::new(
+            P2pServiceConfig {
+                address_book_path: Some(path.clone()),
+                magic: Magic::REGTEST,
+                allow_local_addresses: true,
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into();
+        let now = crate::addrman::now();
+        service.address_book.learn_dns("fixture", &[addr], now);
+        service.address_book.succeeded(addr, 9, now);
+        let lease = register_ready_block_peer(&service.peer_table, addr);
+        *service.workers.lock() = Some(Workers::default());
+        service.shutdown();
+        assert!(lease.is_cancelled(), "workers cancel every lease");
         let restored =
             crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
         assert_eq!(restored.take_restart_anchors(now), vec![addr]);
@@ -3525,7 +4061,7 @@ mod tests {
     #[test]
     fn rejected_duplicates_preserve_active_feeler_and_dispatched_anchor_claims_until_join() {
         for feeler in [false, true] {
-            let address: SocketAddr = "127.0.0.1:8333".parse().expect("address");
+            let address: PeerEndpoint = "127.0.0.1:8333".parse().expect("address");
             let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
             book.learn_dns("seed", &[address], 10_000);
             if feeler {
@@ -3565,8 +4101,10 @@ mod tests {
                 crate::listener::ListenerExtras::default(),
             );
             shared.address_book = Some(Arc::clone(&book));
-            let mapped =
-                SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 8333);
+            let mapped = PeerEndpoint::new(
+                std::net::IpAddr::V6(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped()),
+                8333,
+            );
             let duplicate = OutboundDial::auto(mapped);
             let mut handles = Vec::new();
             spawn_outbound_dial(
@@ -3628,8 +4166,8 @@ mod tests {
         let path = directory.path().join("peers-01010101.dat");
         let book = crate::addrman::AddressBook::open(Some(base), [1; 4], false, Some(&map));
         maintenance.address_book = Arc::clone(&book);
-        let anchor: SocketAddr = "8.8.0.1:8333".parse().expect("anchor");
-        let same_as: SocketAddr = "9.9.0.1:8333".parse().expect("same ASN");
+        let anchor: PeerEndpoint = "8.8.0.1:8333".parse::<PeerEndpoint>().expect("anchor");
+        let same_as: PeerEndpoint = "9.9.0.1:8333".parse::<PeerEndpoint>().expect("same ASN");
         book.learn_dns("seed", &[anchor], 10_000);
         book.succeeded(anchor, 9, 10_000);
         // Promotion frees New before learning the same-AS peer: two fresh
@@ -3677,7 +4215,7 @@ mod tests {
         let book = crate::addrman::AddressBook::open(Some(base), [1; 4], false, None);
         maintenance.address_book = Arc::clone(&book);
         maintenance.network_active.store(false, Ordering::Release);
-        let address: SocketAddr = "8.8.8.8:8333".parse().expect("address");
+        let address: PeerEndpoint = "8.8.8.8:8333".parse().expect("address");
         let now = crate::addrman::now();
         book.learn_dns("seed", &[address], now);
         book.succeeded(address, 9, now);
@@ -3712,6 +4250,13 @@ mod tests {
         pause: Mutex<Option<(Sender<()>, Receiver<()>)>>,
     }
     impl crate::ChainQuery for ServiceTip {
+        fn stale_tip_announcement(
+            &self,
+            _: bitcoin_rs_primitives::Hash256,
+            _: &[bitcoin_rs_primitives::Hash256],
+        ) -> Option<crate::dispatch::StaleTipHeaders> {
+            None
+        }
         fn headers_after(
             &self,
             _: &[bitcoin_rs_primitives::BlockHash],
@@ -3764,8 +4309,8 @@ mod tests {
             });
             let query: Arc<dyn crate::ChainQuery> = tip.clone();
             let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
-            book.learn_dns("seed", &[address], now);
-            book.succeeded(address, if tip_changes { 1032 } else { 9 }, now);
+            book.learn_dns("seed", &[address.into()], now);
+            book.succeeded(address.into(), if tip_changes { 1032 } else { 9 }, now);
             let (mut maintenance, queue) = maintenance_fixture(1);
             maintenance.address_book = Arc::clone(&book);
             maintenance.chain_query = Some(Arc::clone(&query));
@@ -3784,7 +4329,7 @@ mod tests {
                     Ordering::Release,
                 );
             } else {
-                book.set_services(address, 1);
+                book.set_services(address.into(), 1);
             }
             let mut shared = crate::listener::ConnectionShared::new(
                 Arc::clone(&maintenance.peer_table),
@@ -3820,11 +4365,11 @@ mod tests {
                 "stale parked metadata never starts a worker"
             );
             assert!(
-                !book.is_pending(address),
+                !book.is_pending(address.into()),
                 "rejected ordinary claim is released"
             );
             let result = crate::listener::spawn_outbound_connection(
-                address,
+                address.into(),
                 shared,
                 crate::PeerRole::FullRelay,
             )
@@ -3857,8 +4402,8 @@ mod tests {
             None,
         );
         maintenance.address_book = Arc::clone(&book);
-        let bad: SocketAddr = "8.8.8.8:8333".parse().expect("incomplete");
-        let healthy: SocketAddr = "9.9.9.9:8333".parse().expect("healthy");
+        let bad: PeerEndpoint = "8.8.8.8:8333".parse().expect("incomplete");
+        let healthy: PeerEndpoint = "9.9.9.9:8333".parse().expect("healthy");
         book.learn_dns("seed", &[bad, healthy], 10_000);
         book.succeeded(bad, 9, 10_000);
         book.succeeded(healthy, 9, 10_000);
@@ -3905,8 +4450,10 @@ mod tests {
         let server = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = server.local_addr().expect("address");
         let now = crate::addrman::now();
-        service.address_book.learn_dns("loopback", &[address], now);
-        service.address_book.set_services(address, 9);
+        service
+            .address_book
+            .learn_dns("loopback", &[address.into()], now);
+        service.address_book.set_services(address.into(), 9);
         let (entered, entered_rx) = crossbeam_channel::bounded(1);
         let (release, release_rx) = crossbeam_channel::bounded(1);
         let query: Arc<dyn crate::ChainQuery> = Arc::new(ServiceTip {
@@ -3933,8 +4480,11 @@ mod tests {
             crate::listener::ListenerExtras::default(),
         );
         shared.address_book = Some(Arc::clone(&service.address_book));
-        let worker =
-            crate::listener::spawn_outbound_connection(address, shared, crate::PeerRole::FullRelay);
+        let worker = crate::listener::spawn_outbound_connection(
+            address.into(),
+            shared,
+            crate::PeerRole::FullRelay,
+        );
         entered_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("passed early activity check, paused before TCP");
@@ -3961,15 +4511,774 @@ mod tests {
         let result = worker.join().expect("outbound worker");
         disabled.expect("disable does not wait for socket I/O or metadata query");
         assert_eq!(received.expect("closed without handshake"), 0);
-        assert!(matches!(
-            result,
-            Err(crate::PeerError::Protocol("network inactive"))
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(crate::PeerError::Protocol(
+                    "transport or network unavailable"
+                ))
+            ),
+            "unexpected outbound result: {result:?}"
+        );
         assert_eq!(service.peer_table.sessions().len(), 0);
         assert_eq!(ready.load(Ordering::Relaxed), 0);
         service.address_book.save();
         let record = &saved_book(&directory.path().join("peers-fabfb5da.dat"))["records"][0];
         assert_eq!(record["last_success"], 0);
         assert_eq!(record["tried"], false);
+    }
+
+    #[test]
+    fn workers_teardown_cleans_resources_and_cancels_sessions() {
+        let peer_table = Arc::new(crate::PeerTable::new());
+        let addresses = Mutex::new(vec![crate::PeerEndpoint::Ip(SocketAddr::from((
+            [127, 0, 0, 1],
+            8333,
+        )))]);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session_cancel = Arc::new(AtomicBool::new(false));
+        let mut workers = Workers::new(Arc::clone(&shutdown), Arc::clone(&session_cancel));
+
+        let thread_shutdown = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || {
+            while !thread_shutdown.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        });
+        workers.listeners.push(handle);
+
+        assert!(!shutdown.load(Ordering::Acquire));
+        assert!(!session_cancel.load(Ordering::Acquire));
+        assert!(!addresses.lock().is_empty());
+
+        workers.teardown(&peer_table, &addresses);
+
+        assert!(shutdown.load(Ordering::Acquire));
+        assert!(session_cancel.load(Ordering::Acquire));
+        assert!(addresses.lock().is_empty());
+        assert!(workers.listeners.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_fixed_peer_endpoints_valid_typed_endpoints_bypass_resolver() {
+        let network_active = AtomicBool::new(true);
+        let peer_table = crate::PeerTable::new();
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+
+        let good_tor_payload = bitcoin_rs_primitives::endpoint::tor_v3_payload(&[7u8; 32]);
+        let valid_onion = format!(
+            "{}.onion:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload)
+        );
+        let valid_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+
+        // For valid overlay targets (TorV3 and I2P), resolver MUST remain untouched (0 calls)
+        // and pinned dials must be generated.
+        let mut resolve_calls = 0;
+        let valid_overlay_targets = vec![valid_onion, valid_i2p];
+        bootstrap_fixed_peer_endpoints(
+            &network_active,
+            &peer_table,
+            &outbound_tx,
+            &valid_overlay_targets,
+            |_host| {
+                resolve_calls += 1;
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 8333))])
+            },
+        );
+        assert_eq!(
+            resolve_calls, 0,
+            "injected resolver must remain untouched for valid overlay targets"
+        );
+        assert!(matches!(
+            outbound_rx.try_recv().expect("valid onion dial").addr,
+            crate::PeerEndpoint::TorV3 { .. }
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().expect("valid i2p dial").addr,
+            crate::PeerEndpoint::I2p { .. }
+        ));
+
+        // For direct IP, resolver MUST remain untouched (0 calls) and dial is generated.
+        bootstrap_fixed_peer_endpoints(
+            &network_active,
+            &peer_table,
+            &outbound_tx,
+            &["127.0.0.1:8333".to_owned()],
+            |_host| {
+                resolve_calls += 1;
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 8333))])
+            },
+        );
+        assert_eq!(
+            resolve_calls, 0,
+            "injected resolver must remain untouched for direct IP"
+        );
+        assert_eq!(
+            outbound_rx.try_recv().expect("direct ip dial").addr,
+            crate::PeerEndpoint::Ip(SocketAddr::from(([127, 0, 0, 1], 8333)))
+        );
+    }
+
+    fn malformed_reserved_overlay_targets_testdata() -> Vec<String> {
+        let good_tor_payload = bitcoin_rs_primitives::endpoint::tor_v3_payload(&[7u8; 32]);
+        let valid_onion = format!(
+            "{}.onion:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload)
+        );
+        let valid_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
+
+        let mut bad_payload = good_tor_payload;
+        bad_payload[32] ^= 1;
+        let invalid_checksum_onion = format!(
+            "{}.onion:8333",
+            bitcoin_rs_primitives::endpoint::base32_encode(&bad_payload)
+        );
+        let good_b32 = bitcoin_rs_primitives::endpoint::base32_encode(&good_tor_payload);
+
+        vec![
+            // Rejected overlay targets:
+            // - invalid checksum
+            invalid_checksum_onion,
+            // - wrong base32 length
+            "abc.onion:8333".to_owned(),
+            format!("{}.b32.i2p:8333", "a".repeat(51)),
+            format!("{}.b32.i2p:8333", "a".repeat(53)),
+            // - malformed port
+            format!("{good_b32}.onion:notaport"),
+            format!("{good_b32}.onion:0"),
+            format!("{good_b32}.onion:99999"),
+            // - missing port
+            format!("{good_b32}.onion"),
+            format!("{}.b32.i2p", "a".repeat(52)),
+            // - mixed case
+            valid_onion.to_uppercase(),
+            valid_i2p.to_uppercase(),
+            // - trailing dot
+            format!("{good_b32}.onion.:8333"),
+            format!("{good_b32}.onion."),
+            format!("{}.b32.i2p.:8333", "a".repeat(52)),
+            format!("{}.b32.i2p.", "a".repeat(52)),
+            // Unsupported .i2p names (human-readable, short, or invalid canonical b32)
+            "foo.i2p:8333".to_owned(),
+            "foo.i2p".to_owned(),
+            "FOO.I2P:8333".to_owned(),
+            "foo.I2P:8333".to_owned(),
+            "foo.i2p.:8333".to_owned(),
+            "foo.i2p.".to_owned(),
+            "b32.i2p:8333".to_owned(),
+            "b32.i2p".to_owned(),
+            "B32.I2P:8333".to_owned(),
+            "b32.i2p.:8333".to_owned(),
+            "b32.i2p.".to_owned(),
+            // Absolute root overlay targets
+            "onion.:8333".to_owned(),
+            "onion.".to_owned(),
+            "ONION.:8333".to_owned(),
+            "i2p.:8333".to_owned(),
+            "i2p.".to_owned(),
+            "I2P.:8333".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn bootstrap_fixed_peer_endpoints_malformed_reserved_overlay_names_bypass_resolver() {
+        let network_active = AtomicBool::new(true);
+        let peer_table = crate::PeerTable::new();
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+
+        let rejected_overlay_targets = malformed_reserved_overlay_targets_testdata();
+
+        // For all rejected overlay targets, resolver MUST remain untouched (0 calls).
+        let mut resolve_calls = 0;
+        bootstrap_fixed_peer_endpoints(
+            &network_active,
+            &peer_table,
+            &outbound_tx,
+            &rejected_overlay_targets,
+            |_host| {
+                resolve_calls += 1;
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 8333))])
+            },
+        );
+        assert_eq!(
+            resolve_calls, 0,
+            "injected resolver must remain untouched for rejected overlay targets"
+        );
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "no dial should be generated for rejected overlay targets"
+        );
+    }
+
+    #[test]
+    fn bootstrap_fixed_peer_endpoints_ordinary_dns_and_lan_use_resolver() {
+        let network_active = AtomicBool::new(true);
+        let peer_table = crate::PeerTable::new();
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+
+        // For ordinary hostnames (including legitimate fakeb32.i2p.org and single-label LAN names),
+        // injected resolver MUST be called.
+        let ordinary_hostnames = vec![
+            "seed.bitcoin.sipa.be:8333".to_owned(),
+            "fakeb32.i2p.org:8333".to_owned(),
+            "onion:8333".to_owned(),
+            "i2p:8333".to_owned(),
+        ];
+        let expected_addr = SocketAddr::from(([192, 0, 2, 42], 8333));
+        let mut resolve_calls = 0;
+        bootstrap_fixed_peer_endpoints(
+            &network_active,
+            &peer_table,
+            &outbound_tx,
+            &ordinary_hostnames,
+            |_host| {
+                resolve_calls += 1;
+                Ok(vec![expected_addr])
+            },
+        );
+        assert_eq!(
+            resolve_calls, 4,
+            "injected resolver must be called for ordinary DNS and LAN hostnames"
+        );
+        for _ in 0..4 {
+            assert_eq!(
+                outbound_rx.try_recv().expect("dns dial").addr,
+                crate::PeerEndpoint::Ip(expected_addr)
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_fixed_peer_endpoints_queue_and_cancellation() {
+        let peer_table = crate::PeerTable::new();
+
+        // Cancellation: when network_active is false, resolution and dial are skipped.
+        let network_inactive = AtomicBool::new(false);
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let mut resolve_calls = 0;
+        bootstrap_fixed_peer_endpoints(
+            &network_inactive,
+            &peer_table,
+            &outbound_tx,
+            &[
+                "seed.bitcoin.sipa.be:8333".to_owned(),
+                "127.0.0.1:8333".to_owned(),
+            ],
+            |_host| {
+                resolve_calls += 1;
+                Ok(vec![SocketAddr::from(([192, 0, 2, 42], 8333))])
+            },
+        );
+        assert_eq!(resolve_calls, 0);
+        assert!(outbound_rx.try_recv().is_err());
+
+        // Queue saturation: when outbound_tx is bounded and full, bootstrap breaks early.
+        let network_active = AtomicBool::new(true);
+        let (bounded_tx, bounded_rx) = crossbeam_channel::bounded(1);
+        bootstrap_fixed_peer_endpoints(
+            &network_active,
+            &peer_table,
+            &bounded_tx,
+            &["127.0.0.1:8333".to_owned(), "127.0.0.2:8333".to_owned()],
+            |_host| Ok(vec![SocketAddr::from(([127, 0, 0, 1], 8333))]),
+        );
+        assert!(bounded_rx.try_recv().is_ok());
+        assert!(bounded_rx.try_recv().is_err());
+    }
+
+    /// Structurally valid I2P destination (384 zero key bytes plus an
+    /// Ed25519/X25519 key certificate), base64-encoded.
+    fn sam_destination() -> String {
+        format!("{}BQAEAAcABA==", "A".repeat(512))
+    }
+
+    /// [`sam_destination`] followed by 64 private key bytes.
+    fn sam_private_destination() -> String {
+        format!(
+            "{}BQAEAAcABAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+            "A".repeat(512)
+        )
+    }
+
+    /// The endpoint a session on the fixture bridge publishes.
+    fn sam_endpoint() -> crate::PeerEndpoint {
+        let bytes =
+            crate::sam::i2p_base64_decode(&sam_destination()).expect("fixture destination decodes");
+        crate::PeerEndpoint::I2p {
+            hash: crate::sam::destination_hash(&bytes),
+            port: 8333,
+        }
+    }
+
+    /// Shared state of one [`SamBridge`].
+    struct BridgeState {
+        /// While false, the `SESSION CREATE` reply is withheld.
+        release: AtomicBool,
+        stop: AtomicBool,
+        /// How many leading `HELLO` commands are answered with version 3.1,
+        /// which the client refuses at once.
+        unsupported_hellos: AtomicUsize,
+        create_seen: Sender<()>,
+        hung_up: Sender<()>,
+    }
+
+    /// Scripted SAM bridge. It answers every command at once, except that
+    /// the `SESSION CREATE` reply waits for `release`: the pinned bridge
+    /// answers it only once its destination is ready, which can take two
+    /// minutes.
+    struct SamBridge {
+        addr: SocketAddr,
+        state: Arc<BridgeState>,
+        /// One signal per `SESSION CREATE` the bridge received.
+        create_seen: Receiver<()>,
+        /// One signal per client that closed its connection while the
+        /// `SESSION CREATE` reply was held.
+        hung_up: Receiver<()>,
+        accept: Option<JoinHandle<()>>,
+        connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    }
+
+    impl SamBridge {
+        /// A bridge that withholds the `SESSION CREATE` reply until
+        /// [`SamBridge::release`].
+        fn holding_session_create() -> Self {
+            Self::spawn(0)
+        }
+
+        /// A bridge whose first `HELLO` negotiates 3.1, which the client
+        /// refuses for good, and whose later ones negotiate 3.3.
+        fn refusing_first_hello() -> Self {
+            // No client has connected yet, so releasing here is not a race.
+            let bridge = Self::spawn(1);
+            bridge.release();
+            bridge
+        }
+
+        /// Starts a bridge that holds `SESSION CREATE` replies until
+        /// [`SamBridge::release`].
+        fn spawn(unsupported_hellos: usize) -> Self {
+            let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .expect("bind sam bridge");
+            let addr = listener.local_addr().expect("sam bridge address");
+            let (create_seen_tx, create_seen) = crossbeam_channel::unbounded();
+            let (hung_up_tx, hung_up) = crossbeam_channel::unbounded();
+            let state = Arc::new(BridgeState {
+                release: AtomicBool::new(false),
+                stop: AtomicBool::new(false),
+                unsupported_hellos: AtomicUsize::new(unsupported_hellos),
+                create_seen: create_seen_tx,
+                hung_up: hung_up_tx,
+            });
+            let connections = Arc::new(Mutex::new(Vec::new()));
+            let accept = {
+                let state = Arc::clone(&state);
+                let connections = Arc::clone(&connections);
+                thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        let Ok(stream) = stream else { break };
+                        if state.stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let state = Arc::clone(&state);
+                        connections
+                            .lock()
+                            .push(thread::spawn(move || serve_sam_connection(&stream, &state)));
+                    }
+                })
+            };
+            Self {
+                addr,
+                state,
+                create_seen,
+                hung_up,
+                accept: Some(accept),
+                connections,
+            }
+        }
+
+        /// Answers every withheld and later `SESSION CREATE`.
+        fn release(&self) {
+            self.state.release.store(true, Ordering::Release);
+        }
+    }
+
+    impl Drop for SamBridge {
+        fn drop(&mut self) {
+            self.state.stop.store(true, Ordering::Release);
+            self.release();
+            // A throwaway connection wakes the blocking accept loop.
+            let _ = TcpStream::connect(self.addr);
+            if let Some(accept) = self.accept.take() {
+                let _ = accept.join();
+            }
+            let connections = std::mem::take(&mut *self.connections.lock());
+            for connection in connections {
+                let _ = connection.join();
+            }
+        }
+    }
+
+    /// Releases a bridge's hold when dropped, so a start parked on a held
+    /// reply ends on every exit path, a failed assertion included.
+    struct ReleaseOnDrop(Arc<BridgeState>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release.store(true, Ordering::Release);
+        }
+    }
+
+    fn timed_out(error: &io::Error) -> bool {
+        matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
+    }
+
+    /// Waits out the withheld `SESSION CREATE` reply. False when the bridge
+    /// stopped, or the client closed the connection, before the release.
+    fn wait_for_release(reader: &mut impl std::io::Read, state: &BridgeState) -> bool {
+        let mut byte = [0u8; 1];
+        while !state.release.load(Ordering::Acquire) {
+            if state.stop.load(Ordering::Acquire) {
+                return false;
+            }
+            match reader.read(&mut byte) {
+                Ok(read) if read > 0 => {}
+                Err(error) if timed_out(&error) => {}
+                // End of stream or a reset: the client gave up on the reply.
+                Ok(_) | Err(_) => {
+                    let _ = state.hung_up.send(());
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The bridge's reply to `command`; `None` ends the connection.
+    fn bridge_reply(
+        command: &str,
+        state: &BridgeState,
+        reader: &mut impl std::io::Read,
+    ) -> Option<String> {
+        let destination = sam_destination();
+        if command.starts_with("HELLO") {
+            let refused = state
+                .unsupported_hellos
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            let version = if refused { "3.1" } else { "3.3" };
+            Some(format!("HELLO REPLY RESULT=OK VERSION={version}\n"))
+        } else if command.starts_with("DEST GENERATE") {
+            Some(format!(
+                "DEST REPLY PUB={destination} PRIV={}\n",
+                sam_private_destination()
+            ))
+        } else if command.starts_with("SESSION CREATE") {
+            let _ = state.create_seen.send(());
+            wait_for_release(reader, state)
+                .then(|| format!("SESSION STATUS RESULT=OK DESTINATION={destination}\n"))
+        } else if command.starts_with("NAMING LOOKUP") {
+            Some(format!(
+                "NAMING REPLY RESULT=OK NAME=ME VALUE={destination}\n"
+            ))
+        } else {
+            Some("SESSION STATUS RESULT=I2P_ERROR\n".to_owned())
+        }
+    }
+
+    /// Serves one bridge connection until the client or the bridge ends it.
+    fn serve_sam_connection(stream: &TcpStream, state: &BridgeState) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+
+        // A short read timeout lets the worker notice `stop`, and a client
+        // that closed its end while a reply is held.
+        if stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(clone);
+        let mut writer = stream;
+        let mut pending = Vec::new();
+        while !state.stop.load(Ordering::Acquire) {
+            match reader.read_until(b'\n', &mut pending) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(error) if timed_out(&error) => continue,
+                Err(_) => return,
+            }
+            if pending.last() != Some(&b'\n') {
+                continue;
+            }
+            let command = String::from_utf8_lossy(&pending).trim_end().to_owned();
+            pending.clear();
+            let Some(reply) = bridge_reply(&command, state, &mut reader) else {
+                return;
+            };
+            if writer.write_all(reply.as_bytes()).is_err() {
+                return;
+            }
+        }
+    }
+
+    /// A service whose only overlay is the I2P bridge at `bridge`.
+    fn i2p_service(bridge: SocketAddr) -> P2pService {
+        P2pService::new(
+            P2pServiceConfig {
+                overlay: crate::overlay::OverlayConfig {
+                    i2p_sam: Some(bridge),
+                    ..crate::overlay::OverlayConfig::default()
+                },
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    /// Polls `condition` until it holds; false once `limit` has passed.
+    fn wait_until(limit: Duration, condition: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        while !condition() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    /// A `shutdown` must end a `start` parked in the SAM bridge's readiness
+    /// wait: the wait lasts up to two minutes, and `shutdown` itself needs
+    /// the worker slot that start holds. The failed start publishes neither
+    /// a route nor an address, and a restart the operator then permits works.
+    ///
+    /// Removing the cancellation (the stop counter in the startup predicate,
+    /// or its increment in `shutdown`) leaves the start parked until the gate
+    /// opens, so `interrupted` fails.
+    #[test]
+    fn shutdown_interrupts_an_i2p_start_held_in_root_readiness_and_a_restart_publishes() {
+        let bridge = SamBridge::holding_session_create();
+        let service = i2p_service(bridge.addr);
+        let queued: crate::PeerEndpoint = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into();
+        service
+            .outbound_tx
+            .try_send(OutboundDial::auto(queued))
+            .expect("queue a dial for the route probe");
+
+        let (held, interrupted, hung_up, started) = thread::scope(|scope| {
+            let _unhold = ReleaseOnDrop(Arc::clone(&bridge.state));
+            let start = scope.spawn(|| {
+                service.start(
+                    None,
+                    None,
+                    &idle_ready(),
+                    crate::listener::ListenerExtras::default(),
+                )
+            });
+            // The bridge has the `SESSION CREATE` and is withholding its
+            // reply, so the start is inside the readiness wait.
+            let held = bridge
+                .create_seen
+                .recv_timeout(Duration::from_secs(10))
+                .is_ok();
+            let stopper = scope.spawn(|| service.shutdown());
+            let interrupted = wait_until(Duration::from_secs(10), || start.is_finished());
+            // The bridge still holds its reply, so the only way it learns of
+            // the abandoned root is the client closing that connection.
+            let hung_up = bridge.hung_up.recv_timeout(Duration::from_secs(5)).is_ok();
+            bridge.release();
+            let started = start.join().expect("start thread");
+            stopper.join().expect("shutdown thread");
+            (held, interrupted, hung_up, started)
+        });
+
+        assert!(held, "the start never reached the bridge's readiness wait");
+        assert!(
+            interrupted,
+            "shutdown must end a start held in root readiness"
+        );
+        assert!(
+            matches!(
+                &started,
+                Err(P2pServiceError::Overlay(error)) if error.kind() == io::ErrorKind::Interrupted
+            ),
+            "an interrupted start reports the cancellation, got {started:?}"
+        );
+        assert!(
+            service.overlay_addresses().is_empty(),
+            "an interrupted start publishes no overlay address"
+        );
+        assert!(
+            service.workers.lock().is_none(),
+            "an interrupted start publishes no workers, so no route"
+        );
+        assert_eq!(
+            service.outbound_rx.lock().len(),
+            1,
+            "no outbound worker exists to drain the queued dial"
+        );
+        assert!(
+            hung_up,
+            "the abandoned root exchange must be closed, not left on the bridge"
+        );
+        service
+            .join()
+            .expect("an interrupted start leaves the service joinable");
+
+        service
+            .outbound_rx
+            .lock()
+            .try_recv()
+            .expect("drain the probe dial");
+        service.set_network_active(true);
+        service
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
+            .expect("a restart after the interrupted start");
+        assert_eq!(service.overlay_addresses(), vec![sam_endpoint()]);
+        service.shutdown();
+        service.join().expect("restarted join");
+        assert_eq!(
+            service.overlay_addresses(),
+            Vec::<crate::PeerEndpoint>::new()
+        );
+    }
+
+    /// A failed `start` tears its own epoch down while it still holds the
+    /// worker slot, so a `start` that follows cannot publish before that
+    /// teardown ends, and the teardown cannot erase what the next epoch
+    /// published. The failed teardown's address-list clear is its last step
+    /// and is parked here; its peer cancellation, the step before it,
+    /// reports through the registered peer.
+    ///
+    /// Releasing the slot before the teardown, or dropping the teardown's
+    /// cancellation, fails this test: the slot is free once the peer is
+    /// cancelled, the next start reaches the bridge while the teardown is
+    /// still parked, or the peer is never cancelled. The final address
+    /// assertion is an end-to-end check of the surviving epoch, not the
+    /// discriminating one.
+    #[test]
+    fn failed_start_finishes_its_teardown_before_the_next_start_can_publish() {
+        /// What the race scenario observed, read only after every thread ended.
+        struct Observed {
+            /// The failed start's teardown reached its peer cancellation.
+            torn_down: bool,
+            /// The worker slot was still held at that point.
+            slot_held: bool,
+            /// The bridge observation while the prior teardown was parked.
+            early_create: Result<(), crossbeam_channel::RecvTimeoutError>,
+            /// The next start reached the bridge once the teardown ended.
+            reached_bridge: bool,
+            failed: Result<(), P2pServiceError>,
+            next: Result<(), P2pServiceError>,
+        }
+        // The first start's key step meets a bridge that does not speak 3.3,
+        // which fails at once and for good; the next start meets a healthy one.
+        let bridge = SamBridge::refusing_first_hello();
+        let service = i2p_service(bridge.addr);
+        let (frames, _outbound) = crossbeam_channel::unbounded();
+        let peer = crate::PeerLease::new(frames);
+        service.peer_table.register(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 8334)),
+            peer.clone(),
+        );
+
+        let observed = thread::scope(|scope| {
+            let parked = service.overlay_addresses.lock();
+            let failed = scope.spawn(|| {
+                service.start(
+                    None,
+                    None,
+                    &idle_ready(),
+                    crate::listener::ListenerExtras::default(),
+                )
+            });
+            let torn_down = wait_until(Duration::from_secs(10), || peer.is_cancelled());
+            let slot_held = service.workers.try_lock().is_none();
+            let next = scope.spawn(|| {
+                service.start(
+                    None,
+                    None,
+                    &idle_ready(),
+                    crate::listener::ListenerExtras::default(),
+                )
+            });
+            // Only the next start sends `SESSION CREATE`; the failed one stops
+            // at its first `HELLO`. While the failed teardown is parked, the
+            // next start cannot take the slot, so it cannot reach the bridge.
+            // This probe is bounded: it can miss a late scheduler, but it can
+            // never fail a correct implementation. The slot probe above is the
+            // deterministic check.
+            let early_create = bridge.create_seen.recv_timeout(Duration::from_millis(500));
+            drop(parked);
+            let failed = failed.join().expect("failed start thread");
+            let next = next.join().expect("next start thread");
+            let reached_bridge = bridge
+                .create_seen
+                .recv_timeout(Duration::from_secs(5))
+                .is_ok();
+            Observed {
+                torn_down,
+                slot_held,
+                early_create,
+                reached_bridge,
+                failed,
+                next,
+            }
+        });
+
+        assert!(
+            observed.torn_down,
+            "the failed start must cancel its peers in its teardown"
+        );
+        assert!(
+            observed.slot_held,
+            "the failed start must keep the worker slot until its teardown ends"
+        );
+        assert!(
+            matches!(
+                observed.early_create,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout)
+            ),
+            "the live bridge must receive no new root while the prior teardown is running"
+        );
+        assert!(
+            observed.reached_bridge,
+            "the next start proceeds once the failed teardown has ended"
+        );
+        assert!(
+            matches!(
+                &observed.failed,
+                Err(P2pServiceError::Overlay(error)) if error.kind() == io::ErrorKind::Unsupported
+            ),
+            "the first start fails on the bridge's version, got {:?}",
+            observed.failed
+        );
+        observed.next.expect("the start after the failed one");
+        assert_eq!(
+            service.overlay_addresses(),
+            vec![sam_endpoint()],
+            "the failed teardown must not clear what the next epoch published"
+        );
+        assert!(
+            service.workers.lock().is_some(),
+            "the next epoch owns the worker slot"
+        );
+        service.shutdown();
+        service.join().expect("join");
     }
 }

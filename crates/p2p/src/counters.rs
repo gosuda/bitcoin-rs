@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Bytes and activity times for one peer connection.
 ///
@@ -93,8 +93,8 @@ impl Eq for PeerCounters {}
 pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
-    /// The connection's cancellation flag, when reads must stop with it.
-    cancelled: Option<Arc<AtomicBool>>,
+    /// The connection owner's cancellation view, including its transport epoch.
+    lease: Option<crate::PeerLease>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -112,7 +112,7 @@ impl<S> CountingStream<S> {
         Self {
             inner,
             counters,
-            cancelled: None,
+            lease: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -125,19 +125,19 @@ impl<S> CountingStream<S> {
         &self.counters
     }
 
-    /// Makes every read fail once `cancelled` is set, so a peer trickling a
-    /// payload cannot keep a cancelled connection's thread and socket alive.
+    /// Makes every read consult the lease, so a trickling payload cannot keep
+    /// a locally cancelled or transport-revoked connection alive mid-frame.
     #[must_use]
-    pub(crate) fn stop_reading_when(mut self, cancelled: Arc<AtomicBool>) -> Self {
-        self.cancelled = Some(cancelled);
+    pub(crate) fn stop_reading_when(mut self, lease: crate::PeerLease) -> Self {
+        self.lease = Some(lease);
         self
     }
 
     fn check_cancelled(&self) -> IoResult<()> {
         if self
-            .cancelled
+            .lease
             .as_ref()
-            .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+            .is_some_and(crate::PeerLease::is_cancelled)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
@@ -802,38 +802,47 @@ mod tests {
 
     #[test]
     fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
-        let (server, _) = listener.accept()?;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let mut stream = CountingStream::new(server, Arc::new(PeerCounters::default()))
-            .stop_reading_when(Arc::clone(&cancelled));
-        // One byte every 5 ms for about a second, then EOF: without the
-        // cancellation check the read below ends in `UnexpectedEof`.
-        let trickle = std::thread::spawn(move || {
-            for _ in 0..200 {
-                if client.write_all(&[0]).is_err() {
-                    return;
+        use std::sync::atomic::AtomicBool;
+        for transport_failure in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let mut client = std::net::TcpStream::connect(listener.local_addr()?)?;
+            let (server, _) = listener.accept()?;
+            let alive = Arc::new(AtomicBool::new(true));
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let lease = crate::PeerLease::new(tx).with_transport_alive(Some(Arc::clone(&alive)));
+            let mut stream = CountingStream::new(server, Arc::new(PeerCounters::default()))
+                .stop_reading_when(lease.clone());
+            // One byte every 5 ms for about a second, then EOF: without the
+            // cancellation check the read below ends in `UnexpectedEof`.
+            let trickle = std::thread::spawn(move || {
+                for _ in 0..200 {
+                    if client.write_all(&[0]).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
-        let canceller = {
-            let cancelled = Arc::clone(&cancelled);
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                cancelled.store(true, Ordering::Release);
-            })
-        };
-        let mut payload = Vec::new();
-        let result = crate::recv::fill_growing(&mut stream, &mut payload, 4_000_000);
-        drop(stream);
-        let _ = trickle.join();
-        let _ = canceller.join();
-        assert_eq!(
-            result.map_err(|error| error.kind()),
-            Err(std::io::ErrorKind::ConnectionAborted)
-        );
+            });
+            let canceller = {
+                let alive = Arc::clone(&alive);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if transport_failure {
+                        alive.store(false, Ordering::Release);
+                    } else {
+                        lease.cancel();
+                    }
+                })
+            };
+            let mut payload = Vec::new();
+            let result = crate::recv::fill_growing(&mut stream, &mut payload, 4_000_000);
+            drop(stream);
+            let _ = trickle.join();
+            let _ = canceller.join();
+            assert_eq!(
+                result.map_err(|error| error.kind()),
+                Err(std::io::ErrorKind::ConnectionAborted)
+            );
+        }
         Ok(())
     }
 }

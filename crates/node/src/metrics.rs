@@ -181,6 +181,10 @@ fn describe_node_metrics() {
         "node.mempool.observer_failures_total",
         "mempool observer callback failures"
     );
+    metrics::describe_counter!(
+        "node.package_charge_overrun",
+        "bytes by which a decoded peer package's measured heap exceeded its planned charge"
+    );
     metrics::describe_histogram!(
         "node.event_loop.tick_seconds",
         "event loop tick latency seconds"
@@ -211,7 +215,23 @@ fn describe_node_metrics() {
     );
     metrics::describe_gauge!(
         "node.sync.staged_bytes_high_water",
-        "highest staged byte total observed"
+        "highest staged serialized byte total observed"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_decoded_bytes",
+        "decoded heap capacity bytes owned by staged blocks, excluding allocator rounding"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_retained_bytes",
+        "attributed staged bytes: decoded heap capacity plus preserved serialized buffers, excluding allocator rounding; not process RSS"
+    );
+    metrics::describe_gauge!(
+        "node.sync.staged_retained_bytes_high_water",
+        "highest attributed staged retained byte total observed"
+    );
+    metrics::describe_gauge!(
+        "node.sync.inbound_block_queue_depth",
+        "block bodies queued in the bounded inbound channel when the sync drain pass emitted its gauges, after it emptied the receiver; a residual, not a peak"
     );
     metrics::describe_counter!(
         "storage.writes_total",
@@ -229,6 +249,22 @@ fn describe_node_metrics() {
     metrics::describe_gauge!(
         TXINDEX_READINESS_GAUGE,
         "txindex capability readiness from the live getcapabilities source; 1 for the active state label, 0 for the others"
+    );
+    metrics::describe_histogram!(
+        "index.family_planned_write_bytes",
+        "pre-coalescing planned logical write bytes by index row family"
+    );
+    metrics::describe_gauge!(
+        "rpc.connections.active",
+        "admitted live HTTP connections, by listener surface"
+    );
+    metrics::describe_counter!(
+        "rpc.connections.rejected_total",
+        "HTTP connection budget refusals, by listener surface"
+    );
+    metrics::describe_histogram!(
+        "rpc.http.request_seconds",
+        "HTTP time from complete request head through response, by listener surface and route family"
     );
 }
 

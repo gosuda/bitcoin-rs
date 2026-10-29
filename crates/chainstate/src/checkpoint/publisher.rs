@@ -8,10 +8,18 @@ use bitcoin_rs_primitives::Hash256;
 
 use bitcoin_rs_storage::DisconnectPhase;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::checkpoint::{
+    CHECKPOINT_ROOT, CheckpointOpen, UTXO_FILE, open_checkpoint_generation_at,
+};
 
+use bitcoin_rs_utxo::snapshot::{
+    SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact,
+};
 use bitcoin_rs_utxo::{UtxoSet, stats::CoinStatsListener};
 
 use bitcoin_rs_storage::recovery_evidence::{AppliedTipWitness, write_witness};
+
+use bitcoin_rs_storage::checkpoint::fs::open_file;
 
 use crate::{
     ApplyAdmission, UndoStore,
@@ -57,6 +65,9 @@ enum DisconnectRetirement {
 
 /// All the shared handles needed to publish a checkpoint from a background
 /// thread without retaining the full [`crate::Chainstate`].
+/// Seed offer cell shared with the index worker of this process open.
+/// `None` when `ScriptLive` seeding is disabled; the cell itself carries
+/// demand, so the publisher never invents it.
 pub(crate) struct CheckpointPublisher {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -72,6 +83,7 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) journal:
         Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
 
+    pub(crate) seed_offer: Option<SeedOfferCell>,
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
     pub(crate) durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
@@ -254,7 +266,7 @@ impl CheckpointPublisher {
         }
         self.block_body_store.sync()?;
         self.block_body_store.flush_index()?;
-        let written = checkpoint::write_checkpoint_from_dir(
+        let (written, stage_witness) = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
             checkpoint::headers::HeaderCheckpointConfig {
                 network: self.network,
@@ -296,11 +308,54 @@ impl CheckpointPublisher {
         {
             retire_full_revalidation_marker(&self.data_dir)?;
         }
+        // C5 offer: only a full gate pass mints a witness, and only after
+        // `commit_publication` inside the writer. Reopen the committed
+        // generation read-only (never by the staging path), refuse a fused
+        // overwrite on length mismatch, and offer only into demand. Any
+        // failure here leaves the cell untouched and never fails publication.
+        if let (CheckpointWrite::Published { reference }, Some(witness)) = (&written, stage_witness)
+            && let Some(cell) = &self.seed_offer
+            && cell.is_wanted()
+        {
+            Self::offer_committed_seed(&self.checkpoint_data_dir, cell, *reference, witness);
+        }
         // Everything up to this tip is now recoverable, so undo records below
         // it may be pruned.
         self.durable_tip_height
             .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)
+    }
+
+    /// Opens the committed generation's UTXO artifact read-only, checks the
+    /// staged length binding, and offers the sealed descriptor. Drops the
+    /// opened file without storing on any disagreement.
+    fn offer_committed_seed(
+        checkpoint_data_dir: &cap_std::fs::Dir,
+        cell: &SeedOfferCell,
+        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+        witness: V4Witness,
+    ) {
+        let opened = open_checkpoint_generation_at(checkpoint_data_dir, CHECKPOINT_ROOT, reference);
+        let Ok(CheckpointOpen::Selected { generation_dir, .. }) = opened else {
+            return;
+        };
+        // Guarded open (nonblocking, no-follow, regular-file-only) so a
+        // substituted FIFO cannot stall publication; any disagreement leaves
+        // the cell untouched.
+        let Ok(file) = open_file(&generation_dir, UTXO_FILE) else {
+            return;
+        };
+        let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+            return;
+        };
+        if len != witness.byte_len() {
+            return;
+        }
+        let _ = cell.offer(VerifiedSnapshotArtifact::seal(
+            file.into_std(),
+            witness,
+            SeedProvenance::Checkpoint(reference),
+        ));
     }
 }
 
@@ -342,6 +397,95 @@ mod tests {
             Ok(()) => anyhow::bail!("opening a file as the journal directory must fail"),
         };
         assert!(matches!(error, CheckpointError::FullRevalidationMarker(_)));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_fifo_does_not_block_or_seal() -> anyhow::Result<()> {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        // Empty set still mints a witness, so the FIFO refusal below exercises
+        // the guarded open rather than a missing-witness path.
+        let set = bitcoin_rs_utxo::UtxoSet::new();
+        let tip = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0_u8; 32]);
+        let mut encoded = Vec::new();
+        let (_, (), witness) =
+            bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;
+        let Some(witness) = witness else {
+            anyhow::bail!("empty snapshot must mint a witness");
+        };
+        let reference = bitcoin_rs_storage::checkpoint::CheckpointReference {
+            generation: 0,
+            manifest_sha256: [0_u8; 32],
+        };
+
+        let dir = tempfile::tempdir()?;
+        let generation_path = dir
+            .path()
+            .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT)
+            .join("gen-00000000000000000000");
+        std::fs::create_dir_all(&generation_path)?;
+        let fifo_path = generation_path.join(bitcoin_rs_storage::checkpoint::UTXO_FILE);
+        let created = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()?;
+        assert!(created.success(), "create isolated Unix FIFO");
+
+        let cap_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
+        let worker_dir = cap_dir.try_clone()?;
+        let cell: bitcoin_rs_utxo::snapshot::SeedOfferCell =
+            std::sync::Arc::new(bitcoin_rs_utxo::snapshot::SeedSlot::new());
+        cell.want();
+        let worker_cell = cell.clone();
+
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            super::CheckpointPublisher::offer_committed_seed(
+                &worker_dir,
+                &worker_cell,
+                reference,
+                witness,
+            );
+            let _ = sender.send(());
+        });
+        let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        // Capture the rescue result without `?` so the worker join below runs
+        // even if the unblock open fails; no early return may orphan the thread.
+        let rescue: Option<std::io::Result<cap_std::fs::File>> = if observed.is_err() {
+            // Unblock a regressed blocking reader before reporting failure.
+            use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
+            let mut options = cap_std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .write(true)
+                .follow(FollowSymlinks::No)
+                .nonblock(true);
+            Some(cap_dir.open_with(
+                format!(
+                    "{}/gen-00000000000000000000/{}",
+                    bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+                    bitcoin_rs_storage::checkpoint::UTXO_FILE
+                ),
+                &options,
+            ))
+        } else {
+            None
+        };
+        let join_result = worker.join();
+        let rescue = match rescue {
+            Some(Ok(file)) => Some(file),
+            Some(Err(error)) => return Err(error.into()),
+            None => None,
+        };
+        join_result.map_err(|_| anyhow::anyhow!("checkpoint seed worker panicked"))?;
+        drop(rescue);
+        observed.map_err(|_| anyhow::anyhow!("committed FIFO open must not block"))?;
+        assert!(cell.take().is_none(), "committed FIFO must not seal");
+        assert!(
+            std::fs::symlink_metadata(&fifo_path)?.file_type().is_fifo(),
+            "substituted FIFO is preserved, not consumed"
+        );
         Ok(())
     }
 }

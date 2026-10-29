@@ -1,0 +1,8 @@
+SocksPort 127.0.0.1:__SOCKSPORT__
+ControlPort 127.0.0.1:__CONTROLPORT__
+CookieAuthentication 1
+CookieAuthFile __DATADIR__/control_auth_cookie
+ClientOnly 1
+ORPort 0
+DirPort 0
+SocksPolicy accept 127.0.0.0/8

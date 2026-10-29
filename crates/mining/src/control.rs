@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use bitcoin_rs_mempool::SnapshotEntry;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
+use bitcoin_rs_primitives::{
+    Block, BlockHash, BlockPayload, CompactTarget, Header, Network, Tx, Txid,
+};
 use compact_str::CompactString;
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::Mutex;
@@ -298,20 +300,11 @@ pub trait MiningControl: Send + Sync {
     /// applied-chain height. Matches Bitcoin Core's `getnetworkhashps`.
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError>;
 
-    /// Synchronously validates and applies a solved block.
-    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError>;
-
-    /// Applies a decoded block with its exact consensus serialization.
-    ///
-    /// Controls that do not preserve wire bytes fall back to [`Self::submit_block`].
-    fn submit_block_with_bytes(
+    /// Synchronously validates and applies a solved block with its exact consensus serialization.
+    fn submit_block(
         &self,
-        block: Block,
-        raw: Vec<u8>,
-    ) -> Result<BlockValidationResult, MiningControlError> {
-        let _ = raw;
-        self.submit_block(block)
-    }
+        payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError>;
 
     /// Admits a header through the same tree path as inbound P2P headers.
     ///
@@ -518,7 +511,10 @@ impl MiningControl for FakeMiningControl {
         Ok(self.info.lock().network_hashes_per_second)
     }
 
-    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit_block(
+        &self,
+        _payload: BlockPayload,
+    ) -> Result<BlockValidationResult, MiningControlError> {
         self.submit_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(error) = self.armed_failure() {
             return Err(error);

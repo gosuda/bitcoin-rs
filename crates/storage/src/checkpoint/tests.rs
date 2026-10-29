@@ -606,3 +606,253 @@ fn schema_init_exempts_only_a_regular_lock_file() -> Result<(), Box<dyn std::err
     assert!(ensure_current_schema(&data).is_err());
     Ok(())
 }
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+#[test]
+fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    let root = CheckpointRoot::open_or_create(&data, CHECKPOINT_ROOT)?;
+
+    // A valid same-directory rename retains its behavior.
+    root.create_dir("stage-a")?;
+    super::fs::rename_noreplace(root.dir(), "stage-a", "stage-b")?;
+    assert!(root.entry_exists("stage-b")?);
+    assert!(!root.entry_exists("stage-a")?);
+
+    // Operator data that must survive the attack attempts.
+    let mut operator = root.create_file("operator-notes")?;
+    operator.write_all(b"keep")?;
+    drop(operator);
+
+    // Crafted destinations: parent traversal, absolute paths, nested paths
+    // (including symlink-intermediate and replacement-path shapes), trailing
+    // directory slashes, and non-entry structures. Each must fail with
+    // `InvalidInput` before any syscall, leaving the source in place.
+    root.create_dir("victim")?;
+    let hostile_destinations = [
+        "..",
+        ".",
+        "",
+        "/",
+        "/tmp/checkpoint-escape",
+        "../escape",
+        "a/b",
+        "a/../b",
+        "link/",
+        "sub/CURRENT",
+        ".hidden/../escape",
+    ];
+    for hostile in hostile_destinations {
+        let error = match super::fs::rename_noreplace(root.dir(), "victim", hostile) {
+            Ok(()) => panic!("destination {hostile:?} was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "destination {hostile:?}"
+        );
+    }
+    assert!(
+        root.entry_exists("victim")?,
+        "rejected destinations must not consume the source"
+    );
+
+    // Crafted sources are confined symmetrically: an outside path must not be
+    // importable into the root.
+    for hostile in ["../victim", "/tmp/victim", "a/b", "", ".", "..", "link/"] {
+        let error = match super::fs::rename_noreplace(root.dir(), hostile, "fresh-dest") {
+            Ok(()) => panic!("source {hostile:?} was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "source {hostile:?}"
+        );
+    }
+    assert!(!root.entry_exists("fresh-dest")?);
+
+    // A planted symlink plus a trailing-slash destination must not resolve
+    // outside the root: the raw `/` is rejected before component analysis.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = dir.path().join("outside-real");
+        fs::create_dir(&outside)?;
+        let root_path = dir.path().join(CHECKPOINT_ROOT);
+        symlink(&outside, root_path.join("link"))?;
+        let error = match super::fs::rename_noreplace(root.dir(), "victim", "link/escape") {
+            Ok(()) => panic!("symlink-intermediate destination was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let error = match super::fs::rename_noreplace(root.dir(), "link/escape", "fresh-dest") {
+            Ok(()) => panic!("symlink-intermediate source was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            !outside.join("escape").exists(),
+            "rename escaped through the symlink"
+        );
+        assert_eq!(
+            fs::read(root_path.join("operator-notes"))?,
+            b"keep",
+            "operator data must survive"
+        );
+    }
+
+    // An existing destination is preserved by NOREPLACE: the collision fails
+    // without consuming the source or clobbering operator data.
+    let collision = match super::fs::rename_noreplace(root.dir(), "victim", "operator-notes") {
+        Ok(()) => panic!("rename onto operator data was accepted"),
+        Err(collision) => collision,
+    };
+    assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(root.entry_exists("victim")?);
+    assert!(root.entry_exists("operator-notes")?);
+    assert_eq!(
+        fs::read(dir.path().join(CHECKPOINT_ROOT).join("operator-notes"))?,
+        b"keep",
+        "operator data must survive collision"
+    );
+
+    // Nothing escaped the checkpoint root and the root still behaves.
+    assert!(!dir.path().join("escape").exists());
+    assert!(!dir.path().join("tmp").join("checkpoint-escape").exists());
+    super::fs::rename_noreplace(root.dir(), "victim", "victim-promoted")?;
+    assert!(root.entry_exists("victim-promoted")?);
+    Ok(())
+}
+
+#[test]
+fn open_file_reads_regular_file() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read as _;
+
+    let dir = tempdir()?;
+    std::fs::write(dir.path().join("utxo-v4.dat"), b"checkpoint-bytes")?;
+    let cap_dir = open_root(dir.path())?;
+
+    let mut file = super::fs::open_file(&cap_dir, "utxo-v4.dat")?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    assert_eq!(bytes, b"checkpoint-bytes");
+    // The public caller delegates to `open_file`, so it inherits the same
+    // no-follow, regular-file-only posture.
+    assert_eq!(
+        read_file(&cap_dir, "utxo-v4.dat", 1024)?,
+        b"checkpoint-bytes"
+    );
+
+    let missing = match super::fs::open_file(&cap_dir, "missing.dat") {
+        Err(error) => error,
+        Ok(_) => return Err("opening a missing checkpoint entry must fail".into()),
+    };
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn open_file_refuses_directory_entry() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    std::fs::create_dir(dir.path().join("gen-1"))?;
+    let cap_dir = open_root(dir.path())?;
+
+    let error = match super::fs::open_file(&cap_dir, "gen-1") {
+        Err(error) => error,
+        Ok(_) => return Err("opening a directory as a checkpoint entry must fail".into()),
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn open_file_refuses_fifo_without_blocking() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let dir = tempdir()?;
+    let fifo_path = dir.path().join("utxo-v4.dat");
+    let created = std::process::Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()?;
+    assert!(created.success(), "create isolated Unix FIFO");
+
+    let cap_dir = open_root(dir.path())?;
+    let worker_dir = cap_dir.try_clone()?;
+    // Bounded queue: the worker owns exactly one outcome and the test owns
+    // the join, so a regressed reader cannot outlive this test.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let result = super::fs::open_file(&worker_dir, "utxo-v4.dat").map(|_| ());
+        let _ = sender.send(result.map_err(|error| error.kind()));
+    });
+    let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
+    let rescue = if observed.is_err() {
+        // Unblock a regressed reader before reporting failure. O_RDWR
+        // plus NONBLOCK prevents this rescue from introducing another
+        // FIFO wait.
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .follow(FollowSymlinks::No)
+            .nonblock(true);
+        Some(cap_dir.open_with("utxo-v4.dat", &options)?)
+    } else {
+        None
+    };
+    worker
+        .join()
+        .map_err(|_| "checkpoint open worker panicked")?;
+    // Keep queued rescue bytes alive even if the worker started late.
+    drop(rescue);
+    assert_eq!(
+        observed.map_err(|_| "opening a substituted FIFO must not block")?,
+        Err(std::io::ErrorKind::InvalidData)
+    );
+    assert!(
+        std::fs::symlink_metadata(&fifo_path)?.file_type().is_fifo(),
+        "substituted FIFO is preserved, not consumed"
+    );
+    Ok(())
+}
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+#[test]
+fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    fs::write(dir.path().join("staged"), b"new")?;
+    fs::write(dir.path().join("taken"), b"operator")?;
+
+    let error = super::fs::rename_noreplace(&data, "staged", "taken")
+        .err()
+        .ok_or("rename over an existing file must fail")?;
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(dir.path().join("taken"))?, b"operator");
+    assert_eq!(fs::read(dir.path().join("staged"))?, b"new");
+
+    super::fs::rename_noreplace(&data, "staged", "free")?;
+    assert_eq!(fs::read(dir.path().join("free"))?, b"new");
+    assert!(!dir.path().join("staged").exists());
+    Ok(())
+}

@@ -5,6 +5,8 @@
 
 use super::*;
 
+use bitcoin_rs_primitives::BlockPayload;
+
 /// Returns the next `getheaders` from `rx`, skipping other traffic; fails
 /// when none is queued.
 fn next_getheaders(
@@ -33,7 +35,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -47,7 +49,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
     )
     .or_fail("regtest fixture block");
     let expected = unannounced.block_hash();
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(unannounced))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(unannounced))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -72,7 +74,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -99,7 +101,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
     // body, the second's staged-header retry must emit the only possible
     // `getheaders` on this connection (a `tick` tail could also queue one
     // via `request_headers_from_best_peer` and mask a regression).
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block3.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block3.clone()))?;
     sync.drain_inbound_blocks();
     sync.drain_inbound_blocks();
     next_getheaders(&rx)?;
@@ -111,9 +113,8 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(block2))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -134,7 +135,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     let original_tip = applied_tip.load_full().ok_or("missing applied tip")?.hash;
 
@@ -152,9 +153,8 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         headers: vec![block.header],
         source: Some(old_source),
         wire_response: false,
-        body_fetch_owned: false,
     })?;
-    let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+    let mut inbound = crate::InboundBlock::from_local(block.clone());
     inbound.source = Some(old_source);
     inbound_blocks_tx.send(inbound)?;
 
@@ -173,7 +173,7 @@ fn queued_body_from_replaced_source_cannot_enter_staging() -> TestResult {
         "a retired delivery must not enter through its body-carried header",
     );
 
-    let mut current_inbound = crate::InboundBlock::from_decoded(block);
+    let mut current_inbound = crate::InboundBlock::from_local(block);
     current_inbound.source = Some(replacement);
     inbound_blocks_tx.send(current_inbound)?;
     sync.tick();
@@ -196,7 +196,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -220,7 +220,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
     .or_fail("regtest fixture block");
     let block3_hash = Hash256::from(block3.block_hash());
 
-    let mut orphan_body = crate::InboundBlock::from_decoded(block3);
+    let mut orphan_body = crate::InboundBlock::from_local(block3);
     orphan_body.source = Some(old_source);
     inbound_blocks_tx.send(orphan_body)?;
     sync.drain_inbound_blocks();
@@ -245,10 +245,9 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
         headers: vec![block2.header],
         source: Some(replacement_source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
-    let mut parent_body = crate::InboundBlock::from_decoded(block2);
+    let mut parent_body = crate::InboundBlock::from_local(block2);
     parent_body.source = Some(replacement_source);
     inbound_blocks_tx.send(parent_body)?;
     sync.tick();
@@ -263,7 +262,7 @@ fn staged_body_retries_after_source_replacement_without_replacement_credit() -> 
     let replacement_session = peers
         .sessions()
         .into_iter()
-        .find(|session| session.addr == peer)
+        .find(|session| session.endpoint == peer.endpoint())
         .ok_or("replacement peer session missing")?;
     assert!(
         !replacement_session.demonstrated_tips.contains(&block3_hash),
@@ -299,7 +298,6 @@ fn headers_batch_missing_parent_requests_ancestry() -> TestResult {
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
 
     sync.drain_inbound_headers();
@@ -336,7 +334,6 @@ fn body_carried_rejection_keeps_the_live_pending_gate() -> TestResult {
         headers: vec![orphan_tip],
         source: Some(current_source(&peers, peer)),
         wire_response: false,
-        body_fetch_owned: false,
     };
 
     // The first rejection installs the pending gate on this connection.
@@ -396,7 +393,6 @@ fn known_header_batch_still_credits_the_announcer() -> TestResult {
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
 
@@ -404,7 +400,7 @@ fn known_header_batch_still_credits_the_announcer() -> TestResult {
         peers
             .infos()
             .into_iter()
-            .find(|info| info.addr == peer)
+            .find(|info| info.endpoint == peer.endpoint())
             .ok_or("peer info missing")?
             .best_known_height,
         1,
@@ -438,7 +434,6 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> TestResult {
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
 
@@ -459,7 +454,7 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -473,7 +468,7 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded() -> TestResult
     )
     .or_fail("regtest fixture block");
     bad.header.bits = CompactTarget::from_consensus(0x1e0f_ff00);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(bad))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(bad))?;
     // The body stages in the first drain; the staged-header retry runs
     // before staging on the next and discards it.
     sync.tick();
@@ -526,7 +521,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     )
     .or_fail("regtest fixture");
     let fork_hash = Hash256::from(fork.block_hash());
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(fork))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(fork))?;
     sync.tick();
     sync.tick();
 
@@ -571,7 +566,7 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
     )
     .or_fail("regtest fixture");
     let orphan_hash = Hash256::from(orphan_body.block_hash());
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(orphan_body.clone()))?;
     sync.tick();
     assert!(
         sync.scheduler.lock().stager.contains(&orphan_hash),
@@ -585,7 +580,6 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header() -> TestResult 
         headers: vec![fork_root, orphan_body.header],
         source: None,
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
@@ -630,13 +624,13 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
     // The owned-fetch announcement arrives before the batch can attach:
     // the tip is retained as a deferred mark, and the body stages
     // gate-pending in the same tick.
+    assert!(sync.enqueue_owned_body_fetch(source, orphan_hash, || true));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan_body.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: true,
     })?;
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(orphan_body.clone()))?;
     sync.tick();
 
     // The fork admits through the ordinary drain; resolving the deferred
@@ -646,13 +640,62 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> TestResult {
         headers: vec![fork_root, orphan_body.header],
         source: None,
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
     assert!(
         sync.scheduler.lock().stager.contains(&orphan_hash),
         "a body the peer already fetches must be exempt from the recheck"
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_enqueue_publishes_no_owned_body_fetch() -> TestResult {
+    // The send and the ownership publication are one transition: when the
+    // outbound enqueue fails, nothing may be marked, or the window would
+    // wait on a request that never left this node.
+    let (tree, _blocks) = mined_chain(2, 0)?;
+    let SyncHarness { sync, peers, .. } = SyncHarness::new(tree);
+    sync.chain.bootstrap_genesis();
+    let peer = test_addr(9713, 0)?;
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
+    let source = current_source(&peers, peer);
+    let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+
+    assert!(!sync.enqueue_owned_body_fetch(source, hash, || false));
+    assert!(
+        sync.scheduler.lock().owned_body_fetches.is_empty(),
+        "a failed enqueue must publish no ownership mark"
+    );
+    assert!(!sync.owns_body_fetch(source, hash));
+    Ok(())
+}
+
+#[test]
+fn stale_source_never_reaches_the_enqueue_closure() -> TestResult {
+    // A same-address replacement invalidates the old connection identity.
+    // The exact-source guard is held across the send, so the stale
+    // source's closure must not even run: no frame leaves on the new
+    // connection and no mark is published under the old identity.
+    let (tree, _blocks) = mined_chain(2, 0)?;
+    let SyncHarness { sync, peers, .. } = SyncHarness::new(tree);
+    sync.chain.bootstrap_genesis();
+    let peer = test_addr(9714, 0)?;
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
+    let stale = current_source(&peers, peer);
+    let _rx2 = connect_peer(&peers, synthetic_peer(peer, 2));
+    let hash = Hash256::from_le_bytes(&[9_u8; 32]);
+
+    let called = std::cell::Cell::new(false);
+    assert!(!sync.enqueue_owned_body_fetch(stale, hash, || {
+        called.set(true);
+        true
+    }));
+    assert!(!called.get(), "stale source must not reach the send");
+    assert!(
+        sync.scheduler.lock().owned_body_fetches.is_empty(),
+        "stale source must publish no ownership mark"
     );
     Ok(())
 }
@@ -686,8 +729,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
             scheduler.stager.insert(
                 Hash256::from_le_bytes(&key),
                 None,
-                block.clone(),
-                bytes::Bytes::from(consensus_bytes(block)),
+                BlockPayload::from_local(block.clone()),
                 None,
                 now,
             );
@@ -695,7 +737,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> TestResult {
     }
 
     let refused_hash = Hash256::from(blocks[2].block_hash());
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[2].clone()))?;
     sync.drain_inbound_blocks();
 
     let scheduler = sync.scheduler.lock();
@@ -741,13 +783,13 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
     let orphan_hash = Hash256::from(orphan_body.block_hash());
 
     // Defer the mark, stage the body, then drop the owning connection.
+    assert!(sync.enqueue_owned_body_fetch(source, orphan_hash, || true));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan_body.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: true,
     })?;
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(orphan_body.clone()))?;
     sync.tick();
     peers.disconnect_source(source);
 
@@ -755,7 +797,6 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> TestResult {
         headers: vec![fork_root, orphan_body.header],
         source: None,
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
@@ -791,8 +832,8 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> TestResult {
     bad.txs.push(regtest_fixture::coinbase(90));
     let bad_hash = Hash256::from(bad.block_hash());
     let good_hash = Hash256::from(blocks[1].block_hash());
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(bad))?;
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(bad))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[1].clone()))?;
     sync.drain_inbound_blocks();
 
     let scheduler = sync.scheduler.lock();
@@ -825,7 +866,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     for block in &blocks {
-        inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
+        inbound_blocks_tx.send(crate::InboundBlock::from_local(block.clone()))?;
     }
     sync.tick();
     assert_eq!(
@@ -847,7 +888,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
         .or_fail("regtest fixture");
     let fork_h4 =
         regtest_fixture::mined_regtest_header(fork_h3.compute_hash(), 4).or_fail("regtest fixture");
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(winner_body.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(winner_body.clone()))?;
     sync.tick();
     assert!(
         sync.scheduler.lock().stager.contains(&winner_hash),
@@ -858,7 +899,6 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
         headers: vec![fork_root, winner_body.header, fork_h3, fork_h4],
         source: None,
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.tick();
 
@@ -915,7 +955,6 @@ fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
         headers: vec![body_tip],
         source: Some(source),
         wire_response: false,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -927,7 +966,6 @@ fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
         headers: vec![body_tip],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -951,7 +989,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
 
     let peer = test_addr(9706, 0)?;
@@ -964,7 +1002,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
     )
     .or_fail("regtest fixture block");
     let expected = unannounced.block_hash();
-    let mut inbound = crate::InboundBlock::from_decoded(unannounced);
+    let mut inbound = crate::InboundBlock::from_local(unannounced);
     inbound.source = Some(current_source(&peers, peer));
     inbound_blocks_tx.send(inbound)?;
     sync.tick();
@@ -973,7 +1011,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
     let session = peers
         .sessions()
         .into_iter()
-        .find(|session| session.addr == peer)
+        .find(|session| session.endpoint == peer.endpoint())
         .ok_or("peer session missing")?;
     assert_eq!(
         session.demonstrated_tips,
@@ -1012,7 +1050,6 @@ fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
         headers: vec![fork1, fork2],
         source: Some(current_source(&peers, peer)),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
 
@@ -1020,7 +1057,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
         peers
             .infos()
             .into_iter()
-            .find(|info| info.addr == peer)
+            .find(|info| info.endpoint == peer.endpoint())
             .ok_or("peer info missing")?
             .best_known_height,
         1,
@@ -1047,14 +1084,13 @@ fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
         headers: vec![fork],
         source: Some(current_source(&peers, peer)),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     let peer_height = || {
         peers
             .infos()
             .into_iter()
-            .find(|info| info.addr == peer)
+            .find(|info| info.endpoint == peer.endpoint())
             .map(|info| info.best_known_height)
     };
     assert_eq!(peer_height(), Some(1));
@@ -1099,20 +1135,18 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
         headers: vec![fork_base],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![fork_tip],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     assert_eq!(
         peers
             .sessions()
             .into_iter()
-            .find(|session| session.addr == peer)
+            .find(|session| session.endpoint == peer.endpoint())
             .ok_or("peer session missing")?
             .demonstrated_tips,
         vec![Hash256::from(fork_tip.compute_hash())],
@@ -1129,7 +1163,6 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
             headers: vec![tip],
             source: Some(source),
             wire_response: true,
-            body_fetch_owned: false,
         })?;
     }
     sync.drain_inbound_headers();
@@ -1137,7 +1170,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     let retained = peers
         .sessions()
         .into_iter()
-        .find(|session| session.addr == peer)
+        .find(|session| session.endpoint == peer.endpoint())
         .ok_or("peer session missing")?
         .demonstrated_tips;
     assert_eq!(
@@ -1183,14 +1216,12 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult 
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip2],
         source: Some(current_source(&peers, peer)),
 
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
 
@@ -1198,7 +1229,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult 
         peers
             .sessions()
             .into_iter()
-            .find(|session| session.addr == peer)
+            .find(|session| session.endpoint == peer.endpoint())
             .ok_or("peer session missing")?
             .demonstrated_tips,
         vec![Hash256::from(tip2.compute_hash())],
@@ -1229,11 +1260,11 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> TestResult {
         .or_fail("regtest fixture header");
     let tip_hash = Hash256::from(tip.compute_hash());
 
+    assert!(sync.enqueue_owned_body_fetch(current_source(&peers, peer), tip_hash, || true,));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip],
         source: Some(current_source(&peers, peer)),
         wire_response: false,
-        body_fetch_owned: true,
     })?;
     sync.drain_inbound_headers();
 
@@ -1322,12 +1353,16 @@ fn compact_reconstruction_admission_follows_cores_header_gate() -> TestResult {
         !sync.compact_reconstruction_admissible(source, &replayed),
         "no more work than the applied tip"
     );
-    sync.record_owned_body_fetch(current_source(&harness.peers, other), replayed_hash);
+    assert!(sync.enqueue_owned_body_fetch(
+        current_source(&harness.peers, other),
+        replayed_hash,
+        || true,
+    ));
     assert!(
         !sync.compact_reconstruction_admissible(source, &replayed),
         "another connection's fetch"
     );
-    sync.record_owned_body_fetch(source, replayed_hash);
+    assert!(sync.enqueue_owned_body_fetch(source, replayed_hash, || true,));
     assert!(
         sync.compact_reconstruction_admissible(source, &replayed),
         "this connection's fetch"
@@ -1381,6 +1416,56 @@ fn compact_reconstruction_admission_reads_admitted_tree_state() -> TestResult {
 }
 
 #[test]
+fn compact_reconstruction_admission_stays_near_the_applied_tip() -> TestResult {
+    // As in Core, an unrequested compact block earns the mempool scan only
+    // within two blocks of the applied tip; a header the tree already holds
+    // further ahead is only announced, unless this connection owns its fetch.
+    let (tree, blocks) = mined_chain(6, 0)?;
+    let applied = {
+        let id = tree
+            .lookup(Hash256::from(blocks[0].block_hash()))
+            .ok_or("block 1 is in the tree")?;
+        let node = tree.node(id)?;
+        TipSnapshot {
+            tip_id: id,
+            chain_tx_count: node.chain_tx_count,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    let harness = SyncHarness::new(tree);
+    harness.applied_tip.store(Some(Arc::new(applied)));
+    let peer = test_addr(9790, 0)?;
+    let _rx = connect_peer(&harness.peers, synthetic_peer(peer, 0));
+    let source = current_source(&harness.peers, peer);
+    let sync = &harness.sync;
+
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[1].header),
+        "one block above the applied tip"
+    );
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[2].header),
+        "two blocks above the applied tip"
+    );
+    assert!(
+        !sync.compact_reconstruction_admissible(source, &blocks[3].header),
+        "three blocks above the applied tip"
+    );
+    assert!(
+        !sync.compact_reconstruction_admissible(source, &blocks[5].header),
+        "five blocks above the applied tip"
+    );
+    assert!(sync.enqueue_owned_body_fetch(source, Hash256::from(blocks[3].block_hash()), || true));
+    assert!(
+        sync.compact_reconstruction_admissible(source, &blocks[3].header),
+        "a fetch this connection owns"
+    );
+    Ok(())
+}
+
+#[test]
 fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
     // A compact-owned tip announced ahead of its ancestry cannot be marked
     // at delivery: the tree has no height for it yet. Dropping the mark
@@ -1406,11 +1491,11 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
 
     // The tip arrives ahead of `mid`: admission reports MissingParent and
     // the owned-fetch mark is retained rather than dropped.
+    assert!(sync.enqueue_owned_body_fetch(current_source(&peers, peer), tip_hash, || true,));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip],
         source: Some(current_source(&peers, peer)),
         wire_response: false,
-        body_fetch_owned: true,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -1423,7 +1508,6 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches() -> TestResult {
         headers: vec![mid, tip],
         source: Some(current_source(&peers, peer)),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     assert!(
@@ -1444,7 +1528,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         inbound_blocks_tx,
         ..
     } = SyncHarness::new(tree);
-    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_local(blocks[0].clone()))?;
     sync.tick();
     assert_eq!(
         applied_tip.load_full().ok_or("missing applied tip")?.hash,
@@ -1465,7 +1549,6 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         headers: vec![block2.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
 
     sync.drain_inbound_headers();
@@ -1495,7 +1578,6 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> TestResult {
         headers: vec![block3.header],
         source: Some(source),
         wire_response: true,
-        body_fetch_owned: false,
     })?;
     sync.drain_inbound_headers();
     assert!(

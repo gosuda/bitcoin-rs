@@ -94,6 +94,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
 sha2.workspace = true
+sonic-rs.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

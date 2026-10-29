@@ -11,7 +11,7 @@ use crate::download_window::{
 };
 
 /// A pruned peer: witness relay plus `NODE_NETWORK_LIMITED`, no `NODE_NETWORK`.
-fn limited_peer(addr: SocketAddr, height: i32) -> PeerInfo {
+fn limited_peer(addr: PeerRemote, height: i32) -> PeerInfo {
     PeerInfo {
         services: ServiceFlags::WITNESS.to_u64() | ServiceFlags::NETWORK_LIMITED.to_u64(),
         ..synthetic_peer(addr, height)
@@ -20,7 +20,7 @@ fn limited_peer(addr: SocketAddr, height: i32) -> PeerInfo {
 
 /// A full-history peer: `NODE_NETWORK | NODE_WITNESS`, the [`synthetic_peer`]
 /// default.
-fn full_peer(addr: SocketAddr, height: i32) -> PeerInfo {
+fn full_peer(addr: PeerRemote, height: i32) -> PeerInfo {
     synthetic_peer(addr, height)
 }
 

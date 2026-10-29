@@ -30,12 +30,109 @@ Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
 enumerations: backend names, durability modes, closed reason taxonomies
 (see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
-for the pattern), and the enum capability states of `node.capability.txindex_readiness`.
+for the pattern), and the enum capability states of `node.capability.txindex_readiness`, and
+the closed family labels of `index.family_planned_write_bytes{family}` where
+`family` in `{tx_lookup, script_history, script_live, headers, filters}`.
 No speculative instrumentation: a signal earns its place by an operator
 decision (alert, dashboard, SLO) or a named contract hook (below).
 Benchmark evidence identity (binary/configuration/corpus digests and hardware)
 is recorded with benchmark samples under HPA-12; it is not attached to every
 Prometheus series as global labels.
+
+RPC connection isolation (API-34/WF-02) exposes `rpc.connections.active`
+(gauge, admitted live workers), `rpc.connections.rejected_total` (counter,
+connection-budget refusals), and `rpc.http.request_seconds` (histogram,
+complete request head through body read, authentication and response write,
+including subsequent failures; excludes idle/head acquisition). The closed `surface`
+label is `shared`, `management`, or `public`; the histogram's closed `route`
+label is `json_rpc`, `rest`, `esplora_public`, `esplora_backend`, or `not_found`.
+`route` records classification before the listener's route policy is checked;
+it includes refused routes. For example, `surface=management, route=rest`
+records a REST request rejected by the management listener with 404.
+Values aggregate bindings of the same surface. Operators can distinguish
+public saturation from management pressure and compare classified request
+latency. Occupancy updates follow the existing connection permit lifetime,
+including spawn failure and shutdown; no second admission counter is added.
+No paths, method names, credentials, addresses, hashes or txids are labels.
+
+For staged block bodies, `node.sync.received_bytes` and
+`node.sync.staged_bytes_high_water` stay the serialized wire fact that the
+staging byte budget and request headroom read. Four further signals attribute
+retained residency without changing any admission rule:
+
+| Signal | Meaning |
+| --- | --- |
+| `node.sync.staged_decoded_bytes` | Sum over staged blocks of `Block::retained_heap_bytes()`: the capacity of each block's transaction, input, output, script, and witness allocations. |
+| `node.sync.staged_retained_bytes` | `staged_decoded_bytes` plus the preserved serialized buffers (`received_bytes`). |
+| `node.sync.staged_retained_bytes_high_water` | Highest `staged_retained_bytes` observed this run. |
+| `node.sync.inbound_block_queue_depth` | Length of the bounded inbound channel (`inbound_block_queue_limit`) when the drain pass emitted. A count of unstaged bodies, not bytes. |
+
+The three byte signals are attribution, not measurement of the process. They
+exclude allocator rounding, the inline `Block` value, and the stager's map and
+queue bookkeeping, so they are not an RSS or `VmHWM` figure and need not equal
+one. They cover only bodies the stager owns: a body drained for apply, or
+pulled from the channel into a stage batch, is unattributed until it is
+staged or restored, so `staged_retained_bytes = 0` in the middle of an apply
+does not mean no block memory is held. A block is measured once, when the
+stager takes ownership of its allocation (arrival, or restore after a partial
+apply, which re-measures the restored allocation because the restored copy
+need not have the drained original's capacities), and released at the
+transition that releases its serialized bytes: drain, branch retirement,
+count-budget eviction, discard, expiry, or replacement. The retained high-water
+mark advances on arrival and on restore; an arrival's mark is taken before the
+count-budget eviction it causes. `node.sync.staged_blocks_high_water` and
+`node.sync.staged_bytes_high_water` keep their earlier arrival-only behavior.
+Nothing admits, evicts, or retries on these signals. They are backlog/capacity
+gauges (OBS-01) published with the other staged gauges from one scheduler-lock
+hold by the sync drain pass that saw arrivals, expiry, applies, or failures.
+That pass runs after it has emptied the receiver, so
+`inbound_block_queue_depth` is a post-drain residual, normally near zero, not
+a peak, and it is not refreshed on passes that emit nothing.
+
+Staging policy decision (retained): production keeps the fixed 256-block /
+512 MiB wire budget. An isolated count-horizon experiment (candidate
+`f24b7ded0`, committed after the matrix so source bytes match the gated binary)
+ran 48 synthetic regtest trials (4 cells x 4 policies x 3 rounds, 320 blocks
+applied each; raw samples in
+`.outline/evidence/native-gate-20261026T183745Z-1096270/gate.log`) and was
+evaluated and rejected under the fixed Step 25 gate (>=10% peak-RSS reduction,
+throughput >=98%, strictly lower retained high-water, no
+retry/starvation/stall regression): no horizon met the RSS gate (binding
+medians ~1.00-1.01x fixed vs required <=0.90), and the modern-large 8-peer
+15 s and 30 s horizons each added a stall-episode start (median 1 vs fixed 0;
+disconnects stayed 0, which does not cancel the episode regression). Five
+early-multi rows were not valid binding comparisons (all 60 s first refusals
+arrived after the corpus was fully requested; 30 s rounds 1-2 had no refusal).
+Synthetic regtest only (early/small and modern/large-OP_RETURN corpora, 3 runs
+per arm); no mainnet, p99, or whole-node claim.
+
+The call-site audit table below is a snapshot of its audited base. It has no
+row for `index.family_planned_write_bytes`. This clause describes it.
+
+`index.family_planned_write_bytes{family}` is a histogram in bytes with one
+label, `family`, in `{tx_lookup, script_history, script_live, headers,
+filters}`. The families are the transaction-id lookup rows, the script funding
+and spending rows, the live-view mutations, the block header identity rows, and
+the basic compact-filter rows. A forward batch commit records one observation
+for each family whose planned bytes are non-zero, after the store commit
+succeeds (`commit_forward_with_cursor` in `crates/index/src/index/write.rs`;
+`commit_forward` and `commit_block` use it). A failed commit records nothing,
+and no other commit path records this metric. The value is the sum, over the
+blocks of the batch, of the bytes each block planned for that family under the
+rule in the next table (`PendingRows::encoded_bytes_by_family` in
+`crates/index/src/index/rows.rs`). The sum is fixed as blocks join the batch,
+before the commit merges, sorts, and de-duplicates the batch rows. The value is
+row-size arithmetic over the prepared rows. It does not read the store, so it
+does not include write-ahead-log, storage-engine, or device write volume, and
+it is not a count of bytes written.
+
+| `family` | Planned bytes per block |
+| --- | --- |
+| `tx_lookup` | Distinct transaction-id rows times `HASH_PREFIX_ROW_SIZE` (12), plus every transaction-id position times `TX_POSITION_SIZE` (6). |
+| `script_history` | The same rule over the funding rows and the spending rows together. |
+| `script_live` | `SCRIPT_LIVE_ROW_SIZE` (43, the width of the row key) times the number of live-view operations. Inserts and deletes each count once. |
+| `headers` | `HEADER_ROW_SIZE` (80) times the number of header rows. |
+| `filters` | For each filter row, 98 plus the filter length. |
 
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 
@@ -306,9 +403,17 @@ fields stay in tracing, where they can change with the implementation.
   scans every sample, including the real txindex readiness gauge; evidence
   identity remains in benchmark ledger records, not operator time-series labels.
 - The chainstate observability fixtures check retired metric names only on the
-  caller thread with coinbase-only apply/window fixtures. The window verify
+  caller thread with coinbase-only apply/window fixtures connected on top of a
+  directly published genesis seed. Seeding alone (`seed_genesis` in
+  `crates/chainstate/tests/unit/test_fixtures.rs`) publishes the genesis tip
+  with count 1 without connect and without hooks, so it emits no apply/window
+  observations. Nonzero stage observations require connecting at least one
+  mined coinbase-only child (`apply_block` for the apply timers, a
+  `connect_window` pair for the window histogram, `validate_block` for proposal
+  timings). The window verify
   histogram is emitted after the parallel verifier joins; the local recorder
-  does not cover arbitrary Rayon-worker emissions or script sub-stage metrics.
+  does not cover arbitrary Rayon-worker emissions, spending transactions, or
+  script-resolution sub-stages.
 - Real tracing-subscriber regressions cover proposal completion, contextual
   header rejection, and a missing-prevout script rejection. The last exercises
   successful prevout resolution followed by verification failure, not resolution
@@ -316,6 +421,10 @@ fields stay in tracing, where they can change with the implementation.
   vout index exceeding `u32`, which is not a practical valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
+- `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
+  `record_family_byte_histograms` against a local recorder. It checks the five
+  `family` label values with their byte values, and that a family with zero
+  planned bytes records nothing. It does not drive a commit.
 - Review enforcement: a new `metrics::` call site must cite an OBS clause in
   the PR. A series not in the ledger and not an operator signal is a
   review-failing diagnostic leak into the metrics API.

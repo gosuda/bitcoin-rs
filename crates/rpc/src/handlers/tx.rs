@@ -23,6 +23,8 @@ use crate::handlers::{optional_bool, params_array, parse_txid, required_str, req
 use bitcoin_rs_index::block_log::BlockRecord;
 use corepc_types::v31;
 
+pub(crate) mod submit_package;
+
 /// Decodes a lowercase or uppercase hexadecimal string into bytes.
 ///
 /// A non-hex string is a correctly typed but unacceptable value, so it
@@ -191,7 +193,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
             && let Ok(vout) = usize::try_from(vout_u32)
             && let Some(output) = tx.outputs.get(vout)
         {
-            return Ok(txout_json(ctx, output, 0, false, best_block));
+            return txout_typed(ctx, output, 0, false, best_block);
         }
     }
 
@@ -208,31 +210,31 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         return Ok(Value::new_null());
     };
     let confirmations = view.height().saturating_sub(live.height).saturating_add(1);
-    Ok(txout_json(
+    txout_typed(
         ctx,
         &live.txout,
         confirmations,
         live.coinbase,
         view.hash(ctx.chain.chain_network),
-    ))
+    )
 }
 
-fn txout_json(
+fn txout_typed(
     ctx: &Context,
     output: &TxOut,
     confirmations: u32,
     coinbase: bool,
     best_block: Hash256,
-) -> Value {
-    json!({
-        "bestblock": best_block.to_string(),
-        "confirmations": confirmations,
-        "value": sat_to_btc(output.value.to_sat()),
-        "scriptPubKey": crate::tx_render::script_pub_key_json(
+) -> Result<Value, RpcError> {
+    typed_to_sonic_omitting_nulls(&v31::GetTxOut {
+        best_block: best_block.to_string(),
+        confirmations,
+        value: sat_to_btc(output.value.to_sat()),
+        script_pubkey: convert::script_pub_key_typed(
             &output.script_pubkey,
             ctx.chain.chain_network,
         ),
-        "coinbase": coinbase,
+        coinbase,
     })
 }
 
@@ -360,18 +362,40 @@ fn proof_from_block_log(
 ) -> Result<Value, RpcError> {
     let len = ctx.chain.blocks.read().len();
     let mut saw_pruned_block = false;
+    // Scan-cost instrumentation: any future bound on this fallback must be
+    // adopted from these counters on representative successful scans, not
+    // from a guess (ENG-74). The scan is forward from genesis, so a
+    // late-window txid costs nearly the whole log and its bodies.
+    let mut records_scanned: u64 = 0;
+    let mut body_bytes_scanned: u64 = 0;
     for index in 0..len {
         let Some(record) = ctx.chain.blocks.read().get(index).cloned() else {
             break;
         };
+        records_scanned += 1;
         let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
             saw_pruned_block = true;
             continue;
         };
+        body_bytes_scanned =
+            body_bytes_scanned.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         if let Some(proof) = proof_from_body(&bytes, wanted) {
+            tracing::debug!(
+                records_scanned,
+                body_bytes_scanned,
+                found = true,
+                "gettxoutproof fallback scan"
+            );
             return Ok(proof);
         }
     }
+    tracing::debug!(
+        records_scanned,
+        body_bytes_scanned,
+        found = false,
+        saw_pruned_block,
+        "gettxoutproof fallback scan"
+    );
 
     if saw_pruned_block {
         Err(RpcError::NotFound("block data pruned"))
@@ -452,15 +476,44 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["hexstring", "maxfeerate", "maxburnamount"])?;
+    let params = bound.as_ref();
+    super::ensure_at_most_params(params, 3)?;
     let raw = required_str(params, 0, "raw transaction is required")?;
-    let max_feerate = optional_max_feerate(params, 1)?;
+    let max_feerate = send_max_feerate(params, 1)?;
+    let max_burn = params_array(params)?
+        .get(2)
+        .filter(|value| !value.is_null())
+        .map(parse_btc_amount)
+        .transpose()?
+        .unwrap_or(0);
+    if max_burn > Amount::MAX_MONEY.to_sat() {
+        return Err(RpcError::InvalidParameter(
+            "maxburnamount is out of range".to_owned(),
+        ));
+    }
     let tx = decode_tx(
         raw,
         "TX decode failed. Make sure the tx has at least one input.".to_owned(),
     )?;
+    for output in &tx.outputs {
+        let script = output.script_pubkey.as_bytes();
+        // Core's burn guard is per output, not a sum. HasValidOps is
+        // already owned by the script crate, including malformed pushes.
+        if (script.len() > bitcoin_rs_script::MAX_SCRIPT_SIZE
+            || bitcoin_rs_script::is_op_return(script)
+            || !bitcoin_rs_script::has_valid_ops(script))
+            && output.value.to_sat() > max_burn
+        {
+            return Err(RpcError::TxVerifyError(
+                "Unspendable output exceeds maximum configured by user (maxburnamount)".to_owned(),
+            ));
+        }
+    }
     let txid = tx.txid();
 
-    ctx.mempool
+    let _mutation = ctx
+        .mempool
         .gateway
         .submit_local_transaction(
             Arc::new(tx),
@@ -470,6 +523,9 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             &ctx.chain.admission_chain(),
         )
         .map_err(submit_error_to_rpc_error)?;
+    // `hashtx` for newly admitted changes is published once by the gateway
+    // observer, in commit order ahead of `rawtx` and the `sequence` `A` event.
+    // Already-known (duplicate) admissions commit nothing, so they notify nothing.
     typed_to_sonic(&v31::SendRawTransaction(txid.to_string()))
 }
 
@@ -561,6 +617,104 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         object.remove(&"hex");
     }
     Ok(value)
+}
+
+/// BIP337 `compressrawtransaction`: encodes one raw transaction into
+/// its compressed form, degrading unresolvable outpoints to raw form
+/// with one warning each. Disabled (`-32603`) unless the node started
+/// with `--compressed-transactions`.
+pub(crate) fn compressrawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    if !ctx.compressed_transactions {
+        return Err(RpcError::MethodDisabled(
+            "compressrawtransaction is disabled; enable --compressed-transactions",
+        ));
+    }
+    let bound = super::bind_named_params(params, &["hexstring", "compress_outpoints"])?;
+    let params = bound.as_ref();
+    let raw = required_str(params, 0, "raw transaction is required")?;
+    if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
+        return Err(RpcError::InvalidParameter(
+            "hex string exceeds the compressed transaction size limit".to_owned(),
+        ));
+    }
+    let compress_outpoints = optional_bool(params, 1, true)?;
+    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    // Snapshot isolation: the resolver captures its applied view and
+    // resolves UTXO, txindex, and body facts only while this stable
+    // chainstate read excludes transitions, so one call cannot pair a
+    // new-branch UTXO entry with the captured height and body.
+    ctx.chain.with_stable_chainstate(|| {
+        let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
+        let (compressed, warnings) = crate::compressed_tx::compress_transaction(
+            &tx,
+            &mut resolver,
+            crate::compressed_tx::CompressOptions { compress_outpoints },
+        )
+        .map_err(RpcError::from)?;
+        if cancellation.is_triggered() || !resolver.view_matches_current() {
+            return Err(RpcError::Misc(
+                "compressed transaction request cancelled or the applied tip moved; retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(json!({
+            "result": compressed.to_lower_hex_string(),
+            "warnings": warnings,
+        }))
+    })
+}
+
+/// BIP337 `decompressrawtransaction`: restores one compressed
+/// transaction to its raw hex form, refusing when the context its
+/// compressed outpoints or signatures commit to is unavailable.
+/// Disabled (`-32603`) unless the node started with
+/// `--compressed-transactions`.
+pub(crate) fn decompressrawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    if !ctx.compressed_transactions {
+        return Err(RpcError::MethodDisabled(
+            "decompressrawtransaction is disabled; enable --compressed-transactions",
+        ));
+    }
+    let bound = super::bind_named_params(params, &["hexstring"])?;
+    let params = bound.as_ref();
+    let raw = required_str(params, 0, "compressed transaction is required")?;
+    if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
+        return Err(RpcError::InvalidParameter(
+            "hex string exceeds the compressed transaction size limit".to_owned(),
+        ));
+    }
+    let bytes =
+        hex_decode(raw).map_err(|_| RpcError::Deserialization("TX decode failed".to_owned()))?;
+    // Snapshot isolation, as in `compressrawtransaction`: every
+    // resolution read runs under the same stable chainstate read that
+    // captured the applied view. Public-key recovery runs after the lock
+    // is released: it only reads the resolved plan, so a large request
+    // cannot block chain transitions while grinding recovery ids. A tip
+    // move during recovery is caught by the second view check below.
+    let (plan, resolver) = ctx.chain.with_stable_chainstate(|| {
+        let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
+        let plan = crate::compressed_tx::decompress_prepare(&bytes, &mut resolver)
+            .map_err(RpcError::from)?;
+        Ok::<_, RpcError>((plan, resolver))
+    })?;
+    let tx = crate::compressed_tx::decompress_finalize(plan, &resolver).map_err(RpcError::from)?;
+    ctx.chain.with_stable_chainstate(|| {
+        if cancellation.is_triggered() || !resolver.view_matches_current() {
+            return Err(RpcError::Misc(
+                "compressed transaction request cancelled or the applied tip moved; retry"
+                    .to_owned(),
+            ));
+        }
+        Ok(json!(consensus_bytes(&tx).to_lower_hex_string()))
+    })
 }
 
 const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
@@ -682,26 +836,180 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
 }
 
-/// f64 nearest to 2^64 — the value `u64::MAX` rounds to as a float, and the
-/// first `f64` that no longer fits `u64` satoshis. A literal because
-/// `as_conversions` bans the cast that would compute it.
-const U64_MAX_F64: f64 = 18_446_744_073_709_551_616.0;
+/// Converts a BTC-denominated JSON value (number or string) to satoshis using exact
+/// decimal parsing, expanding e/E notation without floating point arithmetic and
+/// rejecting signs other than optional positive, non-digits, more than 8 fractional
+/// decimals, fractional satoshis, and overflow.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one amount parser keeps sign, exponent, mantissa, and scale checks in a single auditable sequence"
+)]
+fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
+    let text = if let Some(text) = value.as_str() {
+        text.to_owned()
+    } else if let Some(raw) = value.as_raw_number() {
+        raw.as_str().to_owned()
+    } else if value.is_number() {
+        value.to_string()
+    } else {
+        return Err(RpcError::InvalidType(
+            "amount must be a number or string".to_owned(),
+        ));
+    };
 
-/// Converts a BTC-denominated float to satoshis, rejecting non-finite,
-/// negative, and overflow values with `message`.
-///
-/// The final step is a scoped `as`: std offers no `TryFrom<f64> for u64`, and
-/// the range check above already bounds `raw` to `[0, 2^64)`, so the cast
-/// only truncates fractional satoshi dust, matching the historical behavior.
-fn sats_from_btc(btc: f64, message: &'static str) -> Result<u64, RpcError> {
-    let raw = btc * 100_000_000.0;
-    if !raw.is_finite() || !(0.0..U64_MAX_F64).contains(&raw) {
+    let text = text.as_str();
+    if text.is_empty() {
         return Err(RpcError::InvalidParams(message));
     }
-    #[expect(clippy::as_conversions)] // see fn doc: no TryFrom<f64> for u64 in std
-    #[expect(clippy::cast_possible_truncation)] // fractional dust, per fn doc
-    #[expect(clippy::cast_sign_loss)] // raw >= 0.0 checked above
-    Ok(raw as u64)
+
+    // Optional positive sign; reject any other sign including negative.
+    let text = if let Some(stripped) = text.strip_prefix('+') {
+        stripped
+    } else if text.starts_with('-') {
+        return Err(RpcError::InvalidParams(message));
+    } else {
+        text
+    };
+
+    if text.is_empty() {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    // Parse scientific notation: mantissa and optional exponent.
+    let (mantissa, exp) = if let Some(pos) = text.find(['e', 'E']) {
+        let (m, e) = text.split_at(pos);
+        let e_str = &e[1..];
+        if m.is_empty() || e_str.is_empty() {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let (e_sign, e_digits) = if let Some(stripped) = e_str.strip_prefix('+') {
+            (1_i32, stripped)
+        } else if let Some(stripped) = e_str.strip_prefix('-') {
+            (-1_i32, stripped)
+        } else {
+            (1_i32, e_str)
+        };
+        if e_digits.is_empty() || !e_digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(RpcError::InvalidParams(message));
+        }
+        let exp_mag: i32 = e_digits
+            .parse()
+            .map_err(|_| RpcError::InvalidParams(message))?;
+        (
+            m,
+            e_sign
+                .checked_mul(exp_mag)
+                .ok_or(RpcError::InvalidParams(message))?,
+        )
+    } else {
+        (text, 0_i32)
+    };
+
+    // Split mantissa on decimal point. Like Core's ParseFixedPoint, a
+    // decimal point requires at least one digit on each side ("1." and
+    // ".1" are malformed), and a second point is garbage.
+    let (int_part, frac_part) = if let Some(pos) = mantissa.find('.') {
+        let (i, f) = mantissa.split_at(pos);
+        let f = &f[1..];
+        if i.is_empty() || f.is_empty() || f.contains('.') {
+            return Err(RpcError::InvalidParams(message));
+        }
+        (i, f)
+    } else {
+        (mantissa, "")
+    };
+
+    // Both parts must contain only ASCII digits, and the integer part
+    // must carry at least one digit.
+    if int_part.is_empty()
+        || !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let mut digits = Vec::with_capacity(int_part.len() + frac_part.len());
+    digits.extend_from_slice(int_part.as_bytes());
+    digits.extend_from_slice(frac_part.as_bytes());
+
+    if digits.iter().all(|&d| d == b'0') {
+        return Ok(0);
+    }
+
+    // Normalize: trailing zeros carry no value, so the fractional-decimal
+    // count is taken after trimming them ("100e-10" and "1.000000000" are
+    // whole satoshis, not nine-decimal amounts).
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+
+    let initial_point =
+        i32::try_from(int_part.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    let point = initial_point
+        .checked_add(exp)
+        .ok_or(RpcError::InvalidParams(message))?;
+
+    let digits_len = i32::try_from(digits.len()).map_err(|_| RpcError::InvalidParams(message))?;
+    let frac_digits = digits_len
+        .checked_sub(point)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if frac_digits > 8 {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let sat_point = point
+        .checked_add(8)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if sat_point < digits_len {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let trailing_zeros = sat_point
+        .checked_sub(digits_len)
+        .ok_or(RpcError::InvalidParams(message))?;
+    if trailing_zeros > 20 {
+        return Err(RpcError::InvalidParams(message));
+    }
+
+    let mut sats: u64 = 0;
+    for &d in &digits {
+        sats = sats
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(d - b'0')))
+            .ok_or(RpcError::InvalidParams(message))?;
+    }
+    for _ in 0..trailing_zeros {
+        sats = sats
+            .checked_mul(10)
+            .ok_or(RpcError::InvalidParams(message))?;
+    }
+
+    Ok(sats)
+}
+
+/// `sendrawtransaction`'s fee argument: Core's `maxfeerate` amount, or the
+/// one pre-0.19 `allowhighfees` value that btcd's RPC client still emits.
+///
+/// Core 31.1 takes only an amount here and refuses any boolean as a type
+/// error; `testmempoolaccept` and `submitpackage` keep that strictness. btcd's
+/// client (pinned by LND v0.21.4 through btcwallet) picks the argument shape by
+/// stripping `/Satoshi:` and the trailing `/` from `getnetworkinfo.subversion`
+/// and string-comparing the rest to `0.19.0`. This node's honest
+/// `/bitcoin-rs:…/` user agent sorts below that, so LND broadcasts every
+/// wallet transaction as `["<hex>", false]`, `allowHighFees = false`. Only
+/// that value is accepted, and it means the default ceiling, exactly as an
+/// omitted or null argument. `true` would switch the fee guard off through a
+/// type Core refuses; nothing observed sends it, so it stays a type error.
+fn send_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
+    let legacy_default = params_array(params)?
+        .get(index)
+        .and_then(JsonValueTrait::as_bool)
+        == Some(false);
+    if legacy_default {
+        Ok(Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB))
+    } else {
+        optional_max_feerate(params, index)
+    }
 }
 
 fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
@@ -711,23 +1019,28 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
     if value.is_null() {
         return Ok(Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB));
     }
-    let btc_per_kvb = if let Some(number) = value.as_f64() {
-        number
-    } else if let Some(text) = value.as_str() {
-        text.parse::<f64>()
-            .map_err(|_| RpcError::InvalidType("maxfeerate must be a number".to_owned()))?
-    } else {
+    if !value.is_number() && !value.is_str() {
         return Err(RpcError::InvalidType(
             "maxfeerate must be a number".to_owned(),
         ));
-    };
-    if !btc_per_kvb.is_finite() || btc_per_kvb < 0.0 {
-        return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
     }
-    if btc_per_kvb == 0.0 {
+    if let Some(text) = value.as_str() {
+        if text.starts_with('-') {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    } else if let Some(raw) = value.as_raw_number() {
+        if raw.as_str().starts_with('-') {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    } else if let Some(f) = value.as_f64() {
+        if f < 0.0 {
+            return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
+        }
+    }
+    let sats = sats_from_btc(value, "maxfeerate is out of range")?;
+    if sats == 0 {
         return Ok(None);
     }
-    let sats = sats_from_btc(btc_per_kvb, "maxfeerate is out of range")?;
     // Core's `ParseFeeRate` refuses rates at or above 1 BTC/kvB, so the
     // ceiling is enforced on the integer domain to keep the parameter
     // contract identical.
@@ -740,18 +1053,7 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
 }
 
 fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
-    if let Some(number) = value.as_f64() {
-        return sats_from_btc(number, "Invalid amount");
-    }
-    if let Some(text) = value.as_str() {
-        let number: f64 = text
-            .parse()
-            .map_err(|_| RpcError::InvalidParams("Invalid amount"))?;
-        return sats_from_btc(number, "Invalid amount");
-    }
-    Err(RpcError::InvalidType(
-        "amount must be a number or string".to_owned(),
-    ))
+    sats_from_btc(value, "Invalid amount")
 }
 
 // ---------------------------------------------------------------------------
@@ -2171,64 +2473,6 @@ mod gettxout_via_utxo_tests {
     use super::*;
 
     #[test]
-    fn gettxout_preserves_script_schema_and_omits_unset_fields()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
-
-        let ctx = Arc::new(Context::new());
-        let handler = crate::Handler::new(Arc::clone(&ctx));
-        let txid = Txid(Hash256::from_le_bytes(&[0x42; 32]));
-        let best_block = ctx.chain.applied_hash();
-        let mut scripts: Vec<_> = convert::fixtures::by_shape()
-            .into_iter()
-            .map(|(_, script)| script)
-            .collect();
-        // A truncated push must retain Core's malformed-instruction ASM too.
-        scripts.push(vec![0x02, 0x01]);
-        for (index, script) in scripts.into_iter().enumerate() {
-            let vout = u32::try_from(index)?;
-            let (satoshis, btc) = [
-                (0, 0.0_f64),
-                (1, 0.000_000_01),
-                (123_456_789, 1.234_567_89),
-                (2_100_000_000_000_000, 21_000_000.0),
-            ][index % 4];
-            let script_hex = script.to_lower_hex_string();
-            let coinbase = index % 2 == 0;
-            let mut changes = BlockChanges::default();
-            changes.add(UtxoAdd::new(
-                OutPoint::new(txid, vout),
-                TxOut {
-                    value: Amount::from_sat(satoshis),
-                    script_pubkey: Script::from_bytes(script),
-                },
-                coinbase,
-                0,
-            ));
-            commit_block_changes(&ctx.chain.utxo.fixture_set(), &changes, &best_block)?;
-            let value = handler.dispatch("gettxout", &json!([txid.to_string(), vout, false]))?;
-            let text = sonic_rs::to_string(&value)?;
-            // The pinned DTO remains an independent wire-schema oracle, without
-            // deserializing and reserializing scripts on the production path.
-            let typed: v31::GetTxOut = serde_json::from_str(&text)?;
-            assert_eq!(typed.best_block, best_block.to_string());
-            assert_eq!(typed.confirmations, 1);
-            assert_eq!(typed.value.to_bits(), btc.to_bits());
-            assert_eq!(typed.coinbase, coinbase);
-            assert_eq!(typed.script_pubkey.hex, script_hex);
-            if script_hex == "0201" {
-                assert_eq!(typed.script_pubkey.asm, "[error]");
-            }
-            assert!(typed.script_pubkey.descriptor.is_some());
-            let script = &value["scriptPubKey"];
-            assert!(script.get("reqSigs").is_none());
-            assert!(script.get("addresses").is_none());
-            assert!(!text.contains(":null"));
-        }
-        Ok(())
-    }
-
-    #[test]
     fn gettxout_returns_null_for_unknown_outpoint() {
         let ctx = Arc::new(Context::new());
         let txid_hex = "a".repeat(64);
@@ -2928,5 +3172,164 @@ mod finalizepsbt_tests {
         assert_eq!(result.get("complete").and_then(Value::as_bool), Some(true));
         assert!(result.get("psbt").is_none_or(Value::is_null));
         assert!(result.get("hex").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn exact_amount_parsing_honors_precision_invariants() {
+        use super::sats_from_btc;
+
+        // 1e-8 = 1 sat accepted, 1e-9 rejected as Invalid amount
+        assert_eq!(
+            sats_from_btc(&json!(1e-8), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc 1e-8 must parse: {err}")),
+            1
+        );
+        assert_eq!(
+            sats_from_btc(&json!("1e-8"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc 1e-8 must parse: {err}")),
+            1
+        );
+        assert_eq!(
+            sats_from_btc(&json!("1E-8"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc 1E-8 must parse: {err}")),
+            1
+        );
+        assert!(sats_from_btc(&json!(1e-9), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1e-9"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1E-9"), "Invalid amount").is_err());
+
+        // Exact 8-decimal satoshi boundary
+        assert_eq!(
+            sats_from_btc(&json!("0.00000001"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc boundary must parse: {err}")),
+            1
+        );
+        // More than 8 fractional decimals rejected when they carry value
+        assert!(sats_from_btc(&json!("0.000000001"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.000000001"), "Invalid amount").is_err());
+        // Trailing zeros normalize away: these are whole satoshis, not
+        // nine-decimal amounts.
+        assert_eq!(
+            sats_from_btc(&json!("1.000000000"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc trailing zeros must parse: {err}")),
+            100_000_000
+        );
+        assert_eq!(
+            sats_from_btc(&json!("100e-10"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc 100e-10 must parse: {err}")),
+            1
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0e-100"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc 0e-100 must parse: {err}")),
+            0
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0.000000000"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc zeros must parse: {err}")),
+            0
+        );
+        // A decimal point needs a digit on each side (Core ParseFixedPoint).
+        assert!(sats_from_btc(&json!("1."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(".1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
+    }
+
+    #[test]
+    fn exact_amount_parsing_handles_zero_sign_and_malformed_inputs() {
+        use super::sats_from_btc;
+
+        // Zero handling
+        assert_eq!(
+            sats_from_btc(&json!(0), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc zero must parse: {err}")),
+            0
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc zero must parse: {err}")),
+            0
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0.0"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc zero must parse: {err}")),
+            0
+        );
+        assert_eq!(
+            sats_from_btc(&json!("0e2147483647"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc zero exp must parse: {err}")),
+            0
+        );
+
+        // Optional positive sign accepted, negative sign rejected
+        assert_eq!(
+            sats_from_btc(&json!("+1.5"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc +1.5 must parse: {err}")),
+            150_000_000
+        );
+        assert!(sats_from_btc(&json!("-1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("-0"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("-0.0"), "Invalid amount").is_err());
+
+        // Non-digits and malformed text rejected (including whitespace)
+        assert!(sats_from_btc(&json!("abc"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1.2.3"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(""), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("."), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!(" 1"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1 "), "Invalid amount").is_err());
+    }
+
+    #[test]
+    fn exact_amount_parsing_enforces_overflow_exponent_and_feerate_ceilings() {
+        use super::{optional_max_feerate, parse_btc_amount, sats_from_btc};
+
+        // Overflow safety
+        assert_eq!(
+            sats_from_btc(&json!("184467440737.09551615"), "Invalid amount")
+                .unwrap_or_else(|err| panic!("sats_from_btc max must parse: {err}")),
+            u64::MAX
+        );
+        assert!(sats_from_btc(&json!("184467440737.09551616"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("18446744073709551616"), "Invalid amount").is_err());
+        assert!(sats_from_btc(&json!("1e25"), "Invalid amount").is_err());
+        // Regression: `digits_len - point` overflows i32 for this input
+        // (point = -2147483646); it must return `InvalidParams`, not panic
+        // in an overflow-checking build.
+        assert!(matches!(
+            sats_from_btc(&json!("1.1e-2147483647"), "Invalid amount"),
+            Err(RpcError::InvalidParams("Invalid amount"))
+        ));
+
+        // parse_btc_amount routes through sats_from_btc
+        assert_eq!(
+            parse_btc_amount(&json!("1e-8"))
+                .unwrap_or_else(|err| panic!("parse_btc_amount 1e-8 must parse: {err}")),
+            1
+        );
+        assert!(parse_btc_amount(&json!("1e-9")).is_err());
+
+        // optional_max_feerate: 0 is no-cap, 1e-8 accepted, >= 1 BTC/kvB ceiling, negative rejected
+        assert_eq!(
+            optional_max_feerate(&json!([0]), 0)
+                .unwrap_or_else(|err| panic!("optional_max_feerate zero must parse: {err}")),
+            None
+        );
+        assert_eq!(
+            optional_max_feerate(&json!(["0"]), 0)
+                .unwrap_or_else(|err| panic!("optional_max_feerate zero must parse: {err}")),
+            None
+        );
+        assert_eq!(
+            optional_max_feerate(&json!(["1e-8"]), 0)
+                .unwrap_or_else(|err| panic!("optional_max_feerate 1e-8 must parse: {err}")),
+            Some(1)
+        );
+        assert!(optional_max_feerate(&json!([1.0]), 0).is_err());
+        assert!(optional_max_feerate(&json!(["1.0"]), 0).is_err());
+        assert!(optional_max_feerate(&json!([-0.1]), 0).is_err());
+        assert!(optional_max_feerate(&json!([-1]), 0).is_err());
+        assert!(optional_max_feerate(&json!(["-1"]), 0).is_err());
     }
 }

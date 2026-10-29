@@ -35,6 +35,73 @@ pub struct IndexRowCounts {
     pub filters: usize,
 }
 
+/// Encoded logical key and value bytes planned for index row families.
+///
+/// Represents pre-coalescing logical row bytes in a prepared batch. This accounts
+/// for planned row payloads before multi-block merging/coalescing and excludes
+/// engine write-ahead logs, metadata overhead, or host physical storage I/O.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct IndexRowBytes {
+    /// Planned transaction-id index row bytes for [`ColumnFamily::TxConfirmed`].
+    pub(crate) tx_lookup: usize,
+    /// Planned script funding and spending row bytes for [`ColumnFamily::Funding`]
+    /// and [`ColumnFamily::Spending`].
+    pub(crate) script_history: usize,
+    /// Planned live-view mutation bytes for [`ColumnFamily::ScriptLive`].
+    pub(crate) script_live: usize,
+    /// Planned block header identity row bytes for [`ColumnFamily::BlockHeaders`].
+    pub(crate) headers: usize,
+    /// Planned basic-filter row bytes for [`ColumnFamily::UtxoMeta`].
+    pub(crate) filters: usize,
+}
+
+impl IndexRowBytes {
+    /// Zero encoded bytes across all families.
+    pub(crate) const ZERO: Self = Self {
+        tx_lookup: 0,
+        script_history: 0,
+        script_live: 0,
+        headers: 0,
+        filters: 0,
+    };
+
+    /// Returns the checked sum of all family bytes.
+    pub(crate) fn total(&self) -> Result<usize, IndexError> {
+        self.tx_lookup
+            .checked_add(self.script_history)
+            .and_then(|s| s.checked_add(self.script_live))
+            .and_then(|s| s.checked_add(self.headers))
+            .and_then(|s| s.checked_add(self.filters))
+            .ok_or(IndexError::MutationSizeOverflow)
+    }
+
+    /// Adds another set of family byte counts with overflow checking.
+    pub(crate) fn checked_add(&self, other: &Self) -> Result<Self, IndexError> {
+        Ok(Self {
+            tx_lookup: self
+                .tx_lookup
+                .checked_add(other.tx_lookup)
+                .ok_or(IndexError::MutationSizeOverflow)?,
+            script_history: self
+                .script_history
+                .checked_add(other.script_history)
+                .ok_or(IndexError::MutationSizeOverflow)?,
+            script_live: self
+                .script_live
+                .checked_add(other.script_live)
+                .ok_or(IndexError::MutationSizeOverflow)?,
+            headers: self
+                .headers
+                .checked_add(other.headers)
+                .ok_or(IndexError::MutationSizeOverflow)?,
+            filters: self
+                .filters
+                .checked_add(other.filters)
+                .ok_or(IndexError::MutationSizeOverflow)?,
+        })
+    }
+}
+
 /// One index row together with the transaction byte range that produced it.
 ///
 /// Ordered by key first so a sorted slice groups by row.
@@ -126,34 +193,58 @@ impl PendingRows {
             + counts.filters
     }
 
-    pub(super) fn encoded_bytes(&self) -> Result<usize, IndexError> {
-        let txid_positions = self.txid_rows.len();
-        let funding_positions = self.funding_rows.len();
-        let distinct_prefix = distinct_row_count(&self.txid_rows)
-            .checked_add(distinct_row_count(&self.funding_rows))
-            .and_then(|s| s.checked_add(distinct_row_count(&self.spending_rows)))
-            .ok_or(IndexError::MutationSizeOverflow)?;
-        let prefix_bytes = distinct_prefix
+    pub(super) fn encoded_bytes_by_family(&self) -> Result<IndexRowBytes, IndexError> {
+        let tx_prefix_bytes = distinct_row_count(&self.txid_rows)
             .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let position_count = txid_positions
-            .checked_add(funding_positions)
-            .and_then(|s| s.checked_add(self.spending_rows.len()))
-            .ok_or(IndexError::MutationSizeOverflow)?;
-        let position_bytes = position_count
+        let tx_pos_bytes = self
+            .txid_rows
+            .len()
             .checked_mul(crate::types::TX_POSITION_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let header_bytes = self
+        let tx_lookup = tx_prefix_bytes
+            .checked_add(tx_pos_bytes)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+
+        let funding_prefix_bytes = distinct_row_count(&self.funding_rows)
+            .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let spending_prefix_bytes = distinct_row_count(&self.spending_rows)
+            .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let history_prefix_bytes = funding_prefix_bytes
+            .checked_add(spending_prefix_bytes)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let funding_pos_bytes = self
+            .funding_rows
+            .len()
+            .checked_mul(crate::types::TX_POSITION_SIZE)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let spending_pos_bytes = self
+            .spending_rows
+            .len()
+            .checked_mul(crate::types::TX_POSITION_SIZE)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let history_pos_bytes = funding_pos_bytes
+            .checked_add(spending_pos_bytes)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+        let script_history = history_prefix_bytes
+            .checked_add(history_pos_bytes)
+            .ok_or(IndexError::MutationSizeOverflow)?;
+
+        let headers = self
             .header_rows
             .len()
             .checked_mul(crate::types::HEADER_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let live_bytes = self
+
+        let script_live = self
             .live_ops
             .len()
             .checked_mul(crate::types::SCRIPT_LIVE_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let filter_bytes = self
+
+        let filters = self
             .filter_rows
             .iter()
             .try_fold(0_usize, |total, (_, row)| {
@@ -161,12 +252,19 @@ impl PendingRows {
                     .checked_add(34 + 64 + row.filter.len())
                     .ok_or(IndexError::MutationSizeOverflow)
             })?;
-        prefix_bytes
-            .checked_add(filter_bytes)
-            .and_then(|s| s.checked_add(position_bytes))
-            .and_then(|s| s.checked_add(header_bytes))
-            .and_then(|s| s.checked_add(live_bytes))
-            .ok_or(IndexError::MutationSizeOverflow)
+
+        Ok(IndexRowBytes {
+            tx_lookup,
+            script_history,
+            script_live,
+            headers,
+            filters,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn encoded_bytes(&self) -> Result<usize, IndexError> {
+        self.encoded_bytes_by_family()?.total()
     }
 }
 
@@ -300,6 +398,256 @@ mod tests {
     // Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical bytes
     // (rows 163-181), together with `crates/index/src/index/rows.rs`'s
     // `for_each_row_group` contract: one stored key retains all numeric positions.
+    #[test]
+    fn family_bytes_accounting() -> Result<(), IndexError> {
+        let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);
+        let outpoint2 = OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 1);
+        let live_row1 = ScriptLiveRow::new(ScriptHash::from_byte_array([10; 32]), &outpoint1);
+        let live_row2 = ScriptLiveRow::new(ScriptHash::from_byte_array([20; 32]), &outpoint2);
+
+        let filter = super::super::filters::BasicFilter {
+            filter: vec![0xaa, 0xbb, 0xcc],
+            hash: [0x11; 32],
+            header: [0x22; 32],
+        };
+
+        let mut rows = PendingRows {
+            txid_rows: positioned_rows(),
+            funding_rows: positioned_rows(),
+            spending_rows: positioned_rows(),
+            header_rows: vec![[0x42; crate::types::HEADER_ROW_SIZE]],
+            live_ops: vec![LiveOp::Insert(live_row1), LiveOp::Delete(live_row2)],
+            filter_rows: vec![([0x33; 32], filter)],
+        };
+        rows.sort();
+
+        let family = rows.encoded_bytes_by_family()?;
+        let total_bytes = rows.encoded_bytes()?;
+
+        // Total equivalence contract: family total must equal encoded_bytes.
+        assert_eq!(family.total()?, total_bytes);
+
+        // Verify each family accounts for its exact logical bytes:
+        // tx_lookup: 2 distinct keys * 12 bytes prefix + 3 positions * 6 bytes = 24 + 18 = 42.
+        assert_eq!(family.tx_lookup, 42);
+        // script_history: funding (24 prefix + 18 pos) + spending (24 prefix + 18 pos) = 84.
+        assert_eq!(family.script_history, 84);
+        // headers: 1 header * 80 bytes = 80.
+        assert_eq!(family.headers, 80);
+        // script_live: 2 distinct live ops * 43 bytes = 86.
+        assert_eq!(family.script_live, 86);
+        // filters: 1 filter row * (34 key + 64 header/hash + 3 filter bytes) = 101.
+        assert_eq!(family.filters, 101);
+
+        assert_eq!(total_bytes, 42 + 84 + 80 + 86 + 101);
+
+        // Put rows into a write batch and verify physical put bytes match family total.
+        let mut puts = BufferedWriteBatch::default();
+        put_rows(&mut puts, &rows);
+        let emitted_bytes: usize = puts
+            .into_ops()
+            .iter()
+            .map(|op| match op {
+                BatchOp::Put { key, value, .. } => key.len() + value.len(),
+                BatchOp::Delete { key, .. } => key.len(),
+                BatchOp::DeleteRange { start, end, .. } => start.len() + end.len(),
+            })
+            .sum();
+        assert_eq!(emitted_bytes, total_bytes);
+
+        // PreparedBatch accumulator preservation.
+        let mut batch = super::super::prepared::PreparedBatch::new(
+            super::super::prepared::PreparedBatchLimits {
+                max_rows: 100,
+                max_bytes: 10_000,
+            },
+        );
+        let block = super::super::prepared::PreparedBlock {
+            height: 1,
+            hash: [1; 32],
+            parent_hash: [0; 32],
+            row_count: rows.total(),
+            encoded_bytes: total_bytes,
+            family_bytes: family,
+            capabilities: super::super::capability::IndexCapabilities::ALL,
+            rows,
+        };
+        batch
+            .try_push(block)
+            .map_err(|_| IndexError::MutationSizeOverflow)?;
+        assert_eq!(batch.family_bytes(), family);
+        assert_eq!(batch.encoded_bytes(), total_bytes);
+
+        Ok(())
+    }
+
+    #[test]
+    fn family_bytes_overflow_detection() {
+        let overflow_total = IndexRowBytes {
+            tx_lookup: usize::MAX,
+            script_history: 1,
+            script_live: 0,
+            headers: 0,
+            filters: 0,
+        };
+        assert!(matches!(
+            overflow_total.total(),
+            Err(IndexError::MutationSizeOverflow)
+        ));
+
+        let base_family = IndexRowBytes {
+            tx_lookup: usize::MAX - 5,
+            script_history: 10,
+            script_live: 10,
+            headers: 10,
+            filters: 10,
+        };
+        let add_overflow = IndexRowBytes {
+            tx_lookup: 10,
+            script_history: 0,
+            script_live: 0,
+            headers: 0,
+            filters: 0,
+        };
+        assert!(matches!(
+            base_family.checked_add(&add_overflow),
+            Err(IndexError::MutationSizeOverflow)
+        ));
+    }
+
+    #[test]
+    fn family_byte_histograms_recording() {
+        let family = IndexRowBytes {
+            tx_lookup: 42,
+            script_history: 84,
+            script_live: 86,
+            headers: 80,
+            filters: 101,
+        };
+        let recorder = RecordedHistograms::default();
+        metrics::with_local_recorder(&recorder, || {
+            super::super::write::record_family_byte_histograms(&family);
+        });
+        let recorded = recorder.samples.lock().clone();
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"tx_lookup\"}"),
+            Some(&vec![42.0])
+        );
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"script_history\"}"),
+            Some(&vec![84.0])
+        );
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"headers\"}"),
+            Some(&vec![80.0])
+        );
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"script_live\"}"),
+            Some(&vec![86.0])
+        );
+        assert_eq!(
+            recorded.get("index.family_planned_write_bytes{family=\"filters\"}"),
+            Some(&vec![101.0])
+        );
+
+        // Zero-size semantics: families with 0 bytes are not emitted.
+        let partial_family = IndexRowBytes {
+            tx_lookup: 100,
+            script_history: 0,
+            script_live: 0,
+            headers: 0,
+            filters: 0,
+        };
+        let partial_recorder = RecordedHistograms::default();
+        metrics::with_local_recorder(&partial_recorder, || {
+            super::super::write::record_family_byte_histograms(&partial_family);
+        });
+        let partial_recorded = partial_recorder.samples.lock().clone();
+        assert_eq!(
+            partial_recorded.get("index.family_planned_write_bytes{family=\"tx_lookup\"}"),
+            Some(&vec![100.0])
+        );
+        assert_eq!(partial_recorded.len(), 1);
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordedHistograms {
+        samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+    }
+
+    impl metrics::Recorder for RecordedHistograms {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::noop()
+        }
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            let labels = key
+                .labels()
+                .map(|l| format!("{}=\"{}\"", l.key(), l.value()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let metric_name = if labels.is_empty() {
+                key.name().to_owned()
+            } else {
+                format!("{}{{{labels}}}", key.name())
+            };
+            metrics::Histogram::from_arc(std::sync::Arc::new(RecordedHistogramHandle {
+                samples: std::sync::Arc::clone(&self.samples),
+                name: metric_name,
+            }))
+        }
+    }
+
+    struct RecordedHistogramHandle {
+        samples: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, Vec<f64>>>>,
+        name: String,
+    }
+
+    impl metrics::HistogramFn for RecordedHistogramHandle {
+        fn record(&self, value: f64) {
+            self.samples
+                .lock()
+                .entry(self.name.clone())
+                .or_default()
+                .push(value);
+        }
+    }
+
     #[test]
     fn groups_preserve_distinct_keys_and_numeric_positions() {
         let mut rows = positioned_rows();

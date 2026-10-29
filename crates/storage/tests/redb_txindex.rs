@@ -5,7 +5,9 @@
 
 #![cfg(feature = "redb")]
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteCondition};
+use bitcoin_rs_storage::{
+    ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError, WriteCondition,
+};
 use redb::ReadableDatabase;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -472,6 +474,192 @@ fn txindex_bounded_scan_empty_values() -> TestResult<()> {
     Ok(())
 }
 
+/// One continuation scan: `(prefix, start, limit)`.
+type ContinuationScan<'a> =
+    &'a dyn Fn(&[u8], &[u8], PrefixScanLimit) -> Result<PrefixScan, StorageError>;
+
+/// Three keys of `width` bytes under prefix `0x01` (low, mid, high) and one
+/// under `0x02`.
+fn fixed_width_keys(width: usize) -> [Vec<u8>; 4] {
+    let key = |head: u8, fill: u8, last: u8| {
+        let mut key = vec![fill; width];
+        key[0] = head;
+        key[width - 1] = last;
+        key
+    };
+    [key(1, 0, 0), key(1, 0, 5), key(1, 0xff, 0xff), key(2, 0, 0)]
+}
+
+fn assert_fixed_width_continuation(
+    scan: ContinuationScan<'_>,
+    width: usize,
+    value: &[u8],
+) -> Result<(), StorageError> {
+    let [low_key, mid_key, high_key, _] = fixed_width_keys(width);
+    let (low, mid, high) = (low_key.as_slice(), mid_key.as_slice(), high_key.as_slice());
+    let past_mid = [mid, &[0x00_u8][..]].concat();
+    let past_high = [high, &[0x00_u8][..]].concat();
+    let check = |prefix: &[u8],
+                 start: &[u8],
+                 max_rows: usize,
+                 expected: &[&[u8]],
+                 complete: bool|
+     -> Result<(), StorageError> {
+        let page = scan(
+            prefix,
+            start,
+            PrefixScanLimit {
+                max_rows,
+                max_bytes: usize::MAX,
+            },
+        )?;
+        let keys: Vec<&[u8]> = page.rows.iter().map(|(key, _)| key.as_slice()).collect();
+        assert_eq!(keys, expected, "prefix {prefix:02x?} start {start:02x?}");
+        assert!(page.rows.iter().all(|(_, row_value)| row_value == value));
+        assert_eq!(
+            page.complete, complete,
+            "prefix {prefix:02x?} start {start:02x?}"
+        );
+        Ok(())
+    };
+    let prefix: &[u8] = &[0x01];
+
+    // A seek before the prefix, short of the key width, or on the first key
+    // keeps every row of the prefix.
+    let from_first: [&[u8]; 4] = [&[], &[0x00, 0xff], &[0x01, 0x00, 0x00], low];
+    for start in from_first {
+        check(prefix, start, usize::MAX, &[low, mid, high], true)?;
+    }
+
+    // The seek is inclusive, including a seek longer than the key width.
+    check(prefix, mid, usize::MAX, &[mid, high], true)?;
+    check(prefix, &past_mid, usize::MAX, &[high], true)?;
+    check(prefix, &[0x01, 0x80], usize::MAX, &[high], true)?;
+
+    // A seek past the last key of the prefix, or past the prefix, is exhausted.
+    check(prefix, &past_high, usize::MAX, &[], true)?;
+    check(prefix, &[0x02], usize::MAX, &[], true)?;
+
+    // A prefix as wide as the key matches one key and nothing after it.
+    check(mid, &[], usize::MAX, &[mid], true)?;
+    check(mid, &past_mid, usize::MAX, &[], true)?;
+
+    // Zero rows are incomplete only while rows remain.
+    check(prefix, &[], 0, &[], false)?;
+    check(prefix, &[0x02], 0, &[], true)?;
+
+    // Exactly exhausting the prefix is complete; stopping short is not.
+    check(prefix, &[], 2, &[low, mid], false)?;
+    check(prefix, &past_mid, 1, &[high], true)?;
+
+    // A prefix wider than the key is refused, not scanned as empty.
+    assert_invalid(scan(&vec![0x01; width + 1][..], &[], MAX_SCAN));
+    Ok(())
+}
+
+/// Resuming each page just after its last key visits every key once, in order.
+fn assert_fixed_width_pages(scan: ContinuationScan<'_>) -> Result<(), StorageError> {
+    let all: Vec<Vec<u8>> = scan(&[], &[], MAX_SCAN)?
+        .rows
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_ne!(all, Vec::<Vec<u8>>::new());
+    for rows_per_page in 1..=all.len() + 1 {
+        let mut seen = Vec::new();
+        let mut start = Vec::new();
+        loop {
+            let page = scan(
+                &[],
+                &start,
+                PrefixScanLimit {
+                    max_rows: rows_per_page,
+                    max_bytes: usize::MAX,
+                },
+            )?;
+            if let Some((last, _)) = page.rows.last() {
+                start.clone_from(last);
+                start.push(0x00);
+            }
+            seen.extend(page.rows.iter().map(|(key, _)| key.clone()));
+            if page.complete {
+                break;
+            }
+            assert!(!page.rows.is_empty(), "an incomplete page must progress");
+        }
+        assert_eq!(seen, all);
+    }
+    Ok(())
+}
+
+#[test]
+fn txindex_continuation_seeks_every_fixed_width_family() -> TestResult<()> {
+    let families: [(ColumnFamily, usize, &[u8]); 5] = [
+        (ColumnFamily::TxConfirmed, 12, &b"tx-position"[..]),
+        (ColumnFamily::Funding, 12, &b"funding-position"[..]),
+        (ColumnFamily::Spending, 12, &b"spending-position"[..]),
+        (ColumnFamily::BlockHeaders, 80, &b""[..]),
+        (ColumnFamily::ScriptLive, 43, &b""[..]),
+    ];
+    for (cf, width, value) in families {
+        let temp = tempfile::TempDir::new()?;
+        let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+        let mut batch = store.new_batch();
+        for key in fixed_width_keys(width) {
+            batch.put(cf, &key, value);
+        }
+        store.write(batch)?;
+
+        let live = |prefix: &[u8], start: &[u8], limit: PrefixScanLimit| {
+            store.scan_prefix_from_bounded(cf, prefix, start, limit)
+        };
+        assert_fixed_width_continuation(&live, width, value)?;
+        assert_fixed_width_pages(&live)?;
+
+        let snapshot = store.snapshot()?;
+        let view = |prefix: &[u8], start: &[u8], limit: PrefixScanLimit| {
+            snapshot.scan_prefix_from_bounded(cf, prefix, start, limit)
+        };
+        assert_fixed_width_continuation(&view, width, value)?;
+        assert_fixed_width_pages(&view)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn txindex_continuation_snapshot_is_point_in_time() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::TxConfirmed, &key_12(1), b"one");
+    batch.put(ColumnFamily::TxConfirmed, &key_12(3), b"three");
+    store.write(batch)?;
+
+    let snapshot = store.snapshot()?;
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::TxConfirmed, &key_12(2), b"two");
+    batch.put(ColumnFamily::TxConfirmed, &key_12(4), b"four");
+    store.write(batch)?;
+
+    let seen =
+        snapshot.scan_prefix_from_bounded(ColumnFamily::TxConfirmed, &[], &key_12(2), MAX_SCAN)?;
+    assert_eq!(seen.rows, vec![(key_12(3).to_vec(), b"three".to_vec())]);
+    assert!(seen.complete);
+
+    let live =
+        store.scan_prefix_from_bounded(ColumnFamily::TxConfirmed, &[], &key_12(2), MAX_SCAN)?;
+    assert_eq!(
+        live.rows,
+        vec![
+            (key_12(2).to_vec(), b"two".to_vec()),
+            (key_12(3).to_vec(), b"three".to_vec()),
+            (key_12(4).to_vec(), b"four".to_vec()),
+        ]
+    );
+    assert!(live.complete);
+    Ok(())
+}
+
 #[test]
 fn txindex_mixed_batch_ordering_and_interleaved_cf() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
@@ -590,6 +778,7 @@ fn txindex_unsupported_column_families_rejected() -> TestResult<()> {
         assert_invalid(store.put(cf, b"key", b"value"));
         assert_invalid(store.iter_prefix(cf, b"key"));
         assert_invalid(store.scan_prefix_bounded(cf, b"key", MAX_SCAN));
+        assert_invalid(store.scan_prefix_from_bounded(cf, b"key", b"key", MAX_SCAN));
         assert_invalid(store.write_durable_if(
             &[WriteCondition::Equals {
                 cf,

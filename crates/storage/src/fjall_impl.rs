@@ -100,8 +100,11 @@ impl FjallStore {
         };
         metrics::counter!("storage.writes_total", "backend" => "fjall", "durability" => durability_label)
             .increment(1);
-        metrics::histogram!("storage.write_bytes", "backend" => "fjall")
-            .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+        metrics::histogram!("storage.write_bytes", "backend" => "fjall").record(
+            bitcoin_rs_primitives::u64_to_f64(
+                u64::try_from(batch.encoded_bytes).unwrap_or(u64::MAX),
+            ),
+        );
 
         #[cfg(any(test, feature = "test-seam"))]
         {
@@ -238,6 +241,20 @@ impl KvStore for FjallStore {
         Ok(Box::new(iterator))
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .keyspace(cf)?
+            .range::<&[u8], _>(core::cmp::max(start, prefix)..)
+            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -344,5 +361,19 @@ impl KvSnapshot for FjallSnapshot<'_> {
                     .map_err(StorageError::backend)
             });
         Ok(Box::new(iterator))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: crate::PrefixScanLimit,
+    ) -> Result<crate::PrefixScan, StorageError> {
+        let rows = self
+            .snapshot
+            .range::<&[u8], _>(self.store.keyspace(cf)?, core::cmp::max(start, prefix)..)
+            .map(|guard| guard.into_inner().map_err(StorageError::backend));
+        crate::trait_::collect_bounded_prefix(rows, prefix, limit)
     }
 }

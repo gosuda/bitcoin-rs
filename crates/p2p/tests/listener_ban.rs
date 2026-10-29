@@ -1,7 +1,8 @@
 //! P2P listener manual-ban and network-control enforcement coverage.
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::error::Error;
 use std::io::{self, Read};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -17,7 +18,11 @@ use parking_lot::RwLock;
 
 #[test]
 fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), Box<dyn Error>> {
-    let helper = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let helper = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
@@ -36,7 +41,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
         Arc::new(AtomicBool::new(false)),
     );
 
-    let handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
     let result = match handle.join() {
         Ok(result) => result,
         Err(error) => std::panic::resume_unwind(error),
@@ -49,7 +54,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
     );
 
     match result {
-        Err(PeerError::BannedDestination(ip)) => assert_eq!(ip, addr.ip()),
+        Err(PeerError::BannedDestination(ip)) => assert_eq!(ip.ip(), Some(addr.ip())),
         other => {
             return Err(io::Error::other(format!(
                 "expected banned destination error, got {other:?}"
@@ -63,7 +68,11 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
 
 #[test]
 fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -82,7 +91,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
     let listener_shutdown = Arc::clone(&shutdown);
     let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
-    let mut client = match connect_with_retry(addr, Duration::from_secs(1)) {
+    let mut client = match connect_with_retry(addr.into(), Duration::from_secs(1)) {
         Ok(client) => client,
         Err(error) => {
             shutdown.store(true, Ordering::Relaxed);
@@ -102,7 +111,11 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -117,7 +130,7 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
     let listener_shutdown = Arc::clone(&shutdown);
     let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
-    let mut client = connect_with_retry(addr, Duration::from_secs(1))?;
+    let mut client = connect_with_retry(addr.into(), Duration::from_secs(1))?;
     wait_for_disconnect(&mut client, Duration::from_secs(1))?;
     assert!(peer_table.is_empty());
 
@@ -128,7 +141,11 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>> {
-    let helper = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let helper = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
@@ -150,7 +167,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
         Arc::new(AtomicBool::new(false)),
     );
 
-    let inactive = spawn_outbound_connection(addr, shared.clone(), PeerRole::FullRelay);
+    let inactive = spawn_outbound_connection(addr.into(), shared.clone(), PeerRole::FullRelay);
     let inactive = inactive
         .join()
         .map_err(|_| io::Error::other("inactive outbound thread panicked"))?;
@@ -165,7 +182,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     );
 
     network_active.store(true, Ordering::Release);
-    let active = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let active = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
     assert!(join_accept(accept_handle)?);
     let _ = active
         .join()
@@ -176,7 +193,11 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
 
 #[test]
 fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error>> {
-    let helper = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let helper = TcpListener::bind(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     helper.set_nonblocking(true)?;
     let addr = helper.local_addr()?;
     let accept_helper = helper.try_clone()?;
@@ -198,7 +219,7 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error
         Arc::new(AtomicBool::new(true)),
     );
 
-    let refused = spawn_outbound_connection(addr, shared, PeerRole::FullRelay)
+    let refused = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay)
         .join()
         .map_err(|_| io::Error::other("cancelled outbound thread panicked"))?;
     assert!(
@@ -217,7 +238,11 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error
 
 #[test]
 fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn Error>> {
-    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let listener = bind_listener(
+        PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
+            .socket_addr()
+            .unwrap_or_else(|| panic!("expected IP fixture")),
+    )?;
     let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -233,7 +258,7 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn E
     let listener_shutdown = Arc::clone(&shutdown);
     let serve_shared = shared.clone();
     let serve_handle = thread::spawn(move || serve(listener, listener_shutdown, serve_shared));
-    let outbound_handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+    let outbound_handle = spawn_outbound_connection(addr.into(), shared, PeerRole::FullRelay);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -304,10 +329,13 @@ fn ban(subnet: IpSubnet) -> BannedSubnet {
     }
 }
 
-fn connect_with_retry(addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+fn connect_with_retry(addr: PeerEndpoint, timeout: Duration) -> io::Result<TcpStream> {
     let deadline = Instant::now() + timeout;
     loop {
-        match TcpStream::connect(addr) {
+        match TcpStream::connect(
+            addr.socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        ) {
             Ok(stream) => return Ok(stream),
             Err(error) => {
                 if Instant::now() >= deadline {

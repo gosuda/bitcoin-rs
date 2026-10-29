@@ -32,7 +32,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         Arc::new(parking_lot::RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))),
-        Some(seen.clone()),
+        Some((seen.clone(), crate::BodyInterest::Metadata)),
         ValidationEngine::Native,
         None,
     );
@@ -96,6 +96,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         seen.0.lock().as_slice(),
         &[crate::MutationEnvelope {
             origin: AdmissionOrigin::Rpc,
+            accepted_transactions: Vec::new(),
             result
         }]
     );
@@ -529,13 +530,293 @@ fn gateway() -> MempoolGateway {
     gateway_observed(None)
 }
 
+#[test]
+fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> TestResult {
+    use crate::PackageTxResult;
+    let seen = Arc::new(Seen::default());
+    let gateway = gateway_observed(Some(seen.clone()));
+    gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+    let parent = spend(&[coin(830)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let txs = [parent, child];
+    let chain = Coins(vec![(
+        coin(830),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+    )]);
+    let preview = gateway.preview_transactions(&txs, None, &chain)?;
+    assert_eq!(
+        preview.results[0].reject_reason,
+        Some(AcceptanceRejectReason::MinRelayFeeNotMet)
+    );
+    let history = gateway.read().estimator_history();
+    let submitted = gateway.submit_rpc_package(&txs, None, unix_time_secs(), &chain)?;
+    assert_eq!(submitted.package_error, None);
+    let mut total_size = 0_u32;
+    for (tx, row) in txs.iter().zip(&submitted.tx_results) {
+        let PackageTxResult::Accepted {
+            vsize,
+            base_fee,
+            effective_includes,
+            ..
+        } = row
+        else {
+            return Err("package was not accepted".into());
+        };
+        total_size += *vsize;
+        assert_eq!(
+            *base_fee,
+            if tx.txid() == txs[0].txid() { 0 } else { 2_000 }
+        );
+        let expected_includes: Vec<_> = txs.iter().map(Tx::wtxid).collect();
+        assert_eq!(effective_includes, &expected_includes);
+    }
+    for row in &submitted.tx_results {
+        let PackageTxResult::Accepted {
+            effective_fee_rate, ..
+        } = row
+        else {
+            unreachable!()
+        };
+        // Every member committed by the atomic plan reports the package's
+        // aggregate rate over the same full set.
+        assert_eq!(*effective_fee_rate, Some(2_000_000 / u64::from(total_size)));
+    }
+    let batches = seen.0.lock();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]
+            .result
+            .changes
+            .iter()
+            .map(|change| change.txid)
+            .collect::<Vec<_>>(),
+        txs.iter()
+            .map(|tx| Hash256::from(tx.txid()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(gateway.read().sequence_number(), 2);
+    assert_eq!(gateway.read().estimator_history(), history);
+    drop(batches);
+    let resident = gateway.submit_rpc_package(&txs, None, unix_time_secs(), &chain)?;
+    assert!(resident.tx_results.iter().all(|row| matches!(
+        row,
+        PackageTxResult::Accepted {
+            effective_fee_rate: None,
+            ..
+        }
+    )));
+    assert_eq!(seen.0.lock().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice() -> TestResult {
+    use crate::PackageTxResult;
+    for invalid_script in [false, true] {
+        let gateway = gateway();
+        gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+        let parent = spend(&[coin(831)], &[98_000], false);
+        let mut child = spend(
+            &[OutPoint::new(parent.txid(), 0)],
+            &[if invalid_script { 96_000 } else { 98_000 }],
+            true,
+        );
+        if invalid_script {
+            child.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
+        }
+        let chain = Coins(vec![(
+            coin(831),
+            TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )]);
+        let expected = if invalid_script {
+            SubmitError::Consensus
+        } else {
+            AcceptanceRejectReason::MinRelayFeeNotMet.into()
+        };
+        let result =
+            gateway.submit_rpc_package(&[parent.clone(), child], None, unix_time_secs(), &chain)?;
+        assert!(matches!(
+            result.tx_results[0],
+            PackageTxResult::Accepted { .. }
+        ));
+        assert_eq!(result.tx_results[1], PackageTxResult::Rejected(expected));
+        assert_eq!(gateway.read().len(), 1);
+        assert!(gateway.read().contains_txid(&parent.txid()));
+        assert_eq!(gateway.read().sequence_number(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing() -> TestResult {
+    let gateway = gateway();
+    gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+    let parent = spend(&[coin(832)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[99_999], true);
+    let chain = Coins(vec![(
+        coin(832),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+    )]);
+    let txs = [parent.clone(), child.clone()];
+    let history = gateway.read().estimator_history();
+    let result = gateway.submit_rpc_package(&txs, None, unix_time_secs(), &chain)?;
+    assert!(
+        result
+            .tx_results
+            .iter()
+            .all(|row| matches!(row, crate::PackageTxResult::Rejected(_)))
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), 0);
+    assert_eq!(gateway.read().estimator_history(), history);
+    assert_eq!(
+        gateway.submit_rpc_package(&[child, parent.clone()], None, 0, &chain),
+        Err(AcceptanceRejectReason::PackageTopology.into())
+    );
+    assert_eq!(
+        gateway.submit_rpc_package(&[parent.clone(), parent.clone()], None, 0, &chain),
+        Err(AcceptanceRejectReason::PackageTopology.into())
+    );
+    assert_eq!(
+        gateway.submit_rpc_package(
+            &[parent.clone(), parent.clone(), parent.clone()],
+            None,
+            0,
+            &chain
+        ),
+        Err(AcceptanceRejectReason::PackageUnsupported.into())
+    );
+    assert_eq!(
+        gateway.submit_rpc_package(
+            &[parent.clone(), parent.clone(), parent.clone()],
+            None,
+            0,
+            &chain
+        ),
+        Err(AcceptanceRejectReason::PackageUnsupported.into())
+    );
+    gateway.prioritise(parent.txid(), 10_000)?;
+    let capped = gateway.submit_rpc_package(&[parent], Some(1_000), unix_time_secs(), &chain)?;
+    assert_eq!(
+        capped.tx_results,
+        vec![crate::PackageTxResult::Rejected(
+            AcceptanceRejectReason::MaxFeeExceeded.into()
+        )]
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), 0);
+    Ok(())
+}
+
+#[test]
+fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() -> TestResult {
+    struct MovingChain<'a> {
+        gateway: &'a MempoolGateway,
+        chain: Coins,
+        marker: bitcoin_rs_primitives::Txid,
+    }
+    impl AdmissionChain for MovingChain<'_> {
+        fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+            self.gateway.prioritise(self.marker, 1).ok()?;
+            self.chain.snapshot(tx)
+        }
+    }
+    let gateway = Arc::new(gateway());
+    let parent = spend(&[coin(833)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let chain = MovingChain {
+        gateway: &gateway,
+        chain: Coins(vec![(
+            coin(833),
+            TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )]),
+        marker: coin(900).txid,
+    };
+    let txs = [parent, child];
+    let result = gateway.submit_rpc_package(&txs, None, unix_time_secs(), &chain)?;
+    assert_eq!(
+        result.tx_results,
+        vec![crate::PackageTxResult::Rejected(SubmitError::RetryExhausted); 2]
+    );
+    assert_eq!(gateway.read().sequence_number(), 0);
+    assert!(gateway.read().is_empty());
+    let change = gateway.begin_chain_change()?;
+    let result = gateway.submit_rpc_package(&txs, None, unix_time_secs(), &chain.chain)?;
+    assert_eq!(
+        result.tx_results,
+        vec![crate::PackageTxResult::Rejected(SubmitError::RetryExhausted); 2]
+    );
+    assert!(gateway.read().is_empty());
+    change.finish()?;
+    Ok(())
+}
+
+#[test]
+fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() -> TestResult {
+    let gateway = gateway();
+    gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+    let parent = spend(&[coin(834)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let chain = Coins(vec![(
+        coin(834),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+    )]);
+    gateway.pool.write().limits.max_total_bytes = parent.vsize() + child.vsize() - 1;
+    let result = gateway.submit_rpc_package(&[parent, child], None, unix_time_secs(), &chain)?;
+    assert_eq!(
+        result.package_error,
+        Some(AcceptanceRejectReason::Mempool(crate::MempoolError::Full))
+    );
+    assert!(gateway.read().is_empty());
+    assert_eq!(gateway.read().sequence_number(), 0);
+
+    gateway.pool.write().limits.max_total_bytes = 0;
+    let resident = spend(&[coin(834)], &[98_000], false);
+    gateway.submit_local_transaction(
+        Arc::new(resident.clone()),
+        crate::LocalOrigin::Rpc,
+        None,
+        unix_time_secs(),
+        &chain,
+    )?;
+    let history = gateway.read().estimator_history();
+    let replacement = spend(&[coin(834)], &[97_000], false);
+    let child = spend(&[OutPoint::new(replacement.txid(), 0)], &[95_000], true);
+    let result =
+        gateway.submit_rpc_package(&[replacement, child], None, unix_time_secs(), &chain)?;
+    assert_eq!(
+        result.tx_results[0],
+        crate::PackageTxResult::Rejected(AcceptanceRejectReason::MempoolConflict.into())
+    );
+    assert!(gateway.read().contains_txid(&resident.txid()));
+    assert_eq!(gateway.read().len(), 1);
+    assert_eq!(gateway.read().sequence_number(), 1);
+    assert_eq!(gateway.read().estimator_history(), history);
+    Ok(())
+}
+
 fn gateway_observed(observer: Option<Arc<dyn crate::MempoolObserver>>) -> MempoolGateway {
     MempoolGateway::new(
         Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         }))),
-        observer,
+        observer.map(|leg| (leg, crate::BodyInterest::Metadata)),
         ValidationEngine::Native,
         None,
     )
@@ -932,5 +1213,86 @@ fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
         envelopes[1].result.changes.last(),
         Some(&expired(resident_txid))
     );
+    Ok(())
+}
+
+/// Single-transaction `maxfeerate` gates on the actual base fee, never the
+/// modified fee: a policy discount must not smuggle an over-cap fee in,
+/// and a surcharge must not refuse an under-cap fee.
+#[test]
+fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
+    use crate::standardness::AcceptanceRejectReason;
+    // Gauge the fixture shape once: one anyone-can-spend input and output.
+    let gauge = gateway();
+    gauge.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
+    let tx = spend(&[coin(840)], &[98_000], true);
+    // The spent output is a witness program so the native single path
+    // verifies the pushed witness instead of refusing a bare key.
+    let chain = Coins(vec![(coin(840), output(100_000))]);
+    gauge.submit_local_transaction(
+        Arc::new(tx.clone()),
+        crate::LocalOrigin::Rpc,
+        None,
+        0,
+        &chain,
+    )?;
+    let vsize = gauge
+        .read()
+        .entry_by_txid(&tx.txid())
+        .ok_or("fixture missing")?
+        .vsize;
+    let base_rate = 2_000_000 / u64::from(vsize);
+    // Wide margins around both rates so integer rounding cannot matter:
+    // the discount drops the modified fee to 100 sats, the surcharge lifts
+    // it to 100_000 sats, while the base fee stays 2_000 sats.
+    let below_base = base_rate / 2;
+    let above_base = base_rate * 2 + 1_000;
+    // Real margins, immune to integer-division equality: the discounted fee
+    // (100 sats) sits below the cap's required fee, the surcharge-implied
+    // fee (100_000 sats) sits above the higher cap's.
+    assert!(crate::rbf::required_fee(below_base, vsize).is_ok_and(|limit| limit > 100));
+    assert!(above_base < 100_000_000 / u64::from(vsize));
+
+    // Discount: modified rate is under the cap, base rate is over it.
+    let discounted = gateway();
+    discounted.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
+    discounted.prioritise(tx.txid(), -1_900)?;
+    let preview =
+        discounted.preview_transactions(std::slice::from_ref(&tx), Some(below_base), &chain)?;
+    assert_eq!(preview.results[0].allowed, Some(false));
+    assert_eq!(
+        preview.results[0].reject_reason,
+        Some(AcceptanceRejectReason::MaxFeeExceeded),
+        "preview must agree with submit on the base-fee cap"
+    );
+    assert_eq!(
+        discounted.submit_local_transaction(
+            Arc::new(tx.clone()),
+            crate::LocalOrigin::Rpc,
+            Some(below_base),
+            0,
+            &chain,
+        ),
+        Err(SubmitError::Policy(AcceptanceRejectReason::MaxFeeExceeded)),
+        "a discount must not admit an over-cap base fee"
+    );
+    assert!(discounted.read().is_empty());
+
+    // Surcharge: modified rate is over the cap, base rate is under it.
+    let surcharged = gateway();
+    surcharged.pool.write().limits.min_relay_fee_sat_per_kvb = 1;
+    surcharged.prioritise(tx.txid(), 98_000)?;
+    let preview =
+        surcharged.preview_transactions(std::slice::from_ref(&tx), Some(above_base), &chain)?;
+    assert_eq!(preview.results[0].allowed, Some(true));
+    assert_eq!(preview.results[0].reject_reason, None);
+    surcharged.submit_local_transaction(
+        Arc::new(tx),
+        crate::LocalOrigin::Rpc,
+        Some(above_base),
+        0,
+        &chain,
+    )?;
+    assert_eq!(surcharged.read().len(), 1);
     Ok(())
 }

@@ -304,7 +304,7 @@ domains = ["offline"]
 timed_region = "outside"
 seams = ["tools/benchmark-campaign/offline_full_validation.py"]
 disposition = "already_bounded"
-evidence = "Outside the timed region by #44/#46. Not a node hot path. The retired mainnet_prefix_replay example is not a seam."
+evidence = "Outside the timed region by #44/#46. Harness stages packed archive plus indexed blk parity (verify_index once plus exhaust iter, every blk pinned 0o400 with pre/post identity checks). Dual custody staging cost grows outside the timed region. Not a node hot path. The retired mainnet_prefix_replay example is not a seam."
 
 # ---------------------------------------------------------------------------
 # P2P-only

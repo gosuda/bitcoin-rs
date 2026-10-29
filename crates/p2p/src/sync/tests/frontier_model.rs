@@ -56,8 +56,11 @@ fn hash(byte: u8) -> Hash256 {
     Hash256::from_le_bytes(&[byte; 32])
 }
 
-fn addr_of(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+fn addr_of(port: u16) -> PeerRemote {
+    PeerRemote::Endpoint(crate::PeerEndpoint::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port,
+    ))
 }
 
 fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer {
@@ -125,7 +128,10 @@ fn unowned_frontier_schedules_recovery_when_a_capable_peer_exists() {
     assert!(plan.schedule_bodies);
     assert_eq!(plan.no_progress, None);
     match plan.header_action {
-        HeaderAction::Probe(source) => assert_eq!(source.addr, addr_of(9001)),
+        HeaderAction::Probe(source) => assert_eq!(
+            source.endpoint,
+            addr_of(9001).endpoint()
+        ),
         action => panic!("expected Probe, got {action:?}"),
     }
 }
@@ -280,6 +286,9 @@ fn live_pending_header_request_awaits_its_connection() {
 
 #[test]
 fn probe_rotates_past_the_dead_pending_owner() {
+    // Rotation orders by connection id, not endpoint: the dead owner is
+    // allocated first so both usable peers sort after it, and the smallest
+    // usable id (the 9001 peer) wins despite its lower endpoint.
     let dead_owner = PeerSource::for_test(addr_of(9005));
     let mut frontier = frontier(
         chain_frontier(5, false),
@@ -302,7 +311,10 @@ fn probe_rotates_past_the_dead_pending_owner() {
     assert!(!frontier.header_request_live);
     match frontier.plan().header_action {
         HeaderAction::Probe(source) => {
-            assert_eq!(source.addr, addr_of(9007));
+            assert_eq!(
+                source.endpoint,
+                addr_of(9001).endpoint()
+            );
             assert_ne!(source, dead_owner);
         }
         action => panic!("expected Probe, got {action:?}"),
@@ -319,7 +331,10 @@ fn non_serving_peers_are_never_probe_picks() {
         vec![non_serving, usable(9002, 100, None)],
     );
     match frontier.plan().header_action {
-        HeaderAction::Probe(source) => assert_eq!(source.addr, addr_of(9002)),
+        HeaderAction::Probe(source) => assert_eq!(
+            source.endpoint,
+            addr_of(9002).endpoint()
+        ),
         action => panic!("expected Probe, got {action:?}"),
     }
 }
@@ -461,7 +476,11 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
     let (tx, rx) = crate::test_support::message_channel();
     let conn1 = PeerLease::new(tx);
     peers.register(staller, conn1.clone());
-    peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
+    peers.publish_info(
+        staller,
+        &conn1,
+        synthetic_peer(staller, 200),
+    );
 
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
@@ -480,19 +499,14 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
             vec![super::transaction(0xEE)],
         )
         .or_fail("regtest fixture block");
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+        let payload = BlockPayload::from_local(block);
         scheduler.window.seed_front_cadence_for_test(50, now);
-        scheduler.stager.insert(
-            tail,
-            None,
-            block,
-            serialized,
-            Some(conn1.source(staller)),
-            now,
-        );
+        scheduler
+            .stager
+            .insert(tail, None, payload, Some(conn1.source(staller.endpoint())), now);
         scheduler
             .window
-            .mark_received_from(tail, 80, Some(conn1.source(staller)), now);
+            .mark_received_from(tail, 80, Some(conn1.source(staller.endpoint())), now);
     }
 
     let next_apply = sync
@@ -521,14 +535,18 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
     let (tx2, rx2) = crate::test_support::message_channel();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());
-    peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
+    peers.publish_info(
+        staller,
+        &conn2,
+        synthetic_peer(staller, 200),
+    );
 
     let owner = owner.ok_or_else(|| std::io::Error::other("missing stall owner"))?;
     assert!(
         !peers.disconnect_source(owner),
         "convicting a replaced connection must not disconnect its successor"
     );
-    let conn2_source = conn2.source(staller);
+    let conn2_source = conn2.source(staller.endpoint());
     assert!(peers.is_current(conn2_source));
     assert!(!conn2.is_cancelled());
     sync.reconcile_peer_sessions();

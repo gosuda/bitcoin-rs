@@ -8,8 +8,16 @@
 //! Embedders control placement of that work on their own runtime.
 
 use bitcoin_rs_index::CapabilitySnapshot;
+use bitcoin_rs_index::IndexCapability;
+use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_index::query_api::{
+    AtPrefix, HistoricalQueryError, HistoricalUnavailableCause, ScriptIndexSnapshot,
+    SpendingRecord, TxUnavailableCause,
+};
 use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize, unix_time_secs};
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize, unix_time_secs,
+};
 pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
 use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
@@ -155,6 +163,70 @@ impl Node {
             )));
         }
         Ok(Some(block))
+    }
+
+    /// Resolves one confirmed transaction against a server-selected covered prefix.
+    ///
+    /// Synchronous bounded blocking read: the call runs the engine's bounded
+    /// scans plus body reads inline, creates no executor, and belongs on a
+    /// caller blocking worker. No mempool merge; confirmed index only.
+    /// Each call selects its own prefix; independent calls do not share an
+    /// anchor. A tx-only node serves this call without `ScriptHistory`.
+    pub fn transaction_at_prefix(
+        &self,
+        txid: &Txid,
+    ) -> Result<AtPrefix<Option<(u32, Tx)>>, HistoricalQueryError> {
+        let Some(adapter) = self.state.historical_index_adapter() else {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
+                    IndexCapability::TxLookup,
+                )),
+            ));
+        };
+        adapter.transaction_at_prefix(txid)
+    }
+
+    /// Resolves confirmed script history against a server-selected covered prefix.
+    ///
+    /// Synchronous bounded blocking read: the call runs the engine's bounded
+    /// scans plus body reads inline, creates no executor, and belongs on a
+    /// caller blocking worker. No mempool merge; confirmed index only.
+    /// Each call selects its own prefix; independent calls do not share an
+    /// anchor.
+    pub fn script_history_at_prefix(
+        &self,
+        script: ScriptHash,
+    ) -> Result<AtPrefix<ScriptIndexSnapshot>, HistoricalQueryError> {
+        let Some(adapter) = self.state.historical_index_adapter() else {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
+                    IndexCapability::ScriptHistory,
+                )),
+            ));
+        };
+        adapter.script_history_at_prefix(script)
+    }
+
+    /// Resolves the confirmed spender of an outpoint against a server-selected covered prefix.
+    ///
+    /// Synchronous bounded blocking read: the call runs the engine's bounded
+    /// scans plus body reads inline, creates no executor, and belongs on a
+    /// caller blocking worker. No mempool merge; confirmed index only.
+    /// Each call selects its own prefix; independent calls do not share an
+    /// anchor. `Ok` with `None` means no matching spend in range, not
+    /// globally unspent.
+    pub fn spender_at_prefix(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<AtPrefix<Option<SpendingRecord>>, HistoricalQueryError> {
+        let Some(adapter) = self.state.historical_index_adapter() else {
+            return Err(HistoricalQueryError::Unavailable(
+                HistoricalUnavailableCause::Shared(TxUnavailableCause::CapabilityDisabled(
+                    IndexCapability::ScriptHistory,
+                )),
+            ));
+        };
+        adapter.spender_at_prefix(outpoint)
     }
 
     /// Resolves a transaction through the mempool, then the confirmed index.

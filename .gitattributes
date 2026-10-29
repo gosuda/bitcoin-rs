@@ -23,8 +23,7 @@ fuzz/corpus/** -text
 
 # Binary fixtures embedded with `include_bytes!`. A fixture without a NUL byte
 # is detected as text, so autocrlf inserts a CR before every 0x0a byte and the
-# tests reading it fail on Windows checkouts only (addrman-historical-v2.dat,
-# addrman-historical-v4-anchors.dat).
+# tests reading it fail on Windows checkouts only.
 *.dat -text
 *.raw -text
 

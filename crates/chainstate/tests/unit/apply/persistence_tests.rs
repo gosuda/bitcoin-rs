@@ -7,7 +7,8 @@ use bitcoin_rs_chain::ActiveTipWait as _;
 use bitcoin_rs_chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, Tx, TxOut,
+    Amount, Block, BlockHash, BlockPayload, CompactTarget, Hash256, Header, Network, OutPoint,
+    Script, Tx, TxOut,
 };
 use bitcoin_rs_storage::{
     CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
@@ -66,11 +67,11 @@ fn canonical_regtest_chain_connects_through_bip34_activation()
     let network = Network::Regtest;
     let handles = handles(network, Arc::new(UtxoSet::new()));
     let genesis = network.genesis_block();
-    handles.apply_block(&genesis, None)?;
+    handles.apply_block(&BlockPayload::from_local(genesis.clone()))?;
     let mut parent = genesis.block_hash();
     for height in 1..=500 {
         let block = mined_child(parent, height)?;
-        let outcome = handles.apply_block(&block, None)?;
+        let outcome = handles.apply_block(&BlockPayload::from_local(block.clone()))?;
         assert_eq!(outcome.tip.height, height);
         assert_eq!(outcome.hash, Hash256::from(block.block_hash()));
         assert_eq!(
@@ -91,7 +92,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     seed_genesis(&handles)?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
-    handles.apply_block(&first, None)?;
+    handles.apply_block(&BlockPayload::from_local(first.clone()))?;
     let applied_hash = Hash256::from(first.block_hash());
     let utxo_len = utxo.len();
     handles.undo_store = Arc::new(RejectingUndoStore {
@@ -119,7 +120,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
         assert!(Instant::now() < registration_deadline, "waiter must park");
         std::thread::yield_now();
     }
-    let outcome = handles.apply_block(&next, None);
+    let outcome = handles.apply_block(&BlockPayload::from_local(next));
     let pending = answer_rx.recv_timeout(Duration::from_millis(30));
     let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
     stop.store(true, Ordering::Release);
@@ -241,7 +242,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
     let shutdown = handles.shutdown_handle();
 
     let transition = handles.begin_transition()?;
-    let outcome = transition.connect(&child, None);
+    let outcome = transition.connect(&BlockPayload::from_local(child));
 
     assert!(matches!(
         outcome,
@@ -264,9 +265,9 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn 
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
-    handles.apply_block(&genesis, None)?;
+    handles.apply_block(&BlockPayload::from_local(genesis.clone()))?;
     let first = mined_child(genesis.block_hash(), 1)?;
-    handles.apply_block(&first, None)?;
+    handles.apply_block(&BlockPayload::from_local(first.clone()))?;
     let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
     assert!(utxo.get(&first_outpoint).is_some());
 

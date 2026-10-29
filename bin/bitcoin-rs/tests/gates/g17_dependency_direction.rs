@@ -52,6 +52,55 @@ pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
 }
 ";
 
+/// Approved exact-payload edge: `primitives` owns `BlockPayload` on the
+/// workspace `bytes` buffer; chainstate/p2p/node/mining consume it.
+/// The gate pins the approved direction without forbidding the `bytes` edge
+/// and without reintroducing a cycle.
+#[test]
+fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), Box<dyn std::error::Error>>
+{
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest.parent().ok_or("workspace root")?.canonicalize()?;
+    let read_manifest = |relative: &str| {
+        std::fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+    };
+    // Approved producer edge: primitives names the workspace `bytes`
+    // dependency that backs `BlockPayload::from_raw/from_local/from_prefix`.
+    let primitives = read_manifest("crates/primitives/Cargo.toml");
+    assert!(
+        primitives.contains("bytes"),
+        "primitives must own the approved bytes edge for BlockPayload"
+    );
+    let lib = read_manifest("crates/primitives/src/lib.rs");
+    assert!(
+        lib.contains("BlockPayload"),
+        "primitives must re-export the BlockPayload owner type"
+    );
+    // Approved consumer direction: every payload consumer depends on
+    // primitives; primitives never depends back (no cycle reintroduced).
+    for consumer in [
+        "crates/chainstate/Cargo.toml",
+        "crates/p2p/Cargo.toml",
+        "crates/node/Cargo.toml",
+        "crates/mining/Cargo.toml",
+    ] {
+        let text = read_manifest(consumer);
+        assert!(
+            text.contains("bitcoin-rs-primitives"),
+            "{consumer} must consume the primitives BlockPayload owner"
+        );
+    }
+    assert!(
+        !primitives.contains("bitcoin-rs-chainstate")
+            && !primitives.contains("bitcoin-rs-p2p")
+            && !primitives.contains("bitcoin-rs-node")
+            && !primitives.contains("bitcoin-rs-mining"),
+        "primitives must not depend back on its payload consumers"
+    );
+    Ok(())
+}
+
 #[test]
 fn workspace_dependency_direction_is_one_way() {
     let graph = WorkspaceGraph::from_cargo_metadata();

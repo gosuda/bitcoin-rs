@@ -1,10 +1,12 @@
 //! Node configuration DTOs, resolution, and validation.
 
-use crate::options::{ChainstateJournalOverrides, UserConfig};
+use crate::options::{ChainstateJournalOverrides, UserConfig, check_index_bundle_path};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_p2p::PeerNetwork;
+use bitcoin_rs_p2p::endpoint::{ClassifiedEndpoint, classify_endpoint};
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
@@ -55,14 +57,10 @@ impl ScriptIndexMode {
 
     /// Derived-index capabilities this mode and txindex jointly enable.
     ///
-    /// PRE: none.
-    /// POST: one of `NONE`, `TX_LOOKUP`, `SCRIPT_LIVE`, `TX_LOOKUP_SCRIPT_LIVE`,
-    /// `TX_AND_SCRIPTS`. Full always includes `TxLookup` regardless of txindex (Esplora
+    /// Full always includes `TxLookup` regardless of txindex (Esplora
     /// prevout and fee rendering needs exact historical transactions); the
     /// RPC-visible `derived_index_query` gate still requires an explicit
     /// `--txindex`.
-    /// INVARIANT: the match is exhaustive over `(bool, Self)`; an
-    /// unreachable combination is not spellable from `crates/node`.
     #[must_use]
     pub const fn enabled_capabilities(self, txindex: bool) -> IndexCapabilities {
         match (txindex, self) {
@@ -135,6 +133,8 @@ pub struct StorageConfig {
 /// Resolved P2P configuration.
 #[derive(Clone, Debug)]
 pub struct P2pConfig {
+    /// Opt-in Tor and IVNP I2P routing.
+    pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
     /// P2P message-start bytes.
     pub magic: [u8; 4],
     /// P2P listener bind addresses.
@@ -153,15 +153,28 @@ pub struct P2pConfig {
     /// `NODE_P2P_V2` is advertised. On by default, as Core's `-v2transport` is;
     /// off keeps every connection on v1.
     pub v2_transport: bool,
+    /// The opt-in relay capabilities offered to peers. Every switch is off by
+    /// default and peers relay packages or stale tips only after both sides
+    /// negotiate them. BIP332 stale-tip relay is off by default on every
+    /// network; setting it on a test network is the explicit test override.
+    pub relay_offers: bitcoin_rs_p2p::RelayOffers,
 }
 
 /// Resolved RPC configuration.
 #[derive(Clone, Debug)]
 pub struct RpcConfig {
     pub bind: SocketAddr,
+    /// Opt-in separate public REST/Esplora listener.
+    pub public_bind: Option<SocketAddr>,
+    /// Connection budget of the shared or management listener.
+    pub max_connections: usize,
+    /// Independent connection budget of the public listener.
+    pub public_max_connections: usize,
     pub rest: bool,
     /// Optional experimental keyless BIP352 read service, off by default.
     pub silent_payments: bool,
+    /// Optional BIP337 compressed-transaction RPCs, off by default.
+    pub compressed_transactions: bool,
     pub auth: Auth,
 }
 
@@ -172,6 +185,12 @@ pub struct IndexConfig {
     /// Optional basic compact-filter index; disabled by default.
     pub blockfilterindex: bool,
     pub script_index: ScriptIndexMode,
+    /// One-shot startup restore of a portable index bundle from this
+    /// directory. Never set by default; excludes [`Self::bundle_export`].
+    pub bundle_import: Option<PathBuf>,
+    /// One-shot startup export of a portable index bundle into this
+    /// directory. Never set by default; excludes [`Self::bundle_import`].
+    pub bundle_export: Option<PathBuf>,
 }
 
 /// Resolved observability configuration.
@@ -262,21 +281,40 @@ impl NodeConfig {
         let mempool_snapshot_restore_timeout_secs = settings
             .mempool_snapshot_restore_timeout_secs
             .unwrap_or_else(|| std::cmp::max(60, mempool_snapshot_max_bytes / (1024 * 1024)));
+        let data_dir = settings
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".bitcoin-rs"));
         Self {
             network: selection.consensus_network(),
             persist_mempool: settings.persist_mempool.unwrap_or(true),
             mempool_snapshot_max_bytes,
             mempool_snapshot_restore_timeout_secs,
-            data_dir: settings
-                .data_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".bitcoin-rs")),
+            data_dir,
             storage: StorageConfig {
                 backend: settings.storage.backend.unwrap_or(DEFAULT_STORAGE_BACKEND),
                 dbcache_mb: settings.storage.dbcache_mb.unwrap_or(DEFAULT_DBCACHE_MB),
                 prune_target_mb: settings.storage.prune_target_mb.unwrap_or(0),
             },
             p2p: P2pConfig {
+                overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+                    proxy: settings.p2p.proxy,
+                    onion_proxy: settings.p2p.onion_proxy,
+                    onlynet: settings.p2p.onlynet.clone().unwrap_or_default(),
+                    randomize_credentials: settings.p2p.proxy_randomize_credentials.unwrap_or(true),
+                    i2p_sam: settings.p2p.i2p_sam,
+                    i2p_accept: settings.p2p.i2p_accept.unwrap_or(false),
+                    tor_control: settings.p2p.tor_control,
+                    tor_cookie: settings.p2p.tor_cookie.clone(),
+                    identity_dir: PathBuf::from(format!(
+                        "overlay-{:08x}",
+                        u32::from_be_bytes(settings.p2p.magic.unwrap_or(profile.magic))
+                    )),
+                    port: settings
+                        .p2p
+                        .overlay_port
+                        .unwrap_or_else(|| selection.consensus_network().default_p2p_port()),
+                },
                 magic: settings.p2p.magic.unwrap_or(profile.magic),
                 listen: settings.p2p.listen.clone().unwrap_or(profile.listen),
                 dns_seeds_enabled: settings.p2p.dns_seeds.unwrap_or(profile.dns_seeds),
@@ -285,11 +323,23 @@ impl NodeConfig {
                 connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
                 fast_sync: settings.p2p.fast_sync.unwrap_or(false),
                 v2_transport: settings.p2p.v2_transport.unwrap_or(true),
+                relay_offers: bitcoin_rs_p2p::RelayOffers {
+                    package_relay: settings.p2p.package_relay.unwrap_or(false),
+                    stale_tip_relay: settings.p2p.stale_tip_relay.unwrap_or(false),
+                    stale_tip_prefers_blocks: settings
+                        .p2p
+                        .stale_tip_prefers_blocks
+                        .unwrap_or(false),
+                },
             },
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
+                public_bind: settings.rpc.public_bind,
+                max_connections: settings.rpc.max_connections.unwrap_or(128),
+                public_max_connections: settings.rpc.public_max_connections.unwrap_or(128),
                 rest: settings.rpc.rest.unwrap_or(false),
                 silent_payments: settings.rpc.silent_payments.unwrap_or(false),
+                compressed_transactions: settings.rpc.compressed_transactions.unwrap_or(false),
                 auth: rpc_auth(settings),
             },
             indexes: IndexConfig {
@@ -299,6 +349,8 @@ impl NodeConfig {
                     .indexes
                     .script_index
                     .unwrap_or(ScriptIndexMode::Disabled),
+                bundle_import: settings.indexes.bundle_import.clone(),
+                bundle_export: settings.indexes.bundle_export.clone(),
             },
             observability: ObservabilityConfig {
                 log_level: settings
@@ -333,6 +385,10 @@ impl NodeConfig {
     /// This is the fail-early gate for engine selection: an engine this build
     /// cannot execute is rejected here — before the data directory opens,
     /// chainstate exists, or any worker starts.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep resolved cross-field checks in one ordered fail-early gate before startup"
+    )]
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             self.mempool_snapshot_max_bytes >= 1024 * 1024
@@ -367,6 +423,26 @@ impl NodeConfig {
             "non-loopback RPC bind requires explicit credentials (--rpc-password or --rpc-cookie)"
         );
         anyhow::ensure!(
+            self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0,
+            "RPC and public connection limits must be positive"
+        );
+        anyhow::ensure!(
+            self.rpc.public_bind.is_none_or(|address| {
+                let management = self.rpc.bind;
+                // Port zero asks the OS for an unused port. Distinct
+                // concrete IPs may share a port; a same-family wildcard
+                // overlaps every concrete address on that port.
+                // Cross-family dual-stack conflicts remain OS-checked at bind.
+                address.port() == 0
+                    || address.port() != management.port()
+                    || (address.ip() != management.ip()
+                        && (address.is_ipv4() != management.is_ipv4()
+                            || (!address.ip().is_unspecified()
+                                && !management.ip().is_unspecified())))
+            }),
+            "public-bind and rpc-bind must not overlap"
+        );
+        anyhow::ensure!(
             self.storage.backend.is_compiled_in(),
             "unsupported storage backend {}",
             self.storage.backend
@@ -377,21 +453,25 @@ impl NodeConfig {
              support is not compiled in (enable the `kernel` feature)",
             self.validation.engine
         );
-        if self.p2p.magic != self.network.magic() {
-            anyhow::ensure!(
-                self.network == Network::Mainnet,
-                "P2P magic overrides currently require --network mainnet"
-            );
-            anyhow::ensure!(
-                !self.p2p.connect.is_empty(),
-                "P2P magic overrides require at least one --connect peer"
-            );
-            anyhow::ensure!(
-                !self.p2p.dns_seeds_enabled,
-                "P2P magic overrides require --dns-seeds-enabled=false"
-            );
-        }
+        anyhow::ensure!(
+            !self.p2p.relay_offers.stale_tip_prefers_blocks
+                || self.p2p.relay_offers.stale_tip_relay,
+            "--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay"
+        );
+        self.validate_index_bundle()?;
+        self.validate_p2p_network()?;
+        self.p2p.overlay.validate()?;
         bitcoin_rs_rpc::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
+        self.validate_chainstate_journal()?;
+        Ok(())
+    }
+
+    /// Validates chainstate journal retention bounds.
+    ///
+    /// PRE: none; this reads only resolved fields and opens no path.
+    /// POST: journal retention counters are internally consistent and positive
+    /// where rotation depends on them.
+    fn validate_chainstate_journal(&self) -> Result<()> {
         let journal = &self.chainstate_journal;
         anyhow::ensure!(
             journal.blocks > 0,
@@ -417,6 +497,129 @@ impl NodeConfig {
             journal.max_lag_seconds > 0,
             "chainstate_journal.max_lag_seconds must be positive"
         );
+        Ok(())
+    }
+
+    /// Validates P2P network identity and overlay/privacy routing.
+    ///
+    /// Split out of [`NodeConfig::validate`] for the line budget only;
+    /// checks and errors moved verbatim: the overlay transport constraints
+    /// (routes for overlay targets, no local DNS under a privacy route),
+    /// then the magic-override requirements (mainnet, a `--connect` peer,
+    /// DNS seeds off).
+    fn validate_p2p_network(&self) -> Result<()> {
+        self.validate_overlay()?;
+        if self.p2p.magic != self.network.magic() {
+            anyhow::ensure!(
+                self.network == Network::Mainnet,
+                "P2P magic overrides currently require --network mainnet"
+            );
+            anyhow::ensure!(
+                !self.p2p.connect.is_empty(),
+                "P2P magic overrides require at least one --connect peer"
+            );
+            anyhow::ensure!(
+                !self.p2p.dns_seeds_enabled,
+                "P2P magic overrides require --dns-seeds-enabled=false"
+            );
+        }
+        Ok(())
+    }
+
+    /// Validates cross-field overlay transport constraints.
+    ///
+    /// Overlay targets require their routes: an onion target without
+    /// an onion/general proxy, an I2P target without a SAM bridge, or
+    /// an onlynet naming an overlay without its route is refused
+    /// before any worker starts.
+    ///
+    /// A configured privacy route (general/onion proxy or I2P SAM bridge)
+    /// additionally forbids local DNS: DNS seeds resolve through the system
+    /// resolver and ordinary hostname `--connect` peers resolve via
+    /// `resolve()` on the dial path, so both would bypass the overlay.
+    /// They fail fast here instead of leaking or silently downgrading
+    /// privacy; typed IP, Tor, and I2P endpoints stay supported.
+    fn validate_overlay(&self) -> Result<()> {
+        let overlay = &self.p2p.overlay;
+        let onion_route = overlay.onion_proxy.is_some() || overlay.proxy.is_some();
+        let privacy_route = onion_route || overlay.i2p_sam.is_some();
+        anyhow::ensure!(
+            !privacy_route || !self.p2p.dns_seeds_enabled,
+            "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
+        );
+        anyhow::ensure!(
+            !overlay
+                .onlynet
+                .contains(&PeerNetwork::Onion)
+                || onion_route,
+            "--onlynet=onion requires an onion route (--onion-proxy or --proxy)"
+        );
+        anyhow::ensure!(
+            !overlay
+                .onlynet
+                .contains(&PeerNetwork::I2p)
+                || overlay.i2p_sam.is_some(),
+            "--onlynet=i2p requires an I2P SAM bridge (--i2p-sam)"
+        );
+        anyhow::ensure!(
+            !overlay.i2p_accept || overlay.i2p_sam.is_some(),
+            "--i2p-accept requires an I2P SAM bridge (--i2p-sam)"
+        );
+        for target in &self.p2p.connect {
+            match classify_endpoint(target) {
+                ClassifiedEndpoint::InvalidOverlay => {
+                    anyhow::bail!("--connect target `{target}` is an invalid overlay endpoint");
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
+                    ..
+                }) => {
+                    anyhow::ensure!(
+                        onion_route,
+                        "--connect onion target requires an onion route (--onion-proxy or --proxy)"
+                    );
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::I2p { .. }) => {
+                    anyhow::ensure!(
+                        overlay.i2p_sam.is_some(),
+                        "--connect I2P target requires an I2P SAM bridge (--i2p-sam)"
+                    );
+                }
+                ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..)) => {}
+                ClassifiedEndpoint::NonOverlay => {
+                    anyhow::ensure!(
+                        !privacy_route,
+                        "--connect target `{target}` is a hostname that would resolve via local DNS; with a proxy/overlay route configured, use a literal IP or overlay endpoint"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the portable index bundle request.
+    ///
+    /// PRE: none; this reads only resolved fields and opens no path.
+    /// POST: at most one nonempty bundle directory is set, and it is set only
+    /// when the transaction index it moves is enabled.
+    /// INVARIANT: the bundle is an explicit one-shot operator request, so a
+    /// request this node cannot honor fails before any worker starts instead
+    /// of being dropped.
+    fn validate_index_bundle(&self) -> Result<()> {
+        let indexes = &self.indexes;
+        anyhow::ensure!(
+            indexes.bundle_import.is_none() || indexes.bundle_export.is_none(),
+            "--index-bundle-import and --index-bundle-export are mutually exclusive"
+        );
+        for (flag, dir) in [
+            ("--index-bundle-import", &indexes.bundle_import),
+            ("--index-bundle-export", &indexes.bundle_export),
+        ] {
+            let Some(dir) = dir else {
+                continue;
+            };
+            check_index_bundle_path(dir).map_err(|error| anyhow::anyhow!("{flag}: {error}"))?;
+            anyhow::ensure!(indexes.txindex, "{flag} requires --txindex");
+        }
         Ok(())
     }
 }
@@ -743,3 +946,29 @@ impl RuntimeInputs {
 #[cfg(test)]
 #[path = "../tests/unit/config/tests.rs"]
 mod tests;
+
+/// Regression: the shared Bitcoin service port follows the winning network on
+/// every selection, so Tor and I2P can never diverge onto separate ports.
+#[cfg(test)]
+mod shared_service_port_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_service_port_is_the_network_default_p2p_port_on_every_network() {
+        for selection in [
+            NetworkSelection::Mainnet,
+            NetworkSelection::Testnet3,
+            NetworkSelection::Testnet4,
+            NetworkSelection::Signet,
+            NetworkSelection::Regtest,
+            NetworkSelection::Drynet4,
+        ] {
+            let config = NodeConfig::default_for_network(selection.consensus_network());
+            assert_eq!(
+                config.p2p.overlay.port,
+                selection.consensus_network().default_p2p_port(),
+                "shared Bitcoin service port must follow {selection:?}",
+            );
+        }
+    }
+}

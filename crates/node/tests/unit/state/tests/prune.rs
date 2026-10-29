@@ -1,5 +1,7 @@
 use super::*;
 
+use bitcoin_rs_primitives::BlockPayload;
+
 #[test]
 fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -8,11 +10,11 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
     config.p2p.listen.clear();
     config.storage.prune_target_mb = 0;
     let state = NodeState::open(config, None)?;
-    let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
+    let payload = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(payload.block().block_hash().as_bytes());
 
     assert!(state.prune_service().is_none());
-    state.apply_block(&block)?;
+    state.apply_block(&payload)?;
 
     assert_eq!(
         state
@@ -20,7 +22,7 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
             .read()
             .first()
             .map(|record| record.body_size),
-        Some(consensus_bytes(&block).len())
+        Some(payload.bytes().len())
     );
     assert_eq!(
         state
@@ -29,16 +31,19 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
             .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
             .load_block_body(0, hash)?
             .as_deref(),
-        Some(consensus_bytes(&block).as_slice())
+        Some(payload.bytes().as_ref())
     );
     Ok(())
 }
 
 #[test]
 fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
-    let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
-    let serialized = bytes::Bytes::from(consensus_bytes(&block));
+    let local = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
+    let hash = Hash256::from_le_bytes(local.block().block_hash().as_bytes());
+    // The same canonical bytes through the raw-claim constructor: the
+    // preserved path retains exactly what the cooked path encodes.
+    let preserved = BlockPayload::from_raw(local.bytes().clone())
+        .map_err(|error| anyhow::anyhow!("genesis bytes are canonical: {error}"))?;
 
     let dir_a = tempfile::tempdir()?;
     let mut config_a = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -46,7 +51,7 @@ fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
     config_a.p2p.listen.clear();
     config_a.storage.prune_target_mb = 0;
     let state_a = NodeState::open(config_a, None)?;
-    state_a.apply_block(&block)?;
+    state_a.apply_block(&local)?;
 
     let dir_b = tempfile::tempdir()?;
     let mut config_b = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -54,7 +59,7 @@ fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
     config_b.p2p.listen.clear();
     config_b.storage.prune_target_mb = 0;
     let state_b = NodeState::open(config_b, None)?;
-    state_b.chainstate().apply_block(&block, Some(serialized))?;
+    state_b.chainstate().apply_block(&preserved)?;
 
     let body_a = state_a
         .chainstate()

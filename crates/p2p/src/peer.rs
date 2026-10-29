@@ -1,5 +1,6 @@
+use bitcoin_rs_primitives::PeerEndpoint;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -7,7 +8,11 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
+use bitcoin_rs_primitives::Wtxid;
+use hashbrown::HashMap;
 
+use crate::feature::FeatureId;
+use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS};
 use crate::wire::{Message, PeerError};
 
 /// Peer connection state.
@@ -50,6 +55,89 @@ impl WtxidRelayState {
     pub const fn peer_supported(self) -> bool {
         self.peer_advertised
     }
+}
+
+/// BIP331 package-relay negotiation state.
+///
+/// A connection relays packages only for the version bits both sides put in
+/// their `sendpackages`, and only once the handshake completed with
+/// `wtxidrelay` from the peer and `fRelay` set in the peer's `version`
+/// (see [`Peer::package_relay_versions`]). Nothing here is a BIP434 feature:
+/// BIP331 negotiates through its own pre-`verack` message.
+///
+/// Only [`Self::KNOWN`] bits are ever stored, so `versions == 0` and unknown
+/// bits from a peer are ignored by construction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PackageRelayNegotiation {
+    /// Known bits this node is configured to offer; zero offers nothing.
+    offered: u64,
+    /// Known bits this node actually sent in its `sendpackages`; zero until
+    /// the message is written.
+    advertised: u64,
+    /// Known bits of the peer's first `sendpackages`; `None` until one
+    /// arrives.
+    remote: Option<u64>,
+}
+
+impl PackageRelayNegotiation {
+    /// The version bits this node understands.
+    pub(crate) const KNOWN: u64 = PKG_RELAY_PKGTXNS | PKG_RELAY_ANC;
+
+    /// Configure the bits to offer; unknown bits are dropped.
+    pub(crate) const fn offer(&mut self, versions: u64) {
+        self.offered = versions & Self::KNOWN;
+    }
+
+    /// Stop offering package relay on this connection.
+    pub(crate) const fn withdraw_offer(&mut self) {
+        self.offered = 0;
+    }
+
+    /// The bits still to be sent in our one `sendpackages`, or `None` when
+    /// nothing is offered or the message already went out.
+    pub(crate) const fn unsent_offer(&self) -> Option<u64> {
+        if self.offered != 0 && self.advertised == 0 {
+            Some(self.offered)
+        } else {
+            None
+        }
+    }
+
+    /// Record the bits our `sendpackages` carried, after it was written.
+    pub(crate) const fn record_advertised(&mut self, versions: u64) {
+        self.advertised = versions & Self::KNOWN;
+    }
+
+    /// Record the peer's `sendpackages`. The first one wins; later ones
+    /// change nothing.
+    pub(crate) const fn record_remote(&mut self, versions: u64) {
+        if self.remote.is_none() {
+            self.remote = Some(versions & Self::KNOWN);
+        }
+    }
+
+    /// Bits both sides sent, whatever the rest of the handshake did.
+    const fn common(&self) -> u64 {
+        match self.remote {
+            Some(remote) => remote & self.advertised,
+            None => 0,
+        }
+    }
+}
+
+/// The one BIP331 download `dispatch` asks the request owner to start after
+/// an `ancpkginfo`.
+///
+/// `wtxids` is exactly the sequence the `getpkgtxns` must carry: the members of
+/// the announced package the node does not hold, in announced order, at most
+/// `MAX_PACKAGE_COUNT` of them. The consumer sends it unchanged; it is never
+/// recomputed from a decoded body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackageRequest {
+    /// The package's subject: the last wtxid of its `ancpkginfo`.
+    pub(crate) subject: Wtxid,
+    /// The wtxids to request, in order.
+    pub(crate) wtxids: Vec<Wtxid>,
 }
 
 /// BIP152 compact-block protocol version this node speaks and advertises.
@@ -216,6 +304,27 @@ pub struct Peer<S> {
     pub compact_blocks: CompactBlockNegotiation,
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
+    /// BIP434 feature announcements the peer sent between its `version` and
+    /// `verack`, by identifier.
+    ///
+    /// This map is the sole owner of remote feature announcements and only
+    /// the FSM's `receive_feature` inserts into it. It keeps the first valid
+    /// payload of each recognised feature (see
+    /// `FeatureAnnouncement::is_supported`); unknown identifiers and invalid
+    /// payloads are never retained, so its size is bounded by the number of
+    /// recognised features, not by what the peer sends. Readers use
+    /// [`Peer::remote_feature`].
+    pub(crate) remote_features: HashMap<FeatureId, Vec<u8>>,
+    /// BIP331 `sendpackages` negotiation for the peer.
+    pub(crate) package_relay: PackageRelayNegotiation,
+    /// Whether this node announces BIP332 stale-tip relay to the peer, and
+    /// its `prefers_blocks` byte; `None`, the default, announces nothing.
+    pub(crate) stale_tip_offer: Option<bool>,
+    /// The download an `ancpkginfo` asked for, until the session hands it to
+    /// the request owner right after that dispatch ([`Peer::take_package_request`]).
+    /// One slot suffices: the session dispatches one message at a time and
+    /// consumes the slot before reading the next.
+    pub(crate) pending_package_request: Option<PackageRequest>,
     /// One BIP157 request waiting for asynchronous index publication or for
     /// outbound room.
     pub(crate) pending_filter_request: Option<ParkedFilter>,
@@ -269,6 +378,10 @@ impl<S> Peer<S> {
             capabilities: PeerCapabilities::default(),
             compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
+            remote_features: HashMap::new(),
+            package_relay: PackageRelayNegotiation::default(),
+            stale_tip_offer: None,
+            pending_package_request: None,
             pending_filter_request: None,
             deferred_inbound: None,
             pending_getdata: Vec::new(),
@@ -289,6 +402,77 @@ impl<S> Peer<S> {
     /// through this peer fail.
     pub(crate) fn take_send_transport(&mut self) -> Option<crate::transport::SendTransport> {
         self.send.take()
+    }
+
+    /// Offer BIP331 package relay on this connection with `versions`, the
+    /// `PKG_RELAY_*` bits to put in our `sendpackages`.
+    ///
+    /// PRE: called before the handshake sends our `version` reply, on a
+    ///   connection that advertises `fRelay`; a block-relay-only handshake
+    ///   ([`crate::handshake::start`]) withdraws the offer.
+    /// POST: unknown bits are dropped; zero, the default, sends no
+    ///   `sendpackages` and leaves the handshake byte-identical to a node
+    ///   without package relay.
+    pub fn offer_package_relay(&mut self, versions: u64) {
+        self.package_relay.offer(versions);
+    }
+
+    /// Announce BIP332 stale-tip relay to this peer, with `prefers_blocks` as
+    /// the feature's single data byte.
+    ///
+    /// PRE: called before the handshake sends our `version` reply.
+    /// POST: the BIP434 `feature` goes only to a peer at protocol version
+    ///   70017 or above ([`crate::handshake`]); by default nothing is announced.
+    ///   Whether the peer relays stale tips back is what
+    ///   [`Peer::remote_feature`] reports for `b"BIP332"`.
+    pub fn offer_stale_tip_relay(&mut self, prefers_blocks: bool) {
+        self.stale_tip_offer = Some(prefers_blocks);
+    }
+
+    /// The `PKG_RELAY_*` bits this connection relays packages for, or `0`.
+    ///
+    /// POST: nonzero only when the handshake completed, the peer sent
+    ///   `wtxidrelay` before `verack` and `fRelay` in its `version`, and both
+    ///   sides sent `sendpackages` for these bits. Zero and unknown bits never
+    ///   count. A `sendpackages` after `verack` is a protocol violation and
+    ///   changes nothing.
+    /// INVARIANT: this node sends `wtxidrelay` and `verack` in the same
+    ///   `version` reply that carries `sendpackages`, and advertises `fRelay`
+    ///   whenever it offers package relay, so the peer's side is the only
+    ///   one left to check.
+    #[must_use]
+    pub fn package_relay_versions(&self) -> u64 {
+        let Some(remote_version) = self.remote_version.as_ref() else {
+            return 0;
+        };
+        if self.state == PeerState::Ready
+            && self.received_verack
+            && self.wtxid_relay.peer_supported()
+            && remote_version.relay
+        {
+            self.package_relay.common()
+        } else {
+            0
+        }
+    }
+
+    /// Takes the download the last dispatched `ancpkginfo` asked for.
+    ///
+    /// POST: the session calls this once after every successful dispatch and,
+    /// when it returns a request, passes it unchanged to
+    /// `PeerTable::request_package_transactions` for this connection's source.
+    pub(crate) fn take_package_request(&mut self) -> Option<PackageRequest> {
+        self.pending_package_request.take()
+    }
+
+    /// The payload the peer announced for the recognised BIP434 feature `id`,
+    /// or `None` when it announced no valid one before `verack`.
+    ///
+    /// POST: a returned payload already satisfies the feature's own validity
+    /// rules; the first valid announcement wins.
+    #[must_use]
+    pub fn remote_feature(&self, id: &[u8]) -> Option<&[u8]> {
+        self.remote_features.get(id).map(Vec::as_slice)
     }
 
     /// Whether a `getdata` is parked, tail or deferred `notfound`: the
@@ -351,7 +535,7 @@ impl<S: Read> Peer<S> {
 /// DNS resolver injection point for peer discovery.
 pub(crate) trait DnsResolver: Send + Sync {
     /// Resolve a DNS seed name into socket addresses.
-    fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError>;
+    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError>;
 }
 
 /// DNS resolver backed by the operating system resolver.
@@ -369,11 +553,11 @@ impl SystemDnsResolver {
 }
 
 impl DnsResolver for SystemDnsResolver {
-    fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
+    fn resolve(&self, seed: &str) -> Result<Vec<PeerEndpoint>, PeerError> {
         let seed = seed.trim_end_matches('.');
         (seed, self.port)
             .to_socket_addrs()
-            .map(std::iter::Iterator::collect)
+            .map(|addresses| addresses.map(PeerEndpoint::from).collect())
             .map_err(PeerError::Io)
     }
 }
@@ -521,7 +705,7 @@ mod tests {
         assert!(
             resolver
                 .resolve("127.0.0.1.")?
-                .contains(&SocketAddr::from(([127, 0, 0, 1], 8333)))
+                .contains(&PeerEndpoint::from(([127, 0, 0, 1], 8333)))
         );
         Ok(())
     }
@@ -533,7 +717,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
             4,
-            SocketAddr::from(([127, 0, 0, 1], 8333)),
+            crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             crate::peer_info::PeerRole::FullRelay,
             false,
         ));
@@ -563,7 +747,7 @@ mod tests {
         let mut peer = Peer::new(Cursor::new(frame), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
             2,
-            SocketAddr::from(([127, 0, 0, 1], 8333)),
+            crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
         ));
 
         let (message, payload) = peer
@@ -581,7 +765,11 @@ mod tests {
         use std::net::{TcpListener, TcpStream};
         use std::time::{Duration, Instant};
 
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let listener = TcpListener::bind(
+            PeerEndpoint::from(([127, 0, 0, 1], 0))
+                .socket_addr()
+                .unwrap_or_else(|| panic!("expected IP fixture")),
+        )?;
         let mut sender = TcpStream::connect(listener.local_addr()?)?;
         let (receiver, _) = listener.accept()?;
         receiver.set_read_timeout(Some(Duration::from_millis(20)))?;

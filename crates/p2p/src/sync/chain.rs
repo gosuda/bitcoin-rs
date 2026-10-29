@@ -13,10 +13,10 @@ pub use bitcoin_rs_chainstate::WindowApplyDisposition;
 pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_primitives::Block;
+use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
-use bytes::Bytes;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -79,7 +79,7 @@ pub trait SyncChain: Send + Sync {
     }
 
     /// Validates a requested historical body through the chainstate owner.
-    fn connect_historical(&self, _block: &Block, _body: Bytes) -> Result<(), SyncChainError> {
+    fn connect_historical(&self, _payload: &BlockPayload) -> Result<(), SyncChainError> {
         Err("historical validation is not configured".into())
     }
     /// Network the applied chain validates against.
@@ -99,6 +99,11 @@ pub trait SyncChain: Send + Sync {
 
     /// Admits a headers batch (header tip move + assume-valid re-evaluation
     /// happen inside, under the implementation's transition lock).
+    ///
+    /// POST: `HeaderAdmission::Accepted::demoted_tip` is the chain-owned
+    ///   fact, forwarded unchanged: the valid header tip this batch moved onto
+    ///   another branch. It is `None` for a linear advance and when no tip was
+    ///   displaced; the seam never derives or defaults it.
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
     /// Cumulative chain work a peer's header chain must demonstrate before
@@ -127,22 +132,23 @@ pub trait SyncChain: Send + Sync {
     /// (apply-side batch policy).
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
-    /// Commits `blocks` in order as one chain transition. `Ok(n)` = all `n`
-    /// committed and settled.
-    fn commit_window(
-        &self,
-        blocks: &[&Block],
-        bodies: &[Bytes],
-    ) -> Result<usize, WindowCommitError>;
+    /// Commits borrowed `payloads` in order as one chain transition without
+    /// cloning. `Ok(n)` = all `n` committed and settled. Borrowing preserves
+    /// the exact-serialization invariant; no payload bytes are copied.
+    fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError>;
 
     /// Moves the applied chain onto `target`'s branch. `staged_body`
     /// resolves connect-side bodies from bounded staging; `connected_body`
     /// runs once per committed connect so the executor can retire download
     /// accounting.
+    ///
+    /// A failed connect reports the valid header tip its invalidation
+    /// displaced, if any, in `ReorgError::ConnectFailed::demoted_tip`; the
+    /// implementation forwards it unchanged.
     fn switch_to_branch(
         &self,
         target: NodeId,
-        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, Bytes)>,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<BlockPayload>,
         connected_body: &mut dyn FnMut(Hash256),
     ) -> Result<(), ReorgError>;
 }

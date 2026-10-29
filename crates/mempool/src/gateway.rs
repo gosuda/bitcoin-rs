@@ -26,9 +26,9 @@ use bitcoin_rs_consensus::{
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::{is_p2sh, is_witness_program};
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Adapter that lets the consensus verifier look up prevouts from a resolved
 /// `(OutPoint, TxOut)` slice, layered under the mempool by `MempoolUtxoView`.
@@ -202,6 +202,7 @@ pub(crate) enum AdmissionMode {
     SingleSubmit,
     PackageTest,
     PackageSubmit,
+    PackageRpcSubmit(Option<u64>),
 }
 
 #[allow(
@@ -216,6 +217,18 @@ enum ReplacementStage {
 }
 
 impl PreparedAdmission {
+    pub(crate) fn check_package_max_feerate(&mut self, maximum: Option<u64>) {
+        if self.rejection.is_none()
+            && maximum
+                .is_some_and(|max| self.fact.effective_fee_rate.is_some_and(|rate| rate > max))
+        {
+            self.reject(
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MaxFeeExceeded),
+                RejectScope::Transaction,
+            );
+        }
+    }
+
     fn reject(&mut self, error: AdmitError, scope: RejectScope) {
         self.replacement = ReplacementStage::Rejected;
         self.fact.allowed = Some(false);
@@ -359,9 +372,12 @@ impl PreparedAdmission {
         }
         // The caller's cap gates the bump like scripts do — Core applies
         // `client_maxfeerate` in PreChecks, before any trim can touch the
-        // floor. A capped candidate keeps its Full report but earns nothing.
+        // floor. The gate uses the transaction's actual base fee: a policy
+        // discount or surcharge must not change the client fee-limit result.
+        // A capped candidate keeps its Full report but earns nothing.
+        let fee_for_max = self.fact.base_fee.unwrap_or(0);
         if crate::standardness::exceeds_max_feerate(
-            self.fact.base_fee.unwrap_or(0),
+            fee_for_max,
             self.fact.vsize,
             request.max_feerate_sat_per_kvb,
         ) {
@@ -451,9 +467,27 @@ use crate::rbf::{LimitEnforcement, RbfError};
 /// Callbacks run without gateway locks and may re-enter the gateway. Nested
 /// commits enqueue behind the current callback and may return before publication.
 /// Observer panics are contained after the pool mutation has committed.
+///
+/// Whether an observer wants accepted transaction bodies is a
+/// registration-time fact ([`BodyInterest`]), never a callback: `commit`
+/// loads the composite's atomic before taking the pool write lock, so no
+/// observer code ever runs under any gateway lock.
 pub trait MempoolObserver: Send + Sync {
     /// Called once per committed, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
+}
+
+/// Body-retention interest declared when a leg registers.
+///
+/// Bodies are captured under the pool write lock because they must match
+/// the commit, not a later state, and are delivered in the ordered
+/// envelope. Metadata-only legs skip retention.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BodyInterest {
+    /// Retain accepted transaction bodies until ordered publication.
+    Bodies,
+    /// Envelope metadata only; no body retention.
+    Metadata,
 }
 
 /// Fans one committed mutation out to several named observers.
@@ -464,6 +498,12 @@ pub struct CompositeObserver {
     /// before calling any leg, so a leg re-entering the gateway cannot
     /// deadlock against an attach.
     legs: Mutex<Vec<(&'static str, Arc<dyn MempoolObserver>)>>,
+    /// Registration-time OR of every leg's [`BodyInterest`]: true once any
+    /// leg registers [`BodyInterest::Bodies`]. `commit` loads it before
+    /// taking the pool write lock, so interest never executes observer code
+    /// under any gateway lock. Legs are append-only, so the OR only ever
+    /// gains `true` and needs no recomputation.
+    bodies_wanted: AtomicBool,
 }
 
 impl CompositeObserver {
@@ -472,14 +512,34 @@ impl CompositeObserver {
     pub fn new() -> Self {
         Self {
             legs: Mutex::new(alloc::vec::Vec::new()),
+            bodies_wanted: AtomicBool::new(false),
         }
     }
 
     /// Appends a named leg. Names identify the leg in failure logs only; the
     /// operator failure counter is intentionally aggregate. Order is
-    /// publication order.
-    pub fn add_leg(&self, name: &'static str, leg: Arc<dyn MempoolObserver>) {
+    /// publication order. Legs are append-only: once a [`BodyInterest::Bodies`]
+    /// leg registers, body retention stays on.
+    pub fn add_leg(
+        &self,
+        name: &'static str,
+        leg: Arc<dyn MempoolObserver>,
+        interest: BodyInterest,
+    ) {
         self.legs.lock().push((name, leg));
+        if interest == BodyInterest::Bodies {
+            self.bodies_wanted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Whether any registered leg wants accepted transaction bodies.
+    ///
+    /// Loads the registration-time atomic; it calls no observer code and
+    /// holds no gateway lock, so `commit` reads it before taking the pool
+    /// write lock.
+    #[must_use]
+    pub fn wants_bodies(&self) -> bool {
+        self.bodies_wanted.load(Ordering::Acquire)
     }
 }
 
@@ -626,16 +686,17 @@ struct PublishState {
 /// Every mutating method flows through exactly one path, `Self::commit`,
 /// which runs, in this exact order:
 ///
-/// 1. take the pool write lock,
+/// 1. take the commit-ordering lock, then the pool write lock,
 /// 2. mutate and assign per-change mempool sequences,
-/// 3. while still holding the write lock, enqueue the non-empty envelope on
-///    the publish state's FIFO queue and elect a drainer if none exists,
-/// 4. release the write lock and the publish-state lock,
+/// 3. release the write lock, join accepted bodies to the committed changes,
+///    then enqueue the non-empty envelope on the publish state's FIFO queue
+///    and elect a drainer if none exists,
+/// 4. release the ordering lock and the publish-state lock,
 /// 5. the elected drainer pops batches one at a time — releasing the
 ///    publish-state lock before every observer call — and returns the
 ///    publish state to idle only once the queue is empty.
 ///
-/// Commits serialize under the write lock and step 3 enqueues under that
+/// Commits serialize under the ordering lock and step 3 enqueues under that
 /// same ownership, so the queue order is the commit order and the sequence
 /// order: every committed, non-empty batch is published exactly once, in
 /// order, even across nested and concurrent callers. Publication is
@@ -656,6 +717,13 @@ pub struct MempoolGateway {
     /// can attach its own named leg after construction. An absent composite
     /// means nobody is listening and the publish path stays allocation-free.
     observer: Option<Arc<CompositeObserver>>,
+    /// Serializes commit-to-enqueue so the publish queue order is the commit
+    /// order. Taken before the pool write lock and released after the
+    /// publish enqueue; the pool guard itself drops before the body join so
+    /// admission-lock time stays out of the join. Lock order is
+    /// commit-order, pool, publish, and it is never held across an observer
+    /// call.
+    commit_order: Mutex<()>,
     publish: Mutex<PublishState>,
     /// BIP152 reconstruction extras: replaced bodies, peer orphans and peer
     /// policy rejects. A leaf lock: pool guards precede it, and nothing else
@@ -703,19 +771,20 @@ impl MempoolGateway {
     #[must_use]
     pub fn new(
         pool: Arc<RwLock<Mempool>>,
-        observer: Option<Arc<dyn MempoolObserver>>,
+        observer: Option<(Arc<dyn MempoolObserver>, BodyInterest)>,
         engine: ValidationEngine,
         script_cache: Option<Arc<ScriptExecutionCache>>,
     ) -> Self {
-        let composite = observer.map(|observer| {
+        let composite = observer.map(|(observer, interest)| {
             let composite = CompositeObserver::new();
-            composite.add_leg("primary", observer);
+            composite.add_leg("primary", observer, interest);
             Arc::new(composite)
         });
         Self {
             pool,
             lifecycle: Mutex::new(crate::orphan::AdmissionLifecycle::default()),
             observer: composite,
+            commit_order: Mutex::new(()),
             publish: Mutex::new(PublishState {
                 queue: VecDeque::new(),
                 draining: false,
@@ -744,11 +813,12 @@ impl MempoolGateway {
         &self,
         name: &'static str,
         leg: Arc<dyn MempoolObserver>,
+        interest: BodyInterest,
     ) -> Result<(), &'static str> {
         let Some(composite) = self.observer.as_ref() else {
             return Err("gateway has no observer slot to extend");
         };
-        composite.add_leg(name, leg);
+        composite.add_leg(name, leg, interest);
         Ok(())
     }
 
@@ -1128,7 +1198,11 @@ impl MempoolGateway {
             _ => LimitEnforcement::Full,
         };
         let deferred = enforcement == LimitEnforcement::Deferred;
-        let floor = if deferred || mode == AdmissionMode::PackageSubmit {
+        let floor = if deferred
+            || matches!(
+                mode,
+                AdmissionMode::PackageSubmit | AdmissionMode::PackageRpcSubmit(_)
+            ) {
             None
         } else {
             Some(pool.min_fee_sat_per_kvb(bitcoin_rs_primitives::unix_time_secs()))
@@ -1183,7 +1257,9 @@ impl MempoolGateway {
         }
         if matches!(
             mode,
-            AdmissionMode::PackageTest | AdmissionMode::PackageSubmit
+            AdmissionMode::PackageTest
+                | AdmissionMode::PackageSubmit
+                | AdmissionMode::PackageRpcSubmit(_)
         ) {
             // Package previews and native submissions forbid replacement;
             // an already resident tx retains its duplicate result here.
@@ -1480,10 +1556,30 @@ impl MempoolGateway {
         mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
         mutation: impl FnOnce(&T) -> Option<&MutationResult>,
     ) -> Result<T, E> {
+        // Registration-time fact, read before the pool write lock: no
+        // observer code runs here or under the write lock below. Linearizable
+        // capture at this load decides one commit's retention; a leg that
+        // attaches concurrently takes effect on a later commit.
+        let bodies_wanted = self
+            .observer
+            .as_ref()
+            .is_some_and(|observer| observer.wants_bodies());
+        // Linearizable commit-to-enqueue: held from the pool mutation through
+        // the publish enqueue so the queue order is the commit order even
+        // though the join no longer runs under the pool write lock. Dropped
+        // before the drain so observer re-entry never blocks on it.
+        let order = self.commit_order.lock();
         let mut elected = false;
+        // Publication decided under the write lock; the index/body join below
+        // runs after the pool guard drops so large packages do not burn
+        // admission-lock time on a quadratic scan.
+        let mut pending = None;
         let outcome = {
             let mut pool = self.pool.write();
-            let outcome = mutate(&mut pool)?;
+            pool.accepted_capture = bodies_wanted.then(Vec::new);
+            let outcome = mutate(&mut pool);
+            let captured = pool.accepted_capture.take().unwrap_or_default();
+            let outcome = outcome?;
             if let Some(result) = mutation(&outcome) {
                 if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Esplora) {
                     for change in &result.changes {
@@ -1498,21 +1594,69 @@ impl MempoolGateway {
                 }
                 self.update_admission_lifecycle(&pool, result);
                 if !result.changes.is_empty() && self.observer.is_some() {
-                    let mut publish = self.publish.lock();
-                    publish.queue.push_back(MutationEnvelope {
-                        origin,
-                        result: result.clone(),
-                    });
-                    elected = !publish.draining;
-                    publish.draining = true;
+                    pending = Some((result.clone(), captured));
                 }
             }
             outcome
         };
+        if let Some((result, captured)) = pending {
+            let transactions = Self::join_accepted_bodies(&result, captured, bodies_wanted);
+            let mut publish = self.publish.lock();
+            publish.queue.push_back(MutationEnvelope {
+                origin,
+                result,
+                accepted_transactions: transactions,
+            });
+            elected = !publish.draining;
+            publish.draining = true;
+        }
+        drop(order);
         if elected {
             self.drain();
         }
         Ok(outcome)
+    }
+
+    /// Joins committed `Accepted` changes to their captured bodies.
+    ///
+    /// Capture runs under the pool write lock so bodies match the commit; the
+    /// index/body join itself needs no pool state and runs after the guard
+    /// drops. A missing body with capture enabled means an accept path
+    /// bypassed the capture and is logged instead of silently dropped;
+    /// without capture the envelope simply carries no bodies.
+    fn join_accepted_bodies(
+        result: &MutationResult,
+        captured: Vec<(Txid, Arc<Tx>)>,
+        bodies_wanted: bool,
+    ) -> Vec<(usize, Arc<Tx>)> {
+        let mut bodies = HashMap::with_capacity(captured.len());
+        for (txid, body) in captured {
+            bodies.insert(txid, body);
+        }
+        result
+            .changes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, change)| {
+                if !matches!(change.outcome, crate::MutationOutcome::Accepted) {
+                    return None;
+                }
+                let Some(body) = bodies.remove(&Txid(change.txid)) else {
+                    if bodies_wanted {
+                        tracing::warn!(
+                            txid = ?change.txid,
+                            "accepted transaction has no captured body; envelope omits it",
+                        );
+                    }
+                    debug_assert!(
+                        !bodies_wanted,
+                        "capture was enabled but an Accepted change has no body",
+                    );
+                    return None;
+                };
+                Some((index, body))
+            })
+            .collect()
     }
 
     /// Finalizes peer-only holding/rejection while the exact admission state
@@ -1545,6 +1689,26 @@ impl MempoolGateway {
             lifecycle.reject(&request.tx, scope);
             if retains_rejected_body(pool, &request.tx, error) {
                 self.retain_for_reconstruction(&request.tx);
+            }
+        }
+    }
+
+    /// Hands each individually refused member of a refused package, in package
+    /// (dependency) order, to the peer lifecycle exactly as a refused single
+    /// transaction would be. Members with no individual refusal, such as those
+    /// caught only by an aggregate fee, topology or cluster check, are not
+    /// recorded. `requests` and `prepared` are the same-length batch the
+    /// refusal was decided on, and a non-peer origin records nothing. PRE: the
+    /// caller holds the pool write lock with the stamped state revalidated.
+    pub(crate) fn record_peer_package_refusal(
+        &self,
+        pool: &Mempool,
+        requests: &[AdmissionRequest],
+        prepared: &[PreparedAdmission],
+    ) {
+        for (request, job) in requests.iter().zip(prepared) {
+            if let Some((error, scope)) = job.rejection {
+                self.record_peer_failure(pool, request, error, scope);
             }
         }
     }
@@ -1815,8 +1979,8 @@ pub fn reset_admission_park() {
 mod tests {
     use super::{
         AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, BLOCK_RECONSTRUCTION_EXTRA_TXN,
-        ChainChangeError, CompositeObserver, ExtraTxnRing, MempoolGateway, MempoolObserver,
-        ValidationEngine,
+        BodyInterest, ChainChangeError, CompositeObserver, ExtraTxnRing, MempoolGateway,
+        MempoolObserver, ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
@@ -1933,6 +2097,171 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct PayloadObserver(Mutex<Vec<MutationEnvelope>>);
+
+    impl MempoolObserver for PayloadObserver {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            self.0.lock().push(envelope.clone());
+        }
+    }
+
+    #[test]
+    fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PayloadObserver::default());
+        let gateway = gateway_with_bodies(observer.clone());
+        let expired = tx(181);
+        let surviving = tx(182);
+        let expired_entry = entry(&expired);
+        let expired_body = Arc::clone(&expired_entry.tx);
+        let mut surviving_entry = entry(&surviving);
+        surviving_entry.time = crate::policy::MEMPOOL_EXPIRY_SECS + 2;
+        let surviving_body = Arc::clone(&surviving_entry.tx);
+        let plan = gateway
+            .read()
+            .prepare_package(vec![expired_entry, surviving_entry], 1)?;
+        let result = gateway.commit(
+            AdmissionOrigin::Rpc,
+            |pool| pool.commit_package(plan),
+            |result| Some(result),
+        )?;
+        assert_eq!(result.changes.len(), 3);
+        assert_eq!(result.changes[0].outcome, MutationOutcome::Accepted);
+        assert_eq!(result.changes[1].outcome, MutationOutcome::Accepted);
+        assert_eq!(
+            result.changes[2].outcome,
+            MutationOutcome::Removed(RemovalReason::Expiry)
+        );
+        assert_eq!(result.changes[2].txid, hash(&expired.txid()));
+        assert!(gateway.read().entry_by_txid(&expired.txid()).is_none());
+        assert_eq!(gateway.read().len(), 1);
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        let envelopes = observer.0.lock();
+        assert_eq!(envelopes.len(), 1);
+        let envelope = &envelopes[0];
+        assert_eq!(envelope.result, result);
+        assert_eq!(envelope.accepted_transactions.len(), 2);
+        for ((index, body), expected) in envelope
+            .accepted_transactions
+            .iter()
+            .zip([&expired_body, &surviving_body])
+        {
+            assert!(
+                Arc::ptr_eq(body, expected),
+                "retain the admitted allocation"
+            );
+            assert_eq!(hash(&body.txid()), envelope.result.changes[*index].txid);
+            assert_eq!(
+                envelope.result.changes[*index].outcome,
+                MutationOutcome::Accepted
+            );
+        }
+        assert_eq!(envelope.accepted_transactions[0].0, 0);
+        assert_eq!(envelope.accepted_transactions[1].0, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_mutation_clears_capture_scope_before_the_next_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(PayloadObserver::default());
+        let gateway = gateway_with_bodies(observer.clone());
+        let stale = Arc::new(tx(183));
+        // Fault-inject capture without mutating membership: failures must leave
+        // neither a queued envelope nor writer-local capture for the next call.
+        let mut capture_enabled = false;
+        let failure: Result<crate::MutationResult, ()> = gateway.commit(
+            AdmissionOrigin::Rpc,
+            |pool| {
+                let capture = pool.accepted_capture.as_mut().ok_or(())?;
+                capture_enabled = true;
+                capture.push((stale.txid(), Arc::clone(&stale)));
+                Err(())
+            },
+            |result| Some(result),
+        );
+        assert!(capture_enabled);
+        assert!(failure.is_err());
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        assert!(observer.0.lock().is_empty());
+        assert_eq!(gateway.read().len(), 0);
+        let next = tx(184);
+        gateway.insert_entry(AdmissionOrigin::Rpc, entry(&next))?;
+        let envelopes = observer.0.lock();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].accepted_transactions.len(), 1);
+        let (index, body) = &envelopes[0].accepted_transactions[0];
+        assert_eq!(*index, 0);
+        assert_eq!(body.txid(), next.txid());
+        assert!(!Arc::ptr_eq(body, &stale));
+        assert!(gateway.pool.read().accepted_capture.is_none());
+        Ok(())
+    }
+
+    /// Records whether the pool write lock was held during delivery and how
+    /// many bodies each envelope retained.
+    struct LockOrderObserver {
+        pool: Arc<RwLock<Mempool>>,
+        saw_write_locked: std::sync::atomic::AtomicBool,
+        retained: Mutex<Vec<usize>>,
+    }
+
+    impl MempoolObserver for LockOrderObserver {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            if self.pool.is_locked_exclusive() {
+                self.saw_write_locked.store(true, Ordering::SeqCst);
+            }
+            self.retained
+                .lock()
+                .push(envelope.accepted_transactions.len());
+        }
+    }
+
+    #[test]
+    fn commit_runs_no_observer_code_under_the_pool_write_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Interest is a registration-time atomic: answering it runs no
+        // observer code, under any lock or otherwise.
+        let composite = CompositeObserver::new();
+        assert!(!composite.wants_bodies());
+        let metadata = Arc::new(RecordingObserver::default());
+        composite.add_leg("metadata", dyn_observer(&metadata), BodyInterest::Metadata);
+        assert!(!composite.wants_bodies());
+        let bodies = Arc::new(RecordingObserver::default());
+        composite.add_leg("bodies", dyn_observer(&bodies), BodyInterest::Bodies);
+        assert!(composite.wants_bodies());
+
+        // Delivery runs after the pool write guard is released: the elected
+        // drainer calls legs with no gateway lock held, and retention follows
+        // the registered interest.
+        for interest in [BodyInterest::Metadata, BodyInterest::Bodies] {
+            let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+            let probe = Arc::new(LockOrderObserver {
+                pool: Arc::clone(&pool),
+                saw_write_locked: std::sync::atomic::AtomicBool::new(false),
+                retained: Mutex::new(Vec::new()),
+            });
+            let gateway = MempoolGateway::new(
+                pool,
+                Some((dyn_observer(&probe), interest)),
+                ValidationEngine::Native,
+                None,
+            );
+            gateway.insert_entry(AdmissionOrigin::Rpc, entry(&tx(91)))?;
+            assert!(
+                !probe.saw_write_locked.load(Ordering::SeqCst),
+                "no observer code may run under the pool write lock"
+            );
+            assert_eq!(
+                *probe.retained.lock(),
+                vec![usize::from(interest == BodyInterest::Bodies)],
+                "retention follows the registration-time interest"
+            );
+        }
+        Ok(())
+    }
+
     struct PanickingObserver;
 
     impl MempoolObserver for PanickingObserver {
@@ -1941,10 +2270,23 @@ mod tests {
         }
     }
 
+    /// Test gateway whose primary leg registers [`BodyInterest::Metadata`]:
+    /// no body retention. Use [`gateway_with_bodies`] for a body-wanting
+    /// primary.
     fn gateway_with(observer: Option<Arc<dyn MempoolObserver>>) -> Arc<MempoolGateway> {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            observer,
+            observer.map(|observer| (observer, BodyInterest::Metadata)),
+            ValidationEngine::Native,
+            None,
+        ))
+    }
+
+    /// Test gateway whose primary leg registers [`BodyInterest::Bodies`].
+    fn gateway_with_bodies(observer: Arc<dyn MempoolObserver>) -> Arc<MempoolGateway> {
+        Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Some((observer, BodyInterest::Bodies)),
             ValidationEngine::Native,
             None,
         ))
@@ -2267,7 +2609,7 @@ mod tests {
                 max_total_bytes: 150,
                 ..MempoolLimits::default()
             }))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         );
@@ -2508,7 +2850,7 @@ mod tests {
         });
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
@@ -2608,7 +2950,7 @@ mod tests {
         });
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         ));
@@ -2735,7 +3077,7 @@ mod tests {
                 max_total_bytes: 150,
                 ..MempoolLimits::default()
             }))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         );
@@ -2783,7 +3125,7 @@ mod tests {
                 max_total_bytes: 1_000,
                 ..MempoolLimits::default()
             }))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         );
@@ -3324,8 +3666,12 @@ mod tests {
         let recorder = Arc::new(RecordingObserver::default());
         let metric_recorder = CounterKeyRecorder::default();
         let composite = CompositeObserver::new();
-        composite.add_leg("panicker", Arc::new(PanickingObserver));
-        composite.add_leg("recorder", dyn_observer(&recorder));
+        composite.add_leg(
+            "panicker",
+            Arc::new(PanickingObserver),
+            BodyInterest::Metadata,
+        );
+        composite.add_leg("recorder", dyn_observer(&recorder), BodyInterest::Metadata);
         let composite = Arc::new(composite);
         let gateway = gateway_with(Some(dyn_observer(&composite)));
 
@@ -3718,7 +4064,13 @@ mod tests {
         candidate.inputs.push(candidate.inputs[0].clone());
         candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let origin = AdmissionOrigin::Peer(crate::PeerToken {
-            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            )),
+            addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+                [127, 0, 0, 1],
+                8333,
+            ))),
             connection_id: 7,
         });
         let request = admit_request(&gateway, &candidate, origin);
@@ -4165,7 +4517,7 @@ mod tests {
         let observer = Arc::new(RecordingObserver::default());
         let gateway = MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(dyn_observer(&observer)),
+            Some((dyn_observer(&observer), BodyInterest::Metadata)),
             ValidationEngine::Native,
             None,
         );

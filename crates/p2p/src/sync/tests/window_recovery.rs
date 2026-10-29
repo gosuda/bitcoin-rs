@@ -184,16 +184,24 @@ fn same_address_registration_after_window_eviction_keeps_replacement() -> TestRe
     let (old_tx, old_rx) = crate::test_support::message_channel();
     let old = PeerLease::new(old_tx);
     peers.register(addr, old.clone());
-    peers.publish_info(addr, &old, synthetic_peer(addr, 100));
+    peers.publish_info(
+        addr,
+        &old,
+        synthetic_peer(addr, 100),
+    );
     sync.tick();
     let _ = old_rx.try_recv()?;
     let _ = old_rx.try_recv()?;
     let (new_tx, new_rx) = crate::test_support::message_channel();
     let new = PeerLease::new(new_tx);
     peers.register(addr, new.clone());
-    peers.publish_info(addr, &new, synthetic_peer(addr, 100));
+    peers.publish_info(
+        addr,
+        &new,
+        synthetic_peer(addr, 100),
+    );
     sync.tick();
-    assert!(peers.is_current(new.source(addr)));
+    assert!(peers.is_current(new.source(addr.endpoint())));
     assert!(old.is_cancelled());
     assert!(peers.is_connected(addr));
     assert!(new_rx.try_recv().is_ok());
@@ -214,7 +222,11 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> Tes
     let (tx, _rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx);
     peers.register(addr, lease.clone());
-    peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
+    peers.publish_info(
+        addr,
+        &lease,
+        synthetic_peer(addr, 8),
+    );
     sync.tick();
     assert!(sync.scheduler.lock().header_request().is_some());
 
@@ -225,7 +237,11 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> Tes
     let (new_tx, _new_rx) = crate::test_support::message_channel();
     let replacement = PeerLease::new(new_tx);
     peers.register(addr, replacement.clone());
-    peers.publish_info(addr, &replacement, synthetic_peer(addr, 8));
+    peers.publish_info(
+        addr,
+        &replacement,
+        synthetic_peer(addr, 8),
+    );
     sync.reconcile_peer_sessions();
     assert!(sync.scheduler.lock().header_request().is_none());
     assert!(sync.scheduler.lock().headers_sync.is_empty());

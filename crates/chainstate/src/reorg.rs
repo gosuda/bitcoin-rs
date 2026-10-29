@@ -3,8 +3,8 @@
 use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };
-use bitcoin_rs_chain::{NodeId, ReorgPlan, plan_reorg};
-use bitcoin_rs_primitives::{Block, DecodeError, Hash256, deserialize};
+use bitcoin_rs_chain::{InvalidationOutcome, NodeId, ReorgPlan, plan_reorg};
+use bitcoin_rs_primitives::{Block, BlockPayload, DecodeError, Hash256};
 use bitcoin_rs_storage::StorageError;
 
 /// Maximum number of disconnect-side block bodies held in memory at once
@@ -28,12 +28,15 @@ pub trait ReorgObserver {
 
 /// Invalidates `hash` and its descendants, then moves applied chainstate to the
 /// best remaining valid tip.
+///
+/// The outcome names the invalid subtree and any valid tip the invalidation
+/// displaced; it is empty when nothing was invalidated.
 pub fn invalidate_block<O, S>(
     handles: &Chainstate,
     observer: &mut O,
     hash: Hash256,
     mut settle: S,
-) -> core::result::Result<Box<[Hash256]>, ReorgError>
+) -> core::result::Result<InvalidationOutcome, ReorgError>
 where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
@@ -50,7 +53,7 @@ where
     })();
     if let Err(error) = validation {
         return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
-            .map(|()| Box::default());
+            .map(|()| InvalidationOutcome::default());
     }
 
     let transition = match handles.begin_transition() {
@@ -62,10 +65,10 @@ where
                 Err(ReorgError::Unavailable(Box::new(source))),
                 &mut settle,
             )
-            .map(|()| Box::default());
+            .map(|()| InvalidationOutcome::default());
         }
     };
-    let mut invalidated: Box<[Hash256]> = Box::default();
+    let mut invalidated = InvalidationOutcome::default();
     // Keep read-only planning refusals in the same settlement path as the
     // execution outcome; an early `?` must not strand a coherent generation.
     let outcome = (|| {
@@ -147,7 +150,7 @@ impl From<InvalidationError> for ReorgError {
 pub(super) fn invalidate_and_republish(
     handles: &Chainstate,
     hash: Hash256,
-) -> core::result::Result<Box<[Hash256]>, InvalidationError> {
+) -> core::result::Result<InvalidationOutcome, InvalidationError> {
     let mut tree = handles.block_tree.write();
     let root = tree
         .lookup(hash)
@@ -156,9 +159,8 @@ pub(super) fn invalidate_and_republish(
         .invalidate_subtree(root)
         .map_err(InvalidationError::Plan)?;
     let tip = tree.tip().ok_or(InvalidationError::NoValidTip)?;
-    handles.chain_tip.store(Some(tip));
-    handles.reevaluate_assume_valid_with(&tree);
-    Ok(invalidated.into_boxed_slice())
+    handles.publish_chain_tip(Some(tip), &tree);
+    Ok(invalidated)
 }
 
 /// Why a branch switch stopped, and what the chain looks like now.
@@ -294,7 +296,11 @@ pub enum ReorgError {
         /// Hashes of the invalid subtree, in deterministic slab order, when the
         /// failure was allowlisted for permanent invalidation. Empty for
         /// body mutation and operational failures.
-        invalidated: Vec<Hash256>,
+        invalidated: Box<[Hash256]>,
+        /// The header tip that invalidation displaced while it stayed valid.
+        /// `None` when nothing was invalidated and when the displaced tip sat
+        /// inside the invalid subtree: an invalidated tip is not stale.
+        demoted_tip: Option<Hash256>,
     },
     /// Marking a permanently-invalid subtree `Invalid` or republishing the
     /// tip failed after a connect already failed.
@@ -471,7 +477,7 @@ fn prepare_branches<F>(
     staged_body: &mut F,
 ) -> core::result::Result<PreparedBranches, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
 {
     let Some(plan) = plan else {
         return Ok(PreparedBranches {
@@ -517,7 +523,7 @@ pub fn switch_to_branch<F, O, S>(
     mut settle: S,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
@@ -637,8 +643,7 @@ struct LoadedPlanProgress {
 
 struct LoadedBranchBody {
     hash: Hash256,
-    block: Block,
-    serialized: bytes::Bytes,
+    payload: BlockPayload,
     height: u32,
 }
 
@@ -651,7 +656,7 @@ fn load_available_branch_prefix<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchPrefix, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
 {
     let window = &nodes[..nodes.len().min(CONNECT_STREAM_WINDOW)];
     let mut loaded = Vec::with_capacity(window.len());
@@ -687,10 +692,10 @@ fn load_branch_body<F>(
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchBody, ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
 {
-    if let Some((block, serialized)) = staged_body(hash) {
-        return validate_branch_body(hash, height, block, serialized);
+    if let Some(payload) = staged_body(hash) {
+        return validate_branch_body(hash, height, payload);
     }
     if let Some(store) = handles.block_body_store()
         && let Some(body) =
@@ -712,22 +717,20 @@ fn decode_branch_body(
     height: u32,
     serialized: bytes::Bytes,
 ) -> core::result::Result<LoadedBranchBody, ReorgError> {
-    let block =
-        deserialize::<Block>(serialized.as_ref()).map_err(|source| ReorgError::BodyDecode {
-            hash,
-            height,
-            source,
-        })?;
-    validate_branch_body(hash, height, block, serialized)
+    let payload = BlockPayload::from_raw(serialized).map_err(|source| ReorgError::BodyDecode {
+        hash,
+        height,
+        source,
+    })?;
+    validate_branch_body(hash, height, payload)
 }
 
 fn validate_branch_body(
     expected: Hash256,
     height: u32,
-    block: Block,
-    serialized: bytes::Bytes,
+    payload: BlockPayload,
 ) -> core::result::Result<LoadedBranchBody, ReorgError> {
-    let actual = block.block_hash().0;
+    let actual = payload.block().block_hash().0;
     if actual != expected {
         return Err(ReorgError::BodyHashMismatch {
             expected,
@@ -735,7 +738,7 @@ fn validate_branch_body(
             height,
         });
     }
-    if !crate::bytes_are_block(serialized.as_ref(), &block) {
+    if !crate::bytes_are_block(payload.bytes().as_ref(), payload.block()) {
         return Err(ReorgError::BodyBytesMismatch {
             hash: expected,
             height,
@@ -743,8 +746,7 @@ fn validate_branch_body(
     }
     Ok(LoadedBranchBody {
         hash: expected,
-        block,
-        serialized,
+        payload,
         height,
     })
 }
@@ -757,7 +759,7 @@ fn preflight_disconnect_bodies<F>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
 {
     for (hash, height) in nodes {
         load_branch_body(handles, *hash, *height, staged_body)?;
@@ -782,14 +784,14 @@ fn restore_disconnected_branch<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
     for (connected, &(hash, height)) in disconnected.iter().rev().enumerate() {
         let body = load_branch_body(handles, hash, height, staged_body)?;
-        match transition.connect(&body.block, Some(body.serialized)) {
-            Ok(outcome) => observer.connected(&body.block, &outcome),
+        match transition.connect(&body.payload) {
+            Ok(outcome) => observer.connected(body.payload.block(), &outcome),
             Err(source) => {
                 return Err(ReorgError::ConnectFailed {
                     disconnected: disconnected.len(),
@@ -798,7 +800,8 @@ where
                     stopped_at: applied_tip_height(handles),
                     disposition: crate::classify_apply_error(&source),
                     source: Box::new(source),
-                    invalidated: Vec::new(),
+                    invalidated: Box::default(),
+                    demoted_tip: None,
                 });
             }
         }
@@ -815,7 +818,7 @@ fn execute_streamed_plan<F, O>(
     staged_body: &mut F,
 ) -> (LoadedPlanProgress, core::result::Result<(), ReorgError>)
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -846,7 +849,7 @@ where
             }
         }
         for body in bodies {
-            match transition.disconnect(&body.block) {
+            match transition.disconnect(body.payload.block()) {
                 Ok(outcome) => {
                     observer.disconnected(&outcome);
                     progress.disconnected += 1;
@@ -890,7 +893,7 @@ fn execute_connect_stream<F, O>(
     progress: &mut LoadedPlanProgress,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     let handles = transition.chainstate();
@@ -928,9 +931,9 @@ fn connect_loaded_body<O>(
 where
     O: ReorgObserver + ?Sized,
 {
-    match transition.connect(&body.block, Some(body.serialized.clone())) {
+    match transition.connect(&body.payload) {
         Ok(outcome) => {
-            observer.connected(&body.block, &outcome);
+            observer.connected(body.payload.block(), &outcome);
             progress.connected += 1;
             Ok(())
         }
@@ -939,9 +942,12 @@ where
             // A permanently-invalid block must be marked invalid or surfaced:
             // an empty `invalidated` on a failed invalidation would let the
             // next switch retry the same block.
-            let invalidated = if disposition == crate::WindowApplyDisposition::Permanent {
+            let InvalidationOutcome {
+                invalid: invalidated,
+                demoted_tip,
+            } = if disposition == crate::WindowApplyDisposition::Permanent {
                 match invalidate_and_republish(transition.chainstate(), body.hash) {
-                    Ok(invalidated) => invalidated.into_vec(),
+                    Ok(outcome) => outcome,
                     Err(invalidation) => {
                         // The tree may be partially marked; republish
                         // whatever tip it still names so `chain_tip` cannot
@@ -949,8 +955,7 @@ where
                         // surface both failures.
                         let handles = transition.chainstate();
                         let tree = handles.block_tree.read();
-                        handles.chain_tip.store(tree.tip());
-                        handles.reevaluate_assume_valid_with(&tree);
+                        handles.publish_chain_tip(tree.tip(), &tree);
                         drop(tree);
                         return Err(ReorgError::Invalidation {
                             source: Box::new(ReorgError::from(invalidation)),
@@ -961,13 +966,14 @@ where
                                 stopped_at: body.height.saturating_sub(1),
                                 source: Box::new(source),
                                 disposition,
-                                invalidated: Vec::new(),
+                                invalidated: Box::default(),
+                                demoted_tip: None,
                             }),
                         });
                     }
                 }
             } else {
-                Vec::new()
+                InvalidationOutcome::default()
             };
             Err(ReorgError::ConnectFailed {
                 disconnected: progress.disconnected,
@@ -976,7 +982,8 @@ where
                 stopped_at: body.height.saturating_sub(1),
                 source: Box::new(source),
                 disposition,
-                invalidated,
+                invalidated: invalidated.into_boxed_slice(),
+                demoted_tip,
             })
         }
     }
@@ -991,12 +998,12 @@ fn revisit_disconnected_blocks<F, O>(
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
 where
-    F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+    F: FnMut(Hash256) -> Option<bitcoin_rs_primitives::BlockPayload>,
     O: ReorgObserver + ?Sized,
 {
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
         let body = load_branch_body(handles, *hash, *block_height, staged_body)?;
-        observer.reconsider_disconnected(&body.block);
+        observer.reconsider_disconnected(body.payload.block());
     }
     Ok(())
 }

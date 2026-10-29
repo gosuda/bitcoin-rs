@@ -14,8 +14,11 @@ fn connect_on(
 ) -> (PeerLease, crate::test_support::MessageReceiver) {
     let (queue, receiver) = crate::test_support::message_channel();
     let lease = PeerLease::new(queue).with_shared_budget(aggregate);
-    peers.register(info.addr, lease.clone());
-    peers.publish_info(info.addr, &lease, info);
+    let Some(endpoint) = info.endpoint else {
+        panic!("identified peer endpoint");
+    };
+    peers.register(endpoint, lease.clone());
+    peers.publish_info(endpoint, &lease, info);
     (lease, receiver)
 }
 
@@ -30,7 +33,7 @@ fn getheaders_saturated_no_disconnect() -> TestResult {
     let hold = hog(&aggregate, 512);
     let addr = test_addr(9_700, 0)?;
     let (lease, rx) = connect_on(&peers, &aggregate, synthetic_peer(addr, 10));
-    let source = lease.source(addr);
+    let source = lease.source(addr.endpoint());
     let locator = || vec![Hash256::from(genesis.compute_hash())];
 
     assert_eq!(

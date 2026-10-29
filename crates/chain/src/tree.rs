@@ -51,6 +51,28 @@ impl Bip9Cache {
     }
 }
 
+/// Facts of one [`BlockTree::invalidate_subtree`] call.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InvalidationOutcome {
+    /// The complete invalid subtree in deterministic slab order. Callers use
+    /// it to purge bounded body and download state after releasing their
+    /// chain-transition witness.
+    pub invalid: Vec<Hash256>,
+    /// The previous active tip, when invalidation left it valid yet selected a
+    /// different branch. A tip displaced because it sits inside the invalid
+    /// subtree is `Invalid`, never stale, and is not reported here.
+    pub demoted_tip: Option<Hash256>,
+}
+
+/// A header inserted by header admission and the tip it displaced.
+#[derive(Clone, Copy)]
+pub(crate) struct Inserted {
+    pub(crate) id: NodeId,
+    /// The previous active tip when this insertion moved the tip onto another
+    /// branch; see `BlockTree::publish_tip_if_best`.
+    pub(crate) demoted_tip: Option<Hash256>,
+}
+
 /// In-memory block tree keyed by compact slab ids and header hashes.
 pub struct BlockTree {
     nodes: Slab<BlockTreeNode>,
@@ -543,6 +565,7 @@ impl BlockTree {
     ) -> Result<NodeId, ChainError> {
         let hash = Hash256::from(header.compute_hash());
         self.insert_header_with_hash(header, hash, status)
+            .map(|inserted| inserted.id)
     }
 
     pub(crate) fn insert_header_with_hash(
@@ -550,7 +573,7 @@ impl BlockTree {
         header: BlockHeader,
         hash: Hash256,
         status: NodeStatus,
-    ) -> Result<NodeId, ChainError> {
+    ) -> Result<Inserted, ChainError> {
         let parent = if self.nodes.is_empty() {
             None
         } else {
@@ -572,6 +595,7 @@ impl BlockTree {
     ) -> Result<NodeId, ChainError> {
         let hash = Hash256::from(header.compute_hash());
         self.insert_node_with_hash(parent, header, hash, status)
+            .map(|inserted| inserted.id)
     }
 
     fn insert_node_with_hash(
@@ -580,7 +604,7 @@ impl BlockTree {
         header: BlockHeader,
         hash: Hash256,
         status: NodeStatus,
-    ) -> Result<NodeId, ChainError> {
+    ) -> Result<Inserted, ChainError> {
         if self.lookup(hash).is_some() {
             return Err(ChainError::DuplicateHeader { hash });
         }
@@ -631,32 +655,42 @@ impl BlockTree {
             .insert_unique(hash_table_key(hash), node_id, |id| {
                 node_hash_key(nodes, *id)
             });
-        self.publish_tip_if_best(node_id)?;
-        Ok(node_id)
+        let demoted_tip = self.publish_tip_if_best(node_id)?;
+        Ok(Inserted {
+            id: node_id,
+            demoted_tip,
+        })
     }
 
     /// Marks `root` and every descendant invalid, then republishes the best valid tip.
     ///
-    /// The returned hashes are the complete invalid subtree in deterministic slab order;
-    /// callers use them to purge bounded body and download state after releasing their
-    /// chain-transition witness. Equal-work valid tips retain insertion order, matching
-    /// normal tip publication.
-    pub fn invalidate_subtree(&mut self, root: NodeId) -> Result<Vec<Hash256>, ChainError> {
+    /// [`InvalidationOutcome::invalid`] is the complete invalid subtree in deterministic
+    /// slab order; callers use it to purge bounded body and download state after
+    /// releasing their chain-transition witness. Equal-work valid tips retain insertion
+    /// order, matching normal tip publication. [`InvalidationOutcome::demoted_tip`] is
+    /// the previous active tip only when it stays valid and the new best tip is not one of
+    /// its descendants; a tip inside the invalid subtree is `Invalid`, not stale.
+    pub fn invalidate_subtree(&mut self, root: NodeId) -> Result<InvalidationOutcome, ChainError> {
         let (invalid, best) = self.invalidation_plan(root)?;
 
         // Demote the previous active tip to Stale if it is not the new best and is not
-        // about to be marked invalid.
-        if let Some(old_tip) = self.tip_id() {
-            if let Some(best) = best {
-                if best != old_tip {
-                    let old_index = old_tip
-                        .index()
-                        .ok_or(ChainError::UnknownNode { id: old_tip })?;
-                    if !invalid[old_index] {
-                        self.node_mut_without_index_invalidation(old_tip)?.status =
-                            NodeStatus::Stale;
-                    }
+        // about to be marked invalid. The tip store is cleared below, so this is the one
+        // place that sees the displaced tip: report it here, not from publication.
+        let mut demoted_tip = None;
+        if let Some(old_tip) = self.tip()
+            && let Some(best) = best
+            && best != old_tip.tip_id
+        {
+            let old_index = old_tip
+                .tip_id
+                .index()
+                .ok_or(ChainError::UnknownNode { id: old_tip.tip_id })?;
+            if !invalid[old_index] {
+                if self.find_common_ancestor(old_tip.tip_id, best) != Some(old_tip.tip_id) {
+                    demoted_tip = Some(old_tip.hash);
                 }
+                self.node_mut_without_index_invalidation(old_tip.tip_id)?
+                    .status = NodeStatus::Stale;
             }
         }
 
@@ -676,10 +710,14 @@ impl BlockTree {
         self.bip9_cache.invalidate_nodes(&invalid);
 
         if let Some(best) = best {
+            // The tip store was cleared above, so publication displaces nothing.
             self.publish_tip_if_best(best)?;
         }
 
-        Ok(hashes)
+        Ok(InvalidationOutcome {
+            invalid: hashes,
+            demoted_tip,
+        })
     }
 
     /// Returns the tip that would become active after invalidating `root` and
@@ -754,33 +792,97 @@ impl BlockTree {
         Ok(out)
     }
 
+    /// Returns the valid nodes off the ancestry of `tip` that replay after
+    /// that ancestry without displacing `tip` as the best tip.
+    ///
+    /// A node qualifies when it is not `Invalid`, its chainwork does not exceed
+    /// `tip`'s, and its parent is on the ancestry or itself qualifies. Invalid
+    /// subtrees and branches heavier than `tip` are therefore excluded whole.
+    /// Nodes are never removed, so slab order is insertion order: the result
+    /// lists every parent before its children, and replaying the ancestry then
+    /// this list keeps every retained leaf's relative learn order. Equal-work
+    /// nodes replay after `tip` and cannot displace it, because publication
+    /// requires strictly more work.
+    pub fn replayable_side_nodes(&self, tip: NodeId) -> Result<Vec<NodeId>, ChainError> {
+        let tip_work = self.node(tip)?.chainwork;
+        let mut kept = vec![false; self.nodes.capacity()];
+        let mut cursor = Some(tip);
+        while let Some(id) = cursor {
+            let index = id.index().ok_or(ChainError::UnknownNode { id })?;
+            *kept.get_mut(index).ok_or(ChainError::UnknownNode { id })? = true;
+            cursor = self.node(id)?.parent;
+        }
+        let mut side = Vec::new();
+        for (index, node) in &self.nodes {
+            let Some(parent) = node.parent else {
+                continue;
+            };
+            let parent_index = parent
+                .index()
+                .ok_or(ChainError::UnknownNode { id: parent })?;
+            if kept[index]
+                || node.status == NodeStatus::Invalid
+                || node.chainwork > tip_work
+                || !kept.get(parent_index).copied().unwrap_or(false)
+            {
+                continue;
+            }
+            kept[index] = true;
+            side.push(
+                u32::try_from(index)
+                    .map(NodeId::new)
+                    .map_err(|_| ChainError::NodeIdOverflow { index })?,
+            );
+        }
+        Ok(side)
+    }
+
     /// Returns the parent id for a node.
     pub fn parent_id(&self, id: NodeId) -> Result<Option<NodeId>, ChainError> {
         Ok(self.node(id)?.parent)
     }
-    fn publish_tip_if_best(&mut self, node_id: NodeId) -> Result<(), ChainError> {
+
+    /// Publishes `node_id` as the active tip when it carries strictly more work.
+    ///
+    /// Returns the hash of the previous active tip exactly when this moved the tip onto
+    /// another branch. Direct-parent extension returns `None` without any ancestry
+    /// walk. Otherwise the new tip's common ancestor with the old tip decides: the old
+    /// tip only counts as displaced when it is not itself that ancestor, which also
+    /// covers a descendant reached through intermediate nodes that were never published.
+    /// The ancestry query runs before the active-height index moves, so the trusted
+    /// index answers it in fork-depth steps. `NodeStatus::Stale` marking is unchanged:
+    /// every previous tip becomes stale; only the returned fact is gated.
+    fn publish_tip_if_best(&mut self, node_id: NodeId) -> Result<Option<Hash256>, ChainError> {
         let node = self.node(node_id)?;
         if node.status == NodeStatus::Invalid {
-            return Ok(());
+            return Ok(None);
         }
-        let should_publish = self
-            .tip
-            .load_full()
-            .is_none_or(|tip| node.chainwork > tip.chainwork);
-        if !should_publish {
-            return Ok(());
+        let parent = node.parent;
+        let chainwork = node.chainwork;
+        let old_tip = self.tip.load_full();
+        if old_tip
+            .as_ref()
+            .is_some_and(|tip| chainwork <= tip.chainwork)
+        {
+            return Ok(None);
         }
 
-        if let Some(old_tip) = self.tip.load_full()
+        let mut demoted_tip = None;
+        if let Some(old_tip) = old_tip
             && old_tip.tip_id != node_id
         {
+            let extends_old_tip = parent == Some(old_tip.tip_id)
+                || self.find_common_ancestor(old_tip.tip_id, node_id) == Some(old_tip.tip_id);
+            if !extends_old_tip {
+                demoted_tip = Some(old_tip.hash);
+            }
             self.node_mut_without_index_invalidation(old_tip.tip_id)?
                 .status = NodeStatus::Stale;
         }
         self.node_mut_without_index_invalidation(node_id)?.status = NodeStatus::Active;
         self.tip.store(Some(Arc::new(self.tip_snapshot(node_id)?)));
         self.refresh_active_height_index(node_id);
-        Ok(())
+        Ok(demoted_tip)
     }
 
     fn refresh_active_height_index(&mut self, tip_id: NodeId) {
@@ -863,6 +965,38 @@ mod tests {
     fn extend(tree: &mut BlockTree, parent: NodeId, nonce: u32) -> Result<NodeId, ChainError> {
         let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);
         tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)
+    }
+
+    // Inserts like `extend`, also returning the tip that insertion displaced.
+    fn extend_with_fact(
+        tree: &mut BlockTree,
+        parent: NodeId,
+        nonce: u32,
+    ) -> Result<(NodeId, Option<Hash256>), ChainError> {
+        let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);
+        let hash = Hash256::from(header.compute_hash());
+        let inserted =
+            tree.insert_node_with_hash(Some(parent), header, hash, NodeStatus::HeaderValid)?;
+        Ok((inserted.id, inserted.demoted_tip))
+    }
+
+    fn extend_branch_with_facts(
+        tree: &mut BlockTree,
+        parent: NodeId,
+        nonces: impl IntoIterator<Item = u32>,
+    ) -> Result<Vec<(NodeId, Option<Hash256>)>, ChainError> {
+        let mut cursor = parent;
+        let mut steps = Vec::new();
+        for nonce in nonces {
+            let step = extend_with_fact(tree, cursor, nonce)?;
+            cursor = step.0;
+            steps.push(step);
+        }
+        Ok(steps)
+    }
+
+    fn demoted_facts(steps: &[(NodeId, Option<Hash256>)]) -> Vec<Option<Hash256>> {
+        steps.iter().map(|(_, demoted)| *demoted).collect()
     }
 
     fn extend_branch(
@@ -1413,7 +1547,12 @@ mod tests {
         assert_eq!(tree.node(side_ids[0])?.status, NodeStatus::HeaderValid);
 
         // Invalidate the side root (b1). This must mark b1..b3 invalid and reselect a2.
-        let invalid_hashes = tree.invalidate_subtree(side_ids[0])?;
+        let outcome = tree.invalidate_subtree(side_ids[0])?;
+        let invalid_hashes = outcome.invalid;
+        assert_eq!(
+            outcome.demoted_tip, None,
+            "the displaced tip sat in the invalid subtree: invalid, not stale"
+        );
         assert_eq!(invalid_hashes.len(), 3);
         for (id, hash) in side_ids.iter().zip(side_hashes.iter()) {
             assert_eq!(tree.node(*id)?.status, NodeStatus::Invalid);
@@ -1492,6 +1631,142 @@ mod tests {
         let a3_id = tree.insert_node(Some(a1_id), a3, NodeStatus::HeaderValid)?;
         assert_eq!(tree.node(a3_id)?.status, NodeStatus::Invalid);
         assert_eq!(tree.tip_id(), Some(genesis_id));
+        Ok(())
+    }
+
+    #[test]
+    fn linear_extension_reports_no_demotion() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(
+            None,
+            test_header(BlockHash::default(), 0),
+            NodeStatus::HeaderValid,
+        )?;
+        let steps = extend_branch_with_facts(&mut tree, genesis, 1..=4)?;
+
+        assert_eq!(demoted_facts(&steps), vec![None; 4]);
+        assert_eq!(tree.tip_id(), Some(steps[3].0));
+        // Status marking is unchanged: every previous tip is stale, yet none
+        // is a displaced side-branch tip.
+        assert_eq!(tree.node(steps[2].0)?.status, NodeStatus::Stale);
+        assert_eq!(tree.node(genesis)?.status, NodeStatus::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn side_branch_that_is_not_best_reports_no_demotion() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (mut tree, main) = linear_chain(2)?;
+        let side = extend_branch_with_facts(&mut tree, main[0], 101..=102)?;
+
+        // Shorter, then equal work: neither strictly exceeds the active tip.
+        assert_eq!(demoted_facts(&side), vec![None, None]);
+        assert_eq!(tree.tip_id(), Some(main[2]));
+        assert_eq!(tree.node(main[2])?.status, NodeStatus::Active);
+        assert_eq!(tree.node(side[1].0)?.status, NodeStatus::HeaderValid);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_switch_reports_the_displaced_tip() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(2)?;
+        let displaced = tree.node(main[2])?.hash;
+        let side = extend_branch_with_facts(&mut tree, main[0], 101..=103)?;
+
+        assert_eq!(demoted_facts(&side), vec![None, None, Some(displaced)]);
+        assert_eq!(tree.tip_id(), Some(side[2].0));
+        assert_eq!(tree.node(main[2])?.status, NodeStatus::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_reorg_reports_the_tip_active_before_each_switch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(2)?;
+        let first_old = tree.node(main[2])?.hash;
+        let second = extend_branch_with_facts(&mut tree, main[0], 101..=103)?;
+        let second_tip = tree.node(second[2].0)?.hash;
+        // Forks from the middle of the branch that just became active.
+        let third = extend_branch_with_facts(&mut tree, second[1].0, 201..=202)?;
+        let third_tip = tree.node(third[1].0)?.hash;
+        // Forks from the root, so the fork walk runs on the rebuilt index.
+        let fourth = extend_branch_with_facts(&mut tree, main[0], 301..=305)?;
+
+        assert_eq!(demoted_facts(&second), vec![None, None, Some(first_old)]);
+        assert_eq!(demoted_facts(&third), vec![None, Some(second_tip)]);
+        assert_eq!(
+            demoted_facts(&fourth),
+            vec![None, None, None, None, Some(third_tip)],
+            "each switch reports the tip active just before it, never an earlier one"
+        );
+        assert_eq!(tree.tip_id(), Some(fourth[4].0));
+        Ok(())
+    }
+
+    #[test]
+    fn descendant_reached_through_a_zero_work_node_is_not_a_displacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(2)?;
+        let tip_hash = tree.node(main[2])?.hash;
+        let zero_work = BlockHeader {
+            bits: CompactTarget::from_consensus(0),
+            ..test_header(BlockHash(tip_hash), 50)
+        };
+        let zero_id = tree.insert_node(Some(main[2]), zero_work, NodeStatus::HeaderValid)?;
+        // Equal chainwork does not publish, so the next insert is not a direct child.
+        assert_eq!(tree.tip_id(), Some(main[2]));
+
+        let (descendant, demoted) = extend_with_fact(&mut tree, zero_id, 51)?;
+
+        assert_eq!(demoted, None, "the old tip is the common ancestor");
+        assert_eq!(tree.tip_id(), Some(descendant));
+        assert_eq!(tree.node(main[2])?.status, NodeStatus::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn invalidation_reports_a_valid_tip_it_displaces_onto_another_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(2)?;
+        let displaced = tree.node(main[2])?.hash;
+        // A heavier branch held invalid, then reconsidered without republication.
+        let mut heavy = Vec::new();
+        let mut parent = main[0];
+        for nonce in 101..=103 {
+            let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);
+            parent = tree.insert_node(Some(parent), header, NodeStatus::Invalid)?;
+            heavy.push(parent);
+        }
+        for &id in &heavy {
+            tree.node_mut(id)?.status = NodeStatus::HeaderValid;
+        }
+        assert_eq!(tree.tip_id(), Some(main[2]));
+        let doomed = extend(&mut tree, main[0], 201)?;
+        let doomed_hash = tree.node(doomed)?.hash;
+
+        let outcome = tree.invalidate_subtree(doomed)?;
+
+        assert_eq!(outcome.invalid, vec![doomed_hash]);
+        assert_eq!(outcome.demoted_tip, Some(displaced));
+        assert_eq!(tree.tip_id(), Some(heavy[2]));
+        assert_eq!(tree.node(main[2])?.status, NodeStatus::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn invalidation_selecting_a_descendant_of_the_old_tip_reports_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, main) = linear_chain(2)?;
+        let held = test_header(BlockHash(tree.node(main[2])?.hash), 101);
+        let descendant = tree.insert_node(Some(main[2]), held, NodeStatus::Invalid)?;
+        tree.node_mut(descendant)?.status = NodeStatus::HeaderValid;
+        let doomed = extend(&mut tree, main[0], 201)?;
+
+        let outcome = tree.invalidate_subtree(doomed)?;
+
+        assert_eq!(outcome.demoted_tip, None, "the old tip is an ancestor");
+        assert_eq!(tree.tip_id(), Some(descendant));
+        assert_eq!(tree.node(main[2])?.status, NodeStatus::Stale);
         Ok(())
     }
 

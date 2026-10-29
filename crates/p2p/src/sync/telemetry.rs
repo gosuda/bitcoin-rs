@@ -64,6 +64,20 @@ impl BlockSync {
         )
     }
 
+    /// Publishes the staged-body, pending-window, and inbound-queue gauges
+    /// from one scheduler-lock hold.
+    ///
+    /// `staged_decoded_bytes` and `staged_retained_bytes` attribute staged
+    /// decoded-heap capacity and preserved serialized buffers; they exclude
+    /// allocator rounding, are not a process-RSS measure, and never feed an
+    /// admission decision. `received_bytes` and `staged_bytes_high_water`
+    /// remain the serialized fact the byte budget reads.
+    /// `inbound_block_queue_depth` is the bounded inbound channel's length at
+    /// emission. The only caller runs after the drain pass has emptied the
+    /// receiver, so it reports the residual queue that arrived during or
+    /// after the pass; bodies the pass already pulled are in the staged
+    /// gauges, or in the apply batch the stager no longer owns, and are not
+    /// attributed in bytes.
     pub(super) fn record_sync_metrics(&self) {
         let scheduler = self.scheduler.lock();
         let window = &scheduler.window;
@@ -81,6 +95,13 @@ impl BlockSync {
             .set(metric_count(stager.received_high_water()));
         metrics::gauge!("node.sync.staged_bytes_high_water")
             .set(metric_count(stager.received_bytes_high_water()));
+        metrics::gauge!("node.sync.staged_decoded_bytes").set(metric_bytes(stager.decoded_bytes()));
+        metrics::gauge!("node.sync.staged_retained_bytes")
+            .set(metric_bytes(stager.retained_attributed_bytes()));
+        metrics::gauge!("node.sync.staged_retained_bytes_high_water")
+            .set(metric_bytes(stager.retained_attributed_bytes_high_water()));
+        metrics::gauge!("node.sync.inbound_block_queue_depth")
+            .set(metric_count(self.inbound_blocks_rx.len()));
     }
 
     pub(super) fn record_pending_sync_metrics(&self) {
@@ -93,4 +114,32 @@ impl BlockSync {
 
 pub(super) fn metric_count(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+/// A byte attribution as a gauge value without the `u32` clamp of
+/// [`metric_count`]: the retained gauges exist to show residency growing past
+/// the serialized budget, so a total above 4 GiB must not saturate. The high
+/// and low 32-bit halves each convert to `f64` exactly.
+fn metric_bytes(value: usize) -> f64 {
+    let value = u64::try_from(value).unwrap_or(u64::MAX);
+    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metric_bytes;
+
+    #[test]
+    fn metric_bytes_is_exact_across_the_u32_boundary() {
+        assert_eq!(metric_bytes(0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(metric_bytes(4_096).to_bits(), 4_096.0_f64.to_bits());
+        if let Ok(above_u32) = usize::try_from(5_000_000_000_u64) {
+            assert_eq!(
+                metric_bytes(above_u32).to_bits(),
+                5_000_000_000.0_f64.to_bits()
+            );
+        }
+    }
 }

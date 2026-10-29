@@ -175,6 +175,8 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+    /// Commit-local observer capture, enabled only by the gateway's writer.
+    pub(crate) accepted_capture: Option<Vec<(Txid, Arc<Tx>)>>,
     /// Core rolling minimum fee (`GetMinFee`/`trackPackageRemoved`/
     /// `removeForBlock` state). Locked after the pool lock and never held
     /// across another call: a capacity eviction or replacement trim raises
@@ -500,14 +502,15 @@ impl VisitMarks for HashSet<EntryId> {
     }
 }
 
-/// Membership for walks confined to one connected component. A component
-/// holds at most the cluster-entry limit, so a small inline list does the
-/// work in time and space bounded by the cluster, where [`VisitSet`]'s bitset
-/// grows to the highest arena slot and zero-fills arena-scale words on every
-/// call.
+/// Membership for walks confined to one connected component or one package.
+/// A component holds at most the cluster-entry limit and a package at most
+/// [`crate::standardness::MAX_PACKAGE_COUNT`], so a small inline list does
+/// the work in time and space bounded by the visited entries, where
+/// [`VisitSet`]'s bitset grows to the highest arena slot and zero-fills
+/// arena-scale words on every call.
 #[derive(Debug, Default)]
 struct WalkSet {
-    seen: SmallVec<[EntryId; 16]>,
+    seen: SmallVec<[EntryId; 25]>,
 }
 
 impl WalkSet {
@@ -517,6 +520,10 @@ impl WalkSet {
 
     fn test(&self, id: EntryId) -> bool {
         self.seen.contains(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.seen.len()
     }
 }
 
@@ -623,6 +630,7 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            accepted_capture: None,
             rolling_min_fee: parking_lot::Mutex::new(
                 crate::rolling_min_fee::RollingMinFee::default(),
             ),
@@ -902,6 +910,9 @@ impl Mempool {
     pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) -> MutationResult {
         let entry = prepared.entry;
         let txid = entry.txid;
+        if let Some(capture) = &mut self.accepted_capture {
+            capture.push((txid, Arc::clone(&entry.tx)));
+        }
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
         let parents = self.in_pool_parents(&entry.tx);
@@ -2142,6 +2153,45 @@ impl Mempool {
         )
     }
 
+    /// The resident BIP331 ancestor package of `tip`: its unconfirmed
+    /// ancestors then `tip`, parents before children. `None` when `tip` is not
+    /// resident or the package would exceed [`MAX_PACKAGE_COUNT`](crate::standardness::MAX_PACKAGE_COUNT)
+    /// transactions. The walk stops at the first excess member, so its work is
+    /// bounded by the package limit and not by the cluster size.
+    #[must_use]
+    pub(crate) fn ancestor_package_wtxids(&self, tip: &Wtxid) -> Option<Vec<Wtxid>> {
+        let tip_id = *self.derived.by_wtxid.get(tip)?;
+        // Bounded by the package limit (at most 25 visited entries), not by
+        // the arena: `VisitSet` would grow its bitset to the highest slot and
+        // zero-fill arena-scale words for a walk that stops at 26 members.
+        let mut seen = WalkSet::new();
+        seen.insert(tip_id);
+        let mut order = Vec::new();
+        // Iterative post-order over the cached parent links: a node is emitted
+        // after every parent, so the result is topological and ends at `tip`.
+        let mut stack = vec![(tip_id, 0_usize)];
+        while let Some(&(id, next)) = stack.last() {
+            if let Some(&parent) = self.parents_of(id).get(next) {
+                if let Some(frame) = stack.last_mut() {
+                    frame.1 += 1;
+                }
+                if seen.insert(parent) {
+                    if seen.len() > crate::standardness::MAX_PACKAGE_COUNT {
+                        return None;
+                    }
+                    stack.push((parent, 0));
+                }
+            } else {
+                order.push(id);
+                stack.pop();
+            }
+        }
+        order
+            .into_iter()
+            .map(|id| self.entry(id).map(|entry| entry.wtxid))
+            .collect()
+    }
+
     /// Returns all descendant entry ids for `id`, EXCLUDING `id` itself.
     #[must_use]
     pub fn descendant_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
@@ -2763,6 +2813,21 @@ pub(crate) fn transaction_heap_usage(tx: &Tx) -> u64 {
     total
 }
 
+/// Heap a decoded package owns.
+///
+/// Every member's `transaction_heap_usage` (which already charges the
+/// member's own outer slot) plus the spare outer slots,
+/// `txs.capacity() - txs.len()`, of the vector holding them. Wire-frame bytes
+/// are never counted here.
+#[must_use]
+pub fn package_heap_usage(txs: &[Tx], spare_slots: usize) -> u64 {
+    let spare =
+        u64::try_from(spare_slots.saturating_mul(core::mem::size_of::<Tx>())).unwrap_or(u64::MAX);
+    txs.iter().fold(spare, |total, tx| {
+        total.saturating_add(transaction_heap_usage(tx))
+    })
+}
+
 fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(SpendingKey, EntryId)> {
     let key = SpendingKey::from(outpoint);
     (key, EntryId::MIN)..=(key, EntryId::MAX)
@@ -2771,6 +2836,148 @@ fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(SpendingKey, EntryId)> 
 #[cfg(test)]
 fn txid_of(bytes: [u8; 32]) -> Txid {
     Txid::from(bitcoin_rs_primitives::Hash256::from_le_bytes(&bytes))
+}
+#[cfg(test)]
+mod package_tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn linked(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: (0..outputs)
+                .map(|vout| TxOut {
+                    value: Amount::from_sat(10_000 + u64::from(vout) + tag * 1_000),
+                    script_pubkey: vec![0x51].into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn resident(pool: &mut Mempool, tx: &Tx) -> Result<(), MempoolError> {
+        let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 7, 0);
+        pool.insert_entry(entry).map(|_id| ())
+    }
+
+    #[test]
+    fn ancestor_package_is_topological_ends_at_the_tip_and_holds_only_residents() -> TestResult {
+        let confirmed = OutPoint::new(txid_of([3; 32]), 0);
+        let root = linked(&[confirmed], 2, 1);
+        let left = linked(&[OutPoint::new(root.txid(), 0)], 1, 2);
+        let right = linked(&[OutPoint::new(root.txid(), 1)], 1, 3);
+        let tip = linked(
+            &[
+                OutPoint::new(left.txid(), 0),
+                OutPoint::new(right.txid(), 0),
+            ],
+            1,
+            4,
+        );
+        let unrelated = linked(&[OutPoint::new(txid_of([4; 32]), 0)], 1, 5);
+        let mut pool = Mempool::new(MempoolLimits::default());
+        for tx in [&root, &left, &right, &tip, &unrelated] {
+            resident(&mut pool, tx)?;
+        }
+
+        let package = pool
+            .ancestor_package_wtxids(&tip.wtxid())
+            .ok_or("the tip is resident")?;
+        assert_eq!(package.len(), 4);
+        assert_eq!(package.first(), Some(&root.wtxid()));
+        assert_eq!(package.last(), Some(&tip.wtxid()));
+        assert!(package.contains(&left.wtxid()) && package.contains(&right.wtxid()));
+        assert_eq!(
+            pool.ancestor_package_wtxids(&left.wtxid()),
+            Some(vec![root.wtxid(), left.wtxid()])
+        );
+        assert_eq!(
+            pool.ancestor_package_wtxids(&root.wtxid()),
+            Some(vec![root.wtxid()])
+        );
+        assert_eq!(
+            pool.ancestor_package_wtxids(&unrelated.wtxid()),
+            Some(vec![unrelated.wtxid()])
+        );
+        let absent = linked(&[confirmed], 1, 9);
+        assert_eq!(pool.ancestor_package_wtxids(&absent.wtxid()), None);
+        Ok(())
+    }
+
+    #[test]
+    fn ancestor_package_stops_at_the_package_count_bound() -> TestResult {
+        let count = crate::standardness::MAX_PACKAGE_COUNT;
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let mut chain: Vec<Tx> = Vec::new();
+        for tag in 0..=count {
+            let input = chain.last().map_or_else(
+                || OutPoint::new(txid_of([5; 32]), 0),
+                |previous| OutPoint::new(previous.txid(), 0),
+            );
+            let tx = linked(&[input], 1, u64::try_from(tag)?);
+            resident(&mut pool, &tx)?;
+            chain.push(tx);
+        }
+        assert_eq!(chain.len(), count + 1);
+        let at_bound = chain.get(count - 1).ok_or("chain reaches the bound")?;
+        let past_bound = chain.get(count).ok_or("chain exceeds the bound")?;
+        assert_eq!(
+            pool.ancestor_package_wtxids(&at_bound.wtxid())
+                .map(|served| served.len()),
+            Some(count)
+        );
+        assert_eq!(pool.ancestor_package_wtxids(&past_bound.wtxid()), None);
+        Ok(())
+    }
+
+    #[test]
+    fn package_walk_stays_bounded_by_visited_entries() -> TestResult {
+        // The ancestor-package walk stops at the package bound, so its visited
+        // set must hold at most `MAX_PACKAGE_COUNT` entries inline rather than
+        // a bitset sized to the highest arena slot.
+        let mut seen = WalkSet::new();
+        for tag in 0..crate::standardness::MAX_PACKAGE_COUNT {
+            let id = EntryId::try_from(u32::try_from(tag)?)?;
+            assert!(seen.insert(id), "distinct ids insert once");
+            assert!(!seen.insert(id), "reinserting is a no-op");
+        }
+        assert_eq!(seen.len(), crate::standardness::MAX_PACKAGE_COUNT);
+        Ok(())
+    }
+
+    #[test]
+    fn package_heap_usage_is_member_usage_plus_spare_outer_slots() -> TestResult {
+        let first = linked(&[OutPoint::new(txid_of([6; 32]), 0)], 1, 1);
+        let second = linked(&[OutPoint::new(txid_of([7; 32]), 0)], 3, 2);
+        let mut txs: Vec<Tx> = Vec::with_capacity(5);
+        txs.push(first);
+        txs.push(second);
+        let members = transaction_heap_usage(&txs[0]) + transaction_heap_usage(&txs[1]);
+        let slot = u64::try_from(core::mem::size_of::<Tx>())?;
+        let spare = txs.capacity() - txs.len();
+
+        assert_eq!(package_heap_usage(&txs, 0), members);
+        assert_eq!(
+            package_heap_usage(&txs, spare),
+            members + slot * u64::try_from(spare)?
+        );
+        assert_eq!(package_heap_usage(&[], 0), 0);
+        assert_eq!(
+            package_heap_usage(&[], usize::MAX),
+            u64::try_from(usize::MAX)?
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

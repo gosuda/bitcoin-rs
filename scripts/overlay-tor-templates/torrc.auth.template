@@ -1,0 +1,9 @@
+SocksPort 0
+ORPort 127.0.0.1:__ORPORT__ IPv4Only
+DirPort 127.0.0.1:__DIRPORT__ IPv4Only
+AuthoritativeDirectory 1
+V3AuthoritativeDirectory 1
+ContactInfo auth@test.test
+ExitRelay 0
+ExitPolicy reject *:*
+IPv6Exit 0

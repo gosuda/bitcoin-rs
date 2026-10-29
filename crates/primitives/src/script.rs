@@ -24,6 +24,16 @@ impl Script {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// Returns the heap bytes allocated for this script's byte buffer,
+    /// including spare capacity.
+    ///
+    /// Excludes inline `Script` struct overhead (which is counted in the enclosing
+    /// vector capacity or on the stack) and allocator metadata/rounding.
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl Deref for Script {
@@ -80,6 +90,23 @@ impl Witness {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Returns the heap bytes allocated for this witness stack, including
+    /// the outer stack allocation and all out-of-line item buffers with spare capacity.
+    ///
+    /// Excludes inline `Witness` struct overhead (counted in `inputs.capacity() * size_of::<TxIn>()`
+    /// or on the stack) and allocator metadata/rounding.
+    #[must_use]
+    pub fn retained_heap_bytes(&self) -> usize {
+        let mut total = self
+            .0
+            .capacity()
+            .saturating_mul(core::mem::size_of::<Vec<u8>>());
+        for item in &self.0 {
+            total = total.saturating_add(item.capacity());
+        }
+        total
+    }
 }
 
 impl Deref for Witness {
@@ -114,5 +141,44 @@ impl<'a> IntoIterator for &'a Witness {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Script, Witness};
+
+    #[test]
+    fn script_retained_heap_bytes_tracks_capacity() {
+        assert_eq!(Script::new().retained_heap_bytes(), 0);
+
+        let mut raw = Vec::with_capacity(128);
+        raw.extend_from_slice(&[0x51, 0x87]);
+        let script = Script::from_bytes(raw);
+        assert_eq!(script.retained_heap_bytes(), 128);
+    }
+
+    #[test]
+    fn witness_retained_heap_bytes_tracks_outer_and_item_capacities() {
+        assert_eq!(Witness::new().retained_heap_bytes(), 0);
+
+        let empty_with_capacity = Witness::from_stack(Vec::with_capacity(7));
+        assert_eq!(
+            empty_with_capacity.retained_heap_bytes(),
+            7 * core::mem::size_of::<Vec<u8>>()
+        );
+
+        let mut item1 = Vec::with_capacity(64);
+        item1.extend_from_slice(&[0x01; 32]);
+        let mut item2 = Vec::with_capacity(120);
+        item2.extend_from_slice(&[0x02; 64]);
+
+        let mut stack = Vec::with_capacity(4);
+        stack.push(item1);
+        stack.push(item2);
+        let witness = Witness::from_stack(stack);
+
+        let expected = 4 * core::mem::size_of::<Vec<u8>>() + 64 + 120;
+        assert_eq!(witness.retained_heap_bytes(), expected);
     }
 }

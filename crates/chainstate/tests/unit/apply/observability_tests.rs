@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use bitcoin_rs_primitives::{Network, consensus_bytes};
+use bitcoin_rs_primitives::{BlockPayload, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::HashSet;
 use metrics::{
@@ -139,7 +139,7 @@ fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&handles)?;
         let first = mined_child(genesis.block_hash(), 1)?;
-        handles.apply_block(&first, None)?;
+        handles.apply_block(&BlockPayload::from_local(first))?;
         Ok(())
     })?;
     assert_names_absent(&recorder, RETIRED_APPLY_METRICS);
@@ -175,13 +175,11 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
                 bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
             )?;
         }
-        let blocks = [&first, &second];
-        let serialized: Vec<bytes::Bytes> = blocks
-            .iter()
-            .map(|block| bytes::Bytes::from(consensus_bytes(*block)))
-            .collect();
+        let first_payload = BlockPayload::from_local(first);
+        let second_payload = BlockPayload::from_local(second);
+        let payloads = [&first_payload, &second_payload];
         let transition = handles.begin_transition()?;
-        transition.connect_window(&blocks, &serialized)?;
+        transition.connect_window(&payloads)?;
         Ok(())
     })?;
     assert_names_absent(&recorder, RETIRED_WINDOW_METRICS);
@@ -189,6 +187,52 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
         recorder.saw("node.window.verify_seconds"),
         "the apply.prove_window hot-path hook is a kept signal (OBS-04)"
     );
+    Ok(())
+}
+
+/// Step-24 execution smoke: a real window commit emits the transition-hold
+/// and group-flush diagnostics on the caller thread.
+///
+/// Drives the production `begin_transition` + `connect_window` path on real
+/// regtest fixtures under the `ProfileFields` dispatch and asserts both
+/// `transition_held_us` and `flush_wait_us` arrive. The transition guard is
+/// dropped inside the capture closure so its `Drop` event reaches the same
+/// dispatch. This measures nothing, writes no ledger, and never touches
+/// `/proc/self/clear_refs`: the `VmHWM` performance gate is neither used nor
+/// bypassed, and no timing ratio or promotion is claimed.
+#[test]
+fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn std::error::Error>>
+{
+    let genesis = Network::Regtest.genesis_block();
+    let fields = ProfileFields::default();
+    capture_profile(&fields, || -> Result<(), Box<dyn std::error::Error>> {
+        let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let first = mined_child(genesis.block_hash(), 1)?;
+        let second = mined_child(first.block_hash(), 2)?;
+        seed_genesis(&handles)?;
+        {
+            let mut tree = handles.block_tree.write();
+            bitcoin_rs_chain::accept_headers(
+                &mut tree,
+                &[first.header, second.header],
+                Network::Regtest,
+                bitcoin_rs_chain::current_unix_seconds(),
+                bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            )?;
+        }
+        let first_payload = BlockPayload::from_local(first);
+        let second_payload = BlockPayload::from_local(second);
+        let payloads = [&first_payload, &second_payload];
+        let transition = handles.begin_transition()?;
+        transition.connect_window(&payloads)?;
+        Ok(())
+    })?;
+    for field in ["transition_held_us", "flush_wait_us"] {
+        assert!(
+            fields.0.lock().contains(field),
+            "missing window diagnostic: {field}"
+        );
+    }
     Ok(())
 }
 
@@ -242,7 +286,8 @@ fn proposal_emits_completed_validation_timings() -> Result<(), Box<dyn std::erro
     seed_genesis(&handles)?;
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
     let fields = ProfileFields::default();
-    capture_profile(&fields, || handles.validate_block(&block))?;
+    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    capture_profile(&fields, || handles.validate_block(&payload))?;
     for field in [
         "contextual_header_us",
         "pow_self_us",
@@ -269,7 +314,8 @@ fn rejected_header_emits_only_completed_validation_timings()
     let mut block = mined_child(genesis.block_hash(), 1)?;
     block.header.time = genesis.header.time;
     let fields = ProfileFields::default();
-    let result = capture_profile(&fields, || handles.validate_block(&block));
+    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,
         Err(super::ApplyError::Chain(
@@ -298,7 +344,8 @@ fn rejected_spend_keeps_resolution_and_dispatch_timings() -> Result<(), Box<dyn 
         .ok_or("test merkle root missing")?;
     block.header.merkle_root = bitcoin_rs_primitives::Hash256::from_le_bytes(&root);
     let fields = ProfileFields::default();
-    let result = capture_profile(&fields, || handles.validate_block(&block));
+    let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);
+    let result = capture_profile(&fields, || handles.validate_block(&payload));
     assert!(matches!(
         result,
         Err(super::ApplyError::Consensus(

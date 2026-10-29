@@ -82,6 +82,8 @@ secp256k1 = { version = ">=0.29.1, <0.30", default-features = false, features = 
 ] }
 
 # sha2 0.11: default features are alloc+oid; no std/asm feature is exposed.
+base64 = "=0.22.1"
+sha3 = { version = ">=0.11, <0.12", default-features = false }
 sha2 = { version = ">=0.11, <0.12", default-features = false }
 bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
     "alloc", "std",
@@ -108,11 +110,6 @@ miniscript = { version = ">=13, <14", default-features = false, features = ["std
 corepc-types = { version = "0.16.0", default-features = false, features = [
     "std", "serde-deny-unknown-fields",
 ] }
-
-# Note: `payjoin` is intentionally NOT declared at the workspace level. Task 14
-# adds it with feature names verified against the version current at that time;
-# the 0.23 line uses `["v2"]` and the 1.0-rc line uses different feature names,
-# so we defer to avoid pinning the wrong API surface.
 
 # --- Core data structures -----------------------------------------------------
 # hashbrown 0.17: HashTable raw API. Default also adds `equivalent` + `raw-entry`

@@ -90,7 +90,7 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
         inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
-    let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
+    let peer = PeerRemote::from(([127, 0, 0, 1], 18_461));
     let rx = connect_peer(&peers, synthetic_peer(peer, 100));
     let source = current_source(&sync.peer_table, peer);
 
@@ -158,7 +158,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
     let [losing1, losing2]: [Block; 2] = losing_bodies
         .try_into()
         .map_err(|_| "the fixture has two losing bodies")?;
-    let mut delivery = vec![crate::InboundBlock::from_decoded(losing1)];
+    let mut delivery = vec![crate::InboundBlock::from_local(losing1)];
     assert_eq!(sync.buffer_received_block_chunk(&mut delivery, None), 1);
     assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
@@ -174,7 +174,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
         "the retarget must purge the staged losing-branch body"
     );
 
-    let mut late = vec![crate::InboundBlock::from_decoded(losing2)];
+    let mut late = vec![crate::InboundBlock::from_local(losing2)];
     assert_eq!(
         sync.buffer_received_block_chunk(&mut late, None),
         0,
@@ -299,7 +299,7 @@ fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
         max_pending_blocks: LOSING_LEN,
         ..crate::sync::default_sync_budget(Network::Regtest)
     });
-    let peer = SocketAddr::from(([127, 0, 0, 1], 18_462));
+    let peer = PeerRemote::from(([127, 0, 0, 1], 18_462));
     let _rx = connect_peer(&peers, synthetic_peer(peer, 100));
     let source = current_source(&sync.peer_table, peer);
     assert!(

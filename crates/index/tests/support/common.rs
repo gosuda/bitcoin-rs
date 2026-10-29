@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_index::{
@@ -13,8 +14,8 @@ use bitcoin_rs_index::{
 };
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError,
-    WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScan,
+    PrefixScanLimit, StorageError, WriteCondition,
 };
 use parking_lot::RwLock;
 
@@ -34,6 +35,48 @@ impl MemoryStore {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
+    }
+}
+
+/// Seeks `rows` to the first key `>= max(start, prefix)` and collects the
+/// prefix's rows under `limit`, never visiting keys before the seek point.
+///
+/// The scan ends complete at the first key outside `prefix` or at the end of
+/// `rows`; the first row `limit` refuses, or whose byte total overflows, ends
+/// it incomplete, so a zero-row limit over a non-empty range yields no rows
+/// and `complete == false`.
+fn scan_prefix_from(
+    rows: &BTreeMap<Vec<u8>, Vec<u8>>,
+    prefix: &[u8],
+    start: &[u8],
+    limit: PrefixScanLimit,
+) -> PrefixScan {
+    let seek = std::cmp::max(start, prefix);
+    let mut out = Vec::new();
+    let mut bytes = 0_usize;
+    for (key, value) in rows.range::<[u8], _>((Bound::Included(seek), Bound::Unbounded)) {
+        if !key.starts_with(prefix) {
+            break;
+        }
+        let accepted = key
+            .len()
+            .checked_add(value.len())
+            .and_then(|row_bytes| bytes.checked_add(row_bytes))
+            .filter(|next_bytes| {
+                out.len() < limit.max_rows && (out.is_empty() || *next_bytes <= limit.max_bytes)
+            });
+        let Some(next_bytes) = accepted else {
+            return PrefixScan {
+                rows: out,
+                complete: false,
+            };
+        };
+        out.push((key.clone(), value.clone()));
+        bytes = next_bytes;
+    }
+    PrefixScan {
+        rows: out,
+        complete: true,
     }
 }
 
@@ -79,6 +122,17 @@ impl KvStore for MemoryStore {
             .map(|(key, value)| Ok((key.clone(), value.clone())))
             .collect::<Vec<_>>();
         Ok(Box::new(rows.into_iter()))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        let guard = self.cfs.read();
+        Ok(scan_prefix_from(&guard[cf.index()], prefix, start, limit))
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -152,6 +206,21 @@ impl KvSnapshot for MemorySnapshot {
             .map(|(key, value)| Ok((key.clone(), value.clone())))
             .collect::<Vec<_>>();
         Ok(Box::new(rows.into_iter()))
+    }
+
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<PrefixScan, StorageError> {
+        Ok(scan_prefix_from(
+            &self.cfs[cf.index()],
+            prefix,
+            start,
+            limit,
+        ))
     }
 }
 

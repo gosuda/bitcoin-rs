@@ -7,7 +7,7 @@ use core::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use bitcoin_rs_chain::{BlockBodySource, LatchReader};
 use bitcoin_rs_chainstate::verify::{
@@ -15,7 +15,7 @@ use bitcoin_rs_chainstate::verify::{
 };
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_rpc::{
-    RpcServer,
+    RpcServer, RpcSurface,
     context::{
         ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
         MempoolHandles, MiningHandles, NetworkHandles,
@@ -59,7 +59,6 @@ mod shutdown {
 /// poisons the index namespace.
 pub(crate) const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
-const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -75,6 +74,7 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
         peer_table: state.peer_table(),
         p2p: state.p2p(),
         local_services: state.p2p().local_services().to_u64(),
+        overlay: state.p2p().overlay_config().clone(),
     }
 }
 
@@ -87,6 +87,19 @@ impl ChainControl for RpcChainControl {
         bitcoin_rs_rpc::context::SnapshotControlError,
     > {
         self.snapshots.import(path).map_err(Into::into)
+    }
+
+    fn dump_txoutset(
+        &self,
+        path: &std::path::Path,
+        cancellation: &LatchReader,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::SnapshotExport,
+        bitcoin_rs_rpc::context::SnapshotControlError,
+    > {
+        self.snapshots
+            .export(path, cancellation)
+            .map_err(Into::into)
     }
 
     fn chainstates(
@@ -102,15 +115,20 @@ impl ChainControl for RpcChainControl {
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> core::result::Result<(), ChainControlError> {
-        let invalidated = crate::reorg::invalidate_block(&self.handles, &self.followers, hash)
+        let outcome = crate::reorg::invalidate_block(&self.handles, &self.followers, hash)
             .map_err(|error| match error {
                 crate::reorg::ReorgError::UnknownBlock(_) => ChainControlError::UnknownBlock,
                 crate::reorg::ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
                 other => ChainControlError::Failed(other.to_string()),
             })?;
         // The transition is already released; the invalid descendants must
-        // not keep occupying bounded download staging.
-        self.sync.purge_invalidated(&invalidated);
+        // not keep occupying bounded download staging. A valid tip the
+        // invalidation displaced is recorded afterwards, outside the
+        // transition, because recording reads the block tree.
+        self.sync.purge_invalidated(&outcome.invalid);
+        if let Some(demoted) = outcome.demoted_tip {
+            self.sync.record_demoted_tip(demoted);
+        }
         Ok(())
     }
 
@@ -159,18 +177,24 @@ fn verify_request(check_level: u8, nblocks: u32) -> VerifyRequest {
     }
 }
 
-/// Binds the RPC listener without spawning a worker. Startup records the
+struct RpcBindings {
+    context: Arc<Context>,
+    listeners: Vec<(RpcServer, RpcSurface)>,
+}
+
+/// Binds every RPC/HTTP listener before spawning a worker. Startup records each
 /// worker immediately after spawning, so a later failure cannot detach it.
 fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-) -> Result<(Arc<Context>, RpcServer)> {
+) -> Result<RpcBindings> {
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
     let context = Context::from_handles(ContextHandles {
         silent_payments: config.rpc.silent_payments,
+        compressed_transactions: config.rpc.compressed_transactions,
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
@@ -216,13 +240,36 @@ fn bind_rpc(
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
         state.config().rpc.bind,
-        rpc_auth,
-        handler,
-        RPC_MAX_CONNECTIONS,
+        Arc::clone(&rpc_auth),
+        Arc::clone(&handler),
+        config.rpc.max_connections,
         RPC_IDLE_TIMEOUT,
         state.config().rpc.rest,
-    )?;
-    Ok((context, server))
+    )
+    .with_context(|| format!("failed to bind RPC listener at {}", config.rpc.bind))?;
+    let mut servers = Vec::with_capacity(2);
+    if let Some(address) = config.rpc.public_bind {
+        // RpcServer's existing binding API requires Auth. Public mode shares
+        // this object only for API compatibility: its closed route policy
+        // rejects JSON-RPC before consulting credentials, even valid ones.
+        let public = RpcServer::bind(
+            address,
+            rpc_auth,
+            handler,
+            config.rpc.public_max_connections,
+            RPC_IDLE_TIMEOUT,
+            config.rpc.rest,
+        )
+        .with_context(|| format!("failed to bind public HTTP listener at {address}"))?;
+        servers.push((server, RpcSurface::Management));
+        servers.push((public, RpcSurface::Public));
+    } else {
+        servers.push((server, RpcSurface::Shared));
+    }
+    Ok(RpcBindings {
+        context,
+        listeners: servers,
+    })
 }
 
 // Records that teardown reached the bootstrap join on the current thread.
@@ -287,7 +334,7 @@ pub(crate) struct NodeServices {
     event_loop_signal: Option<crossbeam_channel::Sender<()>>,
     /// Stops and joins its listener in Drop.
     metrics: Option<crate::metrics::MetricsServer>,
-    rpc_thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
     /// Chainstate idle maintenance (journal flush, retention); joined
     /// before the final clean checkpoint publication.
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
@@ -367,7 +414,7 @@ impl NodeServices {
                 set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
             }
         }
-        if let Some(handle) = self.rpc_thread.take() {
+        for handle in self.rpc_threads.drain(..) {
             match handle.join() {
                 Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
                 // RPC listener returned an I/O error.
@@ -407,6 +454,19 @@ impl NodeServices {
             } else {
                 tracing::error!("tx ingress consumer panicked");
                 set_first_error(first_error, anyhow::anyhow!("tx ingress consumer panicked"));
+            }
+        }
+        if let Some(state) = state {
+            // The consumer has stopped and dropped its channel, which dropped
+            // every queued package and returned its charge. Retire the claims
+            // they left behind and observe the ledger.
+            let package_teardown = state
+                .peer_table()
+                .clear_package_claims(&state.package_capacity());
+            if package_teardown.bytes_reserved != 0 || package_teardown.held != 0 {
+                tracing::warn!(?package_teardown, "package ingress held bytes at teardown");
+            } else {
+                tracing::debug!(?package_teardown, "package ingress cleared at teardown");
             }
         }
         if let Some(handle) = self.tx_relay.take() {
@@ -702,7 +762,8 @@ pub(crate) fn start_node(
             bitcoin_rs_p2p::BlockAnnounceConfig::default(),
         )
         .with_ibd(state.ibd(), state.config().network)
-        .with_recent_block(recent_block),
+        .with_recent_block(recent_block)
+        .with_stale_tips(peer_ready_sync.stale_tips(), chainstate.block_tree_reader()),
     );
     // Early compact-block announce: connect fires this hook after block rules
     // pass for a tip child, before the durable commit. The hook only hands
@@ -727,6 +788,7 @@ pub(crate) fn start_node(
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
+        package_capacity: Some(state.package_capacity()),
         // The node's one latch, built with the chainstate at open and already
         // held by the block-download executor: `initialblockdownload`, the
         // transaction-relay gate, and block-peer eligibility read one signal.
@@ -763,6 +825,7 @@ pub(crate) fn start_node(
                 relay_queue,
                 Arc::downgrade(&gateway),
             )),
+            bitcoin_rs_mempool::BodyInterest::Metadata,
         )
         .map_err(anyhow::Error::msg)?;
 
@@ -773,21 +836,22 @@ pub(crate) fn start_node(
     // state.
     crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
         .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
-    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
-    let rpc_local_addr = rpc_server.local_addr()?;
-    tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
-    let rpc_shutdown = state.shutdown_reader();
-    guard.services.rpc_thread = Some(
-        std::thread::Builder::new()
+    let RpcBindings { context, listeners } = bind_rpc(state, &mining_control, block_body_source)?;
+    for (rpc_server, surface) in listeners {
+        let rpc_local_addr = rpc_server.local_addr()?;
+        tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
+        let rpc_shutdown = state.shutdown_reader();
+        let worker = std::thread::Builder::new()
             .name("bitcoin-rs-rpc".into())
             .spawn(move || {
-                let result = rpc_server.serve_with_shutdown(rpc_shutdown.clone());
+                let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
                 if !rpc_shutdown.is_triggered() {
-                    tracing::error!(error = ?result.as_ref().err(), "rpc listener exited before shutdown");
+                    tracing::error!(?surface, error = ?result.as_ref().err(), "rpc listener exited before shutdown");
                 }
                 result
-            })?,
-    );
+            })?;
+        guard.services.rpc_threads.push(worker);
+    }
     let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
         Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {
             peer_ready_sync.on_peer_ready(source);

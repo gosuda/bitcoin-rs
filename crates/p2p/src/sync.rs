@@ -24,6 +24,7 @@ mod historical;
 mod peers;
 mod receive;
 mod requests;
+mod stale_tips;
 mod telemetry;
 
 #[cfg(test)]
@@ -62,6 +63,7 @@ use crate::download_window::RECEIVED_BLOCK_TIMEOUT;
 use commit::restore_split;
 
 pub use chain::SyncChain;
+pub use stale_tips::StaleTipRetainer;
 
 pub use headers_presync::{
     HeaderAnchor, HeaderSyncError, HeaderSyncResult, HeadersSyncPhase, HeadersSyncState,
@@ -209,12 +211,22 @@ pub struct BlockSync {
     /// Only recreating the sync object (restart path) clears it; there is no
     /// in-place recovery that reopens admission.
     apply_halted: std::sync::atomic::AtomicBool,
+    /// Recent stale tips for BIP332 relay, kept across [`BlockSync::install_budget`]
+    /// so a budget swap cannot erase them. Shared with the announcer and the
+    /// chain query; see [`StaleTipRetainer`].
+    stale_tips: Arc<StaleTipRetainer>,
 }
 
 /// Cap on deferred owned-fetch marks waiting on unattached tip headers:
 /// bounded so a peer cannot grow the scheduler by announcing tips that
 /// never admit. The oldest mark is evicted first.
 const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
+
+/// Blocks above the applied tip within which an unrequested compact block
+/// earns the mempool scan, as in Core (`net_processing.cpp:4664`). A block
+/// further ahead, which the mempool is unlikely to help reconstruct, routes
+/// only its header to admission and downloads through the window.
+const COMPACT_RECONSTRUCTION_MAX_AHEAD: u32 = 2;
 
 /// Appends one deferred owned-fetch mark, keeping the queue deduplicated and
 /// bounded at every insertion point — the initial record, the header-drain
@@ -246,6 +258,12 @@ struct SchedulerState {
     /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
     /// `getdata` was issued for a tip hash whose header has not attached yet.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
+    /// Exact connections that answered an outstanding body request with
+    /// `notfound`, so the released body is replanned elsewhere instead of
+    /// being asked of the same connection again. Retention-bounded by
+    /// [`requests::BODY_UNAVAILABLE_RETRY`] with a safety ceiling, and
+    /// independent of the window's pending budget.
+    body_unavailable: requests::UnavailableBodies,
     /// Chain-sync eviction state for every connection that has not yet shown
     /// it can bring us to the tip. Keyed by exact connection identity, so a
     /// replacement at the same address is judged on its own record.
@@ -288,6 +306,7 @@ impl SchedulerState {
             self.header_request_owner = None;
         }
         self.owned_body_fetches.retain(|(source, _)| owns(source));
+        self.body_unavailable.retain_owned_by(owns);
         self.chain_sync.retain(|source, _| owns(source));
         self.headers_sync.retain(|source, _| owns(source));
     }
@@ -402,6 +421,7 @@ impl BlockSync {
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
+        let stale_tips = Arc::new(StaleTipRetainer::seed(&chain.block_tree()));
         Self {
             historical: Mutex::new(historical::HistoricalDownload::new(budget)),
             historical_work: Mutex::new(()),
@@ -415,6 +435,7 @@ impl BlockSync {
                 stager: BlockStager::new(budget),
                 header_request_owner: None,
                 owned_body_fetches: Vec::new(),
+                body_unavailable: requests::UnavailableBodies::new(),
                 chain_sync: hashbrown::HashMap::new(),
                 headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
@@ -423,6 +444,7 @@ impl BlockSync {
             refused_rerequest_at: Mutex::new(None),
             block_announcements: Mutex::new(hashbrown::HashMap::new()),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
+            stale_tips,
         }
     }
 
@@ -436,6 +458,7 @@ impl BlockSync {
             stager: BlockStager::new(budget),
             header_request_owner: None,
             owned_body_fetches: Vec::new(),
+            body_unavailable: requests::UnavailableBodies::new(),
             chain_sync: hashbrown::HashMap::new(),
             headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
@@ -461,22 +484,47 @@ impl BlockSync {
             .or_insert(hash);
     }
 
-    /// Records an in-flight body fetch the window does not own yet — the
-    /// compact path's `getblocktxn` or fallback `getdata` — so the body
-    /// counts as requested if it arrives before its header drains. The mark
-    /// resolves into a real pending entry on the next header drain
-    /// (`note_owned_body_fetch`/`resolve_owned_body_fetches`).
+    /// Linearizably enqueues one deferred owned body fetch and publishes its
+    /// ownership only after the follow-up left on the same connection.
     ///
-    /// PRE: `source` issued the fetch for `hash`.
-    /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
-    /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
-    /// mark is dropped at resolve time, never attributed to a replacement.
-    pub(crate) fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
-        if !self.peer_table.is_current(source) {
-            return;
-        }
-        let mut scheduler = self.scheduler.lock();
-        defer_owned_body_fetch(&mut scheduler, source, hash);
+    /// The exact-source peer-table guard (`PeerTable::with_current`, holding
+    /// the `parking_lot::RwLockReadGuard<TableView>` entries read guard) is
+    /// held across the scheduler lock, the nonblocking reserved-credit
+    /// `enqueue`, and the ownership publication, so a same-address
+    /// replacement cannot register between validation and publication. The
+    /// tree guard is released before this call; only the
+    /// `peer_table -> scheduler` order is taken here. `enqueue` spends the
+    /// held `ProductionSink` reservation through `send_with` and nonblocking
+    /// `outbound.try_send`, so no blocking send or credit-free write occurs
+    /// under the lock.
+    ///
+    /// PRE: `enqueue` sends the `GetBlockTxn`/`GetData` follow-up for `hash`
+    /// on `source`'s connection under its reply reservation and answers
+    /// whether it left the wire.
+    /// POST: on `false` nothing is published and the answer is `false`; on
+    /// `true` `(source, hash)` is deduplicated under
+    /// `MAX_DEFERRED_OWNED_FETCHES` and the answer is `true`. A stale source
+    /// publishes nothing and answers `false`.
+    /// INVARIANT: `send_then` is not used here because it would charge a new
+    /// budget credit instead of spending the held reply reservation; the
+    /// `with_current` guard plus the reserved-credit `enqueue` is the
+    /// linearizable path.
+    pub(crate) fn enqueue_owned_body_fetch(
+        &self,
+        source: PeerSource,
+        hash: Hash256,
+        enqueue: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut published = false;
+        let admitted = self.peer_table.with_current(source, || {
+            let mut scheduler = self.scheduler.lock();
+            if !enqueue() {
+                return;
+            }
+            defer_owned_body_fetch(&mut scheduler, source, hash);
+            published = true;
+        });
+        admitted && published
     }
 
     /// Whether `source` already owns the download of `hash`.
@@ -510,11 +558,15 @@ impl BlockSync {
     ///   invalid, the header passes the contextual rules header admission
     ///   applies against that parent (required nBits, median time past,
     ///   timewarp, future time, version), and it either carries more work
-    ///   than the applied chain or answers a body fetch `source` owns. This
-    ///   matches Core, which runs its contextual header checks before
-    ///   reconstruction. With the required nBits enforced, forging such a
-    ///   header costs a block at the chain's difficulty, and replaying an
-    ///   old one fails the work test.
+    ///   than the applied chain and sits at most
+    ///   [`COMPACT_RECONSTRUCTION_MAX_AHEAD`] blocks above the applied tip,
+    ///   or answers a body fetch `source` owns.
+    ///   This matches Core, which runs its contextual header checks before
+    ///   reconstruction and scans only blocks that close to its active tip.
+    ///   With the required nBits enforced, forging such a header costs a
+    ///   block at the chain's difficulty, replaying an old one fails the work
+    ///   test, and a header already held far above the applied tip earns no
+    ///   scan.
     /// INVARIANT: the tree read is released before the scheduler lock is
     ///   taken, keeping the `tree -> scheduler` order without nesting.
     ///
@@ -532,7 +584,7 @@ impl BlockSync {
         if bitcoin_rs_chain::validate_pow(header, hash, network).is_err() {
             return false;
         }
-        let candidate_work = {
+        let (candidate_work, candidate_height) = {
             let tree = self.chain.block_tree();
             let invalid = |id: NodeId| {
                 tree.node(id)
@@ -569,12 +621,15 @@ impl BlockSync {
             let Ok(parent) = tree.node(parent_id) else {
                 return false;
             };
-            parent.chainwork + bitcoin_rs_chain::block_work(header)
+            (
+                parent.chainwork + bitcoin_rs_chain::block_work(header),
+                parent.height.saturating_add(1),
+            )
         };
-        let extends_applied = self
-            .chain
-            .applied_tip()
-            .is_none_or(|tip| candidate_work > tip.chainwork);
+        let extends_applied = self.chain.applied_tip().is_none_or(|tip| {
+            candidate_work > tip.chainwork
+                && candidate_height <= tip.height.saturating_add(COMPACT_RECONSTRUCTION_MAX_AHEAD)
+        });
         extends_applied || self.owns_body_fetch(source, hash)
     }
 
@@ -814,7 +869,7 @@ impl BlockSync {
                     })
                 };
                 usable_peers.push(UsablePeer {
-                    source: session.lease.source(session.addr),
+                    source: session.lease.source(session.endpoint),
                     info,
                     demonstrated_tips,
                     active_height,

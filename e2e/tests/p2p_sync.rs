@@ -96,7 +96,7 @@ fn node_syncs_and_follows_core_chain() -> Result<()> {
 /// and the transport it runs over.
 #[test]
 fn peer_and_network_introspection() -> Result<()> {
-    let (core, mut node) = spawn_synced_pair(5)?;
+    let (mut core, mut node) = spawn_synced_pair(5)?;
 
     let peers = node.rpc("getpeerinfo", &json!([]))?;
     let peers = peers
@@ -130,7 +130,32 @@ fn peer_and_network_introspection() -> Result<()> {
         info.str_field("subversion")?,
         concat!("/bitcoin-rs:", env!("CARGO_PKG_VERSION"), "/")
     );
-    assert_eq!(info.u64_field("protocolversion")?, 70016);
+    let core_protocol = core
+        .rpc("getnetworkinfo", &json!([]))?
+        .u64_field("protocolversion")?;
+    assert_eq!(core_protocol, 70016, "pinned Core 31.1 advertises 70016");
+    let advertised = info.u64_field("protocolversion")?;
+    assert_eq!(
+        advertised,
+        core_protocol + 1,
+        "documented deviation: the BIP434 feature-negotiation threshold, one above Core 31.1's"
+    );
+    let core_peers = core.rpc("getpeerinfo", &json!([]))?;
+    let seen_by_core = core_peers
+        .as_array()
+        .ok_or_else(|| Error::Assertion("core getpeerinfo not array".into()))?
+        .iter()
+        .find(|row| {
+            row["subver"]
+                .as_str()
+                .is_some_and(|subver| subver.starts_with("/bitcoin-rs:"))
+        })
+        .ok_or_else(|| Error::Assertion(format!("core sees no bitcoin-rs peer: {core_peers}")))?;
+    assert_eq!(
+        seen_by_core.u64_field("version")?,
+        advertised,
+        "the version message on the wire carries the advertised protocol version"
+    );
     let services = info["localservicesnames"]
         .as_array()
         .ok_or_else(|| Error::Assertion("localservicesnames".into()))?;

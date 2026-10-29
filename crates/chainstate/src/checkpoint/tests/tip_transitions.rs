@@ -25,7 +25,8 @@ fn writer_refuses_an_applied_tip_off_the_active_best_ancestry()
         NETWORK,
         bitcoin_rs_chain::current_unix_seconds(),
         bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
-    )?[0];
+    )?
+    .ids[0];
     let fork = tree.node(fork_id)?;
     let applied = headers::HeaderCheckpointPoint {
         height: fork.height,

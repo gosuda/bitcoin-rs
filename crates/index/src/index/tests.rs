@@ -235,6 +235,16 @@ impl bitcoin_rs_storage::KvStore for FailingWriteStore {
         self.0.iter_prefix(cf, prefix)
     }
 
+    fn scan_prefix_from_bounded(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        start: &[u8],
+        limit: bitcoin_rs_storage::PrefixScanLimit,
+    ) -> Result<bitcoin_rs_storage::PrefixScan, bitcoin_rs_storage::StorageError> {
+        self.0.scan_prefix_from_bounded(cf, prefix, start, limit)
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         self.0.new_batch()
     }

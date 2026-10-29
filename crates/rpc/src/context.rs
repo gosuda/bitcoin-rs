@@ -2,23 +2,36 @@ use alloc::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
-    BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
+    BlockBodyReadError, BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot,
+    softfork_state,
 };
-use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
+use bitcoin_rs_mempool::{
+    AdmissionChain, BodyInterest, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta,
+};
+
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes, unix_time_secs,
+    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    layout::ParsedBlock, unix_time_secs,
+};
+
+use crate::error::RpcError;
+
+use crate::compressed_tx::{
+    LookupError, MAX_CUMULATIVE_BODY_BYTES, MAX_CUMULATIVE_BODY_LOADS, MAX_RESOLVER_STATE_BYTES,
+    MAX_RETAINED_BODIES, MAX_RETAINED_BODY_BYTES, MAX_RETAINED_BYTES_TOTAL,
+    MAX_RETAINED_INDEX_BYTES, PrevoutResolver, ResolvedPrevout,
 };
 
 use bitcoin::hex::DisplayHex as _;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, Script, Txid};
+use bitcoin_rs_primitives::{Amount, Script};
 use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 #[cfg(any(test, feature = "test-seam"))]
@@ -172,6 +185,19 @@ pub trait ChainControl: Send + Sync {
         ))
     }
 
+    /// Writes a Core v2 snapshot of the UTXO set at the applied tip to `path`.
+    ///
+    /// A relative `path` resolves below the node data directory. The file is
+    /// created only if nothing exists at `path`; an existing entry is refused
+    /// and never replaced. A request cancelled through `cancellation`, or a
+    /// node that begins shutting down, answers
+    /// [`SnapshotControlError::Interrupted`] and leaves no file behind.
+    fn dump_txoutset(
+        &self,
+        path: &std::path::Path,
+        cancellation: &LatchReader,
+    ) -> Result<SnapshotExport, SnapshotControlError>;
+
     /// Reads one coherent view of the existing active and historical roles.
     /// Existing implementors may omit this optional capability.
     fn chainstates(&self) -> Result<ChainstatesInfo, SnapshotControlError> {
@@ -217,6 +243,24 @@ pub struct SnapshotImport {
     pub path: String,
 }
 
+/// A completed, durable Core snapshot export.
+#[derive(Debug, serde::Serialize)]
+pub struct SnapshotExport {
+    /// Number of unspent outputs written, not transaction records.
+    pub coins_written: u64,
+    /// Applied tip hash the snapshot is based on, in RPC display order.
+    pub base_hash: String,
+    /// Applied tip height the snapshot is based on.
+    pub base_height: u32,
+    /// UTF-8 display of the absolute output path. Non-UTF-8 filesystem bytes
+    /// in a parent directory are replaced for JSON output only.
+    pub path: String,
+    /// `hash_serialized_3` commitment of the written coins, in RPC display order.
+    pub txoutset_hash: String,
+    /// Transactions in the chain up to and including the base block.
+    pub nchaintx: u64,
+}
+
 /// Coherent lifecycle projection supplied by the chainstate owner.
 #[derive(Debug, serde::Serialize)]
 pub struct ChainstatesInfo {
@@ -258,6 +302,10 @@ pub enum SnapshotControlError {
     /// Activation, persistence, or post-commit consumer settlement failed.
     #[error("{0}")]
     Failed(String),
+    /// The requesting caller cancelled the operation, or the node began
+    /// shutting down, before it completed. Nothing was published.
+    #[error("Snapshot export interrupted")]
+    Interrupted,
 }
 
 /// Failure from a node-owned chain mutation.
@@ -299,6 +347,8 @@ pub use bitcoin_rs_index::{
 pub struct ContextHandles {
     /// Enable the compiled experimental keyless tweak service. No wallet state.
     pub silent_payments: bool,
+    /// Enable the optional BIP337 compressed-transaction RPCs. No wallet state.
+    pub compressed_transactions: bool,
     /// Chain capability: tips, block log, UTXO set, block tree, transition
     /// barrier, and the chain-owned control surfaces.
     pub chain: ChainHandles,
@@ -506,6 +556,9 @@ pub struct NetworkHandles {
     /// Service flags the node advertises, as resolved at P2P startup —
     /// `NETWORK` on an unpruned node, `NETWORK_LIMITED` on a pruned one.
     pub local_services: u64,
+    /// Resolved overlay transport configuration, reported (configured,
+    /// never probed) by `getnetworkinfo`.
+    pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
 }
 
 /// Mining capability handles.
@@ -526,6 +579,8 @@ pub struct MiningHandles {
 pub struct Context {
     #[cfg(feature = "silent-payments")]
     pub(crate) silent_payments: Option<Mutex<()>>,
+    /// Runtime opt-in for the BIP337 compressed-transaction RPCs.
+    pub(crate) compressed_transactions: bool,
     /// Chain capability: tips, block log, UTXO set, block tree, transition
     /// barrier, and the chain-owned control surfaces.
     pub chain: ChainHandles,
@@ -548,6 +603,72 @@ pub struct Context {
     server_bound_at: Mutex<Option<Instant>>,
     /// Limits concurrent full-block and spent-output response materializations.
     block_render_budget: Arc<BlockRenderBudget>,
+    /// Calls currently executing through `Handler::dispatch`, oldest first.
+    pub(crate) active_calls: ActiveCalls,
+}
+
+/// One in-flight JSON-RPC call, tracked for `getrpcinfo`.
+///
+/// Registration happens in `Handler::dispatch` only after registry
+/// resolution and blocking-quota acquisition, so unknown or refused
+/// methods never appear. Removal is by the unique `id`, never by method
+/// name, so two concurrent calls to one method settle independently.
+pub(crate) struct ActiveCalls {
+    entries: Mutex<Vec<ActiveCallEntry>>,
+    next_id: AtomicU64,
+}
+
+struct ActiveCallEntry {
+    id: u64,
+    method: String,
+    started: Instant,
+}
+
+/// RAII registration of one active call; dropping removes exactly its entry.
+pub(crate) struct ActiveCallGuard<'a> {
+    calls: &'a ActiveCalls,
+    id: u64,
+}
+
+impl Drop for ActiveCallGuard<'_> {
+    fn drop(&mut self) {
+        self.calls
+            .entries
+            .lock()
+            .retain(|entry| entry.id != self.id);
+    }
+}
+
+impl ActiveCalls {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Registers `method` as started now and returns its removal guard.
+    pub(crate) fn begin(&self, method: &str) -> ActiveCallGuard<'_> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().push(ActiveCallEntry {
+            id,
+            method: method.to_owned(),
+            started: Instant::now(),
+        });
+        ActiveCallGuard { calls: self, id }
+    }
+
+    /// `(method, elapsed_micros)` rows, oldest first.
+    pub(crate) fn snapshot(&self) -> Vec<(String, u64)> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|entry| {
+                let micros = u64::try_from(entry.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                (entry.method.clone(), micros)
+            })
+            .collect()
+    }
 }
 
 impl fmt::Debug for Context {
@@ -648,6 +769,7 @@ impl Default for NetworkHandles {
             peer_table: p2p.table(),
             p2p,
             local_services: 0x09,
+            overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
         }
     }
 }
@@ -659,6 +781,7 @@ impl Default for ContextHandles {
     fn default() -> Self {
         Self {
             silent_payments: false,
+            compressed_transactions: false,
             chain: ChainHandles::default(),
             mempool: MempoolHandles::default(),
             indexes: IndexHandles::default(),
@@ -699,7 +822,7 @@ impl Context {
             mempool: MempoolHandles {
                 gateway: Arc::new(MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-                    Some(observer),
+                    Some((observer, BodyInterest::Metadata)),
                     ValidationEngine::Native,
                     None,
                 )),
@@ -722,6 +845,7 @@ impl Context {
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {
             silent_payments,
+            compressed_transactions,
             chain,
             mempool,
             indexes,
@@ -735,6 +859,7 @@ impl Context {
         Self {
             #[cfg(feature = "silent-payments")]
             silent_payments: silent_payments.then(|| Mutex::new(())),
+            compressed_transactions,
             chain,
             mempool,
             indexes,
@@ -744,6 +869,7 @@ impl Context {
             debug_log_path,
             server_bound_at: Mutex::new(None),
             block_render_budget: Arc::new(BlockRenderBudget::new()),
+            active_calls: ActiveCalls::new(),
         }
     }
 
@@ -819,6 +945,386 @@ impl Context {
     #[must_use]
     pub(crate) fn zmq_notifications(&self) -> Vec<crate::zmq::ZmqNotifier> {
         self.zmq_publisher.active_notifiers()
+    }
+}
+
+/// Flat-output prefix row for one transaction in a retained body.
+struct FlatRow {
+    txid: Txid,
+    first_flat: u32,
+    output_count: u32,
+}
+
+/// One retained block body: its flat-output prefix rows plus the
+/// transactions materialized while building them.
+///
+/// The raw bytes are parsed once in [`RpcPrevoutResolver::ensure_body`]
+/// and then dropped; only the materialized transactions are retained.
+/// They share the body's lifetime and are dropped with it on eviction,
+/// so per-input lookups never reparse and retention costs one body-sized
+/// copy, not two.
+struct RetainedBody {
+    height: u32,
+    rows: Vec<FlatRow>,
+    txs: Vec<Tx>,
+    index_bytes: usize,
+    tx_bytes: usize,
+}
+
+/// Conservative accounting for a materialized transaction's owned
+/// allocations, including one vector entry per witness item.
+fn retained_tx_bytes(txs: &[Tx]) -> usize {
+    txs.iter()
+        .map(|tx| {
+            core::mem::size_of::<Tx>()
+                + tx.inputs.len() * core::mem::size_of::<TxIn>()
+                + tx.outputs.len() * core::mem::size_of::<TxOut>()
+                + tx.inputs
+                    .iter()
+                    .map(|input| {
+                        input.script_sig.len()
+                            + input.witness.len() * core::mem::size_of::<Vec<u8>>()
+                            + input.witness.iter().map(Vec::len).sum::<usize>()
+                    })
+                    .sum::<usize>()
+                + tx.outputs
+                    .iter()
+                    .map(|output| output.script_pubkey.len())
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Production [`PrevoutResolver`] for the BIP337 codec.
+///
+/// Consistency: snapshot isolation. Handlers construct and run the
+/// resolver inside `ChainHandles::with_stable_chainstate`, so the
+/// captured `applied_view()`, UTXO entries, txindex heights, and bodies
+/// all come from one transition-excluded chainstate read; a tip that
+/// moves mid-call cancels the call instead of mixing branches. It holds one
+/// block-render permit for the whole call, retains materialized
+/// transactions plus cumulative-output prefix rows per height, and parses
+/// each retained body once in a scope that drops the parsed block before
+/// the next body is read. Retained materialized transactions are charged
+/// against the body and combined budgets and evicted with their body, so
+/// the cache lifetime stays bounded. Cumulative loads and bytes bound the
+/// total read/parse/materialize/txid work under the exclusion and fail
+/// closed; codecs group height-known lookups so each body loads once.
+/// Missing, corrupt, and unreadable bodies stay distinct ([`LookupError`])
+/// because the codec degrades them differently.
+pub(crate) struct RpcPrevoutResolver<'ctx> {
+    ctx: &'ctx Context,
+    view: AppliedView,
+    /// Held for the whole call; dropping releases the render slot.
+    _permit: BlockRenderPermit,
+    cancellation: LatchReader,
+    bodies: Vec<RetainedBody>,
+    retained_tx_bytes: usize,
+    retained_index_bytes: usize,
+    /// Cumulative body loads performed (distinct reads; eviction reloads
+    /// count again, so cycling past the retained slots cannot do unbounded
+    /// parse work under the exclusion). Never decremented.
+    loads: usize,
+    /// Cumulative body bytes read, bounding total parse work. Never
+    /// decremented.
+    loaded_bytes: usize,
+    memo: HashMap<OutPoint, Option<ResolvedPrevout>>,
+    state_bytes: usize,
+}
+
+impl<'ctx> RpcPrevoutResolver<'ctx> {
+    /// Captures the applied view and the call's single render permit.
+    ///
+    /// # Errors
+    /// Returns retryable `Misc` (-1) when both block-render slots are
+    /// busy; the caller never queues behind a render.
+    pub(crate) fn new(ctx: &'ctx Context, cancellation: LatchReader) -> Result<Self, RpcError> {
+        let permit = ctx
+            .try_acquire_block_render()
+            .ok_or_else(|| RpcError::Misc("block rendering is busy; retry".to_owned()))?;
+        Ok(Self {
+            ctx,
+            view: ctx.chain.applied_view(),
+            _permit: permit,
+            cancellation,
+            bodies: Vec::new(),
+            retained_tx_bytes: 0,
+            retained_index_bytes: 0,
+            loads: 0,
+            loaded_bytes: 0,
+            memo: HashMap::new(),
+            state_bytes: 0,
+        })
+    }
+
+    /// Whether the captured view still equals the live applied view.
+    #[must_use]
+    pub(crate) fn view_matches_current(&self) -> bool {
+        let current = self.ctx.chain.applied_view();
+        match (self.view.tip(), current.tip()) {
+            (None, None) => true,
+            (Some(before), Some(now)) => before.height == now.height && before.hash == now.hash,
+            _ => false,
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_triggered() || !self.view_matches_current()
+    }
+
+    /// Ensures the body at `height` is retained, evicting oldest-first.
+    /// Cumulative loads and bytes fail closed before doing body I/O or
+    /// parsing: without them a request cycling more heights than the
+    /// retained slots could pay a full body read, parse, materialization,
+    /// and txid pass per input while holding the stable-chainstate
+    /// exclusion. Codecs group height-known lookups so each body loads
+    /// once; this budget backstops the rest.
+    fn ensure_body(&mut self, height: u32) -> Result<(), LookupError> {
+        if self.bodies.iter().any(|body| body.height == height) {
+            return Ok(());
+        }
+        if self.is_cancelled() {
+            return Err(LookupError::Cancelled);
+        }
+        let record = self
+            .ctx
+            .chain
+            .block_by_height_in_view(&self.view, height)
+            .ok_or(LookupError::Missing)?;
+        let source = self
+            .ctx
+            .chain
+            .block_body_source
+            .as_ref()
+            .ok_or(LookupError::BodyMissing(height))?;
+        // Fail closed before body I/O so the exclusion never pays for more
+        // than a bounded number of loads.
+        if self.loads >= MAX_CUMULATIVE_BODY_LOADS {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::Loads,
+            ));
+        }
+        let bytes = source
+            .block_body(height, record.hash)
+            .map_err(|error| match error {
+                BlockBodyReadError::Corrupt(_) => LookupError::CorruptBody(height),
+                BlockBodyReadError::Read(_) => LookupError::BodyReadFailed(height),
+            })?
+            .ok_or(LookupError::BodyMissing(height))?;
+        if bytes.len() > MAX_RETAINED_BODY_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::BodyBytes,
+            ));
+        }
+        if self.loaded_bytes.saturating_add(bytes.len()) > MAX_CUMULATIVE_BODY_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::LoadBytes,
+            ));
+        }
+        self.loads += 1;
+        self.loaded_bytes = self.loaded_bytes.saturating_add(bytes.len());
+        // Pre-charge the transient index space this body will occupy.
+        let index_bytes = bytes.len() / 60 * 40;
+        if index_bytes > MAX_RETAINED_INDEX_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::IndexBytes,
+            ));
+        }
+        let (rows, txs) = {
+            let parsed =
+                ParsedBlock::parse_exact(&bytes).map_err(|_| LookupError::CorruptBody(height))?;
+            let mut rows = Vec::with_capacity(parsed.transactions().len());
+            let mut txs = Vec::with_capacity(parsed.transactions().len());
+            let mut flat = 0_u32;
+            for parsed_tx in parsed.transactions() {
+                let tx = parsed_tx.materialize();
+                let output_count = u32::try_from(tx.outputs.len())
+                    .map_err(|_| LookupError::CorruptBody(height))?;
+                rows.push(FlatRow {
+                    txid: tx.txid(),
+                    first_flat: flat,
+                    output_count,
+                });
+                flat = flat
+                    .checked_add(output_count)
+                    .ok_or(LookupError::CorruptBody(height))?;
+                txs.push(tx);
+            }
+            (rows, txs)
+        };
+        // Charge the owned allocations, not just the wire length: a witness
+        // item needs a vector entry even when its payload is one byte.
+        let tx_bytes = retained_tx_bytes(&txs);
+        while self.bodies.len() >= MAX_RETAINED_BODIES
+            || self.retained_tx_bytes + tx_bytes > MAX_RETAINED_BODY_BYTES
+            || self.retained_index_bytes + index_bytes > MAX_RETAINED_INDEX_BYTES
+            || self.retained_tx_bytes + self.retained_index_bytes + tx_bytes + index_bytes
+                > MAX_RETAINED_BYTES_TOTAL
+        {
+            let Some(evicted) = (!self.bodies.is_empty()).then(|| self.bodies.remove(0)) else {
+                return Err(LookupError::LimitExceeded(
+                    crate::compressed_tx::Limit::Bodies,
+                ));
+            };
+            self.retained_tx_bytes -= evicted.tx_bytes;
+            self.retained_index_bytes -= evicted.index_bytes;
+        }
+        self.retained_tx_bytes += tx_bytes;
+        self.retained_index_bytes += index_bytes;
+        self.bodies.push(RetainedBody {
+            height,
+            rows,
+            txs,
+            index_bytes,
+            tx_bytes,
+        });
+        Ok(())
+    }
+
+    /// Borrows the transaction `txid` cached with the retained body at
+    /// `height` without cloning; the body is parsed once at retain time,
+    /// so this lookup scans cached transactions without reparsing.
+    /// Callers clone only the requested output via [`Self::body_txout`].
+    fn body_tx_ref(&mut self, height: u32, txid: &Txid) -> Result<Option<&Tx>, LookupError> {
+        self.ensure_body(height)?;
+        let Some(body) = self.bodies.iter().find(|body| body.height == height) else {
+            return Err(LookupError::BodyMissing(height));
+        };
+        Ok(body
+            .rows
+            .iter()
+            .zip(body.txs.iter())
+            .find_map(|(row, tx)| (row.txid == *txid).then_some(tx)))
+    }
+
+    /// Clones only the requested output `vout` of `txid` at `height`;
+    /// the retained funding transaction itself is never cloned, so
+    /// per-input prevout lookups cost one `TxOut`, not one `Tx`.
+    fn body_txout(
+        &mut self,
+        height: u32,
+        txid: &Txid,
+        vout: u32,
+    ) -> Result<Option<TxOut>, LookupError> {
+        let vout = usize::try_from(vout).map_err(|_| LookupError::Missing)?;
+        let Some(tx) = self.body_tx_ref(height, txid)? else {
+            return Ok(None);
+        };
+        Ok(tx.outputs.get(vout).cloned())
+    }
+
+    fn resolve_prevout(
+        &mut self,
+        outpoint: &OutPoint,
+    ) -> Result<Option<ResolvedPrevout>, LookupError> {
+        if let Some(coin) = self.ctx.chain.utxo.get_entry(outpoint) {
+            return Ok(Some(ResolvedPrevout {
+                txout: coin.txout,
+                confirmed_height: Some(coin.height),
+            }));
+        }
+        let height = match self.ctx.indexes.derived_index.as_ref() {
+            Some(index) => index
+                .transaction_height(&outpoint.txid)
+                .map_err(|_| LookupError::Missing)?,
+            None => None,
+        };
+        let Some(height) = height else {
+            return Ok(None);
+        };
+        let Some(txout) = self.body_txout(height, &outpoint.txid, outpoint.vout)? else {
+            return Ok(None);
+        };
+        Ok(Some(ResolvedPrevout {
+            txout,
+            confirmed_height: Some(height),
+        }))
+    }
+}
+
+impl PrevoutResolver for RpcPrevoutResolver<'_> {
+    fn prevout(&mut self, outpoint: &OutPoint) -> Result<Option<ResolvedPrevout>, LookupError> {
+        if let Some(cached) = self.memo.get(outpoint) {
+            return Ok(cached.clone());
+        }
+        let resolved = self.resolve_prevout(outpoint)?;
+        let charge = 96_usize
+            + resolved
+                .as_ref()
+                .map_or(0, |prevout| prevout.txout.script_pubkey.len());
+        let total = self
+            .state_bytes
+            .checked_add(charge)
+            .ok_or(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::State,
+            ))?;
+        if total > MAX_RESOLVER_STATE_BYTES {
+            return Err(LookupError::LimitExceeded(
+                crate::compressed_tx::Limit::State,
+            ));
+        }
+        self.state_bytes = total;
+        self.memo.insert(*outpoint, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn flat_output_index(
+        &mut self,
+        height: u32,
+        txid: &Txid,
+        vout: u32,
+    ) -> Result<Option<u32>, LookupError> {
+        match self.ensure_body(height) {
+            Err(LookupError::Missing) => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        let Some(body) = self.bodies.iter().find(|body| body.height == height) else {
+            return Err(LookupError::BodyMissing(height));
+        };
+        Ok(body
+            .rows
+            .iter()
+            .find(|row| row.txid == *txid && vout < row.output_count)
+            .map(|row| row.first_flat + vout))
+    }
+
+    fn outpoint_at(
+        &mut self,
+        height: u32,
+        flat_index: u32,
+    ) -> Result<Option<(OutPoint, ResolvedPrevout)>, LookupError> {
+        match self.ensure_body(height) {
+            Err(LookupError::Missing) => return Ok(None),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        let located = self.bodies.iter().find_map(|body| {
+            if body.height != height {
+                return None;
+            }
+            body.rows.iter().find_map(|row| {
+                (flat_index >= row.first_flat && flat_index < row.first_flat + row.output_count)
+                    .then_some((row.txid, flat_index - row.first_flat))
+            })
+        });
+        let Some((txid, vout)) = located else {
+            return Ok(None);
+        };
+        let Some(txout) = self.body_txout(height, &txid, vout)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            OutPoint::new(txid, vout),
+            ResolvedPrevout {
+                txout,
+                confirmed_height: Some(height),
+            },
+        )))
+    }
+
+    fn cancelled(&self) -> bool {
+        self.is_cancelled()
     }
 }
 
@@ -977,6 +1483,40 @@ impl ChainHandles {
         })
     }
 
+    /// Returns the block hash for an applied height.
+    ///
+    /// Once an applied tip exists, its ancestry is authoritative and heights
+    /// above it are absent even when header sync has found a better fork.
+    /// Before the first applied-tip publication, genesis and cache-only test
+    /// records remain available.
+    #[must_use]
+    pub(crate) fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
+        self.block_hash_at_height_in_view(&self.applied_view(), height)
+    }
+
+    /// Returns the applied-chain hash at `height` within a retained view.
+    ///
+    /// PRE: `view` is the response's retained applied publication.
+    /// POST: that branch's hash at `height`; with no applied tip yet, the
+    ///   genesis hash at height 0 or the block-log record's hash, which is the
+    ///   cache-only fallback such contexts use.
+    /// INVARIANT: reads the tree and the log as necessary but never reloads
+    ///   `applied_tip`, so one response cannot straddle two applied branches.
+    #[must_use]
+    pub(crate) fn block_hash_at_height_in_view(
+        &self,
+        view: &AppliedView,
+        height: u32,
+    ) -> Option<Hash256> {
+        if let Some(tip) = view.tip() {
+            return self.hash_at_height_from_tip(tip, height);
+        }
+        if height == 0 {
+            return Some(self.chain_network.genesis_block_hash());
+        }
+        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
+    }
+
     /// Resolves a block record for `hash`.
     ///
     /// The restored header tree is the only identity authority. A hash it does
@@ -1015,40 +1555,6 @@ impl ChainHandles {
             return Some(record);
         }
         None
-    }
-
-    /// Returns the block hash for an applied height.
-    ///
-    /// Once an applied tip exists, its ancestry is authoritative and heights
-    /// above it are absent even when header sync has found a better fork.
-    /// Before the first applied-tip publication, genesis and cache-only test
-    /// records remain available.
-    #[must_use]
-    pub(crate) fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
-        self.block_hash_at_height_in_view(&self.applied_view(), height)
-    }
-
-    /// Returns the applied-chain hash at `height` within a retained view.
-    ///
-    /// PRE: `view` is the response's retained applied publication.
-    /// POST: that branch's hash at `height`; with no applied tip yet, the
-    ///   genesis hash at height 0 or the block-log record's hash, which is the
-    ///   cache-only fallback such contexts use.
-    /// INVARIANT: reads the tree and the log as necessary but never reloads
-    ///   `applied_tip`, so one response cannot straddle two applied branches.
-    #[must_use]
-    pub(crate) fn block_hash_at_height_in_view(
-        &self,
-        view: &AppliedView,
-        height: u32,
-    ) -> Option<Hash256> {
-        if let Some(tip) = view.tip() {
-            return self.hash_at_height_from_tip(tip, height);
-        }
-        if height == 0 {
-            return Some(self.chain_network.genesis_block_hash());
-        }
-        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
     }
 
     /// Returns the applied block at a height.
@@ -1468,12 +1974,6 @@ mod tests {
                 expected,
                 "block_by_height disagrees with the log at height {height}"
             );
-            let expected_hash = if height == 0 {
-                Some(ctx.chain.chain_network.genesis_block_hash())
-            } else {
-                expected.map(Hash256::from)
-            };
-            assert_eq!(ctx.chain.block_hash_at_height(height), expected_hash);
         }
     }
 
@@ -1603,6 +2103,7 @@ mod tests {
                 peer_table: p2p.table(),
                 p2p: Arc::clone(&p2p),
                 local_services: 0x09,
+                overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
             },
             ..ContextHandles::default()
         });
@@ -2359,7 +2860,10 @@ mod admission_chain_tests {
         let result = ctx.mempool.gateway.submit_transaction(
             Arc::new(tx),
             AdmissionOrigin::Peer(PeerToken {
-                addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+                endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+                )),
+                addr: Some(std::net::SocketAddr::from(([127, 0, 0, 1], 18444)).into()),
                 connection_id: 1,
             }),
             None,
@@ -2518,6 +3022,254 @@ mod admission_chain_tests {
             "the accepted preview must not insert"
         );
         Ok(())
+    }
+
+    fn burn_raw() -> String {
+        // Consensus-valid but unspendable: a 1_000-sat OP_RETURN output.
+        // Inputs never resolve; the burn guard runs before admission.
+        let burn = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[7; 32])), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x6a, 0x01, 0x51]),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        consensus_bytes(&burn).to_lower_hex_string()
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn sendrawtransaction_honors_maxburnamount_before_admission() {
+        use sonic_rs::json;
+
+        use crate::error::RpcError;
+        use crate::handlers::tx;
+
+        let rpc_ctx = Arc::new(Context::new());
+        let raw = &burn_raw();
+        // Default cap 0: the burn guard fires before admission is attempted,
+        // so even an unfunded burn is refused at the guard, not the pool.
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw]))
+            .expect_err("burn above the default cap must be refused");
+        assert!(
+            refused.to_string().contains("maxburnamount"),
+            "unexpected refusal: {refused}"
+        );
+        // A cap covering the burn output passes the guard; admission then
+        // refuses the unknown prevout instead.
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00001"]))
+            .expect_err("unknown prevout must still be refused");
+        assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+        // An explicit cap below the burn still refuses at the guard.
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, "0.00000999"]))
+            .expect_err("burn above the explicit cap must be refused");
+        assert!(
+            refused.to_string().contains("maxburnamount"),
+            "unexpected refusal: {refused}"
+        );
+        // The named form carries the same cap.
+        let refused = tx::sendrawtransaction(
+            &rpc_ctx,
+            &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
+        )
+        .expect_err("unknown prevout must still be refused");
+        assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingPublisher {
+        hashtx: std::sync::Mutex<Vec<Txid>>,
+    }
+
+    impl crate::zmq::ZmqPublisher for RecordingPublisher {
+        fn publish_hashblock(&self, _hash: Hash256) {}
+
+        fn publish_hashtx(&self, txid: Txid) {
+            if let Ok(mut seen) = self.hashtx.lock() {
+                seen.push(txid);
+            }
+        }
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {}
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {}
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn sendrawtransaction_publishes_hashtx_once_per_admission() -> anyhow::Result<()> {
+        use sonic_rs::json;
+
+        use crate::handlers::tx;
+
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[31; 32])), 0);
+        let spend = spending(outpoint);
+        let raw = &consensus_bytes(&spend).to_lower_hex_string();
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
+            },
+            false,
+            0,
+        ));
+
+        let recording = Arc::new(RecordingPublisher::default());
+        let publisher: Arc<dyn crate::zmq::ZmqPublisher> = recording.clone();
+        let mut fresh_ctx = Context::new_with_mempool_observer(Arc::new(
+            crate::zmq::MempoolSequenceObserver::new(publisher.clone()),
+        ));
+        fresh_ctx.zmq_publisher = publisher;
+        let rpc_ctx = Arc::new(fresh_ctx);
+        let published = || {
+            recording
+                .hashtx
+                .lock()
+                .map(|seen| seen.clone())
+                .unwrap_or_default()
+        };
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &rpc_ctx.chain.utxo.fixture_set(),
+            &changes,
+            &Hash256::default(),
+        )?;
+
+        // Accepted: one `hashtx` for the admitted txid.
+        tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
+        assert_eq!(
+            published(),
+            vec![spend.txid()],
+            "admission must publish exactly one hashtx"
+        );
+
+        // Duplicate: already known, so the second call publishes nothing.
+        tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
+        assert_eq!(
+            published().len(),
+            1,
+            "a duplicate admission must not republish"
+        );
+
+        // Rejected: an unknown prevout publishes nothing.
+        let orphan = spending(OutPoint::new(
+            Txid::from(Hash256::from_le_bytes(&[32; 32])),
+            0,
+        ));
+        let orphan_raw = consensus_bytes(&orphan).to_lower_hex_string();
+        tx::sendrawtransaction(&rpc_ctx, &json!([orphan_raw]))
+            .expect_err("an unknown prevout must be refused");
+        assert_eq!(
+            published().len(),
+            1,
+            "a rejected submission must not publish"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn submitpackage_publishes_hashtx_only_for_newly_admitted() -> anyhow::Result<()> {
+        use sonic_rs::json;
+
+        use crate::handlers::tx::submit_package::submitpackage;
+
+        let coin = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[41; 32])), 0);
+        let parent = spending(coin);
+        let child = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(parent.txid(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::from_stack(vec![vec![0x51]]),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(7_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
+            }],
+            lock_time: LockTime::ZERO,
+        };
+        let raws = [
+            consensus_bytes(&parent).to_lower_hex_string(),
+            consensus_bytes(&child).to_lower_hex_string(),
+        ];
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            coin,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
+            },
+            false,
+            0,
+        ));
+
+        let recording = Arc::new(RecordingPublisher::default());
+        let publisher: Arc<dyn crate::zmq::ZmqPublisher> = recording.clone();
+        let mut fresh_ctx = Context::new_with_mempool_observer(Arc::new(
+            crate::zmq::MempoolSequenceObserver::new(publisher.clone()),
+        ));
+        fresh_ctx.zmq_publisher = publisher;
+        let rpc_ctx = Arc::new(fresh_ctx);
+        let published = || {
+            recording
+                .hashtx
+                .lock()
+                .map(|seen| seen.clone())
+                .unwrap_or_default()
+        };
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &rpc_ctx.chain.utxo.fixture_set(),
+            &changes,
+            &Hash256::default(),
+        )?;
+
+        // Both members are newly admitted: one `hashtx` each, in order.
+        submitpackage(&rpc_ctx, &json!([[raws[0].clone(), raws[1].clone()]]))?;
+        assert_eq!(
+            published(),
+            vec![parent.txid(), child.txid()],
+            "each newly admitted member must publish hashtx"
+        );
+
+        // Re-submission finds residents: rows carry no aggregate rate, so
+        // nothing publishes again.
+        submitpackage(&rpc_ctx, &json!([[raws[0].clone(), raws[1].clone()]]))?;
+        assert_eq!(published().len(), 2, "resident members must not republish");
+        Ok(())
+    }
+
+    #[test]
+    #[expect(clippy::expect_used)]
+    fn sendrawtransaction_rejects_unknown_extra_params() {
+        use sonic_rs::json;
+
+        use crate::handlers::tx;
+
+        let rpc_ctx = Arc::new(Context::new());
+        let raw = &burn_raw();
+        // A fourth positional parameter is rejected before decoding.
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!([raw, null, null, "extra"]))
+            .expect_err("a fourth parameter must be refused");
+        assert!(
+            refused.to_string().contains("too many parameters"),
+            "unexpected refusal: {refused}"
+        );
+        // An unknown named parameter is rejected before decoding.
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!({"hexstring": raw, "bogus": 1}))
+            .expect_err("an unknown named parameter must be refused");
+        assert!(
+            refused.to_string().contains("Unknown named parameter"),
+            "unexpected refusal: {refused}"
+        );
     }
 }
 

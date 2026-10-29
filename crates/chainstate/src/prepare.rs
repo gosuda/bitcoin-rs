@@ -1,4 +1,4 @@
-//! Exact serialized-body validation, transaction planning, and resolved prevout preparation.
+//! Payload parsing, transaction planning, and resolved prevout preparation.
 
 use super::SameBlockSpentSet;
 use super::{
@@ -7,7 +7,7 @@ use super::{
 };
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::{Block, ConsensusEncode, OutPoint, Tx, TxOut, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, BlockPayload, ConsensusEncode, OutPoint, Tx, TxOut, Txid};
 use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -26,8 +26,7 @@ pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
 }
 
 pub(super) fn parse_block_for_apply(
-    block: &Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &BlockPayload,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<
     (
@@ -36,22 +35,15 @@ pub(super) fn parse_block_for_apply(
     ),
     ApplyError,
 > {
-    // Preserved bytes must BE this block, not merely agree with it on
-    // transaction count. The parse below drives the txids and the transactions
-    // that script verification runs, while the witness commitment check and
-    // the UTXO mutation use the decoded block. Changing a witness does not
-    // change a txid, so a count check lets a caller pair a block carrying an
-    // invalid witness with bytes carrying a valid one: the scripts verify
-    // against the bytes and the invalid block gets applied.
-    if let Some(raw) = provided_serialized.as_deref()
-        && !bytes_are_block(raw, block)
-    {
-        return Err(ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Kernel(
-                "preserved bytes are not the serialization of the block they accompany".to_owned(),
-            ),
-        ));
-    }
+    // Exactness is owned by the constructor: `from_raw` retains only bytes
+    // that decoded, `from_local` retains its own single encode, and
+    // `from_prefix` retains only the consumed prefix. There is no second
+    // pair to compare here and no re-encode fallback: the retained bytes
+    // below ARE this block. The txid-count gate still stands because the
+    // parse below drives the txids and the transactions that script
+    // verification runs, while the witness commitment check and the UTXO
+    // mutation use the decoded block.
+    let block = payload.block();
     // Every engine's parse shares one shape — parse once, count check,
     // txids — so the caller stays uniform whichever selection resolved the
     // value. The kernel parse hashes every transaction on the way past using
@@ -59,9 +51,7 @@ pub(super) fn parse_block_for_apply(
     // layout derives txids, witness IDs, weight, byte positions, and Merkle
     // verdicts in a single pass. Either way there is no second transaction
     // tree decode.
-    let raw_block: bytes::Bytes =
-        provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
-    let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(&raw_block, engine)
+    let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(payload.bytes(), engine)
         .map_err(ApplyError::Consensus)?;
     if parsed.transaction_count() != block.txs.len() {
         return Err(ApplyError::TxidCountMismatch {
@@ -72,14 +62,14 @@ pub(super) fn parse_block_for_apply(
     parsed.into_parts(&block.txs).map_err(ApplyError::Consensus)
 }
 
-/// Parses a block and resolves the outputs it spends.
+/// Parses a payload and resolves the outputs it spends.
 pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Sized>(
-    block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    payload: &'b BlockPayload,
     source: &S,
     engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let (script_source, facts) = parse_block_for_apply(block, provided_serialized, engine)?;
+    let block = payload.block();
+    let (script_source, facts) = parse_block_for_apply(payload, engine)?;
     let tx_plan = plan_block_transactions(block, facts.txids());
     let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));

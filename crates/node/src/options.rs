@@ -34,7 +34,9 @@ use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
 
 /// Canonical subnet type shared by every process-input surface.
-pub use bitcoin_rs_p2p::IpSubnet;
+pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
+/// Network label for `--onlynet`.
+pub use bitcoin_rs_primitives::NetworkLabel;
 
 /// Parses a network selection spelling.
 pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
@@ -51,6 +53,54 @@ pub fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, S
     ScriptIndexMode::parse(value).ok_or_else(|| {
         format!("invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean")
     })
+}
+
+/// Verifies that a portable index bundle path is non-empty, not merely
+/// whitespace, and contains no NUL byte.
+///
+/// PRE: none; operates only on the path's encoded bytes, without filesystem I/O.
+/// POST: returns `Ok(())` when `path` is usable; returns the specific reason
+///   when it is not.
+/// INVARIANT: this is the single authority for index bundle path validity,
+///   shared by process-input parsers and the post-resolution configuration
+///   validator.
+pub fn check_index_bundle_path(
+    path: &std::path::Path,
+) -> std::result::Result<(), IndexBundleDirError> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.is_empty() || bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err(IndexBundleDirError::Empty);
+    }
+    if bytes.contains(&0) {
+        return Err(IndexBundleDirError::Nul);
+    }
+    Ok(())
+}
+
+/// Parses a portable index bundle directory: any nonblank path without a NUL.
+///
+/// PRE: `value` is the operator's text for `index_bundle_import` or
+/// `index_bundle_export`.
+/// POST: the path is returned verbatim; no filesystem access happens here, so
+/// existence and writability are checked only when the bundle directive runs.
+/// INVARIANT: an empty or blank value is an error on every surface rather than
+/// a quiet "unset", because an operator who wrote the key meant to run a
+/// bundle operation.
+pub fn parse_index_bundle_dir(value: &str) -> std::result::Result<PathBuf, IndexBundleDirError> {
+    let path = PathBuf::from(value);
+    check_index_bundle_path(&path)?;
+    Ok(path)
+}
+
+/// Why an index bundle directory value was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum IndexBundleDirError {
+    /// The value was empty or only whitespace.
+    #[error("index bundle directory must not be empty")]
+    Empty,
+    /// The value contained a NUL byte, which no path can hold.
+    #[error("index bundle directory must not contain a NUL byte")]
+    Nul,
 }
 
 /// Parses a validation mode.
@@ -103,6 +153,20 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String
     Ok(value.to_owned())
 }
 
+/// Parse one allowed remote network without DNS resolution.
+pub fn parse_peer_network(value: &str) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, String> {
+    value.parse().map_err(str::to_owned)
+}
+fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|network| parse_peer_network(network.trim()).map_err(anyhow::Error::msg))
+        .collect()
+}
+
 /// Parses a comma-separated listener bind list.
 fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
     value
@@ -127,6 +191,19 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
         .split(',')
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
         .collect()
+}
+
+/// Parses one `--onlynet` network label.
+pub fn parse_network_label(
+    value: &str,
+) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, String> {
+    match value {
+        "ipv4" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv4),
+        "ipv6" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv6),
+        "onion" => Ok(bitcoin_rs_primitives::NetworkLabel::Onion),
+        "i2p" => Ok(bitcoin_rs_primitives::NetworkLabel::I2p),
+        other => Err(format!("unknown network label: {other}")),
+    }
 }
 
 /// Parses an operator discouragement-exemption subnet.
@@ -538,6 +615,7 @@ macro_rules! option_rows {
                         cli[#[arg(long = "dns-seeds-enabled")]]
                         env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
                         toml native("dns_seeds_enabled")
+                        conf["dnsseed"]
                     }
                     /// Optional Bitcoin Core `ASMap` file for network diversity.
                     asmap as asmap: Option<PathBuf> {
@@ -557,6 +635,67 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_CONNECT", parse_connect_list]
                         toml each("connect", parse_connect_endpoint)
                     }
+                    /// SOCKS5 route for IP destinations; onion routing is configured separately.
+                    proxy as proxy: Option<SocketAddr> {
+                        cli[#[arg(long = "proxy")]]
+                        env["BITCOIN_RS_PROXY", str::parse]
+                        toml native("proxy")
+                        conf["proxy"]
+                    }
+                    /// SOCKS5 route for Tor v3 destinations, passed to the proxy without local DNS.
+                    onion_proxy as onion_proxy: Option<SocketAddr> {
+                        cli[#[arg(long = "onion-proxy")]]
+                        env["BITCOIN_RS_ONION_PROXY", str::parse]
+                        toml native("onion_proxy")
+                        conf["onion"]
+                    }
+                    /// Loopback SAM bridge of an operator-managed IVNP router.
+                    i2p_sam as i2p_sam: Option<SocketAddr> {
+                        cli[#[arg(long = "i2p-sam")]]
+                        env["BITCOIN_RS_I2P_SAM", str::parse]
+                        toml native("i2p_sam")
+                        conf["i2psam"]
+                    }
+                    /// Loopback Tor control endpoint enabling a persistent inbound onion service.
+                    tor_control as tor_control: Option<SocketAddr> {
+                        cli[#[arg(long = "tor-control")]]
+                        env["BITCOIN_RS_TOR_CONTROL", str::parse]
+                        toml native("tor_control")
+                        conf["torcontrol"]
+                    }
+                    /// Tor SAFECOOKIE file; otherwise use NULL authentication.
+                    tor_cookie as tor_cookie: Option<PathBuf> {
+                        cli[#[arg(long = "tor-cookie")]]
+                        env["BITCOIN_RS_TOR_COOKIE", parse_path]
+                        toml native("tor_cookie")
+                    }
+                    /// Accept inbound I2P streams using a persistent application destination.
+                    i2p_accept as i2p_accept: Option<bool> {
+                        cli[#[arg(long = "i2p-accept", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_I2P_ACCEPT", parse_bool]
+                        toml native("i2p_accept")
+                        conf["i2pacceptincoming"]
+                    }
+                    /// Require SOCKS username/password authentication with fresh credentials per connection.
+                    proxy_randomize_credentials as proxy_randomize_credentials: Option<bool> {
+                        cli[#[arg(long = "proxy-randomize-credentials", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_PROXY_RANDOMIZE_CREDENTIALS", parse_bool]
+                        toml native("proxy_randomize_credentials")
+                        conf["proxyrandomize"]
+                    }
+                    /// Public Bitcoin service port for inbound overlay services.
+                    overlay_port as overlay_port: Option<u16> {
+                        cli[#[arg(long = "overlay-port")]]
+                        env["BITCOIN_RS_OVERLAY_PORT", str::parse]
+                        toml native("overlay_port")
+                    }
+                    /// Restrict every peer connection to these remote networks.
+                    onlynet as onlynet: Option<Vec<$crate::options::PeerNetwork>> {
+                        cli[#[arg(long = "onlynet", value_delimiter = ',', value_parser = $crate::options::parse_peer_network)]]
+                        env["BITCOIN_RS_ONLYNET", parse_peer_networks]
+                        toml each("onlynet", parse_peer_network)
+                        conf["onlynet"]
+                    }
                     /// Whether fast sync (shallow, early fan-out over a larger
                     /// outbound set) is enabled.
                     fast_sync as fast_sync: Option<bool> {
@@ -572,6 +711,26 @@ macro_rules! option_rows {
                         toml native("v2_transport")
                         conf["v2transport"]
                     }
+                    /// Offer BIP331 ancestor package relay to peers. Off by default.
+                    package_relay as p2p_package_relay: Option<bool> {
+                        cli[#[arg(long = "p2p-package-relay", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_P2P_PACKAGE_RELAY", parse_bool]
+                        toml native("p2p_package_relay")
+                    }
+                    /// Announce and accept BIP332 stale-tip headers. Off by default; setting
+                    /// it on a test network is the explicit test override.
+                    stale_tip_relay as p2p_stale_tip_relay: Option<bool> {
+                        cli[#[arg(long = "p2p-stale-tip-relay", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_P2P_STALE_TIP_RELAY", parse_bool]
+                        toml native("p2p_stale_tip_relay")
+                    }
+                    /// Tell BIP332 peers this node prefers stale-tip blocks over headers.
+                    /// Requires `p2p_stale_tip_relay`.
+                    stale_tip_prefers_blocks as p2p_stale_tip_prefers_blocks: Option<bool> {
+                        cli[#[arg(long = "p2p-stale-tip-prefers-blocks", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_P2P_STALE_TIP_PREFERS_BLOCKS", parse_bool]
+                        toml native("p2p_stale_tip_prefers_blocks")
+                    }
                 }
                 /// User-supplied RPC overrides.
                 group rpc: RpcOverrides {
@@ -581,11 +740,35 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_SILENT_PAYMENTS", parse_bool]
                         toml native("silent_payments")
                     }
+                    /// Enable the optional BIP337 compressrawtransaction and decompressrawtransaction RPCs.
+                    compressed_transactions as compressed_transactions: Option<bool> {
+                        cli[#[arg(long = "compressed-transactions", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_COMPRESSED_TRANSACTIONS", parse_bool]
+                        toml native("compressed_transactions")
+                    }
                     /// JSON-RPC bind address.
                     bind as rpc_bind: Option<SocketAddr> {
                         cli[#[arg(long = "rpc-bind")]]
                         env["BITCOIN_RS_RPC_BIND", str::parse]
                         toml native("rpc_bind")
+                    }
+                    /// Separate public HTTP bind; when set, rpc-bind serves JSON-RPC only.
+                    public_bind as public_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "public-bind")]]
+                        env["BITCOIN_RS_PUBLIC_BIND", str::parse]
+                        toml native("public_bind")
+                    }
+                    /// Maximum live connections on the RPC listener (default 128).
+                    max_connections as rpc_max_connections: Option<usize> {
+                        cli[#[arg(long = "rpc-max-connections")]]
+                        env["BITCOIN_RS_RPC_MAX_CONNECTIONS", str::parse]
+                        toml native("rpc_max_connections")
+                    }
+                    /// Maximum live connections on the optional public listener (default 128).
+                    public_max_connections as public_max_connections: Option<usize> {
+                        cli[#[arg(long = "public-max-connections")]]
+                        env["BITCOIN_RS_PUBLIC_MAX_CONNECTIONS", str::parse]
+                        toml native("public_max_connections")
                     }
                     /// Whether the REST gateway is enabled.
                     rest as rest: Option<bool> {
@@ -637,6 +820,22 @@ macro_rules! option_rows {
                         cli[#[arg(long = "scriptindex", visible_alias = "script-index", num_args = 0..=1, default_missing_value = "true", value_parser = parse_script_index)]]
                         env["BITCOIN_RS_SCRIPTINDEX", parse_script_index]
                         toml text("script_index", parse_script_index)
+                    }
+                    /// One-shot startup restore of a portable index bundle from this
+                    /// directory. Requires `txindex` and excludes `index_bundle_export`;
+                    /// remove it after the run.
+                    bundle_import as index_bundle_import: Option<PathBuf> {
+                        cli[#[arg(long = "index-bundle-import", value_parser = $crate::options::parse_index_bundle_dir)]]
+                        env["BITCOIN_RS_INDEX_BUNDLE_IMPORT", parse_index_bundle_dir]
+                        toml text("index_bundle_import", parse_index_bundle_dir)
+                    }
+                    /// One-shot startup export of a portable index bundle into this
+                    /// directory. Requires `txindex` and excludes `index_bundle_import`;
+                    /// remove it after the run.
+                    bundle_export as index_bundle_export: Option<PathBuf> {
+                        cli[#[arg(long = "index-bundle-export", value_parser = $crate::options::parse_index_bundle_dir)]]
+                        env["BITCOIN_RS_INDEX_BUNDLE_EXPORT", parse_index_bundle_dir]
+                        toml text("index_bundle_export", parse_index_bundle_dir)
                     }
                 }
                 /// User-supplied observability overrides.

@@ -26,6 +26,17 @@ compatibility boundary for these rows; a mismatch refuses open and recovery full
 
 ## Implementation boundaries
 
+The runtime query engine owns exact transaction resolution; `Indexer` exposes
+row scans and watermark reads rather than a second resolution policy.
+`TxQueryError::Unavailable(TxUnavailableCause)` gives callers typed refusal
+causes, while the query branches still decide whether absence is proven.
+
+`QueryBudget` retains one verified decoded block per query, keyed by height and
+full block hash. Consecutive reads of that identity reuse the block without
+another body read or byte charge; changing identity evicts it before fetching.
+Positioned reads and full-block fallback share the row's resolved block hash.
+These are implemented query behaviors, not measured latency or RSS gains.
+
 `lib.rs` exports the public API through the private `index.rs` facade.
 Its private modules separate block preparation
 (`block`, `prepared`), canonical row mutation (`rows`), durable writes (`write`),

@@ -350,6 +350,40 @@ impl TxPosition {
     }
 }
 
+/// Exclusive upper bound, in bytes, of a transaction position's end offset
+/// within one serialized block.
+///
+/// Consensus caps a serialized block at 4,000,000 bytes
+/// (`bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE`); a position ending
+/// past this names bytes no valid block holds. The writer enforces it, and
+/// the query engine and the portable bundle framing apply [`positions_are_valid`],
+/// so a row the writer admits is never corrupt to an exporter.
+pub(crate) const MAX_POSITION_END_BYTES: usize = 4_000_000;
+
+/// Reports whether `positions` are a valid, block-ordered position list:
+/// nonzero lengths inside one serialized block, strictly ascending and
+/// non-overlapping. This is the one predicate the writer enforces and the
+/// query engine and bundle framing apply before trusting a stored row.
+pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
+    let mut previous: Option<TxPosition> = None;
+    for &position in positions {
+        let Some(end) = position.end() else {
+            return false;
+        };
+        if position.byte_len() == 0
+            || usize::try_from(end).map_or(true, |end| end > MAX_POSITION_END_BYTES)
+            || previous.is_some_and(|prior| {
+                position.offset() <= prior.offset()
+                    || position.offset() < prior.end().unwrap_or(u32::MAX)
+            })
+        {
+            return false;
+        }
+        previous = Some(position);
+    }
+    true
+}
+
 /// Codec for the row value carrying a row's transaction byte positions.
 ///
 /// Layout: a packed `TxPosition[n]`, `n >= 1`. An empty value means the row

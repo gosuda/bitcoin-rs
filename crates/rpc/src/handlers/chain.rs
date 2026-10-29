@@ -15,12 +15,14 @@ use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
 
 use super::util::{ScanScript, parse_derivation_range, scan_descriptor};
+#[cfg(test)]
+use super::util::scan_descriptor_range;
 use bitcoin::hex::DisplayHex as _;
 
 use crate::context::{AppliedView, ChainControlError, Context, TxQueryError, TxUnavailableCause};
 use crate::convert::{
-    self, compact_target_hex, i32_saturated, i64_saturated, i64_saturated_len, sat_to_btc,
-    typed_to_sonic, typed_to_sonic_omitting_nulls,
+    self, compact_target_hex, i32_saturated, i64_saturated, sat_to_btc, typed_to_sonic,
+    typed_to_sonic_omitting_nulls,
 };
 use crate::error::RpcError;
 use crate::handlers::{
@@ -90,6 +92,7 @@ fn snapshot_error(error: crate::context::SnapshotControlError) -> RpcError {
         SnapshotControlError::Unavailable(message) | SnapshotControlError::Failed(message) => {
             RpcError::Internal(message)
         }
+        SnapshotControlError::Interrupted => RpcError::Misc(error.to_string()),
     }
 }
 
@@ -121,6 +124,41 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     typed_to_sonic(
         &control
             .load_txoutset(std::path::Path::new(path))
+            .map_err(snapshot_error)?,
+    )
+}
+
+/// Core 31.1 `dumptxoutset`, restricted to `type = "latest"`: the snapshot is
+/// the applied tip's UTXO set. Rollback snapshots and `options` are not served.
+pub(crate) fn dumptxoutset(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    let params = super::bind_named_params(params, &["path", "type"])?;
+    super::ensure_at_most_params(&params, 2)?;
+    let path = required_str(&params, 0, "path is required")?;
+    // Core 31.1 gives `type` the default "", which it rejects like any other
+    // value that is neither "latest" nor "rollback".
+    let snapshot_type = match params_array(&params)?.get(1) {
+        Some(value) if !value.is_null() => value
+            .as_str()
+            .ok_or_else(|| super::wrong_type_plain(value, "string"))?,
+        _ => "",
+    };
+    if snapshot_type != "latest" {
+        return Err(RpcError::InvalidParameter(format!(
+            "Invalid snapshot type \"{snapshot_type}\" specified. Only \"latest\" is supported"
+        )));
+    }
+    let control = ctx
+        .chain
+        .chain_control
+        .as_ref()
+        .ok_or_else(|| RpcError::Internal("snapshot control unavailable".to_owned()))?;
+    typed_to_sonic(
+        &control
+            .dump_txoutset(std::path::Path::new(path), cancellation)
             .map_err(snapshot_error)?,
     )
 }
@@ -1166,7 +1204,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
         height: i64::from(applied_height),
         best_block: best_block.to_string_be(),
-        transactions: Some(i64_saturated_len(transactions)),
+        transactions: Some(i64_saturated(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),
         hash_serialized_3,
@@ -1516,40 +1554,65 @@ fn parse_scan_scripts(
             "At most 1024 scan descriptors are supported".into(),
         ));
     }
-    let mut scripts = std::collections::BTreeMap::new();
+    let mut descriptors = Vec::with_capacity(scanobjects.len());
     let mut input_bytes = 0usize;
-    let mut script_bytes = 0usize;
+    let mut script_count = 0usize;
     for scanobject in scanobjects {
         if cancelled()? {
-            break;
+            return Ok(std::collections::BTreeMap::new());
         }
-        let descriptor = scanobject_descriptor(scanobject)?;
+        let (descriptor, range) = scanobject_descriptor(scanobject)?;
+        let range = range.map(parse_derivation_range).transpose()?;
         input_bytes = input_bytes.saturating_add(descriptor.len());
         if descriptor.len() > MAX_SCAN_DESCRIPTOR_BYTES || input_bytes > MAX_SCAN_INPUT_BYTES {
             return Err(RpcError::InvalidParameter(
                 "Scan descriptor byte limit exceeded".into(),
             ));
         }
-        let ScanScript {
-            script_pubkey,
-            desc,
-        } = scan_descriptor(descriptor, network)?;
-        if let std::collections::btree_map::Entry::Vacant(entry) = scripts.entry(script_pubkey) {
-            script_bytes += entry.key().len();
-            if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
-                return Err(RpcError::InvalidParameter(
-                    "Scan script byte limit exceeded".into(),
-                ));
-            }
-            entry.insert(desc);
+        let descriptor = scan_descriptor(descriptor, range, network)?;
+        script_count = script_count.saturating_add(descriptor.script_count());
+        if script_count > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPTS {
+            return Err(RpcError::InvalidParameter(
+                "At most 1024 scan script expansions are supported".into(),
+            ));
         }
+        descriptors.push(descriptor);
+    }
+    // Admit the whole request's work before deriving any public keys. Count
+    // duplicate expansions too: deduplication bounds retained scripts, not CPU.
+    let mut scripts = std::collections::BTreeMap::new();
+    let mut script_bytes = 0usize;
+    for descriptor in descriptors {
+        if cancelled()? {
+            break;
+        }
+        descriptor.expand(
+            &cancelled,
+            |ScanScript {
+                 script_pubkey,
+                 desc,
+             }| {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    scripts.entry(script_pubkey)
+                {
+                    script_bytes += entry.key().len();
+                    if script_bytes > bitcoin_rs_utxo::scan::MAX_SCAN_SCRIPT_BYTES {
+                        return Err(RpcError::InvalidParameter(
+                            "Scan script byte limit exceeded".into(),
+                        ));
+                    }
+                    entry.insert(desc);
+                }
+                Ok(())
+            },
+        )?;
     }
     Ok(scripts)
 }
 
-fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
+fn scanobject_descriptor(scanobject: &Value) -> Result<(&str, Option<&Value>), RpcError> {
     if let Some(descriptor) = scanobject.as_str() {
-        return Ok(descriptor);
+        return Ok((descriptor, None));
     }
     let object = scanobject.as_object().ok_or_else(|| {
         RpcError::InvalidParameter("Scan object needs to be either a string or an object".into())
@@ -1563,10 +1626,8 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
     let descriptor = descriptor
         .as_str()
         .ok_or_else(|| super::wrong_type_plain(descriptor, "string"))?;
-    if let Some(range) = object.get(&"range").filter(|value| !value.is_null()) {
-        parse_derivation_range(range)?;
-    }
-    Ok(descriptor)
+    let range = object.get(&"range").filter(|value| !value.is_null());
+    Ok((descriptor, range))
 }
 
 fn scan_unspents(
@@ -1662,7 +1723,8 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 /// keeps headers ahead of it; a block whose header is known but which has not
 /// been connected is not in it, so it is `-1` rather than `0`.
 pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
-    // Membership and depth come from the response's one captured publication.
+    // Membership comes from the response's one captured publication; depth
+    // comes from the shared render helper so every surface agrees.
     let Some(tip) = view.tip() else {
         return -1;
     };
@@ -1676,12 +1738,8 @@ pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, he
         tree.node_at_height_from(tip.tip_id, height)
             .and_then(|id| tree.node(id).ok().map(|node| node.hash))
     };
-    if active_hash != Some(hash) {
-        return -1;
-    }
-    i64::from(tip.height)
-        .saturating_sub(i64::from(height))
-        .saturating_add(1)
+    let on_active = active_hash == Some(hash);
+    crate::render::confirmations(view.height(), height, on_active)
 }
 
 fn block_verbose_typed(
@@ -1702,27 +1760,26 @@ fn block_verbose_typed(
         .chain_work_hex_for_hash(hash)
         .unwrap_or_else(|| "00".to_owned());
     let next_block_hash = (block_confirmations > 0)
-        .then(|| next_applied_block_hash(ctx, &view, record.height))
-        .flatten();
+        .then(|| {
+            record
+                .height
+                .checked_add(1)
+                .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
+        })
+        .flatten()
+        .map(BlockHash::from);
     if !include_block_fields {
-        return typed_to_sonic(&v31::GetBlockHeaderVerbose {
-            hash: record.hash.to_string(),
-            confirmations: block_confirmations,
-            height: i64::from(record.height),
-            version: header.version,
-            version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
-            merkle_root: header.merkle_root.to_string_be(),
-            time: i64::from(header.time),
-            median_time: i64_saturated(u64::from(mediantime)),
-            nonce: i64::from(header.nonce),
-            bits: format!("{:08x}", header.bits),
-            target: compact_target_hex(header.bits),
-            difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
-            n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
-            previous_block_hash: Some(header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
-        });
+        return render_block_header_verbose(
+            ctx,
+            record,
+            &header,
+            BlockHeaderRenderFacts {
+                confirmations: block_confirmations,
+                mediantime,
+                chainwork_hex,
+                next_block_hash,
+            },
+        );
     }
     let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
@@ -1732,8 +1789,8 @@ fn block_verbose_typed(
         typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
             confirmations: block_confirmations,
-            size: i64_saturated_len(block.total_size()),
-            stripped_size: Some(i64_saturated_len(block.stripped_size())),
+            size: i64_saturated(block.total_size()),
+            stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
             coinbase_tx,
             height: i64::from(record.height),
@@ -1748,7 +1805,7 @@ fn block_verbose_typed(
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
-            n_tx: i64_saturated_len(record.tx_count),
+            n_tx: i64_saturated(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
         })?
@@ -1756,8 +1813,8 @@ fn block_verbose_typed(
         let base = v31::GetBlockVerboseTwo {
             hash: record.hash.to_string(),
             confirmations: block_confirmations,
-            size: i64_saturated_len(block.total_size()),
-            stripped_size: Some(i64_saturated_len(block.stripped_size())),
+            size: i64_saturated(block.total_size()),
+            stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
             coinbase_tx,
             height: i64::from(record.height),
@@ -1772,7 +1829,7 @@ fn block_verbose_typed(
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
-            n_tx: i64_saturated_len(block.txs.len()),
+            n_tx: i64_saturated(block.txs.len()),
             previous_block_hash: (record.height > 0).then(|| header.prev_blockhash.to_string()),
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
         };
@@ -1795,6 +1852,39 @@ fn block_verbose_typed(
         .ok_or_else(|| RpcError::Internal("typed block coinbase is not an object".to_owned()))?;
     let _ = coinbase.insert("version", json!(coinbase_version));
     Ok(value)
+}
+
+struct BlockHeaderRenderFacts {
+    confirmations: i64,
+    mediantime: u32,
+    chainwork_hex: String,
+    next_block_hash: Option<BlockHash>,
+}
+
+fn render_block_header_verbose(
+    ctx: &Context,
+    record: &BlockRecord,
+    header: &Header,
+    facts: BlockHeaderRenderFacts,
+) -> Result<Value, RpcError> {
+    typed_to_sonic(&v31::GetBlockHeaderVerbose {
+        hash: record.hash.to_string(),
+        confirmations: facts.confirmations,
+        height: i64::from(record.height),
+        version: header.version,
+        version_hex: format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes())),
+        merkle_root: header.merkle_root.to_string_be(),
+        time: i64::from(header.time),
+        median_time: i64_saturated(u64::from(facts.mediantime)),
+        nonce: i64::from(header.nonce),
+        bits: format!("{:08x}", header.bits),
+        target: compact_target_hex(header.bits),
+        difficulty: ctx.chain.difficulty_for_bits(header.bits),
+        chain_work: facts.chainwork_hex,
+        n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
+        previous_block_hash: Some(header.prev_blockhash.to_string()),
+        next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
+    })
 }
 
 type SpentCoins = Vec<Vec<bitcoin_rs_utxo::UtxoCoin>>;
@@ -1867,18 +1957,6 @@ fn render_detailed_block(
     let mut value = typed_to_sonic_omitting_nulls(base)?;
     let _ = value.insert("tx", json!(tx));
     Ok(value)
-}
-
-fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
-    let tip = view.tip()?;
-    let next_height = height.checked_add(1)?;
-    if next_height > tip.height {
-        return None;
-    }
-    let tree = ctx.chain.block_tree.read();
-    let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
-    let node = tree.node(node_id).ok()?;
-    Some(BlockHash::from(node.hash))
 }
 
 fn decode_header(record: &BlockRecord) -> Result<Header, RpcError> {
@@ -5743,11 +5821,6 @@ mod scantxoutset_tests {
                 "Descriptor needs to be provided",
             ),
             (
-                "ranged descriptor",
-                json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
-                "Ranged and multipath scantxoutset descriptors are not supported",
-            ),
-            (
                 "inverted range",
                 json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
                 "must not have begin after end",
@@ -6165,11 +6238,485 @@ mod scantxoutset_tests {
         );
     }
 
+    const SCAN_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+    #[test]
+    fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> anyhow::Result<()> {
+        let ctx = Arc::new(Context::new());
+        let single = format!("wpkh({SCAN_XPUB}/0/*)");
+        let multi = format!("wpkh({SCAN_XPUB}/<0;1>/*)");
+        for objects in [
+            json!([{"desc":single,"range":1024}]),
+            json!([{"desc":multi,"range":512}]),
+            json!([multi]), // Default 0..=1000 applies to each path.
+            json!([{"desc":single,"range":512},{"desc":single,"range":512}]),
+            // The trailing object takes the total over budget before the
+            // earlier descriptor can attempt an impossible hardened derive.
+            json!([{"desc":format!("wpkh({SCAN_XPUB}/*h)"),"range":1023},"raw(51)"]),
+        ] {
+            let error = scantxoutset(&ctx, &json!(["start", objects]))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("oversized scan succeeded"))?;
+            assert_eq!(error.code(), -8);
+            assert!(error.to_string().contains("1024 scan script expansions"));
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+        }
+        for objects in [
+            json!([{"desc":single,"range":1023}]),
+            json!([{"desc":multi,"range":511}]),
+            json!([single]),
+            json!([{"desc":format!("wpkh({SCAN_XPUB}/<0;1>/7)"),"range":999_999}]),
+        ] {
+            let result = scantxoutset(&ctx, &json!(["start", objects]))?;
+            assert_eq!(result["success"].as_bool(), Some(true));
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> anyhow::Result<()> {
+        let ctx = Arc::new(Context::new());
+        let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+        let secret = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
+        for desc in [
+            format!("wpkh({SCAN_XPUB}/0h/*)"),
+            format!("wpkh({SCAN_XPUB}/<0;1h>/*)"),
+            format!("wpkh({SCAN_XPUB}/*h)"),
+            format!("wpkh({SCAN_XPUB}/<0;1>/*h)"),
+            format!("wpkh({SCAN_XPUB}/<0;0>/*)"),
+            format!("wpkh({tpub}/0/*)"),
+            format!("wpkh({secret}/<0;1>/*)"),
+            format!("wpkh({SCAN_XPUB}/0/*)#badbadba"),
+            "addr(foo*)".into(),
+        ] {
+            let error = scantxoutset(&ctx, &json!(["start", [{"desc":desc,"range":[0,1]}]]))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("invalid descriptor succeeded: {desc}"))?;
+            assert_eq!(error.code(), -5, "{desc}: {error}");
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+            assert_eq!(
+                scantxoutset(&ctx, &json!(["start", []]))?["success"].as_bool(),
+                Some(true)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scan_expansion_observes_abort_shutdown_and_deadline() -> anyhow::Result<()> {
+        use std::cell::Cell;
+
+        let ctx = Arc::new(Context::new());
+        for cause in ["abort", "shutdown", "deadline"] {
+            let permit = ctx.chain.utxo.reserve_scan()?;
+            let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
+            let descriptor = scan_descriptor(
+                &format!("wpkh({SCAN_XPUB}/<0;1>/*)"),
+                Some((0, 9)),
+                ctx.chain.chain_network,
+            )?;
+            let emitted = Cell::new(0);
+            let result = descriptor.expand(
+                &|| {
+                    if emitted.get() >= 2 {
+                        if cause == "deadline" {
+                            return Err(scan_error(&bitcoin_rs_utxo::scan::UtxoScanError::Limit(
+                                "60 seconds",
+                            )));
+                        }
+                        if cause == "shutdown" {
+                            cancellation.store(true);
+                        } else {
+                            ctx.chain.utxo.abort_scan();
+                        }
+                    }
+                    permit
+                        .cancelled(|| cancellation.is_triggered())
+                        .map_err(|error| scan_error(&error))
+                },
+                |_| {
+                    emitted.set(emitted.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(emitted.get() > 0 && emitted.get() < 20);
+            if cause == "deadline" {
+                assert!(
+                    result
+                        .err()
+                        .ok_or_else(|| anyhow::anyhow!("deadline ignored"))?
+                        .to_string()
+                        .contains("60 seconds")
+                );
+            } else {
+                result?;
+                let response = scantxoutset_scan(
+                    &ctx,
+                    &permit,
+                    &std::collections::BTreeMap::new(),
+                    &cancellation,
+                )?;
+                assert_eq!(response["success"].as_bool(), Some(false));
+                assert_eq!(response["txouts"].as_u64(), Some(0));
+            }
+            drop(permit);
+            assert_eq!(ctx.chain.utxo.scan_progress(), None);
+            assert_eq!(
+                scantxoutset(&ctx, &json!(["start", []]))?["success"].as_bool(),
+                Some(true)
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn scantxoutset_abort_returns_false() {
         let ctx = Arc::new(Context::new());
         let result = scantxoutset(&ctx, &json!(["abort"]))
             .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn ranged_descriptor_matches_fixed_descriptors() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let ranged_desc = format!("wpkh({xpub}/0/*)");
+        let fixed_0 = format!("wpkh({xpub}/0/0)");
+        let fixed_1 = format!("wpkh({xpub}/0/1)");
+        let fixed_2 = format!("wpkh({xpub}/0/2)");
+
+        let scripts =
+            scan_descriptor_range(&ranged_desc, Network::Mainnet, Some((0, 2)), || Ok(false))
+                .unwrap_or_else(|err| panic!("derive ranged scripts: {err}"));
+        assert_eq!(scripts.len(), 3);
+
+        // Also test scan_descriptor on a fixed form
+        let single = scan_descriptor_range(&fixed_0, Network::Mainnet, None, || Ok(false))
+            .unwrap_or_else(|err| panic!("scan_descriptor fixed form: {err}"))
+            .pop()
+            .unwrap_or_else(|| panic!("scan_descriptor fixed form produced no script"));
+        assert_eq!(single.script_pubkey, scripts[0].script_pubkey);
+        assert_eq!(single.desc, scripts[0].desc);
+
+        for (i, s) in scripts.iter().enumerate() {
+            let idx_u64 = u64::try_from(i).unwrap_or(0);
+            let idx_u32 = u32::try_from(i).unwrap_or(0);
+            let outpoint = OutPoint::new(Txid::from(test_txid(50 + idx_u64)), idx_u32);
+            let txout = TxOut {
+                value: Amount::from_sat(10_000 * (idx_u64 + 1)),
+                script_pubkey: s.script_pubkey.clone().into(),
+            };
+            commit_test_utxo(&ctx, outpoint, txout, false, 0);
+        }
+
+        let ranged_result = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": ranged_desc, "range": [0, 2]}]]),
+        )
+        .unwrap_or_else(|err| panic!("ranged scan failed: {err}"));
+
+        let fixed_result = scantxoutset(&ctx, &json!(["start", [fixed_0, fixed_1, fixed_2]]))
+            .unwrap_or_else(|err| panic!("fixed scan failed: {err}"));
+
+        assert_eq!(ranged_result["txouts"], fixed_result["txouts"]);
+        assert_eq!(ranged_result["total_amount"], fixed_result["total_amount"]);
+        assert_eq!(ranged_result["unspents"], fixed_result["unspents"]);
+
+        let unspents = ranged_result["unspents"]
+            .as_array()
+            .unwrap_or_else(|| panic!("unspents missing: {ranged_result:?}"));
+        assert_eq!(unspents.len(), 3);
+        for entry in unspents {
+            assert!(entry.get("txid").is_some());
+            assert!(entry.get("vout").is_some());
+            assert!(entry.get("amount").is_some());
+            assert!(entry.get("desc").is_some());
+        }
+    }
+
+    #[test]
+    fn multipath_expansion_uses_index_major_branch_inner_order() {
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let desc = format!("wpkh({xpub}/<0;1>/*)");
+        let scripts = scan_descriptor_range(&desc, Network::Mainnet, Some((0, 2)), || Ok(false))
+            .unwrap_or_else(|err| panic!("scan_descriptor_range failed: {err}"));
+        assert_eq!(scripts.len(), 6);
+        // Multipath expansion must be index-major / branch-inner:
+        // index 0: /0/0, /1/0
+        // index 1: /0/1, /1/1
+        // index 2: /0/2, /1/2
+        let descs: Vec<&str> = scripts.iter().map(|s| s.desc.as_str()).collect();
+        assert!(
+            descs[0].contains("/0/0]"),
+            "expected /0/0, got {}",
+            descs[0]
+        );
+        assert!(
+            descs[1].contains("/1/0]"),
+            "expected /1/0, got {}",
+            descs[1]
+        );
+        assert!(
+            descs[2].contains("/0/1]"),
+            "expected /0/1, got {}",
+            descs[2]
+        );
+        assert!(
+            descs[3].contains("/1/1]"),
+            "expected /1/1, got {}",
+            descs[3]
+        );
+        assert!(
+            descs[4].contains("/0/2]"),
+            "expected /0/2, got {}",
+            descs[4]
+        );
+        assert!(
+            descs[5].contains("/1/2]"),
+            "expected /1/2, got {}",
+            descs[5]
+        );
+    }
+
+    #[test]
+    fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+        // [0, 1023] is 1024 scripts: within budget, succeeds
+        let ok = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 1023]}]]),
+        );
+        assert!(ok.is_ok(), "range [0, 1023] must succeed: {ok:?}");
+
+        // [0, 1024] is 1025 scripts: fails before derivation
+        let err_1024 = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 1024]}]]),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("range [0, 1024] must fail"));
+        assert_eq!(err_1024.code(), -8);
+        assert!(
+            err_1024
+                .to_string()
+                .contains("At most 1024 scan descriptors are supported")
+        );
+
+        // Omitted range on multipath descriptor defaults to [0, 1000] (1001 indices * 2 paths = 2002 scripts): fails
+        let err_multipath =
+            scantxoutset(&ctx, &json!(["start", [format!("wpkh({xpub}/<0;1>/*)")]]))
+                .err()
+                .unwrap_or_else(|| panic!("omitted multipath default must fail on 2002 scripts"));
+        assert_eq!(err_multipath.code(), -8);
+        assert!(
+            err_multipath
+                .to_string()
+                .contains("At most 1024 scan descriptors are supported")
+        );
+    }
+
+    #[test]
+    fn cancellation_during_ranged_scan_releases_reservation() {
+        let ctx = Arc::new(Context::new());
+        let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+        let stop = Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let cancel_reader = bitcoin_rs_chain::LatchReader::new(stop);
+
+        let result = super::scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("wpkh({xpub}/0/*)"), "range": [0, 10]}]]),
+            &cancel_reader,
+        )
+        .unwrap_or_else(|err| panic!("cancelled scan returned error: {err}"));
+        assert_eq!(result["success"].as_bool(), Some(false));
+        assert_eq!(ctx.chain.utxo.scan_progress(), None);
+    }
+}
+
+#[cfg(test)]
+mod dumptxoutset_tests {
+    use alloc::sync::Arc;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
+
+    use bitcoin_rs_primitives::Hash256;
+    use sonic_rs::{JsonValueTrait as _, json};
+
+    use crate::context::{
+        ChainControl, ChainControlError, Context, SnapshotControlError, SnapshotExport,
+    };
+    use crate::handlers::Handler;
+
+    /// Records the delegated path and answers with a chosen outcome.
+    struct Exporter {
+        seen: Mutex<Option<PathBuf>>,
+        failure: Option<fn() -> SnapshotControlError>,
+    }
+
+    impl Exporter {
+        fn handler(failure: Option<fn() -> SnapshotControlError>) -> (Arc<Self>, Handler) {
+            let exporter = Arc::new(Self {
+                seen: Mutex::new(None),
+                failure,
+            });
+            let ctx = Context::new().with_chain_control(exporter.clone());
+            (exporter, Handler::new(Arc::new(ctx)))
+        }
+
+        fn seen(&self) -> Option<PathBuf> {
+            self.seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl ChainControl for Exporter {
+        fn dump_txoutset(
+            &self,
+            path: &std::path::Path,
+            cancellation: &bitcoin_rs_chain::LatchReader,
+        ) -> Result<SnapshotExport, SnapshotControlError> {
+            *self.seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(path.to_path_buf());
+            if cancellation.is_triggered() {
+                return Err(SnapshotControlError::Interrupted);
+            }
+            if let Some(failure) = self.failure {
+                return Err(failure());
+            }
+            Ok(SnapshotExport {
+                coins_written: 3,
+                base_hash: Hash256::from_le_bytes(&[1; 32]).to_string_be(),
+                base_height: 7,
+                path: "/data/out.dat".to_owned(),
+                txoutset_hash: Hash256::from_le_bytes(&[2; 32]).to_string_be(),
+                nchaintx: 9,
+            })
+        }
+
+        fn invalidate_block(&self, _hash: Hash256) -> Result<(), ChainControlError> {
+            Err(ChainControlError::UnknownBlock)
+        }
+
+        fn verify_chain(
+            &self,
+            _check_level: u8,
+            _nblocks: u32,
+            _cancellation: &bitcoin_rs_chain::LatchReader,
+        ) -> Result<bool, ChainControlError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn positional_and_named_arguments_delegate_and_report_the_core_fields() {
+        for params in [
+            json!(["out.dat", "latest"]),
+            json!({"path": "out.dat", "type": "latest"}),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let result = handler
+                .dispatch("dumptxoutset", &params)
+                .unwrap_or_else(|error| panic!("{params}: {error}"));
+            assert_eq!(exporter.seen(), Some(PathBuf::from("out.dat")), "{params}");
+            assert_eq!(result["coins_written"].as_u64(), Some(3));
+            assert_eq!(
+                result["base_hash"].as_str(),
+                Some(Hash256::from_le_bytes(&[1; 32]).to_string_be().as_str())
+            );
+            assert_eq!(result["base_height"].as_u64(), Some(7));
+            assert_eq!(result["path"].as_str(), Some("/data/out.dat"));
+            assert_eq!(
+                result["txoutset_hash"].as_str(),
+                Some(Hash256::from_le_bytes(&[2; 32]).to_string_be().as_str())
+            );
+            assert_eq!(result["nchaintx"].as_u64(), Some(9));
+        }
+    }
+
+    #[test]
+    fn only_the_latest_type_is_served_and_refusals_never_reach_the_control() {
+        // Core 31.1 gives `type` no usable default: missing, null and empty
+        // are refused like any value other than the one served.
+        for params in [
+            json!(["out.dat"]),
+            json!(["out.dat", null]),
+            json!(["out.dat", ""]),
+            json!(["out.dat", "rollback"]),
+            json!(["out.dat", "Latest"]),
+            json!({"path": "out.dat"}),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert_eq!(error.code(), -8, "{params}: {error}");
+            assert_eq!(exporter.seen(), None, "{params}");
+        }
+        for (params, code) in [
+            (json!([]), -32602),
+            (json!([5, "latest"]), -3),
+            (json!(["out.dat", 5]), -3),
+            (json!(["out.dat", "latest", {}]), -32602),
+            (
+                json!({"path": "out.dat", "type": "latest", "rollback": 1}),
+                -8,
+            ),
+        ] {
+            let (exporter, handler) = Exporter::handler(None);
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("{params} must be refused"));
+            assert_eq!(error.code(), code, "{params}: {error}");
+            assert_eq!(exporter.seen(), None, "{params}");
+        }
+    }
+
+    #[test]
+    fn control_errors_keep_their_transport_codes_and_a_stopped_handler_interrupts() {
+        let params = json!(["out.dat", "latest"]);
+        let cases: [(fn() -> SnapshotControlError, i64); 4] = [
+            (|| SnapshotControlError::File("exists".to_owned()), -8),
+            (
+                || SnapshotControlError::Unavailable("busy".to_owned()),
+                -32603,
+            ),
+            (|| SnapshotControlError::Failed("disk".to_owned()), -32603),
+            (|| SnapshotControlError::Interrupted, -1),
+        ];
+        for (failure, code) in cases {
+            let (_exporter, handler) = Exporter::handler(Some(failure));
+            let error = handler
+                .dispatch("dumptxoutset", &params)
+                .err()
+                .unwrap_or_else(|| panic!("the control failure must surface"));
+            assert_eq!(error.code(), code, "{error}");
+        }
+
+        // The request latch handed to the control is the handler's stop latch.
+        let (exporter, handler) = Exporter::handler(None);
+        handler.stop();
+        let error = handler
+            .dispatch("dumptxoutset", &params)
+            .err()
+            .unwrap_or_else(|| panic!("a stopped handler must interrupt the export"));
+        assert_eq!(error.code(), -1, "{error}");
+        assert_eq!(exporter.seen(), Some(PathBuf::from("out.dat")));
+    }
+
+    #[test]
+    fn missing_chain_control_is_an_internal_error() {
+        let handler = Handler::new(Arc::new(Context::new()));
+        let error = handler
+            .dispatch("dumptxoutset", &json!(["out.dat", "latest"]))
+            .err()
+            .unwrap_or_else(|| panic!("no control must refuse the export"));
+        assert_eq!(error.code(), -32603, "{error}");
     }
 }

@@ -23,8 +23,12 @@ pub(crate) mod counters;
 pub mod dispatch;
 /// Block download window, peer-assignment, stall, and scheduling policy.
 pub mod download_window;
+/// Typed endpoint parsing, BIP155 conversion, and the single transport dial.
+pub mod endpoint;
 /// Inbound eviction selection when the inbound slots are full.
 pub(crate) mod eviction;
+/// BIP434 feature negotiation messages and codec.
+pub mod feature;
 /// Peer finite-state machine.
 pub(crate) mod fsm;
 /// Version/verack negotiation helpers.
@@ -36,9 +40,15 @@ pub mod inv;
 /// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
 pub(crate) mod netgroup;
+/// Opt-in Tor and IVNP I2P transport configuration.
+pub mod overlay;
+pub use overlay::OverlayNetworkState;
 
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
+
+/// BIP331 ancestor package relay codec and combined package hash.
+pub mod packages;
 
 /// Peer state and DNS resolution types.
 pub(crate) mod peer;
@@ -48,8 +58,14 @@ pub(crate) mod peer_info;
 pub(crate) mod peer_table;
 /// Buffered reads that survive a peer socket's poll interval.
 pub(crate) mod recv;
+/// I2P SAM v3 client for typed I2P transports.
+pub(crate) mod sam;
 /// Runtime owner for P2P control state and workers.
 pub(crate) mod service;
+/// SOCKS5 client for proxied IP and onion transports.
+pub(crate) mod socks;
+/// BIP332 `staletip` message codec.
+pub mod staletip;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
@@ -66,6 +82,9 @@ pub mod wire;
 #[cfg(test)]
 mod test_support;
 
+pub use bitcoin_rs_primitives::{
+    EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork,
+};
 pub use block_announce::{
     BlockAnnounceConfig, BlockAnnounceQueue, BlockAnnounceReceiver, BlockAnnouncer,
     MAX_BLOCKS_TO_ANNOUNCE, MAX_HIGH_BANDWIDTH_PEERS, spawn_block_announce_worker,
@@ -74,12 +93,25 @@ pub(crate) use block_stager::BlockStager;
 pub use chain_query::{ActiveChainQuery, RecentBlockSlot};
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
-pub use connection::{ConnectionId, OutboundRefusal, PeerLease, PeerSource, QueuedFrame};
+pub use connection::{
+    ConnectionId, OutboundRefusal, PeerLease, PeerRemote, PeerSource, QueuedFrame,
+};
 pub use counters::{CountingStream, PeerCounters};
-pub use dispatch::{ChainQuery, FilterRequest, FilterServing, InventoryServing, TxInventory};
+pub use dispatch::{
+    ChainQuery, FilterRequest, FilterServing, InventoryServing, StaleTipHeaders, TxInventory,
+};
+pub use endpoint::{
+    DialFailure, DialRoutes, RouteDenial, RouteTable, TransportRemote, accepted_ip_identity,
+    addrv2_gossip_enabled, connect_peer_stream, dialed_ip_identity, endpoint_from_addrv2,
+    endpoint_to_addrv2, format_endpoint, parse_endpoint,
+};
+pub use feature::{
+    FEATURE_COMMAND, FEATURE_V2_SHORT_ID, FEATURE_VERSION, FeatureAnnouncement, FeatureError,
+    FeatureId,
+};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
-pub use listener::ListenerExtras;
+pub use listener::{ListenerExtras, RelayOffers};
 pub use peer::{
     CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState, WtxidRelayState,
 };
@@ -91,6 +123,11 @@ pub use service::{
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use transport::{TransportFailure, TransportProtocol};
+pub use tx_policy::{
+    InboundBody, InboundPackage, MAX_DECODED_PACKAGES_PER_PEER, OpenedPackage, PackageCapacity,
+    PackageCharge, PackageOpening, PackagePlan, PackageRefusal, PackageRejection, PackageTeardown,
+    PackageToken, plan_package_charge,
+};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
     RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
@@ -98,6 +135,7 @@ pub use tx_relay::{
 pub use wire::{Message, PeerError};
 
 pub use download_window::default_sync_budget;
+pub use sync::StaleTipRetainer;
 
 /// Bounded automatic reconnect avoidance; manual bans retain their owner.
 pub mod discouragement;
