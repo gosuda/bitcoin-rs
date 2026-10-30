@@ -706,7 +706,7 @@ fn check_bip68_sequence_locks(
         }
         for tx_input in &tx.inputs {
             let sequence = tx_input.sequence;
-            if sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+            if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
                 continue;
             }
             let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {

@@ -38,7 +38,10 @@ pub use sighash::{
     AnnexError, CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, tapleaf_hash,
 };
 pub use tx::{Tx, TxIn, TxOut};
-pub use units::{Amount, CompactTarget, LockTime, Sequence};
+pub use units::{
+    Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL, SEQUENCE_LOCKTIME_DISABLE_FLAG,
+    SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
+};
 pub use version::{PKG_VERSION, USER_AGENT, client_version};
 
 /// Wall-clock seconds since the Unix epoch, `0` when the clock predates it.

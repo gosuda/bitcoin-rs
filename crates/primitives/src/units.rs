@@ -44,6 +44,21 @@ impl PartialEq<u64> for Amount {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Sequence(u32);
 
+/// Lock times below this value are block heights; at or above it they are Unix times.
+pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+
+/// A sequence number that makes its input final.
+pub const SEQUENCE_FINAL: u32 = 0xffff_ffff;
+
+/// BIP68: set to disable the relative lock time of an input.
+pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
+
+/// BIP68: set when the relative lock time counts 512-second intervals instead of blocks.
+pub const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+
+/// BIP68: the bits of a sequence number that carry the relative lock time.
+pub const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
+
 impl Sequence {
     pub const ZERO: Self = Self(0);
     /// `0xffffffff` — final, disables relative locktime and RBF signaling.
