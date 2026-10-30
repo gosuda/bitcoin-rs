@@ -236,7 +236,6 @@ fn rejected_staged_add_leaves_source_record_unchanged() -> Result<(), UtxoError>
                 Some(&record),
                 record.txid(),
                 &additions,
-                true,
                 overwritten.as_mut(),
             ),
             Err(UtxoError::ScriptTooLarge { .. })
@@ -432,7 +431,7 @@ fn edit_replacement_fuses_removals_and_additions() -> Result<(), UtxoError> {
     };
     assert_eq!(
         edited,
-        UtxoRecord::add_run_replacement(Some(&record), record.txid(), &additions, false, None)?
+        UtxoRecord::add_run_replacement(Some(&record), record.txid(), &additions, None)?
     );
     Ok(())
 }
@@ -453,7 +452,6 @@ fn add_with_an_unsaturated_inline_partition_falls_back_to_rebuild() -> Result<()
         Some(&shrunk),
         shrunk.txid(),
         &[OutputParts::new(9, 99, &[0x59], false, 2)],
-        true,
         None,
     )?;
     assert_eq!(grown.output_count(), 9);
@@ -538,7 +536,6 @@ fn failed_non_unique_add_leaves_the_overwrite_sink_untouched() -> Result<(), Utx
         Some(&record),
         Hash256::default(),
         &[addition],
-        false,
         Some(&mut overwritten),
     );
     assert!(

@@ -245,24 +245,37 @@ impl UtxoRecord {
         existing: Option<&Self>,
         txid: Hash256,
         additions: &'p [OutputParts<'p>],
-        add_unique: bool,
         overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<Self, UtxoError> {
-        if add_unique {
-            let appended = match existing {
-                Some(record) => record.append_unique_run(additions)?,
-                None => Some(Self::from_output_parts(
-                    txid,
-                    additions.len().min(INLINE_CAPACITY),
-                    additions,
-                )?),
-            };
-            if let Some(record) = appended {
-                if let Some(sink) = overwritten {
-                    sink.resize(sink.len().saturating_add(additions.len()), None);
-                }
-                return Ok(record);
+        if vouts_are_strictly_increasing(
+            existing.and_then(Self::max_vout),
+            additions.iter().map(|part| part.vout),
+        ) {
+            Self::append_run(existing, txid, additions, overwritten)
+        } else {
+            Self::overwrite_run(existing, txid, additions, overwritten)
+        }
+    }
+
+    fn append_run<'p>(
+        existing: Option<&Self>,
+        txid: Hash256,
+        additions: &'p [OutputParts<'p>],
+        overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+    ) -> Result<Self, UtxoError> {
+        let appended = match existing {
+            Some(record) => record.append_unique_run(additions)?,
+            None => Some(Self::from_output_parts(
+                txid,
+                additions.len().min(INLINE_CAPACITY),
+                additions,
+            )?),
+        };
+        if let Some(record) = appended {
+            if let Some(sink) = overwritten {
+                sink.resize(sink.len().saturating_add(additions.len()), None);
             }
+            return Ok(record);
         }
         let (mut parts, mut inline_len) = match existing {
             Some(record) => (record.output_parts(), record.header().inline_len),
@@ -271,13 +284,28 @@ impl UtxoRecord {
         let mut staged = overwritten
             .is_some()
             .then(|| Vec::with_capacity(additions.len()));
-        apply_additions(
-            &mut parts,
-            &mut inline_len,
-            additions,
-            add_unique,
-            staged.as_mut(),
-        );
+        append_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
+        let record = Self::from_output_parts(txid, inline_len, &parts)?;
+        if let (Some(sink), Some(events)) = (overwritten, staged) {
+            sink.extend(events);
+        }
+        Ok(record)
+    }
+
+    fn overwrite_run<'p>(
+        existing: Option<&Self>,
+        txid: Hash256,
+        additions: &'p [OutputParts<'p>],
+        overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+    ) -> Result<Self, UtxoError> {
+        let (mut parts, mut inline_len) = match existing {
+            Some(record) => (record.output_parts(), record.header().inline_len),
+            None => (Vec::with_capacity(additions.len()), 0),
+        };
+        let mut staged = overwritten
+            .is_some()
+            .then(|| Vec::with_capacity(additions.len()));
+        overwrite_parts(&mut parts, &mut inline_len, additions, staged.as_mut());
         let record = Self::from_output_parts(txid, inline_len, &parts)?;
         if let (Some(sink), Some(events)) = (overwritten, staged) {
             sink.extend(events);
@@ -411,14 +439,12 @@ impl UtxoRecord {
             if additions.is_empty() {
                 return Ok(RemovedRecord::Emptied);
             }
-            let add_unique =
-                vouts_are_strictly_increasing(None, additions.iter().map(|part| part.vout));
-            let record = Self::add_run_replacement(None, self.txid(), additions, add_unique, None)?;
+            let record = Self::add_run_replacement(None, self.txid(), additions, None)?;
             return Ok(RemovedRecord::Replaced(record));
         }
         let mut parts = self.output_parts();
         let mut inline_len = self.header().inline_len;
-        let add_unique = vouts_are_strictly_increasing(
+        let appends = vouts_are_strictly_increasing(
             parts.iter().map(|part| part.vout).max(),
             additions.iter().map(|part| part.vout),
         );
@@ -427,7 +453,11 @@ impl UtxoRecord {
                 remove_part_at(&mut parts, &mut inline_len, index);
             }
         }
-        apply_additions(&mut parts, &mut inline_len, additions, add_unique, None);
+        if appends {
+            append_parts(&mut parts, &mut inline_len, additions, None);
+        } else {
+            overwrite_parts(&mut parts, &mut inline_len, additions, None);
+        }
         if parts.is_empty() {
             return Ok(RemovedRecord::Emptied);
         }
@@ -573,26 +603,35 @@ fn owned_parts(outputs: &[OwnedUtxoOut]) -> Vec<OutputParts<'_>> {
     outputs.iter().map(OutputParts::from_owned).collect()
 }
 
-fn apply_additions<'a>(
+fn append_parts<'a>(
     parts: &mut Vec<OutputParts<'a>>,
     inline_len: &mut usize,
     additions: &[OutputParts<'a>],
-    add_unique: bool,
+    overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+) {
+    for &addition in additions {
+        debug_assert!(parts.iter().all(|part| part.vout != addition.vout));
+        push_part(parts, inline_len, addition);
+    }
+    if let Some(sink) = overwritten {
+        sink.extend(additions.iter().map(|_| None));
+    }
+}
+
+fn overwrite_parts<'a>(
+    parts: &mut Vec<OutputParts<'a>>,
+    inline_len: &mut usize,
+    additions: &[OutputParts<'a>],
     overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
 ) {
     let mut displaced = Vec::with_capacity(additions.len());
     for &addition in additions {
-        let old = if add_unique {
-            debug_assert!(parts.iter().all(|part| part.vout != addition.vout));
-            None
-        } else {
-            parts
-                .iter()
-                .position(|part| part.vout == addition.vout)
-                .map(|index| remove_part_at(parts, inline_len, index))
-        };
+        let previous = parts
+            .iter()
+            .position(|part| part.vout == addition.vout)
+            .map(|index| remove_part_at(parts, inline_len, index));
         push_part(parts, inline_len, addition);
-        displaced.push(old.map(OutputParts::into_owned));
+        displaced.push(previous.map(OutputParts::into_owned));
     }
     if let Some(sink) = overwritten {
         sink.extend(displaced);
@@ -623,7 +662,7 @@ fn remove_part_at<'a>(
     }
 }
 
-pub(crate) fn vouts_are_strictly_increasing(
+fn vouts_are_strictly_increasing(
     previous: Option<u32>,
     vouts: impl IntoIterator<Item = u32>,
 ) -> bool {

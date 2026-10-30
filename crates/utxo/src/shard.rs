@@ -10,7 +10,7 @@ use crate::{
     UtxoCoin, UtxoError, UtxoKey,
     contract::UtxoAdd,
     listener::{UtxoChangeEvents, UtxoInserted, UtxoRemoved},
-    record::{OutputParts, OwnedUtxoOut, RemovedRecord, UtxoRecord, vouts_are_strictly_increasing},
+    record::{OutputParts, OwnedUtxoOut, RemovedRecord, UtxoRecord},
     set::{BuildPayload, SpendPayload},
     stats::CoinStatsListener,
 };
@@ -513,11 +513,7 @@ fn apply_add_by_parts(
     parts: &[OutputParts<'_>],
 ) -> Result<(), UtxoError> {
     let existing = find_record(table, key, txid);
-    let add_unique = vouts_are_strictly_increasing(
-        existing.and_then(UtxoRecord::max_vout),
-        parts.iter().map(|part| part.vout),
-    );
-    let replacement = UtxoRecord::add_run_replacement(existing, txid, parts, add_unique, None)?;
+    let replacement = UtxoRecord::add_run_replacement(existing, txid, parts, None)?;
     replace_record(table, key, txid, replacement);
     Ok(())
 }
@@ -536,8 +532,7 @@ fn apply_combined_run(
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
         }
     } else {
-        let add_unique = vouts_are_strictly_increasing(None, parts.iter().map(|part| part.vout));
-        let fresh = UtxoRecord::add_run_replacement(None, txid, parts, add_unique, None)?;
+        let fresh = UtxoRecord::add_run_replacement(None, txid, parts, None)?;
         match fresh.edit_replacement(vouts, &[])? {
             RemovedRecord::Unchanged => RecordMutation::Replace(fresh),
             RemovedRecord::Emptied => RecordMutation::Delete,
@@ -599,18 +594,9 @@ fn stage_add(
 ) -> Result<StagedAdd, UtxoError> {
     let parts: SmallVec<[OutputParts<'_>; 8]> = payloads.iter().map(payload_parts).collect();
     let existing = find_record(table, key, txid);
-    let add_unique = vouts_are_strictly_increasing(
-        existing.and_then(UtxoRecord::max_vout),
-        parts.iter().map(|part| part.vout),
-    );
     let mut overwritten = Vec::with_capacity(payloads.len());
-    let replacement = UtxoRecord::add_run_replacement(
-        existing,
-        txid,
-        &parts,
-        add_unique,
-        Some(&mut overwritten),
-    )?;
+    let replacement =
+        UtxoRecord::add_run_replacement(existing, txid, &parts, Some(&mut overwritten))?;
     Ok(StagedAdd {
         replacement,
         overwritten,

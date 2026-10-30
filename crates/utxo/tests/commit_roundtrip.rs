@@ -107,22 +107,24 @@ fn owned_changes(adds: &[Entry], removes: &[OutPoint]) -> BlockChanges {
     changes
 }
 
-fn commit(
+type CommitPath = fn(&UtxoSet, &[Entry], &[OutPoint], &Hash256) -> Result<(), UtxoError>;
+
+fn commit_borrowed(
     set: &UtxoSet,
     adds: &[Entry],
     removes: &[OutPoint],
     block: &Hash256,
-    borrowed: bool,
 ) -> Result<(), UtxoError> {
-    if borrowed {
-        bitcoin_rs_utxo::contract::commit_block_changes(
-            set,
-            &borrowed_changes(adds, removes),
-            block,
-        )
-    } else {
-        bitcoin_rs_utxo::contract::commit_block_changes(set, &owned_changes(adds, removes), block)
-    }
+    bitcoin_rs_utxo::contract::commit_block_changes(set, &borrowed_changes(adds, removes), block)
+}
+
+fn commit_owned(
+    set: &UtxoSet,
+    adds: &[Entry],
+    removes: &[OutPoint],
+    block: &Hash256,
+) -> Result<(), UtxoError> {
+    bitcoin_rs_utxo::contract::commit_block_changes(set, &owned_changes(adds, removes), block)
 }
 
 #[test]
@@ -148,8 +150,8 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
                 .collect();
             let mut removes = Vec::new();
             for round in 0..2 {
-                commit(&owned, &entries, &removes, &txid(round), false)?;
-                commit(&borrowed, &entries, &removes, &txid(round), true)?;
+                commit_owned(&owned, &entries, &removes, &txid(round))?;
+                commit_borrowed(&borrowed, &entries, &removes, &txid(round))?;
                 let expected = expected_hash_serialized_3(&entries)?;
                 assert_eq!(owned.lock_stable_view().hash_serialized_3()?, expected);
                 assert_eq!(borrowed.lock_stable_view().hash_serialized_3()?, expected);
@@ -168,8 +170,9 @@ fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
 #[test]
 fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult {
     for cross_shard in [false, true] {
-        for borrowed in [false, true] {
-            let far_shard = u8::from(cross_shard);
+        let far_shard = u8::from(cross_shard);
+        let commit_paths: [CommitPath; 2] = [commit_owned, commit_borrowed];
+        for commit in commit_paths {
             let set = UtxoSet::new();
             let retained = OutPoint::new(txid_in_shard(0, 100).into(), 0);
             let peer = OutPoint::new(txid_in_shard(far_shard, 101).into(), 0);
@@ -179,7 +182,7 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 (retained, retained_txout.clone(), false, 10),
                 (peer, peer_txout.clone(), false, 10),
             ];
-            commit(&set, &preload, &[], &txid(102), borrowed)?;
+            commit_owned(&set, &preload, &[], &txid(102))?;
 
             let valid_add = OutPoint::new(txid_in_shard(0, 200).into(), 0);
             let invalid_add = OutPoint::new(txid_in_shard(far_shard, 201).into(), 0);
@@ -187,7 +190,7 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 (valid_add, txout(200), false, 11),
                 (invalid_add, oversized_txout(201), false, 11),
             ];
-            let error = match commit(&set, &adds, &[retained], &txid(103), borrowed) {
+            let error = match commit(&set, &adds, &[retained], &txid(103)) {
                 Ok(()) => return Err("oversized script unexpectedly committed".into()),
                 Err(error) => error,
             };
@@ -248,7 +251,7 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
             )
         })
         .collect();
-    commit(&set, &entries, &[], &txid(90), false)?;
+    commit_owned(&set, &entries, &[], &txid(90))?;
 
     assert_eq!(set.record_count(), 1, "one txid must hold one record");
     assert_eq!(set.len(), entries.len());
@@ -280,7 +283,7 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
     for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
         assert!(set.has_live_outputs_for_txid(&live));
         let block = txid(91 + u64::try_from(index)?);
-        commit(&set, &[], std::slice::from_ref(outpoint), &block, false)?;
+        commit_owned(&set, &[], std::slice::from_ref(outpoint), &block)?;
         assert_eq!(set.get(outpoint), None);
     }
     assert!(!set.has_live_outputs_for_txid(&live));
@@ -304,11 +307,11 @@ fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResul
         })
         .collect();
     let removes: Vec<OutPoint> = adds.iter().map(|entry| entry.0).collect();
-    commit(&set, &adds, &[], &txid(94), false)?;
+    commit_owned(&set, &adds, &[], &txid(94))?;
     assert_eq!(set.record_count(), 1);
     assert_eq!(set.len(), 64);
 
-    commit(&set, &[], &removes, &txid(95), false)?;
+    commit_owned(&set, &[], &removes, &txid(95))?;
 
     for remove in &removes {
         assert_eq!(set.get(remove), None);
@@ -339,14 +342,14 @@ fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
         if reverse {
             adds.reverse();
         }
-        commit(&set, &adds, &[], &txid(300), false)?;
+        commit_owned(&set, &adds, &[], &txid(300))?;
 
-        commit(&set, &[], &[first_a], &txid(301), false)?;
+        commit_owned(&set, &[], &[first_a], &txid(301))?;
         assert_eq!(set.get(&first_a), None);
         assert_eq!(set.get(&first_b), Some(first_b_txout));
         assert_eq!(set.get(&peer), Some(peer_txout.clone()));
 
-        commit(&set, &[], &[first_b], &txid(302), false)?;
+        commit_owned(&set, &[], &[first_b], &txid(302))?;
         assert_eq!(set.get(&peer), Some(peer_txout));
         assert!(!set.has_live_outputs_for_txid(&first));
         assert!(set.has_live_outputs_for_txid(&second));
@@ -367,9 +370,9 @@ fn duplicate_remove_does_not_fast_delete_unspent_vout() -> TestResult {
         (removed, txout(700), false, 1),
         (retained, retained_txout.clone(), false, 1),
     ];
-    commit(&set, &adds, &[], &txid(702), false)?;
+    commit_owned(&set, &adds, &[], &txid(702))?;
 
-    commit(&set, &[], &[removed, removed], &txid(703), false)?;
+    commit_owned(&set, &[], &[removed, removed], &txid(703))?;
 
     assert_eq!(set.get(&removed), None);
     assert_eq!(set.get(&retained), Some(retained_txout));
