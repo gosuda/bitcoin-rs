@@ -147,16 +147,25 @@ impl BlockStager {
             Entry::Vacant(entry) => entry,
         };
         let bytes = payload.bytes().len();
+        let decoded_bytes = payload.block().retained_heap_bytes();
+        let retained = bytes.saturating_add(decoded_bytes);
+        if retained > self.budget.max_retained_bytes {
+            return StagedBlock::DroppedForRetry { hash };
+        }
         if bytes > self.budget.max_received_bytes {
             return StagedBlock::DroppedForRetry { hash };
         }
         if Some(hash) != next_expected_hash
-            && self.received_bytes.saturating_add(bytes) > self.budget.max_received_bytes
+            && (self.received_bytes.saturating_add(bytes) > self.budget.max_received_bytes
+                || self
+                    .received_bytes
+                    .saturating_add(self.decoded_bytes)
+                    .saturating_add(retained)
+                    > self.budget.max_retained_bytes)
         {
             return StagedBlock::DroppedForRetry { hash };
         }
 
-        let decoded_bytes = payload.block().retained_heap_bytes();
         entry.insert(ReceivedBlock {
             payload,
             received_at: now,
@@ -171,7 +180,7 @@ impl BlockStager {
         self.received_bytes_high_water = self.received_bytes_high_water.max(self.received_bytes);
         self.track_received_deadline(now);
 
-        let dropped = if self.is_over_count_budget() {
+        let dropped = if self.is_over_budget() {
             self.evict_over_budget(next_expected_hash)
         } else {
             Vec::new()
@@ -322,7 +331,7 @@ impl BlockStager {
 
     fn evict_over_budget(&mut self, next_expected_hash: Option<Hash256>) -> Vec<Hash256> {
         let mut dropped = Vec::new();
-        while self.is_over_count_budget() {
+        while self.is_over_budget() {
             let Some(hash) = self.oldest_unprotected_candidate(next_expected_hash) else {
                 break;
             };
@@ -353,8 +362,9 @@ impl BlockStager {
         self.received_order.remove(candidate_index)
     }
 
-    fn is_over_count_budget(&self) -> bool {
+    fn is_over_budget(&self) -> bool {
         self.received.len() > self.budget.max_received_blocks
+            || self.retained_attributed_bytes() > self.budget.max_retained_bytes
     }
 
     fn remove(&mut self, hash: &Hash256) -> Option<Hash256> {

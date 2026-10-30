@@ -19,6 +19,8 @@ use bitcoin_rs_primitives::{
 use super::ApplyError;
 use crate::test_fixtures::{handles, seed_genesis};
 
+mod sigops;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn empty_handles() -> Arc<crate::Chainstate> {

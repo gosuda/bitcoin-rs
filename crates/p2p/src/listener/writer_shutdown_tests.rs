@@ -127,7 +127,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error
     let source = lease.source(Some(addr));
 
     shared.send_headers(&lease, source, Vec::new(), true);
-    shared.send_block(&lease, addr, payload);
+    shared.send_block(&lease, addr, payload, None);
 
     assert_eq!(headers_rx.try_recv()?.source, Some(source));
     let received = blocks_rx.try_recv()?;
@@ -151,7 +151,7 @@ fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Err
     let header = payload.block().header;
     let source = lease.source(Some(addr));
 
-    shared.send_block(&lease, addr, payload);
+    shared.send_block(&lease, addr, payload, None);
 
     let forwarded = headers_rx.try_recv()?;
     assert_eq!(forwarded.source, Some(source));
@@ -179,10 +179,10 @@ fn send_block_unblocks_when_session_is_cancelled() -> Result<(), Box<dyn std::er
     let second_bytes = first.bytes().clone();
     let second = bitcoin_rs_primitives::BlockPayload::from_raw(second_bytes)
         .map_err(|_| std::io::Error::other("genesis block must decode"))?;
-    shared.send_block(&lease, addr, first);
+    shared.send_block(&lease, addr, first, None);
 
     let blocked = std::thread::spawn(move || {
-        shared.send_block(&lease, addr, second);
+        shared.send_block(&lease, addr, second, None);
     });
     let started = std::time::Instant::now();
     while !blocked.is_finished() && started.elapsed() < Duration::from_millis(250) {

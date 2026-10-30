@@ -478,7 +478,7 @@ fn padded_block(script_len: usize) -> Block {
 }
 
 #[test]
-fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
+fn estimate_sized_blocks_stop_at_the_retained_budget_without_eviction() {
     let budget = default_sync_budget(Network::Regtest);
     assert_eq!(
         budget.max_received_bytes,
@@ -489,7 +489,12 @@ fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
     let block = block_with_total_size(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
     let mut stager = BlockStager::new(budget);
     let now = Instant::now();
-    let window_slots = budget.max_received_blocks;
+    let payload = BlockPayload::from_local(block.clone());
+    let retained_per_block = payload.bytes().len() + payload.block().retained_heap_bytes();
+    let window_slots = budget
+        .max_received_blocks
+        .min(budget.max_retained_bytes / retained_per_block);
+    assert!(window_slots > 0);
 
     for index in 0..window_slots {
         let mut raw = [0xee; 32];
@@ -506,7 +511,7 @@ fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
             super::StagedBlock::Memory { dropped, .. } => {
                 assert!(
                     dropped.is_empty(),
-                    "full window must stage without eviction"
+                    "blocks within both budgets must stage without eviction"
                 );
             }
             other => panic!("estimate-sized block should stage in memory: {other:?}"),
@@ -514,7 +519,22 @@ fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
     }
 
     assert_eq!(stager.received_len(), window_slots);
-    assert_eq!(stager.received_bytes(), budget.max_received_bytes);
+    assert_eq!(
+        stager.received_bytes(),
+        window_slots * payload.bytes().len()
+    );
+    assert!(stager.retained_attributed_bytes() <= budget.max_retained_bytes);
+    assert!(matches!(
+        stager.insert(
+            Hash256::from_le_bytes(&[0xff; 32]),
+            None,
+            payload,
+            None,
+            now
+        ),
+        super::StagedBlock::DroppedForRetry { .. }
+    ));
+    assert_eq!(stager.received_len(), window_slots);
 }
 
 #[test]
@@ -707,6 +727,41 @@ fn lean_and_fat_blocks() -> (Block, Block, bytes::Bytes) {
     fat.txs.reserve_exact(64);
     assert!(fat.retained_heap_bytes() > lean.retained_heap_bytes());
     (lean, fat, serialized)
+}
+
+#[test]
+fn decoded_heap_limits_staging_and_expected_frontier_can_evict_a_fat_tail() {
+    let (lean, fat, _) = lean_and_fat_blocks();
+    let lean = BlockPayload::from_local(lean);
+    let fat = BlockPayload::from_local(fat);
+    let lean_cost = lean.bytes().len() + lean.block().retained_heap_bytes();
+    let fat_cost = fat.bytes().len() + fat.block().retained_heap_bytes();
+    let mut budget = default_sync_budget(Network::Regtest);
+    budget.max_retained_bytes = fat_cost.max(lean_cost);
+    let mut stager = BlockStager::new(budget);
+    let tail = Hash256::from_le_bytes(&[0x31; 32]);
+    let expected = Hash256::from_le_bytes(&[0x32; 32]);
+    let now = Instant::now();
+    assert!(matches!(
+        stager.insert(tail, Some(expected), fat, None, now),
+        super::StagedBlock::Memory { .. }
+    ));
+    assert!(matches!(
+        stager.insert(expected, None, lean.clone(), None, now),
+        super::StagedBlock::DroppedForRetry { .. }
+    ));
+    let super::StagedBlock::Memory { dropped, .. } =
+        stager.insert(expected, Some(expected), lean, None, now)
+    else {
+        panic!("frontier should displace fat tail");
+    };
+    assert_eq!(dropped, vec![tail]);
+    assert!(stager.contains(&expected));
+    assert!(stager.retained_attributed_bytes() <= budget.max_retained_bytes);
+    let drained = stager.drain_expected_prefix(&[expected]);
+    assert_eq!(stager.retained_attributed_bytes(), 0);
+    stager.restore_many(drained);
+    assert!(stager.retained_attributed_bytes() <= budget.max_retained_bytes);
 }
 
 #[test]

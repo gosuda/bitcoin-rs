@@ -15,7 +15,7 @@ pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 pub enum ResumeSource {
     /// A pinned snapshot selected by the authoritative durable head.
     Snapshot,
-    /// No recoverable checkpoint existed.
+    /// No checkpoint was accepted, including marker-forced revalidation.
     Cold,
     /// State came directly from a full checkpoint.
     Checkpoint,

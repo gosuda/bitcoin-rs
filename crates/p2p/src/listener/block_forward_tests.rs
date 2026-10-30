@@ -101,6 +101,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::er
             &lease,
             flooded,
             bitcoin_rs_primitives::BlockPayload::from_local(unrelated.clone()),
+            None,
         );
     }
     assert_eq!(
@@ -113,6 +114,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::er
         &lease,
         flooded,
         bitcoin_rs_primitives::BlockPayload::from_local(block2),
+        None,
     );
     assert_eq!(
         blocks_rx.len(),
@@ -129,6 +131,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::er
         &other_lease,
         other,
         bitcoin_rs_primitives::BlockPayload::from_local(unrelated.clone()),
+        None,
     );
     assert_eq!(
         blocks_rx.len(),
@@ -141,6 +144,7 @@ fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::er
         &lease,
         flooded,
         bitcoin_rs_primitives::BlockPayload::from_local(unrelated),
+        None,
     );
     assert_eq!(
         blocks_rx.len(),

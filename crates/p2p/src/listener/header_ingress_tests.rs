@@ -20,7 +20,7 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     let expected = payload.block().header;
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let worker = std::thread::spawn(move || {
-        shared.send_block(&lease, addr, payload);
+        shared.send_block(&lease, addr, payload, None);
         let _ = done_tx.send(());
     });
 
@@ -149,6 +149,7 @@ fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
                         &lease,
                         addr,
                         bitcoin_rs_primitives::BlockPayload::from_local(block),
+                        None,
                     );
                 }
                 if n + 1 == CAPACITY {
