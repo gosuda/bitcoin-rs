@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::assumeutxo_snapshot::SnapshotArchiveError;
+use crate::error::{ApplyError, DisconnectError};
+use crate::{Chainstate, ConnectOutcome};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::{AssumeUtxoData, Block, BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::core_snapshot::{StateVerifyError, VerifiedSnapshotState};
 use parking_lot::{Mutex, MutexGuard, RwLock};
-
-use crate::error::{ApplyError, DisconnectError};
-use crate::{Chainstate, ConnectOutcome};
 
 mod serde_hash256 {
     use bitcoin_rs_primitives::Hash256;
@@ -123,7 +123,55 @@ pub enum AssumeUtxoError {
     #[error("snapshot storage: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("snapshot archive: {0}")]
-    Archive(#[from] anyhow::Error),
+    Archive(SnapshotArchiveError),
+    #[error("open historical checkpoint data directory: {error}")]
+    HistoricalCheckpointDir { error: std::io::Error },
+    #[error("historical checkpoint load failed: {error}")]
+    HistoricalCheckpointLoad {
+        error: bitcoin_rs_storage::checkpoint::CheckpointLoadError,
+    },
+    #[error("publish historical checkpoint: {error}")]
+    HistoricalCheckpointPublish {
+        error: crate::checkpoint::CheckpointError,
+    },
+    #[error("historical checkpoint is ahead of certified validation progress")]
+    HistoricalCheckpointAheadOfProgress,
+    #[error("durable head names a historical checkpoint that is not published")]
+    HistoricalCheckpointNotPublished,
+    #[error("historical checkpoint does not match its durable-head reference")]
+    HistoricalCheckpointReferenceMismatch,
+    #[error("historical checkpoint has no certified transaction count")]
+    HistoricalCheckpointWithoutTransactionCount,
+    #[error("historical checkpoint is not on the pinned ancestry")]
+    HistoricalCheckpointNotOnAncestry,
+    #[error("historical checkpoint hash is not on the pinned ancestry")]
+    HistoricalCheckpointHashNotOnAncestry,
+    #[error("certified historical progress is not on the pinned ancestry")]
+    HistoricalProgressNotOnAncestry,
+    #[error("durable historical progress is not on the pinned ancestry")]
+    DurableHistoricalProgressNotOnAncestry,
+    #[error("historical archive body identity mismatch")]
+    HistoricalBodyIdentityMismatch,
+    #[error("historical validation intent exceeds snapshot base")]
+    ValidationIntentExceedsBase,
+    #[error("historical checkpoint is ahead of pending validation intent")]
+    HistoricalCheckpointAheadOfIntent,
+    #[error("missing historical body store")]
+    MissingHistoricalBodyStore,
+    #[error("missing historical validation dependency")]
+    MissingHistoricalDependencyBody,
+    #[error("historical validation dependency identity mismatch")]
+    HistoricalDependencyIdentityMismatch,
+    #[error("missing pending validation body store")]
+    MissingPendingBodyStore,
+    #[error("missing pending validation body")]
+    MissingPendingBody,
+    #[error("pending validation body identity mismatch")]
+    PendingBodyIdentityMismatch,
+    #[error("historical checkpoint is due without a historical chainstate")]
+    CheckpointDueWithoutChainstate,
+    #[error("historical checkpoint tip does not match certified progress")]
+    CheckpointTipMismatch,
     #[error("snapshot base header {0} is not present")]
     SnapshotHeaderMissing(Hash256),
     #[error("snapshot base header height {found} does not match pinned height {expected}")]
@@ -372,15 +420,10 @@ impl AssumeUtxoManager {
             return active.create_historical_counterpart(base_height, base_hash, undo, None);
         };
         if checkpoint.height > historical_height || checkpoint.height > base_height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is ahead of certified validation progress"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointAheadOfProgress);
         }
-        let data =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir).map_err(|error| {
-                anyhow::anyhow!("open historical checkpoint data directory: {error}")
-            })?;
+        let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
+            .map_err(|error| AssumeUtxoError::HistoricalCheckpointDir { error })?;
         let config = crate::checkpoint::headers::HeaderCheckpointConfig {
             network,
             genesis: network.genesis_block_hash(),
@@ -391,27 +434,18 @@ impl AssumeUtxoManager {
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             checkpoint.checkpoint,
         )
-        .map_err(|error| anyhow::anyhow!("historical checkpoint load failed: {error}"))?;
+        .map_err(|error| AssumeUtxoError::HistoricalCheckpointLoad { error })?;
         let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
-            return Err(anyhow::anyhow!(
-                "durable head names a historical checkpoint that is not published"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointNotPublished);
         };
         if restored.generation != checkpoint.checkpoint.generation
             || restored.applied_tip.height != checkpoint.height
             || restored.applied_tip.hash != checkpoint.hash
         {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint does not match its durable-head reference"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointReferenceMismatch);
         }
         if restored.applied_tip.chain_tx_count.get().is_none() {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint has no certified transaction count"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointWithoutTransactionCount);
         }
 
         let mut tree = active.block_tree.write();
@@ -420,30 +454,20 @@ impl AssumeUtxoManager {
             .ok_or(AssumeUtxoError::SnapshotHeaderMissing(base_hash))?;
         let checkpoint_id = tree
             .node_at_height_from(base_id, checkpoint.height)
-            .ok_or_else(|| {
-                anyhow::anyhow!("historical checkpoint is not on the pinned ancestry")
-            })?;
+            .ok_or(AssumeUtxoError::HistoricalCheckpointNotOnAncestry)?;
         let checkpoint_node = tree.node(checkpoint_id).map_err(ApplyError::from)?;
         if checkpoint_node.hash != checkpoint.hash || checkpoint_node.height != checkpoint.height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint hash is not on the pinned ancestry"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointHashNotOnAncestry);
         }
         let checkpoint_height = checkpoint_node.height;
         let checkpoint_hash = checkpoint_node.hash;
         let checkpoint_chainwork = checkpoint_node.chainwork;
         let progress_id = tree
             .node_at_height_from(base_id, historical_height)
-            .ok_or_else(|| {
-                anyhow::anyhow!("certified historical progress is not on the pinned ancestry")
-            })?;
+            .ok_or(AssumeUtxoError::HistoricalProgressNotOnAncestry)?;
         let progress_node = tree.node(progress_id).map_err(ApplyError::from)?;
         if progress_node.hash != historical_hash {
-            return Err(anyhow::anyhow!(
-                "durable historical progress is not on the pinned ancestry"
-            )
-            .into());
+            return Err(AssumeUtxoError::DurableHistoricalProgressNotOnAncestry);
         }
         tree.restore_chain_tx_count(checkpoint_id, restored.applied_tip.chain_tx_count)
             .map_err(ApplyError::from)?;
@@ -551,13 +575,15 @@ impl AssumeUtxoManager {
         };
 
         let (set, stats, staging_witness) =
-            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)?;
+            crate::assumeutxo_snapshot::write_coins_sealed(&self.data_dir, state, pinned)
+                .map_err(AssumeUtxoError::Archive)?;
         self.active_chainstate
             .install_snapshot(set, stats, pinned, |tree, tip, prior| {
                 if crate::recovery::requires_full_revalidation(&self.data_dir) {
                     return Err(AssumeUtxoError::FullRevalidationRequired);
                 }
-                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)?;
+                crate::assumeutxo_snapshot::write_headers(&self.data_dir, tree, tip)
+                    .map_err(AssumeUtxoError::Archive)?;
                 let next = bitcoin_rs_storage::DurableHead {
                     assumeutxo: new_status,
                     commit_id: prior.map_or(1, |head| head.commit_id + 1),
@@ -798,10 +824,10 @@ impl AssumeUtxoManager {
             let Some(bytes) = bytes else {
                 return Ok(HistoricalAdvance::MissingBody { height, hash });
             };
-            let payload =
-                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?;
+            let payload = BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?;
             if payload.block().block_hash().0 != hash {
-                return Err(anyhow::anyhow!("historical archive body identity mismatch").into());
+                return Err(AssumeUtxoError::HistoricalBodyIdentityMismatch);
             }
             self.step_historical(&payload)?;
         }
@@ -1007,9 +1033,7 @@ impl AssumeUtxoManager {
             return Ok(());
         };
         if pending.height > base_height {
-            return Err(
-                anyhow::anyhow!("historical validation intent exceeds snapshot base").into(),
-            );
+            return Err(AssumeUtxoError::ValidationIntentExceedsBase);
         }
         let historical = self
             .historical_chainstate
@@ -1020,10 +1044,7 @@ impl AssumeUtxoManager {
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.height.saturating_add(1));
         if replay_start > pending.height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is ahead of pending validation intent"
-            )
-            .into());
+            return Err(AssumeUtxoError::HistoricalCheckpointAheadOfIntent);
         }
         for height in replay_start..pending.height {
             let (_, hash) = self
@@ -1036,15 +1057,14 @@ impl AssumeUtxoManager {
                     .active_chainstate
                     .block_body_store
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("missing historical body store"))?
+                    .ok_or(AssumeUtxoError::MissingHistoricalBodyStore)?
                     .load_block_body(height, hash)?
-                    .ok_or_else(|| anyhow::anyhow!("missing historical validation dependency"))?;
-                BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
+                    .ok_or(AssumeUtxoError::MissingHistoricalDependencyBody)?;
+                BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                    .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
             };
             if payload.block().block_hash().0 != hash {
-                return Err(
-                    anyhow::anyhow!("historical validation dependency identity mismatch").into(),
-                );
+                return Err(AssumeUtxoError::HistoricalDependencyIdentityMismatch);
             }
             historical
                 .lock_transition()?
@@ -1059,13 +1079,14 @@ impl AssumeUtxoManager {
                 .active_chainstate
                 .block_body_store
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing pending validation body store"))?
+                .ok_or(AssumeUtxoError::MissingPendingBodyStore)?
                 .load_staged_body(pending.height, pending.hash, pending.position)?
-                .ok_or_else(|| anyhow::anyhow!("missing pending validation body"))?;
-            BlockPayload::from_raw(bytes::Bytes::from(bytes)).map_err(anyhow::Error::from)?
+                .ok_or(AssumeUtxoError::MissingPendingBody)?;
+            BlockPayload::from_raw(bytes::Bytes::from(bytes))
+                .map_err(|error| AssumeUtxoError::Archive(SnapshotArchiveError::from(error)))?
         };
         if payload.block().block_hash().0 != pending.hash {
-            return Err(anyhow::anyhow!("pending validation body identity mismatch").into());
+            return Err(AssumeUtxoError::PendingBodyIdentityMismatch);
         }
         self.step_historical(&payload)?;
         Ok(())
@@ -1194,24 +1215,16 @@ impl AssumeUtxoManager {
             return Ok(());
         }
         let Some(historical) = historical else {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint is due without a historical chainstate"
-            )
-            .into());
+            return Err(AssumeUtxoError::CheckpointDueWithoutChainstate);
         };
         let tip = historical
             .applied_tip_snapshot()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
         if tip.height != *historical_height || tip.height > *base_height {
-            return Err(anyhow::anyhow!(
-                "historical checkpoint tip does not match certified progress"
-            )
-            .into());
+            return Err(AssumeUtxoError::CheckpointTipMismatch);
         }
-        let data =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir).map_err(|error| {
-                anyhow::anyhow!("open historical checkpoint data directory: {error}")
-            })?;
+        let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir)
+            .map_err(|error| AssumeUtxoError::HistoricalCheckpointDir { error })?;
         let config = crate::checkpoint::headers::HeaderCheckpointConfig {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
@@ -1226,7 +1239,7 @@ impl AssumeUtxoManager {
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
             bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )
-        .map_err(|error| anyhow::anyhow!("publish historical checkpoint: {error}"))?;
+        .map_err(|error| AssumeUtxoError::HistoricalCheckpointPublish { error })?;
         let reference = match write {
             crate::checkpoint::CheckpointWrite::Published { reference } => reference,
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {

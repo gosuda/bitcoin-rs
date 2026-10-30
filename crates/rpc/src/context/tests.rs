@@ -103,7 +103,7 @@ fn applied_view_uses_one_publication() {
 }
 
 #[test]
-fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
+fn applied_view_does_not_wait_for_transition() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -125,10 +125,9 @@ fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
     });
     let height = rx
         .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| anyhow::anyhow!("capture blocked behind the transition barrier"))?;
+        .map_err(|_| "capture blocked behind the transition barrier")?;
     assert_eq!(height, 5, "the capture must see the published tip");
-    join.join()
-        .map_err(|_| anyhow::anyhow!("capture worker panicked"))?;
+    join.join().map_err(|_| "capture worker panicked")?;
     drop(transition);
     Ok(())
 }

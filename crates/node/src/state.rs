@@ -1,4 +1,5 @@
 use crate::NodeConfig;
+use crate::snapshot::SnapshotImportError;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
@@ -43,6 +44,7 @@ mod open;
 mod storage;
 
 pub use data_dir_lock::DataDirLockError;
+pub use index::IndexWorkerError;
 
 struct IndexChainCursorSource(Arc<ChainEventPublisher>);
 
@@ -271,11 +273,16 @@ impl NodeState {
         Ok(outcome.tip)
     }
 
-    pub fn publish_checkpoint(&self) -> Result<Option<u64>> {
-        Ok(self.chainstate.publish_checkpoint()?)
+    pub fn publish_checkpoint(
+        &self,
+    ) -> core::result::Result<Option<u64>, bitcoin_rs_chainstate::CheckpointError> {
+        self.chainstate.publish_checkpoint()
     }
 
-    pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
+    pub fn start_chainstate_maintenance(
+        &self,
+    ) -> core::result::Result<std::thread::JoinHandle<()>, bitcoin_rs_chainstate::MaintenanceError>
+    {
         self.chainstate.start_maintenance()
     }
 
@@ -289,9 +296,8 @@ impl NodeState {
     pub fn activate_assumeutxo_snapshot_file(
         &self,
         path: impl AsRef<std::path::Path>,
-    ) -> anyhow::Result<()> {
-        self.snapshots.import_native(path.as_ref())?;
-        Ok(())
+    ) -> core::result::Result<(), SnapshotImportError> {
+        self.snapshots.import_native(path.as_ref())
     }
 
     #[must_use]
@@ -342,7 +348,7 @@ impl NodeState {
         })
     }
 
-    pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
+    pub fn start_index_workers(&mut self) -> core::result::Result<(), IndexWorkerError> {
         let history = self.storage.bounded_history();
         self.derived_index.start(&self.chainstate, history)
     }
@@ -352,7 +358,10 @@ impl NodeState {
         self.derived_index.status()
     }
 
-    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) -> Result<()> {
+    pub(crate) fn bounded_index_shutdown(
+        &mut self,
+        deadline: Duration,
+    ) -> core::result::Result<(), IndexWorkerError> {
         self.derived_index.shutdown(deadline)
     }
 

@@ -8,7 +8,9 @@ use bitcoin_rs_e2e::rpc::Connection;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
 use sonic_rs::{Value, json};
 
-fn call(connection: &mut Connection, method: &str, params: Value) -> anyhow::Result<Value> {
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn call(connection: &mut Connection, method: &str, params: Value) -> TestResult<Value> {
     let mut request = json!({"jsonrpc":"2.0", "id":1,"method":method});
     request["params"] = params;
     Ok(connection.rpc(
@@ -18,24 +20,24 @@ fn call(connection: &mut Connection, method: &str, params: Value) -> anyhow::Res
     )?)
 }
 
-fn reserved(context: &Context) -> anyhow::Result<()> {
+fn reserved(context: &Context) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(3);
     while context.chain.utxo.scan_progress().is_none() {
-        anyhow::ensure!(Instant::now() < deadline, "scan never reserved");
+        assert!(Instant::now() < deadline, "scan never reserved");
         std::thread::sleep(Duration::from_millis(1));
     }
     Ok(())
 }
 
 #[test]
-fn scan_preserves_control_capacity_and_observes_server_shutdown() -> anyhow::Result<()> {
+fn scan_preserves_control_capacity_and_observes_server_shutdown() -> TestResult {
     for stop in [false, true] {
         check_scan_cancellation(stop)?;
     }
     Ok(())
 }
 
-fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
+fn check_scan_cancellation(stop: bool) -> TestResult {
     let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
     let context = Arc::new(Context::new().with_chain_transition(transition.clone()));
     let handler = Arc::new(Handler::new(Arc::clone(&context)));
@@ -52,7 +54,7 @@ fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
     let flag = Arc::clone(&shutdown);
     let serving = std::thread::spawn(move || server.serve_with_shutdown(flag));
     let mut control = Connection::new(address);
-    let result = (|| -> anyhow::Result<()> {
+    let result = (|| -> TestResult<()> {
         assert_eq!(
             call(&mut control, "getblockcount", json!([]))?["result"],
             json!(0)
@@ -65,7 +67,7 @@ fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
                 json!(["start", []]),
             )
         });
-        let operation = (|| -> anyhow::Result<()> {
+        let operation = (|| -> TestResult<()> {
             reserved(&context)?;
             assert_eq!(
                 call(&mut control, "scantxoutset", json!(["status"]))?["result"]["progress"],
@@ -88,9 +90,7 @@ fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
                 );
             }
 
-            let response = scan
-                .join()
-                .map_err(|_| anyhow::anyhow!("scan worker panicked"))??;
+            let response = scan.join().map_err(|_| "scan worker panicked")??;
             assert_eq!(response["result"]["success"], json!(false));
             assert_eq!(response["result"]["txouts"], json!(0));
             assert_eq!(context.chain.utxo.scan_progress(), None);
@@ -101,8 +101,6 @@ fn check_scan_cancellation(stop: bool) -> anyhow::Result<()> {
         Ok(())
     })();
     shutdown.store(true, Ordering::Release);
-    serving
-        .join()
-        .map_err(|_| anyhow::anyhow!("server panicked"))??;
+    serving.join().map_err(|_| "server panicked")??;
     result
 }

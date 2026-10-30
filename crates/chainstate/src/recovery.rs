@@ -1,12 +1,15 @@
 //! Checkpoint selection, journal replay, and fail-closed startup recovery.
 
 use crate::{ChainstateJournalConfig, JournalBootstrap};
-use anyhow::Context as _;
-use anyhow::{Result, bail};
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_storage::ScriptAttestation;
+use bitcoin_rs_storage::chainstate_journal::JournalWriterError;
+use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::snapshot::VerifiedSnapshotArtifact;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::assumeutxo_snapshot::SnapshotArchiveError;
 
 /// Threshold for classifying a restored checkpoint as catastrophically stale.
 pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
@@ -24,6 +27,69 @@ pub enum ResumeSource {
 }
 
 pub const CHAINSTATE_JOURNAL_DIR: &str = bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
+
+/// Failures while selecting, restoring, or rebuilding the startup chainstate.
+#[derive(Debug, thiserror::Error)]
+pub enum RecoveryError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointLoadError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotArchiveError),
+    #[error("read the script attestation of the durable head")]
+    AttestationRead {
+        #[source]
+        source: bitcoin_rs_storage::StorageError,
+    },
+    #[error("mark the datadir for full revalidation")]
+    MarkFullRevalidation {
+        #[source]
+        source: JournalWriterError,
+    },
+    #[error("remove {path}")]
+    RemoveJournalDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create {path}")]
+    CreateJournalDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open {path}")]
+    OpenJournalDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open data_dir {path}")]
+    OpenDataDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("validate CURRENT_SCHEMA for datadir {path}")]
+    ValidateSchema {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("snapshot-base checkpoint does not match the pinned commitment/count")]
+    PinnedCheckpointMismatch,
+    #[error("checkpoint disappeared while recovering from journal fallback")]
+    CheckpointDisappeared,
+    #[error(
+        "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
+    )]
+    PrunedDatadirNeedsFullValidation,
+}
 
 pub fn requires_full_revalidation(data_dir: &Path) -> bool {
     data_dir
@@ -45,29 +111,25 @@ pub fn require_full_script_attestation(
     head: Option<&bitcoin_rs_storage::DurableHead>,
     store: &dyn bitcoin_rs_storage::DurableHeadStore,
     pruned: bool,
-) -> Result<()> {
-    use bitcoin_rs_storage::ScriptAttestation;
-
+) -> Result<(), RecoveryError> {
     let (crate::ValidationMode::Full, Some(head)) = (mode, head) else {
         return Ok(());
     };
     let attested = store
         .load_attestation(head)
-        .context("read the script attestation of the durable head")?;
+        .map_err(|source| RecoveryError::AttestationRead { source })?;
     if attested >= ScriptAttestation::Full {
         return Ok(());
     }
     if pruned {
-        bail!(
-            "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
-        );
+        return Err(RecoveryError::PrunedDatadirNeedsFullValidation);
     }
     tracing::warn!(
         attested = ?attested,
         "the stored chain was not fully script-validated; rebuilding it with full validation"
     );
     bitcoin_rs_storage::chainstate_journal::mark_full_revalidation_at(data_dir)
-        .context("mark the datadir for full revalidation")?;
+        .map_err(|source| RecoveryError::MarkFullRevalidation { source })?;
     Ok(())
 }
 
@@ -81,27 +143,32 @@ pub struct InitialChainstate {
     pub script_live_seed: Option<VerifiedSnapshotArtifact>,
 }
 
-fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir, RecoveryError> {
     let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
     match std::fs::remove_dir_all(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+        Err(source) => {
+            return Err(RecoveryError::RemoveJournalDir { path, source });
+        }
     }
     open_journal_dir(data_dir)
 }
 
-pub fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+pub fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir, RecoveryError> {
     let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
-    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    std::fs::create_dir_all(&path).map_err(|source| RecoveryError::CreateJournalDir {
+        path: path.clone(),
+        source,
+    })?;
     bitcoin_rs_storage::checkpoint::fs::open_data_dir(&path)
-        .with_context(|| format!("open {}", path.display()))
+        .map_err(|source| RecoveryError::OpenJournalDir { path, source })
 }
 
 fn restored_initial(
     restored: crate::checkpoint::RestoredChainstate,
     config: ChainstateJournalConfig,
-) -> Result<InitialChainstate> {
+) -> Result<InitialChainstate, RecoveryError> {
     let journal_bootstrap = if config.enabled {
         let node = restored.tree.node(restored.applied_tip.tip_id)?;
         let prev_hash = match node.parent {
@@ -135,7 +202,7 @@ pub(crate) fn restore_snapshot(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
     pinned: &bitcoin_rs_primitives::AssumeUtxoData,
-) -> Result<InitialChainstate> {
+) -> Result<InitialChainstate, RecoveryError> {
     let config = crate::checkpoint::headers::HeaderCheckpointConfig {
         network,
         genesis: network.genesis_block_hash(),
@@ -158,7 +225,7 @@ pub(crate) fn restore_snapshot(
                     != pinned.hash_serialized
                     || restored.applied_tip.chain_tx_count.to_wire() != pinned.chain_tx_count)
             {
-                bail!("snapshot-base checkpoint does not match the pinned commitment/count");
+                return Err(RecoveryError::PinnedCheckpointMismatch);
             }
             return restored_initial(
                 *restored,
@@ -170,6 +237,7 @@ pub(crate) fn restore_snapshot(
         }
     }
     crate::assumeutxo_snapshot::load_verified(data_dir, network, pinned)
+        .map_err(RecoveryError::from)
 }
 
 fn cold_initial_chainstate(
@@ -177,7 +245,7 @@ fn cold_initial_chainstate(
     network: bitcoin_rs_primitives::Network,
     journal_config: ChainstateJournalConfig,
     reset_journal: bool,
-) -> Result<InitialChainstate> {
+) -> Result<InitialChainstate, RecoveryError> {
     if journal_config.enabled && reset_journal {
         drop(reset_journal_dir(data_dir)?);
     }
@@ -206,11 +274,20 @@ pub fn prepare_initial_chainstate(
     network: bitcoin_rs_primitives::Network,
     journal_config: ChainstateJournalConfig,
     durable_head: Option<&bitcoin_rs_storage::DurableHead>,
-) -> Result<InitialChainstate> {
-    let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
-        .with_context(|| format!("open data_dir {}", data_dir.display()))?;
-    bitcoin_rs_storage::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir)
-        .with_context(|| format!("validate CURRENT_SCHEMA for datadir {}", data_dir.display()))?;
+) -> Result<InitialChainstate, RecoveryError> {
+    let checkpoint_data_dir =
+        bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir).map_err(|source| {
+            RecoveryError::OpenDataDir {
+                path: data_dir.to_path_buf(),
+                source,
+            }
+        })?;
+    bitcoin_rs_storage::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir).map_err(
+        |source| RecoveryError::ValidateSchema {
+            path: data_dir.to_path_buf(),
+            source,
+        },
+    )?;
     let anchor = durable_head
         .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, &head.assumeutxo))
         .transpose()?
@@ -349,7 +426,7 @@ pub fn prepare_initial_chainstate(
                 checkpoint_config,
             )?;
             let crate::checkpoint::CheckpointLoad::Complete(reloaded) = reloaded else {
-                bail!("checkpoint disappeared while recovering from journal fallback");
+                return Err(RecoveryError::CheckpointDisappeared);
             };
             restored_initial(*reloaded, journal_config)
         }

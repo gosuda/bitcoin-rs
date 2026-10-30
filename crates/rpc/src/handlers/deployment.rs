@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn native_deployments_share_the_pinned_schema_without_inventing_versionbits()
-    -> anyhow::Result<()> {
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut context = Context::new();
         context.chain.chain_network = Network::Regtest;
         let context = Arc::new(context);

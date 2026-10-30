@@ -6,7 +6,17 @@ use std::time::{Duration, Instant};
 
 use crate::checkpoint::publisher::CheckpointPublisher;
 use crate::checkpoint::{CheckpointError, CheckpointWrite};
+
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Failures while starting the chainstate maintenance worker.
+#[derive(Debug, thiserror::Error)]
+pub enum MaintenanceError {
+    #[error("maintenance requires checkpoint configuration")]
+    MissingCheckpointConfiguration,
+    #[error(transparent)]
+    Spawn(#[from] std::io::Error),
+}
 
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
@@ -86,12 +96,14 @@ fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, duration: Duratio
 }
 
 impl crate::Chainstate {
-    pub fn start_maintenance(&self) -> anyhow::Result<JoinHandle<()>> {
+    pub fn start_maintenance(&self) -> Result<JoinHandle<()>, MaintenanceError> {
         let publisher = self
             .checkpoint_publisher
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("maintenance requires checkpoint configuration"))?;
-        spawn_chainstate_maintenance_worker(publisher, self.shutdown_reader())
-            .map_err(anyhow::Error::new)
+            .ok_or(MaintenanceError::MissingCheckpointConfiguration)?;
+        Ok(spawn_chainstate_maintenance_worker(
+            publisher,
+            self.shutdown_reader(),
+        )?)
     }
 }

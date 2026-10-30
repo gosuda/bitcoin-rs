@@ -47,13 +47,15 @@ pub use assumeutxo::{
     HistoricalCheckpointRef,
 };
 
-mod checkpoint;
-use checkpoint::CheckpointError;
 mod assumeutxo_snapshot;
+mod checkpoint;
+pub use assumeutxo_snapshot::SnapshotArchiveError;
+pub use checkpoint::{CheckpointError, CheckpointSetupError};
 mod error;
 pub mod events;
 mod journal;
 mod maintenance;
+pub use maintenance::MaintenanceError;
 pub mod recovery;
 pub mod reorg;
 pub mod verify;
@@ -1117,13 +1119,12 @@ impl Chainstate {
         data_dir: &std::path::Path,
         durable_tip_height: Arc<std::sync::atomic::AtomicU32>,
         seed_offer: Option<bitcoin_rs_utxo::SeedOfferCell>,
-    ) -> anyhow::Result<()> {
-        let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
-            .map_err(anyhow::Error::new)?;
+    ) -> core::result::Result<(), CheckpointSetupError> {
+        let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
         let block_body_store = self
             .block_body_store
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("checkpointing requires a block body store"))?;
+            .ok_or(CheckpointSetupError::MissingBlockBodyStore)?;
         self.checkpoint_publisher = Some(Arc::new(
             crate::checkpoint::publisher::CheckpointPublisher {
                 admission: Arc::clone(&self.admission),

@@ -1189,9 +1189,11 @@ fn snapshot_persistence_does_not_block_existing_progress_queries() -> TestResult
                 observed = received
                     .recv_timeout(std::time::Duration::from_secs(1))
                     .ok();
-                Err(AssumeUtxoError::Archive(anyhow::anyhow!(
-                    "simulated persistence refusal"
-                )))
+                Err(AssumeUtxoError::Storage(
+                    bitcoin_rs_storage::StorageError::InvalidOperation(
+                        "simulated persistence refusal",
+                    ),
+                ))
             },
         )
     });

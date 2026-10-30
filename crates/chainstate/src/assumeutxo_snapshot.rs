@@ -8,9 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
 use cap_std::fs::Dir;
 
-use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{AssumeUtxoData, Network, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{AssumeUtxoData, DecodeError, Network, consensus_bytes, deserialize};
 use bitcoin_rs_storage::checkpoint::fs::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState;
 use bitcoin_rs_utxo::snapshot::{SeedProvenance, VerifiedSnapshotArtifact};
@@ -26,7 +25,43 @@ const DIRECTORY: &str = "assumeutxo";
 
 static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
 
-fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> Result<Dir> {
+/// Failures while writing, reclaiming, or verifying the immutable snapshot archive.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotArchiveError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Utxo(#[from] bitcoin_rs_utxo::UtxoError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("snapshot temporary reservation exhausted")]
+    ReservationExhausted,
+    #[error(
+        "AssumeUTXO validation previously failed; preserve this datadir and resync into a separate directory"
+    )]
+    PreviouslyFailed,
+    #[error("unrecognized durable snapshot base")]
+    UnrecognizedBase,
+    #[error("durable snapshot identity differs from the network trust anchor")]
+    TrustAnchorIdentity,
+    #[error("durable snapshot transaction count differs from the network trust anchor")]
+    TrustAnchorTxCount,
+    #[error("snapshot header archive length does not match the pinned height")]
+    HeaderArchiveLength,
+    #[error("snapshot header archive does not end at the pinned block")]
+    HeaderArchiveEnd,
+    #[error("snapshot header height mismatch")]
+    HeaderHeightMismatch,
+    #[error("snapshot coin archive identity mismatch")]
+    CoinArchiveIdentity,
+}
+
+fn archive_directory(
+    data_dir: &Path,
+    base: bitcoin_rs_primitives::Hash256,
+) -> Result<Dir, SnapshotArchiveError> {
     fn child(parent: &Dir, name: &str) -> std::io::Result<Dir> {
         if let Err(error) = parent.create_dir(name)
             && error.kind() != std::io::ErrorKind::AlreadyExists
@@ -45,8 +80,8 @@ fn archive_directory(data_dir: &Path, base: bitcoin_rs_primitives::Hash256) -> R
 fn write_archive<T>(
     directory: &Dir,
     name: &str,
-    write: impl FnOnce(&mut BufWriter<File>) -> Result<T>,
-) -> Result<T> {
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<T, SnapshotArchiveError>,
+) -> Result<T, SnapshotArchiveError> {
     let mut reserved = None;
     for _ in 0..32 {
         let sequence = NEXT_ARCHIVE.fetch_add(1, Ordering::Relaxed);
@@ -66,12 +101,7 @@ fn write_archive<T>(
             Err(error) => return Err(error.into()),
         }
     }
-    let (temporary, file) = reserved.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "snapshot temporary reservation exhausted",
-        )
-    })?;
+    let (temporary, file) = reserved.ok_or(SnapshotArchiveError::ReservationExhausted)?;
     let result = (|| {
         let mut writer = BufWriter::new(file);
         let write_result = write(&mut writer)?;
@@ -150,7 +180,10 @@ fn recognized_reservation(
     }
 }
 
-pub(super) fn cleanup_reservations(data_dir: &Path, network: Network) -> Result<()> {
+pub(super) fn cleanup_reservations(
+    data_dir: &Path,
+    network: Network,
+) -> Result<(), SnapshotArchiveError> {
     let data = open_data_dir(data_dir)?;
     let root = match data.open_dir_nofollow(DIRECTORY) {
         Ok(root) => root,
@@ -219,7 +252,7 @@ pub(super) fn write_coins(
     data_dir: &Path,
     set: &UtxoSet,
     pinned: &AssumeUtxoData,
-) -> Result<Option<bitcoin_rs_utxo::V4Witness>> {
+) -> Result<Option<bitcoin_rs_utxo::V4Witness>, SnapshotArchiveError> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     write_archive(&directory, "coins.dat", |writer| {
         let (_, _, witness) = bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(
@@ -246,7 +279,7 @@ pub(super) fn write_coins_sealed(
     data_dir: &Path,
     state: VerifiedSnapshotState,
     pinned: &AssumeUtxoData,
-) -> Result<(UtxoSet, CoinStats, Option<bitcoin_rs_utxo::V4Witness>)> {
+) -> Result<(UtxoSet, CoinStats, Option<bitcoin_rs_utxo::V4Witness>), SnapshotArchiveError> {
     let directory = archive_directory(data_dir, pinned.block_hash)?;
     let (set, stats) = state.into_parts();
     let trailer = stats.muhash.finalize();
@@ -263,7 +296,11 @@ pub(super) fn write_coins_sealed(
     Ok((set, stats, witness))
 }
 
-pub(super) fn write_headers(data_dir: &Path, tree: &BlockTree, base: &TipSnapshot) -> Result<()> {
+pub(super) fn write_headers(
+    data_dir: &Path,
+    tree: &BlockTree,
+    base: &TipSnapshot,
+) -> Result<(), SnapshotArchiveError> {
     let directory = archive_directory(data_dir, base.hash)?;
     write_archive(&directory, "headers.dat", |writer| {
         let mut ancestry = tree.ancestor_chain(base.tip_id)?;
@@ -278,12 +315,10 @@ pub(super) fn write_headers(data_dir: &Path, tree: &BlockTree, base: &TipSnapsho
 pub(crate) fn trusted_anchor(
     network: Network,
     status: &AssumeUtxoDiskStatus,
-) -> Result<Option<&'static AssumeUtxoData>> {
+) -> Result<Option<&'static AssumeUtxoData>, SnapshotArchiveError> {
     let (height, hash, commitment) = match status {
         AssumeUtxoDiskStatus::Uninitialized => return Ok(None),
-        AssumeUtxoDiskStatus::Failed { .. } => bail!(
-            "AssumeUTXO validation previously failed; preserve this datadir and resync into a separate directory"
-        ),
+        AssumeUtxoDiskStatus::Failed { .. } => return Err(SnapshotArchiveError::PreviouslyFailed),
         AssumeUtxoDiskStatus::Validating {
             base_height,
             base_hash,
@@ -298,14 +333,14 @@ pub(crate) fn trusted_anchor(
     };
     let pinned = network
         .assume_utxo_for_height(*height)
-        .context("unrecognized durable snapshot base")?;
+        .ok_or(SnapshotArchiveError::UnrecognizedBase)?;
     if pinned.block_hash != *hash || pinned.hash_serialized != *commitment {
-        bail!("durable snapshot identity differs from the network trust anchor");
+        return Err(SnapshotArchiveError::TrustAnchorIdentity);
     }
     if let AssumeUtxoDiskStatus::Validating { chain_tx_count, .. } = status
         && *chain_tx_count != pinned.chain_tx_count
     {
-        bail!("durable snapshot transaction count differs from the network trust anchor");
+        return Err(SnapshotArchiveError::TrustAnchorTxCount);
     }
     Ok(Some(pinned))
 }
@@ -314,11 +349,11 @@ pub(super) fn load_verified(
     data_dir: &Path,
     network: Network,
     pinned: &AssumeUtxoData,
-) -> Result<InitialChainstate> {
+) -> Result<InitialChainstate, SnapshotArchiveError> {
     let path = data_dir.join(DIRECTORY).join(pinned.block_hash.to_string());
     let mut headers = BufReader::new(File::open(path.join("headers.dat"))?);
     if headers.get_ref().metadata()?.len() != (u64::from(pinned.height) + 1) * 80 {
-        bail!("snapshot header archive length does not match the pinned height");
+        return Err(SnapshotArchiveError::HeaderArchiveLength);
     }
     let mut tree = BlockTree::new();
     for _ in 0..=pinned.height {
@@ -335,10 +370,10 @@ pub(super) fn load_verified(
     }
     let id = tree
         .lookup(pinned.block_hash)
-        .context("snapshot header archive does not end at the pinned block")?;
+        .ok_or(SnapshotArchiveError::HeaderArchiveEnd)?;
     let node = tree.node(id)?;
     if node.height != pinned.height {
-        bail!("snapshot header height mismatch");
+        return Err(SnapshotArchiveError::HeaderHeightMismatch);
     }
     let tip = TipSnapshot {
         tip_id: id,
@@ -360,7 +395,7 @@ pub(super) fn load_verified(
         witness,
     ) = read_snapshot_strict_v4_witnessed(&mut coins, ())?;
     if height != pinned.height || tip_hash != pinned.block_hash {
-        bail!("snapshot coin archive identity mismatch");
+        return Err(SnapshotArchiveError::CoinArchiveIdentity);
     }
     let mut stats = set.with_stable_view(|view| {
         if view.hash_serialized_3_at_height(pinned.height)? != pinned.hash_serialized {
@@ -391,7 +426,9 @@ pub(super) fn load_verified(
 mod tests {
     use super::*;
 
-    fn native_fixture() -> Result<(Vec<u8>, &'static AssumeUtxoData)> {
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn native_fixture() -> TestResult<(Vec<u8>, &'static AssumeUtxoData)> {
         let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
         let loaded = bitcoin_rs_utxo::core_snapshot::read_and_verify(
             &mut core.as_slice(),
@@ -411,7 +448,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fifo_replacement_after_entry_check_is_preserved_without_blocking() -> Result<()> {
+    fn fifo_replacement_after_entry_check_is_preserved_without_blocking() -> TestResult {
         use std::os::unix::fs::FileTypeExt as _;
 
         let dir = tempfile::tempdir()?;
@@ -422,7 +459,10 @@ mod tests {
             name,
             consensus_bytes(&Network::Regtest.genesis_block().header),
         )?;
-        let entry = archive.entries()?.next().context("reservation entry")??;
+        let entry = archive
+            .entries()?
+            .next()
+            .ok_or("reservation entry must exist")??;
         assert!(entry.file_type()?.is_file());
         archive.remove_file(name)?;
         let path = dir
@@ -455,17 +495,18 @@ mod tests {
         } else {
             None
         };
-        worker
-            .join()
-            .map_err(|_| anyhow::anyhow!("cleanup worker panicked"))?;
+        worker.join().map_err(|_| "cleanup worker panicked")?;
         drop(rescue);
-        assert!(!observed.context("cleanup blocked on substituted FIFO")??);
+        assert!(
+            !observed.map_err(|_| "cleanup blocked on substituted FIFO")??,
+            "cleanup must not block on a substituted FIFO"
+        );
         assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());
         Ok(())
     }
 
     #[test]
-    fn live_archive_reservation_is_not_reclaimed() -> Result<()> {
+    fn live_archive_reservation_is_not_reclaimed() -> TestResult {
         let dir = tempfile::tempdir()?;
         let (native, pinned) = native_fixture()?;
         let archive = archive_directory(dir.path(), pinned.block_hash)?;
@@ -487,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_native_reservations_are_reclaimed_without_touching_unknowns() -> Result<()> {
+    fn abandoned_native_reservations_are_reclaimed_without_touching_unknowns() -> TestResult {
         let dir = tempfile::tempdir()?;
         let (native, pinned) = native_fixture()?;
         let archive = archive_directory(dir.path(), pinned.block_hash)?;
@@ -526,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> Result<()> {
+    fn sealed_archive_matches_recomputed_archive_byte_for_byte() -> TestResult {
         let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
         let bare = bitcoin_rs_utxo::core_snapshot::read_and_verify(
             &mut core.as_slice(),

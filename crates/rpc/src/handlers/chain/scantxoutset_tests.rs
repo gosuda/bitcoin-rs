@@ -10,6 +10,8 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;
 
+type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
 fn test_txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
@@ -415,8 +417,8 @@ fn scan_projection_uses_retained_branch_after_tip_changes() {
     assert_eq!(unspents[0].block_hash, tip.hash.to_string());
 }
 
-fn stale_branch_fixture()
--> anyhow::Result<(Context, AppliedView, bitcoin_rs_utxo::UtxoScan, Hash256)> {
+fn stale_branch_fixture() -> TestResult<(Context, AppliedView, bitcoin_rs_utxo::UtxoScan, Hash256)>
+{
     let ctx = Context::new();
     let (old, new, expected) = {
         let mut tree = ctx.chain.block_tree.write();
@@ -443,9 +445,7 @@ fn stale_branch_fixture()
                 expected = tree.node(parent)?.hash;
             }
         }
-        let old = tree
-            .tip()
-            .ok_or_else(|| anyhow::anyhow!("missing old tip"))?;
+        let old = tree.tip().ok_or("missing old tip")?;
         parent = genesis_id;
         for height in 1..=301 {
             let header = Header {
@@ -456,9 +456,7 @@ fn stale_branch_fixture()
             };
             parent = tree.insert_node(Some(parent), header, NodeStatus::Active)?;
         }
-        let new = tree
-            .tip()
-            .ok_or_else(|| anyhow::anyhow!("missing new tip"))?;
+        let new = tree.tip().ok_or("missing new tip")?;
         (old, new, expected)
     };
     ctx.chain.applied_tip.store(Some(old));
@@ -482,7 +480,7 @@ fn stale_branch_fixture()
 }
 
 #[test]
-fn scan_stale_ancestry_walk_is_shared_bounded_and_cancellable() -> anyhow::Result<()> {
+fn scan_stale_ancestry_walk_is_shared_bounded_and_cancellable() -> TestResult {
     let (ctx, applied, scan, expected) = stale_branch_fixture()?;
     let checks = std::cell::Cell::new(0);
     let hashes = scan_ancestry(
@@ -495,7 +493,7 @@ fn scan_stale_ancestry_walk_is_shared_bounded_and_cancellable() -> anyhow::Resul
         },
         301,
     )?
-    .ok_or_else(|| anyhow::anyhow!("unexpected abort"))?;
+    .ok_or("unexpected abort")?;
     assert_eq!(
         hashes.len(),
         1,
@@ -565,7 +563,7 @@ fn scan_stale_ancestry_walk_is_shared_bounded_and_cancellable() -> anyhow::Resul
 }
 
 #[test]
-fn scan_projection_abort_totals_only_the_completed_prefix() -> anyhow::Result<()> {
+fn scan_projection_abort_totals_only_the_completed_prefix() -> TestResult {
     let (ctx, applied, scan, expected) = stale_branch_fixture()?;
     let hashes = std::collections::BTreeMap::from([(1, expected)]);
     let descs = std::collections::BTreeMap::from([(vec![0x51], "raw(51)#8lvh9jxk".into())]);
@@ -651,7 +649,7 @@ fn scan_descriptor_limits_and_public_fixed_forms() {
 const SCAN_XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
 
 #[test]
-fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> anyhow::Result<()> {
+fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> TestResult {
     let ctx = Arc::new(Context::new());
     let single = format!("wpkh({SCAN_XPUB}/0/*)");
     let multi = format!("wpkh({SCAN_XPUB}/<0;1>/*)");
@@ -664,7 +662,7 @@ fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> anyhow::Result<
     ] {
         let error = scantxoutset(&ctx, &json!(["start", objects]))
             .err()
-            .ok_or_else(|| anyhow::anyhow!("oversized scan succeeded"))?;
+            .ok_or("oversized scan succeeded")?;
         assert_eq!(error.code(), -8);
         assert!(error.to_string().contains("1024 scan script expansions"));
         assert_eq!(ctx.chain.utxo.scan_progress(), None);
@@ -683,7 +681,7 @@ fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> anyhow::Result<
 }
 
 #[test]
-fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> anyhow::Result<()> {
+fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> TestResult {
     let ctx = Arc::new(Context::new());
     let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
     let secret = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
@@ -700,7 +698,7 @@ fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> anyhow::Resul
     ] {
         let error = scantxoutset(&ctx, &json!(["start", [{"desc":desc,"range":[0,1]}]]))
             .err()
-            .ok_or_else(|| anyhow::anyhow!("invalid descriptor succeeded: {desc}"))?;
+            .ok_or_else(|| format!("invalid descriptor succeeded: {desc}"))?;
         assert_eq!(error.code(), -5, "{desc}: {error}");
         assert_eq!(ctx.chain.utxo.scan_progress(), None);
         assert_eq!(
@@ -712,7 +710,7 @@ fn scan_ranged_keys_preserve_refusals_and_release_reservation() -> anyhow::Resul
 }
 
 #[test]
-fn scan_expansion_observes_abort_shutdown_and_deadline() -> anyhow::Result<()> {
+fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
     use std::cell::Cell;
 
     let ctx = Arc::new(Context::new());
@@ -753,7 +751,7 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> anyhow::Result<()> {
             assert!(
                 result
                     .err()
-                    .ok_or_else(|| anyhow::anyhow!("deadline ignored"))?
+                    .ok_or("deadline ignored")?
                     .to_string()
                     .contains("60 seconds")
             );

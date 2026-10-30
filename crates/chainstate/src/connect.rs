@@ -950,8 +950,12 @@ fn map_block_change_error(error: &BlockChangeError) -> ApplyError {
     }
 }
 
-pub(super) type BuiltJournalRecord =
-    Option<core::result::Result<bitcoin_rs_storage::chainstate_journal::JournalRecord, String>>;
+pub(super) type BuiltJournalRecord = Option<
+    core::result::Result<
+        bitcoin_rs_storage::chainstate_journal::JournalRecord,
+        crate::journal::JournalDeltaError,
+    >,
+>;
 
 fn build_journal_record(
     block: &Block,
@@ -980,19 +984,17 @@ fn build_journal_record(
     debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
     raw_header.copy_from_slice(&encoded);
     Some(
-        crate::journal::mutations_for_block(changes, undo_coins)
-            .map(
-                |mutations| bitcoin_rs_storage::chainstate_journal::JournalRecord {
-                    height,
-                    block_hash: block_hash.to_le_bytes(),
-                    prev_hash: prev_hash.to_le_bytes(),
-                    block_tx_count,
-                    coin_stats_height_delta,
-                    raw_header,
-                    mutations,
-                },
-            )
-            .map_err(|error| error.to_string()),
+        crate::journal::mutations_for_block(changes, undo_coins).map(|mutations| {
+            bitcoin_rs_storage::chainstate_journal::JournalRecord {
+                height,
+                block_hash: block_hash.to_le_bytes(),
+                prev_hash: prev_hash.to_le_bytes(),
+                block_tx_count,
+                coin_stats_height_delta,
+                raw_header,
+                mutations,
+            }
+        }),
     )
 }
 

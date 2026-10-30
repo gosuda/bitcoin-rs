@@ -577,11 +577,13 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
         .err()
         .ok_or("snapshot-base checkpoint accepted an impossible coin height")?;
     assert!(matches!(
-        error.downcast_ref::<bitcoin_rs_utxo::UtxoError>(),
-        Some(bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange {
-            height,
-            snapshot_height,
-        }) if *height == invalid_height && *snapshot_height == fixture.pinned.height
+        error,
+        crate::recovery::RecoveryError::Utxo(
+            bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange {
+                height,
+                snapshot_height,
+            }
+        ) if height == invalid_height && snapshot_height == fixture.pinned.height
     ));
     assert_eq!(
         std::fs::read(utxo_path)?,

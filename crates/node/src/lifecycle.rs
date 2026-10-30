@@ -337,7 +337,7 @@ impl NodeServices {
         let mut first_error = None;
         let state = state.map(|state| {
             if let Err(error) = state.bounded_index_shutdown(DRAIN_DEADLINE) {
-                set_first_error(&mut first_error, error);
+                set_first_error(&mut first_error, error.into());
             }
             &*state
         });
@@ -544,7 +544,7 @@ fn publish_clean_checkpoint_if_eligible(
             }
             Err(error) => {
                 tracing::error!(%error, "clean checkpoint publication failed");
-                set_first_error(first_error, error);
+                set_first_error(first_error, error.into());
             }
         }
     } else {

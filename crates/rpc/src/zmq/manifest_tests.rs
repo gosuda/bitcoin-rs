@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "zmq")]
+type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
 #[test]
 fn zmq_topic_names_match_the_compatibility_manifest() {
     let published: std::collections::BTreeSet<&str> = [
@@ -130,7 +133,7 @@ fn wired_sequence_gateway() -> (
 
 #[cfg(feature = "zmq")]
 #[test]
-fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> anyhow::Result<()> {
+fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> TestResult {
     struct EmptyChain;
     impl bitcoin_rs_mempool::AdmissionChain for EmptyChain {
         fn snapshot(
@@ -162,7 +165,7 @@ fn admitted_unconfirmed_rawtx_is_exact_and_not_repeated() -> anyhow::Result<()> 
             subscriber.recv_multipart(0)?;
             break;
         }
-        anyhow::ensure!(
+        assert!(
             std::time::Instant::now() < deadline,
             "ZMQ subscription timed out"
         );

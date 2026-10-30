@@ -18,17 +18,21 @@ use bitcoin_rs_storage::StorageBackend;
 pub use bitcoin_rs_p2p::{IpSubnet, PeerNetwork};
 pub use bitcoin_rs_primitives::NetworkLabel;
 
-pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, String> {
+pub fn parse_network(value: &str) -> std::result::Result<NetworkSelection, OptionParseError> {
     NetworkSelection::from_str(value)
 }
 
-pub fn parse_storage_backend(value: &str) -> std::result::Result<StorageBackend, String> {
-    StorageBackend::from_str(value)
+pub fn parse_storage_backend(value: &str) -> std::result::Result<StorageBackend, OptionParseError> {
+    StorageBackend::from_str(value).map_err(|_| OptionParseError::StorageBackend {
+        value: value.to_owned(),
+    })
 }
 
-pub fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, String> {
-    ScriptIndexMode::parse(value).ok_or_else(|| {
-        format!("invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean")
+pub fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, OptionParseError> {
+    ScriptIndexMode::parse(value).ok_or_else(|| OptionParseError::InvalidValue {
+        flag: "scriptindex",
+        value: value.to_owned(),
+        expected: "`utxo`, `full`, or a boolean",
     })
 }
 
@@ -59,15 +63,50 @@ pub enum IndexBundleDirError {
     Nul,
 }
 
-pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, String> {
-    ValidationMode::parse(value).ok_or_else(|| {
-        format!("invalid validation-mode value `{value}`: expected `full` or `assume-valid`")
+#[derive(Debug, thiserror::Error)]
+pub enum OptionParseError {
+    #[error("unknown network {value}")]
+    Network { value: String },
+    #[error("unsupported storage backend {value}")]
+    StorageBackend { value: String },
+    #[error("invalid {flag} value `{value}`: expected {expected}")]
+    InvalidValue {
+        flag: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    #[error("p2p magic must be exactly eight hexadecimal characters")]
+    P2pMagic,
+    #[error("connect peer `{value}` must include a port")]
+    ConnectPortMissing { value: String },
+    #[error("connect peer `{value}` has an empty hostname")]
+    ConnectHostEmpty { value: String },
+    #[error("connect peer `{value}` has an invalid port: {reason}")]
+    ConnectPortInvalid {
+        value: String,
+        reason: std::num::ParseIntError,
+    },
+    #[error("unknown network label: {value}")]
+    NetworkLabel { value: String },
+    #[error("{expected}")]
+    PeerNetwork { expected: &'static str },
+}
+
+pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, OptionParseError> {
+    ValidationMode::parse(value).ok_or_else(|| OptionParseError::InvalidValue {
+        flag: "validation-mode",
+        value: value.to_owned(),
+        expected: "`full` or `assume-valid`",
     })
 }
 
-pub fn parse_validation_engine(value: &str) -> std::result::Result<ValidationEngine, String> {
-    ValidationEngine::parse(value).ok_or_else(|| {
-        format!("invalid validation-engine value `{value}`: expected `native` or `kernel`")
+pub fn parse_validation_engine(
+    value: &str,
+) -> std::result::Result<ValidationEngine, OptionParseError> {
+    ValidationEngine::parse(value).ok_or_else(|| OptionParseError::InvalidValue {
+        flag: "validation-engine",
+        value: value.to_owned(),
+        expected: "`native` or `kernel`",
     })
 }
 
@@ -79,30 +118,40 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
-pub fn parse_p2p_magic(value: &str) -> Result<[u8; 4]> {
+pub fn parse_p2p_magic(value: &str) -> std::result::Result<[u8; 4], OptionParseError> {
     let value = value.trim();
-    <[u8; 4]>::from_hex(value)
-        .map_err(|_| anyhow::anyhow!("p2p magic must be exactly eight hexadecimal characters"))
+    <[u8; 4]>::from_hex(value).map_err(|_| OptionParseError::P2pMagic)
 }
 
-pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String> {
+pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, OptionParseError> {
     let value = value.trim();
     if value.parse::<SocketAddr>().is_ok() {
         return Ok(value.to_owned());
     }
     let Some((host, port)) = value.rsplit_once(':') else {
-        return Err(format!("connect peer `{value}` must include a port"));
+        return Err(OptionParseError::ConnectPortMissing {
+            value: value.to_owned(),
+        });
     };
     if host.is_empty() {
-        return Err(format!("connect peer `{value}` has an empty hostname"));
+        return Err(OptionParseError::ConnectHostEmpty {
+            value: value.to_owned(),
+        });
     }
     port.parse::<u16>()
-        .map_err(|error| format!("connect peer `{value}` has an invalid port: {error}"))?;
+        .map_err(|reason| OptionParseError::ConnectPortInvalid {
+            value: value.to_owned(),
+            reason,
+        })?;
     Ok(value.to_owned())
 }
 
-pub fn parse_peer_network(value: &str) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, String> {
-    value.parse().map_err(str::to_owned)
+pub fn parse_peer_network(
+    value: &str,
+) -> std::result::Result<bitcoin_rs_p2p::PeerNetwork, OptionParseError> {
+    value
+        .parse()
+        .map_err(|expected| OptionParseError::PeerNetwork { expected })
 }
 fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> {
     if value.trim().is_empty() {
@@ -110,8 +159,9 @@ fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> 
     }
     value
         .split(',')
-        .map(|network| parse_peer_network(network.trim()).map_err(anyhow::Error::msg))
-        .collect()
+        .map(|network| parse_peer_network(network.trim()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
@@ -129,19 +179,22 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     }
     value
         .split(',')
-        .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
-        .collect()
+        .map(|part| parse_connect_endpoint(part.trim()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn parse_network_label(
     value: &str,
-) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, String> {
+) -> std::result::Result<bitcoin_rs_primitives::NetworkLabel, OptionParseError> {
     match value {
         "ipv4" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv4),
         "ipv6" => Ok(bitcoin_rs_primitives::NetworkLabel::Ipv6),
         "onion" => Ok(bitcoin_rs_primitives::NetworkLabel::Onion),
         "i2p" => Ok(bitcoin_rs_primitives::NetworkLabel::I2p),
-        other => Err(format!("unknown network label: {other}")),
+        other => Err(OptionParseError::NetworkLabel {
+            value: other.to_owned(),
+        }),
     }
 }
 
@@ -821,3 +874,76 @@ macro_rules! option_rows {
 }
 
 option_rows!(emit_user_config);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_network_maps_an_unknown_name_to_the_network_variant() {
+        let error = parse_network("bogus");
+        assert!(
+            matches!(&error, Err(OptionParseError::Network { value }) if value.as_str() == "bogus"),
+            "--network is the only flag that names an unknown network, got {error:?}"
+        );
+        assert!(parse_network("regtest").is_ok());
+    }
+
+    #[test]
+    fn parse_script_index_names_the_flag_it_rejected() {
+        let error = parse_script_index("bogus");
+        assert!(
+            matches!(
+                &error,
+                Err(OptionParseError::InvalidValue {
+                    flag,
+                    value,
+                    expected,
+                }) if *flag == "scriptindex"
+                    && value.as_str() == "bogus"
+                    && *expected == "`utxo`, `full`, or a boolean"
+            ),
+            "the scriptindex grammar owns its rejected flag and its accepted values, got {error:?}"
+        );
+        assert!(parse_script_index("utxo").is_ok());
+    }
+
+    #[test]
+    fn parse_connect_endpoint_separates_a_missing_port_from_an_empty_host_and_a_bad_port() {
+        let missing = parse_connect_endpoint("peer");
+        assert!(
+            matches!(&missing, Err(OptionParseError::ConnectPortMissing { .. })),
+            "a --connect value without a port is its own fault class, got {missing:?}"
+        );
+        let empty = parse_connect_endpoint(":8333");
+        assert!(
+            matches!(&empty, Err(OptionParseError::ConnectHostEmpty { .. })),
+            "a --connect value with an empty host is its own fault class, got {empty:?}"
+        );
+        let port = parse_connect_endpoint("peer:99999");
+        assert!(
+            matches!(&port, Err(OptionParseError::ConnectPortInvalid { .. })),
+            "a --connect value whose port exceeds u16 is its own fault class, got {port:?}"
+        );
+        assert!(
+            matches!(
+                &parse_connect_endpoint("peer:8333"),
+                Ok(value) if value.as_str() == "peer:8333"
+            ),
+            "the accepted --connect grammar is host:port, returned unchanged"
+        );
+    }
+
+    #[test]
+    fn parse_p2p_magic_accepts_only_exactly_four_hex_bytes() {
+        let short = parse_p2p_magic("zz");
+        assert!(
+            matches!(&short, Err(OptionParseError::P2pMagic)),
+            "a short or non-hex --p2p-magic is its own fault class, got {short:?}"
+        );
+        assert!(
+            matches!(&parse_p2p_magic(" eca5d404 "), Ok([0xec, 0xa5, 0xd4, 0x04])),
+            "eight hexadecimal characters, optionally padded, are the only accepted --p2p-magic"
+        );
+    }
+}

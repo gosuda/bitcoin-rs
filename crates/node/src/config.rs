@@ -1,4 +1,6 @@
-use crate::options::{ChainstateJournalOverrides, UserConfig, check_index_bundle_path};
+use crate::options::{
+    ChainstateJournalOverrides, OptionParseError, UserConfig, check_index_bundle_path,
+};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -940,10 +942,12 @@ impl NetworkSelection {
 }
 
 impl FromStr for NetworkSelection {
-    type Err = String;
+    type Err = OptionParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value).ok_or_else(|| format!("unknown network {value}"))
+        Self::parse(value).ok_or_else(|| OptionParseError::Network {
+            value: value.to_owned(),
+        })
     }
 }
 

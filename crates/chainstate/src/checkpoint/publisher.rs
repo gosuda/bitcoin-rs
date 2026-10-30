@@ -323,8 +323,10 @@ mod tests {
     use crate::checkpoint::CheckpointError;
     use bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
 
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
     #[test]
-    fn full_revalidation_marker_clears_after_checkpoint_publication() -> anyhow::Result<()> {
+    fn full_revalidation_marker_clears_after_checkpoint_publication() -> TestResult {
         let dir = tempfile::tempdir()?;
         let journal_dir = dir.path().join(JOURNAL_DIR_NAME);
         let marker =
@@ -339,20 +341,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_full_revalidation_marker_is_success() -> anyhow::Result<()> {
+    fn missing_full_revalidation_marker_is_success() -> TestResult {
         let dir = tempfile::tempdir()?;
         retire_full_revalidation_marker(dir.path())?;
         Ok(())
     }
 
     #[test]
-    fn marker_clear_io_is_classified_as_retryable_marker_error() -> anyhow::Result<()> {
+    fn marker_clear_io_is_classified_as_retryable_marker_error() -> TestResult {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(JOURNAL_DIR_NAME), b"not a directory")?;
 
         let error = match retire_full_revalidation_marker(dir.path()) {
             Err(error) => error,
-            Ok(()) => anyhow::bail!("opening a file as the journal directory must fail"),
+            Ok(()) => return Err("opening a file as the journal directory must fail".into()),
         };
         assert!(matches!(error, CheckpointError::FullRevalidationMarker(_)));
         Ok(())
@@ -360,7 +362,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn committed_fifo_does_not_block_or_seal() -> anyhow::Result<()> {
+    fn committed_fifo_does_not_block_or_seal() -> TestResult {
         use std::os::unix::fs::FileTypeExt as _;
 
         let set = bitcoin_rs_utxo::UtxoSet::new();
@@ -369,7 +371,7 @@ mod tests {
         let (_, (), witness) =
             bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;
         let Some(witness) = witness else {
-            anyhow::bail!("empty snapshot must mint a witness");
+            return Err("empty snapshot must mint a witness".into());
         };
         let reference = bitcoin_rs_storage::checkpoint::CheckpointReference {
             generation: 0,
@@ -431,9 +433,9 @@ mod tests {
             Some(Err(error)) => return Err(error.into()),
             None => None,
         };
-        join_result.map_err(|_| anyhow::anyhow!("checkpoint seed worker panicked"))?;
+        join_result.map_err(|_| "checkpoint seed worker panicked")?;
         drop(rescue);
-        observed.map_err(|_| anyhow::anyhow!("committed FIFO open must not block"))?;
+        observed.map_err(|_| "committed FIFO open must not block")?;
         assert!(cell.take().is_none(), "committed FIFO must not seal");
         assert!(
             std::fs::symlink_metadata(&fifo_path)?.file_type().is_fifo(),

@@ -1,6 +1,3 @@
-#[cfg(feature = "zmq")]
-use anyhow::Context as _;
-use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 
 #[cfg(test)]
@@ -13,6 +10,7 @@ use serde::Deserialize;
 use std::collections::HashSet as StdHashSet;
 #[cfg(feature = "zmq")]
 use std::sync::atomic::{AtomicU32, Ordering};
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -42,39 +40,52 @@ impl ZmqEndpointConfig {
     }
 }
 
-pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<()> {
+#[derive(Debug, Error)]
+pub enum ZmqConfigError {
+    #[error("ZMQ endpoint must not be empty")]
+    EmptyEndpoint,
+    #[error("ZMQ endpoint {endpoint} must have at least one topic")]
+    NoTopics { endpoint: String },
+    #[error("duplicate ZMQ endpoint: {endpoint}")]
+    DuplicateEndpoint { endpoint: String },
+    #[error("ZMQ HWM must be positive; zero disables libzmq's queue limit")]
+    NonPositiveHwm,
+    #[error("ZMQ HWM exceeds libzmq's signed SNDHWM range: {hwm}")]
+    HwmOutOfRange { hwm: u32 },
+    #[error("duplicate ZMQ topic on endpoint: {endpoint}")]
+    DuplicateTopic { endpoint: String },
+}
+
+pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<(), ZmqConfigError> {
     let mut endpoints = StdHashSet::new();
     for config in configs {
-        ensure!(
-            !config.endpoint.trim().is_empty(),
-            "ZMQ endpoint must not be empty"
-        );
-        ensure!(
-            !config.topics.is_empty(),
-            "ZMQ endpoint {} must have at least one topic",
-            config.endpoint
-        );
-        ensure!(
-            endpoints.insert(&config.endpoint),
-            "duplicate ZMQ endpoint: {}",
-            config.endpoint
-        );
+        if config.endpoint.trim().is_empty() {
+            return Err(ZmqConfigError::EmptyEndpoint);
+        }
+        if config.topics.is_empty() {
+            return Err(ZmqConfigError::NoTopics {
+                endpoint: config.endpoint.clone(),
+            });
+        }
+        if !endpoints.insert(&config.endpoint) {
+            return Err(ZmqConfigError::DuplicateEndpoint {
+                endpoint: config.endpoint.clone(),
+            });
+        }
         let hwm = config.effective_hwm();
-        ensure!(
-            hwm > 0,
-            "ZMQ HWM must be positive; zero disables libzmq's queue limit"
-        );
-        ensure!(
-            i32::try_from(hwm).is_ok(),
-            "ZMQ HWM exceeds libzmq's signed SNDHWM range: {hwm}"
-        );
+        if hwm == 0 {
+            return Err(ZmqConfigError::NonPositiveHwm);
+        }
+        if i32::try_from(hwm).is_err() {
+            return Err(ZmqConfigError::HwmOutOfRange { hwm });
+        }
         let mut topics = StdHashSet::new();
         for topic in &config.topics {
-            ensure!(
-                topics.insert(topic),
-                "duplicate ZMQ topic on endpoint: {}",
-                config.endpoint
-            );
+            if !topics.insert(topic) {
+                return Err(ZmqConfigError::DuplicateTopic {
+                    endpoint: config.endpoint.clone(),
+                });
+            }
         }
     }
     Ok(())
@@ -234,8 +245,43 @@ impl fmt::Debug for SocketZmqPublisher {
 }
 
 #[cfg(feature = "zmq")]
+#[derive(Debug, Error)]
+pub enum ZmqBindError {
+    #[error(transparent)]
+    Config(#[from] ZmqConfigError),
+    #[error("create ZMQ PUB socket")]
+    CreateSocket(#[source] zmq::Error),
+    #[error("ZMQ HWM exceeds i32")]
+    HwmNotI32(#[source] std::num::TryFromIntError),
+    #[error("set ZMQ SNDHWM for endpoint {endpoint}")]
+    SetSendHighWaterMark {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+    #[error("set ZMQ LINGER for endpoint {endpoint}")]
+    SetLinger {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+    #[error("set ZMQ IPv6 for endpoint {endpoint}")]
+    SetIpv6 {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+    #[error("bind ZMQ PUB endpoint {endpoint}")]
+    BindEndpoint {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+}
+
+#[cfg(feature = "zmq")]
 impl SocketZmqPublisher {
-    pub fn bind(endpoint_configs: &[ZmqEndpointConfig]) -> Result<Self> {
+    pub fn bind(endpoint_configs: &[ZmqEndpointConfig]) -> Result<Self, ZmqBindError> {
         let deduped_configs: Vec<ZmqEndpointConfig> = endpoint_configs
             .iter()
             .map(|config| {
@@ -264,23 +310,37 @@ impl SocketZmqPublisher {
 
         for endpoint_config in &deduped_configs {
             let hwm = endpoint_config.effective_hwm();
-            let socket = context.socket(zmq::PUB).context("create ZMQ PUB socket")?;
+            let endpoint = endpoint_config.endpoint.as_str();
+            let socket = context
+                .socket(zmq::PUB)
+                .map_err(ZmqBindError::CreateSocket)?;
+            let sndhwm = i32::try_from(hwm).map_err(ZmqBindError::HwmNotI32)?;
             socket
-                .set_sndhwm(i32::try_from(hwm).context("ZMQ HWM exceeds i32")?)
-                .with_context(|| {
-                    format!("set ZMQ SNDHWM for endpoint {}", endpoint_config.endpoint)
+                .set_sndhwm(sndhwm)
+                .map_err(|source| ZmqBindError::SetSendHighWaterMark {
+                    endpoint: endpoint.to_owned(),
+                    source,
                 })?;
-            socket.set_linger(0).with_context(|| {
-                format!("set ZMQ LINGER for endpoint {}", endpoint_config.endpoint)
-            })?;
-            if is_ipv6_tcp_endpoint(&endpoint_config.endpoint) {
-                socket.set_ipv6(true).with_context(|| {
-                    format!("set ZMQ IPv6 for endpoint {}", endpoint_config.endpoint)
+            socket
+                .set_linger(0)
+                .map_err(|source| ZmqBindError::SetLinger {
+                    endpoint: endpoint.to_owned(),
+                    source,
                 })?;
+            if is_ipv6_tcp_endpoint(endpoint) {
+                socket
+                    .set_ipv6(true)
+                    .map_err(|source| ZmqBindError::SetIpv6 {
+                        endpoint: endpoint.to_owned(),
+                        source,
+                    })?;
             }
             socket
-                .bind(&endpoint_config.endpoint)
-                .with_context(|| format!("bind ZMQ PUB endpoint {}", endpoint_config.endpoint))?;
+                .bind(endpoint)
+                .map_err(|source| ZmqBindError::BindEndpoint {
+                    endpoint: endpoint.to_owned(),
+                    source,
+                })?;
             let endpoint_index = endpoints.len();
             endpoints.push(EndpointSocket {
                 endpoint: endpoint_config.endpoint.clone(),

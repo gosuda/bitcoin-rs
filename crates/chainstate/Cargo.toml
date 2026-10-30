@@ -45,7 +45,6 @@ bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
 bitcoin-rs-chain.workspace = true
 
-anyhow.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
 cap-fs-ext.workspace = true

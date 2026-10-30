@@ -314,7 +314,6 @@ dependencies = [
 name = "bitcoin-rs-chainstate"
 version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin-rs-chain",
  "bitcoin-rs-chainstate",
@@ -564,7 +563,6 @@ dependencies = [
 name = "bitcoin-rs-rpc"
 version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",

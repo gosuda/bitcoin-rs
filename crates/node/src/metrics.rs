@@ -30,11 +30,19 @@ impl core::fmt::Display for Sha256Hex {
     }
 }
 
-impl core::str::FromStr for Sha256Hex {
-    type Err = String;
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum Sha256HexError {
+    #[error("digest {text:?} is not 64 lowercase hex characters")]
+    Malformed { text: String },
+}
 
-    fn from_str(text: &str) -> Result<Self, String> {
-        let malformed = || format!("digest {text:?} is not 64 lowercase hex characters");
+impl core::str::FromStr for Sha256Hex {
+    type Err = Sha256HexError;
+
+    fn from_str(text: &str) -> Result<Self, Sha256HexError> {
+        let malformed = || Sha256HexError::Malformed {
+            text: text.to_owned(),
+        };
         if text.len() != 64 {
             return Err(malformed());
         }
@@ -97,7 +105,7 @@ fn hardware_identity() -> String {
 }
 
 impl EvidenceIdentity {
-    pub fn of_process(config: &crate::config::NodeConfig) -> Result<Self> {
+    pub fn of_process(config: &crate::config::NodeConfig) -> std::io::Result<Self> {
         let executable = std::env::current_exe()?;
         let binary_sha256 = Sha256Hex::digest(&std::fs::read(&executable)?);
         let journal = config.chainstate_journal;

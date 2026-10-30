@@ -160,7 +160,7 @@ struct Encoded {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SnapshotImportError {
+pub enum SnapshotImportError {
     #[error("could not read snapshot: {0}")]
     File(#[from] std::io::Error),
     #[error("snapshot input must be a regular file")]

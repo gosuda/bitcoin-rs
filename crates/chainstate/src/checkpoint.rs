@@ -129,6 +129,15 @@ pub enum CheckpointError {
     FullRevalidationMarker(std::io::Error),
 }
 
+/// Failures while attaching a checkpoint publisher to a chainstate.
+#[derive(Debug, Error)]
+pub enum CheckpointSetupError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("checkpointing requires a block body store")]
+    MissingBlockBodyStore,
+}
+
 #[expect(clippy::as_conversions)]
 const _: () = assert!(COINSTATS_PAYLOAD_LEN as usize == COIN_STATS_ENCODED_LEN);
 

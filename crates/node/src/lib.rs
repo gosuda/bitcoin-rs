@@ -67,6 +67,7 @@ pub use chain_feed::{
 };
 pub use embed::{Node, NodeError};
 
+pub use snapshot::SnapshotImportError;
 pub use state::DataDirLockError;
 
 pub use mining::MiningCoordinator;
