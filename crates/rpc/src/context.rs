@@ -288,6 +288,7 @@ pub use bitcoin_rs_index::{
 pub struct ContextHandles {
     pub silent_payments: bool,
     pub compressed_transactions: bool,
+    pub shutdown_request: Option<Arc<dyn Fn() + Send + Sync>>,
     pub chain: ChainHandles,
     pub mempool: MempoolHandles,
     pub indexes: IndexHandles,
@@ -448,6 +449,7 @@ pub struct Context {
     #[cfg(feature = "silent-payments")]
     pub(crate) silent_payments: Option<Mutex<()>>,
     pub(crate) compressed_transactions: bool,
+    pub(crate) shutdown_request: Option<Arc<dyn Fn() + Send + Sync>>,
     pub chain: ChainHandles,
     pub mempool: MempoolHandles,
     pub indexes: IndexHandles,
@@ -611,6 +613,7 @@ impl Default for ContextHandles {
         Self {
             silent_payments: false,
             compressed_transactions: false,
+            shutdown_request: None,
             chain: ChainHandles::default(),
             mempool: MempoolHandles::default(),
             indexes: IndexHandles::default(),
@@ -658,6 +661,7 @@ impl Context {
         let ContextHandles {
             silent_payments,
             compressed_transactions,
+            shutdown_request,
             chain,
             mempool,
             indexes,
@@ -673,6 +677,7 @@ impl Context {
             #[cfg(feature = "silent-payments")]
             silent_payments: silent_payments.then(|| Mutex::new(())),
             compressed_transactions,
+            shutdown_request,
             chain,
             mempool,
             indexes,
@@ -719,6 +724,14 @@ impl Context {
     #[must_use]
     pub fn with_chain_control(mut self, chain_control: Arc<dyn ChainControl>) -> Self {
         self.chain.chain_control = Some(chain_control);
+        self
+    }
+
+    /// Attaches the node's graceful-shutdown trigger so the `stop` RPC can
+    /// route into the same latch the signal handler uses.
+    #[must_use]
+    pub fn with_shutdown_request(mut self, request: impl Fn() + Send + Sync + 'static) -> Self {
+        self.shutdown_request = Some(Arc::new(request));
         self
     }
 
