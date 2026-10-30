@@ -1,4 +1,4 @@
-"""Offline tests of formal evidence custody and failure handling, not model proofs."""
+"""Offline tests of formal evidence custody, bounds and failure handling, not model proofs."""
 
 from __future__ import annotations
 
@@ -14,24 +14,25 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_models
 
+MODULES = (("PeerLeases", "Session"), ("ChainAdmission", "Commit"))
+
 
 class ModelEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        directory = self.root / "docs/models"
-        directory.mkdir(parents=True)
         rows: list[str] = []
-        for name in check_models.MODELS:
-            tla = (directory / f"{name}.tla")
+        for owner, machine in MODULES:
+            directory = self.root / "docs/models" / owner
+            directory.mkdir(parents=True, exist_ok=True)
+            tla = directory / f"{machine}.tla"
             tla.write_text("fixture\n", encoding="utf-8")
-            cfg = (directory / f"{name}.cfg")
+            cfg = directory / f"{machine}.cfg"
             cfg.write_text("CONSTANTS\nN = 1\nINIT Init\nNEXT Next\n", encoding="utf-8")
-            digest = hashlib.sha256(tla.read_bytes()).hexdigest()
-            cfg_digest = hashlib.sha256(cfg.read_bytes()).hexdigest()
             rows.append(
-                f"| {name} | {digest} | {cfg_digest} | N=1 | 128 | BLOCKED | - | - |"
+                f"| {owner}/{machine} | {hashlib.sha256(tla.read_bytes()).hexdigest()} "
+                f"| {hashlib.sha256(cfg.read_bytes()).hexdigest()} | N=1 | 128 | BLOCKED | - | - |"
             )
         contract = self.root / check_models.FORMAL_CONTRACT
         contract.parent.mkdir(parents=True, exist_ok=True)
@@ -41,17 +42,20 @@ class ModelEvidenceTests(unittest.TestCase):
         (self.home / "lib").mkdir()
         jar = self.home / "lib/apalache.jar"
         jar.write_bytes(b"synthetic tool, not a prover")
+        archive = self.home / "apalache-0.62.4.zip"
+        archive.write_bytes(b"synthetic archive, not the prover")
         api = self.root / "crates/rpc"
         api.mkdir(parents=True)
         (api / "core-compat.toml").write_text(
-            '[reference.formal_tool]\nname = "apalache-mc"\nversion = "0.62.2"\n'
+            '[reference.formal_tool]\nname = "apalache-mc"\nversion = "0.62.4"\n'
+            f'archive_sha256 = "{hashlib.sha256(archive.read_bytes()).hexdigest()}"\n'
             f'jar_sha256 = "{hashlib.sha256(jar.read_bytes()).hexdigest()}"\n',
             encoding="utf-8",
         )
         self.executable = self.home / "bin/apalache-mc"
         self.write_tool('print("The outcome is: NoError\\nEXITCODE: OK")')
 
-    def write_tool(self, body: str, version: str = "0.62.2") -> None:
+    def write_tool(self, body: str, version: str = "0.62.4") -> None:
         self.executable.write_text(
             f"#!{sys.executable}\nimport sys, time\n"
             f"if sys.argv[1] == 'version':\n    print({version!r})\n    sys.exit(0)\n{body}\n",
@@ -59,58 +63,95 @@ class ModelEvidenceTests(unittest.TestCase):
         )
         self.executable.chmod(0o755)
 
-    def run_check(self, timeout: int = 5) -> None:
-        model = check_models.models(self.root)[0]
-        check_models.run_model(self.root, self.executable, model, check_models.PROPERTIES[0], timeout)
+    def module(self, index: int = 0) -> check_models.Module:
+        return check_models.modules(self.root)[index]
 
-    def test_input_custody_rejects_changed_or_missing_models(self) -> None:
-        self.assertEqual(len(check_models.models(self.root)), 3)
-        (self.root / "docs/models/ChainAdmission.tla").write_text("changed", encoding="utf-8")
+    def run_check(self, timeout: int = 5) -> dict:
+        return check_models.run_module(
+            self.root, self.executable, self.module(), check_models.PROPERTIES[0], timeout
+        )
+
+    def results(self) -> list[dict]:
+        return [
+            json.loads(path.read_text())
+            for path in sorted(self.root.glob("target/apalache/**/result.json"))
+        ]
+
+    def newest_result(self) -> dict:
+        results = sorted(self.root.glob("target/apalache/**/result.json"),
+                         key=lambda path: path.stat().st_mtime)
+        self.assertTrue(results, "no result.json recorded")
+        return json.loads(results[-1].read_text())
+
+    def test_inventory_keys_on_owner_and_machine(self) -> None:
+        inventory = check_models.modules(self.root)
+        self.assertEqual([module.name for module in inventory],
+                         ["ChainAdmission/Commit", "PeerLeases/Session"])
+        self.assertEqual(self.module(1).source(self.root).name, "Session.tla")
+
+    def test_input_custody_rejects_changed_missing_and_extra_models(self) -> None:
+        (self.root / "docs/models/PeerLeases/Session.tla").write_text("changed", encoding="utf-8")
         with self.assertRaises(check_models.EvidenceError) as error:
-            check_models.models(self.root)
+            check_models.modules(self.root)
         self.assertEqual(error.exception.code, 15)
-        (self.root / check_models.FORMAL_CONTRACT).write_text("", encoding="utf-8")
+        (self.root / "docs/models/PeerLeases/Session.tla").unlink()
         with self.assertRaises(check_models.EvidenceError) as error:
-            check_models.models(self.root)
+            check_models.modules(self.root)
         self.assertEqual(error.exception.code, 15)
+        (self.root / "docs/models/PeerLeases/Session.tla").write_text("fixture\n", encoding="utf-8")
+        (self.root / "docs/models/PeerLeases/Lease.tla").write_text("extra\n", encoding="utf-8")
+        with self.assertRaises(check_models.EvidenceError) as error:
+            check_models.modules(self.root)
+        self.assertEqual(error.exception.code, 15)
+        self.assertEqual(str(error.exception).startswith("module inventory differs"), True)
 
     def test_tool_custody_rejects_wrong_version_and_jar(self) -> None:
         with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
             self.assertEqual(check_models.tool(self.root), self.executable)
-            self.write_tool("", version="0.62.20")
+            self.write_tool("", version="0.62.40")
             with self.assertRaises(check_models.EvidenceError) as error:
                 check_models.tool(self.root)
             self.assertEqual(error.exception.code, 11)
             self.write_tool("")
+            (self.home / "apalache-0.62.4.zip").write_bytes(b"different")
+            with self.assertRaises(check_models.EvidenceError) as error:
+                check_models.tool(self.root)
+            self.assertEqual(error.exception.code, 11)
+            self.assertEqual("archive" in str(error.exception), True)
+            (self.home / "apalache-0.62.4.zip").write_bytes(b"synthetic archive, not the prover")
             (self.home / "lib/apalache.jar").write_bytes(b"different")
             with self.assertRaises(check_models.EvidenceError) as error:
                 check_models.tool(self.root)
             self.assertEqual(error.exception.code, 11)
+            self.assertEqual("JAR" in str(error.exception), True)
+
+    def test_provisioned_download_archive_satisfies_custody(self) -> None:
+        # The CI provisioner keeps the archive under target/ci-reference-downloads
+        # and extracts it into the install root, so the archive check reads both.
+        (self.home / "apalache-0.62.4.zip").unlink()
+        downloads = self.root / "target/ci-reference-downloads"
+        downloads.mkdir(parents=True)
+        (downloads / "apalache-0.62.4.zip").write_bytes(b"synthetic archive, not the prover")
+        with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
+            self.assertEqual(check_models.tool(self.root), self.executable)
 
     def test_empty_apalache_home_uses_default_location(self) -> None:
-        default = (
-            self.root / "target/tools" / "apalache-0.62.2" / "bin" / "apalache-mc"
-        ).resolve()
+        default = (self.root / "target/tools" / "apalache-0.62.4" / "bin"
+                   / "apalache-mc").resolve()
         with patch.dict(os.environ, {"APALACHE_HOME": ""}):
             with self.assertRaises(check_models.EvidenceError) as error:
                 check_models.tool(self.root)
         self.assertEqual(error.exception.code, 11)
         self.assertEqual(str(error.exception), f"missing executable: {default}")
 
-
     def test_missing_model_file_is_a_model_identity_failure(self) -> None:
-        # A missing model file is a custody failure on the model lane, not an
-        # unavailable run: main() must report the model-identity code, 15,
-        # never the generic FileNotFoundError mapped to 14.
-        (self.root / "docs/models/PeerLeases.tla").unlink()
+        (self.root / "docs/models/PeerLeases/Session.tla").unlink()
         with patch.object(check_models, "ROOT", self.root):
             with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 15)
 
     def test_missing_jar_is_a_tool_identity_failure(self) -> None:
-        # A missing JAR is a tool-lane custody failure: main() must report the
-        # tool-identity code, 11, never the generic FileNotFoundError code 14.
         (self.home / "lib/apalache.jar").unlink()
         with patch.object(check_models, "ROOT", self.root):
             with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
@@ -118,75 +159,88 @@ class ModelEvidenceTests(unittest.TestCase):
                     self.assertEqual(check_models.main(), 11)
 
     def test_malformed_tool_pin_missing_version_is_a_tool_identity_failure(self) -> None:
-        # A pin missing one of the name/version/jar_sha256 keys cannot name a
-        # tool: main() must report the tool-identity code, 11, never the
-        # generic KeyError code 14.
         pin = self.root / "crates/rpc/core-compat.toml"
         text = pin.read_text(encoding="utf-8")
-        pin.write_text(text.replace('version = "0.62.2"\n', ""), encoding="utf-8")
+        pin.write_text(text.replace('version = "0.62.4"\n', ""), encoding="utf-8")
         with patch.object(check_models, "ROOT", self.root):
             with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 11)
 
     def test_deleted_contract_is_an_inventory_identity_failure(self) -> None:
-        # A deleted formal contract cannot settle model identity: main()
-        # must report the inventory code, 15, never the generic
-        # FileNotFoundError code 14.
         (self.root / check_models.FORMAL_CONTRACT).unlink()
         with patch.object(check_models, "ROOT", self.root):
             with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 15)
 
+    def test_check_only_confirms_identity_without_running_properties(self) -> None:
+        with patch.object(check_models, "ROOT", self.root):
+            with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
+                with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
+                    self.assertEqual(check_models.main(), 0)
+        self.assertEqual(self.results(), [])
+
+    def test_unknown_module_name_is_a_model_identity_failure(self) -> None:
+        with patch.object(check_models, "ROOT", self.root):
+            with patch.object(sys, "argv", ["check_models.py", "--check-only",
+                                            "--module", "PeerLeases/Lease"]):
+                with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
+                    self.assertEqual(check_models.main(), 15)
+
+    def test_module_filter_runs_only_the_named_module(self) -> None:
+        with patch.object(check_models, "ROOT", self.root):
+            with patch.object(sys, "argv", ["check_models.py", "--k-start", "4",
+                                            "--module", "PeerLeases/Session"]):
+                with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
+                    self.assertEqual(check_models.main(), 0)
+        summary = json.loads((self.root / "target/apalache/summary.json").read_text())
+        self.assertEqual(set(summary), {"PeerLeases/Session"})
+
     def test_temporal_lane_writes_under_temporal_directory(self) -> None:
-        model = check_models.models(self.root)[0]
-        check_models.run_model(
-            self.root, self.executable, model, check_models.PROPERTIES[1], 5
+        module = self.module()
+        check_models.run_module(
+            self.root, self.executable, module, check_models.PROPERTIES[1], 5
         )
         results = list(self.root.glob("target/apalache/**/result.json"))
         self.assertEqual(len(results), 1)
-        self.assertEqual(json.loads(results[0].read_text()), {"native_rc": 0, "evidence_rc": 0})
-        # Identity is recorded inside the fresh run directory itself.
+        record = json.loads(results[0].read_text())
+        self.assertEqual(record, {"k": 128, "native_rc": 0, "evidence_rc": 0})
         self.assertTrue(results[0].with_name("identity.json").is_file())
-        temporal = self.root / "target/apalache" / model.name / "temporal"
+        temporal = (self.root / "target/apalache" / module.owner / module.machine
+                    / "temporal" / "k128")
         self.assertEqual(results[0].parent.parent, temporal)
 
     def test_inherited_smt_solver_cannot_override_the_pinned_prover(self) -> None:
-        # The solver is part of the recorded evidence identity; a variable
-        # inherited from the caller's shell must not swap the pinned prover.
         with patch.dict(os.environ, {"SMT_SOLVER": "boo"}):
             self.run_check()
-        results = list(self.root.glob("target/apalache/**/result.json"))
-        self.assertEqual(len(results), 1)
-        identity = json.loads(results[0].with_name("identity.json").read_text())
+        identity = json.loads(self.newest_result_file().with_name("identity.json").read_text())
         self.assertEqual(identity["solver"], "z3")
 
-    def test_complete_success_retains_identity_and_outcome(self) -> None:
-        self.run_check()
-        results = list(self.root.glob("target/apalache/**/result.json"))
-        self.assertEqual(len(results), 1)
-        self.assertEqual(json.loads(results[0].read_text()), {"native_rc": 0, "evidence_rc": 0})
-        identity = json.loads(results[0].with_name("identity.json").read_text())
-        self.assertIn("--length=128", identity["argv"])
-        self.assertIn("--inv=TypeOK,Safety,TransitionSafety", identity["argv"])
-        self.assertEqual(identity["constants"], "N = 1")
+    def newest_result_file(self) -> Path:
+        path = next(self.root.glob("target/apalache/**/result.json"))
+        return path
 
-    def newest_result(self) -> dict[str, object]:
-        # Each subtest spawns a fresh run directory, so the newest result.json
-        # under the model's run tree records that subtest's verdict.
-        results = sorted(self.root.glob("target/apalache/**/result.json"),
-                         key=lambda path: path.stat().st_mtime)
-        self.assertTrue(results, "no result.json recorded")
-        return json.loads(results[-1].read_text())
+    def test_complete_success_retains_identity_and_outcome(self) -> None:
+        record = self.run_check()
+        self.assertEqual(record["k"], 128)
+        self.assertEqual(record["evidence_rc"], 0)
+        results = self.results()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0], {"k": 128, "native_rc": 0, "evidence_rc": 0})
+        identity = json.loads(self.newest_result_file().with_name("identity.json").read_text())
+        self.assertIn("--length=128", identity["argv"])
+        self.assertIn("--inv=TypeOK", identity["argv"])
+        self.assertEqual(identity["constants"], "N = 1")
+        self.assertEqual(identity["k"], 128)
 
     def test_native_failures_keep_their_meaning(self) -> None:
         for native, expected in ((150, 12), (120, 12), (12, 13), (255, 14)):
             with self.subTest(native=native):
                 self.write_tool(f"sys.exit({native})")
-                with self.assertRaises(check_models.EvidenceError) as error:
-                    self.run_check()
-                self.assertEqual(error.exception.code, expected)
+                record = self.run_check()
+                self.assertEqual(record["evidence_rc"], expected)
+                self.assertEqual(record["native_rc"], native)
                 result = self.newest_result()
                 self.assertEqual(result["native_rc"], native)
                 self.assertEqual(result["evidence_rc"], expected)
@@ -195,17 +249,46 @@ class ModelEvidenceTests(unittest.TestCase):
         for text in ("", "The outcome is: NoError", "EXITCODE: OK"):
             with self.subTest(text=text):
                 self.write_tool(f"print({text!r})")
-                with self.assertRaises(check_models.EvidenceError) as error:
-                    self.run_check()
-                self.assertEqual(error.exception.code, 14)
+                record = self.run_check()
+                self.assertEqual(record["evidence_rc"], 14)
                 self.assertEqual(self.newest_result()["evidence_rc"], 14)
 
+    def test_resource_exhaustion_halves_the_bound_and_records_the_largest_completed(self) -> None:
+        body = (
+            "import sys\n"
+            "length = [arg for arg in sys.argv if arg.startswith('--length=')][0]\n"
+            "bound = int(length.split('=')[1])\n"
+            "if bound > 16:\n    sys.exit(255)\n"
+            "print('The outcome is: NoError\\nEXITCODE: OK')\n"
+        )
+        self.write_tool(body)
+        record = self.run_check()
+        self.assertEqual(record["k"], 16)
+        self.assertEqual(record["evidence_rc"], 0)
+        bounds = sorted(result["k"] for result in self.results())
+        self.assertEqual(bounds, [16, 32, 64, 128])
+
+    def test_halving_stops_at_one_and_reports_the_resource_code(self) -> None:
+        self.write_tool("sys.exit(255)")
+        record = check_models.run_module(
+            self.root, self.executable, self.module(), check_models.PROPERTIES[0], 5
+        )
+        self.assertEqual(record["k"], 1)
+        self.assertEqual(record["evidence_rc"], 14)
+
+    def test_summary_records_bound_and_return_codes(self) -> None:
+        with patch.object(check_models, "ROOT", self.root):
+            with patch.object(sys, "argv", ["check_models.py", "--k-start", "8"]):
+                with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
+                    self.assertEqual(check_models.main(), 0)
+        summary = json.loads((self.root / "target/apalache/summary.json").read_text())
+        self.assertEqual(set(summary), {"ChainAdmission/Commit", "PeerLeases/Session"})
+        for lanes in summary.values():
+            for kind in ("safety", "temporal"):
+                self.assertEqual(lanes[kind]["k"], 8)
+                self.assertEqual(lanes[kind]["evidence_rc"], 0)
+
     def test_timeout_kills_the_whole_tool_session(self) -> None:
-        # The fake tool is a real process tree: the python child spawns a
-        # `sleep 300` descendant, records its pid on disk, and waits for it.
-        # A plain sleep would leave the os.killpg branch unproven, so after
-        # run_model times out the test asserts the recorded descendant is
-        # gone (the whole group died, not just the launcher).
         body = (
             "import os, subprocess, sys\n"
             "if sys.argv[1] == 'check':\n"
@@ -215,13 +298,8 @@ class ModelEvidenceTests(unittest.TestCase):
             "    os.wait()\n"
         )
         self.write_tool(body)
-        # cwd=run_dir for the tool, so the pid file lands beside output.log.
-        with self.assertRaises(check_models.EvidenceError) as error:
-            self.run_check(timeout=1)
-        # Descendant state first: os.killpg must have reached the whole tool
-        # session before any recorded outcome can be asserted.  A killed
-        # descendant may remain as a zombie until its parent is reaped, so
-        # os.kill(pid, 0) alone does not prove that it is no longer running.
+        record = self.run_check(timeout=1)
+        self.assertEqual(record["evidence_rc"], 14)
         pid_file = next(self.root.glob("target/apalache/**/descendant.pid"))
         descendant = int(pid_file.read_text())
         try:
@@ -229,11 +307,11 @@ class ModelEvidenceTests(unittest.TestCase):
         except (ProcessLookupError, FileNotFoundError):
             stat = None
         if stat is not None:
-            state = stat[stat.rfind(")") + 1 :].split(maxsplit=1)[0]
+            state = stat[stat.rfind(")") + 1:].split(maxsplit=1)[0]
             self.assertEqual(state, "Z")
-        self.assertEqual(error.exception.code, 14)
         result = next(self.root.glob("target/apalache/**/result.json"))
-        self.assertEqual(json.loads(result.read_text()), {"native_rc": None, "evidence_rc": 14})
+        self.assertEqual(json.loads(result.read_text()),
+                         {"k": 128, "native_rc": None, "evidence_rc": 14})
 
 
 if __name__ == "__main__":
