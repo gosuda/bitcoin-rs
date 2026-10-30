@@ -3,6 +3,7 @@
 use super::{IndexBundleError, artifact::HEADER_LEN};
 use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::hex::{hex_decode_array, hex_encode, is_lowercase_hex};
 use serde::{Deserialize, Serialize};
 
 pub(super) const BUNDLE_FORMAT: &str = "bitcoin-rs-index-bundle";
@@ -143,7 +144,7 @@ impl IndexBundleManifestV1 {
             base: ManifestBase {
                 height: identity.base_height,
                 hash: base_hash.clone(),
-                chainwork: encode_hex(&identity.chainwork.to_be_bytes::<32>()),
+                chainwork: hex_encode(&identity.chainwork.to_be_bytes::<32>()),
                 chain_tx_count: identity.chain_tx_count,
                 validated: true,
             },
@@ -160,7 +161,7 @@ impl IndexBundleManifestV1 {
             artifacts: vec![ManifestArtifact {
                 family: BundleFamily::TxLookup,
                 name: BundleFamily::TxLookup.file_name().to_owned(),
-                sha256: encode_hex(&artifact.sha256),
+                sha256: hex_encode(&artifact.sha256),
                 bytes: artifact.bytes,
                 records: artifact.records,
             }],
@@ -264,44 +265,22 @@ impl IndexBundleManifestV1 {
     }
 }
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-pub(super) fn encode_hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
-}
-
 /// Encodes little-endian hash bytes in the conventional big-endian spelling.
 pub(super) fn encode_hash_be(le: &[u8; 32]) -> String {
     let mut be = *le;
     be.reverse();
-    encode_hex(&be)
+    hex_encode(&be)
 }
 
 fn parse_hex32(text: &str, field: &str) -> Result<[u8; 32], IndexBundleError> {
-    let invalid = || IndexBundleError::Manifest(format!("{field} is not 64 lowercase hex digits"));
-    let digits = text.as_bytes();
-    if digits.len() != 64 {
-        return Err(invalid());
+    if !is_lowercase_hex(text) {
+        return Err(invalid_hex32(field));
     }
-    let nibble = |digit: u8| match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        _ => None,
-    };
-    let mut out = [0_u8; 32];
-    let (pairs, _) = digits.as_chunks::<2>();
-    for (slot, &[high, low]) in out.iter_mut().zip(pairs) {
-        let (Some(high), Some(low)) = (nibble(high), nibble(low)) else {
-            return Err(invalid());
-        };
-        *slot = (high << 4) | low;
-    }
-    Ok(out)
+    hex_decode_array::<32>(text).map_err(|_| invalid_hex32(field))
+}
+
+fn invalid_hex32(field: &str) -> IndexBundleError {
+    IndexBundleError::Manifest(format!("{field} is not 64 lowercase hex digits"))
 }
 
 /// Parses a big-endian hash spelling into little-endian bytes.

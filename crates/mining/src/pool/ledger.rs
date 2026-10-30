@@ -28,7 +28,7 @@ pub const MAX_PAYOUT_OUTPUT_WEIGHT_WU: u64 = MAX_STANDARD_TX_WEIGHT_WU - PAYOUT_
 pub const MAX_CHANGE_OUTPUTS: usize = 1;
 pub const MAX_CHANGE_SCRIPTS: usize = 16;
 
-const OP_RETURN: u8 = 0x6a;
+use bitcoin_rs_script::opcode::OP_RETURN;
 const BATCH_ID_DOMAIN: &[u8] = b"btcrs.pool.payout-batch.v1";
 const REQUEST_MAGIC: &[u8; 4] = b"BRPR";
 const RECEIPT_MAGIC: &[u8; 4] = b"BRPT";
@@ -43,17 +43,6 @@ pub fn sha256(data: &[u8]) -> Hash32 {
 pub fn sha256d(data: &[u8]) -> Hash32 {
     let first = Sha256::digest(data);
     Sha256::digest(first).into()
-}
-
-#[must_use]
-pub fn to_hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    out
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1246,7 +1235,11 @@ impl fmt::Display for LedgerError {
             }
             Self::UnknownShare => write!(f, "unknown share"),
             Self::BlockConflict => write!(f, "block already recorded with a different claim"),
-            Self::UnknownBatch(id) => write!(f, "unknown batch {}", to_hex(id)),
+            Self::UnknownBatch(id) => write!(
+                f,
+                "unknown batch {}",
+                bitcoin_rs_primitives::hex::hex_encode(id)
+            ),
             Self::IllegalTransition {
                 batch,
                 from,
@@ -1255,11 +1248,15 @@ impl fmt::Display for LedgerError {
                 write!(
                     f,
                     "batch {} in state {from:?} cannot {action}",
-                    to_hex(batch)
+                    bitcoin_rs_primitives::hex::hex_encode(batch)
                 )
             }
             Self::Receipt(e) => write!(f, "receipt refused: {e:?}"),
-            Self::NotObserved(txid) => write!(f, "transaction {} not observed", to_hex(txid)),
+            Self::NotObserved(txid) => write!(
+                f,
+                "transaction {} not observed",
+                bitcoin_rs_primitives::hex::hex_encode(txid)
+            ),
             Self::Chain(e) => write!(f, "{e}"),
             Self::Signer(e) => write!(f, "{e}"),
             Self::Invariant(m) => write!(f, "invariant violated: {m}"),

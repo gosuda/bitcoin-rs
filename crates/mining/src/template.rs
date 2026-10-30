@@ -5,7 +5,8 @@ use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
 use bitcoin_rs_mempool::{BlockRemovalPlan, Mempool, MempoolMiningSnapshot};
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
-    encode::{consensus_bytes, double_sha256, hex_encode},
+    encode::{consensus_bytes, double_sha256},
+    hex::hex_encode,
     varint,
 };
 use bitcoin_rs_script::VerifyFlags;

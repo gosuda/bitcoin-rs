@@ -108,11 +108,9 @@ impl core::str::FromStr for Hash256 {
 }
 
 const fn decode_nibble(byte: u8, offset: usize) -> Result<u8, HashError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(HashError::InvalidHex { offset, byte }),
+    match crate::hex::hex_nibble(byte) {
+        Some(value) => Ok(value),
+        None => Err(HashError::InvalidHex { offset, byte }),
     }
 }
 

@@ -13,6 +13,7 @@ pub mod endpoint;
 pub use endpoint::{EndpointHost, NetworkLabel, PeerAddress, PeerEndpoint, PeerNetwork};
 pub mod hash;
 pub mod header;
+pub mod hex;
 pub mod ids;
 pub mod layout;
 pub mod network;
@@ -39,8 +40,8 @@ pub use sighash::{
 };
 pub use tx::{Tx, TxIn, TxOut};
 pub use units::{
-    Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL, SEQUENCE_LOCKTIME_DISABLE_FLAG,
-    SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
+    Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL,
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
 };
 pub use version::{PKG_VERSION, USER_AGENT, client_version};
 

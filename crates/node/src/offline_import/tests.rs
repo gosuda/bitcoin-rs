@@ -321,7 +321,7 @@ fn two_block_archive() -> TwoBlockArchive {
     hasher.update(&corpus);
     let manifest = format!(
         r#"{{"schema":"core-framed-archive-manifest-v1","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":1,"archive_sha256":"{digest}","archive_bytes":{bytes},"blocks":[{blocks}]}}"#,
-        digest = bitcoin_rs_primitives::encode::hex_encode(&hasher.finalize()),
+        digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize()),
         bytes = corpus.len(),
         blocks = entries.join(",")
     );

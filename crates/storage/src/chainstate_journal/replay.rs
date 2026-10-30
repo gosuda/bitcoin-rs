@@ -1,6 +1,6 @@
 use super::record::{FRAME_HEADER_LEN, JournalRecord, MAX_PAYLOAD_LEN, decode_record};
 use super::writer::{HeadMarker, read_head_bytes};
-use bitcoin_rs_primitives::encode::hex_encode;
+use bitcoin_rs_primitives::hex::hex_encode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReplayError {

@@ -534,7 +534,7 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
 
 #[test]
 fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
-    use bitcoin_rs_primitives::encode::hex_encode;
+    use bitcoin_rs_primitives::hex::hex_encode;
     use bitcoin_rs_storage::checkpoint::{
         CHECKPOINT_ROOT, CURRENT_FILE, CheckpointManifestV1, CurrentV1, MANIFEST_FILE,
     };

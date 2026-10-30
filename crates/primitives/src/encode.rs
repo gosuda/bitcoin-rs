@@ -5,17 +5,6 @@ use thiserror::Error;
 
 use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
 
-#[must_use]
-pub fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
 pub trait Sink {
     fn write_all(&mut self, bytes: &[u8]);
 }
@@ -341,7 +330,8 @@ impl ConsensusDecode for Block {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use super::{ConsensusEncode, DecodeError, deserialize, hex_encode, varint};
+    use super::{ConsensusEncode, DecodeError, deserialize, varint};
+    use crate::hex::hex_encode;
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 

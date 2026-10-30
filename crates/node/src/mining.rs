@@ -526,7 +526,7 @@ impl MiningControl for MiningCoordinator {
             let hash = block.block_hash();
             if request.submit {
                 let payload = BlockPayload::from_local(block);
-                let hex = bitcoin_rs_primitives::encode::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
                 match self.submit(&payload)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -544,7 +544,7 @@ impl MiningControl for MiningCoordinator {
                         "generated block failed validation: {validation:?}"
                     ))));
                 }
-                let hex = bitcoin_rs_primitives::encode::hex_encode(payload.bytes());
+                let hex = bitcoin_rs_primitives::hex::hex_encode(payload.bytes());
                 generated.push(GeneratedBlock { hash, hex });
             }
         }

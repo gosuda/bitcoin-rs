@@ -8,7 +8,7 @@ use std::fmt;
 
 use crate::pool::{Job, JobError, JobId, ShareTarget, WorkerIdentity};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::encode::hex_encode as primitives_hex_encode;
+use bitcoin_rs_primitives::hex::{hex_decode, hex_encode as primitives_hex_encode, hex_nibble};
 use sonic_rs::{Array, JsonContainerTrait, JsonValueTrait, Value};
 
 pub use crate::pool::{BlockOutcome, PoolCore, RefreshError, Refreshed};
@@ -30,15 +30,6 @@ pub const MAX_EXTENSION_NAME_LEN: usize = 64;
 pub const MAX_JSON_DEPTH: usize = 8;
 pub const MAX_DIFFICULTY_TEXT_LEN: usize = 20;
 
-fn nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 pub fn push_hex(out: &mut String, bytes: &[u8]) {
     out.push_str(&primitives_hex_encode(bytes));
 }
@@ -49,24 +40,12 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 }
 
 #[must_use]
-pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    let (pairs, odd_tail) = text.as_bytes().as_chunks::<2>();
-    if !odd_tail.is_empty() {
-        return None;
-    }
-    pairs
-        .iter()
-        .map(|&[high, low]| Some((nibble(high)? << 4) | nibble(low)?))
-        .collect()
-}
-
-#[must_use]
 pub fn parse_u32_hex(text: &str, min_digits: usize) -> Option<u32> {
     if text.len() < min_digits.max(1) || text.len() > 8 {
         return None;
     }
     text.bytes().try_fold(0_u32, |value, byte| {
-        Some((value << 4) | u32::from(nibble(byte)?))
+        Some((value << 4) | u32::from(hex_nibble(byte)?))
     })
 }
 
@@ -89,7 +68,7 @@ pub fn prevhash_to_wire(internal: &[u8; 32]) -> String {
 
 #[must_use]
 pub fn prevhash_from_wire(text: &str) -> Option<[u8; 32]> {
-    let bytes: [u8; 32] = decode_hex(text)?.try_into().ok()?;
+    let bytes: [u8; 32] = hex_decode(text).ok()?.try_into().ok()?;
     Some(swap_words(&bytes))
 }
 
@@ -784,7 +763,7 @@ fn parse_submit(params: &[Value]) -> Result<Submit, WireError> {
     let job_id = required_text_at(params, 1, MAX_JOB_ID_LEN)?.to_owned();
     let extranonce2_text = required_text_at(params, 2, MAX_EXTRANONCE2_BYTES * 2)
         .map_err(|_| errors::INVALID_EXTRANONCE2)?;
-    let extranonce2 = decode_hex(extranonce2_text).ok_or(errors::INVALID_EXTRANONCE2)?;
+    let extranonce2 = hex_decode(extranonce2_text).map_err(|_| errors::INVALID_EXTRANONCE2)?;
     let ntime =
         parse_u32_hex(required_text_at(params, 3, 8)?, 8).ok_or(errors::INVALID_NTIME_FORMAT)?;
     let nonce =

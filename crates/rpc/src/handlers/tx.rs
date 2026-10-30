@@ -4,7 +4,7 @@ use hashbrown::HashSet;
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::hex::DisplayHex as _;
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
@@ -28,11 +28,12 @@ pub(crate) mod submit_package;
 /// A non-hex string is a correctly typed but unacceptable value, so it
 /// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
-    Vec::<u8>::from_hex(hex).map_err(|error| match error {
-        bitcoin::hex::HexToBytesError::OddLengthString(_) => {
+    bitcoin_rs_primitives::hex::hex_decode(hex).map_err(|error| match error {
+        bitcoin_rs_primitives::hex::HexError::OddLength => {
             RpcError::InvalidParameter("hex string must have even length".to_owned())
         }
-        bitcoin::hex::HexToBytesError::InvalidChar(_) => {
+        bitcoin_rs_primitives::hex::HexError::InvalidDigit { .. }
+        | bitcoin_rs_primitives::hex::HexError::WrongLength { .. } => {
             RpcError::InvalidParameter("invalid hex character".to_owned())
         }
     })

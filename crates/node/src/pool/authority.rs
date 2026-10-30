@@ -55,20 +55,13 @@ fn decode_key_into(text: &str, key: &mut [u8; KEY_BYTES]) -> Result<(), Authorit
     }
     let digits = text.as_bytes();
     for (index, destination) in key.iter_mut().enumerate() {
-        let high = hex_digit(digits[index * 2]).ok_or(AuthorityKeyError::InvalidFormat)?;
-        let low = hex_digit(digits[index * 2 + 1]).ok_or(AuthorityKeyError::InvalidFormat)?;
+        let high = bitcoin_rs_primitives::hex::hex_nibble(digits[index * 2])
+            .ok_or(AuthorityKeyError::InvalidFormat)?;
+        let low = bitcoin_rs_primitives::hex::hex_nibble(digits[index * 2 + 1])
+            .ok_or(AuthorityKeyError::InvalidFormat)?;
         *destination = (high << 4) | low;
     }
     Ok(())
-}
-
-const fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(unix)]

@@ -40,27 +40,14 @@ pub fn network_name(network: Network) -> &'static str {
 }
 
 pub fn decode_hex<const N: usize>(encoded: &str) -> Result<[u8; N], CheckpointError> {
-    if encoded.len() != N.saturating_mul(2)
-        || !encoded
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(CheckpointError::Invalid(format!(
+    let invalid = || {
+        CheckpointError::Invalid(format!(
             "expected {} lowercase hexadecimal characters",
             N.saturating_mul(2)
-        )));
+        ))
+    };
+    if !bitcoin_rs_primitives::hex::is_lowercase_hex(encoded) {
+        return Err(invalid());
     }
-    let mut decoded = [0_u8; N];
-    for (index, pair) in encoded.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        decoded[index] = (decode_nibble(pair[0]) << 4) | decode_nibble(pair[1]);
-    }
-    Ok(decoded)
-}
-
-pub(super) fn decode_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        _ => 0,
-    }
+    bitcoin_rs_primitives::hex::hex_decode_array(encoded).map_err(|_| invalid())
 }
