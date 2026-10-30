@@ -287,6 +287,40 @@ fn environment_parses_script_index() {
 }
 
 #[test]
+fn scripthash_limit_defaults_and_cli_override_environment() {
+    for (flag, text) in [
+        ("--config", "scripthash_limit = 7000"),
+        ("--bitcoin-conf", "scripthash-limit=7000"),
+    ] {
+        let config = load_file(flag, text, &[], std::iter::empty())
+            .unwrap_or_else(|error| panic!("valid script query limit: {error}"));
+        assert_eq!(config.indexes.scripthash_limit, 7000);
+    }
+    assert_eq!(
+        resolved(&["bitcoin-rs"], &[]).indexes.scripthash_limit,
+        25_000
+    );
+    assert_eq!(
+        resolved(
+            &["bitcoin-rs"],
+            &[("BITCOIN_RS_SCRIPTHASH_LIMIT", "100000")]
+        )
+        .indexes
+        .scripthash_limit,
+        100_000
+    );
+    assert_eq!(
+        resolved(
+            &["bitcoin-rs", "--scripthash-limit=5000"],
+            &[("BITCOIN_RS_SCRIPTHASH_LIMIT", "100000")]
+        )
+        .indexes
+        .scripthash_limit,
+        5000
+    );
+}
+
+#[test]
 fn environment_parses_script_index_utxo() {
     let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "utxo")]);
 

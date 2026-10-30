@@ -232,6 +232,7 @@ pub(super) struct SingleBlockBody {
     pub(super) hash: BlockHash,
     pub(super) body: Vec<u8>,
     pub(super) full_reads: AtomicUsize,
+    range_reads: AtomicUsize,
 }
 
 impl BlockBodySource for SingleBlockBody {
@@ -256,6 +257,7 @@ impl BlockBodySource for SingleBlockBody {
         if height != self.height || hash != self.hash {
             return None;
         }
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         self.body.get(start..end).map(<[u8]>::to_vec)
@@ -302,6 +304,7 @@ impl QueryFixture {
         });
         let body = if config.retain_body && blocks.len() == 1 {
             Some(Arc::new(SingleBlockBody {
+                range_reads: AtomicUsize::new(0),
                 height: heights[0],
                 hash: blocks[0].block_hash(),
                 body: consensus_bytes(&blocks[0]),
@@ -312,6 +315,7 @@ impl QueryFixture {
         };
         let multi_body = if config.retain_body && blocks.len() > 1 {
             Some(Arc::new(MultiBlockBody {
+                range_reads: AtomicUsize::new(0),
                 bodies: heights
                     .iter()
                     .zip(blocks.iter())
@@ -912,6 +916,7 @@ fn confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_quer
 }
 
 struct MultiBlockBody {
+    range_reads: AtomicUsize,
     bodies: Vec<(u32, BlockHash, Vec<u8>)>,
     full_reads: AtomicUsize,
 }
@@ -943,6 +948,7 @@ impl BlockBodySource for MultiBlockBody {
             .bodies
             .iter()
             .find(|(block_height, block_hash, _)| *block_height == height && *block_hash == hash)?;
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         body.get(start..end).map(<[u8]>::to_vec)
@@ -1136,6 +1142,231 @@ fn funding_prefix_scan_ignores_outputs_paying_other_scripts()
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the large-history fixture and its I/O oracle together"
+)]
+fn high_activity_history_is_exact_and_shared_spenders_are_read_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Exceeds both former 4,096-read and 4,096-scan limits.
+    let count = 4_100_usize;
+    let (mut block, _, script, _) = block_with_spending_transaction()?;
+    let template = block.txs[0].clone();
+    block.txs = (0..count)
+        .map(|i| {
+            let mut tx = template.clone();
+            tx.lock_time = LockTime::from_consensus(u32::try_from(i).unwrap_or_default());
+            tx
+        })
+        .collect();
+    let outpoints: Vec<_> = block
+        .txs
+        .iter()
+        .map(|tx| OutPoint::new(tx.txid(), 0))
+        .collect();
+    let mut spender = template;
+    spender.inputs = outpoints
+        .iter()
+        .map(|&previous_output| TxIn {
+            previous_output,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        })
+        .collect();
+    spender.outputs[0].script_pubkey = Script::new();
+    let spender_txid = spender.txid();
+    block.txs.push(spender);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| std::io::Error::other("transactions"))?;
+    // The header plus CompactSize(4101) precedes these contiguous transactions.
+    let mut offset = 83_u32;
+    let positions: Vec<_> = block
+        .txs
+        .iter()
+        .map(|tx| {
+            let len = u32::try_from(consensus_bytes(tx).len()).unwrap_or_default();
+            let position = TxPosition::new(offset, len);
+            offset += len;
+            position
+        })
+        .collect();
+    let mut scans = vec![scan_response(
+        ColumnFamily::Funding,
+        ScriptHashRow::scan_prefix(script),
+        vec![(
+            ScriptHashRow::row(script, 0).to_db_row().to_vec(),
+            TxPositionValue::encode(&positions[..count]),
+        )],
+        true,
+    )];
+    for outpoint in &outpoints {
+        scans.push(scan_response(
+            ColumnFamily::Spending,
+            SpendingPrefixRow::scan_prefix(outpoint),
+            vec![(
+                SpendingPrefixRow::row(outpoint, 0).to_db_row().to_vec(),
+                TxPositionValue::encode(&positions[count..]),
+            )],
+            true,
+        ));
+    }
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans,
+        watermark: None,
+        extra_blocks: Vec::new(),
+        utxo_adds: Vec::new(),
+    })?;
+    let snapshot = fixture.engine.history_snapshot(script)?;
+    assert_eq!(snapshot.funding.len(), count);
+    assert_eq!(snapshot.history.len(), count + 1);
+    assert!(
+        snapshot
+            .history
+            .iter()
+            .any(|record| record.txid == spender_txid)
+    );
+    assert_eq!(
+        fixture
+            .body
+            .as_ref()
+            .map(|body| body.range_reads.load(Ordering::Relaxed)),
+        Some(count + 1)
+    );
+    assert_eq!(fixture.full_reads()?, 0);
+    let limited = fixture.engine.clone().with_scripthash_limit(count - 1);
+    assert_eq!(
+        limited.history_snapshot(script),
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::ScriptHashLimitExceeded { limit: count - 1 }
+        ))
+    );
+    assert_eq!(
+        fixture
+            .body
+            .as_ref()
+            .map(|body| body.range_reads.load(Ordering::Relaxed)),
+        Some(count + 1),
+        "limit refusal precedes body reads"
+    );
+    Ok(())
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the three-height cursor fixture and independent history oracle together"
+)]
+fn history_pages_include_recent_spends_of_old_funding_and_skip_old_spender_bodies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (genesis, mut chain, script) = paying_chain()?;
+    let outpoints = [
+        OutPoint::new(genesis.txs[0].txid(), 0),
+        OutPoint::new(chain[0].txs[0].txid(), 0),
+    ];
+    let mut scans = Vec::new();
+    for (outpoint, height) in outpoints.into_iter().zip([1_u32, 2]) {
+        let mut spend = chain[0].txs[0].clone();
+        spend.inputs[0].previous_output = outpoint;
+        spend.outputs[0].script_pubkey = Script::new();
+        let block = &mut chain[usize::try_from(height - 1)?];
+        block.txs.push(spend);
+        let position = position_of_transaction(block, block.txs.len() - 1)?;
+        scans.push(scan_response(
+            ColumnFamily::Spending,
+            SpendingPrefixRow::scan_prefix(&outpoint),
+            vec![(
+                SpendingPrefixRow::row(&outpoint, height)
+                    .to_db_row()
+                    .to_vec(),
+                TxPositionValue::encode(&[position]),
+            )],
+            true,
+        ));
+    }
+    chain[0].header.merkle_root = regtest_fixture::merkle_root(&chain[0].txs)
+        .ok_or_else(|| std::io::Error::other("transactions"))?;
+    chain[1].header.prev_blockhash = chain[0].block_hash();
+    chain[1].header.merkle_root = regtest_fixture::merkle_root(&chain[1].txs)
+        .ok_or_else(|| std::io::Error::other("transactions"))?;
+    let mut rows = Vec::new();
+    for (height, block) in std::iter::once(&genesis).chain(chain.iter()).enumerate() {
+        let positions = block
+            .txs
+            .iter()
+            .enumerate()
+            .filter(|(_, tx)| ScriptHash::new(&tx.outputs[0].script_pubkey) == script)
+            .map(|(index, _)| position_of_transaction(block, index))
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push((
+            ScriptHashRow::row(script, u32::try_from(height)?)
+                .to_db_row()
+                .to_vec(),
+            TxPositionValue::encode(&positions),
+        ));
+    }
+    scans.push(scan_response(
+        ColumnFamily::Funding,
+        ScriptHashRow::scan_prefix(script),
+        rows,
+        true,
+    ));
+    let mut expected = std::iter::once(&genesis)
+        .chain(chain.iter())
+        .enumerate()
+        .flat_map(|(height, block)| {
+            block.txs.iter().map(move |tx| ScriptHistoryRecord {
+                height: u32::try_from(height).unwrap_or_default(),
+                txid: tx.txid(),
+            })
+        })
+        .collect::<Vec<_>>();
+    expected.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| b.txid.cmp(&a.txid)));
+    let fixture = QueryFixture::new(FixtureConfig {
+        block: genesis,
+        retain_body: true,
+        scans,
+        watermark: None,
+        extra_blocks: chain,
+        utxo_adds: Vec::new(),
+    })?;
+    let first = fixture.engine.history_page(script, None, 1)?;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].height, 2);
+    assert_eq!(
+        fixture
+            .multi_body
+            .as_ref()
+            .map(|body| body.range_reads.load(Ordering::Relaxed)),
+        Some(5),
+        "four funders plus the newest spender; the height-one spender is deferred"
+    );
+    let mut full = fixture.engine.confirmed_history(script)?;
+    full.reverse();
+    assert_eq!(full, expected);
+    let mut actual = first;
+    while let Some(last) = actual.last() {
+        let page = fixture.engine.history_page(script, Some(last.txid), 1)?;
+        if page.is_empty() {
+            break;
+        }
+        actual.extend(page);
+        assert!(actual.len() <= expected.len());
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fixture
+            .engine
+            .history_page(script, Some(Txid::default()), 2)?,
+        expected[..2]
+    );
+    assert_eq!(fixture.engine.history_page(script, None, 0)?, []);
+    Ok(())
+}
+
+#[test]
 fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), Box<dyn std::error::Error>> {
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let real = OutPoint {
@@ -1290,6 +1521,15 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), Box<dyn 
     })?;
 
     let unspent = fixture.engine.unspent_outputs(scripthash)?;
+    assert_eq!(
+        fixture
+            .engine
+            .with_scripthash_limit(0)
+            .unspent_outputs(scripthash),
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::ScriptHashLimitExceeded { limit: 0 }
+        ))
+    );
     assert_eq!(unspent.len(), expected.len());
     for (record, (height, txid, vout)) in unspent.iter().zip(expected.iter()) {
         assert_eq!(record.height, *height);

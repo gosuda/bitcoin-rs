@@ -211,6 +211,15 @@ clients; Basic auth is not encrypted without a TLS-terminating proxy.
 
 `--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
 
+`--scripthash-limit` defaults to 25,000 entries per script query (environment
+`BITCOIN_RS_SCRIPTHASH_LIMIT`, TOML `scripthash_limit`, bitcoin.conf
+`scripthash-limit`). Funding queries bound candidate positions and matching
+outputs; UTXO queries bound live locators before resolving coins. Compact-prefix
+collisions also consume this work allowance. Esplora returns HTTP 422 with
+`scripthash limit exceeded` when the allowance is exceeded, without partial or
+estimated statistics. Increase it explicitly to serve larger scripts; the shared
+row and byte safety budgets still apply. This setting requires no reindexing.
+
 `--index-bundle-export <dir>` saves the `--txindex` lookup data to a bundle directory, and `--index-bundle-import <dir>` loads a bundle into a `--txindex` that has not started building. The environment variables are `BITCOIN_RS_INDEX_BUNDLE_EXPORT` and `BITCOIN_RS_INDEX_BUNDLE_IMPORT`, the TOML keys are `index_bundle_export` and `index_bundle_import`, and `bitcoin.conf` cannot set them. Both need `--txindex`, and you cannot use both in one run. Each is a one-shot request that runs when the index opens, so remove the setting after the run. A bundle holds only the lookup data, not script-index or block-filter data. The rules, including how an import is checked, are in the [indexing contract](contracts/indexing.md#idx-11-portable-index-bundle).
 
 The optional `silent-payments` build feature plus `--silent-payments` enables

@@ -392,6 +392,7 @@ fn build_derived_index_open_spec(
     let cache_bytes = txindex_cache_bytes;
     let guard = Arc::clone(guard);
     Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
+        scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
         namespace: "txindex",
         storage_backend: config.storage.backend,

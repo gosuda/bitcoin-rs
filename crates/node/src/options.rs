@@ -632,6 +632,12 @@ macro_rules! option_rows {
                     }
                 }
                 group indexes: IndexOverrides {
+                    scripthash_limit as scripthash_limit: Option<usize> {
+                        cli[#[arg(long = "scripthash-limit")]]
+                        env["BITCOIN_RS_SCRIPTHASH_LIMIT", str::parse]
+                        toml native("scripthash_limit")
+                        conf["scripthash-limit"]
+                    }
                     txindex as txindex: Option<bool> {
                         cli[#[arg(long = "txindex")]]
                         env["BITCOIN_RS_TXINDEX", parse_bool]

@@ -40,6 +40,9 @@ pub enum TxQueryError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxUnavailableCause {
+    ScriptHashLimitExceeded {
+        limit: usize,
+    },
     RowBudgetExhausted,
     RowBudgetExceeded,
     PrefixScanTruncated,
@@ -70,6 +73,9 @@ pub enum TxUnavailableCause {
 impl core::fmt::Display for TxUnavailableCause {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::ScriptHashLimitExceeded { limit } => {
+                write!(f, "scripthash limit exceeded ({limit} entries)")
+            }
             Self::RowBudgetExhausted => f.write_str("txindex query work budget exhausted"),
             Self::RowBudgetExceeded => f.write_str("txindex query work budget exceeded"),
             Self::PrefixScanTruncated => f.write_str("txindex prefix scan truncated"),
@@ -204,6 +210,21 @@ pub trait RollbackWarningSource: Send + Sync {
 }
 
 pub trait ScriptIndexQuery: Send + Sync {
+    /// Newest first, exclusive txid cursor. An unknown cursor starts at the tip.
+    fn history_page(
+        &self,
+        script_hash: ScriptHash,
+        last: Option<Txid>,
+        limit: usize,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        let mut history = self.confirmed_history(script_hash)?;
+        history.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| b.txid.cmp(&a.txid)));
+        history.dedup_by_key(|record| record.txid);
+        let start = last
+            .and_then(|txid| history.iter().position(|r| r.txid == txid))
+            .map_or(0, |i| i + 1);
+        Ok(history.into_iter().skip(start).take(limit).collect())
+    }
     fn unspent_outputs(
         &self,
         script_hash: ScriptHash,
