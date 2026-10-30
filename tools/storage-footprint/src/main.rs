@@ -3,6 +3,8 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 #[cfg(target_os = "linux")]
+mod frames;
+#[cfg(target_os = "linux")]
 mod linux;
 
 fn main() -> std::process::ExitCode {
