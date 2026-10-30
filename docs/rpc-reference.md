@@ -50,6 +50,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `waitforblock` | 0.13.0 | Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits. |
 | `waitforblockheight` | 0.13.0 | Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits. |
 | `waitfornewblock` | 0.13.0 | Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits. |
+| `stop` | 0.14.0 | Answers Core's exact status string "Bitcoin Core stopping" (src/rpc/server.cpp), then triggers the node's single graceful-shutdown latch, the same chainstate latch SIGTERM/SIGINT use; the reply is written before teardown starts and the process exits 0. Core's hidden numeric wait argument is not honored: any argument is refused with the local parameter-shape error (crates/rpc/src/handlers/util.rs). |
 | `decodescript` | 0.12.0 | Wallet-free Core script projection and wrapping. Invalid-curve keys inside complex Miniscript retain an address descriptor fallback instead of Core permissive wsh inference. Missing/extra arguments return compact usage rather than the full Core help body; direct calls enforce the existing 16 MiB RPC hex-input budget. Scoped Core process evidence covers script classes, descriptors, parameters, networks, and shared consumers (crates/rpc/src/handlers/util.rs and crates/rpc/src/tx_render.rs). |
 | `submitpackage` | 0.14.0 | Scoped singleton and 1-parent-1-child CPFP submission through the existing atomic gateway, with Core individual-first partial acceptance and resident fee exclusion. Wider packages, replacement and capacity eviction are explicitly unsupported. Generic rejection details retain native differences; see docs/policies/mempool-policy.md. |
 
@@ -135,7 +136,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `scanblocks` | n/a | Scanning is not implemented; optional basic filters are available through getblockfilter. |
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
-| `stop` | n/a | Lifecycle control not exposed over RPC. |
 | `getaddrmaninfo` | n/a | Addrman table stats not exposed. |
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
 | `analyzepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
@@ -251,4 +251,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 34, Implemented (unverified) 56, Extension 14, Disabled 0, Unimplemented 83 - total 187.
+Row counts: Supported 0, Deviation 35, Implemented (unverified) 56, Extension 14, Disabled 0, Unimplemented 82 - total 187.
