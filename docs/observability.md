@@ -1,9 +1,9 @@
 # Observability boundary
 
 The normative rule for where instrumentation lands in bitcoin-rs. The
-observability surface has three layers — `metrics::` counters/histograms/
-gauges, `tracing::` logs, and USDT probes (`bitcoin_rs_consensus::trace`) — and this page
-is what keeps new instrumentation in the right one. Raised by issue #1195 as a
+observability surface has three layers: `metrics::` counters/histograms/
+gauges, `tracing::` logs, and USDT probes (`bitcoin_rs_consensus::trace`). This
+page keeps new instrumentation in the right one. Issue #1195 raised it as a
 follow-up to the USDT work of #1187/#1194.
 
 Owners:
@@ -191,7 +191,7 @@ become a ledger path row. The named hooks are:
 | Is it a per-event decomposition a developer attaches to one investigation? | `tracing::` (OBS-02) |
 | Is it detailed per-event data (hashes, payloads, peer identity, raw durations) worth keeping in production? | USDT probe argument (OBS-03) |
 | Is it a measured product stage the hot-path attribution consumes? | ledger path first, then `metrics::` hook (OBS-04) |
-| Does it need a block hash, txid, or peer address as a metric label? | none of the above — it is a `tracing::` field or probe argument |
+| Does it need a block hash, txid, or peer address as a metric label? | none of the above, so it is a `tracing::` field or probe argument |
 
 ### `OBS-06`: Metric migration
 
@@ -243,26 +243,27 @@ if verification runs. Consumers must not require every field on a single event.
 ## Evidence and checks
 
 - `scrape_returns_operator_metrics_without_evidence_identity_labels` exercises
-  the rendered Prometheus boundary using a corpus-bearing process identity and
-  scans every sample, including the real txindex readiness gauge; evidence
-  identity remains in benchmark ledger records, not operator time-series labels.
+  the rendered Prometheus boundary with a corpus-bearing process identity. It
+  scans every sample, including the real txindex readiness gauge. Evidence
+  identity remains in benchmark ledger records, not in operator time-series
+  labels.
 - The chainstate observability fixtures check retired metric names only on the
-  caller thread with coinbase-only apply/window fixtures connected on top of a
-  directly published genesis seed. Seeding alone (`seed_genesis` in
-  `crates/chainstate/src/test_fixtures.rs`) publishes the genesis tip
-  with count 1 without connect and without hooks, so it emits no apply/window
-  observations. Nonzero stage observations require connecting at least one
-  mined coinbase-only child (`apply_block` for the apply timers, a
-  `connect_window` pair for the window histogram, `validate_block` for proposal
-  timings). The window verify
-  histogram is emitted after the parallel verifier joins; the local recorder
-  does not cover arbitrary Rayon-worker emissions, spending transactions, or
-  script-resolution sub-stages.
+  caller thread. The fixtures connect coinbase-only apply/window cases on
+  top of a directly published genesis seed. Seeding alone (`seed_genesis` in
+  `crates/chainstate/src/test_fixtures.rs`) publishes the genesis tip with
+  count 1 without connect and without hooks, so it emits no apply/window
+  observation. Nonzero stage observations require at least one connected mined
+  coinbase-only child: `apply_block` for the apply timers, a `connect_window`
+  pair for the window histogram, or `validate_block` for proposal timings. The
+  window verify histogram is emitted after the parallel verifier joins. The
+  local recorder does not cover arbitrary Rayon-worker emissions, spending
+  transactions, or script-resolution sub-stages.
 - Real tracing-subscriber regressions cover proposal completion, contextual
   header rejection, and a missing-prevout script rejection. The last exercises
-  successful prevout resolution followed by verification failure, not resolution
-  failure: the resolver's fallible overlay insertion currently rejects only a
-  vout index exceeding `u32`, which is not a practical valid-block fixture.
+  successful prevout resolution followed by verification failure, not
+  resolution failure. The resolver's fallible overlay insertion currently
+  rejects only a vout index exceeding `u32`, which is not a practical
+  valid-block fixture.
 - `composite_isolates_a_panicking_leg` exercises the real observer failure
   path and requires the operator counter to have no leg label.
 - `family_byte_histograms_recording` (`crates/index/src/index/rows.rs`) drives
@@ -274,5 +275,5 @@ if verification runs. Consumers must not require every field on a single event.
   review-failing diagnostic leak into the metrics API.
 - The historical stage-timer tables in
   [`benchmarks/end-to-end-sync.md`](benchmarks/end-to-end-sync.md) record
-  measurements taken under the old names on retired artifacts; they are
+  measurements taken under the old names on retired artifacts. They are
   evidence, not a promise that those series still exist.

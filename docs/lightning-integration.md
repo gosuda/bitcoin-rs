@@ -20,9 +20,10 @@ independent upstream component:
 The existing [`tools/ldk`](../tools/ldk/README.md) adapter was authored for
 [issue #815](https://github.com/gosuda/bitcoin-rs/issues/815). It proves that
 the production `Node` embedding contract (`crates/node/src/embed.rs`,
-[`docs/contracts/embedding.md`](contracts/embedding.md)) can satisfy the low-level
-trait requirements of `rust-lightning` (`BroadcasterInterface`, `FeeEstimator`,
-and `BlockSource` from `lightning = "=0.2.7"` and `lightning-block-sync = "=0.2.0"`).
+[`docs/contracts/embedding.md`](contracts/embedding.md)) can satisfy the
+low-level trait requirements of `rust-lightning`. Those traits are
+`BroadcasterInterface`, `FeeEstimator`, and `BlockSource` from
+`lightning = "=0.2.7"` and `lightning-block-sync = "=0.2.0"`.
 
 `tools/ldk` lives in an independent Cargo workspace with its own `Cargo.lock`,
 keeping LDK dependencies entirely out of the authoritative `bitcoin-rs` workspace
@@ -41,8 +42,9 @@ LND, Core Lightning, Lampo, Eclair) over JSON-RPC, REST, and ZMQ belongs
 exclusively to [issue #1488](https://github.com/gosuda/bitcoin-rs/issues/1488).
 That issue owns the external verification evidence to be recorded in
 `docs/lightning-interop-matrix.md` and exercised via `scripts/verify-lightning-interop.sh`.
-Pin and provenance qualification of the external binaries without starting any node
-(`--verify-pins-only`) and the runner's exit-status contract are specified in
+Pin and provenance qualification of the external binaries runs without starting
+any node (`--verify-pins-only`). That route and the runner's exit-status
+contract are specified in
 [`docs/lightning-interop-matrix.md`](lightning-interop-matrix.md) section 4.
 Issue #1631 addresses only in-process, native Rust embedding.
 
@@ -88,13 +90,14 @@ functions:
 - Service instantiation happens exclusively inside the private socket accept loop:
   `NodeService::new(...)` (`main.rs`).
 - The serving loop is a private inline Tokio event loop (`main.rs`) driving
-  `grpc_listener.accept()` on a local `TcpListener` (`main.rs`), in-line TLS
-  handshake via `acceptor.accept(stream)` (`main.rs`), HTTP/2 serving via
+  `grpc_listener.accept()` on a local `TcpListener` (`main.rs`). It performs the
+  TLS handshake in line via `acceptor.accept(stream)` (`main.rs`) and serves
+  HTTP/2 via
   `http2::Builder::new(TokioExecutor::new()).serve_connection(io_stream, node_service)`
-  (`main.rs`), and LDK event polling via `event_node.next_event_async()`
+  (`main.rs`). LDK events are polled via `event_node.next_event_async()`
   (`main.rs`). Events are processed internally and emitted via a private
-  broadcast channel (`event_sender: broadcast::Sender<EventEnvelope>` at `service.rs`),
-  with no public API for external consumers to subscribe to, poll, or process
+  broadcast channel (`event_sender: broadcast::Sender<EventEnvelope>` at `service.rs`).
+  No public API lets external consumers subscribe to, poll, or process
   these events directly.
 - Shutdown handling is coupled to system signals (`SIGTERM`/`Ctrl-C`), systemd
   notification (`systemd::notify_stopping()`), and immediate `node.stop()`

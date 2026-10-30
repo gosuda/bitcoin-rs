@@ -230,7 +230,7 @@ curl -s --user "$(cat .bitcoin-rs/.cookie)" \
 
 For the tip hash only, use `getbestblockhash` with the same empty parameter list.
 
-[rpc-reference.md](rpc-reference.md) is generated from the RPC registry and names each surface's honest state: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
+[rpc-reference.md](rpc-reference.md) is generated from the RPC registry. It names each surface's honest state: `Supported`, `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`, or `Unimplemented`. The node has no in-tree wallet or private-key custody. Key-free descriptor/PSBT helpers remain available for external signers.
 
 ## Capability state
 
@@ -327,27 +327,27 @@ Startup replay distinguishes cold revalidation from recovery after an accepted c
 
 ## Validation engine
 
-`--validation-engine` (also `BITCOIN_RS_VALIDATION_ENGINE` or `validation_engine` in TOML) selects which script-verification engine validation runs on. The setting is resolved once at startup and passed to every script-verification seam; `--validation-mode` above is a separate policy and is unchanged. Layers run in the documented precedence — defaults, then config file, then environment, then CLI — so an operator override at any of them wins over the layer below.
+`--validation-engine` (also `BITCOIN_RS_VALIDATION_ENGINE` or `validation_engine` in TOML) selects which script-verification engine validation runs on. The node resolves the setting once at startup and passes it to every script-verification seam. `--validation-mode` above is a separate policy and is unchanged. Layers run in the documented precedence: defaults, then config file, then environment, then CLI. An operator override at any of them wins over the layer below.
 
 - `native` (default): the native Rust interpreter. It is compiled in every build.
 - `kernel`: Bitcoin Core's C++ engine (`libbitcoinkernel`). Requires a build with `--features kernel` (plus `cmake` and `libboost-dev`). The feature compiles kernel support in; the setting selects it.
 
-Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error — ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)`` — before chain state opens or workers start. There is no silent engine substitution.
+Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error: ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)``. The failure comes before chain state opens or workers start. There is no silent engine substitution.
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
 ```
 
-Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set: `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value, while `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&bitcoin_rs_script::SignatureCache>`. Pass `None` for uncached calls, or `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction, keeping `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
+Direct `bitcoin-rs-consensus` library callers have no config file, environment, or CLI to set. `kernel::BlockParse::parse(raw, engine)` takes a `bitcoin_rs_consensus::ValidationEngine` value. `kernel::verify_tx_scripts(tx, spent, flags, engine, signature_cache)` and `verify_transaction(..., engine, signature_cache)` take both the engine and a trailing `Option<&bitcoin_rs_script::SignatureCache>`. Pass `None` for uncached calls. Pass `Some(&cache)` for serial native reuse across multiple passes over the same transaction. When `ValidationEngine::Kernel` is selected, kernel verification ignores the signature cache while running all standard checks, and its behavior is unchanged. Lower-level callers using `PreparedTransaction::verify_input(input_index, flags, signature_cache)` also pass the optional cache reference per call without storing it inside the prepared transaction. That keeps `PreparedTransaction` shareable across parallel input checks during block verification. A binary embedder that wants one setting should resolve `ValidationEngine` itself and pass it down exactly as `bitcoin-rs-node` does.
 
 ## Operator migration: validation engine
 
 - No change for `bin/bitcoin-rs` users who never set an engine: the binary's default was already kernel-free and remains `native`. Direct library users take the next bullet instead.
-- `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior: their defaults used to compile **and implicitly select** `kernel`, and now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must both enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI) — or, for a direct `bitcoin-rs-consensus` caller, pass `ValidationEngine::Kernel` to the verify/parse entries described above.
+- `crates/consensus`, `crates/chainstate`, and `crates/node` library builds changed behavior. Their defaults used to compile **and implicitly select** `kernel`. They now compile nothing kernel-related and default to `native`. A library user who relied on the old kernel default must enable the `kernel` feature and select `validation_engine = "kernel"` (binary config, env, or CLI). A direct `bitcoin-rs-consensus` caller instead passes `ValidationEngine::Kernel` to the verify/parse entries described above.
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
-- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
+- Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
 - `--validation-mode` / `validation_mode` (Full/AssumeValid) is the separate script-skip policy and is unchanged.
 
 ## More
