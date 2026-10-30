@@ -178,7 +178,10 @@ fn invalid_input_index_is_a_typed_error() {
     }
 }
 
-fn flip_first_byte(witness: &bitcoin_rs_primitives::Witness, item: usize) -> bitcoin_rs_primitives::Witness {
+fn flip_first_byte(
+    witness: &bitcoin_rs_primitives::Witness,
+    item: usize,
+) -> bitcoin_rs_primitives::Witness {
     let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
     stack[item][0] ^= 0x01;
     bitcoin_rs_primitives::Witness::from_stack(stack)

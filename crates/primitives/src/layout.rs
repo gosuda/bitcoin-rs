@@ -485,7 +485,10 @@ impl<'a> ParsedTransaction<'a> {
             .witness_item_spans(input)
             .map(|span| widen(span.len()))
             .fold(0_usize, usize::saturating_add);
-        let items = self.inputs.get(input).map_or(0, |layout| widen(layout.witness_items));
+        let items = self
+            .inputs
+            .get(input)
+            .map_or(0, |layout| widen(layout.witness_items));
         let mut witness = Witness::with_capacity(items, item_bytes);
         for span in self.witness_item_spans(input) {
             witness.push(slice_at(self.bytes, span));

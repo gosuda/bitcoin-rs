@@ -243,8 +243,7 @@ fn pow_valid_hook_skips_legacy_sigop_violating_block() -> Result<(), Box<dyn std
     let mut block = mined_child(genesis_tip.hash.into(), 1)?;
     block.txs[0].outputs[0].script_pubkey =
         vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001].into();
-    block.header.merkle_root =
-        merkle_root(&block.txs).ok_or("merkle root of non-empty block")?;
+    block.header.merkle_root = merkle_root(&block.txs).ok_or("merkle root of non-empty block")?;
     mine_block_to_declared_target(&mut block)
         .map_err(|error| format!("regrind legacy sigop block: {error:?}"))?;
     let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(block));

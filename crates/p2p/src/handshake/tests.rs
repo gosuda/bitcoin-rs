@@ -59,7 +59,8 @@ fn a_block_before_readiness_is_refused_before_materialization() -> Result<(), Pe
 }
 
 #[test]
-fn expanding_commands_before_readiness_are_refused_before_materialization() -> Result<(), PeerError> {
+fn expanding_commands_before_readiness_are_refused_before_materialization() -> Result<(), PeerError>
+{
     let magic = Magic::BITCOIN;
     for command in ["tx", "cmpctblock", "blocktxn", "pkgtxns"] {
         let mut frame = Vec::new();

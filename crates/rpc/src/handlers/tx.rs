@@ -803,8 +803,7 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
 }
 
-const MAX_BROADCAST_HEX_CHARS: u64 =
-    2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
+const MAX_BROADCAST_HEX_CHARS: u64 = 2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
 const MAX_INSPECT_HEX_CHARS: u64 = 2 * bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
 const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
 const CONSENSUS_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the consensus size limit";

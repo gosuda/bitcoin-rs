@@ -141,8 +141,7 @@ mod tests {
         pool.insert_entry(high).expect("high");
         pool.insert_entry(low).expect("low");
 
-        let evicted =
-            evict_lowest_fee_packages(&mut pool, unit(2)).expect("eviction policy");
+        let evicted = evict_lowest_fee_packages(&mut pool, unit(2)).expect("eviction policy");
         assert_eq!(
             evicted,
             vec![MutationChange {
@@ -307,7 +306,10 @@ mod tests {
             3,
             "four 4 KB transactions exceed a 3.5-transaction memory budget, so one is evicted"
         );
-        assert!(!pool.contains_txid(&heavy(1).txid()), "the cheapest leaves first");
+        assert!(
+            !pool.contains_txid(&heavy(1).txid()),
+            "the cheapest leaves first"
+        );
     }
 
     fn unit(label: u8) -> u64 {

@@ -143,15 +143,21 @@ fn dense_transaction_wire() -> Vec<u8> {
     let txs = (0..count)
         .map(|index| {
             let vout = u32::try_from(index).unwrap_or_else(|_| unreachable!("count fits u32"));
-            transaction(vec![dummy_input(vout, Witness::new())], vec![empty_output()])
+            transaction(
+                vec![dummy_input(vout, Witness::new())],
+                vec![empty_output()],
+            )
         })
         .collect();
     wire_of(txs)
 }
 
 fn fixture_wire(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/tests/testdata/{name}", env!("CARGO_MANIFEST_DIR")))
-        .unwrap_or_else(|error| panic!("fixture {name} must be readable: {error}"))
+    std::fs::read(format!(
+        "{}/tests/testdata/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap_or_else(|error| panic!("fixture {name} must be readable: {error}"))
 }
 
 fn assert_decode_heap_stays_bounded(label: &str, wire: Vec<u8>) {
@@ -159,8 +165,8 @@ fn assert_decode_heap_stays_bounded(label: &str, wire: Vec<u8>) {
     let baseline = LIVE.load(Ordering::SeqCst);
     let raw = Bytes::from(wire);
     PEAK.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
-    let payload = BlockPayload::from_raw(raw)
-        .unwrap_or_else(|error| panic!("{label} must decode: {error}"));
+    let payload =
+        BlockPayload::from_raw(raw).unwrap_or_else(|error| panic!("{label} must decode: {error}"));
     let peak = PEAK.load(Ordering::SeqCst) - baseline;
     let retained = wire_len + payload.block().retained_heap_bytes();
     let reservation = decode_reservation(wire_len);

@@ -761,10 +761,7 @@ fn retained_tx_bytes(txs: &[Tx]) -> usize {
                 + tx.outputs.len() * core::mem::size_of::<TxOut>()
                 + tx.inputs
                     .iter()
-                    .map(|input| {
-                        input.script_sig.len()
-                            + input.witness.retained_heap_bytes()
-                    })
+                    .map(|input| input.script_sig.len() + input.witness.retained_heap_bytes())
                     .sum::<usize>()
                 + tx.outputs
                     .iter()

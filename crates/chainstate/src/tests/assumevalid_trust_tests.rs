@@ -121,7 +121,10 @@ fn assert_rejected_unchanged(
         "the script-invalid spend must be rejected, got {result:?}"
     );
     assert_eq!(chain.applied_tip_snapshot().ok_or("tip")?.hash, tip_before);
-    assert!(chain.utxo.get(funding).is_some(), "the funding coin must stay unspent");
+    assert!(
+        chain.utxo.get(funding).is_some(),
+        "the funding coin must stay unspent"
+    );
     Ok(())
 }
 
@@ -152,7 +155,10 @@ fn assume_valid_sibling_below_the_pin_runs_scripts() -> TestResult {
     chain.admit_headers(&[pin.header, successor.header, sibling.header])?;
     chain.validation_mode = ValidationMode::AssumeValid;
     chain.assume_valid_height = 101;
-    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((101, pin.block_hash().0))));
+    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((
+        101,
+        pin.block_hash().0,
+    ))));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     assert!(
         chain.scripts_verified_upstream(BlockProvenance::Network, 101, pin.block_hash().0),
@@ -174,7 +180,10 @@ fn assume_valid_pin_at_its_own_height_still_skips_scripts() -> TestResult {
     chain.admit_headers(&[pin.header, successor.header])?;
     chain.validation_mode = ValidationMode::AssumeValid;
     chain.assume_valid_height = 101;
-    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((101, pin.block_hash().0))));
+    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((
+        101,
+        pin.block_hash().0,
+    ))));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     assert!(
         chain.scripts_verified_upstream(BlockProvenance::Network, 101, pin.block_hash().0),
@@ -206,7 +215,10 @@ fn assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin() -> TestResult {
     ])?;
     chain.validation_mode = ValidationMode::AssumeValid;
     chain.assume_valid_height = 101;
-    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((101, pin.block_hash().0))));
+    chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((
+        101,
+        pin.block_hash().0,
+    ))));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
     let failed = chain.apply_block(&BlockPayload::from_local(branch_block));

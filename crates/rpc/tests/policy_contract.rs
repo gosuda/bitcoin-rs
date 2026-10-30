@@ -382,7 +382,8 @@ fn preview_verdict(
 #[test]
 fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    let unit = bitcoin_rs_mempool::entry_memory_usage(&tx(staged_outpoint(0x86), 1_000, 0xffff_ffff));
+    let unit =
+        bitcoin_rs_mempool::entry_memory_usage(&tx(staged_outpoint(0x86), 1_000, 0xffff_ffff));
     let mut cheap = tx(staged_outpoint(0x85), 1_000, 0xffff_ffff);
     cheap.outputs[0].script_pubkey =
         Script::from_bytes(vec![0x51; usize::try_from(2 * unit).unwrap_or(0)]);

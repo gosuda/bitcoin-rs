@@ -711,13 +711,12 @@ fn gateway_over(pool: Mempool) -> MempoolGateway {
 fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Error>> {
     let wide = |label: u8| {
         let mut wide = tx(outpoint(label, 0), 1_000, 0xFF_FF_FF_FF);
-        wide.outputs[0].script_pubkey = Script::from_bytes(vec![0x51; usize::try_from(unit()).unwrap_or(0)]);
+        wide.outputs[0].script_pubkey =
+            Script::from_bytes(vec![0x51; usize::try_from(unit()).unwrap_or(0)]);
         wide
     };
     let limits = MempoolLimits {
-        max_total_bytes: 2 * unit()
-            + bitcoin_rs_mempool::entry_memory_usage(&wide(3))
-            + unit() / 4,
+        max_total_bytes: 2 * unit() + bitcoin_rs_mempool::entry_memory_usage(&wide(3)) + unit() / 4,
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);

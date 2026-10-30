@@ -159,7 +159,9 @@ fn check_budget(
         }
         Err(expected_error) => match &result {
             Err(ApplyError::Consensus(err)) => assert_eq!(err, expected_error, "{result:?}"),
-            other => panic!("expected Err(ApplyError::Consensus({expected_error:?})), got {other:?}"),
+            other => {
+                panic!("expected Err(ApplyError::Consensus({expected_error:?})), got {other:?}")
+            }
         },
     }
     if expected.is_err() || matches!(path, Path::Proposal) {
@@ -206,10 +208,7 @@ fn aggregate_sigops_enforce_the_inclusive_budget_on_every_connect_path() -> Test
             let (mut chain, funding, parent) = funded_chain()?;
             let block = legacy_block(parent, &funding, transactions, extra)?;
             let expected = if cost > 80_000 {
-                Err(ConsensusError::SigopsLimit {
-                    cost,
-                    max: 80_000,
-                })
+                Err(ConsensusError::SigopsLimit { cost, max: 80_000 })
             } else {
                 Ok(())
             };
@@ -228,10 +227,7 @@ fn coinbase_only_blocks_obey_the_sigop_budget() -> TestResult {
         block.txs[0].outputs[0].script_pubkey = vec![OP_CHECKMULTISIG; count].into();
         remine(&mut block)?;
         let expected = if cost > 80_000 {
-            Err(ConsensusError::SigopsLimit {
-                cost,
-                max: 80_000,
-            })
+            Err(ConsensusError::SigopsLimit { cost, max: 80_000 })
         } else {
             Ok(())
         };
@@ -349,12 +345,7 @@ fn empty_coinbase_outputs_rejected_on_every_connect_path() -> TestResult {
         let mut block = mined_child(parent, 101)?;
         block.txs[0].outputs.clear();
         remine(&mut block)?;
-        check_budget(
-            &mut chain,
-            block,
-            path,
-            Err(ConsensusError::EmptyOutputs),
-        )?;
+        check_budget(&mut chain, block, path, Err(ConsensusError::EmptyOutputs))?;
     }
     Ok(())
 }

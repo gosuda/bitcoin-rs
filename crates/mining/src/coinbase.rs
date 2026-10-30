@@ -92,9 +92,7 @@ pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: boo
     if !needs_witness_reserved_value(block, segwit_active) {
         return;
     }
-    block.txs[0].inputs[0]
-        .witness
-        .push(&WITNESS_RESERVED_VALUE);
+    block.txs[0].inputs[0].witness.push(&WITNESS_RESERVED_VALUE);
 }
 
 fn coinbase_has_witness_commitment(tx: &Tx) -> bool {

@@ -166,7 +166,10 @@ fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
         "decoderawtransaction",
         &sonic_rs::json!([valid_tx_hex.as_str()]),
     );
-    assert!(served.is_ok(), "a free budget must serve the decode: {served:?}");
+    assert!(
+        served.is_ok(),
+        "a free budget must serve the decode: {served:?}"
+    );
 }
 
 #[test]

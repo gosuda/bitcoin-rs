@@ -317,10 +317,11 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
     let mut changed_tx = tx.clone();
     for (failed_input, signature_input) in [(1, 41), (41, 1)] {
         let mut isolated = tx.clone();
-        isolated.inputs[failed_input].witness = with_item(&isolated.inputs[failed_input].witness, 0, |item| {
-            item.clear();
-            item.extend_from_slice(&tx.inputs[signature_input].witness[0]);
-        });
+        isolated.inputs[failed_input].witness =
+            with_item(&isolated.inputs[failed_input].witness, 0, |item| {
+                item.clear();
+                item.extend_from_slice(&tx.inputs[signature_input].witness[0]);
+            });
         let prepared =
             PreparedTransaction::new(&isolated, &resolved_prevouts(&isolated, &prevouts))
                 .expect("ordered prevouts");

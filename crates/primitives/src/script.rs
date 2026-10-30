@@ -146,9 +146,11 @@ impl Witness {
     /// item buffer and the item end offsets, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
-        self.bytes
-            .capacity()
-            .saturating_add(self.ends.capacity().saturating_mul(core::mem::size_of::<u32>()))
+        self.bytes.capacity().saturating_add(
+            self.ends
+                .capacity()
+                .saturating_mul(core::mem::size_of::<u32>()),
+        )
     }
 }
 
@@ -169,7 +171,11 @@ impl From<Vec<Vec<u8>>> for Witness {
 
 impl PartialEq<Vec<Vec<u8>>> for Witness {
     fn eq(&self, other: &Vec<Vec<u8>>) -> bool {
-        self.len() == other.len() && self.iter().zip(other).all(|(item, rhs)| item == rhs.as_slice())
+        self.len() == other.len()
+            && self
+                .iter()
+                .zip(other)
+                .all(|(item, rhs)| item == rhs.as_slice())
     }
 }
 
@@ -251,8 +257,8 @@ mod tests {
         use proptest::collection::vec;
         use proptest::prelude::*;
 
-        use crate::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
         use crate::consensus_bytes;
+        use crate::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
 
         fn bitcoin_tx_with(stack: &[Vec<u8>]) -> bitcoin::Transaction {
             bitcoin::Transaction {

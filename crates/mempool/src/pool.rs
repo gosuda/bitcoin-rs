@@ -141,7 +141,9 @@ struct Derived {
 impl Derived {
     fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
         self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
-        self.inner_usage = self.inner_usage.saturating_sub(entry_memory_usage(&entry.tx));
+        self.inner_usage = self
+            .inner_usage
+            .saturating_sub(entry_memory_usage(&entry.tx));
         self.total_fee -= u128::from(entry.fee);
         match self.fee_rate_aggregates.entry(entry.fee_rate) {
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
@@ -1053,10 +1055,12 @@ impl Mempool {
     pub(crate) fn entry_memory(&self, id: EntryId) -> Option<u64> {
         let entry = self.entry(id)?;
         let links = self.links(id)?;
-        Some(entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(
-            links.parents.len() + links.children.len(),
-            1,
-        )))
+        Some(
+            entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(
+                links.parents.len() + links.children.len(),
+                1,
+            )),
+        )
     }
 
     /// Memory an admitted entry adds: its own cost and the link records it creates on both sides.
@@ -2266,7 +2270,9 @@ pub(crate) const fn chunk_index_memory_per_entry() -> usize {
     use core::mem::size_of;
 
     size_of::<crate::chunk_index::ChunkKey>()
-        + 2 * (size_of::<EntryId>() + size_of::<Txid>() + size_of::<crate::chunk_index::ChunkSlot>())
+        + 2 * (size_of::<EntryId>()
+            + size_of::<Txid>()
+            + size_of::<crate::chunk_index::ChunkSlot>())
 }
 
 /// Heap one live entry holds apart from its links: the transaction and one record per index.
@@ -2529,7 +2535,6 @@ mod dynamic_memory_usage_tests {
         assert!(after < before, "{after} vs {before}");
     }
 
-
     #[test]
     fn a_cleared_pool_reports_zero_usage() {
         let mut pool = pool_with(64, 64);
@@ -2553,7 +2558,6 @@ mod dynamic_memory_usage_tests {
             "the per-entry charge {charged} must cover the index's own count {measured}"
         );
     }
-
 
     proptest::proptest! {
         #[test]

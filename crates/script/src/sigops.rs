@@ -142,7 +142,11 @@ mod tests {
             );
 
             let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
-            assert_eq!(count_segwit(&p2wsh, &Witness::from_stack(vec![script])), accurate, "p2wsh: {name}");
+            assert_eq!(
+                count_segwit(&p2wsh, &Witness::from_stack(vec![script])),
+                accurate,
+                "p2wsh: {name}"
+            );
         }
 
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();

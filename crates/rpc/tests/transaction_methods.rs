@@ -523,8 +523,13 @@ fn broadcast_methods_refuse_hex_beyond_the_standard_size_limit_before_decode()
     let oversized = "00".repeat(400_001);
     let broadcast = handler.dispatch("sendrawtransaction", &json!([oversized.as_str()]));
     let preview = handler.dispatch("testmempoolaccept", &json!([[oversized.as_str()]]));
-    for (method, result) in [("sendrawtransaction", broadcast), ("testmempoolaccept", preview)] {
-        let error = result.err().ok_or("oversized broadcast hex must be refused")?;
+    for (method, result) in [
+        ("sendrawtransaction", broadcast),
+        ("testmempoolaccept", preview),
+    ] {
+        let error = result
+            .err()
+            .ok_or("oversized broadcast hex must be refused")?;
         assert!(
             matches!(&error, RpcError::InvalidParameter(message) if message == BROADCAST_HEX_LIMIT_ERROR),
             "{method} refused with the wrong boundary: {error:?}"

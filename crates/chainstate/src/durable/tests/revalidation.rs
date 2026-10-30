@@ -164,12 +164,8 @@ fn prepare_cold(
             dir
         }
     };
-    let initial = prepare_initial_chainstate(
-        dir.path(),
-        Network::Regtest,
-        journal_config,
-        Some(&head),
-    )?;
+    let initial =
+        prepare_initial_chainstate(dir.path(), Network::Regtest, journal_config, Some(&head))?;
     assert_eq!(initial.resume_source, ResumeSource::Cold);
     assert!(initial.applied_tip.is_none());
     chain.validation_mode = mode;
@@ -200,7 +196,10 @@ fn prepare_warm(
         Some(&head),
     )?;
     assert_eq!(initial.resume_source, ResumeSource::Checkpoint);
-    let tip = initial.applied_tip.clone().ok_or("missing checkpoint tip")?;
+    let tip = initial
+        .applied_tip
+        .clone()
+        .ok_or("missing checkpoint tip")?;
     assert_eq!(tip.height, 100);
     chain.validation_mode = mode;
     chain.coin_stats = Arc::new(CoinStatsListener::new(initial.coin_stats));
@@ -216,7 +215,8 @@ fn prepare_warm(
 }
 
 #[test]
-fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evidence() -> TestResult {
+fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evidence() -> TestResult
+{
     for (mode, marker) in [
         (ValidationMode::Full, true),
         (ValidationMode::AssumeValid, true),
