@@ -126,7 +126,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error
         .map_err(|_| std::io::Error::other("genesis block must decode"))?;
     let source = lease.source(Some(addr));
 
-    shared.send_headers(source, Vec::new(), true);
+    shared.send_headers(&lease, source, Vec::new(), true);
     shared.send_block(&lease, addr, payload, None);
 
     assert_eq!(headers_rx.try_recv()?.source, Some(source));

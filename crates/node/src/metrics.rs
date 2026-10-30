@@ -118,6 +118,10 @@ impl EvidenceIdentity {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep metric descriptions together in the process-wide registry"
+)]
 fn describe_node_metrics() {
     metrics::describe_counter!("node.event_loop.sync_ticks", "block sync ticks");
     metrics::describe_counter!(
@@ -183,6 +187,10 @@ fn describe_node_metrics() {
     metrics::describe_gauge!(
         "node.sync.inbound_block_queue_depth",
         "block bodies queued in the bounded inbound channel when the sync drain pass emitted its gauges, after it emptied the receiver; a residual, not a peak"
+    );
+    metrics::describe_gauge!(
+        "node.sync.inbound_header_queue_depth",
+        "header batches remaining in the bounded inbound channel when sync emits its gauges; a sampled backlog, not a peak or byte count"
     );
     metrics::describe_counter!(
         "storage.writes_total",

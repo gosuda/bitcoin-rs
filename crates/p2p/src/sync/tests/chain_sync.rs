@@ -599,6 +599,68 @@ fn chain_sync_probe_holds_request_for_its_response_window() -> TestResult {
 }
 
 #[test]
+fn queued_probe_answer_defers_eviction_until_admission() -> TestResult {
+    let (tree, blocks) = mined_chain(1, 2)?;
+    let SyncHarness {
+        sync,
+        peers,
+        inbound_headers_tx,
+        ..
+    } = SyncHarness::new(tree);
+    sync.chain.bootstrap_genesis();
+    let addr = test_addr(9_943, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, i32::MAX));
+    let source = current_source(&peers, addr);
+    let now = Instant::now();
+    let frontier = sync.observe_frontier(sync.observe_chain_frontier(), now);
+    let peer = frontier
+        .usable_peers
+        .iter()
+        .find(|peer| peer.source == source)
+        .ok_or("missing probe source")?;
+    let height = frontier
+        .chain
+        .chain_tip
+        .as_ref()
+        .ok_or("missing tip")?
+        .height;
+    let mut state = ChainSyncState::default();
+    let mut protected = 0;
+    assert_eq!(
+        consider_eviction(
+            peer,
+            &mut state,
+            height,
+            now.checked_sub(Duration::from_mins(20))
+                .ok_or("clock underflow")?,
+            &mut protected
+        ),
+        None,
+    );
+    assert_eq!(
+        consider_eviction(peer, &mut state, height, now, &mut protected),
+        Some(ChainSyncAction::Probe),
+    );
+    sync.scheduler.lock().chain_sync.insert(source, state);
+    assert!(sync.probe_chain_sync(source, &frontier));
+    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
+    sync.note_header_response_received(source);
+    inbound_headers_tx.send(crate::InboundHeaders {
+        headers: vec![blocks[0].header],
+        source: Some(source),
+        wire_response: true,
+    })?;
+    let expired = now + HEADERS_RESPONSE_TIME;
+    sync.retire_timed_out_header_syncs(expired);
+    assert!(!sync.sweep_chain_sync(&frontier, expired));
+    assert!(peers.is_connected(addr));
+    sync.drain_inbound_headers();
+    assert!(!sync.scheduler.lock().headers_sync.contains_key(&source));
+    assert!(peers.is_connected(addr));
+    Ok(())
+}
+
+#[test]
 fn replacing_expired_frontier_with_chain_sync_probe_releases_owner() -> TestResult {
     let (tree, _blocks) = mined_chain(1, 2)?;
     let harness = SyncHarness::new(tree);

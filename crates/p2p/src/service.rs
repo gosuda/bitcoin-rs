@@ -47,6 +47,10 @@ fn feeler_delay(uniform: u64) -> Duration {
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
+/// At most 64 protocol-bounded batches (2,000 headers each) await sync.
+/// Full ingress backpressures the connection, rather than losing a response.
+const INBOUND_HEADER_QUEUE_LIMIT: usize = 64;
+
 const DEFAULT_MAX_PEER_CONNECTIONS: usize = 200;
 
 const MAX_PARKED_DIALS: usize = 64;
@@ -419,7 +423,8 @@ impl P2pService {
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
-        let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (inbound_headers_tx, inbound_headers_rx) =
+            crossbeam_channel::bounded(INBOUND_HEADER_QUEUE_LIMIT);
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         let address_book = crate::addrman::AddressBook::open(

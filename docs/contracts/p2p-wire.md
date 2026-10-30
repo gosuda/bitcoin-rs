@@ -74,6 +74,7 @@ Queue accounting: per-connection 4,096 messages and 64 MiB; node aggregate one s
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 
+- A decoded wire `headers` response received before its request deadline marks that exact connection's request `ResponseQueued` before channel backpressure. Receipt stops peer-silence expiry without consuming the request, advancing presync, or granting header credit; the admission drain still owns those transitions. Queued responses retain request ownership and defer chain-sync eviction until processed. Body-carried headers, late responses, and retired or replaced sources cannot acknowledge a request. Request publication excludes receipt callbacks under the peer-table lock, followed by the scheduler lock; neither lock is held during channel waits. Receipt and timeout retirement settle under the same scheduler lock.
 - The applied chain plus selected header ancestry own the next required body; the download cursor is a scan hint. An unowned frontier behind the hint becomes requestable again, including applied rollback with unchanged headers. Pending and staged bodies keep ownership. Past handshake credit (P2P-03), only a subsequent accepted active-branch announcement grants body capability. Losing the last credited peer MUST NOT require restart or an unsolicited announcement from a survivor.
 - Header request plus timeout pace discovery. Empty answers mark a request answered, keep its original timestamp; identical retries pace to five seconds from it; answered requests are not blamed as silence. Frontier requests use the same five-second deadline while unanswered. An unanswered chain-sync eviction probe holds its gate for the existing two-minute `HEADERS_RESPONSE_TIME`. A nonempty batch consumes its request only when usable (admitted, or already known in full); a rejecting batch keeps the gate and moves the deadline to the answer.
 - Expiry strikes only the exact unanswered connection: ordinary frontier expiry clears the gate, marks it unresponsive, and disconnects it while another usable peer remains, so the next tick elects another. Strikes rank it below equal advertisers; the live-set sweep drops strikes with dead work, so a replacement starts clean. Only silence is blamed (Core `net_processing.cpp` clears on a connecting header). The below-floor and live download-twice timeout (P2P-10) retires its source even as the last usable peer.
@@ -95,8 +96,41 @@ Queue accounting: per-connection 4,096 messages and 64 MiB; node aggregate one s
 - `MSG_BLOCK`/`MSG_WITNESS_BLOCK` invs are availability, never body requests: each queues against the announcing connection for the header drain, which credits known hashes (`note_announced_tip`, P2P-03) and asks headers for unknown ones. Bodies come only from header admission plus the download window (Core 31.1 `net_processing.cpp`). Transaction vectors keep relay gate, have-filter, witness upgrade. The queue holds one entry per connection (first unprocessed wins); while the frontier-owned `getheaders` is outstanding, further unknown announcements wait, and the owner never changes mid-flight.
 - Near-tip direct fetch: `direct_fetch_announced_tip` asks the proving connection for the body inside the admitting drain (Core `HeadersDirectFetchBlocks` and `CanDirectFetch`) via `send_getdata_for_pending_blocks`, so window budget, per-peer inflight cap, pending ownership, and compact flavor for a single near-tip BIP152 fetch apply unchanged. Off-branch tips, or tips leaving the frontier more than `COMPACT_RELAY_NEAR_TIP_BLOCKS` below, stay with the ordinary scheduler.
 - Ingress bounds: node-wide shared inbound block channel (`P2pServiceConfig::inbound_block_queue_limit` from `INBOUND_BLOCK_CHANNEL_LIMIT`); per-connection unsolicited share ahead of it (`PeerLease::admit_block_forward`, `MAX_UNSOLICITED_BLOCK_FORWARDS`, `connection.rs`). Window-owned bodies (requests, deferred compact fetches via `owns_body_fetch`) are always admitted. Over-bound unsolicited bodies drop with their carried header (refused bodies MUST NOT grow the header queue), a debug record, and `node.sync.dropped_unsolicited_blocks`; the listener never blocks on the channel and the connection is never disconnected for this bound alone. Credit rides the payload and releases at sync take; ownership/credit are per-connection (no inheritance).
+- **Header ingress and tick fairness**: `P2pService` owns a shared channel
+  capped at 64 header batches (`INBOUND_HEADER_QUEUE_LIMIT` in
+  `crates/p2p/src/service.rs`). Wire decoding bounds a batch to 2,000 headers;
+  body and compact announcements carry one, and stale-tip pages at most 20.
+  Full ingress waits with 100 ms cancellation checks in
+  `ConnectionShared::send_headers`, retaining the whole batch and its
+  `wire_response` identity until admission, session/lease cancellation, or
+  receiver disconnection. No peer-table, scheduler, or transition lock is
+  held while waiting. The body remains queued before its carried header.
+  `BlockSync::drain_inbound_headers` consumes at most 32 batches per tick,
+  including empty and stale-source entries, and stops once it has consumed
+  4,000 headers. It finishes the current batch, so a final wire page can
+  overshoot by at most 1,999 headers. Pages are never split: request
+  consumption, live presync cursors, and owned body fetches retain their
+  existing admission path. Block drain, recovery and scheduling then run;
+  the remainder is driven by the existing inbound wake or periodic sync
+  tick, without a new scheduler. The queue's maximum decoded header payload
+  is `64 * 2,000 * size_of::<Header>()`; channel/Vec metadata, in-flight
+  producers, bodies, allocator overhead and process RSS are separate.
+  `node.sync.inbound_header_queue_depth` samples the remaining batch count
+  at the existing sync-metrics emission points, not the peak or byte count.
+  Queue residence is local processing time, not peer silence (P2P-05).
 - Permanent consensus failure (`WindowCommitDisposition::Permanent`, apply pass or branch-switch `ConnectFailed` via staged source): `punish_permanent_delivery_source` disconnects the deliverer (apply: after invalid-hash purge; branch-switch: before the purge drops the source entry), releases its `getheaders` gate, marks it unresponsive only when that exact connection was current and removed; increments `node.sync.invalid_block_disconnects`. `BodyMutated`/`Operational` stay retryable and non-punitive; `Fatal` halts admission without peer blame. `BodyMutated` names only delivered bytes (header stays valid, body re-fetched): Merkle/witness mismatch, or a coinbaseless body holding a 64-byte witness-stripped tx (`SixtyFourByteMutation`; CVE-2017-12842, Core `IsBlockMutated`). Other coinbaseless bodies are `Permanent`. Pre-staging binding failures keep delivery-rejection policy.
 - Unresolved-body quota: hash-unresolvable staged bodies owe admission later (`gate_pending`), capped at `MAX_UNRESOLVED_STAGED_BODIES` (`sync/receive.rs`).
+
+Proof for header ingress: `crates/p2p/src/listener/header_ingress_tests.rs`
+covers sustained wire/body forwarding into real sync ticks, bounded queue
+occupancy, body application, full-queue ordering, cancellation and
+disconnection; `crates/p2p/src/sync/tests/header_ingress.rs` covers message
+and header work limits plus block application and request scheduling while
+headers remain queued. `headers_presync.rs` test
+`sufficient_work_chain_syncs_presync_then_redownload` defers a continuation
+across the batch budget before completing both passes. These are local
+behavioral proofs, not a live-network throughput or multi-peer fairness
+campaign.
 
 ### `P2P-08`: Inbound admission and the outbound service gate
 
