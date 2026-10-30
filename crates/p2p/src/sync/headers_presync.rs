@@ -532,3 +532,131 @@ impl HeadersSyncState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{HeaderAnchor, HeaderSyncError, HeadersSyncPhase, HeadersSyncState};
+    use bitcoin_rs_chain::{ChainWork, block_work, current_unix_seconds, regtest_fixture};
+    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, HeadersSyncParams, Network};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    const CORE_COMMITMENTS_PER_HOUR: u64 = 6;
+    const CORE_MAX_FUTURE_BLOCK_TIME_SECONDS: u64 = 2 * 60 * 60;
+    const BATCH: u32 = 256;
+
+    fn anchor(median_time_past: u32) -> Result<HeaderAnchor, Box<dyn std::error::Error>> {
+        let mut header = regtest_fixture::mined_regtest_header(BlockHash::default(), 0)?;
+        header.time = median_time_past;
+        regtest_fixture::mine_header_to_declared_target(&mut header)?;
+        let hash = Hash256::from(header.compute_hash());
+        Ok(HeaderAnchor {
+            network: Network::Regtest,
+            height: 0,
+            hash,
+            header,
+            chain_work: block_work(&header),
+            median_time_past,
+            locator: vec![hash],
+        })
+    }
+
+    fn mined_batch(
+        prev: Hash256,
+        first_height: u32,
+    ) -> Result<(Vec<Header>, Hash256), Box<dyn std::error::Error>> {
+        let mut headers = Vec::with_capacity(usize::try_from(BATCH).unwrap_or(0));
+        let mut cursor = BlockHash::from(prev);
+        for offset in 0..BATCH {
+            let header =
+                regtest_fixture::mined_regtest_header(cursor, first_height.saturating_add(offset))?;
+            cursor = BlockHash::from(header.compute_hash());
+            headers.push(header);
+        }
+        Ok((headers, Hash256::from(cursor)))
+    }
+
+    #[test]
+    fn a_low_work_chain_cannot_retain_more_commitments_than_its_elapsed_time_allows() -> TestResult
+    {
+        let before = current_unix_seconds();
+        let median_time_past = before.saturating_sub(100);
+        let start = anchor(median_time_past)?;
+        let start_hash = start.hash;
+        let mut sync = HeadersSyncState::new(
+            start,
+            ChainWork::from_be_bytes([0xff; 32]),
+            HeadersSyncParams {
+                commitment_period: 1,
+                redownload_buffer_size: 16,
+            },
+            [0; 16],
+        );
+        let after = current_unix_seconds();
+        let elapsed_low =
+            u64::from(before.saturating_sub(median_time_past)) + CORE_MAX_FUTURE_BLOCK_TIME_SECONDS;
+        let elapsed_high = u64::from(before.max(after).saturating_sub(median_time_past))
+            + CORE_MAX_FUTURE_BLOCK_TIME_SECONDS;
+        let cap_low = CORE_COMMITMENTS_PER_HOUR * elapsed_low;
+        let cap_high = CORE_COMMITMENTS_PER_HOUR * elapsed_high;
+
+        let mut height = 0_u32;
+        let mut prev = start_hash;
+        let mut refusal = None;
+        while u64::from(height) <= cap_high.saturating_add(2) {
+            let (batch, next) = mined_batch(prev, height.saturating_add(1))?;
+            prev = next;
+            height = height.saturating_add(BATCH);
+            match sync.process(&batch, true) {
+                Ok(result) => {
+                    assert_eq!(
+                        result.phase,
+                        HeadersSyncPhase::Presync,
+                        "a chain under the work floor must stay in presync instead of releasing headers"
+                    );
+                    assert!(
+                        result.ready_headers.is_empty(),
+                        "presync retains headers rather than handing them to the block tree"
+                    );
+                }
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let Some(error) = refusal else {
+            return Err(format!(
+                "headerssync.cpp caps retained commitments at 6 per commitment period of elapsed time; \
+                 a low-work chain of {height} headers was absorbed without refusal"
+            )
+            .into());
+        };
+        let HeaderSyncError::MaxCommitments { height: refused } = error else {
+            return Err(
+                format!("the commitment cap must refuse an over-long chain, got {error}").into(),
+            );
+        };
+        let refused = u64::from(refused);
+        assert!(
+            refused > cap_low,
+            "headerssync.cpp m_max_commitments = 6 * elapsed / commitment_period = {cap_low}; \
+             the state refused at {refused}, below the elapsed time the chain can account for"
+        );
+        assert!(
+            refused <= cap_high.saturating_add(1),
+            "headerssync.cpp m_max_commitments = 6 * elapsed / commitment_period = {cap_high}; \
+             a low-work chain retained {refused} commitments, past the elapsed-time bound"
+        );
+        assert!(
+            error.is_peer_fault(),
+            "an over-long low-work header chain is the sender's fault, so the connection must be faulted"
+        );
+        assert_eq!(
+            sync.phase(),
+            HeadersSyncPhase::Final,
+            "reaching the commitment cap must end the state instead of keeping the retained bits"
+        );
+        Ok(())
+    }
+}
