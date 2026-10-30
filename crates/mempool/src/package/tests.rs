@@ -39,7 +39,7 @@ fn native_package_aggregates_cpfp_atomically_and_ignores_input_order() -> TestRe
         coin(801),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     assert!(
@@ -131,7 +131,7 @@ fn native_package_consensus_failures_match_single_submission() -> TestResult {
             coin(810),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let before = (
@@ -210,7 +210,7 @@ fn native_package_revalidates_fee_metadata_and_bounds_unavailable_chain_retries(
             coin(806),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]),
         txid: child.txid(),
@@ -257,7 +257,7 @@ fn native_package_failure_keeps_membership_sequence_overlay_and_estimator() -> T
         coin(802),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     gateway.prioritise(parent.txid(), 0)?;
@@ -312,7 +312,7 @@ fn native_package_resident_parent_fees_do_not_subsidize_child() -> TestResult {
         coin(803),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let now = unix_time_secs();
@@ -389,7 +389,7 @@ fn native_package_capacity_and_topology_refuse_before_mutation() {
         coin(804),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     assert_eq!(
@@ -429,7 +429,7 @@ fn native_package_combined_cluster_limit_is_checked_before_any_insert() -> TestR
         coin(808),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let txs = vec![parent, child];
@@ -488,6 +488,22 @@ fn output(value: u64) -> TxOut {
     }
 }
 
+fn p2sh_true_script() -> Vec<u8> {
+    [
+        vec![0xa9, 0x14],
+        vec![
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ],
+        vec![0x87],
+    ]
+    .concat()
+}
+
+fn true_redeem_script_sig() -> Vec<u8> {
+    bitcoin_rs_script::push_data(&[0x51])
+}
+
 fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
     Tx {
         version: 3,
@@ -497,7 +513,11 @@ fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
             .map(|outpoint| TxIn {
                 previous_output: *outpoint,
                 sequence: Sequence::MAX,
-                script_sig: Script::new(),
+                script_sig: Script::from_bytes(if witness {
+                    Vec::new()
+                } else {
+                    true_redeem_script_sig()
+                }),
                 witness: if witness {
                     Witness::from_stack(vec![vec![0x51]])
                 } else {
@@ -507,6 +527,27 @@ fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
             .collect(),
         outputs: outputs.iter().copied().map(output).collect(),
     }
+}
+
+fn measured_package_memory(parent: &Tx, child: &Tx) -> u64 {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    for tx in [parent, child] {
+        pool.insert_entry(crate::MempoolEntry::new(
+            Arc::new(tx.clone()),
+            100,
+            1_000,
+            0,
+            1,
+            0,
+        ))
+        .expect("fixture entry inserts");
+    }
+    assert_eq!(
+        pool.dynamic_memory_usage(),
+        pool.recount_memory_usage(),
+        "the incremental memory walk must agree with the from-scratch walk"
+    );
+    pool.recount_memory_usage()
 }
 
 struct Coins(Vec<(OutPoint, TxOut)>);
@@ -538,7 +579,7 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
         coin(830),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let preview = gateway.preview_transactions(&txs, None, &chain)?;
@@ -624,7 +665,7 @@ fn rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice() -> TestR
             coin(831),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let expected = if invalid_script {
@@ -656,7 +697,7 @@ fn rpc_package_underpayment_priority_cap_and_unsupported_shapes_mutate_nothing()
         coin(832),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let txs = [parent.clone(), child.clone()];
@@ -727,7 +768,7 @@ fn rpc_package_fee_cap_compares_signed_fees_without_rounding() -> TestResult {
             coin(840),
             TxOut {
                 value: Amount::from_sat(u64::try_from(outputs)? * 1_000 + fee),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         if outputs == 30 {
@@ -797,7 +838,7 @@ fn rpc_package_fee_failure_precedence_preserves_other_planner_errors() -> TestRe
             coin(841),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]);
         let history = gateway.read().estimator_history();
@@ -841,7 +882,7 @@ fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() 
             coin(833),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )]),
         marker: coin(900).txid,
@@ -866,6 +907,55 @@ fn rpc_package_retries_fee_revision_and_chain_fences_without_membership_leaks() 
 }
 
 #[test]
+fn package_capacity_projection_counts_its_own_dependency_links() -> TestResult {
+    let gateway = gateway();
+    gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
+    let parent = spend(&[coin(850)], &[100_000], false);
+    let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
+    let measured = measured_package_memory(&parent, &child);
+    let chain = Coins(vec![(
+        coin(850),
+        TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
+        },
+    )]);
+    gateway.pool.write().limits.max_total_bytes = measured - 1;
+    let refused = gateway.submit_rpc_package(
+        &[parent.clone(), child.clone()],
+        None,
+        unix_time_secs(),
+        &chain,
+    )?;
+    assert_eq!(
+        refused.package_error,
+        Some(AcceptanceRejectReason::Mempool(crate::MempoolError::Full)),
+        "a package one byte above the measured bound must be refused: {refused:?}"
+    );
+    assert!(
+        gateway.read().is_empty(),
+        "a refused package commits nothing"
+    );
+
+    gateway.pool.write().limits.max_total_bytes = measured;
+    let admitted = gateway.submit_rpc_package(&[parent, child], None, unix_time_secs(), &chain)?;
+    assert_eq!(admitted.package_error, None, "{admitted:?}");
+    let pool = gateway.read();
+    assert_eq!(
+        pool.recount_memory_usage(),
+        measured,
+        "the committed package must use exactly the measured memory"
+    );
+    assert!(
+        pool.recount_memory_usage() <= pool.limits.max_total_bytes,
+        "the independent walk must stay within max_total_bytes: {} > {}",
+        pool.recount_memory_usage(),
+        pool.limits.max_total_bytes
+    );
+    Ok(())
+}
+
+#[test]
 fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() -> TestResult {
     let gateway = gateway();
     gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
@@ -875,7 +965,7 @@ fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() 
         coin(834),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     gateway.pool.write().limits.max_total_bytes =
@@ -994,7 +1084,7 @@ fn zero_fee_ephemeral_parent_requires_its_child_to_spend_dust() -> TestResult {
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let parent = spend(&[coin(1)], &[100_000, 0], false);
@@ -1065,7 +1155,7 @@ fn ephemeral_fee_overlay_rejects_without_state_changes() -> TestResult {
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     gateway.prioritise(parent.txid(), 1)?;
@@ -1122,7 +1212,7 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
         coin(1),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let parent = spend(&[coin(1)], &[49_000, 49_000], false);
@@ -1167,7 +1257,7 @@ fn native_package_commit_expires_an_unrelated_stale_entry_in_its_own_envelope() 
         coin(821),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
 
@@ -1266,14 +1356,14 @@ fn native_package_commit_survives_its_stale_resident_expiring() -> TestResult {
             coin(824),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
         (
             coin(825),
             TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
     ]);

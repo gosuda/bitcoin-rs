@@ -19,12 +19,20 @@ impl Mempool {
         now: u64,
     ) -> Result<PreparedPackage, AcceptanceRejectReason> {
         let expiry_time = entries.iter().map(|entry| entry.time).max().unwrap_or(0);
-        let size = entries
-            .iter()
-            .try_fold(self.dynamic_memory_usage(), |sum, entry| {
+        let members: HashSet<Txid> = entries.iter().map(|entry| entry.txid).collect();
+        let size = entries.iter().enumerate().try_fold(
+            self.dynamic_memory_usage(),
+            |sum, (index, entry)| {
                 sum.checked_add(self.admission_memory(entry))
+                    .and_then(|sum| {
+                        sum.checked_add(super::link_memory_usage(
+                            package_parent_edges(&entries[index], &members),
+                            2,
+                        ))
+                    })
                     .ok_or(PolicyError::FeeArithmetic)
-            })?;
+            },
+        )?;
         let cutoff = expiry_time.saturating_sub(crate::policy::MEMPOOL_EXPIRY_SECS);
         let expired_ids = self.expired_entry_ids(expiry_time);
         let mut expired_txids: HashSet<Txid> = expired_ids
@@ -119,4 +127,15 @@ impl Mempool {
         changes.extend(self.expire(prepared.expiry_time).changes);
         Ok(self.finish_mutation(changes))
     }
+}
+
+fn package_parent_edges(entry: &MempoolEntry, members: &HashSet<Txid>) -> usize {
+    entry
+        .tx
+        .inputs
+        .iter()
+        .map(|input| input.previous_output.txid)
+        .filter(|parent| *parent != entry.txid && members.contains(parent))
+        .collect::<HashSet<Txid>>()
+        .len()
 }
