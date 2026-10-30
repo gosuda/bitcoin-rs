@@ -2,10 +2,13 @@
 
 use bitcoin_rs_primitives::{Block, BlockPayload, Header, Tx};
 
+pub(crate) mod block_memory;
+
 pub struct InboundBlock {
     payload: BlockPayload,
     pub source: Option<crate::PeerSource>,
     pub(crate) forward_credit: Option<crate::connection::BlockForwardCredit>,
+    pub(crate) memory_credit: Option<block_memory::BlockMemoryCredit>,
 }
 pub struct InboundHeaders {
     pub headers: Vec<Header>,
@@ -32,6 +35,7 @@ impl InboundBlock {
             payload: BlockPayload::from_local(block),
             source: None,
             forward_credit: None,
+            memory_credit: None,
         }
     }
 
@@ -44,6 +48,7 @@ impl InboundBlock {
             payload,
             source,
             forward_credit,
+            memory_credit: None,
         }
     }
 

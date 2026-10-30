@@ -46,6 +46,34 @@ mod vector_tests {
 
     type TestResult = Result<(), Box<dyn Error>>;
 
+    #[test]
+    fn block_admission_runs_before_v2_typed_decode() -> TestResult {
+        let mut sender = super::packet::SendCipher::new([1; 32], [2; 32]);
+        let command = crate::Message::BlockPayload(bytes::Bytes::new()).command();
+        let contents = super::msg_type::encode(&command, &bytes::Bytes::from(vec![0; 80]));
+        let frame = sender.seal(&contents, &[], false)?;
+        let reader =
+            super::PacketReader::new(super::packet::RecvCipher::new([1; 32], [2; 32]), Vec::new());
+        let mut receiver = crate::transport::RecvTransport::V2(Box::new(reader));
+        let mut called = false;
+        let result = receiver.read_message(
+            &mut std::io::Cursor::new(frame),
+            bitcoin::p2p::Magic::REGTEST,
+            |command, payload| {
+                assert_eq!(command, "block");
+                assert_eq!(payload.len(), 80);
+                called = true;
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::Interrupted, "admission cancelled")
+                        .into(),
+                )
+            },
+        );
+        assert!(called);
+        assert!(matches!(result, Err(crate::PeerError::Io(_))));
+        Ok(())
+    }
+
     struct Csv {
         header: Vec<String>,
         rows: Vec<Vec<String>>,

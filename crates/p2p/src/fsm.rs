@@ -32,15 +32,17 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
             peer.compact_blocks.record_remote_preference(send_cmpct);
             Ok(())
         }
-        _ => {
-            if peer.state == PeerState::Ready {
-                Ok(())
-            } else {
-                Err(PeerError::Misbehavior(
-                    "message received before handshake completed",
-                ))
-            }
-        }
+        _ => require_ready(peer.state),
+    }
+}
+
+pub(crate) const fn require_ready(state: PeerState) -> Result<(), PeerError> {
+    if matches!(state, PeerState::Ready) {
+        Ok(())
+    } else {
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed",
+        ))
     }
 }
 

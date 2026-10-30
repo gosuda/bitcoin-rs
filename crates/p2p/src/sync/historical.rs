@@ -186,7 +186,7 @@ impl BlockSync {
         }
     }
 
-    pub(super) fn receive_historical(&self, inbound: InboundBlock) -> Option<InboundBlock> {
+    pub(super) fn receive_historical(&self, mut inbound: InboundBlock) -> Option<InboundBlock> {
         let _work = self.historical_work.lock();
         let hash = inbound.payload().block().block_hash().0;
         let Some(source) = inbound.source else {
@@ -215,6 +215,7 @@ impl BlockSync {
                 ..
             } = &mut *historical;
             let _ = inbound.forward_credit;
+            let _memory_credit = inbound.memory_credit.take();
             match stager.insert(
                 hash,
                 *next_expected,

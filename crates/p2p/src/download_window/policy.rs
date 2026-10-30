@@ -194,6 +194,7 @@ pub fn default_sync_budget(network: Network) -> SyncBudget {
         max_pending_bytes: PENDING_BYTE_BUDGET,
         max_received_blocks: RECEIVED_BLOCK_BUDGET,
         max_received_bytes: RECEIVED_BLOCK_BYTE_BUDGET,
+        max_retained_bytes: 512 * 1024 * 1024,
         max_peer_inflight: PEER_INFLIGHT_BUDGET,
         fanout_peer_inflight: MAX_BLOCKS_IN_TRANSIT_PER_PEER,
         min_peers_for_fanout: MIN_PEERS_FOR_FANOUT,

@@ -388,12 +388,56 @@ impl<S: Read> Peer<S> {
     /// packet keeps the bytes already read, so retrying after `TimedOut` or
     /// `WouldBlock` continues it.
     pub fn read_message(&mut self) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
+        self.read_message_admitted(|_, _| Ok(()))
+    }
+
+    pub(crate) fn read_message_admitted(
+        &mut self,
+        admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
+    ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
         self.recv
             .read_message(&mut self.stream, self.magic, |command, payload| {
                 crate::net_trace::inbound_message(net_trace, command, payload);
+                admit(command, payload)
             })
             .map_err(PeerError::inbound)
+    }
+
+    pub(crate) fn read_message_bounded(
+        &mut self,
+        memory: &Arc<crate::inbound::block_memory::BlockMemory>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<
+        Option<(
+            Message,
+            bytes::Bytes,
+            Option<crate::inbound::block_memory::BlockMemoryCredit>,
+        )>,
+        PeerError,
+    > {
+        let mut credit = None;
+        let Some((message, raw)) = self.read_message_admitted(|command, payload| {
+            if command == "block" {
+                credit = Some(memory.reserve(
+                    bitcoin_rs_primitives::layout::ParsedBlock::decode_heap_bound(payload.len()),
+                    cancelled,
+                )?);
+            }
+            Ok(())
+        })?
+        else {
+            return Ok(None);
+        };
+        if let (Message::Block(payload), Some(credit)) = (&message, credit.as_mut()) {
+            credit.retain(
+                payload
+                    .bytes()
+                    .len()
+                    .saturating_add(payload.block().retained_heap_bytes()),
+            )?;
+        }
+        Ok(Some((message, raw, credit)))
     }
 }
 

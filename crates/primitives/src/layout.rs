@@ -32,6 +32,9 @@ pub struct ByteSpan {
     len: u32,
 }
 
+#[cfg(test)]
+mod tests;
+
 impl ByteSpan {
     fn checked(start: u64, len: u64, limit: u64) -> Result<Self, DecodeError> {
         let available = usize::try_from(limit.saturating_sub(start)).unwrap_or(usize::MAX);
@@ -511,6 +514,43 @@ pub struct ParsedBlock<'a> {
 }
 
 impl<'a> ParsedBlock<'a> {
+    /// Conservative peak heap bound for parsing and materializing a wire image.
+    /// Counts both simultaneously live representations, vector growth in the
+    /// parser, and copied scripts/witness data. It is an allocation bound, not
+    /// a consensus limit or a measurement of allocator/RSS overhead.
+    #[must_use]
+    pub fn decode_heap_bound(wire_len: usize) -> usize {
+        let txs = wire_len / usize::try_from(MIN_TX_LEN).unwrap_or(usize::MAX);
+        let inputs = wire_len / usize::try_from(MIN_INPUT_LEN).unwrap_or(usize::MAX);
+        let outputs = wire_len / usize::try_from(MIN_OUTPUT_LEN).unwrap_or(usize::MAX);
+        // Each parser Vec grows geometrically. Nested input/output/witness
+        // vectors may each have the minimum allocation in every transaction.
+        let grown = |count: usize, vectors: usize| {
+            count
+                .saturating_mul(2)
+                .saturating_add(vectors.saturating_mul(4))
+        };
+        let arrays = [
+            (
+                grown(txs, 1),
+                core::mem::size_of::<ParsedTransaction<'_>>() + core::mem::size_of::<ByteSpan>(),
+            ),
+            (grown(inputs, txs), core::mem::size_of::<InputLayout>()),
+            (grown(outputs, txs), core::mem::size_of::<OutputLayout>()),
+            (grown(wire_len, txs), core::mem::size_of::<ByteSpan>()),
+            // Materialize collects exact-length iterators, without growth.
+            (txs, core::mem::size_of::<Tx>()),
+            (inputs, core::mem::size_of::<TxIn>()),
+            (outputs, core::mem::size_of::<TxOut>()),
+            (wire_len, core::mem::size_of::<Vec<u8>>()),
+        ];
+        arrays
+            .into_iter()
+            .fold(wire_len.saturating_mul(3), |bound, (count, size)| {
+                bound.saturating_add(count.saturating_mul(size))
+            })
+    }
+
     pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
