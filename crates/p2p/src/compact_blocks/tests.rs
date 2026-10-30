@@ -470,7 +470,11 @@ fn colliding_hint_requests_only_its_slot() {
     assert_eq!(request.txs_request.indexes, vec![1]);
     assert_eq!(
         reconstruction.retained_bytes(),
-        2 * 6 + native.txs[0].total_size() + native.txs[2].total_size()
+        2 * 6
+            + [&native.txs[0], &native.txs[2]]
+                .into_iter()
+                .map(|tx| core::mem::size_of::<Tx>() + tx.retained_heap_bytes())
+                .sum::<usize>()
     );
 
     let txn = BlockTxn {
@@ -1186,4 +1190,36 @@ fn colliding_tx_bytes(branch: u8, payload: u32) -> Vec<u8> {
     bytes.extend_from_slice(&payload.to_le_bytes());
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes
+}
+
+fn blocks_with_prefilled_witness_items(items: usize) -> (Block, CmpctBlock) {
+    let mut heavy = test_coinbase(1);
+    heavy.inputs[0].witness = Witness::from_stack(vec![Vec::new(); items]);
+    let native = conforming_block(vec![heavy, test_tx(2)]);
+    let short_id = wtxid_short_id(&native, 7, &native.txs[1]);
+    let cmpct = cmpct_with_slots(&native, 7, vec![short_id]);
+    (native, cmpct)
+}
+
+#[test]
+fn prefilled_witness_heap_counts_against_the_pending_retention_cap() {
+    let hints = SetHints { txs: Vec::new() };
+
+    let (_, light) = blocks_with_prefilled_witness_items(100);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&light, 2, &hints, now()),
+            Outcome::RequestMissing(_)
+        ),
+        "control: a small prefilled witness stays well under the 8 MiB cap"
+    );
+
+    let (_, heavy) = blocks_with_prefilled_witness_items(2_200_000);
+    assert!(
+        matches!(
+            Reconstruction::new().receive_cmpctblock(&heavy, 2, &hints, now()),
+            Outcome::Fallback(_)
+        ),
+        "decoded witness heap must be charged, not only the serialized length"
+    );
 }
