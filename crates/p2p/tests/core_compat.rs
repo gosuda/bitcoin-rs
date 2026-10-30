@@ -1288,10 +1288,12 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     Ok(())
 }
 
-/// The live connection's per-message byte accounting must carry the framed
-/// ping the peer sent and the pong this node answered with, at or above the
-/// 29-byte threshold Core v31.1's functional `connect_nodes` waits on in
-/// `bytesrecv_per_msg['pong']` (`test_framework.py`).
+/// The live connection's per-message byte accounting must carry both ping
+/// directions at or above the 29-byte threshold Core v31.1's functional
+/// `connect_nodes` waits on in `bytesrecv_per_msg['pong']`
+/// (`test_framework.py`): the ping the peer sent with the pong this node
+/// answered, and the ping this node originated after the handshake with the
+/// pong the peer sent back.
 fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), Box<dyn Error>> {
     // The writer thread charges a frame's bucket after the socket accepted
     // it, so poll briefly like the framework's wait_until instead of reading
@@ -1302,25 +1304,28 @@ fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), Box<dyn Erro
         let Some(info) = infos.first() else {
             return Err("handshake-complete peer never published its counters".into());
         };
-        let recv_ping = info
-            .counters
-            .recv_per_message()
-            .into_iter()
-            .find(|(command, _)| *command == "ping");
-        let sent_pong = info
-            .counters
-            .sent_per_message()
-            .into_iter()
-            .find(|(command, _)| *command == "pong");
-        match (recv_ping, sent_pong) {
-            (Some(("ping", recv)), Some(("pong", sent))) if recv >= 29 && sent >= 29 => {
+        let per_message = |command: &str, table: Vec<(&'static str, u64)>| {
+            table
+                .into_iter()
+                .find(|(known, _)| *known == command)
+                .map_or(0, |(_, bytes)| bytes)
+        };
+        let recv = |command: &str| per_message(command, info.counters.recv_per_message());
+        let sent = |command: &str| per_message(command, info.counters.sent_per_message());
+        match (recv("ping"), sent("pong"), sent("ping"), recv("pong")) {
+            (recv_ping, sent_pong, sent_ping, recv_pong)
+                if recv_ping >= 29 && sent_pong >= 29 && sent_ping >= 29 && recv_pong >= 29 =>
+            {
                 return Ok(());
             }
-            _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            (recv, sent) => {
+            state if Instant::now() < deadline => {
+                let _ = state;
+                thread::sleep(Duration::from_millis(10));
+            }
+            state => {
                 return Err(format!(
-                    "per-message ping/pong accounting missing or below the wire threshold: \
-                     received ping {recv:?}, sent pong {sent:?}"
+                    "per-message ping/pong accounting missing or below the wire threshold \
+                     (recv ping, sent pong, sent ping, recv pong): {state:?}"
                 )
                 .into());
             }
@@ -1398,11 +1403,22 @@ fn drive_handshake_as_core(
 
     write_message(&mut client, magic, &Message::Verack)?;
 
+    // Core v31.1 originates a ping on the first send pass after VERACK
+    // (`MaybeSendPing`; a peer's `m_ping_start` initializes to the clock
+    // epoch), so a Core-like peer receives one without asking. This side
+    // both solicits a pong with its own ping and answers the node's
+    // originated ping, so `assert_ping_pong_accounted` can check both
+    // directions' wire accounting afterwards.
     write_message(&mut client, magic, &Message::Ping(0xfeed_face))?;
+    let mut originated_ping = false;
+    let mut ponged_our_ping = false;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if Instant::now() > deadline {
-            return Err(format!("pong for ping never arrived on {network:?}").into());
+            return Err(format!(
+                "pong for ping never arrived on {network:?} (originated ping seen: {originated_ping})"
+            )
+            .into());
         }
         let (message, _) = match read_message(&mut client, magic) {
             Ok(pair) => pair,
@@ -1418,11 +1434,21 @@ fn drive_handshake_as_core(
         };
         match message {
             Message::Pong(nonce) => {
-                assert_eq!(nonce, 0xfeed_face);
-                break;
+                assert_eq!(
+                    nonce, 0xfeed_face,
+                    "pong must echo the solicited ping nonce"
+                );
+                ponged_our_ping = true;
             }
-            Message::Ping(_) | Message::SendCmpct(_) => continue,
+            Message::Ping(nonce) => {
+                originated_ping = true;
+                write_message(&mut client, magic, &Message::Pong(nonce))?;
+            }
+            Message::SendCmpct(_) => {}
             other => return Err(format!("unexpected post-handshake message {other:?}").into()),
+        }
+        if originated_ping && ponged_our_ping {
+            break;
         }
     }
     Ok(client)
