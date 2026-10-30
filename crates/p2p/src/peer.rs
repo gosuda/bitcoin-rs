@@ -243,6 +243,10 @@ pub struct Peer<S> {
     pub(crate) pending_getdata: Vec<Inventory>,
     pub(crate) pending_notfound: Vec<Inventory>,
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
+    /// Per-message byte accounting for this connection, when the connection
+    /// has any: the same [`PeerCounters`] the `CountingStream` counts
+    /// socket-level aggregates into. Test fixtures carry `None`.
+    pub(crate) counters: Option<Arc<crate::counters::PeerCounters>>,
     recv: crate::transport::RecvTransport,
     send: Option<crate::transport::SendTransport>,
     transport: crate::transport::TransportProtocol,
@@ -278,10 +282,18 @@ impl<S> Peer<S> {
             pending_getdata: Vec::new(),
             pending_notfound: Vec::new(),
             net_trace: None,
+            counters: None,
             recv: negotiated.recv,
             send: Some(negotiated.send),
             transport: negotiated.protocol,
         }
+    }
+
+    /// Points this connection's per-message byte accounting at `counters`,
+    /// the same instance its `CountingStream` charges socket-level aggregates
+    /// into, so both views describe one connection.
+    pub(crate) fn account_message_bytes(&mut self, counters: Arc<crate::counters::PeerCounters>) {
+        self.counters = Some(counters);
     }
 
     pub const fn transport(&self) -> crate::TransportProtocol {
@@ -373,6 +385,9 @@ impl<S: Read + Write> Peer<S> {
         let frame = transport.encode(message)?;
         crate::net_trace::outbound_message(self.net_trace.as_ref(), message, frame.payload());
         let written = crate::wire::write_frame(&mut self.stream, &frame)?;
+        if let Some(counters) = self.counters.as_ref() {
+            counters.record_msg_sent(message.command().as_ref(), written);
+        }
         if matches!(message, Message::Verack) {
             self.sent_verack = true;
         }
@@ -396,9 +411,13 @@ impl<S: Read> Peer<S> {
         admit: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         let net_trace = self.net_trace.as_ref();
+        let counters = self.counters.clone();
         self.recv
-            .read_message(&mut self.stream, self.magic, |command, payload| {
+            .read_message(&mut self.stream, self.magic, |command, payload, wire_len| {
                 crate::net_trace::inbound_message(net_trace, command, payload);
+                if let Some(counters) = counters.as_ref() {
+                    counters.record_msg_recv(command, wire_len);
+                }
                 admit(command, payload)
             })
             .map_err(PeerError::inbound)
@@ -713,6 +732,56 @@ mod tests {
 
         assert_eq!(message, Message::Pong(2));
         assert!(!payload.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn read_and_send_charge_per_message_accounting_with_wire_frame_sizes() -> Result<(), PeerError>
+    {
+        use std::collections::BTreeMap;
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        let framed_len = |message: &Message| -> Result<u64, PeerError> {
+            let mut frame = Vec::new();
+            write_message(&mut frame, Magic::BITCOIN, message)?;
+            Ok(u64::try_from(frame.len()).unwrap_or(u64::MAX))
+        };
+
+        let mut inbound = Vec::new();
+        write_message(&mut inbound, Magic::BITCOIN, &Message::Ping(7))?;
+        write_message(&mut inbound, Magic::BITCOIN, &Message::Pong(7))?;
+        let counters = Arc::new(crate::PeerCounters::default());
+        let mut peer = Peer::new(Cursor::new(inbound), Magic::BITCOIN);
+        peer.account_message_bytes(Arc::clone(&counters));
+
+        let _ = peer
+            .read_message()?
+            .ok_or_else(|| std::io::Error::other("a v1 frame is a message"))?;
+        let _ = peer
+            .read_message()?
+            .ok_or_else(|| std::io::Error::other("a v1 frame is a message"))?;
+        let received: BTreeMap<_, _> = counters.recv_per_message().into_iter().collect();
+        assert_eq!(
+            received,
+            BTreeMap::from([
+                ("ping", framed_len(&Message::Ping(7))?),
+                ("pong", framed_len(&Message::Pong(7))?),
+            ]),
+            "received frames charge their full wire size to their command"
+        );
+
+        peer.send(&Message::Verack)?;
+        peer.send(&Message::Pong(7))?;
+        let sent: BTreeMap<_, _> = counters.sent_per_message().into_iter().collect();
+        assert_eq!(
+            sent,
+            BTreeMap::from([
+                ("verack", framed_len(&Message::Verack)?),
+                ("pong", framed_len(&Message::Pong(7))?),
+            ]),
+            "sent frames charge their full wire size to their command"
+        );
         Ok(())
     }
 

@@ -288,6 +288,7 @@ impl Served {
                         close,
                         &mut gated,
                         &mut SendTransport::V1(MAGIC),
+                        &crate::PeerCounters::default(),
                         None,
                     );
                     let _ = gated.socket.shutdown(Shutdown::Both);

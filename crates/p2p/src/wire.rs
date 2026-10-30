@@ -355,8 +355,13 @@ impl FramedMessage {
         }
     }
 
-    fn wire_len(&self) -> usize {
-        HEADER_LEN + self.payload.len()
+    /// The bytes this frame puts on the wire: the v1 header plus payload, or
+    /// the sealed BIP324 packet as a whole.
+    pub(crate) fn wire_len(&self) -> usize {
+        match &self.wire {
+            FrameWire::V1(_) => HEADER_LEN + self.payload.len(),
+            FrameWire::V2(packet) => packet.len(),
+        }
     }
 
     pub(crate) fn payload(&self) -> &[u8] {
@@ -439,7 +444,7 @@ pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    V1Receiver::default().read_message_with(reader, expected_magic, |_, _| Ok(()))
+    V1Receiver::default().read_message_with(reader, expected_magic, |_, _, _| Ok(()))
 }
 
 #[derive(Debug, Default)]
@@ -468,11 +473,14 @@ impl V1Receiver {
         receiver
     }
 
+    /// Reads one message, then hands `(command, payload, framed length)` to
+    /// `observe`: the framed length is the v1 header plus payload bytes this
+    /// frame took from the wire.
     pub(crate) fn read_message_with<R: Read>(
         &mut self,
         reader: &mut R,
         expected_magic: Magic,
-        observe: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
+        observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
     ) -> Result<(Message, bytes::Bytes), PeerError> {
         let mut body = if let Some(body) = self.body.take() {
             body
@@ -489,7 +497,11 @@ impl V1Receiver {
             return Err(PeerError::BadChecksum);
         }
 
-        observe(&body.command, &body.payload)?;
+        observe(
+            &body.command,
+            &body.payload,
+            HEADER_LEN + body.payload.len(),
+        )?;
         let payload = bytes::Bytes::from(body.payload);
         let message = decode_payload(&body.command, &payload)?;
         Ok((message, payload))

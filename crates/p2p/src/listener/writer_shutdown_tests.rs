@@ -587,6 +587,7 @@ fn writer_mid_write_exits_on_unblock_deterministically() {
             close_rx,
             &mut writer,
             &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+            &crate::PeerCounters::default(),
             Some(&net_trace),
         );
         let _ = done_tx.send(());
@@ -640,6 +641,7 @@ fn writer_releases_budget_after_write() {
             close_rx,
             &mut writer,
             &mut crate::transport::SendTransport::V1(Magic::BITCOIN),
+            &crate::PeerCounters::default(),
             None,
         );
         let _ = done_tx.send(());

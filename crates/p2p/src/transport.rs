@@ -75,12 +75,15 @@ impl RecvTransport {
     /// Reads at most one message: `Ok(None)` when the v2 transport carried a decoy
     /// packet or a message of an empty or undefined type, which BIP324 peers drop.
     ///
-    /// A v1 frame always carries a message and is never `None`.
+    /// A v1 frame always carries a message and is never `None`. `observe`
+    /// receives the command, its payload, and the frame's exact wire size:
+    /// header plus payload for v1, or the BIP324 packet's ciphertext length
+    /// for v2.
     pub(crate) fn read_message<R: Read>(
         &mut self,
         reader: &mut R,
         magic: Magic,
-        observe: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
+        observe: impl FnOnce(&str, &[u8], usize) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
             Self::V1(receiver) => receiver.read_message_with(reader, magic, observe).map(Some),
@@ -91,7 +94,11 @@ impl RecvTransport {
                 let Some((command, payload)) = msg_type::decode(&contents) else {
                     return Ok(None);
                 };
-                observe(&command, &payload)?;
+                observe(
+                    &command,
+                    &payload,
+                    crate::bip324::PACKET_OVERHEAD + contents.len(),
+                )?;
                 let message = decode_payload(&command, &payload)?;
                 Ok(Some((message, payload)))
             }

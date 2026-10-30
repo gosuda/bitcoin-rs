@@ -299,6 +299,15 @@ struct PeerInfoWire {
     session_id: String,
 }
 
+/// The per-message byte maps of one `getpeerinfo` row: wire-frame totals per
+/// command with zero buckets omitted, as Core renders them.
+fn per_message_map(entries: Vec<(&'static str, u64)>) -> std::collections::BTreeMap<String, u64> {
+    entries
+        .into_iter()
+        .map(|(command, bytes)| (command.to_owned(), bytes))
+        .collect()
+}
+
 fn peer_info_wire(
     session: &bitcoin_rs_p2p::PeerSession,
     peer: &bitcoin_rs_p2p::PeerInfo,
@@ -351,8 +360,8 @@ fn peer_info_wire(
             Vec::new()
         },
         minimum_fee_filter,
-        bytes_sent_per_message: std::collections::BTreeMap::new(),
-        bytes_received_per_message: std::collections::BTreeMap::new(),
+        bytes_sent_per_message: per_message_map(peer.counters.sent_per_message()),
+        bytes_received_per_message: per_message_map(peer.counters.recv_per_message()),
         inv_to_send: 0,
         last_inv_sequence: 0,
         connection_type: Some(if session.lease.is_inbound() {
