@@ -390,7 +390,7 @@ fn message_loop_keeps_current_lease_running() {
 }
 
 #[test]
-fn message_loop_does_not_probe_a_peer_inside_one_interval() {
+fn message_loop_probes_a_fresh_peer_immediately_then_stays_quiet() {
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
     let lease = crate::PeerLease::new(outbound_tx);
     let reads = Arc::new(AtomicUsize::new(0));
@@ -406,10 +406,17 @@ fn message_loop_does_not_probe_a_peer_inside_one_interval() {
     assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
     assert!(
         matches!(
+            outbound_rx.try_recv().map(|frame| frame.message().clone()),
+            Ok(crate::Message::Ping(_))
+        ),
+        "the first pass after the handshake owes an immediate probe, like Core's epoch-initialized m_ping_start",
+    );
+    assert!(
+        matches!(
             outbound_rx.try_recv(),
             Err(crossbeam_channel::TryRecvError::Empty)
         ),
-        "a peer quiet for less than one interval owes no probe",
+        "a peer already probed owes no second probe inside one interval",
     );
 }
 
