@@ -99,6 +99,7 @@ pub fn verify_block_rules_precomputed(
             max: MAX_BLOCK_WEIGHT,
         });
     }
+    verify_block_transactions_and_legacy_sigops(&block.txs)?;
     Ok(())
 }
 
@@ -110,8 +111,13 @@ pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> 
     if size > max {
         return Err(ConsensusError::BlockBaseSize { size, max });
     }
+    verify_block_transactions_and_legacy_sigops(&block.txs)?;
+    Ok(())
+}
+
+fn verify_block_transactions_and_legacy_sigops(txs: &[Tx]) -> Result<(), ConsensusError> {
     let mut sigop_cost = 0_u32;
-    for tx in &block.txs {
+    for tx in txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
         sigop_cost = sigop_cost
             .saturating_add(bitcoin_rs_script::sigops::count_tx_legacy(tx).saturating_mul(4));

@@ -180,7 +180,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
         .inputs
         .first_mut()
         .ok_or("coinbase input")?
-        .script_sig = vec![0x51].into();
+        .script_sig = vec![0x51, 0x51].into();
     violating.header.merkle_root =
         merkle_root(&violating.txs).ok_or("merkle root of non-empty block")?;
     mine_block_to_declared_target(&mut violating)
@@ -228,6 +228,72 @@ fn hook_installation_after_a_clone_is_visible_through_both_handles()
     assert!(
         shadow.set_tip_staged(Arc::new(|_, _| {})).is_err(),
         "the clone must see the install and refuse a second one"
+    );
+    Ok(())
+}
+
+#[test]
+fn pow_valid_hook_skips_legacy_sigop_violating_block() -> Result<(), Box<dyn std::error::Error>> {
+    let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
+    handles
+        .set_pow_valid_block(recording_hook(&calls))
+        .map_err(|_| "hook installs once")?;
+    let genesis_tip = seed_genesis(&handles)?;
+    let mut block = mined_child(genesis_tip.hash.into(), 1)?;
+    block.txs[0].outputs[0].script_pubkey =
+        vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001].into();
+    block.header.merkle_root =
+        merkle_root(&block.txs).ok_or("merkle root of non-empty block")?;
+    mine_block_to_declared_target(&mut block)
+        .map_err(|error| format!("regrind legacy sigop block: {error:?}"))?;
+    let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(block));
+    assert!(
+        matches!(
+            &failed,
+            Err(ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::SigopsLimit {
+                    cost: 80_004,
+                    max: 80_000,
+                }
+            ))
+        ),
+        "legacy sigop violation must fail connect, got {failed:?}"
+    );
+    assert!(
+        calls.lock().expect("hook calls").is_empty(),
+        "legacy sigop violation must be rejected before pow_valid hook"
+    );
+    Ok(())
+}
+
+#[test]
+fn proposal_intent_rejects_non_final_coinbase_parity() -> Result<(), Box<dyn std::error::Error>> {
+    let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&handles)?;
+    let tip = handles.applied_tip_snapshot().ok_or("tip")?;
+    let mut non_final = mined_child(tip.hash.into(), 1)?;
+    let coinbase = non_final.txs.first_mut().ok_or("coinbase")?;
+    coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
+    coinbase
+        .inputs
+        .first_mut()
+        .ok_or("coinbase input")?
+        .sequence = bitcoin_rs_primitives::Sequence::from_consensus(0);
+    non_final.header.merkle_root =
+        merkle_root(&non_final.txs).ok_or("merkle root of non-empty block")?;
+    mine_block_to_declared_target(&mut non_final)
+        .map_err(|error| format!("regrind non-final block: {error:?}"))?;
+    let payload = BlockPayload::from_local(non_final);
+    let failed = handles.validate_block(&payload);
+    assert!(
+        matches!(
+            &failed,
+            Err(ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP113", .. }
+            ))
+        ),
+        "proposal intent must reject non-final coinbase under BIP113, got {failed:?}"
     );
     Ok(())
 }
