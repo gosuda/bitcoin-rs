@@ -542,6 +542,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-p2pk-scan"
+version = "0.15.0"
+dependencies = [
+ "bitcoin",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-script",
+ "bitcoin-rs-utxo",
+ "clap",
+ "serde",
+ "sonic-rs",
+ "thiserror",
+]
+
+[[package]]
 name = "bitcoin-rs-primitives"
 version = "0.15.0"
 dependencies = [

@@ -19,6 +19,7 @@ members = [
     "e2e",
     "tools/storage-footprint",
     "tools/snapshot",
+    "tools/p2pk-scan",
 ]
 
 [workspace.package]
