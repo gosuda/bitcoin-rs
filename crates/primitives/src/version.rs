@@ -4,6 +4,37 @@ pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const USER_AGENT: &str = concat!("/bitcoin-rs:", env!("CARGO_PKG_VERSION"), "/");
 
+/// Core's `MAX_SUBVERSION_LENGTH` (`src/net.h`): the composed subversion
+/// string may not exceed this many bytes.
+pub const MAX_SUBVERSION_LENGTH: usize = 256;
+
+/// Core's `SAFE_CHARS_UA_COMMENT` (`src/util/strencodings.h`): the BIP-0014
+/// comment subset — ASCII alphanumerics plus ` .,;-_?@`.
+const UA_COMMENT_SAFE_EXTRA: &str = " .,;-_?@";
+
+/// Whether one `-uacomment` value is within Core's BIP-0014 safe subset.
+#[must_use]
+pub fn ua_comment_is_safe(comment: &str) -> bool {
+    comment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || UA_COMMENT_SAFE_EXTRA.contains(c))
+}
+
+/// The subversion string advertised in the version handshake and reported by
+/// `getnetworkinfo`.
+///
+/// Core's `FormatSubVersion` shape: `/name:version(c1; c2)/` with the
+/// parenthesized comments omitted when there are none, built on this node's
+/// [`USER_AGENT`] base.
+#[must_use]
+pub fn sub_version(ua_comments: &[String]) -> String {
+    if ua_comments.is_empty() {
+        return USER_AGENT.to_owned();
+    }
+    let comments = ua_comments.join("; ");
+    format!("{}({comments})/", USER_AGENT.trim_end_matches('/'))
+}
+
 /// Numeric client version, by Bitcoin Core's `CLIENT_VERSION` arithmetic.
 /// `10000 * major + 100 * minor + patch`, read from the same string the user
 #[must_use]
@@ -31,7 +62,10 @@ pub fn client_version() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{PKG_VERSION, USER_AGENT, client_version};
+    use super::{
+        MAX_SUBVERSION_LENGTH, PKG_VERSION, USER_AGENT, client_version, sub_version,
+        ua_comment_is_safe,
+    };
 
     #[test]
     fn the_client_version_is_the_package_version() {
@@ -48,5 +82,35 @@ mod tests {
             USER_AGENT.contains(PKG_VERSION),
             "the user agent carries the same version"
         );
+    }
+
+    /// Core `FormatSubVersion` (`src/clientversion.cpp`) and `InitSubversion`
+    /// (`src/init.cpp`): no comments leaves the bare `/name:version/`, several
+    /// comments join with `"; "` inside one parenthesized group directly
+    /// after the version and before the closing slash.
+    #[test]
+    fn sub_version_composes_comments_in_cores_shape() {
+        assert_eq!(sub_version(&[]), USER_AGENT);
+        assert_eq!(
+            sub_version(&["testnode0".to_owned()]),
+            format!("{}(testnode0)/", USER_AGENT.trim_end_matches('/'))
+        );
+        assert_eq!(
+            sub_version(&["testnode0".to_owned(), "foo".to_owned()]),
+            format!("{}(testnode0; foo)/", USER_AGENT.trim_end_matches('/'))
+        );
+    }
+
+    /// Core's `SAFE_CHARS_UA_COMMENT` accepts ASCII alphanumerics plus
+    /// ` .,;-_?@` and nothing else (`util_tests.cpp` pins the complement).
+    #[test]
+    fn ua_comment_safety_matches_cores_bip14_subset() {
+        for accepted in ["testnode0", "foo bar", "a.,;-_?@"] {
+            assert!(ua_comment_is_safe(accepted), "{accepted:?} is safe");
+        }
+        for refused in ["/", ":", "(", ")", "\u{20b3}", "\u{1f3c3}", "\0"] {
+            assert!(!ua_comment_is_safe(refused), "{refused:?} is unsafe");
+        }
+        assert!("a".repeat(MAX_SUBVERSION_LENGTH).len() <= MAX_SUBVERSION_LENGTH);
     }
 }

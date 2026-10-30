@@ -232,6 +232,61 @@ fn auth_debug_redacts_secrets() {
     assert!(rendered.contains("<redacted>"));
 }
 
+/// Core's `InitSubversion` (`src/init.cpp`): unsafe comment characters and a
+/// composed subversion over `MAX_SUBVERSION_LENGTH` each fail startup with
+/// Core's exact message; safe comments resolve into `p2p.ua_comments`.
+#[test]
+fn ua_comments_are_validated_and_resolved_in_cores_shape() {
+    let layer = UserConfig {
+        p2p: crate::options::P2pOverrides {
+            ua_comments: Some(vec!["testnode0".to_owned(), "foo".to_owned()]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = resolved(&[&layer]);
+    assert_eq!(config.p2p.ua_comments, ["testnode0", "foo"]);
+
+    for unsafe_comment in ["/", ":", "(", ")", "₿", "🏃"] {
+        let layer = UserConfig {
+            p2p: crate::options::P2pOverrides {
+                ua_comments: Some(vec![unsafe_comment.to_owned()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let Err(error) = super::resolve(&[&layer]) else {
+            panic!("an unsafe uacomment must fail startup");
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("User Agent comment ({unsafe_comment}) contains unsafe characters.")
+        );
+    }
+
+    let overflow = "a".repeat(bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH);
+    let layer = UserConfig {
+        p2p: crate::options::P2pOverrides {
+            ua_comments: Some(vec![overflow]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let expected_len =
+        bitcoin_rs_primitives::sub_version(layer.p2p.ua_comments.as_deref().unwrap_or_default())
+            .len();
+    let Err(error) = super::resolve(&[&layer]) else {
+        panic!("an oversized subversion must fail startup");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Total length of network version string ({expected_len}) exceeds maximum length (256). \
+             Reduce the number or size of uacomments."
+        )
+    );
+}
+
 #[test]
 fn mempool_persistence_can_be_disabled_without_changing_other_settings() {
     assert!(

@@ -39,7 +39,9 @@ pub use sighash::{
 };
 pub use tx::{Tx, TxIn, TxOut};
 pub use units::{Amount, CompactTarget, LockTime, Sequence};
-pub use version::{PKG_VERSION, USER_AGENT, client_version};
+pub use version::{
+    MAX_SUBVERSION_LENGTH, PKG_VERSION, USER_AGENT, client_version, sub_version, ua_comment_is_safe,
+};
 
 /// Wall-clock seconds since the Unix epoch, `0` when the clock predates it.
 #[must_use]
