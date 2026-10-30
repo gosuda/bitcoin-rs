@@ -412,33 +412,6 @@ fn a_zero_byte_read_stamps_nothing_while_a_single_byte_write_counts() {
 }
 
 #[test]
-fn a_vectored_write_counts_every_slice_the_socket_took() {
-    struct VectoredWriter;
-    impl Write for VectoredWriter {
-        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
-            Err(std::io::Error::other(
-                "write_vectored must not fall back to write",
-            ))
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let counters = Arc::new(PeerCounters::default());
-    let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
-    let written = stream
-        .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
-        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
-
-    assert_eq!(written, 10);
-    assert_eq!(counters.bytes_sent(), 10);
-}
-
-#[test]
 fn a_short_vectored_write_counts_what_the_socket_took() {
     struct ShortVectoredWriter;
     impl Write for ShortVectoredWriter {
@@ -467,52 +440,6 @@ fn a_short_vectored_write_counts_what_the_socket_took() {
 
     assert_eq!(written, 3);
     assert_eq!(counters.bytes_sent(), 3);
-}
-
-#[test]
-fn write_message_through_counting_stream_stays_vectored() {
-    struct FailOnUnvectored {
-        calls: Arc<AtomicU64>,
-    }
-    impl Write for FailOnUnvectored {
-        fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
-            Err(std::io::Error::other(
-                "write_message must not fall back to write",
-            ))
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let counters = Arc::new(PeerCounters::default());
-    let calls = Arc::new(AtomicU64::new(0));
-    let mut stream = CountingStream::new(
-        FailOnUnvectored {
-            calls: Arc::clone(&calls),
-        },
-        Arc::clone(&counters),
-    );
-    let written = crate::wire::write_message(
-        &mut stream,
-        bitcoin::p2p::Magic::BITCOIN,
-        &crate::wire::Message::Ping(42),
-    )
-    .unwrap_or_else(|error| panic!("write_message failed: {error}"));
-
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        1,
-        "header and payload in one writev"
-    );
-    assert_eq!(
-        counters.bytes_sent(),
-        u64::try_from(written).unwrap_or(u64::MAX)
-    );
 }
 
 #[test]

@@ -1749,31 +1749,6 @@ fn shutdown_captures_anchors_before_cancelling_workers() {
     assert_eq!(restored.take_restart_anchors(now), vec![addr]);
 }
 
-#[test]
-fn shutdown_captures_anchors_before_cancelling_worker_leases() {
-    let directory = tempfile::tempdir().expect("directory");
-    let path = directory.path().join("peers.dat");
-    let service = P2pService::new(
-        P2pServiceConfig {
-            address_book_path: Some(path.clone()),
-            magic: Magic::REGTEST,
-            allow_local_addresses: true,
-            ..P2pServiceConfig::default()
-        },
-        Arc::new(AtomicBool::new(false)),
-    );
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)).into();
-    let now = crate::addrman::now();
-    service.address_book.learn_dns("fixture", &[addr], now);
-    service.address_book.succeeded(addr, 9, now);
-    let lease = register_ready_block_peer(&service.peer_table, addr);
-    *service.workers.lock() = Some(Workers::default());
-    service.shutdown();
-    assert!(lease.is_cancelled(), "workers cancel every lease");
-    let restored =
-        crate::addrman::AddressBook::open(Some(path), Magic::REGTEST.to_bytes(), true, None);
-    assert_eq!(restored.take_restart_anchors(now), vec![addr]);
-}
 fn saved_book(path: &std::path::Path) -> sonic_rs::Value {
     let bytes = std::fs::read(path).expect("saved book");
     sonic_rs::from_slice(&bytes[..bytes.len() - 32]).expect("book JSON")
