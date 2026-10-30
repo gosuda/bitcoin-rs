@@ -317,7 +317,7 @@ See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 `--validation-mode` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML) selects which historical script verification the apply path may skip. Non-script consensus checks always run.
 
 - `assume-valid` (default): Bitcoin Core `-assumevalid` semantics. Scripts are skipped through `--assume-valid-height` only while the active chain contains the pinned network anchor.
-- `full`: every script executes; `--assume-valid-height` is ignored.
+- `full`: every script executes; `--assume-valid-height` is ignored. A cold rebuild also executes every script. A warm restart that replays above an accepted checkpoint inherits that base's script verdicts; changing the mode does not revalidate it.
 - `fast`: scripts are skipped for every block that lies on the best header chain strictly below its tip, so only the block at the tip executes scripts while catching up. Blocks on competing branches always run scripts. This trusts the most-work header chain and is independent of `--fast-sync`.
 
 ```sh

@@ -554,14 +554,16 @@ fn apply_replayed_gap_block(
     height: u32,
     hash: Hash256,
 ) -> Result<super::ConnectOutcome, ApplyError> {
+    let warm_base = restored.is_some();
     let proven = match load_block_undo(handles.undo_store.as_ref(), height, hash) {
-        Ok(undo) => Some(ProvenApply::AssumeValidSkipped(
+        Ok(undo) if warm_base => Some(ProvenApply::AssumeValidSkipped(
             super::prepare::prepare_apply(
                 payload,
                 &UndoRowSpends(&undo),
                 handles.validation_engine,
             )?,
         )),
+        Ok(_) => None,
         Err(UndoLoadError::Missing { .. }) => None,
         Err(_) => {
             return Err(ApplyError::DurableHeadGapUnrecoverable {
@@ -573,11 +575,16 @@ fn apply_replayed_gap_block(
             });
         }
     };
+    let provenance = if warm_base {
+        BlockProvenance::LocalReplay
+    } else {
+        BlockProvenance::ColdReplay
+    };
     super::connect::apply_committed_block_admitted(
         handles,
         payload,
         proven,
-        BlockProvenance::LocalReplay,
+        provenance,
         PublishMode::Replay {
             receipt: DurableReceipt::from_head(head),
             certify_head: height == head.height && hash == head.tip,

@@ -309,6 +309,7 @@ impl AssumeValidGate {
 pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
+    ColdReplay,
 }
 
 #[derive(Clone, Debug)]
@@ -973,6 +974,7 @@ impl Chainstate {
     ) -> bool {
         match provenance {
             BlockProvenance::LocalReplay => true,
+            BlockProvenance::ColdReplay => false,
             BlockProvenance::Network => match self.validation_mode {
                 ValidationMode::Full => false,
                 ValidationMode::AssumeValid => {
