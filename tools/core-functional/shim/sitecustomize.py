@@ -19,46 +19,25 @@
 #    and fail loudly on the missing RPC - honest failure beats a silent wrong
 #    mine.
 #
-# 2. test_framework.authproxy.AuthServiceProxy.get_request: the framework's
-#    client serializes zero-argument calls as "params": {} (an empty JSON
-#    object; get_request's `params = args or argsn` falls back to an empty
-#    dict). Core's JSON-RPC layer treats an empty params object as "no named
-#    parameters" and accepts it. bitcoin-rs rejects it with
-#    {"code": -32602, "message": "invalid params: params must be an array"},
-#    which kills every test at the very first framework probe
-#    (wait_for_rpc_connection's getblockcount). The patch rewrites exactly the
-#    empty-object case to [] on the CLIENT side so the rest of each test can
-#    be measured; the node-side deviation itself is recorded as a node gap in
-#    the README and must be fixed in the node, after which this patch becomes
-#    a no-op that should be deleted. Set BITCOIN_RS_NO_PARAMS_SHIM=1 to
-#    disable it and reproduce the raw failure. The same patch also rewrites
-#    generatetoaddress's named-object params (nblocks=/address=/maxtries=,
-#    how the framework's mining plumbing always calls it) into the
-#    positional array [nblocks, address, maxtries] - bitcoin-rs's handler
-#    parses positionally only and rejects the object form with -32602, while
-#    Core accepts both. The rewrite is deliberately limited to this one
-#    method because its parameter order is identical on both sides, so no
-#    argument can be silently reordered; every other method fails honestly
-#    on named-object params.
-#
-# 3. test_framework.authproxy.AuthServiceProxy.__call__: two RPCs that the
-#    framework's own plumbing calls unconditionally - syncwithvalidation-
-#    interfacequeue (sync_mempools after pools match, so via sync_all in the
-#    default setup_network of every test) and setmocktime (_initialize_chain's
-#    cache build pins the cache node's clock to its tip time) - are missing
-#    from bitcoin-rs's RPC surface and would gate every candidate at setup,
-#    before any test body runs. bitcoin-rs returns
-#    {"code": -32601, "message": "method not found: ..."} for both. The patch
-#    no-ops exactly these two methods CLIENT-side (Core's replies are null and
-#    the framework ignores them). Verified against v31.1: no candidate test
-#    file calls setmocktime itself, and set_node_times/bump_mocktime (the
+# 2. test_framework.authproxy.AuthServiceProxy.__call__: framework-plumbing
+#    RPCs the node does not implement are no-op'd CLIENT-side. Today this is
+#    exactly setmocktime (_initialize_chain's cache build pins the cache
+#    node's clock to its tip time): bitcoin-rs answers
+#    {"code": -32601, "message": "method not found: ..."} for it, which would
+#    gate every candidate at setup before any test body runs (Core's reply is
+#    null and the framework ignores it). Verified against v31.1: no candidate
+#    test file calls setmocktime itself, and set_node_times/bump_mocktime (the
 #    other setmocktime callers) are used by no candidate, so no observable
-#    test behavior is being faked. Both remain node gaps for the next phase;
-#    once the node implements them, delete this patch. Set
+#    test behavior is being faked. It remains a node gap (NG-3) for the next
+#    phase; once the node implements it, delete this patch. Set
 #    BITCOIN_RS_NO_RPC_PLUMBING_SHIM=1 to disable it and reproduce the raw
-#    method-not-found failures.
+#    method-not-found failure.
 #
-# 4. test_framework.authproxy.AuthServiceProxy.__call__: Core's stop takes a
+#    syncwithvalidationinterfacequeue used to be no-op'd here with it; the
+#    node now implements it (an immediate null reply - see the registry row),
+#    so its half of this patch was deleted.
+#
+# 3. test_framework.authproxy.AuthServiceProxy.__call__: Core's stop takes a
 #    hidden numeric wait argument; bitcoin-rs's stop takes none and refuses
 #    any with the local parameter-shape error (a documented deviation in
 #    crates/rpc/src/registry.rs). The framework's stop_node() teardown sends
@@ -67,6 +46,19 @@
 #    stop. Non-zero waits (feature_shutdown.py, wait=1000) are forwarded
 #    untouched and fail honestly. Set BITCOIN_RS_NO_STOP_WAIT_SHIM=1 to
 #    disable it.
+#
+# Deleted patches (kept here as the audit trail of the measured 2026-10-30
+# baseline run, which had them active):
+#
+# - params normalization (old patch 2): the framework client serializes
+#   zero-argument calls as "params": {} and its mining plumbing calls
+#   generatetoaddress(nblocks=, address=, maxtries=) as a params object;
+#   both were rewritten CLIENT-side to positional arrays around node gap
+#   NG-1. The node now accepts the empty object for every method
+#   unconditionally and binds generatetoaddress's named form
+#   (crates/rpc/src/server.rs, crates/rpc/src/handlers/mining.rs), so the
+#   patch was deleted; raw failures reproduced with it gone pass the first
+#   probe.
 
 import importlib.abc
 import importlib.util
@@ -93,37 +85,8 @@ def _patch_wallet(wallet):
     wallet.__bitcoin_rs_patched__ = True
 
 
-# Framework-plumbing RPCs bitcoin-rs does not implement. See header note 3.
-NOOP_RPC_METHODS = frozenset({"syncwithvalidationinterfacequeue", "setmocktime"})
-
-
-def _normalize_empty_params(proxy_cls):
-    original_get_request = proxy_cls.get_request
-
-    def get_request_with_empty_params_normalized(self, *args, **argsn):
-        request = original_get_request(self, *args, **argsn)
-        params = request.get("params")
-        if isinstance(params, dict) and not params:
-            request["params"] = []
-            return request
-        # generatetoaddress only: the framework's own mining plumbing calls it
-        # with named args (test_framework._initialize_chain passes nblocks=
-        # and address=; TestNode.generate passes nblocks=/address=/maxtries=),
-        # which serializes as a params OBJECT. bitcoin-rs's handler parses
-        # params positionally only and answers -32602. Core accepts the named
-        # form. Translation is deliberately limited to this one method, whose
-        # Core-documented parameter order (nblocks, address, maxtries) is
-        # identical to the node handler's positional reads, so no silent
-        # reordering of arguments is possible. Other methods keep failing
-        # honestly on named-object params.
-        if (self._service_name == "generatetoaddress"
-                and isinstance(params, dict) and "args" not in params):
-            positional = [params.get(name) for name in ("nblocks", "address", "maxtries")
-                          if name in params]
-            request["params"] = positional
-        return request
-
-    proxy_cls.get_request = get_request_with_empty_params_normalized
+# Framework-plumbing RPCs bitcoin-rs does not implement. See header note 2.
+NOOP_RPC_METHODS = frozenset({"setmocktime"})
 
 
 def _strip_default_stop_wait(proxy_cls):
@@ -161,8 +124,6 @@ def _patch_authproxy(authproxy):
     proxy_cls = authproxy.AuthServiceProxy
     if getattr(authproxy, "__bitcoin_rs_params_patched__", False):
         return
-    if not os.environ.get("BITCOIN_RS_NO_PARAMS_SHIM"):
-        _normalize_empty_params(proxy_cls)
     if not os.environ.get("BITCOIN_RS_NO_RPC_PLUMBING_SHIM"):
         _noop_plumbing_methods(proxy_cls)
     if not os.environ.get("BITCOIN_RS_NO_STOP_WAIT_SHIM"):

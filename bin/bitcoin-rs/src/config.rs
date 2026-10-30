@@ -54,6 +54,9 @@ macro_rules! emit_cli {
             pub(crate) config: Option<PathBuf>,
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
+            /// Print the node version and license notice, then exit.
+            #[arg(long)]
+            pub(crate) version: bool,
             /// Single regular Core-framed archive file for foreground offline import.
             #[arg(long)]
             pub(crate) corpus: Option<PathBuf>,
