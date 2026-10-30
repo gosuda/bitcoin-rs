@@ -432,3 +432,16 @@ fn payload_witness_identity_is_byte_exact_not_txid_only() {
     assert_eq!(left_payload.block(), &left);
     assert_eq!(right_payload.block(), &right);
 }
+
+#[test]
+fn payload_clone_shares_the_immutable_block() {
+    let payload = crate::BlockPayload::from_local(Block {
+        header: Header::default(),
+        txs: Vec::new(),
+    });
+    let cloned = payload.clone();
+    assert!(
+        std::ptr::eq(payload.block(), cloned.block()),
+        "a handoff clone must share the one immutable block"
+    );
+}
