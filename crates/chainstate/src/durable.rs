@@ -690,6 +690,12 @@ fn replay_gap_chain(
         }
     };
     drop(transition);
+    if restored.is_none() {
+        handles
+            .durable_head
+            .attest(head, bitcoin_rs_storage::ScriptAttestation::Full)
+            .map_err(ApplyError::DurableHeadCommit)?;
+    }
     metrics::counter!("node.durable_head.recovery_gaps_replayed").increment(replayed_blocks);
     metrics::counter!("node.durable_head.recovery_gaps").increment(1);
     tracing::info!(

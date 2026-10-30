@@ -37,6 +37,19 @@ impl DurableHeadStore for FaultHead {
     fn load(&self) -> Result<Option<DurableHead>, StorageError> {
         self.inner.load()
     }
+    fn load_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_attestation(head)
+    }
+    fn attest(
+        &self,
+        head: &DurableHead,
+        level: bitcoin_rs_storage::ScriptAttestation,
+    ) -> Result<(), StorageError> {
+        self.inner.attest(head, level)
+    }
     fn commit(
         &self,
         expected: Option<&DurableHead>,

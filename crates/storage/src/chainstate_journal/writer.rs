@@ -55,6 +55,28 @@ pub fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), JournalW
     clear_full_revalidation_marker(&dir)
 }
 
+/// Require the next start to rebuild the chainstate by executing every script.
+///
+/// An existing marker is success. The marker file and its directory entry are durable on return.
+pub fn mark_full_revalidation_at(data_dir: &Path) -> Result<(), JournalWriterError> {
+    use std::io::Write as _;
+
+    let path = data_dir.join(JOURNAL_DIR_NAME);
+    std::fs::create_dir_all(&path)?;
+    let dir = crate::checkpoint::fs::open_data_dir(&path)?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    match dir.open_with(FULL_REVALIDATION_MARKER, &options) {
+        Ok(mut file) => {
+            file.write_all(b"required")?;
+            file.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::checkpoint::fs::sync_dir(&dir).map_err(JournalWriterError::from)
+}
+
 fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
     clear_full_revalidation_marker_with_sync(dir, crate::checkpoint::fs::sync_dir)
 }

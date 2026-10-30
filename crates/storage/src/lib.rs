@@ -40,7 +40,7 @@ pub type StoreGuard = std::sync::Arc<dyn core::any::Any + Send + Sync>;
 
 pub use durable_head::{
     BodyExtent, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
-    KvDurableHeadStore,
+    KvDurableHeadStore, SCRIPT_ATTESTATION_KEY, ScriptAttestation,
 };
 
 #[cfg(feature = "fjall")]

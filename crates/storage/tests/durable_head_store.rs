@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, KvDurableHeadStore, KvStore, PersistFault,
-    StorageError,
+    ScriptAttestation, StorageError,
 };
 
 fn head(commit_id: u64, height: u32) -> DurableHead {
@@ -137,6 +137,155 @@ fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> 
     assert!(
         recovered == first || recovered == next,
         "fault {fault:?} left a torn head: {recovered:?} (commit outcome {outcome:?})"
+    );
+    Ok(())
+}
+
+fn open_store(
+    path: &std::path::Path,
+) -> Result<
+    (
+        Arc<bitcoin_rs_storage::FjallStore>,
+        KvDurableHeadStore<bitcoin_rs_storage::FjallStore>,
+    ),
+    StorageError,
+> {
+    let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(path)?);
+    Ok((backend.clone(), KvDurableHeadStore::new(backend)))
+}
+
+fn batch_of(level: ScriptAttestation) -> CommitRecords<'static> {
+    CommitRecords {
+        attestation: Some(level),
+        ..CommitRecords::default()
+    }
+}
+
+// RCV-02
+#[test]
+fn a_commit_keeps_the_weakest_attestation_of_the_chain_so_far() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(store.load_attestation(&first)?, ScriptAttestation::Full);
+
+    let second = head(2, 2);
+    store.commit(
+        Some(&first),
+        &second,
+        &batch_of(ScriptAttestation::AssumeValid),
+    )?;
+    assert_eq!(
+        store.load_attestation(&second)?,
+        ScriptAttestation::AssumeValid
+    );
+
+    let third = head(3, 3);
+    store.commit(Some(&second), &third, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(
+        store.load_attestation(&third)?,
+        ScriptAttestation::AssumeValid,
+        "executing scripts for a later block never repairs an earlier skipped one"
+    );
+
+    let fourth = head(4, 4);
+    store.commit(Some(&third), &fourth, &CommitRecords::default())?;
+    assert_eq!(
+        store.load_attestation(&fourth)?,
+        ScriptAttestation::AssumeValid,
+        "a replay that attests nothing carries the previous value to the new head"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn a_head_committed_before_attestation_existed_reads_unattested_and_still_commits()
+-> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let legacy = head(7, 7);
+    let mut batch = backend.new_batch();
+    batch.put(
+        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+        bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY,
+        &legacy.encode(),
+    );
+    backend.write_durable(batch)?;
+    assert_eq!(store.load()?, Some(legacy));
+    assert_eq!(
+        store.load_attestation(&legacy)?,
+        ScriptAttestation::Unattested
+    );
+
+    let next = head(8, 8);
+    store.commit(Some(&legacy), &next, &batch_of(ScriptAttestation::Full))?;
+    assert_eq!(
+        store.load_attestation(&next)?,
+        ScriptAttestation::Unattested,
+        "a weaker or unknown history is never upgraded by a stronger batch"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn an_attestation_row_bound_to_another_head_reads_unattested() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    let other = head(2, 2);
+    assert_eq!(
+        store.load_attestation(&other)?,
+        ScriptAttestation::Unattested,
+        "the row names commit 1, so a different head cannot inherit it"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn a_corrupt_attestation_row_fails_closed() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::Full))?;
+    for corrupt in [&[0_u8; 3][..], &[1, 0, 0, 0, 0, 0, 0, 0, 9][..]] {
+        let mut batch = backend.new_batch();
+        batch.put(
+            bitcoin_rs_storage::ColumnFamily::UtxoMeta,
+            bitcoin_rs_storage::SCRIPT_ATTESTATION_KEY,
+            corrupt,
+        );
+        backend.write_durable(batch)?;
+        assert!(
+            matches!(
+                store.load_attestation(&first),
+                Err(StorageError::IncompatibleData(_))
+            ),
+            "{corrupt:?} must be refused, never read as a weaker or stronger level"
+        );
+    }
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn attest_raises_only_the_current_head() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (_backend, store) = open_store(temp.path())?;
+    let first = head(1, 1);
+    store.commit(None, &first, &batch_of(ScriptAttestation::AssumeValid))?;
+    store.attest(&first, ScriptAttestation::Full)?;
+    assert_eq!(store.load_attestation(&first)?, ScriptAttestation::Full);
+    let moved = head(2, 2);
+    store.commit(Some(&first), &moved, &CommitRecords::default())?;
+    assert!(
+        store.attest(&first, ScriptAttestation::Full).is_err(),
+        "a head that is no longer current cannot be attested"
     );
     Ok(())
 }

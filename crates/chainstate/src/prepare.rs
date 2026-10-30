@@ -242,6 +242,12 @@ fn run_non_script_checks_only(
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation
 )]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScriptsRan {
+    Executed,
+    Skipped,
+}
+
 pub(super) fn verify_block_transactions(
     handles: &Chainstate,
     view: &mut bitcoin_rs_consensus::BlockView<'_>,
@@ -251,17 +257,17 @@ pub(super) fn verify_block_transactions(
     provenance: BlockProvenance,
     script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
     script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
-) -> core::result::Result<(), ApplyError> {
+) -> core::result::Result<ScriptsRan, ApplyError> {
     debug_assert_eq!(view.txs().len(), view.txids().len());
     if tx_plan.only_coinbase {
         for tx in view.txs() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
         }
-        return Ok(());
+        return Ok(ScriptsRan::Executed);
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
-        return run_non_script_checks_only(
+        run_non_script_checks_only(
             view.txs(),
             tx_plan,
             resolved,
@@ -269,7 +275,8 @@ pub(super) fn verify_block_transactions(
             context.height,
             context.locktime_cutoff,
             context.flags,
-        );
+        )?;
+        return Ok(ScriptsRan::Skipped);
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
@@ -298,5 +305,5 @@ pub(super) fn verify_block_transactions(
         "script_verify: profile"
     );
     script_input_result?;
-    Ok(())
+    Ok(ScriptsRan::Executed)
 }

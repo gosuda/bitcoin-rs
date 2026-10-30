@@ -54,6 +54,8 @@ For one block, or a bounded fully verified prefix during IBD:
 4. Apply one atomic storage batch containing the durable head row, undo rows, body locator records, and block-file maximum-height rows. Wait for durable completion. A successful commit on this nonempty batch makes prior deferred body-index writes on the same store durable with the head.
 5. Publish the committed chain and coin view.
 6. Feed the committed chain update into the mempool canonical lifecycle, update the fee estimator, and reconcile projections.
+
+Script attestation: the atomic batch in step 4 also holds one `node:script-attestation` row in `UtxoMeta`. The row carries the `commit_id` of the head it describes and one level: `Unattested`, `AssumeValid` or `Full`. A commit writes the weakest of the previous level and the level of its own batch. A batch is `Full` when every block in it executed scripts and `AssumeValid` when any block skipped them. A replay above an accepted checkpoint keeps the previous level. A row that is absent, or that names another `commit_id`, reads as `Unattested`. A row with a wrong length or an unknown level is a corruption error. A `Full` start whose head is below `Full` writes the revalidation marker and takes the cold path, and a cold rebuild that reaches the stored head writes `Full`. An `AssumeValid` start never raises a level. The row does not change the head encoding, so no schema epoch moves.
 7. Publish the stable coherent generation only after mempool and projection alignment.
 8. Dispatch notifications and relay in the declared observable order outside all domain locks.
 

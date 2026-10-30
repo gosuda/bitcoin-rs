@@ -17,6 +17,62 @@ use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 
 pub const DURABLE_HEAD_KEY: &[u8] = b"node:durable-head";
 
+pub const SCRIPT_ATTESTATION_KEY: &[u8] = b"node:script-attestation";
+
+const SCRIPT_ATTESTATION_ROW_LEN: usize = 9;
+
+/// How strongly the scripts of every block up to the durable head were executed.
+///
+/// The row binds to one head by its `commit_id`, so a binary that does not know the row
+/// cannot leave a stale stronger value behind: the next commit changes the `commit_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScriptAttestation {
+    Unattested,
+    AssumeValid,
+    Full,
+}
+
+impl ScriptAttestation {
+    #[must_use]
+    pub const fn byte(self) -> u8 {
+        match self {
+            Self::Unattested => 0,
+            Self::AssumeValid => 1,
+            Self::Full => 2,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Unattested),
+            1 => Some(Self::AssumeValid),
+            2 => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    fn row(self, commit_id: u64) -> [u8; SCRIPT_ATTESTATION_ROW_LEN] {
+        let mut row = [0_u8; SCRIPT_ATTESTATION_ROW_LEN];
+        row[..8].copy_from_slice(&commit_id.to_le_bytes());
+        row[8] = self.byte();
+        row
+    }
+
+    fn from_row(row: &[u8], head: &DurableHead) -> Result<Self, StorageError> {
+        let corrupt =
+            || StorageError::IncompatibleData("script attestation row is unreadable".to_owned());
+        let row: &[u8; SCRIPT_ATTESTATION_ROW_LEN] = row.try_into().map_err(|_| corrupt())?;
+        let commit_id = u64::from_le_bytes(row[..8].try_into().map_err(|_| corrupt())?);
+        let level = Self::from_byte(row[8]).ok_or_else(corrupt)?;
+        Ok(if commit_id == head.commit_id {
+            level
+        } else {
+            Self::Unattested
+        })
+    }
+}
+
 pub const DURABLE_HEAD_FORMAT_VERSION: u8 = 4;
 
 const DURABLE_HEAD_MAGIC: [u8; 4] = *b"BRSD";
@@ -136,6 +192,9 @@ fn parse_payload(payload: &[u8]) -> Option<DurableHead> {
 pub struct CommitRecords<'a> {
     pub undo_rows: Vec<(u32, Hash256, &'a [u8])>,
     pub body_rows: Vec<(u32, Hash256, crate::block_file::BlockFilePosition)>,
+    /// Strength of the scripts this batch executed. `None` keeps the previous value, as a
+    /// replay of blocks that an earlier commit already attested does.
+    pub attestation: Option<ScriptAttestation>,
 }
 
 pub trait DurableHeadStore: Send + Sync + 'static {
@@ -147,6 +206,13 @@ pub trait DurableHeadStore: Send + Sync + 'static {
         next: &DurableHead,
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError>;
+
+    /// The attestation recorded for exactly this head; `Unattested` when the row is absent
+    /// or names another head.
+    fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError>;
+
+    /// Raise the attestation of the current head after its scripts were executed again.
+    fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError>;
 }
 
 pub struct KvDurableHeadStore<S: KvStore> {
@@ -161,6 +227,30 @@ impl<S: KvStore> KvDurableHeadStore<S> {
 
     fn load_bytes(&self) -> Result<Option<Vec<u8>>, StorageError> {
         self.store.get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)
+    }
+
+    fn write_attestation(
+        &self,
+        head: &DurableHead,
+        level: ScriptAttestation,
+    ) -> Result<(), StorageError> {
+        let mut batch = self.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            SCRIPT_ATTESTATION_KEY,
+            &level.row(head.commit_id),
+        );
+        let condition = WriteCondition::Equals {
+            cf: ColumnFamily::UtxoMeta,
+            key: DURABLE_HEAD_KEY,
+            expected: &head.encode(),
+        };
+        if !self.store.write_durable_if(&[condition], batch)? {
+            return Err(StorageError::InvalidOperation(
+                "durable head moved since it was read",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -177,13 +267,37 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
             .transpose()
     }
 
+    fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
+        self.store
+            .get(ColumnFamily::UtxoMeta, SCRIPT_ATTESTATION_KEY)?
+            .map_or(Ok(ScriptAttestation::Unattested), |row| {
+                ScriptAttestation::from_row(&row, head)
+            })
+    }
+
+    fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
+        self.write_attestation(head, level)
+    }
+
     fn commit(
         &self,
         expected: Option<&DurableHead>,
         next: &DurableHead,
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError> {
+        let previous = match expected {
+            Some(current) => self.load_attestation(current)?,
+            None => ScriptAttestation::Full,
+        };
+        let attestation = records
+            .attestation
+            .map_or(previous, |batch| previous.min(batch));
         let mut batch = self.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            SCRIPT_ATTESTATION_KEY,
+            &attestation.row(next.commit_id),
+        );
         for (height, hash, record) in &records.undo_rows {
             batch.put(
                 ColumnFamily::UndoData,
@@ -246,6 +360,7 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
 #[derive(Debug, Default)]
 pub struct InMemoryDurableHeadStore {
     head: parking_lot::RwLock<Option<DurableHead>>,
+    attestation: parking_lot::RwLock<Option<(u64, ScriptAttestation)>>,
 }
 
 impl InMemoryDurableHeadStore {
@@ -253,6 +368,7 @@ impl InMemoryDurableHeadStore {
     pub const fn new() -> Self {
         Self {
             head: parking_lot::RwLock::new(None),
+            attestation: parking_lot::RwLock::new(None),
         }
     }
 }
@@ -262,11 +378,28 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
         Ok(*self.head.read())
     }
 
+    fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
+        Ok(match *self.attestation.read() {
+            Some((commit_id, level)) if commit_id == head.commit_id => level,
+            _ => ScriptAttestation::Unattested,
+        })
+    }
+
+    fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
+        if self.head.read().as_ref() != Some(head) {
+            return Err(StorageError::InvalidOperation(
+                "durable head moved since it was read",
+            ));
+        }
+        *self.attestation.write() = Some((head.commit_id, level));
+        Ok(())
+    }
+
     fn commit(
         &self,
         expected: Option<&DurableHead>,
         next: &DurableHead,
-        _records: &CommitRecords<'_>,
+        records: &CommitRecords<'_>,
     ) -> Result<(), StorageError> {
         let mut head = self.head.write();
         if head.as_ref() != expected {
@@ -274,6 +407,14 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
                 "durable head moved since it was read",
             ));
         }
+        let previous = match expected {
+            Some(current) => self.load_attestation(current)?,
+            None => ScriptAttestation::Full,
+        };
+        let level = records
+            .attestation
+            .map_or(previous, |batch| previous.min(batch));
+        *self.attestation.write() = Some((next.commit_id, level));
         *head = Some(*next);
         Ok(())
     }

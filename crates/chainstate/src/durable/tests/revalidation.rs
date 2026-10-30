@@ -1,4 +1,4 @@
-//! Cold recovery must not inherit script trust from Fast commits (#1730).
+//! Cold recovery must not inherit script trust from AssumeValid commits (#1730).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -6,7 +6,10 @@ use std::sync::Arc;
 use super::*;
 use crate::{
     ValidationMode,
-    recovery::{ResumeSource, prepare_initial_chainstate},
+    recovery::{
+        ResumeSource, prepare_initial_chainstate, require_full_script_attestation,
+        requires_full_revalidation,
+    },
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_primitives::{
@@ -369,12 +372,12 @@ fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> 
 }
 
 #[test]
-fn warm_accepted_base_control_preserves_trust_and_reuses_durable_receipt() -> TestResult {
+fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receipt() -> TestResult {
     let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, true)?;
     let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
-    let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::Full)?;
-    // Warm replay trusts the committed gap above an accepted checkpoint,
+    let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::AssumeValid)?;
+    // An AssumeValid start trusts the committed gap above an accepted checkpoint,
     // so scripts are not re-verified and the gap replays to the stored head.
     super::super::reconcile_at_boot(&chain)?;
     let tip = chain.applied_tip_snapshot().ok_or("missing replay tip")?;
@@ -390,5 +393,134 @@ fn warm_accepted_base_control_preserves_trust_and_reuses_durable_receipt() -> Te
             .is_some()
     );
     assert!(chain.begin_transition().is_ok());
+    Ok(())
+}
+
+fn journal_off() -> crate::ChainstateJournalConfig {
+    crate::ChainstateJournalConfig {
+        enabled: false,
+        ..crate::ChainstateJournalConfig::default()
+    }
+}
+
+// RCV-02
+#[test]
+fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_script()
+-> TestResult {
+    let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, true)?;
+    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    assert_eq!(
+        chain.durable_head.load_attestation(&head)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "the block committed with scripts skipped, so the head attests AssumeValid at best"
+    );
+
+    require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::AssumeValid,
+        Some(&head),
+        chain.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(!requires_full_revalidation(checkpoint_dir.path()));
+    let warm = prepare_initial_chainstate(
+        checkpoint_dir.path(),
+        Network::Regtest,
+        journal_off(),
+        Some(&head),
+    )?;
+    assert_eq!(
+        warm.resume_source,
+        ResumeSource::Checkpoint,
+        "an AssumeValid restart of the same datadir keeps the warm checkpoint replay"
+    );
+
+    require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::Full,
+        Some(&head),
+        chain.durable_head.as_ref(),
+        false,
+    )?;
+    assert!(requires_full_revalidation(checkpoint_dir.path()));
+    let dir = prepare_cold(
+        &mut chain,
+        Some(checkpoint_dir),
+        false,
+        ValidationMode::Full,
+    )?;
+    let error = super::super::reconcile_at_boot(&chain)
+        .err()
+        .ok_or("a Full restart must execute the skipped script")?;
+    assert!(
+        matches!(error, ApplyError::Consensus(ConsensusError::Script { .. })),
+        "{error:?}"
+    );
+    let tip = chain
+        .applied_tip_snapshot()
+        .ok_or("missing replay prefix")?;
+    assert_eq!(
+        (tip.height, tip.hash),
+        (100, invalid.header.prev_blockhash.0),
+        "nothing publishes at the invalid height"
+    );
+    assert!(chain.utxo.get(&funding).is_some());
+    drop(dir);
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestResult {
+    let (mut chain, _valid, _funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
+    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    assert_eq!(
+        chain.durable_head.load_attestation(&head)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid
+    );
+    require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::Full,
+        Some(&head),
+        chain.durable_head.as_ref(),
+        false,
+    )?;
+    let _dir = prepare_cold(
+        &mut chain,
+        Some(checkpoint_dir),
+        false,
+        ValidationMode::Full,
+    )?;
+    super::super::reconcile_at_boot(&chain)?;
+    assert_eq!(
+        chain.durable_head.load_attestation(&head)?,
+        bitcoin_rs_storage::ScriptAttestation::Full,
+        "a cold rebuild executed every script, so the next Full start needs no rebuild"
+    );
+    Ok(())
+}
+
+// RCV-02
+#[test]
+fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
+    let (chain, _block, _funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
+    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let error = require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::Full,
+        Some(&head),
+        chain.durable_head.as_ref(),
+        true,
+    )
+    .err()
+    .ok_or("a pruned datadir cannot rebuild with full validation")?;
+    assert!(
+        error.to_string().contains("--validation-mode assume-valid"),
+        "{error}"
+    );
+    assert!(!requires_full_revalidation(checkpoint_dir.path()));
     Ok(())
 }

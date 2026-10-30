@@ -36,6 +36,9 @@ pub(super) struct PendingBlockCommit {
     /// The derived journal record, emitted at flush — after the batch, so
     /// the journal never leads the durable head.
     pub journal_record: super::connect::BuiltJournalRecord,
+    /// Strength of the scripts this block executed; `None` for a replay that keeps the
+    /// previous attestation.
+    pub attestation: Option<bitcoin_rs_storage::ScriptAttestation>,
 }
 
 #[derive(Default)]
@@ -117,6 +120,11 @@ impl WindowGroup {
         let records = CommitRecords {
             undo_rows,
             body_rows,
+            attestation: self
+                .pending
+                .iter()
+                .filter_map(|pending| pending.attestation)
+                .min(),
         };
         let receipt = commit_connect_head(handles, &facts, &records)?;
         debug_assert!(

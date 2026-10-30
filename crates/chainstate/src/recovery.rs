@@ -32,6 +32,45 @@ pub fn requires_full_revalidation(data_dir: &Path) -> bool {
         .is_file()
 }
 
+/// Make a `Full` start execute every script again when the stored chain was not attested as
+/// fully executed: the datadir is marked for a cold rebuild.
+///
+/// # Errors
+///
+/// Fails when the datadir is pruned, because a cold rebuild needs every block body, and when
+/// the attestation or the marker cannot be read or written.
+pub fn require_full_script_attestation(
+    data_dir: &Path,
+    mode: crate::ValidationMode,
+    head: Option<&bitcoin_rs_storage::DurableHead>,
+    store: &dyn bitcoin_rs_storage::DurableHeadStore,
+    pruned: bool,
+) -> Result<()> {
+    use bitcoin_rs_storage::ScriptAttestation;
+
+    let (crate::ValidationMode::Full, Some(head)) = (mode, head) else {
+        return Ok(());
+    };
+    let attested = store
+        .load_attestation(head)
+        .context("read the script attestation of the durable head")?;
+    if attested >= ScriptAttestation::Full {
+        return Ok(());
+    }
+    if pruned {
+        bail!(
+            "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
+        );
+    }
+    tracing::warn!(
+        attested = ?attested,
+        "the stored chain was not fully script-validated; rebuilding it with full validation"
+    );
+    bitcoin_rs_storage::chainstate_journal::mark_full_revalidation_at(data_dir)
+        .context("mark the datadir for full revalidation")?;
+    Ok(())
+}
+
 pub struct InitialChainstate {
     pub utxo: UtxoSet,
     pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,

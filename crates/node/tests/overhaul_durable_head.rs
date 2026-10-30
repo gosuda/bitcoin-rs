@@ -116,6 +116,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             &CommitRecords {
                 undo_rows: vec![(1, hash_of(1), undo_one.as_slice())],
                 body_rows: vec![(1, hash_of(1), position_one)],
+                attestation: None,
             },
         )?;
 
@@ -142,6 +143,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             &CommitRecords {
                 undo_rows: vec![(2, hash_of(2), undo_two.as_slice())],
                 body_rows: vec![(2, hash_of(2), position_two)],
+                attestation: None,
             },
         );
         drop(family);
