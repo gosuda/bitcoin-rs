@@ -44,7 +44,7 @@ pub(crate) fn build_coinbase(
     }];
 
     if let Some(commitment) = witness_commitment {
-        witness.push(WITNESS_RESERVED_VALUE.to_vec());
+        witness.push(&WITNESS_RESERVED_VALUE);
         outputs.push(TxOut {
             value: Amount::ZERO,
             script_pubkey: witness_commitment_script(commitment).into(),
@@ -94,7 +94,7 @@ pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: boo
     }
     block.txs[0].inputs[0]
         .witness
-        .push(WITNESS_RESERVED_VALUE.to_vec());
+        .push(&WITNESS_RESERVED_VALUE);
 }
 
 fn coinbase_has_witness_commitment(tx: &Tx) -> bool {

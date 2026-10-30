@@ -763,8 +763,7 @@ fn retained_tx_bytes(txs: &[Tx]) -> usize {
                     .iter()
                     .map(|input| {
                         input.script_sig.len()
-                            + input.witness.len() * core::mem::size_of::<Vec<u8>>()
-                            + input.witness.iter().map(Vec::len).sum::<usize>()
+                            + input.witness.retained_heap_bytes()
                     })
                     .sum::<usize>()
                 + tx.outputs

@@ -2,7 +2,7 @@ use super::*;
 use crate::Message;
 use crate::peer::Peer;
 use bitcoin::p2p::Magic;
-use bitcoin_rs_primitives::{BlockPayload, Network, layout::ParsedBlock, varint};
+use bitcoin_rs_primitives::{BlockPayload, Network, varint};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -75,7 +75,7 @@ fn witness_heavy_bytes() -> Vec<u8> {
 
 #[test]
 fn maximum_wire_image_fits_alone_and_cannot_bypass_peak_admission() -> TestResult {
-    let reservation = ParsedBlock::decode_heap_bound(crate::wire::MAX_MESSAGE_PAYLOAD);
+    let reservation = bitcoin_rs_primitives::layout::decode_reservation(crate::wire::MAX_MESSAGE_PAYLOAD);
     assert!(reservation <= BLOCK_INGRESS_BYTES, "{reservation}");
     let memory = Arc::new(BlockMemory::default());
     let held = memory.reserve(BLOCK_INGRESS_BYTES, || false)?;

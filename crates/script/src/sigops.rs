@@ -1,6 +1,6 @@
 //! Native sigop counting over scripts, transactions, and blocks.
 
-use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_primitives::{Tx, Witness};
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
@@ -12,7 +12,7 @@ pub fn count_accurate(script: &[u8]) -> u32 {
     count_script(script, true)
 }
 
-pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
+pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
     if is_p2wpkh(script) {
         return 1;
     }
@@ -142,12 +142,12 @@ mod tests {
             );
 
             let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
-            assert_eq!(count_segwit(&p2wsh, &[script]), accurate, "p2wsh: {name}");
+            assert_eq!(count_segwit(&p2wsh, &Witness::from_stack(vec![script])), accurate, "p2wsh: {name}");
         }
 
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
-        assert_eq!(count_segwit(&p2wpkh, &[]), 1);
-        assert_eq!(count_segwit(&[opcode::OP_DUP], &[]), 0);
+        assert_eq!(count_segwit(&p2wpkh, &Witness::new()), 1);
+        assert_eq!(count_segwit(&[opcode::OP_DUP], &Witness::new()), 0);
     }
 
     #[test]

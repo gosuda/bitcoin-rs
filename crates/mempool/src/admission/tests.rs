@@ -511,9 +511,9 @@ fn peer_policy_refusal_gate_counts_witness_spare_capacity() {
     let packed =
         nonstandard_with_heap_usage(coin, 3, crate::gateway::EXTRA_TXN_MAX_MEMORY_BYTES - 100);
     let mut roomy_outer = packed.clone();
-    roomy_outer.inputs[0].witness = Witness::from_stack(Vec::with_capacity(8));
+    roomy_outer.inputs[0].witness = Witness::with_capacity(32, 0);
     let mut roomy_item = packed.clone();
-    roomy_item.inputs[0].witness = Witness::from_stack(vec![Vec::with_capacity(128)]);
+    roomy_item.inputs[0].witness = Witness::with_capacity(1, 128);
     for roomy in [&roomy_outer, &roomy_item] {
         assert!(crate::pool::transaction_heap_usage(&packed) < limit);
         assert!(

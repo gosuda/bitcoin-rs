@@ -2246,22 +2246,8 @@ pub(crate) fn transaction_heap_usage(tx: &Tx) -> u64 {
     for input in &tx.inputs {
         total =
             total.saturating_add(u64::try_from(input.script_sig.capacity()).unwrap_or(u64::MAX));
-        total = total.saturating_add(
-            u64::try_from(
-                input
-                    .witness
-                    .capacity()
-                    .saturating_mul(size_of::<Vec<u8>>())
-                    .saturating_add(
-                        input
-                            .witness
-                            .iter()
-                            .map(std::vec::Vec::capacity)
-                            .sum::<usize>(),
-                    ),
-            )
-            .unwrap_or(u64::MAX),
-        );
+        total = total
+            .saturating_add(u64::try_from(input.witness.retained_heap_bytes()).unwrap_or(u64::MAX));
     }
     for output in &tx.outputs {
         total = total

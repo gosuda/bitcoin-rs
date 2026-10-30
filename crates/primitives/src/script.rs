@@ -1,6 +1,6 @@
 //! Native script and witness byte stacks.
 
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, Index};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Script(Vec<u8>);
@@ -55,78 +55,167 @@ impl PartialEq<Vec<u8>> for Script {
     }
 }
 
-/// A BIP144 witness stack.
+/// A BIP144 witness stack stored as one flat byte buffer.
+///
+/// `ends[i]` is the exclusive end offset of item `i` inside `bytes`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Witness(Vec<Vec<u8>>);
+pub struct Witness {
+    bytes: Vec<u8>,
+    ends: Vec<u32>,
+}
 
 impl Witness {
     #[must_use]
     pub const fn new() -> Self {
-        Self(Vec::new())
+        Self {
+            bytes: Vec::new(),
+            ends: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_capacity(items: usize, bytes: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(bytes),
+            ends: Vec::with_capacity(items),
+        }
     }
 
     #[must_use]
     pub fn from_stack(stack: Vec<Vec<u8>>) -> Self {
-        Self(stack)
+        let total = stack.iter().map(Vec::len).sum();
+        let mut witness = Self::with_capacity(stack.len(), total);
+        for item in &stack {
+            witness.push(item);
+        }
+        witness
+    }
+
+    pub fn push(&mut self, item: &[u8]) {
+        self.bytes.extend_from_slice(item);
+        let end = u32::try_from(self.bytes.len())
+            .expect("a witness stays below the 4_000_000 byte consensus block maximum");
+        self.ends.push(end);
+    }
+
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.ends.clear();
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.ends.is_empty()
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.ends.len()
     }
 
-    /// Returns the heap bytes allocated for this witness stack, including
-    /// the outer stack allocation and all out-of-line item buffers with spare capacity.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        let end = usize::try_from(*self.ends.get(index)?).ok()?;
+        let start = match index.checked_sub(1) {
+            None => 0,
+            Some(previous) => usize::try_from(self.ends[previous]).ok()?,
+        };
+        self.bytes.get(start..end)
+    }
+
+    #[must_use]
+    pub fn first(&self) -> Option<&[u8]> {
+        self.get(0)
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&[u8]> {
+        self.get(self.len().checked_sub(1)?)
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> WitnessItems<'_> {
+        WitnessItems {
+            witness: self,
+            front: 0,
+            back: self.len(),
+        }
+    }
+
+    /// Returns the heap bytes allocated for this witness stack: the flat
+    /// item buffer and the item end offsets, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
-        let mut total = self
-            .0
+        self.bytes
             .capacity()
-            .saturating_mul(core::mem::size_of::<Vec<u8>>());
-        for item in &self.0 {
-            total = total.saturating_add(item.capacity());
-        }
-        total
+            .saturating_add(self.ends.capacity().saturating_mul(core::mem::size_of::<u32>()))
     }
 }
 
-impl Deref for Witness {
-    type Target = Vec<Vec<u8>>;
+impl Index<usize> for Witness {
+    type Output = [u8];
 
-    fn deref(&self) -> &Vec<Vec<u8>> {
-        &self.0
-    }
-}
-
-impl DerefMut for Witness {
-    fn deref_mut(&mut self) -> &mut Vec<Vec<u8>> {
-        &mut self.0
+    fn index(&self, index: usize) -> &[u8] {
+        self.get(index)
+            .unwrap_or_else(|| panic!("witness item {index} out of range for {} items", self.len()))
     }
 }
 
 impl From<Vec<Vec<u8>>> for Witness {
     fn from(stack: Vec<Vec<u8>>) -> Self {
-        Self(stack)
+        Self::from_stack(stack)
     }
 }
 
 impl PartialEq<Vec<Vec<u8>>> for Witness {
     fn eq(&self, other: &Vec<Vec<u8>>) -> bool {
-        &self.0 == other
+        self.len() == other.len() && self.iter().zip(other).all(|(item, rhs)| item == rhs.as_slice())
     }
 }
 
-impl<'a> IntoIterator for &'a Witness {
-    type Item = &'a Vec<u8>;
-    type IntoIter = std::slice::Iter<'a, Vec<u8>>;
+#[derive(Clone, Debug)]
+pub struct WitnessItems<'a> {
+    witness: &'a Witness,
+    front: usize,
+    back: usize,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+impl<'a> Iterator for WitnessItems<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.front == self.back {
+            return None;
+        }
+        let item = self.witness.get(self.front);
+        self.front += 1;
+        item
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.back - self.front;
+        (remaining, Some(remaining))
+    }
+}
+
+impl DoubleEndedIterator for WitnessItems<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.front == self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.witness.get(self.back)
+    }
+}
+
+impl ExactSizeIterator for WitnessItems<'_> {}
+
+impl<'a> IntoIterator for &'a Witness {
+    type Item = &'a [u8];
+    type IntoIter = WitnessItems<'a>;
+
+    fn into_iter(self) -> WitnessItems<'a> {
+        self.iter()
     }
 }
 
@@ -145,26 +234,75 @@ mod tests {
     }
 
     #[test]
-    fn witness_retained_heap_bytes_tracks_outer_and_item_capacities() {
+    fn witness_retained_heap_bytes_tracks_buffer_and_offset_capacities() {
         assert_eq!(Witness::new().retained_heap_bytes(), 0);
 
-        let empty_with_capacity = Witness::from_stack(Vec::with_capacity(7));
-        assert_eq!(
-            empty_with_capacity.retained_heap_bytes(),
-            7 * core::mem::size_of::<Vec<u8>>()
-        );
+        let reserved = Witness::with_capacity(7, 100);
+        assert_eq!(reserved.retained_heap_bytes(), 100 + 7 * 4);
 
-        let mut item1 = Vec::with_capacity(64);
-        item1.extend_from_slice(&[0x01; 32]);
-        let mut item2 = Vec::with_capacity(120);
-        item2.extend_from_slice(&[0x02; 64]);
+        let mut witness = Witness::with_capacity(4, 200);
+        witness.push(&[0x01; 32]);
+        witness.push(&[0x02; 64]);
+        assert_eq!(witness.retained_heap_bytes(), 200 + 4 * 4);
+    }
 
-        let mut stack = Vec::with_capacity(4);
-        stack.push(item1);
-        stack.push(item2);
-        let witness = Witness::from_stack(stack);
+    mod roundtrip {
+        use bitcoin::consensus::serialize;
+        use proptest::collection::vec;
+        use proptest::prelude::*;
 
-        let expected = 4 * core::mem::size_of::<Vec<u8>>() + 64 + 120;
-        assert_eq!(witness.retained_heap_bytes(), expected);
+        use crate::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
+        use crate::consensus_bytes;
+
+        fn bitcoin_tx_with(stack: &[Vec<u8>]) -> bitcoin::Transaction {
+            bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint {
+                        txid: bitcoin::hashes::Hash::all_zeros(),
+                        vout: 0,
+                    },
+                    script_sig: bitcoin::ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::from_slice(stack),
+                }],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::ZERO,
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn stacks_round_trip_and_encode_like_rust_bitcoin(
+                stack in vec(vec(any::<u8>(), 0..300), 0..64)
+            ) {
+                let witness = Witness::from_stack(stack.clone());
+                prop_assert_eq!(witness.len(), stack.len());
+                let items: Vec<&[u8]> = witness.iter().collect();
+                let expected: Vec<&[u8]> = stack.iter().map(Vec::as_slice).collect();
+                prop_assert_eq!(items, expected);
+                prop_assert_eq!(witness.iter().rev().count(), stack.len());
+
+                let tx = Tx {
+                    version: 2,
+                    inputs: vec![TxIn {
+                        previous_output: OutPoint::default(),
+                        script_sig: Script::new(),
+                        sequence: Sequence::MAX,
+                        witness,
+                    }],
+                    outputs: vec![TxOut {
+                        value: Amount::from_sat(0),
+                        script_pubkey: Script::new(),
+                    }],
+                    lock_time: LockTime::ZERO,
+                };
+                let oracle = serialize(&bitcoin_tx_with(&stack));
+                prop_assert_eq!(consensus_bytes(&tx), oracle);
+            }
+        }
     }
 }

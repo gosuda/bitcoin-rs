@@ -974,7 +974,7 @@ fn package_count_order_conflicts_and_weight_boundaries() -> TestResult {
         assert_eq!(oracle.weight().to_wu(), 202_000);
     }
     assert!(check_structure(&weighted).is_ok());
-    let mut padding = weighted[1].inputs[0].witness[0].clone();
+    let mut padding = weighted[1].inputs[0].witness[0].to_vec();
     padding.push(0);
     weighted[1].inputs[0].witness = Witness::from_stack(vec![padding]);
     assert_eq!(

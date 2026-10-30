@@ -1173,7 +1173,7 @@ fn script_tests_native_column() {
         let result = Interpreter.execute_with_prevouts(
             &row.script_pubkey,
             &row.script_sig,
-            &row.witness,
+            &Witness::from_stack(row.witness.clone()),
             row.flags,
             &prevouts,
             spend,
@@ -1516,11 +1516,9 @@ fn push_shape(script: &[u8]) -> Vec<Option<usize>> {
 
 fn sigcache_flip_first_signature_byte(tx: &mut Tx) {
     for input in &mut tx.inputs {
-        for item in input.witness.iter_mut() {
-            if !item.is_empty() {
-                item[0] ^= 0x01;
-                return;
-            }
+        if let Some(index) = input.witness.iter().position(|item| !item.is_empty()) {
+            input.witness = flip_first_byte(&input.witness, index);
+            return;
         }
         if input.script_sig.as_bytes().is_empty() {
             continue;
@@ -1787,4 +1785,10 @@ fn signature_cache_policy_encoding_still_rejected_after_permissive_success() {
         }),
         "high-S rejection survives a permissive cached success"
     );
+}
+
+fn flip_first_byte(witness: &Witness, item: usize) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    stack[item][0] ^= 0x01;
+    Witness::from_stack(stack)
 }

@@ -227,11 +227,11 @@ impl ConsensusDecode for TxIn {
     }
 }
 
-fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
+fn witness_stack_size(witness: &crate::Witness) -> usize {
     varint::encoded_len(compact_len(witness.len())).saturating_add(
         witness
             .iter()
-            .map(|item| script_size(item))
+            .map(script_size)
             .fold(0_usize, usize::saturating_add),
     )
 }

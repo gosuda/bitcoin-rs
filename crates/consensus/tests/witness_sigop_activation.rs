@@ -114,7 +114,8 @@ fn engines() -> Vec<ValidationEngine> {
 fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), ConsensusError> {
     for engine in engines() {
         let mut fixture = WitnessFixture::new(1);
-        fixture.tx.inputs[0].witness[0].push(opcode::OP_PUSHNUM_1);
+        fixture.tx.inputs[0].witness =
+            with_item(&fixture.tx.inputs[0].witness, 0, |item| item.push(opcode::OP_PUSHNUM_1));
         let block = fixture.block(engine)?;
         for (flags, witness_active) in [
             (VerifyFlags::NONE, false),
@@ -226,4 +227,10 @@ fn mixed_activation_units_keep_their_own_sigop_context() -> Result<(), Consensus
         }
     }
     Ok(())
+}
+
+fn with_item(witness: &Witness, index: usize, edit: impl FnOnce(&mut Vec<u8>)) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    edit(&mut stack[index]);
+    Witness::from_stack(stack)
 }

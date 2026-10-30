@@ -249,7 +249,7 @@ impl Interpreter {
         &self,
         script_pubkey: &[u8],
         script_sig: &[u8],
-        witness: &[Vec<u8>],
+        witness: &Witness,
         flags: VerifyFlags,
         prevouts: &[TxOut],
         tx: &Tx,
@@ -266,20 +266,14 @@ impl Interpreter {
                 index: input_idx,
                 inputs,
             })?;
-        let matches_tx = input.script_sig.as_slice() == script_sig
-            && input.witness.len() == witness.len()
-            && input
-                .witness
-                .iter()
-                .zip(witness.iter())
-                .all(|(stored, provided)| stored == provided);
+        let matches_tx = input.script_sig.as_slice() == script_sig && input.witness == *witness;
         let spending: Cow<'_, Tx> = if matches_tx {
             Cow::Borrowed(tx)
         } else {
             let mut grafted = tx.clone();
             let grafted_input = &mut grafted.inputs[input_idx];
             grafted_input.script_sig = Script::from_bytes(script_sig.to_vec());
-            grafted_input.witness = Witness::from_stack(witness.to_vec());
+            grafted_input.witness = witness.clone();
             Cow::Owned(grafted)
         };
 
@@ -409,7 +403,7 @@ fn invalid(code: ScriptErrCode) -> ScriptError {
 fn verify_script(
     script_sig: &[u8],
     script_pubkey: &[u8],
-    witness: &[Vec<u8>],
+    witness: &Witness,
     flags: VerifyFlags,
     checker: &mut TxSignatureChecker<'_>,
 ) -> Result<(), ScriptError> {
@@ -509,7 +503,7 @@ fn verify_script(
 }
 
 fn verify_witness_program(
-    witness: &[Vec<u8>],
+    witness: &Witness,
     version: u8,
     program: &[u8],
     flags: VerifyFlags,
@@ -528,31 +522,31 @@ fn verify_witness_program(
     }
 
     let mut witness_stack = Stack::new();
-    let (witness_script, elements) = match program.len() {
+    let (witness_script, element_count) = match program.len() {
         32 => {
-            let Some((script, rest)) = witness.split_last() else {
+            let Some(script) = witness.last() else {
                 return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
             };
             if Sha256::digest(script).as_slice() != program {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (script.clone(), rest)
+            (script.to_vec(), witness.len() - 1)
         }
         20 => {
             if witness.len() != 2 {
                 return Err(invalid(ScriptErrCode::WitnessProgramMismatch));
             }
-            (p2wpkh_script_code(program), witness)
+            (p2wpkh_script_code(program), witness.len())
         }
         _ => return Err(invalid(ScriptErrCode::WitnessProgramWrongLength)),
     };
 
-    for element in elements {
+    for element in witness.iter().take(element_count) {
         if element.len() > MAX_SCRIPT_ELEMENT_SIZE {
             return Err(invalid(ScriptErrCode::PushSize));
         }
         witness_stack
-            .push(ScriptItem::Bytes(element.as_slice().into()))
+            .push(ScriptItem::Bytes(element.into()))
             .map_err(|_| invalid(ScriptErrCode::StackSize))?;
     }
 
@@ -606,7 +600,7 @@ fn require_true_top(stack: &Stack) -> Result<(), ScriptError> {
 
 fn verify_taproot(
     program: &[u8],
-    witness: &[Vec<u8>],
+    witness: &Witness,
     flags: VerifyFlags,
     checker: &mut TxSignatureChecker<'_>,
 ) -> Result<(), ScriptError> {
@@ -614,7 +608,7 @@ fn verify_taproot(
         return Err(invalid(ScriptErrCode::WitnessProgramWitnessEmpty));
     }
 
-    let mut stack: Vec<Vec<u8>> = witness.to_vec();
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
 
     let annex_bytes = strip_annex(&mut stack);
 
@@ -647,7 +641,7 @@ fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
 fn verify_taproot_scriptpath(
     checker: &mut TxSignatureChecker<'_>,
     program: &[u8],
-    witness: &[Vec<u8>],
+    witness: &Witness,
     stack: &mut Vec<Vec<u8>>,
     annex_bytes: Option<Vec<u8>>,
     flags: VerifyFlags,
@@ -748,7 +742,7 @@ mod tests {
             interpreter.execute_with_prevouts(
                 &prevout.script_pubkey,
                 &[],
-                &[],
+                &Witness::new(),
                 VerifyFlags::MANDATORY,
                 std::slice::from_ref(&prevout),
                 &tx,
@@ -761,7 +755,7 @@ mod tests {
             interpreter.execute_with_prevouts(
                 &[0x00],
                 &[],
-                &[],
+                &Witness::new(),
                 VerifyFlags::MANDATORY,
                 std::slice::from_ref(&prevout),
                 &tx,
@@ -787,7 +781,7 @@ mod tests {
             interpreter.execute_with_prevouts(
                 &prevout.script_pubkey,
                 &[],
-                &[],
+                &Witness::new(),
                 VerifyFlags::MANDATORY,
                 &three,
                 &tx,

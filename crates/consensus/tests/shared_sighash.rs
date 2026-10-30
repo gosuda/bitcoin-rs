@@ -317,7 +317,10 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
     let mut changed_tx = tx.clone();
     for (failed_input, signature_input) in [(1, 41), (41, 1)] {
         let mut isolated = tx.clone();
-        isolated.inputs[failed_input].witness[0].clone_from(&tx.inputs[signature_input].witness[0]);
+        isolated.inputs[failed_input].witness = with_item(&isolated.inputs[failed_input].witness, 0, |item| {
+            item.clear();
+            item.extend_from_slice(&tx.inputs[signature_input].witness[0]);
+        });
         let prepared =
             PreparedTransaction::new(&isolated, &resolved_prevouts(&isolated, &prevouts))
                 .expect("ordered prevouts");
@@ -335,8 +338,11 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
                 "isolated signature substitution at {failed_input}, checking {input_index}"
             );
         }
-        changed_tx.inputs[failed_input].witness[0]
-            .clone_from(&tx.inputs[signature_input].witness[0]);
+        changed_tx.inputs[failed_input].witness =
+            with_item(&changed_tx.inputs[failed_input].witness, 0, |item| {
+                item.clear();
+                item.extend_from_slice(&tx.inputs[signature_input].witness[0]);
+            });
     }
     for engine in std::iter::once(ValidationEngine::Native).chain(if cfg!(feature = "kernel") {
         Some(ValidationEngine::Kernel)
@@ -499,7 +505,10 @@ fn native_signature_cache_preserves_verdicts() {
         Ok(())
     );
     let mut changed = tx.clone();
-    changed.inputs[1].witness[0].clone_from(&tx.inputs[41].witness[0]);
+    changed.inputs[1].witness = with_item(&changed.inputs[1].witness, 0, |item| {
+        item.clear();
+        item.extend_from_slice(&tx.inputs[41].witness[0]);
+    });
     let uncached = verify_tx_scripts(
         &changed,
         &spent,
@@ -521,4 +530,10 @@ fn native_signature_cache_preserves_verdicts() {
         ),
         uncached
     );
+}
+
+fn with_item(witness: &Witness, index: usize, edit: impl FnOnce(&mut Vec<u8>)) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    edit(&mut stack[index]);
+    Witness::from_stack(stack)
 }

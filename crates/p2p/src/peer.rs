@@ -420,7 +420,7 @@ impl<S: Read> Peer<S> {
         let Some((message, raw)) = self.read_message_admitted(|command, payload| {
             if command == "block" {
                 credit = Some(memory.reserve(
-                    bitcoin_rs_primitives::layout::ParsedBlock::decode_heap_bound(payload.len()),
+                    bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
                     cancelled,
                 )?);
             }

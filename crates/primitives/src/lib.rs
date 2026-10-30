@@ -33,7 +33,7 @@ pub use header::Header;
 pub use ids::{BlockHash, Txid, Wtxid};
 pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
 pub use outpoint::OutPoint;
-pub use script::{Script, Witness};
+pub use script::{Script, Witness, WitnessItems};
 pub use sighash::{
     AnnexError, CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, tapleaf_hash,
 };

@@ -53,7 +53,7 @@ proptest! {
             return Ok(());
         };
         let mut witness = fixture.tx.inputs[0].witness.clone();
-        witness.push(extra);
+        witness.push(&extra);
         let input = &fixture.tx.inputs[0];
         let interpreter = Interpreter;
         let ok = interpreter.execute_with_prevouts(
