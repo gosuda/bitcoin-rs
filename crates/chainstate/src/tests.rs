@@ -10,4 +10,5 @@ mod pow_valid_hook_tests;
 mod recovery_marker_order_tests;
 mod window_disposition_tests;
 mod window_invalidation_tests;
+mod window_pipeline_tests;
 mod window_tx_count_tests;
