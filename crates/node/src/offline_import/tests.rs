@@ -234,11 +234,7 @@ fn manifest_network_matches_configured_identity() {
 #[test]
 fn offline_import_pins_full_validation_mode() {
     use bitcoin_rs_chainstate::ValidationMode;
-    for inherited in [
-        ValidationMode::Full,
-        ValidationMode::AssumeValid,
-        ValidationMode::Fast,
-    ] {
+    for inherited in [ValidationMode::Full, ValidationMode::AssumeValid] {
         assert_eq!(
             resolve_offline_validation_mode(inherited),
             ValidationMode::Full

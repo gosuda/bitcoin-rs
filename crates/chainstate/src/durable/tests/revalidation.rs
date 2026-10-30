@@ -88,7 +88,7 @@ fn commit_chain(
         lock_time: LockTime::ZERO,
     };
     // An independent transaction-verification boundary confirms the fixture's
-    // script verdict before Fast deliberately skips it during block connect.
+    // script verdict before AssumeValid deliberately skips it during block connect.
     let verdict = bitcoin_rs_consensus::verify_transaction(
         &spend,
         &SpendView(funding, first.txs[0].outputs[0].clone()),
@@ -110,7 +110,13 @@ fn commit_chain(
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut spend_block)?;
     let successor = mined_child(spend_block.block_hash(), 102)?;
     chain.admit_headers(&[spend_block.header, successor.header])?;
-    chain.validation_mode = ValidationMode::Fast;
+    chain.validation_mode = ValidationMode::AssumeValid;
+    chain.assume_valid_height = 102;
+    chain.assume_valid_gate = std::sync::Arc::new(crate::AssumeValidGate::with_anchor(Some((
+        102,
+        successor.block_hash().0,
+    ))));
+    chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     chain.apply_block(&BlockPayload::from_local(spend_block.clone()))?;
     chain.apply_block(&BlockPayload::from_local(successor))?;
     Ok((chain, spend_block, funding, checkpoint_dir))
@@ -220,10 +226,8 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
     for (mode, marker) in [
         (ValidationMode::Full, true),
         (ValidationMode::AssumeValid, true),
-        (ValidationMode::Fast, true),
         (ValidationMode::Full, false),
         (ValidationMode::AssumeValid, false),
-        (ValidationMode::Fast, false),
     ] {
         let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, marker)?;
         let head = chain.durable_head.load()?;

@@ -62,7 +62,6 @@ pub mod verify;
 pub enum ValidationMode {
     Full,
     AssumeValid,
-    Fast,
 }
 
 impl ValidationMode {
@@ -71,7 +70,6 @@ impl ValidationMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "full" => Some(Self::Full),
             "assume-valid" | "assume_valid" | "assumevalid" => Some(Self::AssumeValid),
-            "fast" => Some(Self::Fast),
             _ => None,
         }
     }
@@ -322,7 +320,7 @@ pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
     /// Rebuilding without an accepted checkpoint cannot inherit script trust
-    /// from durable commits that may have used Fast/AssumeValid.
+    /// from durable commits that may have used AssumeValid.
     ColdReplay,
 }
 
@@ -1010,16 +1008,6 @@ impl Chainstate {
                     };
                     tree.node_at_height_from(header_tip.tip_id, pinned_height)
                         .is_some_and(|pin_id| tree.lookup(pinned_hash) == Some(pin_id))
-                        && tree
-                            .node_at_height_from(header_tip.tip_id, height)
-                            .is_some_and(|id| tree.lookup(hash) == Some(id))
-                }
-                ValidationMode::Fast => {
-                    let tree = self.block_tree.read();
-                    let Some(header_tip) = tree.tip() else {
-                        return false;
-                    };
-                    height < header_tip.height
                         && tree
                             .node_at_height_from(header_tip.tip_id, height)
                             .is_some_and(|id| tree.lookup(hash) == Some(id))

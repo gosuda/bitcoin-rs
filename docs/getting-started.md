@@ -318,7 +318,6 @@ See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 
 - `assume-valid` (default): Bitcoin Core `-assumevalid` semantics. Scripts are skipped through `--assume-valid-height` only while the active chain contains the pinned network anchor.
 - `full`: every script executes; `--assume-valid-height` is ignored. A cold rebuild also executes every script. A warm restart that replays above an accepted checkpoint inherits that base's script verdicts; changing the mode does not revalidate it.
-- `fast`: scripts are skipped for every block that lies on the best header chain strictly below its tip, so only the block at the tip executes scripts while catching up. Blocks on competing branches always run scripts. This trusts the most-work header chain and is independent of `--fast-sync`.
 
 Startup replay distinguishes cold revalidation from recovery after an accepted checkpoint; [the recovery contract](contracts/recovery.md#rcv-02-ordered-commit-protocol) defines that trust boundary.
 
@@ -349,7 +348,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
 - Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`), so bare `docker run` keeps today's kernel behavior while `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still override it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics — `docker run IMAGE args` runs `bitcoin-rs args` — so going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
-- `--validation-mode` / `validation_mode` (Full/AssumeValid/Fast) is the separate script-skip policy and is unchanged.
+- `--validation-mode` / `validation_mode` (Full/AssumeValid) is the separate script-skip policy and is unchanged.
 
 ## More
 
