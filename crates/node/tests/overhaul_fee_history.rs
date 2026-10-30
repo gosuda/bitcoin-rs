@@ -169,6 +169,38 @@ fn assert_matches_declared_semantics(state: &NodeState, shadow: &FeeEstimator) {
     }
 }
 
+fn seed_replayable_history(state: &NodeState) -> Result<()> {
+    // Restart rebuilds coins from block bodies, so these confirmations need
+    // real funding ancestry rather than the admission-only fund_utxo seam.
+    let first = mine_and_apply(state, applied_tip_hash(state)?, 1, 0, Vec::new())?;
+    let mut tip = first.block_hash().0;
+    for height in 2..=100 {
+        tip = mine_and_apply(state, tip, height, 0, Vec::new())?
+            .block_hash()
+            .0;
+    }
+    let mut funding = spending_tx(first.txs[0].txid(), 0, u32::MAX);
+    funding.outputs = vec![
+        TxOut {
+            value: Amount::from_sat(PARENT_VALUE_SATS),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        };
+        2
+    ];
+    let parent = funding.txid();
+    let funded = mine_and_apply(state, tip, 101, 0, vec![funding])?;
+    let txs = [0, 1].map(|vout| {
+        let mut tx = spending_tx(parent, HIGH_FEE_SATS, u32::MAX);
+        tx.inputs[0].previous_output = OutPoint::new(parent, vout);
+        tx
+    });
+    for tx in &txs {
+        admit(state, tx.clone())?;
+    }
+    mine_and_apply(state, funded.block_hash().0, 102, 0, txs.to_vec())?;
+    Ok(())
+}
+
 fn mirror_admitted(shadow: &mut FeeEstimator, state: &NodeState, txid: Txid) {
     let pool = state.mempool();
     let guard = pool.read();
@@ -466,19 +498,8 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
 
     let state = NodeState::open(config.clone(), None)?;
     apply_genesis(&state)?;
+    seed_replayable_history(&state)?;
     let pool = state.mempool();
-    for marker in [0x51_u8, 0x52] {
-        fund_utxo(&state, parent_txid(marker), PARENT_VALUE_SATS)?;
-    }
-    let txs = [
-        spending_tx(parent_txid(0x51), HIGH_FEE_SATS, 0xffff_ffff),
-        spending_tx(parent_txid(0x52), HIGH_FEE_SATS, 0xffff_ffff),
-    ];
-    for tx in &txs {
-        admit(&state, tx.clone())?;
-    }
-    let tip = applied_tip_hash(&state)?;
-    mine_and_apply(&state, tip, 1, 0, txs.to_vec())?;
 
     let estimate_before = pool
         .read()
@@ -520,19 +541,8 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
 
     let state = NodeState::open(config.clone(), None)?;
     apply_genesis(&state)?;
+    seed_replayable_history(&state)?;
     let pool = state.mempool();
-    for marker in [0x61_u8, 0x62] {
-        fund_utxo(&state, parent_txid(marker), PARENT_VALUE_SATS)?;
-    }
-    let txs = [
-        spending_tx(parent_txid(0x61), HIGH_FEE_SATS, 0xffff_ffff),
-        spending_tx(parent_txid(0x62), HIGH_FEE_SATS, 0xffff_ffff),
-    ];
-    for tx in &txs {
-        admit(&state, tx.clone())?;
-    }
-    let tip = applied_tip_hash(&state)?;
-    mine_and_apply(&state, tip, 1, 0, txs.to_vec())?;
     assert!(pool.read().estimate_fee_rate(1).is_some());
     drop(state);
 
