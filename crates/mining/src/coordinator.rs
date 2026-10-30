@@ -1364,9 +1364,9 @@ pub fn snapshot_for_selection(
         GenerateSelection::Mempool => Ok(full),
         GenerateSelection::Ordered(items) => {
             let flags = if segwit_active {
-                VerifyFlags::WITNESS
+                VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
             } else {
-                VerifyFlags::NONE
+                VerifyFlags::P2SH
             };
             let prevouts: HashMap<_, _> =
                 prevouts.iter().map(|(key, value)| (*key, value)).collect();

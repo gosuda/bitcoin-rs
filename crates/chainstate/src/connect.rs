@@ -259,6 +259,18 @@ pub(super) fn apply_block_admitted<'b>(
     );
     script_verify_result?;
 
+    // Sigop cost is a block budget, including coinbase and contextual
+    // P2SH/witness costs. A script proof or assume-valid skips execution,
+    // never this check, which precedes UTXO mutation and applied-tip publication.
+    check_block_sigops(
+        block,
+        &tx_plan,
+        view.txids(),
+        Arc::clone(&resolved),
+        height,
+        verify_flags,
+    )?;
+
     let coinbase_maturity_started =
         tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let coinbase_maturity_result =
@@ -572,6 +584,43 @@ fn emit_block_connected(
             i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX),
         )
     });
+}
+
+fn check_block_sigops(
+    block: &Block,
+    tx_plan: &BlockTxPlan,
+    txids: &[Txid],
+    resolved: Arc<ResolvedUtxoView>,
+    height: u32,
+    flags: bitcoin_rs_script::VerifyFlags,
+) -> Result<(), ApplyError> {
+    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, 0);
+    let mut cost = 0_u32;
+    for (index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+        let prevouts: Vec<_> = tx
+            .inputs
+            .iter()
+            .filter_map(|input| {
+                view.lookup(&input.previous_output)
+                    .map(|output| (input.previous_output, output))
+            })
+            .collect();
+        cost = cost.saturating_add(bitcoin_rs_consensus::transaction_sigop_cost(
+            tx, &prevouts, flags,
+        ));
+        if cost > bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST {
+            return Err(bitcoin_rs_consensus::ConsensusError::SigopsLimit {
+                cost,
+                max: bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST,
+            }
+            .into());
+        }
+        if tx_plan.needs_local_utxo_overlay {
+            view.spend_inputs(tx);
+            view.add_outputs(index, *txid, tx.outputs.len())?;
+        }
+    }
+    Ok(())
 }
 
 fn check_coinbase_maturity(
