@@ -1431,3 +1431,25 @@ fn generatetoaddress_binds_named_params_like_core() {
     assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
     assert_eq!(error.to_string(), "Unknown named parameter dummy");
 }
+
+/// Core takes `submitheader` with named `hexdata` (`RPCHelpMan` arg name,
+/// `src/rpc/mining.cpp`); the named object binds to the same positional
+/// array the handler parses.
+#[test]
+fn submitheader_binds_the_named_hexdata_argument() {
+    let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+    let ctx = ctx_with_control(control);
+    let header = consensus_bytes(&sample_block().header).to_lower_hex_string();
+
+    let named = submitheader(&ctx, &json!({ "hexdata": header.as_str() }))
+        .unwrap_or_else(|err| panic!("named submitheader failed: {err}"));
+    let positional = submitheader(&ctx, &json!([header.as_str()]))
+        .unwrap_or_else(|err| panic!("positional submitheader failed: {err}"));
+    assert_eq!(named, positional);
+
+    // Unknown names keep Core's -8 "Unknown named parameter".
+    assert!(matches!(
+        submitheader(&ctx, &json!({"hex": header.as_str()})),
+        Err(RpcError::InvalidParameter(_))
+    ));
+}

@@ -122,7 +122,8 @@ check("derived conf passed", f"--bitcoin-conf={datadir}/bitcoin-rs-derived.conf"
 check("p2p bind from framework -bind", "--p2p-listen=0.0.0.0:11000" in argv, argv)
 check("rpc bind from conf rpcport", "--rpc-bind=127.0.0.1:16000" in argv, argv)
 check("onion bind dropped", not any("21000" in a for a in argv), argv)
-check("no raw -flags survive", not any(a.startswith("-d") or a.startswith("-u") for a in argv), argv)
+check("no raw -flags survive", not any(a.startswith("-d") for a in argv), argv)
+check("uacomment translated", "--uacomment=testnode0" in argv, argv)
 derived = (datadir / "bitcoin-rs-derived.conf").read_text()
 check("derived conf keeps dnsseed=0", "dnsseed=0" in derived, derived)
 check("derived conf has [regtest] section", "[regtest]" in derived, derived)
@@ -137,7 +138,7 @@ check("--rpc-cookie points at it", f"--rpc-cookie={cookie}" in argv, argv)
 recorded = drops(datadir)
 dropped_tokens = {d["token"] for d in recorded}
 expected_drops = {"-logtimemicros", "-debug", "-debugexclude=leveldb", "-debugexclude=rand",
-                  "-uacomment=testnode0", "-logthreadnames", "-bind=127.0.0.1:21000=onion",
+                  "-logthreadnames", "-bind=127.0.0.1:21000=onion",
                   "server=1", "connect=0", "fallbackfee=0.0002", "maxconnections=94"}
 check("dropped flags are all logged", expected_drops <= dropped_tokens,
       expected_drops - dropped_tokens)
@@ -239,7 +240,7 @@ check("wallets dir 0700 on mainnet",
 check("datadir root itself not chmodded (mainnet chain dir is \"\")",
       stat.S_IMODE(os.lstat(datadir).st_mode) == 0o755,
       oct(stat.S_IMODE(os.lstat(datadir).st_mode)))
-check("printtoconsole=0 -> warn console", "--log-level=warn" in argv, argv)
+check("printtoconsole=0 -> silent console", "--log-level=off" in argv, argv)
 check("node data dir still the fresh subdir",
       f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
 
@@ -268,6 +269,26 @@ argv = run_wrapper(
 rpc_binds = [a for a in argv if a.startswith("--rpc-bind")]
 check("bare-IP -rpcbind gains conf rpcport, emitted once",
       rpc_binds == ["--rpc-bind=127.0.0.1:16000"], rpc_binds)
+
+print("case 13: repeated -uacomment appends; conf uacomment suppressed when CLI set it")
+datadir = fresh_datadir("node11")
+argv = run_wrapper(
+    datadir,
+    [a.format(D=datadir) for a in BASE_ARGV] + ["-uacomment=foo", "-printtoconsole=0"],
+    FRAMEWORK_CONF + "uacomment=fromconf\n",
+)
+check("uacomment occurrences append", argv.count("--uacomment=testnode0") == 1
+      and "--uacomment=foo" in argv, argv)
+check("conf uacomment suppressed when CLI set it",
+      "uacomment=fromconf" not in (datadir / "bitcoin-rs-derived.conf").read_text())
+check("suppression logged", any(d["token"] == "uacomment=fromconf" for d in drops(datadir)))
+check("argv printtoconsole=0 -> silent console", "--log-level=off" in argv, argv)
+datadir = fresh_datadir("node12")
+argv = run_wrapper(datadir, ["-datadir=" + str(datadir), "-regtest"],
+                   FRAMEWORK_CONF + "uacomment=fromconf\n")
+check("conf-only uacomment carried into derived conf",
+      "uacomment=fromconf" in (datadir / "bitcoin-rs-derived.conf").read_text())
+check("conf-only uacomment not a CLI flag", not any("uacomment" in a for a in argv), argv)
 
 print()
 if failures:

@@ -116,12 +116,15 @@ fn decode_block_header(hex: &str) -> Result<Header, RpcError> {
 }
 
 pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const SUBMIT_HEADER_ARGUMENTS: &[&str] = &["hexdata"];
+    let bound = super::bind_named_params(params, SUBMIT_HEADER_ARGUMENTS)?;
+    let params = bound.as_ref();
     let control = ctx
         .mining
         .mining_control
         .as_ref()
         .ok_or_else(|| RpcError::MethodNotFound("submitheader".to_owned()))?;
-    ensure_at_most_params(params, 1)?;
+    ensure_at_most_params(params, SUBMIT_HEADER_ARGUMENTS.len())?;
     let hex = required_str(params, 0, "header hex is required")?;
     let header = decode_block_header(hex)?;
     match control.submit_header(header) {

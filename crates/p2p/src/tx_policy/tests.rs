@@ -269,6 +269,7 @@ fn known_state_and_external_arrival_retire_requests_before_another_send() {
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
     );
     table.publish_info(
         addr,
@@ -354,6 +355,7 @@ pub(super) fn register_ready(table: &PeerTable, port: u16, lease: &crate::PeerLe
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
     );
     table.publish_info(
         addr,

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
+use bitcoin_rs_primitives::unix_time_secs;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::context::Context;
@@ -133,7 +133,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     }
     typed_to_sonic(&v31::GetNetworkInfo {
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
-        subversion: USER_AGENT.to_owned(),
+        subversion: ctx.network.user_agent.clone(),
         protocol_version: usize::try_from(bitcoin_rs_p2p::wire::PROTOCOL_VERSION)
             .unwrap_or(usize::MAX),
         local_services: format!("{local_services:016x}"),
@@ -455,6 +455,9 @@ pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const SET_NETWORK_ACTIVE_ARGUMENTS: &[&str] = &["state"];
+    let bound = super::bind_named_params(params, SET_NETWORK_ACTIVE_ARGUMENTS)?;
+    let params = bound.as_ref();
     let array = params_array(params)?;
     let state = array
         .first()
@@ -469,6 +472,9 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
 }
 
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const ADD_NODE_ARGUMENTS: &[&str] = &["node", "command", "v2transport"];
+    let bound = super::bind_named_params(params, ADD_NODE_ARGUMENTS)?;
+    let params = bound.as_ref();
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
     if !matches!(command, "add" | "onetry" | "remove") {
@@ -724,6 +730,56 @@ mod admin_rpc_tests {
             assert_eq!(result.as_bool(), Some(active));
             assert_eq!(ctx.network.p2p.network_active(), active);
         }
+    }
+
+    /// Core accepts named params on setnetworkactive (`RPCHelpMan` "state";
+    /// `src/rpc/net.cpp`), and `feature_loadblock.py` calls exactly that form
+    /// through authproxy (`setnetworkactive(state=False)`).
+    #[test]
+    fn setnetworkactive_binds_the_named_state_argument() {
+        let ctx = Arc::new(Context::new());
+        let named = setnetworkactive(&ctx, &json!({"state": false}))
+            .unwrap_or_else(|err| panic!("named setnetworkactive failed: {err}"));
+        assert_eq!(named.as_bool(), Some(false));
+        assert!(!ctx.network.p2p.network_active());
+
+        // Unknown names keep Core's -8 "Unknown named parameter".
+        assert!(matches!(
+            setnetworkactive(&ctx, &json!({"unknown": false})),
+            Err(RpcError::InvalidParameter(_))
+        ));
+    }
+
+    /// Core accepts named params on addnode (`RPCHelpMan` "node", "command",
+    /// "v2transport"; `src/rpc/net.cpp`); the framework reaches both named
+    /// shapes: `connect_nodes(peer_advertises_v2=...)` sends all three as
+    /// kwargs and `feature_proxy.py` sends a positional pair plus `v2transport=`.
+    #[test]
+    fn addnode_binds_named_arguments_in_cores_order() {
+        let ctx = Arc::new(Context::new());
+        let named = addnode(
+            &ctx,
+            &json!({"node": "127.0.0.1:8333", "command": "remove"}),
+        )
+        .unwrap_or_else(|err| panic!("named addnode failed: {err}"));
+        let positional = addnode(&ctx, &json!(["127.0.0.1:8333", "remove"]))
+            .unwrap_or_else(|err| panic!("positional addnode failed: {err}"));
+        assert_eq!(named, positional);
+
+        let prefixed = addnode(
+            &ctx,
+            &json!({"args": ["127.0.0.1:8333"], "command": "remove"}),
+        )
+        .unwrap_or_else(|err| panic!("args-prefixed addnode failed: {err}"));
+        assert_eq!(prefixed, named);
+
+        assert!(matches!(
+            addnode(
+                &ctx,
+                &json!({"node": "127.0.0.1:8333", "command": "remove", "bogus": true})
+            ),
+            Err(RpcError::InvalidParameter(_))
+        ));
     }
 
     #[test]

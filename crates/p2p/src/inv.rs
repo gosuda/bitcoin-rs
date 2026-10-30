@@ -167,6 +167,7 @@ mod tests {
                     0,
                     crate::peer_info::PeerRole::FullRelay,
                     bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                    bitcoin_rs_primitives::USER_AGENT,
                 );
                 version.services = if witness {
                     ServiceFlags::NETWORK | ServiceFlags::WITNESS

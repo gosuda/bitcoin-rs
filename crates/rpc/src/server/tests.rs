@@ -1142,7 +1142,7 @@ fn named_object_params_are_bound_only_by_methods_with_a_name_map() {
     let handler = Handler::new(Arc::new(Context::new()));
     let refused = handle_json(
         &handler,
-        br#"{"id":1,"method":"setnetworkactive","params":{"state":false}}"#,
+        br#"{"id":1,"method":"getblockhash","params":{"blockheight":0}}"#,
     );
     let body = refused.body.expect("unbound method replies");
     assert_eq!(
@@ -1152,9 +1152,18 @@ fn named_object_params_are_bound_only_by_methods_with_a_name_map() {
         Some(-32602),
         "a method without a name map rejects the named form honestly: {body:?}"
     );
+
+    // The framework's setnetworkactive(state=False) shape (feature_loadblock)
+    // binds and executes since NG-17's closure.
+    let bound = handle_json(
+        &handler,
+        br#"{"id":1,"method":"setnetworkactive","params":{"state":false}}"#,
+    );
+    let body = bound.body.expect("bound method replies");
+    assert_eq!(body.get("result").and_then(Value::as_bool), Some(false));
     assert!(
-        handler.context().network.p2p.network_active(),
-        "a refused named call must not execute the method"
+        !handler.context().network.p2p.network_active(),
+        "the named call must execute the method"
     );
 }
 
