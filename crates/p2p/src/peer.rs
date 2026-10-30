@@ -417,7 +417,7 @@ impl<S: Read> Peer<S> {
         PeerError,
     > {
         let mut credit = None;
-        let result = self.read_message_admitted(|command, payload| {
+        let Some((message, raw)) = self.read_message_admitted(|command, payload| {
             if command == "block" {
                 credit = Some(memory.reserve(
                     bitcoin_rs_primitives::layout::ParsedBlock::decode_heap_bound(payload.len()),
@@ -425,18 +425,19 @@ impl<S: Read> Peer<S> {
                 )?);
             }
             Ok(())
-        })?;
-        Ok(result.map(|(message, raw)| {
-            if let (Message::Block(payload), Some(credit)) = (&message, credit.as_mut()) {
-                credit.retain(
-                    payload
-                        .bytes()
-                        .len()
-                        .saturating_add(payload.block().retained_heap_bytes()),
-                );
-            }
-            (message, raw, credit)
-        }))
+        })?
+        else {
+            return Ok(None);
+        };
+        if let (Message::Block(payload), Some(credit)) = (&message, credit.as_mut()) {
+            credit.retain(
+                payload
+                    .bytes()
+                    .len()
+                    .saturating_add(payload.block().retained_heap_bytes()),
+            )?;
+        }
+        Ok(Some((message, raw, credit)))
     }
 }
 

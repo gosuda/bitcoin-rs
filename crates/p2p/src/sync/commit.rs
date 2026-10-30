@@ -22,10 +22,6 @@ pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize
 }
 
 impl BlockSync {
-    fn punish_permanent_block_delivery(&self, blocker: &DrainedBlock) {
-        self.punish_permanent_delivery_source(blocker.source(), blocker.hash);
-    }
-
     pub(super) fn punish_permanent_delivery_source(
         &self,
         source: Option<crate::PeerSource>,
@@ -108,7 +104,7 @@ impl BlockSync {
         let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
         let mut failed_hash = None;
         let mut failed_permanent = false;
-        let drained: Vec<_> = drained.into_iter().collect();
+        let mut drained = drained;
         let mut chunk_start = 0_usize;
         while chunk_start < drained.len() {
             let chunk_end = chunk_start.saturating_add(
@@ -129,6 +125,7 @@ impl BlockSync {
                     let stopped = error.applied.min(chunk.len());
                     failed = failed.saturating_add(1);
                     let blocker = chunk.get(stopped);
+                    let failed_delivery = blocker.map(|block| (block.source(), block.hash));
                     if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
                     }
@@ -151,16 +148,19 @@ impl BlockSync {
                     applied = applied.saturating_add(stopped);
                     let restore_from =
                         restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
+                    // All borrowed payloads/blocker references end above.
+                    // Transfer the uncommitted tail back without duplicating
+                    // its decoded witness tree while the source still lives.
                     self.scheduler
                         .lock()
                         .stager
-                        .restore_many(drained[restore_from..].iter().cloned());
+                        .restore_many(drained.drain(restore_from..));
                     if error.disposition == WindowApplyDisposition::Permanent {
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
-                        if let Some(blocker) = blocker {
-                            self.punish_permanent_block_delivery(blocker);
+                        if let Some((source, hash)) = failed_delivery {
+                            self.punish_permanent_delivery_source(source, hash);
                         }
                     }
                     break;

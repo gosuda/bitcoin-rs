@@ -8,6 +8,54 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[test]
+fn cancellation_predicate_runs_outside_the_budget_lock_on_every_attempt() -> TestResult {
+    let memory = Arc::new(BlockMemory::default());
+    let _held = memory.reserve(BLOCK_INGRESS_BYTES, || false)?;
+    let cancelled = AtomicBool::new(false);
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    std::thread::scope(|scope| -> TestResult {
+        let waiting = scope.spawn(|| {
+            memory.reserve(1, || {
+                let _guard = memory
+                    .used
+                    .try_lock()
+                    .unwrap_or_else(|| panic!("cancellation callback holds the budget mutex"));
+                let stop = cancelled.load(Ordering::Acquire);
+                let _ = entered_tx.try_send(());
+                stop
+            })
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5))?;
+        cancelled.store(true, Ordering::Release);
+        assert!(waiting.join().map_err(|_| "waiter panicked")?.is_err());
+        Ok(())
+    })?;
+    assert_eq!(*memory.used.lock(), BLOCK_INGRESS_BYTES);
+    Ok(())
+}
+
+#[test]
+fn an_underestimated_bound_is_a_local_error_and_keeps_the_original_credit() -> TestResult {
+    let memory = Arc::new(BlockMemory::default());
+    let mut credit = memory.reserve(64, || false)?;
+    let error = credit
+        .retain(65)
+        .err()
+        .ok_or("underestimated allocation must be refused")?;
+    assert!(
+        matches!(PeerError::inbound(error), PeerError::Io(_)),
+        "local failure must not blame the peer"
+    );
+    assert_eq!(*memory.used.lock(), 64);
+    assert_eq!(credit.bytes, 64);
+    credit.retain(32)?;
+    assert_eq!(*memory.used.lock(), 32);
+    drop(credit);
+    assert_eq!(*memory.used.lock(), 0);
+    Ok(())
+}
+
 fn witness_heavy_bytes() -> Vec<u8> {
     let mut bytes = vec![0; 80];
     bytes.push(1);

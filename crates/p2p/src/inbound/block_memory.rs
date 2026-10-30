@@ -28,7 +28,6 @@ impl BlockMemory {
                 std::io::Error::other("block decode reservation exceeds ingress budget").into(),
             );
         }
-        let mut used = self.used.lock();
         loop {
             if cancelled() {
                 return Err(std::io::Error::new(
@@ -37,6 +36,7 @@ impl BlockMemory {
                 )
                 .into());
             }
+            let mut used = self.used.lock();
             if used.saturating_add(bytes) <= BLOCK_INGRESS_BYTES {
                 *used += bytes;
                 return Ok(BlockMemoryCredit {
@@ -57,14 +57,18 @@ pub(crate) struct BlockMemoryCredit {
 }
 
 impl BlockMemoryCredit {
-    pub(crate) fn retain(&mut self, bytes: usize) {
-        assert!(
-            bytes <= self.bytes,
-            "decoded block exceeded its allocation bound"
-        );
+    pub(crate) fn retain(&mut self, bytes: usize) -> Result<(), PeerError> {
+        if bytes > self.bytes {
+            // Refuse locally without weakening the accounting or blaming the
+            // peer for an implementation's underestimated allocation bound.
+            return Err(
+                std::io::Error::other("decoded block exceeded its allocation bound").into(),
+            );
+        }
         *self.owner.used.lock() -= self.bytes - bytes;
         self.bytes = bytes;
         self.owner.released.notify_all();
+        Ok(())
     }
 }
 
