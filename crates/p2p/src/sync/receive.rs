@@ -383,13 +383,14 @@ impl BlockSync {
         {
             let mut scheduler = self.scheduler.lock();
             let stager = &mut scheduler.stager;
-            for (inbound, (admission, binding_result)) in blocks
+            for (mut inbound, (admission, binding_result)) in blocks
                 .drain(..)
                 .zip(admission_plan.into_iter().zip(binding_results))
             {
                 let hash = Hash256::from(inbound.payload().block().block_hash());
                 let source = inbound.source;
                 let _ = inbound.forward_credit;
+                let _memory_credit = inbound.memory_credit.take();
                 let payload = inbound.into_payload();
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));

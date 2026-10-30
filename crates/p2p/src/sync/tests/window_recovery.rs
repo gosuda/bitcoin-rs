@@ -109,6 +109,71 @@ fn restore_split_pins_off_by_one() {
 }
 
 #[test]
+fn mutated_window_moves_the_uncommitted_tail_back_without_copying_decoded_blocks() -> TestResult {
+    let fixture = apply_cache_fixture(4, 0)?;
+    let mut mutated = fixture.blocks[1].clone();
+    mutated.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
+    stage_body(&fixture.sync, &fixture.blocks[0]);
+    stage_body(&fixture.sync, &mutated);
+
+    let payload = BlockPayload::from_local(fixture.blocks[2].clone());
+    let txs_ptr = payload.block().txs.as_ptr();
+    let script_ptr = payload.block().txs[0].inputs[0].script_sig.as_ptr();
+    let hash = payload.block().block_hash().0;
+    fixture
+        .sync
+        .scheduler
+        .lock()
+        .stager
+        .insert(hash, None, payload, None, Instant::now());
+    stage_body(&fixture.sync, &fixture.blocks[3]);
+
+    assert_eq!(fixture.sync.apply_buffered_blocks(None), (1, 1));
+    assert_eq!(
+        fixture.applied_tip.load_full().map(|tip| tip.height),
+        Some(1)
+    );
+    let hashes = [hash, fixture.blocks[3].block_hash().0];
+    let restored = fixture
+        .sync
+        .scheduler
+        .lock()
+        .stager
+        .drain_expected_prefix(&hashes);
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].payload().block().txs.as_ptr(), txs_ptr);
+    assert_eq!(
+        restored[0].payload().block().txs[0].inputs[0]
+            .script_sig
+            .as_ptr(),
+        script_ptr
+    );
+    assert_eq!(
+        restored[0].payload().bytes().as_ref(),
+        consensus_bytes(&fixture.blocks[2])
+    );
+    fixture.sync.scheduler.lock().stager.restore_many(restored);
+
+    // Replacing just the mutated parent must apply its retained successors.
+    stage_body(&fixture.sync, &fixture.blocks[1]);
+    assert_eq!(fixture.sync.apply_buffered_blocks(None), (3, 0));
+    assert_eq!(
+        fixture.applied_tip.load_full().map(|tip| tip.height),
+        Some(4)
+    );
+    assert_eq!(
+        fixture
+            .sync
+            .scheduler
+            .lock()
+            .stager
+            .retained_attributed_bytes(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers() -> TestResult {
     const PEER_COUNT: usize = 9;
     const SELECTED_PEERS: usize = super::super::MIN_PEERS_FOR_FANOUT;

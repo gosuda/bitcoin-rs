@@ -439,7 +439,7 @@ pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
-    V1Receiver::default().read_message_with(reader, expected_magic, |_, _| {})
+    V1Receiver::default().read_message_with(reader, expected_magic, |_, _| Ok(()))
 }
 
 #[derive(Debug, Default)]
@@ -472,7 +472,7 @@ impl V1Receiver {
         &mut self,
         reader: &mut R,
         expected_magic: Magic,
-        observe: impl FnOnce(&str, &[u8]),
+        observe: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<(Message, bytes::Bytes), PeerError> {
         let mut body = if let Some(body) = self.body.take() {
             body
@@ -489,7 +489,7 @@ impl V1Receiver {
             return Err(PeerError::BadChecksum);
         }
 
-        observe(&body.command, &body.payload);
+        observe(&body.command, &body.payload)?;
         let payload = bytes::Bytes::from(body.payload);
         let message = decode_payload(&body.command, &payload)?;
         Ok((message, payload))

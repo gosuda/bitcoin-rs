@@ -39,6 +39,12 @@ use std::vec::Vec;
 /// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
+/// Empty and stale-source batches must also yield to block/recovery work.
+pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
+/// Stop between whole batches, never in a download-twice response page.
+/// A final protocol-bounded batch can exceed this by at most 1,999 headers.
+pub(super) const MAX_HEADERS_PER_TICK: usize = 2 * crate::wire::MAX_HEADERS_MESSAGE_COUNT;
+
 struct PresyncOutcome {
     failure: Option<HeaderSyncError>,
     request_more: bool,
@@ -49,22 +55,47 @@ struct PresyncOutcome {
 }
 
 impl BlockSync {
+    /// Receipt ends the peer's response deadline, but admission still owns
+    /// request consumption and presync cursor advancement.
+    pub(crate) fn note_header_response_received(&self, source: PeerSource) {
+        let now = Instant::now();
+        self.peer_table.with_current(source, || {
+            let mut scheduler = self.scheduler.lock();
+            if let Some(request) = scheduler
+                .headers_sync
+                .get_mut(&source)
+                .and_then(|owned| owned.request.as_mut())
+                && request.state == HeaderRequestState::AwaitingResponse
+                && now >= request.requested_at
+                && request.is_live(now)
+            {
+                request.state = HeaderRequestState::ResponseQueued;
+            }
+        });
+    }
+
     #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
         let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
-        while let Ok(InboundHeaders {
-            headers,
-            source,
-            wire_response,
-        }) = self.inbound_headers_rx.try_recv()
-        {
+        for _ in 0..MAX_HEADER_BATCHES_PER_TICK {
+            if total_headers >= MAX_HEADERS_PER_TICK {
+                break;
+            }
+            let Ok(InboundHeaders {
+                headers,
+                source,
+                wire_response,
+            }) = self.inbound_headers_rx.try_recv()
+            else {
+                break;
+            };
+            let batch_len = headers.len();
+            total_headers = total_headers.saturating_add(batch_len);
             if source.is_some_and(|source| !self.peer_table.is_current(source)) {
                 continue;
             }
-            let batch_len = headers.len();
-            total_headers = total_headers.saturating_add(batch_len);
 
             self.consume_header_request(source, wire_response, headers.is_empty());
 
@@ -133,7 +164,7 @@ impl BlockSync {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
                         let disconnected = self.peer_table.disconnect_source(source);
-                        self.clear_headers_sync_for(source);
+                        self.scheduler.lock().clear_headers_sync_for(source);
                         if disconnected {
                             self.scheduler
                                 .lock()
@@ -339,14 +370,6 @@ impl BlockSync {
         }
     }
 
-    fn clear_headers_sync_for(&self, source: PeerSource) {
-        let mut scheduler = self.scheduler.lock();
-        scheduler.headers_sync.remove(&source);
-        if scheduler.header_request_owner == Some(source) {
-            scheduler.header_request_owner = None;
-        }
-    }
-
     fn clear_presync_for(&self, source: PeerSource) -> Option<HeadersSyncState> {
         let mut scheduler = self.scheduler.lock();
         let state = scheduler
@@ -366,8 +389,8 @@ impl BlockSync {
     pub(super) fn retire_timed_out_header_syncs(&self, now: Instant) {
         let below_floor = self.below_header_work_floor();
         let expired: Vec<_> = {
-            let scheduler = self.scheduler.lock();
-            scheduler
+            let mut scheduler = self.scheduler.lock();
+            let expired: Vec<_> = scheduler
                 .headers_sync
                 .iter()
                 .filter_map(|(source, owned)| {
@@ -377,11 +400,15 @@ impl BlockSync {
                         && now.saturating_duration_since(request.requested_at) >= request.timeout())
                     .then_some(*source)
                 })
-                .collect()
+                .collect();
+            // Receipt and timeout settle under the same request-state lock.
+            for source in &expired {
+                scheduler.clear_headers_sync_for(*source);
+            }
+            expired
         };
         for source in expired {
             self.peer_table.disconnect_source(source);
-            self.clear_headers_sync_for(source);
             tracing::debug!(peer_addr = ?source.endpoint, "block sync: header sync request timed out");
         }
     }
@@ -781,10 +808,7 @@ impl BlockSync {
                             .headers_sync
                             .get(&owner)
                             .and_then(|owned| owned.request)
-                            .is_none_or(|request| {
-                                now.saturating_duration_since(request.requested_at)
-                                    >= request.timeout()
-                            })
+                            .is_none_or(|request| !request.is_live(now))
                 });
                 if can_claim_owner {
                     scheduler.header_request_owner = Some(source);
@@ -808,7 +832,7 @@ impl BlockSync {
                     "block sync: outbound channel disconnected"
                 );
                 self.peer_table.disconnect_source(source);
-                self.clear_headers_sync_for(source);
+                self.scheduler.lock().clear_headers_sync_for(source);
                 return GetheadersOutcome::Failed;
             }
         }
@@ -839,6 +863,7 @@ impl BlockSync {
         };
         let unexpired = now.saturating_duration_since(request.requested_at) < request.timeout();
         match request.state {
+            HeaderRequestState::ResponseQueued => true,
             HeaderRequestState::AwaitingResponse
                 if below_floor || owned.presync.is_some() || unexpired =>
             {
@@ -1092,7 +1117,7 @@ impl BlockSync {
             return;
         }
         let disconnected = self.peer_table.disconnect_source(source);
-        self.clear_headers_sync_for(source);
+        self.scheduler.lock().clear_headers_sync_for(source);
         if disconnected {
             self.scheduler
                 .lock()
@@ -1114,6 +1139,15 @@ impl BlockSync {
                 .block_locator(tip.tip_id, LOCATOR_MAX_ENTRIES);
         }
         std::vec![self.chain.network().genesis_block_hash()]
+    }
+}
+
+impl SchedulerState {
+    fn clear_headers_sync_for(&mut self, source: PeerSource) {
+        self.headers_sync.remove(&source);
+        if self.header_request_owner == Some(source) {
+            self.header_request_owner = None;
+        }
     }
 }
 

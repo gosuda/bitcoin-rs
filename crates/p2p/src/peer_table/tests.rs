@@ -2,6 +2,47 @@ use super::*;
 use bitcoin_rs_primitives::PeerEndpoint;
 
 #[test]
+fn request_publication_precedes_receipt_callbacks() -> crate::test_support::TestResult {
+    use std::time::Duration;
+
+    let table = Arc::new(PeerTable::new());
+    let (tx, outbound) = crossbeam_channel::unbounded();
+    let lease = PeerLease::new(tx);
+    let source = lease.source(Some(addr(1)));
+    table.register(addr(1), lease);
+    let (publishing_tx, publishing_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+    let sender_table = Arc::clone(&table);
+    let sender = std::thread::spawn(move || {
+        sender_table
+            .send_then(source, crate::Message::Ping(1), || {
+                assert!(publishing_tx.send(()).is_ok());
+                assert!(release_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+            })
+            .is_ok()
+    });
+    publishing_rx.recv_timeout(Duration::from_secs(5))?;
+    outbound.recv_timeout(Duration::from_secs(5))?;
+    let (starting_tx, starting_rx) = crossbeam_channel::bounded(1);
+    let (receipt_tx, receipt_rx) = crossbeam_channel::bounded(1);
+    let receipt = std::thread::spawn(move || {
+        assert!(starting_tx.send(()).is_ok());
+        table.with_current(source, || assert!(receipt_tx.send(()).is_ok()))
+    });
+    starting_rx.recv_timeout(Duration::from_secs(5))?;
+    let deferred = receipt_rx.recv_timeout(Duration::from_millis(30)).is_err();
+    release_tx.send(())?;
+    assert!(sender.join().map_err(|_| "sender panicked")?);
+    assert!(receipt.join().map_err(|_| "receipt panicked")?);
+    assert!(
+        deferred,
+        "receipt must wait for the request to be published"
+    );
+    receipt_rx.recv_timeout(Duration::from_secs(5))?;
+    Ok(())
+}
+
+#[test]
 fn retiring_an_epoch_wakes_its_leases_without_cancelling_a_replacement() {
     let table = PeerTable::new();
     let old_epoch = Arc::new(AtomicBool::new(true));

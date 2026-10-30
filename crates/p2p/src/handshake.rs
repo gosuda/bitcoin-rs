@@ -180,7 +180,14 @@ fn read_handshake_message<S: Read>(
                 std::io::ErrorKind::TimedOut,
             )));
         }
-        match peer.read_message() {
+        let state = peer.state;
+        match peer.read_message_admitted(|command, _| {
+            if command == "block" {
+                crate::fsm::require_ready(state)
+            } else {
+                Ok(())
+            }
+        }) {
             Err(error) if lease.ignores_protocol_error(&error) => {
                 tracing::debug!(node_id = lease.node_id(), %error, "protected peer malformed handshake message ignored");
                 continue;

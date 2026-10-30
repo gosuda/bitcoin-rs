@@ -99,6 +99,7 @@ pub struct ConnectionShared {
     pub relay_offers: RelayOffers,
     pub(crate) overlay: Arc<crate::overlay::OverlayTransport>,
     pub(crate) shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
+    block_memory: Arc<crate::inbound::block_memory::BlockMemory>,
     pub dial_routes: crate::DialRoutes,
 }
 
@@ -159,6 +160,7 @@ impl ConnectionShared {
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
+            block_memory: Arc::default(),
             dial_routes: crate::DialRoutes::default(),
         }
     }
@@ -327,20 +329,42 @@ impl ConnectionShared {
         self.session_cancel.load()
     }
 
+    /// Retain the whole response under backpressure. Never wait while holding
+    /// the peer-table, scheduler, or chain transition lock; a cancelled
+    /// connection/session releases the wait at the next send timeout.
     fn send_headers(
         &self,
+        lease: &crate::PeerLease,
         source: crate::PeerSource,
         headers: Vec<bitcoin_rs_primitives::Header>,
         wire_response: bool,
     ) {
-        if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
+        if self.is_session_cancelled() || lease.is_cancelled() {
+            return;
+        }
+        if wire_response && let Some(sync) = &self.block_sync {
+            sync.note_header_response_received(source);
+        }
+        let mut inbound = crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
-        }) {
-            tracing::warn!(peer_addr = ?source.endpoint, %error, "p2p inbound headers channel disconnected");
-        } else {
-            wake_sync(self.wake_tx.as_ref());
+        };
+        loop {
+            if self.is_session_cancelled() || lease.is_cancelled() {
+                return;
+            }
+            match self.headers_tx.send_timeout(inbound, POLL_INTERVAL) {
+                Ok(()) => {
+                    wake_sync(self.wake_tx.as_ref());
+                    return;
+                }
+                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    tracing::warn!(peer_addr = ?source.endpoint, "p2p inbound headers channel disconnected");
+                    return;
+                }
+            }
         }
     }
 
@@ -349,6 +373,7 @@ impl ConnectionShared {
         lease: &crate::PeerLease,
         peer_addr: impl Into<crate::PeerRemote>,
         payload: bitcoin_rs_primitives::BlockPayload,
+        memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
@@ -362,8 +387,8 @@ impl ConnectionShared {
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
             return;
         };
-        if self.forward_block(payload, source, Some(credit)) {
-            self.send_headers(source, vec![header], false);
+        if self.forward_block(payload, source, Some(credit), memory_credit) {
+            self.send_headers(lease, source, vec![header], false);
         }
     }
 
@@ -372,8 +397,10 @@ impl ConnectionShared {
         payload: bitcoin_rs_primitives::BlockPayload,
         source: crate::PeerSource,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
+        memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) -> bool {
         let mut inbound = crate::InboundBlock::new(payload, Some(source), forward_credit);
+        inbound.memory_credit = memory_credit;
         loop {
             if self.is_session_cancelled() {
                 tracing::debug!(
@@ -1873,10 +1900,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
-        let (message, _raw, reply) = if let Some((message, reply)) = resumed {
-            (message, bytes::Bytes::new(), reply)
+        let (message, _raw, reply, memory_credit) = if let Some((message, reply)) = resumed {
+            (message, bytes::Bytes::new(), reply, None)
         } else {
-            let read_result = peer.read_message();
+            let read_result = peer.read_message_bounded(&shared.block_memory, || {
+                lease.is_cancelled() || shared.is_session_cancelled()
+            });
             if lease.is_cancelled() {
                 tracing::debug!(
                     peer_addr = %peer_addr,
@@ -1886,7 +1915,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             match read_result {
                 Ok(None) => continue,
-                Ok(Some((message, raw))) => {
+                Ok(Some((message, raw, memory_credit))) => {
                     keepalive.record_recv(Instant::now());
                     let Some(message) = enforce_relay_role(lease.role(), message)? else {
                         continue;
@@ -1922,7 +1951,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             continue;
                         }
                     };
-                    (message, raw, reply)
+                    (message, raw, reply, memory_credit)
                 }
                 Err(crate::wire::PeerError::Io(error))
                     if matches!(
@@ -2111,7 +2140,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 }
             }
             crate::Message::Headers(headers) => {
-                shared.send_headers(lease.source(peer_addr.endpoint()), headers, true);
+                shared.send_headers(lease, lease.source(peer_addr.endpoint()), headers, true);
             }
             crate::Message::NotFound(items) => {
                 shared.block_not_found(lease.source(peer_addr.endpoint()), &items);
@@ -2138,13 +2167,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             if let Some(sync) = &shared.block_sync {
                                 sync.stale_tips().note_heard(source, tip_hash);
                             }
-                            shared.send_headers(source, headers, false);
+                            shared.send_headers(lease, source, headers, false);
                         }
                     }
                 }
             }
             crate::Message::Block(payload) => {
-                shared.send_block(lease, peer_addr, payload);
+                shared.send_block(lease, peer_addr, payload, memory_credit);
             }
             crate::Message::Tx(tx) => forward_tx_if_relay_open(
                 shared,
@@ -2395,7 +2424,12 @@ fn process_compact_wire_message(
             hash = %header.compute_hash(),
             "p2p compact block header does not earn reconstruction"
         );
-        shared.send_headers(lease.source(peer_addr.endpoint()), vec![header], false);
+        shared.send_headers(
+            lease,
+            lease.source(peer_addr.endpoint()),
+            vec![header],
+            false,
+        );
         return;
     }
 
@@ -2421,7 +2455,7 @@ fn process_compact_wire_message(
         sync.enqueue_owned_body_fetch(source, hash, || sink.send(follow_up).is_ok());
     }
     if let Some(header) = announced_header {
-        shared.send_headers(source, vec![header], false);
+        shared.send_headers(lease, source, vec![header], false);
     }
 }
 
@@ -2441,6 +2475,7 @@ fn handle_compact_outcome(
                 lease,
                 peer_addr,
                 bitcoin_rs_primitives::BlockPayload::from_local(block),
+                None,
             );
             None
         }
@@ -3802,6 +3837,9 @@ mod v2_transport_tests;
 
 #[cfg(test)]
 mod getdata_pause_tests;
+
+#[cfg(test)]
+mod header_ingress_tests;
 
 #[cfg(test)]
 mod aggregate_budget_tests;

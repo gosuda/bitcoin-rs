@@ -21,6 +21,8 @@ pub struct SyncBudget {
     pub max_pending_bytes: usize,
     pub max_received_blocks: usize,
     pub max_received_bytes: usize,
+    /// Wire storage plus materialized block heap retained by the stager.
+    pub max_retained_bytes: usize,
     pub max_peer_inflight: usize,
     pub fanout_peer_inflight: usize,
     pub min_peers_for_fanout: usize,

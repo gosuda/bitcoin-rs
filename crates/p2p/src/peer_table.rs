@@ -1041,7 +1041,8 @@ impl PeerTable {
         message: crate::Message,
         published: impl FnOnce(),
     ) -> Result<(), OutboundRefusal> {
-        let entries = self.entries.read();
+        // A receipt callback must not observe the send before request publication.
+        let entries = self.entries.write();
         let Some(entry) = entries
             .get(&PeerRemote::from(source))
             .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
