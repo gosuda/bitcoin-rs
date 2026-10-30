@@ -205,7 +205,10 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
 }
 
 pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    ensure_at_most_params(params, 3)?;
+    const GENERATE_TO_ADDRESS_ARGUMENTS: &[&str] = &["nblocks", "address", "maxtries"];
+    let bound = super::bind_named_params(params, GENERATE_TO_ADDRESS_ARGUMENTS)?;
+    let params = bound.as_ref();
+    ensure_at_most_params(params, GENERATE_TO_ADDRESS_ARGUMENTS.len())?;
     let control = ctx
         .mining
         .mining_control

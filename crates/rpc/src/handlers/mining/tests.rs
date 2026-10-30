@@ -1387,3 +1387,47 @@ fn submitheader_maps_armed_control_failure() {
     assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
     assert_eq!(error.to_string(), "bad-prevblk");
 }
+
+/// Core accepts named params on generatetoaddress
+/// (`RPCHelpMan` "nblocks", "address", "maxtries"; `src/rpc/mining.cpp`), and
+/// the framework's mining plumbing calls exclusively in that form
+/// (TestNode.generate passes nblocks=/address=/maxtries=). The named
+/// object binds to the same positional array the handler parses.
+#[test]
+fn generatetoaddress_binds_named_params_like_core() {
+    let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+    let ctx = ctx_with_control(control.clone());
+
+    let named = generatetoaddress(&ctx, &json!({"nblocks": 2, "address": REGTEST_ADDRESS}))
+        .unwrap_or_else(|err| panic!("named generatetoaddress failed: {err}"));
+    let positional = generatetoaddress(&ctx, &json!([2, REGTEST_ADDRESS]))
+        .unwrap_or_else(|err| panic!("positional generatetoaddress failed: {err}"));
+    assert_eq!(named, positional);
+    let request = control
+        .last_generate
+        .lock()
+        .take()
+        .unwrap_or_else(|| panic!("the named call reached the mining coordinator"));
+    assert_eq!(request.count, 2);
+
+    // Core's args prefix supplies leading positionals; named values may
+    // arrive in any object order.
+    generatetoaddress(&ctx, &json!({"args": [3, REGTEST_ADDRESS]}))
+        .unwrap_or_else(|err| panic!("args-prefixed named call failed: {err}"));
+    generatetoaddress(
+        &ctx,
+        &json!({"nblocks": 1, "maxtries": 5, "address": REGTEST_ADDRESS}),
+    )
+    .unwrap_or_else(|err| panic!("out-of-order named call failed: {err}"));
+
+    // Unknown names keep Core's -8 "Unknown named parameter", never a
+    // silent ignore.
+    let error = generatetoaddress(
+        &ctx,
+        &json!({"nblocks": 1, "address": REGTEST_ADDRESS, "maxtries": 1, "dummy": 1}),
+    )
+    .err()
+    .unwrap_or_else(|| panic!("an unknown name must be refused"));
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(error.to_string(), "Unknown named parameter dummy");
+}
