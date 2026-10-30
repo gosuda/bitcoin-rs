@@ -1471,7 +1471,10 @@ impl Keepalive {
         let probe_owed = self
             .last_ping
             .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
-        if probe_owed && idle {
+        // Core initializes a peer's `m_ping_start` to the clock epoch, so the
+        // first `MaybeSendPing` pass after VERACK owes a probe without waiting
+        // for silence (v31.1 net_processing.cpp); later probes stay idle-gated.
+        if probe_owed && (self.last_ping.is_none() || idle) {
             KeepaliveAction::Ping
         } else {
             KeepaliveAction::Idle
@@ -1485,15 +1488,32 @@ mod keepalive_tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn probes_owe_one_ping_per_idle_interval() {
+    fn first_probe_is_owed_immediately() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
         assert_eq!(
             keepalive.next_action(t0),
+            KeepaliveAction::Ping,
+            "Core's m_ping_start initializes to the clock epoch, so the first pass after the handshake pings without waiting for silence"
+        );
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
+            KeepaliveAction::Idle,
+            "after the first probe a busy-enough connection sends no keepalive"
+        );
+    }
+
+    #[test]
+    fn probes_owe_one_ping_per_idle_interval() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle,
             "a busy-enough connection sends no keepalive"
         );
-        keepalive.record_send(t0);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL),
             KeepaliveAction::Ping,
@@ -3391,6 +3411,16 @@ mod address_tests {
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 
+    /// The message loop originates one keepalive ping on its first pass; the
+    /// once-per-connection assertions below strip that probe so they keep
+    /// judging only the address replies.
+    fn keepalive_probes_stripped(replies: Vec<Message>) -> Vec<Message> {
+        replies
+            .into_iter()
+            .filter(|message| !matches!(message, Message::Ping(_)))
+            .collect()
+    }
+
     #[test]
     fn local_dial_cancellation_is_not_attempt_evidence_but_tcp_failure_is() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3502,7 +3532,7 @@ mod address_tests {
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
         assert_eq!(book.len(), 1);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::Addr(addresses)] = replies.as_slice() else {
             panic!("expected exactly one addr response: {replies:?}");
         };
@@ -3550,7 +3580,7 @@ mod address_tests {
         let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::AddrV2(rows)] = replies.as_slice() else {
             panic!("expected exactly one addrv2 response: {replies:?}");
         };

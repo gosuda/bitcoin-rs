@@ -146,10 +146,12 @@ fn a_filter_request_waits_out_an_aggregate_refusal_longer_than_its_allowance() -
     assert!(!served.lease.is_cancelled());
 
     drop(hold);
-    let received = read_messages(&mut served.client, 1)?;
+    // The first-pass keepalive probe was refused with the aggregate full; it
+    // drains first, then the parked filter request is served.
+    let received = read_messages(&mut served.client, 2)?;
     assert!(
-        matches!(&received[..], [Message::CFilter(_)]),
-        "the parked request is served once there is room: {received:?}"
+        matches!(&received[..], [Message::Ping(_), Message::CFilter(_)]),
+        "the probe and the parked request are served once there is room: {received:?}"
     );
 
     served.lease.cancel();
