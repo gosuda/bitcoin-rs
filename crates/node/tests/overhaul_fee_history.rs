@@ -48,13 +48,22 @@ fn apply_genesis(state: &NodeState) -> Result<()> {
         .map_err(|error| anyhow!("genesis apply failed: {error}"))
 }
 
+fn p2sh_true_output() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
     let mut changes = BlockChanges::with_capacity(1, 0);
     changes.add(UtxoAdd::new(
         OutPoint::new(parent, 0),
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         },
         false,
         100,
@@ -76,7 +85,7 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(sequence),
             witness: Witness::new(),
         }],
@@ -124,7 +133,7 @@ fn mine_and_apply(
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     };
@@ -183,7 +192,7 @@ fn seed_replayable_history(state: &NodeState) -> Result<()> {
     funding.outputs = vec![
         TxOut {
             value: Amount::from_sat(PARENT_VALUE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         };
         2
     ];

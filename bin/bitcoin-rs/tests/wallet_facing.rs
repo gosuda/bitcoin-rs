@@ -255,7 +255,10 @@ enum Coinbase<'a> {
 impl Coinbase<'_> {
     fn script_pubkey(self) -> ScriptBuf {
         match self {
-            Self::AnyoneCanSpend => Builder::new().push_opcode(OP_PUSHNUM_1).into_script(),
+            Self::AnyoneCanSpend => Builder::new()
+                .push_opcode(OP_PUSHNUM_1)
+                .into_script()
+                .to_p2sh(),
             Self::P2wpkh(script) => script.clone(),
         }
     }
@@ -661,7 +664,7 @@ fn spend_anyone_can_spend(client: &Client, height: u32, payout: &ScriptBuf) -> T
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::new(txid, 0),
-            script_sig: ScriptBuf::new(),
+            script_sig: ScriptBuf::from_bytes(vec![0x01, 0x51]),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

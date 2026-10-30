@@ -313,6 +313,13 @@ fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut pool = Mempool::new(crate::MempoolLimits::default());
     let tx = standard_tx(2);
+    let prevouts = [(
+        tx.inputs[0].previous_output,
+        TxOut {
+            value: Amount::from_sat(200_000),
+            script_pubkey: p2pkh(&[7_u8; 20]).into(),
+        },
+    )];
     let txid = tx.txid();
 
     pool.prioritise(txid, -3_000)?;
@@ -329,6 +336,7 @@ fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
         &pool,
         &policy(),
         &tx,
+        &prevouts,
         context,
         Some(10_000),
         None,

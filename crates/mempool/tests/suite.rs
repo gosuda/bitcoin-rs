@@ -5,3 +5,4 @@ mod graph_limits;
 mod policy_contract;
 mod rbf_bip125;
 mod replacement_profile;
+mod standardness_spend;

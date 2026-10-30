@@ -17,7 +17,7 @@ use bitcoin_rs_mempool::{
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::opcode;
+use bitcoin_rs_script::{opcode, push_data};
 use parking_lot::RwLock;
 
 const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
@@ -47,6 +47,22 @@ fn op_true_script() -> Vec<u8> {
     vec![0x51]
 }
 
+fn p2sh_true_script() -> Vec<u8> {
+    [
+        vec![opcode::OP_HASH160, 0x14],
+        vec![
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ],
+        vec![opcode::OP_EQUAL],
+    ]
+    .concat()
+}
+
+fn true_redeem_script_sig() -> Vec<u8> {
+    push_data(&[opcode::OP_PUSHNUM_1])
+}
+
 fn outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid::from(Hash256::from_le_bytes(&[label; 32])), vout)
 }
@@ -63,7 +79,7 @@ fn tx_multi(inputs: &[(OutPoint, u32)], output_value: u64, script_pubkey: Vec<u8
             .iter()
             .map(|(prevout, sequence)| TxIn {
                 previous_output: *prevout,
-                script_sig: Script::new(),
+                script_sig: Script::from_bytes(true_redeem_script_sig()),
                 sequence: Sequence::from_consensus(*sequence),
                 witness: Witness::new(),
             })
@@ -540,7 +556,7 @@ fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn 
     for case in relative_lock_cases() {
         let spendable = TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: Script::from_bytes(op_true_script()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         };
         let chain = meta_chain(
             case.chain_height,
@@ -572,7 +588,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     let parent = tx_multi(
         &[(outpoint(48, 0), 0xFF_FF_FF_FF)],
         10_000,
-        op_true_script(),
+        p2sh_true_script(),
     );
     let parent_outpoint = OutPoint::new(parent.txid(), 0);
     pool.insert_entry(entry(parent, 250, 3_000))?;
@@ -589,7 +605,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     );
     let coin = TxOut {
         value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(op_true_script()),
+        script_pubkey: Script::from_bytes(p2sh_true_script()),
     };
     let chain = meta_chain(
         12,
@@ -663,10 +679,12 @@ const CAPACITY_EVICTION: MutationOutcome = MutationOutcome::Removed(RemovalReaso
 
 const SPEND_OUTPUT_SATS: u64 = 10_000;
 
-const SPEND_VSIZE: u64 = 82;
+fn spend_vsize() -> u64 {
+    tx(outpoint(1, 0), SPEND_OUTPUT_SATS, 0xFF_FF_FF_FF).vsize()
+}
 
-const fn spend_fee_at(rate: u64) -> u64 {
-    rate * SPEND_VSIZE / 1_000
+fn spend_fee_at(rate: u64) -> u64 {
+    rate * spend_vsize() / 1_000
 }
 
 fn preview_spend(
@@ -676,7 +694,7 @@ fn preview_spend(
 ) -> Result<Option<AcceptanceRejectReason>, Box<dyn Error>> {
     let coin = TxOut {
         value: Amount::from_sat(SPEND_OUTPUT_SATS + fee),
-        script_pubkey: Script::from_bytes(op_true_script()),
+        script_pubkey: Script::from_bytes(p2sh_true_script()),
     };
     let chain = meta_chain(
         12,

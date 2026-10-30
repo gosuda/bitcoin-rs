@@ -322,7 +322,7 @@ fn standard_tx(label: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(true_redeem_script_sig()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -331,6 +331,26 @@ fn standard_tx(label: u8) -> Tx {
             script_pubkey: script.into(),
         }],
     }
+}
+
+fn p2sh_true_script() -> Vec<u8> {
+    [
+        vec![bitcoin_rs_script::opcode::OP_HASH160, 0x14],
+        vec![
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ],
+        vec![bitcoin_rs_script::opcode::OP_EQUAL],
+    ]
+    .concat()
+}
+
+fn true_redeem_script_sig() -> Vec<u8> {
+    bitcoin_rs_script::push_data(&[bitcoin_rs_script::opcode::OP_PUSHNUM_1])
+}
+
+fn p2pkh_prevout_script() -> Vec<u8> {
+    [vec![0x76, 0xa9, 0x14], vec![0x2b; 20], vec![0x88, 0xac]].concat()
 }
 
 fn prevout_spend(prev: OutPoint, value: u64, script: u8) -> Tx {
@@ -367,7 +387,7 @@ fn admit_request(gateway: &MempoolGateway, tx: &Tx, origin: AdmissionOrigin) -> 
             tx.inputs[0].previous_output,
             TxOut {
                 value: Amount::from_sat(11_000),
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )],
         prevout_meta: hashbrown::HashMap::new(),
@@ -1160,7 +1180,7 @@ fn admit_transaction_rejects_a_script_invalid_input() {
     let tx = standard_tx(0x83);
 
     let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
-    request.prevouts[0].1.script_pubkey = vec![0x00].into();
+    request.prevouts[0].1.script_pubkey = Script::from_bytes(p2pkh_prevout_script());
 
     let result = gateway.admit_transaction(request);
     assert!(
@@ -1175,8 +1195,11 @@ fn admission_counts_resolved_sigops_before_verification() -> Result<(), Box<dyn 
 {
     let gateway = gateway_with(None);
     let mut tx = standard_tx(0x84);
-    let redeem_script = vec![0xae; 201];
-    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(&redeem_script));
+    let witness_script = vec![0xae; 900];
+    tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(
+        &[vec![0x00, 0x20], vec![1; 32]].concat(),
+    ));
+    tx.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
     request.prevouts[0].1.script_pubkey =
         Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
@@ -1336,6 +1359,167 @@ fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
     Ok(())
 }
 
+fn p2wpkh_prevout_script() -> Vec<u8> {
+    [vec![0x00, 0x14], vec![0x2b; 20]].concat()
+}
+
+fn multi_input_tx(input_count: u32) -> (Tx, Vec<(OutPoint, TxOut)>) {
+    let count = usize::try_from(input_count).expect("input count fits usize");
+    let mut inputs = Vec::with_capacity(count);
+    let mut prevouts = Vec::with_capacity(count);
+    for index in 0..input_count {
+        let mut bytes = [0_u8; 32];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&bytes)), 0);
+        inputs.push(TxIn {
+            previous_output: outpoint,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        });
+        prevouts.push((
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(p2wpkh_prevout_script()),
+            },
+        ));
+    }
+    let tx = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs,
+        outputs: vec![TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from_bytes(p2pkh_prevout_script()),
+        }],
+    };
+    (tx, prevouts)
+}
+
+fn multi_input_request(
+    gateway: &MempoolGateway,
+    tx: Tx,
+    prevouts: Vec<(OutPoint, TxOut)>,
+    fee: u64,
+) -> AdmissionRequest {
+    let generation = gateway
+        .stable_generation()
+        .expect("generation is even in test setup");
+    let sequence = gateway.read().sequence_number();
+    AdmissionRequest {
+        tx: Arc::new(tx),
+        context: PackageTxContext {
+            fee,
+            vsize: 1,
+            sigop_cost: 0,
+            missing_inputs: false,
+        },
+        prevouts,
+        prevout_meta: hashbrown::HashMap::new(),
+        csv_active: false,
+        next_block_script_flags: bitcoin_rs_script::VerifyFlags::STANDARD,
+        locktime_cutoff: 0,
+        max_feerate_sat_per_kvb: None,
+        time: 1,
+        height: 1,
+        origin: AdmissionOrigin::Rpc,
+        expected_generation: generation,
+        expected_sequence: sequence,
+    }
+}
+
+#[test]
+fn oversize_multi_input_tx_is_rejected_before_prevout_resolution() {
+    let gateway = gateway_with(None);
+    let (tx, prevouts) = multi_input_tx(20_000);
+    let oracle: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+            .expect("the attack frame parses as a Core transaction");
+    assert!(
+        oracle.total_size() <= 4_000_000,
+        "the attack frame stays inside the 4,000,000-byte wire limit, got {}",
+        oracle.total_size()
+    );
+    let weight = oracle.weight().to_wu();
+    assert!(
+        weight > crate::standardness::MAX_STANDARD_TX_WEIGHT,
+        "the rust-bitcoin weight oracle {weight} must exceed the Core tx-size limit"
+    );
+    let request = multi_input_request(&gateway, tx, prevouts, 1_000_000);
+    super::reset_prevout_probes();
+    let prepared = {
+        let pool = gateway.read();
+        MempoolGateway::prepare_admission(
+            &pool,
+            &request,
+            AdmissionMode::Single,
+            crate::admission::AdmissionFence::Stable,
+            gateway.engine(),
+        )
+    };
+    assert_eq!(
+        prepared.fact.reject_reason,
+        Some(crate::standardness::AcceptanceRejectReason::NonStandard(
+            crate::standardness::StandardnessError::Weight
+        )),
+        "the Core tx-size rule rejects the frame regardless of prevout resolution"
+    );
+    assert_eq!(
+        super::prevout_probes(),
+        0,
+        "an over-size frame must be rejected before any prevout index probe"
+    );
+}
+
+#[test]
+fn many_input_admission_probes_each_prevout_once() {
+    let gateway = gateway_with(None);
+    let (tx, prevouts) = multi_input_tx(2_400);
+    let oracle: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))
+            .expect("the attack frame parses as a Core transaction");
+    let weight = oracle.weight().to_wu();
+    assert!(
+        weight <= crate::standardness::MAX_STANDARD_TX_WEIGHT,
+        "the rust-bitcoin weight oracle {weight} must stay inside the Core tx-size limit"
+    );
+    let reference: std::collections::HashMap<OutPoint, TxOut> = prevouts.iter().cloned().collect();
+    let request = multi_input_request(&gateway, tx, prevouts, 1_000_000);
+    super::reset_prevout_probes();
+    let prepared = {
+        let pool = gateway.read();
+        MempoolGateway::prepare_admission(
+            &pool,
+            &request,
+            AdmissionMode::Single,
+            crate::admission::AdmissionFence::Stable,
+            gateway.engine(),
+        )
+    };
+    assert_eq!(
+        prepared.fact.reject_reason, None,
+        "the policy oracle accepts a standard spend that stays inside every relay bound"
+    );
+    assert_eq!(
+        prepared.prevouts.len(),
+        reference.len(),
+        "every input must resolve against the chain prevout index"
+    );
+    for (outpoint, output) in &prepared.prevouts {
+        assert_eq!(
+            reference.get(outpoint),
+            Some(output),
+            "the indexed lookup must return the plain HashMap result for {outpoint:?}"
+        );
+    }
+    let probes = super::prevout_probes();
+    assert!(
+        probes <= usize::try_from(2_400).expect("input count fits usize"),
+        "each input must cost at most one prevout probe, got {probes}"
+    );
+}
+
 #[test]
 fn exact_duplicate_is_success_without_second_publication() {
     let observer = Arc::new(RecordingObserver::default());
@@ -1402,7 +1586,7 @@ fn admit_transaction_publishes_ordered_removals_then_one_accept() {
             replacement.inputs[0].previous_output,
             TxOut {
                 value: Amount::from_sat(10_000),
-                script_pubkey: vec![0x51].into(),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         )],
         prevout_meta: hashbrown::HashMap::new(),
@@ -2301,7 +2485,7 @@ fn admit_transaction_invalid_script_refusal_leaves_the_floor() {
     let gateway = floor_trim_gateway_with_filler();
 
     let mut request = floor_trim_candidate(&gateway);
-    request.prevouts[0].1.script_pubkey = vec![0x00].into();
+    request.prevouts[0].1.script_pubkey = Script::from_bytes(p2pkh_prevout_script());
     let error = gateway
         .admit_transaction(request)
         .expect_err("candidate cannot survive trimming");

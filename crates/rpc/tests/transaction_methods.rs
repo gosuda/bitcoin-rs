@@ -25,13 +25,22 @@ fn is_op_return(script: &[u8]) -> bool {
     script.first() == Some(&0x6a_u8)
 }
 
+fn p2sh_true_script() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn make_tx(prevout: OutPoint, output_value: u64, script: Vec<u8>) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xFFFF_FFFE),
             witness: Witness::new(),
         }],
@@ -50,7 +59,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         outpoint,
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_script(),
         },
         false,
         1,

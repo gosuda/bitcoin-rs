@@ -261,7 +261,7 @@ pub(crate) fn fresh_child(prev: Hash256, height: u32, time: u32, txs: Vec<Tx>) -
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(super::support::REGTEST_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: super::support::p2sh_true_output(),
         }],
     };
     let mut block = Block {

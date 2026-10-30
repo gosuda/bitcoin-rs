@@ -190,6 +190,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         let mut coinbase = regtest_fixture::coinbase(height);
         if height == 1 {
             coinbase.outputs[0].value = Amount::from_sat(subsidy);
+            coinbase.outputs[0].script_pubkey = p2sh.clone();
         }
         let mut txs = vec![coinbase];
         if height == 101 {
@@ -198,7 +199,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(first_txid, 0),
-                    script_sig: Script::from_bytes(push_int(1)),
+                    script_sig: redeem_sig.clone(),
                     sequence: Sequence::MAX,
                     witness: Witness::new(),
                 }],

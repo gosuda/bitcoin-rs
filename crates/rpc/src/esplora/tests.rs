@@ -108,14 +108,23 @@ fn fixture_genesis() -> Block {
     block
 }
 
+fn p2sh_true_script() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
-    let spendable = vec![0x51];
+    let spendable = p2sh_true_script();
     let script = [vec![0x00, 0x14], vec![0x11; 20]].concat();
     let funding = transaction(
         None,
         TxOut {
             value: Amount::from_sat(input_value),
-            script_pubkey: spendable.clone().into(),
+            script_pubkey: spendable.clone(),
         },
     );
     let txid = funding.txid();
@@ -124,7 +133,7 @@ fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         OutPoint::new(txid, 0),
         TxOut {
             value: Amount::from_sat(input_value),
-            script_pubkey: spendable.into(),
+            script_pubkey: spendable,
         },
         false,
         1,
@@ -135,16 +144,15 @@ fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )
     .expect("fund test UTXO");
-    (
-        transaction(
-            Some(OutPoint::new(txid, 0)),
-            TxOut {
-                value: Amount::from_sat(input_value - 1_000),
-                script_pubkey: script.into(),
-            },
-        ),
-        funding,
-    )
+    let mut spend = transaction(
+        Some(OutPoint::new(txid, 0)),
+        TxOut {
+            value: Amount::from_sat(input_value - 1_000),
+            script_pubkey: script.into(),
+        },
+    );
+    spend.inputs[0].script_sig = p2sh_true_spend_script_sig();
+    (spend, funding)
 }
 
 struct StaticTxIndex {

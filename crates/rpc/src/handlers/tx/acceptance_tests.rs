@@ -17,13 +17,22 @@ fn fixture_outpoint(tag: u8) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[tag; 32])), 0)
 }
 
+fn p2sh_true_script() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         fixture_outpoint(tag),
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_script(),
         },
         false,
         7,
@@ -42,7 +51,7 @@ fn spending_tx(tag: u8, output_value: u64) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: fixture_outpoint(tag),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

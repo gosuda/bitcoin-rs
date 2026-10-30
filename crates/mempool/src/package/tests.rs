@@ -529,7 +529,7 @@ fn spend(inputs: &[OutPoint], outputs: &[u64], witness: bool) -> Tx {
     }
 }
 
-fn measured_package_memory(parent: &Tx, child: &Tx) -> u64 {
+fn measured_package_memory(parent: &Tx, child: &Tx) -> Result<u64, crate::MempoolError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     for tx in [parent, child] {
         pool.insert_entry(crate::MempoolEntry::new(
@@ -539,15 +539,14 @@ fn measured_package_memory(parent: &Tx, child: &Tx) -> u64 {
             0,
             1,
             0,
-        ))
-        .expect("fixture entry inserts");
+        ))?;
     }
     assert_eq!(
         pool.dynamic_memory_usage(),
         pool.recount_memory_usage(),
         "the incremental memory walk must agree with the from-scratch walk"
     );
-    pool.recount_memory_usage()
+    Ok(pool.recount_memory_usage())
 }
 
 struct Coins(Vec<(OutPoint, TxOut)>);
@@ -912,7 +911,7 @@ fn package_capacity_projection_counts_its_own_dependency_links() -> TestResult {
     gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 1_000;
     let parent = spend(&[coin(850)], &[100_000], false);
     let child = spend(&[OutPoint::new(parent.txid(), 0)], &[98_000], true);
-    let measured = measured_package_memory(&parent, &child);
+    let measured = measured_package_memory(&parent, &child)?;
     let chain = Coins(vec![(
         coin(850),
         TxOut {

@@ -50,6 +50,22 @@ fn source() -> PeerToken {
     }
 }
 
+fn p2sh_true_script() -> Vec<u8> {
+    [
+        vec![0xa9, 0x14],
+        vec![
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ],
+        vec![0x87],
+    ]
+    .concat()
+}
+
+fn true_redeem_script_sig() -> Vec<u8> {
+    bitcoin_rs_script::push_data(&[0x51])
+}
+
 fn standard_spend(outpoint: OutPoint, marker: u8) -> Tx {
     let mut script = vec![0x76, 0xa9, 0x14];
     script.extend_from_slice(&[marker; 20]);
@@ -59,7 +75,7 @@ fn standard_spend(outpoint: OutPoint, marker: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint,
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(true_redeem_script_sig()),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -74,7 +90,7 @@ fn parent_and_child() -> (Tx, Arc<Tx>) {
     let mut parent = standard_spend(OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0), 1);
     parent.outputs[0] = TxOut {
         value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(vec![0x51]),
+        script_pubkey: Script::from_bytes(p2sh_true_script()),
     };
     let child = Arc::new(standard_spend(OutPoint::new(parent.txid(), 0), 2));
     (parent, child)
@@ -220,7 +236,7 @@ fn funded_coin() -> (OutPoint, Coins) {
         coin,
         TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     (coin, chain)
@@ -471,7 +487,9 @@ fn peer_policy_refusal_gate_counts_script_spare_capacity() {
     bytes.reserve(64);
     roomy_pubkey.outputs[0].script_pubkey = Script::from_bytes(bytes);
     let mut roomy_sig = packed.clone();
-    roomy_sig.inputs[0].script_sig = Script::from_bytes(Vec::with_capacity(64));
+    let mut script_sig = roomy_sig.inputs[0].script_sig.as_bytes().to_vec();
+    script_sig.reserve(64);
+    roomy_sig.inputs[0].script_sig = Script::from_bytes(script_sig);
     for roomy in [&roomy_pubkey, &roomy_sig] {
         assert_eq!(packed.total_size(), roomy.total_size(), "one wire size");
         assert_eq!(packed.wtxid(), roomy.wtxid(), "one witness identity");
@@ -567,7 +585,7 @@ fn local_origin_policy_refusal_is_not_retained() {
 #[test]
 fn consensus_refusal_is_not_retained_for_reconstruction() {
     let gateway = gateway();
-    let (parent, valid) = parent_and_child();
+    let (parent, valid) = witness_parent_and_child();
     let chain = Coins(vec![(
         valid.inputs[0].previous_output,
         parent.outputs[0].clone(),
@@ -859,7 +877,7 @@ fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
 #[test]
 fn rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid() {
     let gateway = gateway();
-    let (parent, valid) = parent_and_child();
+    let (parent, valid) = witness_parent_and_child();
     let chain = Coins(vec![(
         valid.inputs[0].previous_output,
         parent.outputs[0].clone(),
@@ -895,6 +913,8 @@ fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
 
     let gateway = gateway();
     let (_, child) = parent_and_child();
+    let mut child = (*child).clone();
+    child.inputs[0].script_sig = Script::new();
     let witness_script = vec![0x51];
     let mut script_pubkey = vec![0x00, 0x20];
     script_pubkey.extend_from_slice(&sha256::Hash::hash(&witness_script).to_byte_array());
@@ -905,14 +925,20 @@ fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
             script_pubkey: Script::from_bytes(script_pubkey),
         },
     )]);
-    let mut valid = (*child).clone();
+    let mut valid = child.clone();
     valid.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let valid = Arc::new(valid);
     let stripped_wtxid = child.wtxid();
     assert_eq!(child.txid(), valid.txid());
     assert_ne!(stripped_wtxid, valid.wtxid());
     assert_eq!(
-        gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, 1, &chain),
+        gateway.submit_transaction(
+            Arc::new(child),
+            AdmissionOrigin::Peer(source()),
+            None,
+            1,
+            &chain
+        ),
         Err(SubmitError::Consensus)
     );
     assert!(gateway.is_rejected(Hash256::from(valid.txid())));
@@ -1382,6 +1408,7 @@ fn witness_parent_and_child() -> (Tx, Arc<Tx>) {
     let (mut parent, child) = parent_and_child();
     let mut tx = (*child).clone();
     tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+    tx.inputs[0].script_sig = Script::new();
     let mut script = vec![0x00, 0x20];
     script.extend_from_slice(&Sha256::digest([0x51]));
     parent.outputs[0].script_pubkey = Script::from_bytes(script);
@@ -1801,6 +1828,7 @@ fn p2wsh_parent_and_variants() -> (Tx, Arc<Tx>, Arc<Tx>) {
     };
     let outpoint = OutPoint::new(parent.txid(), 0);
     let mut first = standard_spend(outpoint, 2);
+    first.inputs[0].script_sig = Script::new();
     first.inputs[0].witness = Witness::from_stack(vec![vec![0x11], witness_script.clone()]);
     let first = Arc::new(first);
     let mut second = (*first).clone();
@@ -1905,7 +1933,7 @@ fn zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint() {
         outpoint,
         TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )]);
     let retried = gateway.retry_orphans(&coins, unix_time_secs());
@@ -2015,7 +2043,7 @@ fn input_structure_duplicate_rejection_is_shared_across_witnesses() {
                 outpoint,
                 TxOut {
                     value: Amount::from_sat(10_000),
-                    script_pubkey: Script::from_bytes(vec![0x51]),
+                    script_pubkey: Script::from_bytes(p2sh_true_script()),
                 },
             )]
         } else {
@@ -2098,7 +2126,7 @@ fn funded_chain(outpoint: OutPoint, value: u64) -> Coins {
         outpoint,
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )])
 }
@@ -2121,7 +2149,7 @@ fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: 
                     OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
                     TxOut {
                         value: Amount::from_sat(50_000),
-                        script_pubkey: Script::from_bytes(vec![0x51]),
+                        script_pubkey: Script::from_bytes(p2sh_true_script()),
                     },
                 )
             })
@@ -2498,14 +2526,14 @@ fn remove_for_reorg_sweeps_only_unsupported_residents() {
             valid_out,
             TxOut {
                 value: Amount::from_sat(20_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
         (
             locktime_out,
             TxOut {
                 value: Amount::from_sat(20_000),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ),
     ]);
@@ -2685,6 +2713,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 insert_stale(&gateway, stale);
                 let (fresh, _) = independent_spend(71);
                 let chain = funded_chain(fresh.inputs[0].previous_output, 9_000 + fee);
+                let fresh_vsize = u32::try_from(fresh.vsize()).unwrap_or(u32::MAX);
                 let fresh_id = fresh.txid();
                 let now = unix_time_secs();
                 if expire_first {
@@ -2726,7 +2755,7 @@ fn expiry_capacity_ordering_under_pressure() {
                     pool.min_fee_sat_per_kvb(now)
                 );
                 assert!(result.is_ok());
-                assert_eq!(pool.total_vsize(), 85);
+                assert_eq!(pool.total_vsize(), u64::from(fresh_vsize));
                 assert_eq!(pool.min_fee_sat_per_kvb(now), 1_000);
             }
         }

@@ -59,6 +59,16 @@ fn transaction(previous_output: OutPoint, value: u64, script: &[u8]) -> Tx {
     }
 }
 
+fn p2sh_true_output() -> Vec<u8> {
+    bitcoin::ScriptBuf::from_bytes(vec![0x51])
+        .to_p2sh()
+        .into_bytes()
+}
+
+fn p2sh_true_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn fixture(members: u32) -> TestResult<Fixture> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let mut roots = Vec::new();
@@ -72,7 +82,8 @@ fn fixture(members: u32) -> TestResult<Fixture> {
         for depth in 0..members {
             let fee = u64::from(depth % 7 + 1) * 1_000;
             value = value.checked_sub(fee).ok_or("fixture funding exhausted")?;
-            let tx = Arc::new(transaction(input, value, &[0x51]));
+            let fx = p2sh_true_output();
+            let tx = Arc::new(transaction(input, value, &fx));
             input = OutPoint::new(tx.txid(), 0);
             let vsize = u32::try_from(tx.vsize())?;
             pool.insert_entry(MempoolEntry::new(tx, vsize, fee, 1, 1, 0))?;
@@ -166,7 +177,11 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
                 .tips
                 .iter()
                 .take(25)
-                .map(|&(outpoint, value)| transaction(outpoint, value - 1_000, &script))
+                .map(|&(outpoint, value)| {
+                    let mut tx = transaction(outpoint, value - 1_000, &script);
+                    tx.inputs[0].script_sig = p2sh_true_script_sig();
+                    tx
+                })
                 .collect();
             let sequence = gateway.read().sequence_number();
             let facts = gateway.preview_transactions(&txs, None, &Chain(Vec::new()))?;

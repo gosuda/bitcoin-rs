@@ -44,8 +44,15 @@ const P2PKH_SCRIPT: &[u8] = &[
     opcode::OP_CHECKSIG,
 ];
 
-fn anyone_can_spend() -> Vec<u8> {
-    vec![opcode::OP_PUSHNUM_1]
+fn p2sh_true_script() -> Vec<u8> {
+    p2sh_script_pubkey(&[
+        0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7, 0x7e,
+        0xba, 0x30, 0xcd, 0x5a, 0x4b,
+    ])
+}
+
+fn true_redeem_script_sig() -> Vec<u8> {
+    bitcoin_rs_script::push_data(&[opcode::OP_PUSHNUM_1])
 }
 
 fn p2sh_script_pubkey(hash: &[u8; 20]) -> Vec<u8> {
@@ -133,7 +140,13 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     ));
 
     let prev = outpoint(1, 0);
-    let tx = tx_one_input(prev, Vec::new(), Vec::new(), 99_000, P2PKH_SCRIPT.to_vec());
+    let tx = tx_one_input(
+        prev,
+        true_redeem_script_sig(),
+        Vec::new(),
+        99_000,
+        P2PKH_SCRIPT.to_vec(),
+    );
     let context = PackageTxContext {
         fee: 1_000,
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
@@ -144,7 +157,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
         prev,
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(anyone_can_spend()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);
@@ -205,11 +218,11 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     ));
 
     let prev = outpoint(3, 0);
-    let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
+    let witness_script = vec![opcode::OP_CHECKMULTISIG; 900];
     let tx = tx_one_input(
         prev,
-        bitcoin_rs_script::push_data(&redeem),
-        Vec::new(),
+        bitcoin_rs_script::push_data(&p2wsh_script_pubkey(&[0x42; 32])),
+        vec![witness_script],
         99_000,
         P2PKH_SCRIPT.to_vec(),
     );
@@ -233,7 +246,7 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     assert_eq!(
         result,
         Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
-        "P2SH sigops counted from the prevout must trigger the standard limit"
+        "Core counts 20 sigops for each CHECKMULTISIG in a P2SH-wrapped P2WSH witness script, so 900 exceed the 16,000 standard cost"
     );
     assert_eq!(
         gateway.read().len(),
@@ -317,20 +330,22 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
         MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1, 0),
     )?;
 
-    let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
+    let witness_script = vec![opcode::OP_CHECKMULTISIG; 900];
     let child = Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![
             TxIn {
                 previous_output: OutPoint::new(parent_txid, 0),
-                script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
+                script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&p2wsh_script_pubkey(
+                    &[0x42; 32],
+                ))),
                 sequence: Sequence::MAX,
-                witness: Witness::new(),
+                witness: Witness::from_stack(vec![witness_script]),
             },
             TxIn {
                 previous_output: outpoint(6, 0),
-                script_sig: Script::new(),
+                script_sig: Script::from_bytes(true_redeem_script_sig()),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
@@ -350,7 +365,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
         outpoint(6, 0),
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(anyone_can_spend()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )];
     let request = admission_request(&gateway, &child, context, prevouts);
@@ -360,7 +375,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     assert_eq!(
         result,
         Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
-        "overlay-resolved P2SH sigops must trigger the standard limit despite the omission"
+        "overlay-resolved P2SH-wrapped P2WSH sigops must trigger the standard limit despite the omission"
     );
     assert_eq!(
         gateway.read().len(),
@@ -389,7 +404,7 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     let prev = outpoint(5, 0);
     let tx = tx_one_input(
         prev,
-        Vec::new(),
+        true_redeem_script_sig(),
         Vec::new(),
         99_000,
         p2sh_script_pubkey(&[0x42; 20]),
@@ -404,7 +419,7 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
         prev,
         TxOut {
             value: Amount::from_sat(100_000),
-            script_pubkey: Script::from_bytes(anyone_can_spend()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);
@@ -452,11 +467,11 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
         outputs: vec![
             TxOut {
                 value: Amount::from_sat(60_000),
-                script_pubkey: Script::from_bytes(anyone_can_spend()),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
             TxOut {
                 value: Amount::from_sat(40_000),
-                script_pubkey: Script::from_bytes(anyone_can_spend()),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             },
         ],
     };
@@ -482,7 +497,7 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
 
     let mut candidate = tx_one_input(
         OutPoint::new(parent_txid, 1),
-        Vec::new(),
+        true_redeem_script_sig(),
         Vec::new(),
         37_000,
         P2PKH_SCRIPT.to_vec(),
@@ -499,7 +514,7 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
         OutPoint::new(parent_txid, 1),
         TxOut {
             value: Amount::from_sat(40_000),
-            script_pubkey: Script::from_bytes(anyone_can_spend()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
     )];
     let request = admission_request(&gateway, &candidate, context, prevouts);

@@ -226,12 +226,17 @@ impl AdmissionChain for AdmissionCoins {
     }
 }
 
+fn p2sh_true_output() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
 fn orphan_child(outpoint: OutPoint) -> Arc<Tx> {
     Arc::new(Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: outpoint,
-            script_sig: Script::new(),
+            script_sig: Script::from_bytes(vec![0x01, 0x51]),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -347,7 +352,7 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> anyhow::Resu
         available.inputs[0].previous_output,
         TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         },
     )];
     followers.on_snapshot();
@@ -452,7 +457,7 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Resul
         outpoint,
         TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         },
     )];
     assert!(gateway.stable_generation().is_none());

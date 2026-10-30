@@ -893,6 +893,16 @@ fn orphan_tx(prev_byte: u8, witness_byte: u8) -> Tx {
     }
 }
 
+fn p2sh_true_output() -> Vec<u8> {
+    bitcoin::ScriptBuf::from_bytes(vec![0x51])
+        .to_p2sh()
+        .into_bytes()
+}
+
+fn p2sh_true_script_sig() -> Vec<u8> {
+    vec![0x01, 0x51]
+}
+
 fn p2p_parent() -> Tx {
     Tx {
         version: 2,
@@ -905,7 +915,7 @@ fn p2p_parent() -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(10_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_output().into(),
         }],
     }
 }
@@ -919,7 +929,7 @@ fn p2p_child(parent_txid: Txid, marker: u8) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Vec::<u8>::new().into(),
+            script_sig: p2sh_true_script_sig().into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

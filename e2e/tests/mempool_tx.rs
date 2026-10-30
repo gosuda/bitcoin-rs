@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::transaction::OutPoint;
 use bitcoin_rs_e2e::helpers::{
     COINBASE_MATURITY, coinbase_at, funding_address, funding_output, mature_funding, mempool_txids,
-    op_true_script, raw_spend_to, signed_spend, spend_anyone, submit_genesis, tx_hex,
+    op_true_script, signed_spend, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -32,11 +32,11 @@ fn mempool_lifecycle_from_broadcast_to_confirmation() -> Result<()> {
 
     let info = node.rpc("getmempoolinfo", &json!([]))?;
     assert_eq!(info.u64_field("size")?, 1);
-    assert_eq!(info.u64_field("bytes")?, 82);
+    assert_eq!(info.u64_field("bytes")?, 84);
 
     let entry = node.rpc("getmempoolentry", &json!([txid]))?;
     assert_eq!(entry.str_field("wtxid")?, txid);
-    assert_eq!(entry.u64_field("vsize")?, 82);
+    assert_eq!(entry.u64_field("vsize")?, 84);
     assert_eq!(entry.u64_field("ancestorcount")?, 1);
     assert_eq!(entry.u64_field("descendantcount")?, 1);
     let base_fee = entry["fees"]["base"]
@@ -83,7 +83,7 @@ fn mempool_accept_preview() -> Result<()> {
     let row = &rows[0];
     assert_eq!(row["allowed"], json!(true), "valid spend must pass: {row}");
     assert_eq!(row["txid"], json!(txid));
-    assert_eq!(row["vsize"], json!(82));
+    assert_eq!(row["vsize"], json!(84));
     assert!(
         mempool_txids(&mut node)?.is_empty(),
         "preview must not pool"
@@ -109,13 +109,8 @@ fn ancestors_and_descendants_views() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
 
-    let parent = raw_spend_to(
-        outpoint,
-        &prevout,
-        1_000,
-        bitcoin::Sequence::MAX,
-        &funding_address()?.script_pubkey(),
-    );
+    let mut parent = spend_anyone(outpoint, &prevout, 1_000);
+    parent.output[0].script_pubkey = funding_address()?.script_pubkey();
     let parent_txid = parent.compute_txid().to_string();
     node.rpc("sendrawtransaction", &json!([tx_hex(&parent)]))?;
 

@@ -57,8 +57,17 @@ fn open_node() -> anyhow::Result<(NodeState, tempfile::TempDir)> {
     Ok((state, dir))
 }
 
+fn p2sh_true_output() -> Vec<u8> {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    redeem.to_p2sh().into_bytes()
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> {
-    fund_utxo_script(state, parent, value, vec![0x51])
+    fund_utxo_script(state, parent, value, p2sh_true_output())
 }
 
 fn fund_utxo_script(
@@ -86,11 +95,15 @@ fn fund_utxo_script(
 }
 
 fn spending_tx(parent: Txid, output_value: u64) -> Tx {
+    spending_tx_with_script(parent, output_value, p2sh_true_spend_script_sig())
+}
+
+fn spending_tx_with_script(parent: Txid, output_value: u64, script_sig: Script) -> Tx {
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: Script::new(),
+            script_sig,
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -707,7 +720,7 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
     locking_script
         .extend_from_slice(bitcoin::hashes::sha256::Hash::hash(&witness_script).as_byte_array());
     fund_utxo_script(&harness.state, parent, 50_000, locking_script)?;
-    let mut tx = spending_tx(parent, 40_000);
+    let mut tx = spending_tx_with_script(parent, 40_000, Script::new());
     tx.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let txid = tx.txid();
     let wtxid = tx.wtxid();
@@ -878,7 +891,7 @@ fn rejected_witness_keeps_an_honest_transaction_source() -> anyhow::Result<()> {
     locking_script
         .extend_from_slice(bitcoin::hashes::sha256::Hash::hash(&witness_script).as_byte_array());
     fund_utxo_script(&harness.state, parent, 50_000, locking_script)?;
-    let mut valid = spending_tx(parent, 40_000);
+    let mut valid = spending_tx_with_script(parent, 40_000, Script::new());
     valid.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let mut invalid = valid.clone();
     invalid.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);

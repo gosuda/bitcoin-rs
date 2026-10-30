@@ -303,7 +303,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-                script_pubkey: Script::from_bytes(vec![0x51]),
+                script_pubkey: p2sh_true_output(),
             }],
             lock_time: LockTime::ZERO,
         };
@@ -392,7 +392,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     };
@@ -400,7 +400,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

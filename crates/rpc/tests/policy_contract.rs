@@ -46,13 +46,22 @@ fn op_true_script() -> Vec<u8> {
     vec![0x51]
 }
 
+fn p2sh_true_script() -> Vec<u8> {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    redeem.to_p2sh().into_bytes()
+}
+
+fn p2sh_true_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn tx(prevout: OutPoint, output_value: u64, sequence: u32) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Script::new(),
+            script_sig: p2sh_true_script_sig(),
             sequence: Sequence::from_consensus(sequence),
             witness: Witness::new(),
         }],
@@ -77,7 +86,7 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(op_true_script()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
         false,
         1,
@@ -147,6 +156,14 @@ fn sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool()
 
 fn funded_fee_tx(ctx: &Context, label: u8, fee: u64) -> Tx {
     tx(fund_utxo(ctx, label, 10_000 + fee), 10_000, 0xffff_ffff)
+}
+
+fn spend_vsize() -> u64 {
+    tx(staged_outpoint(0x40), 10_000, 0xffff_ffff).vsize()
+}
+
+fn floor_fee(sat_per_kvb: u64) -> u64 {
+    sat_per_kvb * spend_vsize() / 1_000
 }
 
 fn pool_holds(ctx: &Context, tx: &Tx) -> bool {
@@ -299,7 +316,11 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
         Some("min relay fee not met")
     );
 
-    let at_floor = tx(fund_utxo(&ctx, 0x84, 10_410), 10_000, 0xffff_ffff);
+    let at_floor = tx(
+        fund_utxo(&ctx, 0x84, 10_000 + floor_fee(5_000)),
+        10_000,
+        0xffff_ffff,
+    );
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&at_floor)]))?;
     assert!(
         ctx.mempool
@@ -443,7 +464,7 @@ fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(),
         (false, Some("min relay fee not met".to_owned()))
     );
 
-    let at_floor = funded_fee_tx(&ctx, 0x8b, 164);
+    let at_floor = funded_fee_tx(&ctx, 0x8b, floor_fee(2_000));
     assert_eq!(preview_verdict(&handler, &at_floor)?, (true, None));
 
     ctx.mempool
@@ -669,7 +690,7 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x98, 0xffff_fffd, 4_000, 8_000)?;
     let mut unrelated = tx(fund_utxo(&ctx, 0x99, 10_000), 9_000, 0xffff_ffff);
-    unrelated.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
+    unrelated.outputs[0].script_pubkey = Script::from_bytes(p2sh_true_script());
     ctx.mempool
         .gateway
         .pool()
@@ -967,7 +988,7 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
     };
     for _ in 0..25 {
         let mut next = tx(previous, 1_000, 0xffff_ffff);
-        next.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
+        next.outputs[0].script_pubkey = Script::from_bytes(p2sh_true_script());
         previous = OutPoint::new(next.txid(), 0);
         pool.insert_entry(seeded_entry(Arc::new(next.clone()), 4_000, 4_000))?;
         txs.push(next);
@@ -982,13 +1003,13 @@ fn tx_multi_child(funded: &OutPoint, tip: &Tx) -> Tx {
         inputs: vec![
             TxIn {
                 previous_output: *funded,
-                script_sig: Script::new(),
+                script_sig: p2sh_true_script_sig(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
             TxIn {
                 previous_output: OutPoint::new(tip.txid(), 0),
-                script_sig: Script::new(),
+                script_sig: p2sh_true_script_sig(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
@@ -1147,7 +1168,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
         let root = Tx {
             outputs: vec![TxOut {
                 value: Amount::from_sat(50_000),
-                script_pubkey: Script::from_bytes(op_true_script()),
+                script_pubkey: Script::from_bytes(p2sh_true_script()),
             }],
             ..tx(
                 OutPoint {
@@ -1209,7 +1230,7 @@ fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
             .iter()
             .map(|(prevout, sequence)| TxIn {
                 previous_output: *prevout,
-                script_sig: Script::new(),
+                script_sig: p2sh_true_script_sig(),
                 sequence: Sequence::from_consensus(*sequence),
                 witness: Witness::new(),
             })
@@ -1227,7 +1248,7 @@ fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Script::new(),
+            script_sig: p2sh_true_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -1318,7 +1339,7 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
         preview_verdict(&handler, &evicted_rate)?,
         (false, Some("min relay fee not met".to_owned()))
     );
-    let at_floor = funded_fee_tx(&ctx, 0x95, 246);
+    let at_floor = funded_fee_tx(&ctx, 0x95, floor_fee(3_000));
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&at_floor)]))?;
     assert!(
         pool_holds(&ctx, &at_floor),
@@ -1435,7 +1456,7 @@ fn reorg_seed_coinbase(height: u32) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REORG_SUBSIDY_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         }],
         lock_time: LockTime::ZERO,
     }
@@ -1446,7 +1467,7 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(reorg_seed_coinbase(1).txid(), 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -1633,7 +1654,7 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
         TxOut {
             value: Amount::from_sat(value),
-            script_pubkey: Script::from_bytes(op_true_script()),
+            script_pubkey: Script::from_bytes(p2sh_true_script()),
         },
         true,
         height,

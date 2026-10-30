@@ -46,6 +46,14 @@ The mempool owner implements the selected Core 31.1 replacement and preview prof
 - Absolute locktime evaluates at tip+1. BIP68 evaluates confirmed height/MTP metadata and treats unconfirmed parents as the next block. The CSV gate controls these relative locks. Coinbase spends require depth at least 100.
 - Completed preview rows use the pinned v31 response type. Unfinished package rows contain identities and optional package error, with no fabricated `allowed` value or fee. Generic script-detail and numeric-error differences are listed in the manifest.
 
+### `POL-07`: Core input and witness standardness
+
+- Admission resolves every input through the mempool and chain view, then runs `is_standard_spend` on the complete list. A partial list is a missing-input refusal, so the check never reads a coin the caller did not resolve.
+- Input standardness refuses four cases. An outpoint script that Core `Solver` cannot classify. A witness program whose version and length Core does not define. A P2SH redeem script above 15 accurate sigops. A transaction whose executable legacy sigops exceed BIP54's 2,500. The reason is `bad-txns-nonstandard-inputs`. A bare multisig outpoint stays standard up to Core's 20-key shape, which is wider than the 3-key limit on new outputs.
+- Witness standardness requires a direct or P2SH-wrapped witness program for every non-empty witness. It refuses a witness on a P2A output, a taproot annex, an empty taproot control block, a P2WSH witness script above 3,600 bytes, more than 100 P2WSH stack items below that script, and P2WSH or tapscript items above 80 bytes. The reason is `bad-witness-nonstandard`.
+- A tapscript initial stack of 1,000 empty items stays standard. Consensus caps that stack at 1,000, and Core caps only the size of each item.
+- Both checks run before sigop cost, fee floors and script verification, in Core's order.
+
 ## Restart snapshots
 
 `mempool::snapshot` owns the optional `mempool-snapshot.dat` artifact. It is a set of admission candidates and operator fee deltas, never a second membership or Chainstate authority. Its independent version, genesis identity, checksum, configurable file-byte bound (64 MiB by default) and 400,000-byte transaction bound do not change `CURRENT_SCHEMA`. Record counts are bounded by file bytes and the format's u32 count fields, without a separate 100,000-record cap. Format version 2 also stores each member's pending initial-broadcast flag. No cluster/chunk graph, computed fee, policy stamp, sequence, orphan or per-peer relay state is persisted.

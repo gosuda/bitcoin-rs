@@ -288,7 +288,7 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     let known_tx = seed_coinbase(1);
     let known_txid = known_tx.txid();
     let known_outpoint = OutPoint::new(known_txid, 0);
-    let script = ScriptHash::from_script_bytes(&[0x51]);
+    let script = ScriptHash::from_script_bytes(known_tx.outputs[0].script_pubkey.as_bytes());
 
     let ready = wait_historical_transaction(&node, &known_txid)?;
     assert_eq!(ready.prefix.floor, 0, "seeded chain covers from genesis");
@@ -387,6 +387,15 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     Ok((tip.hash, first_hash, first_bytes))
 }
 
+fn p2sh_true_output() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
 fn seed_coinbase(height: u32) -> Tx {
     Tx {
         version: 2,
@@ -398,7 +407,7 @@ fn seed_coinbase(height: u32) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::ZERO,
     }
@@ -410,7 +419,7 @@ fn seed_coinbase_spend() -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

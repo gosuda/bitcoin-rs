@@ -53,6 +53,6 @@ pub use rbf::{RbfError, required_fee};
 #[cfg(any(test, feature = "test-seam"))]
 pub use rbf::{ReplacementCandidate, ReplacementPlan};
 pub use reader::MempoolReader;
-pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
+pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_spend, is_standard_tx};
 pub use submit_package::{PackageSubmission, PackageTxResult};
 pub use truc::TrucError;

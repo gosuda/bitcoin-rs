@@ -58,8 +58,12 @@ pub fn submit_genesis(node: &mut ProcessNode) -> Result<()> {
     }
 }
 
+pub fn p2sh_true_script() -> ScriptBuf {
+    op_true_script().to_p2sh()
+}
+
 pub fn mine_bare_blocks(node: &mut ProcessNode, count: u32) -> Result<Vec<String>> {
-    mine_blocks_to(node, count, "raw(51)")
+    mine_blocks_to(node, count, &format!("raw({:x})", p2sh_true_script()))
 }
 
 pub fn mine_blocks_to(node: &mut ProcessNode, count: u32, descriptor: &str) -> Result<Vec<String>> {
@@ -144,7 +148,11 @@ pub fn raw_spend_to(
 
 #[must_use]
 pub fn spend_anyone(outpoint: OutPoint, prevout: &TxOut, fee_sats: u64) -> Transaction {
-    raw_spend_to(outpoint, prevout, fee_sats, Sequence::MAX, &sink_script())
+    let mut spend = raw_spend_to(outpoint, prevout, fee_sats, Sequence::MAX, &sink_script());
+    if prevout.script_pubkey == p2sh_true_script() {
+        spend.input[0].script_sig = ScriptBuf::from_bytes(vec![0x01, 0x51]);
+    }
+    spend
 }
 
 pub fn signed_spend(

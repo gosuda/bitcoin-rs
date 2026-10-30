@@ -16,14 +16,45 @@ use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
+struct PrevoutMap<'a> {
+    index: HashMap<OutPoint, &'a TxOut>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PREVOUT_PROBES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_prevout_probes(count: usize) {
+    PREVOUT_PROBES.with(|probes| probes.set(probes.get() + count));
+}
+
+#[cfg(test)]
+fn reset_prevout_probes() {
+    PREVOUT_PROBES.with(|probes| probes.set(0));
+}
+
+#[cfg(test)]
+fn prevout_probes() -> usize {
+    PREVOUT_PROBES.with(core::cell::Cell::get)
+}
+
+impl<'a> PrevoutMap<'a> {
+    fn new(prevouts: &'a [(OutPoint, TxOut)]) -> Self {
+        let mut index = HashMap::with_capacity(prevouts.len());
+        for (outpoint, output) in prevouts {
+            index.entry(*outpoint).or_insert(output);
+        }
+        Self { index }
+    }
+}
 
 impl UtxoView for PrevoutMap<'_> {
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        self.0
-            .iter()
-            .find(|(op, _)| op == outpoint)
-            .map(|(_, txout)| txout.clone())
+        #[cfg(test)]
+        bump_prevout_probes(1);
+        self.index.get(outpoint).map(|output| (*output).clone())
     }
 }
 
@@ -209,7 +240,7 @@ impl PreparedAdmission {
         };
         if bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
             &request.tx,
-            &PrevoutMap(&self.prevouts),
+            &PrevoutMap::new(&self.prevouts),
             height,
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
@@ -263,15 +294,19 @@ impl PreparedAdmission {
         };
         let default_scope = rejection_scope(&request.tx);
         let signature_cache = bitcoin_rs_script::SignatureCache::new();
-        if let Err(error) = verify_transaction(
-            &request.tx,
-            &PrevoutMap(&self.prevouts),
-            height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-            self.engine,
-            Some(&signature_cache),
-        ) {
+        let standard_pass = {
+            let chain = PrevoutMap::new(&self.prevouts);
+            verify_transaction(
+                &request.tx,
+                &chain,
+                height,
+                request.locktime_cutoff,
+                VerifyFlags::STANDARD,
+                self.engine,
+                Some(&signature_cache),
+            )
+        };
+        if let Err(error) = standard_pass {
             if verifying_refusal {
                 self.refused_bump = None;
                 return;
@@ -314,7 +349,7 @@ impl PreparedAdmission {
         let flags = request.next_block_script_flags;
         if let Err(error) = verify_transaction(
             &request.tx,
-            &PrevoutMap(&self.prevouts),
+            &PrevoutMap::new(&self.prevouts),
             height,
             request.locktime_cutoff,
             flags,
@@ -873,11 +908,18 @@ impl MempoolGateway {
         engine: ValidationEngine,
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
-        let chain = PrevoutMap(&request.prevouts);
-        let view = MempoolUtxoView::new(pool, &chain);
-        let standard =
-            crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok();
-        let prevouts: Vec<_> = if standard && !pool.contains_txid(&request.tx.txid()) {
+        let standard_result =
+            crate::standardness::is_standard_tx(&request.tx, &policy.standardness);
+        let already_known = pool.contains_txid(&request.tx.txid());
+        let oversize = matches!(
+            standard_result,
+            Err(crate::standardness::StandardnessError::Weight)
+        );
+        let prevouts: Vec<_> = if already_known || oversize {
+            Vec::new()
+        } else {
+            let chain = PrevoutMap::new(&request.prevouts);
+            let view = MempoolUtxoView::new(pool, &chain);
             request
                 .tx
                 .inputs
@@ -887,9 +929,8 @@ impl MempoolGateway {
                         .map(|output| (input.previous_output, output))
                 })
                 .collect()
-        } else {
-            Vec::new()
         };
+        let standard = standard_result.is_ok();
         let mut context = request.context;
         if standard {
             context.sigop_cost =
@@ -935,6 +976,7 @@ impl MempoolGateway {
             pool,
             &policy.standardness,
             &request.tx,
+            &prevouts,
             context,
             None,
             floor,
@@ -953,7 +995,7 @@ impl MempoolGateway {
             engine,
             script_cache_key: None,
         };
-        if !pool.contains_txid(&request.tx.txid()) {
+        if !already_known {
             if standard
                 && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
                     .is_err()
