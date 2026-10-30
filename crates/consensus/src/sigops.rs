@@ -34,7 +34,10 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
             };
             *output
         };
-        let redeem = if is_p2sh(&prevout.script_pubkey) && is_push_only(&input.script_sig) {
+        let redeem = if flags.contains(VerifyFlags::P2SH)
+            && is_p2sh(&prevout.script_pubkey)
+            && is_push_only(&input.script_sig)
+        {
             last_push(&input.script_sig)
         } else {
             None
@@ -137,10 +140,10 @@ mod tests {
         for (script_pubkey, script_sig, witness, inactive_cost, active_cost) in cases {
             let tx = single_input_tx(script_sig, witness);
             let prevouts = [prevout(tx.inputs[0].previous_output, script_pubkey)];
-            for flags in [VerifyFlags::P2SH, VerifyFlags::NONE] {
+            for (flags, expected) in [(VerifyFlags::P2SH, inactive_cost), (VerifyFlags::NONE, 4)] {
                 assert_eq!(
                     transaction_sigop_cost(&tx, &prevouts, flags),
-                    inactive_cost,
+                    expected,
                     "{flags:?}"
                 );
             }
