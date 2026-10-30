@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use bitcoin_rs_primitives::Hash256;
 
-use crate::{ColumnFamily, KvStore, StorageError};
+use crate::{BufferedWriteBatch, ColumnFamily, KvStore, StorageError, WriteCondition};
 
 pub(crate) const BLOCK_UNDO_PREFIX: u8 = b'u';
 pub(crate) const BLOCK_UNDO_PREFIX_BYTES: &[u8] = b"u";
@@ -53,11 +53,14 @@ pub trait UndoStore: Send + Sync {
 
     /// Records that the rollback finished, in memory, and is owed a checkpoint.
     /// `RolledBack` marker — a checkpoint taken over a half-finished rollback
-    /// would be a checkpoint of the damage.
+    /// would be a checkpoint of the damage. Refuses when no disconnect is armed
+    /// or the armed marker names another block.
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Clears the marker once a disconnect has finished cleanly.
     /// The marker covers authoritative UTXO and tip state between checkpoints.
+    /// Refuses a marker that is `InFlight`, or that changed after this call
+    /// observed it.
     fn disarm_disconnect(&self) -> Result<(), StorageError>;
 
     /// Clears the marker unconditionally after disconnect recovery.
@@ -182,7 +185,18 @@ impl UndoStore for InMemoryUndoStore {
     }
 
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        *self.marker.write() = Some(DisconnectMarker {
+        let mut marker = self.marker.write();
+        let Some(armed) = marker.as_ref() else {
+            return Err(StorageError::InvalidOperation(
+                "cannot complete a disconnect that was never armed",
+            ));
+        };
+        if armed.height != height || armed.hash != hash {
+            return Err(StorageError::InvalidOperation(
+                "cannot complete a disconnect for another block than the armed marker",
+            ));
+        }
+        *marker = Some(DisconnectMarker {
             hash,
             height,
             phase: DisconnectPhase::RolledBack,
@@ -224,6 +238,34 @@ impl<S: KvStore> KvUndoStore<S> {
     pub const fn new(store: Arc<S>) -> Self {
         Self { store }
     }
+
+    fn marker_row(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        self.store
+            .get(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY)
+    }
+
+    /// Applies a marker mutation only while the row it was derived from is unchanged.
+    fn commit_marker_change(
+        &self,
+        observed: &[u8],
+        batch: BufferedWriteBatch,
+    ) -> Result<(), StorageError> {
+        let unchanged = self.store.write_durable_if(
+            &[WriteCondition::Equals {
+                cf: ColumnFamily::UtxoMeta,
+                key: DISCONNECT_MARKER_KEY,
+                expected: observed,
+            }],
+            batch,
+        )?;
+        if unchanged {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidOperation(
+                "disconnect marker changed while it was being updated",
+            ))
+        }
+    }
 }
 
 impl<S: KvStore> UndoStore for KvUndoStore<S> {
@@ -262,7 +304,7 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
             .get(ColumnFamily::UndoData, &block_undo_key(height, hash))
     }
 
-    /// Flushed, unlike every other write on this path.
+    /// Durable before the disconnect mutates authoritative state.
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
         self.store.put(
             ColumnFamily::UtxoMeta,
@@ -278,7 +320,19 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     }
 
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.store.put(
+        let Some(observed) = self.marker_row()? else {
+            return Err(StorageError::InvalidOperation(
+                "cannot complete a disconnect that was never armed",
+            ));
+        };
+        let armed = DisconnectMarker::decode(&observed)?;
+        if armed.height != height || armed.hash != hash {
+            return Err(StorageError::InvalidOperation(
+                "cannot complete a disconnect for another block than the armed marker",
+            ));
+        }
+        let mut batch = self.store.new_batch();
+        batch.put(
             ColumnFamily::UtxoMeta,
             DISCONNECT_MARKER_KEY,
             &DisconnectMarker {
@@ -287,26 +341,25 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
                 phase: DisconnectPhase::RolledBack,
             }
             .encode(),
-        )?;
-        self.store.flush()
+        );
+        self.commit_marker_change(&observed, batch)
     }
 
     /// Refuses to clear a marker that is still `InFlight`.
     /// The caller is a checkpoint, and a checkpoint taken while a rollback is
     /// half-done captures the damage. Only a completed rollback may be cleared.
     fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        if self
-            .load_disconnect_marker()?
-            .is_some_and(|marker| marker.phase == DisconnectPhase::InFlight)
-        {
+        let Some(observed) = self.marker_row()? else {
+            return Ok(());
+        };
+        if DisconnectMarker::decode(&observed)?.phase == DisconnectPhase::InFlight {
             return Err(StorageError::InvalidOperation(
                 "cannot disarm an in-flight disconnect",
             ));
         }
         let mut batch = self.store.new_batch();
         batch.delete(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY);
-        self.store.write(batch)?;
-        self.store.flush()
+        self.commit_marker_change(&observed, batch)
     }
 
     fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
@@ -317,93 +370,11 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     }
 
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
-        self.store
-            .get(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY)?
+        self.marker_row()?
             .map(|bytes| DisconnectMarker::decode(&bytes))
             .transpose()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(feature = "redb")]
-    #[test]
-    fn a_deferred_undo_record_is_readable_before_any_flush()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let store = Arc::new(crate::RedbStore::open(dir.path())?);
-        let undo_store = KvUndoStore::new(Arc::clone(&store));
-        let hash = Hash256::from_le_bytes(&[0x4d; 32]);
-
-        undo_store.persist_undo(4_242, hash, b"undo-record")?;
-
-        let loaded = undo_store
-            .load_undo(4_242, hash)?
-            .ok_or("undo record must be readable in-process before any flush")?;
-        assert_eq!(
-            loaded, b"undo-record",
-            "the deferred write must return exactly what was written"
-        );
-        Ok(())
-    }
-
-    #[cfg(feature = "fjall")]
-    #[test]
-    fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let block_hash = Hash256::from_le_bytes(&[0xa7; 32]);
-
-        {
-            let store = Arc::new(crate::FjallStore::open(dir.path())?);
-            KvUndoStore::new(store).arm_disconnect(140_003, block_hash)?;
-        }
-
-        let reopened = Arc::new(crate::FjallStore::open(dir.path())?);
-        let marker = KvUndoStore::new(Arc::clone(&reopened))
-            .load_disconnect_marker()?
-            .ok_or("armed marker did not survive the reopen")?;
-        assert_eq!(marker.hash, block_hash, "hash must round-trip");
-        assert_eq!(marker.height, 140_003, "height must round-trip");
-        assert_eq!(
-            marker.phase,
-            DisconnectPhase::InFlight,
-            "arming records an unfinished rollback"
-        );
-
-        assert!(matches!(
-            KvUndoStore::new(Arc::clone(&reopened)).disarm_disconnect(),
-            Err(StorageError::InvalidOperation(_))
-        ));
-        assert!(
-            KvUndoStore::new(Arc::clone(&reopened))
-                .load_disconnect_marker()?
-                .is_some(),
-            "a checkpoint must not clear an in-flight marker"
-        );
-
-        KvUndoStore::new(Arc::clone(&reopened)).complete_disconnect(140_003, block_hash)?;
-        KvUndoStore::new(Arc::clone(&reopened)).disarm_disconnect()?;
-        drop(reopened);
-        let after = Arc::new(crate::FjallStore::open(dir.path())?);
-        assert_eq!(
-            KvUndoStore::new(after).load_disconnect_marker()?,
-            None,
-            "a completed rollback must clear and stay cleared across a reopen"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn a_truncated_disconnect_marker_is_an_error_not_an_absence() {
-        let Err(error) = DisconnectMarker::decode(&[0_u8; 20]) else {
-            panic!("a 20-byte marker must not decode as absent");
-        };
-        assert!(
-            error.to_string().contains("expected 37"),
-            "error must say what it expected, got: {error}"
-        );
-    }
-}
+mod tests;
