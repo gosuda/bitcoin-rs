@@ -10,7 +10,7 @@ Whether the documented production default engine is strict-Rust validation. Ever
 
 ## Ordering
 
-1. Implement and independently qualify the strict-Rust cryptography path (valid/invalid ECDSA, Schnorr, tweaks; integer/point boundaries; encoding rules; dependency closure) before measuring it (no `k256` verifier or dedicated target exists yet; current regressions do not establish it). 2. Measure the final qualified artifact; earlier numbers are not promotion proof. 3. Promote in one changeset: complete the cells below, change the shipped selection (`/etc/bitcoin-rs/default.toml`, `Dockerfile`), prove kernel-free closure with the `cargo tree` lane below plus native profiles in `scripts/ci-pr.sh`.
+1. Implement and independently qualify the strict-Rust cryptography path before measuring it. The path covers valid and invalid ECDSA, Schnorr and tweaks, integer and point boundaries, encoding rules, and dependency closure. No `k256` verifier or dedicated target exists yet, and current regressions do not establish the path. 2. Measure the final qualified artifact. Earlier numbers are not promotion proof. 3. Promote in one changeset. Complete the cells below, change the shipped selection (`/etc/bitcoin-rs/default.toml`, `Dockerfile`), and prove kernel-free closure with the `cargo tree` lane below plus native profiles in `scripts/ci-pr.sh`.
 
 ## End-state cells
 

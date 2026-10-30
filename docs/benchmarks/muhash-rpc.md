@@ -1,10 +1,10 @@
 # MuHash RPC comparator cell
 
-This document owns the MuHash API cell: the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs compared with the same JSON-RPC call in Bitcoin Core `v31.1`, driven by the custody controller `tools/benchmark-campaign/muhash_rpc.py`. The controller is a comparator, not a benchmark result; a ratio exists only after every custody gate passes. In the target node the query uses an `AppliedView` tip check and a stable UTXO view, is bounded and cancellable, and its result is a product cell under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md) and a manifest row of the T31 Core RPC contract.
+This document owns the MuHash API cell. The cell is the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs, compared with the same JSON-RPC call in Bitcoin Core `v31.1`. The custody controller `tools/benchmark-campaign/muhash_rpc.py` drives the comparison. The controller is a comparator, not a benchmark result. A ratio exists only after every custody gate passes. In the target node the query uses an `AppliedView` tip check and a stable UTXO view. It is bounded and cancellable. Its result is a product cell under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md) and a manifest row of the T31 Core RPC contract.
 
 ## Cell it owns
 
-Wall of exactly one JSON-RPC `gettxoutsetinfo` call per arm at the frozen tip, seven alternating pairs, under one declared cache policy, with receipts binding both binaries, the tip and the reply body.
+The cell measures the wall of exactly one JSON-RPC `gettxoutsetinfo` call per arm at the frozen tip. Each campaign has seven alternating pairs under one declared cache policy. Receipts bind both binaries, the tip and the reply body.
 
 ## Reference identity
 
@@ -47,30 +47,30 @@ daemons (see "Status").
 
 ### Measured contract
 
-Every measured observation is exactly one JSON-RPC call, and the client can
-send no other:
+Every measured observation is exactly one JSON-RPC call. The client cannot
+send a different call:
 
 ```json
 {"method":"gettxoutsetinfo","params":["muhash",null,false]}
 ```
 
-The historical-height argument is `null` and `use_index` is `false`, so both
-processes must already be committed at the frozen corpus tip. Core 31.1
-performs `ForceFlushStateToDisk(false)` inside this production RPC; that
-flush stays inside the measured interval because it is part of the call. No
-supervisor RPC, warm-up query, or explicit flush call exists in v2 — the
-handler records every POST a trial makes, and the protocol test asserts the
-fixture saw exactly one request.
+The historical-height argument is `null` and `use_index` is `false`. Both
+processes must therefore already be committed at the frozen corpus tip.
+Core 31.1 performs `ForceFlushStateToDisk(false)` inside this production
+RPC. That flush stays inside the measured interval, because it is part of
+the call. No supervisor RPC, warm-up query or explicit flush call exists in
+v2. The handler records every POST a trial makes, and the protocol test
+asserts the fixture saw exactly one request.
 
-The monotonic interval spans the whole one-shot exchange: `perf_counter_ns`
+The monotonic interval spans the whole one-shot exchange. `perf_counter_ns`
 is read immediately before the fixed request body is handed to the
-transport and again only after the bounded response has been fully received,
-decoded as JSON, envelope-validated (`jsonrpc == "2.0"`, matching id,
-`error: null`), parsed into the strict eight-field UTXO state, and checked
-against the frozen tip. Core always answers a JSON-RPC 2.0 request with
-HTTP 200 and reports RPC errors in the body's `error` field, so the
-envelope check is authoritative. A non-positive or non-monotonic duration
-refuses the run.
+transport. It is read again only after the bounded response is fully
+received. The response is decoded as JSON and envelope-validated
+(`jsonrpc == "2.0"`, matching id, `error: null`). It is then parsed into the
+strict eight-field UTXO state and checked against the frozen tip. Core always
+answers a JSON-RPC 2.0 request with HTTP 200 and reports RPC errors in the
+body's `error` field, so the envelope check is authoritative. A non-positive
+or non-monotonic duration refuses the run.
 
 ### Transport and custody limits
 
@@ -120,11 +120,11 @@ refuses the run.
 
 ### Receipts are controller declarations
 
-The pre- and post-receipt files are operator declarations, not endpoint
-attestation. The operator is the trust root; the comparator explicitly
-disclaims remote binary authentication via the required
-`operator_trust_boundary` field. What the receipts do provide is a hash
-graph that binds declarations to observations:
+The pre-receipt and post-receipt files are operator declarations. They are
+not endpoint attestation. The operator is the trust root, and the
+comparator explicitly disclaims remote binary authentication via the
+required `operator_trust_boundary` field. The receipts do provide a hash
+graph. That graph binds declarations to observations:
 
 trial input file   --canonical_sha256--> observation.input_sha256
 fixed request body --sha256--> observation.request_sha256
@@ -138,22 +138,24 @@ aggregate manifest --sha256--> result.config_sha256
 result record      --canonical_sha256--> result.result_sha256
 
 The pre-receipt declares the observed executable, node config, corpus,
-backend, datadir, endpoint, affinity, cache-policy action, frozen tip, and
-`/proc` fault and I/O counters, plus the attested PID and process starttime
-binding the endpoint to a specific process lifecycle. The post-receipt
-re-records the PID/starttime (which must equal the pre-receipt within one
-observation) and the counter deltas. Each aggregate triple therefore pins
-four files: the trial input, pre-receipt, observation, and post-receipt.
-Aggregate re-verifies the trial input's FileRef, re-parses it strictly,
-checks its coordinates, endpoint, corpus, frozen tip, and pre-receipt
-reference against the triple, recomputes its canonical hash, recomputes the
-fixed request body hash, and base64-decodes the embedded raw response to
-re-hash it, strict-parse its envelope, and prove its parsed state equals
-the observation's state. A single mismatch anywhere refuses the campaign.
+backend, datadir, endpoint, affinity, cache-policy action and frozen tip. It
+also declares the `/proc` fault and I/O counters, and the attested PID and
+process starttime. The PID and starttime bind the endpoint to a specific
+process lifecycle.
+The post-receipt re-records the PID/starttime, which must equal
+the pre-receipt within one observation, and the counter deltas. Each
+aggregate triple therefore pins four files: the trial input, pre-receipt,
+observation and post-receipt. Aggregate re-verifies the trial input's
+FileRef and re-parses it strictly. It checks its coordinates, endpoint,
+corpus, frozen tip and pre-receipt reference against the triple, then
+recomputes its canonical hash. It recomputes the fixed request body hash.
+It base64-decodes the embedded raw response to re-hash it, strict-parse its
+envelope, and prove its parsed state equals the observation's state. A
+single mismatch anywhere refuses the campaign.
 
 ### One policy, seven alternating pairs
 
-A campaign declares exactly one cache policy; a second policy is a second
+A campaign declares exactly one cache policy. A second policy is a second
 campaign and a second result file. There is no fresh/warm dual phase.
 
 - `warm`: one untimed exact production query per arm after frozen-tip
@@ -173,14 +175,15 @@ campaign and a second result file. There is no fresh/warm dual phase.
   query is refused as internally impossible evidence.
 
 The aggregate consumes 14 strict pre-receipt/observation/post-receipt
-triples — seven pairs, even pairs Core then bitcoin-rs, odd pairs
-bitcoin-rs then Core, each pair index appearing exactly twice. Missing,
-duplicated, reordered, or extra triples are refused; no retry based on an
-alternative outcome exists anywhere. The declared schedule is also bound
-to physical chronology: in manifest order, every observation's monotonic
-start must be at or after the previous observation's monotonic end, so
-overlapping or reordered intervals are refused and the alternating
-labels cannot disguise concurrent or regrouped execution.
+triples. The triples are seven pairs: even pairs are Core then bitcoin-rs,
+and odd pairs are bitcoin-rs then Core. Each pair index appears exactly
+twice. Missing, duplicated, reordered or extra triples are refused. No
+retry based on an alternative outcome exists anywhere. The declared
+schedule is also bound to physical chronology. In manifest order, every
+observation's monotonic start must be at or after the previous
+observation's monotonic end. Overlapping or reordered intervals are
+therefore refused, and the alternating labels cannot disguise concurrent
+or regrouped execution.
 
 ### Correctness gate
 
@@ -190,20 +193,20 @@ No result file is created unless all of these hold:
   hash graph above recomputes — including the trial-input, request-body,
   and embedded-raw-response edges;
 
-`bogosize` and `disk_size` remain in every observation for diagnosis but are
-not equality fields: storage implementations legitimately represent the
-same UTXO set differently. `total_amount` is compared as a Decimal value,
-never as JSON text, so `12.50000000` equals `12.5`.
+`bogosize` and `disk_size` remain in every observation for diagnosis. They
+are not equality fields, because storage implementations legitimately
+represent the same UTXO set differently. `total_amount` is compared as a
+Decimal value, never as JSON text, so `12.50000000` equals `12.5`.
 
-A timeout, redirect, HTTP failure, JSON-RPC error, oversized or too-deep
-body or file, duplicated JSON member, unknown schema member, out-of-domain
-amount, malformed
-field, custody change, broken hash edge, policy violation, or pre-existing
-output path ends the run with exit status 2 and no comparative record.
-Refusal messages name the failed gate and never include credentials, raw
-untrusted response bodies, or attacker-controlled member names: wrong-key
-diagnostics carry counts only, and duplicate-member refusals are fixed
-strings.
+The run ends with exit status 2 and no comparative record in any of these
+cases. A timeout, a redirect, an HTTP failure or a JSON-RPC error ends the run.
+So does an oversized or too-deep body or file, a duplicated JSON member, an
+unknown schema member or an out-of-domain amount. A malformed field, a custody
+change, a broken hash edge, a policy violation or a pre-existing output path
+also ends the run. Refusal messages name the failed gate. They never include
+credentials, raw untrusted response bodies or attacker-controlled member
+names. Wrong-key diagnostics carry counts only, and duplicate-member
+refusals are fixed strings.
 
 ### Statistics and result identity
 
@@ -224,8 +227,9 @@ python3.14 tools/benchmark-campaign/muhash_rpc.py trial \
   --input /bench/trial-input.json --output /bench/obs.json
 ```
 
-Run a full lifecycle-owned campaign (spawns both arms, applies the declared
-cache policy, writes the 14 receipt triples, and publishes the result):
+Run a full lifecycle-owned campaign. It spawns both arms, applies the
+declared cache policy, writes the 14 receipt triples, and publishes the
+result:
 
 ```text
 python3.14 tools/benchmark-campaign/muhash_rpc.py campaign \
@@ -239,62 +243,63 @@ python3.14 tools/benchmark-campaign/muhash_rpc.py aggregate \
   --input /bench/aggregate-manifest.json --output /bench/result.json
 ```
 
-The trial input is a strict `muhash-rpc-trial-input-v2` object (unknown or
-missing keys rejected) carrying the coordinates, endpoint, credential file
-reference, timeout, response cap, corpus, expected frozen tip, and the
-controller pre-receipt reference. The campaign config is a strict
-`muhash-rpc-campaign-config-v2` object that binds one Core arm (`backend` is
-always `coinsdb`) to one bitcoin-rs arm (`backend` is exactly one of
-`fjall`, `rocksdb`, or `redb`), the single cache policy, the corpus, and the
-pinned binaries and commands. `{binary}` is copied and re-hashed before every
-spawn; `{config}` is required so the receipt's pinned config is the file the
-daemon received (`docs/contracts/muhash-rpc.md` `MRPC-03`): the controller
-copies that file into the workspace, opens the copy through the shared
-regular-file reader, re-hashes it into a sealed memfd (`MFD_EXEC` for the
+The trial input is a strict `muhash-rpc-trial-input-v2` object, and unknown
+or missing keys are rejected. It carries the coordinates, endpoint,
+credential file reference, timeout, response cap, corpus, expected frozen
+tip and the controller pre-receipt reference. The campaign config is a
+strict `muhash-rpc-campaign-config-v2` object. It binds one Core arm, whose
+`backend` is always `coinsdb`, to one bitcoin-rs arm, whose `backend` is
+exactly one of `fjall`, `rocksdb` or `redb`. It also binds the single cache
+policy, the corpus, and the pinned binaries and commands. `{binary}` is
+copied and re-hashed before every spawn. `{config}` is required, so the
+receipt's pinned config is the file the daemon received
+(`docs/contracts/muhash-rpc.md` `MRPC-03`). The controller copies that file
+into the workspace and opens the copy through the shared regular-file
+reader. It re-hashes the copy into a sealed memfd (`MFD_EXEC` for the
 binary, `MFD_NOEXEC_SEAL` for `{config}`), and passes `/proc/self/fd/<n>`
-to the child. `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and
-`{cookie}` are the only other placeholders. Readiness requires the listening
-socket inode to belong to the spawned child. The timed query is sent only
-after the ESTABLISHED peer inode belongs to that same attested process
-(`MRPC-02`). The controller owns process lifecycle and `/proc`
-fault and I/O snapshots, writes each pre-receipt/trial/observation/post-receipt
-triple, and then hands the same 14 triples to `aggregate`. A second backend
-is a second campaign and a second result file.
+to the child. `{rpc_bind}`, `{rpc_port}`, `{data_dir}` and `{cookie}` are
+the only other placeholders. Readiness requires the listening socket inode
+to belong to the spawned child. The timed query is sent only after the
+ESTABLISHED peer inode belongs to that same attested process (`MRPC-02`).
+The controller owns the process lifecycle and the `/proc` fault and I/O
+snapshots. It writes each pre-receipt/trial/observation/post-receipt
+triple, then hands the same 14 triples to `aggregate`. A second backend is
+a second campaign and a second result file.
 
-The aggregate manifest is a strict
-`muhash-rpc-aggregate-input-v2` object carrying the campaign, the single
-policy, the corpus, and the 14 triple references in schedule order; each
-triple pins its trial input, pre-receipt, observation, and post-receipt
-files. Every referenced file must already exist with its declared size and
-hash; the comparator never fetches anything. Output paths must not already
-exist. Publication establishes namespace trust component by component:
-every ancestor is opened with `O_NOFOLLOW` from the previously opened
-directory descriptor, and any ancestor an untrusted user could rename
-through is refused unless it follows the root-owned sticky `01777`
-contract with an effective-user-owned, non-writable child. The record is
-written to an anonymous `O_TMPFILE` inode in the held trusted directory,
-fsynced, and the parent's namespace identity is re-established (a fresh
-trusted traversal must resolve to the same inode) immediately before
-publishing with `linkat(AT_EMPTY_PATH)` against the still-open descriptor;
-a rename/rebind of the requested pathname therefore refuses instead of
-returning a success the caller cannot see. No replaceable temporary name
-ever exists, a final inode check proves the published bytes are the
-record, and if any verification or durability step fails after the link,
-the linked name is removed through the held directory descriptor only
-after a no-follow check that it still identifies the linked inode,
-followed by a best-effort directory sync — a substituted inode is never
-removed. A refused run or caught post-link failure leaves no comparator-owned
-partial record. An uncatchable interruption after `linkat` can leave a complete
-record whose final durability check did not run.
+The aggregate manifest is a strict `muhash-rpc-aggregate-input-v2` object.
+It carries the campaign, the single policy, the corpus, and the 14 triple
+references in schedule order. Each triple pins its trial input, pre-receipt,
+observation and post-receipt files. Every referenced file must already
+exist with its declared size and hash. The comparator never fetches
+anything. Output paths must not already exist. Publication establishes
+namespace trust component by component. Every ancestor is opened with
+`O_NOFOLLOW` from the previously opened directory descriptor. Any ancestor
+that an untrusted user could rename through is refused, unless it follows
+the root-owned sticky `01777` contract with an effective-user-owned,
+non-writable child. The record is written to an anonymous `O_TMPFILE` inode
+in the held trusted directory, and fsynced. The parent's namespace identity
+is then re-established immediately before publishing: a fresh trusted
+traversal must resolve to the same inode. Publication uses
+`linkat(AT_EMPTY_PATH)` against the still-open descriptor. A rename or
+rebind of the requested pathname therefore refuses, instead of returning a
+success the caller cannot see. No replaceable temporary name ever exists.
+A final inode check proves the published bytes are the record. If any
+verification or durability step fails after the link, the linked name is
+removed through the held directory descriptor. That removal happens only
+after a no-follow check that the name still identifies the linked inode,
+and it is followed by a best-effort directory sync. A substituted inode is
+never removed. A refused run or a caught post-link failure leaves no
+comparator-owned partial record. An uncatchable interruption after `linkat`
+can leave a complete record whose final durability check did not run.
 
 ### Status
 
 The protocol contract above is implemented and covered by local fixture
-tests, including a lifecycle-owned campaign against fixture RPC daemons for
-every bitcoin-rs backend (`fjall`, `rocksdb`, `redb`) paired with a Core
-arm. The live evidence is not: no unmodified-daemon smoke has confirmed
-that both Bitcoin Core 31.1 and the bitcoin-rs RPC server accept the exact
-triplet against a frozen-tip corpus. Any future comparative claim must come
-from executing that campaign against unmodified daemons and publishing its
-result file; until then this document records a controller, not a
-measurement.
+tests. One test is a lifecycle-owned campaign against fixture RPC daemons
+for every bitcoin-rs backend (`fjall`, `rocksdb`, `redb`) paired with a
+Core arm. The live evidence is not present. No unmodified-daemon smoke has
+confirmed that both Bitcoin Core 31.1 and the bitcoin-rs RPC server accept
+the exact triplet against a frozen-tip corpus. Any future comparative claim
+must come from executing that campaign against unmodified daemons and
+publishing its result file. Until then this document records a controller,
+not a measurement.

@@ -8,7 +8,7 @@ Status: `planned_not_executed`, as defined in [`README.md`](README.md#status-voc
 
 ## CLI and verification boundary
 
-The runner and analyzer live side by side in `tools/benchmark-campaign/` with zero third-party Python dependencies (Python `>= 3.11`; `uv` runs the documented offline synthetic probe; live validation and campaign runs require a Linux x86 host exposing `/proc/cpuinfo` `model name` and `os.sched_getaffinity(0)`, plus `taskset` and `perf` with permission to count `task-clock,cycles:u,instructions:u`).
+The runner and analyzer live side by side in `tools/benchmark-campaign/` and have zero third-party Python dependencies. They need Python `>= 3.11`, and `uv` runs the documented offline synthetic probe. Live validation and campaign runs need a Linux x86 host that exposes `/proc/cpuinfo` `model name` and `os.sched_getaffinity(0)`. That host also needs `taskset` and `perf`, with permission to count `task-clock,cycles:u,instructions:u`.
 
 ```sh
 # Validate registration schema, file hashes, live CPU affinity, and CPU model (launches nothing):
@@ -27,7 +27,7 @@ python3 tools/benchmark-campaign/measured_analyze.py \
 uv run --offline --no-project --script tools/benchmark-campaign/test_measured_campaign.py
 ```
 
-Only `measured_runner.py run --registration /abs/path/to/registration.json` launches benchmark child processes, and it refuses to start unless `status` is `"registered"`, `campaign_root` does not yet exist, and every static and live check passes. `--help` on any subcommand exits without reading or launching measurements.
+Only `measured_runner.py run --registration /abs/path/to/registration.json` launches benchmark child processes. It refuses to start unless three conditions hold: `status` is `"registered"`, `campaign_root` does not yet exist, and every static and live check passes. `--help` on any subcommand exits without reading or launching measurements.
 
 Rust benchmark binaries in the four campaign targets also expose untimed inspection and verification flags before Criterion starts:
 
@@ -36,7 +36,7 @@ Rust benchmark binaries in the four campaign targets also expose untimed inspect
 - `--mrp-verify` runs the untimed fixture, residency, oracle, and identity assertions for the target's rows without emitting campaign sample records (supported on all four campaign bench binaries, including `signature_verification`). On `sync_pipeline` it also prints the `corpus` and `node_identity` pin lines that [freeze-time capture](#freeze-time-capture) copies into the registration.
 - `--list` lists ordinary Criterion benchmark IDs (`sync_pipeline --list` enters Criterion benchmark registration and also executes non-campaign timed proxy preludes; those printed timings are not campaign evidence).
 
-Untimed `--mrp-verify`, `--mrp-verify-counted`, and `--mrp-list-counted` runs, `--list` inventories (including `sync_pipeline --list`'s non-campaign timed proxy preludes), and `test_measured_campaign.py` prove harness mechanics and rejection boundaries on synthetic fixtures. None of them collect campaign samples, supply frozen build or baseline receipts, or establish a performance verdict.
+Untimed `--mrp-verify`, `--mrp-verify-counted` and `--mrp-list-counted` runs prove harness mechanics and rejection boundaries on synthetic fixtures. So do `--list` inventories, including `sync_pipeline --list`'s non-campaign timed proxy preludes, and `test_measured_campaign.py`. None of these runs collects campaign samples, supplies frozen build or baseline receipts, or establishes a performance verdict.
 
 ## Registration
 
@@ -49,7 +49,7 @@ A campaign starts from one complete operator-supplied registration JSON object. 
 - `validate_registration(reg, check_output_absent=True)` is the static full-schema validator. It checks every key, row, inventory map, file hash, build receipt, and baseline evidence document against the real files on disk without querying caller CPU affinity or `/proc/cpuinfo`.
 - `validate_live_registration(reg, check_output_absent=True)` runs `validate_registration` and then checks the live host: `host.cpu` must belong to `os.sched_getaffinity(0)`, and the `model name` parsed from the `/proc/cpuinfo` processor block for `host.cpu` (`read_cpu_model(host.cpu)`, with no first-block or echoed-label fallback) must equal `host.cpu_model`.
 
-The `validate`, `plan`, and `run` subcommands call `validate_live_registration` (`plan` sets `check_output_absent=False`). `measured_analyze.py` states no registration rules of its own: it first binds its own executing file (`Path(__file__).resolve()` and fresh SHA-256 bytes, uncached on every call) to `scripts.analyzer`, then verifies `scripts.runner.sha256` against the exact bytes at `scripts.runner.path` before loading `validate_registration(reg, check_output_absent=False)` (cached only under that verified digest plus file path). Instead of checking the analyzer process's own CPU affinity, the analyzer binds every recorded case's `host_before` and `host_after` (`chosen_cpu`, `chosen_cpu_model`) and `command[:3]` (`["taskset", "-c", "<cpu>"]`) to `host.cpu` and `host.cpu_model`.
+The `validate`, `plan` and `run` subcommands call `validate_live_registration`, and `plan` sets `check_output_absent=False`. `measured_analyze.py` states no registration rules of its own. It first binds its own executing file (`Path(__file__).resolve()` and fresh SHA-256 bytes, uncached on every call) to `scripts.analyzer`. It then verifies `scripts.runner.sha256` against the exact bytes at `scripts.runner.path`. Only after that does it load `validate_registration(reg, check_output_absent=False)`. That call is cached only under the verified digest plus file path. The analyzer does not check its own process CPU affinity. Instead it binds three things to `host.cpu` and `host.cpu_model`: every recorded case's `host_before` and `host_after` (`chosen_cpu`, `chosen_cpu_model`), and `command[:3]` (`["taskset", "-c", "<cpu>"]`).
 
 ### Top-level registration keys
 
@@ -76,7 +76,7 @@ All 16 top-level keys are required. Any missing or unrecognized key (including r
 
 ### Identity digests, binary keys, build receipts, and baseline evidence
 
-`identity_digest(files)` is the lowercase SHA-256 hex digest of `json.dumps(files, sort_keys=True, separators=(",", ":"))` encoded as UTF-8. A tree's `source_digest` is `identity_digest(source_fingerprints[tree])`; its `lock_digest` is `identity_digest(lock_fingerprints[tree])`.
+`identity_digest(files)` is the lowercase SHA-256 hex digest of `json.dumps(files, sort_keys=True, separators=(",", ":"))` encoded as UTF-8. A tree's `source_digest` is `identity_digest(source_fingerprints[tree])`. Its `lock_digest` is `identity_digest(lock_fingerprints[tree])`.
 
 The ten required keys in `binaries` are `<tree>/<bench_target>`:
 
@@ -86,9 +86,9 @@ The ten required keys in `binaries` are `<tree>/<bench_target>`:
 - `control_T3/sync_pipeline`
 - `control_T4/sync_pipeline`, `control_T4/signature_verification`
 
-For every gated row (`acceptance`, `primary`, `guard_keep`, `connect_guard`), all binary keys that share a `bench_target` (`candidate/<bench>` and every gated `control_T<n>/<bench>`) must have pairwise distinct `sha256` digests. A control binary whose hash equals `candidate/<bench>` or another gated control on the same bench is rejected as a zero-delta or shared build. Diagnostic rows (`signature_verification/*`) and `report_only` rows do not require distinct binary hashes when a control lever does not touch their crate; their provenance is established by build receipts.
+Consider every gated row (`acceptance`, `primary`, `guard_keep`, `connect_guard`). All binary keys that share a `bench_target` (`candidate/<bench>` and every gated `control_T<n>/<bench>`) must have pairwise distinct `sha256` digests. The runner rejects a control binary whose hash equals `candidate/<bench>` or another gated control on the same bench, as a zero-delta or shared build. Diagnostic rows (`signature_verification/*`) and `report_only` rows do not need distinct binary hashes when a control lever does not touch their crate. Build receipts establish their provenance.
 
-Each `binaries[key].receipt` JSON object must contain at least these fields with exact type-strict values (additional informational fields such as command lines, toolchain strings, log paths, or isolated output roots are allowed and ignored by the schema validator):
+Each `binaries[key].receipt` JSON object must contain at least these fields with exact type-strict values. Additional informational fields are allowed and ignored by the schema validator, such as command lines, toolchain strings, log paths or isolated output roots:
 
 | Receipt field | Required value |
 |---|---|
@@ -103,7 +103,7 @@ Each `binaries[key].receipt` JSON object must contain at least these fields with
 | `base_commit` | Derived controls only (`control_T1..control_T4`): lowercase 40- or 64-hex git commit the control was derived from; must equal the candidate `source_commit`. Forbidden on `candidate`. |
 | `transform` | Derived controls only: nonempty single-lever derivation string naming the neutralized lever (distinct per control tree). Forbidden on `candidate`. |
 
-Frozen trees remain source-only with no `.git` inside any root; provenance lives in these external receipts, never in the trees. Content hashes (`source_digest`, `bench_source_sha256`, `lock_digest`, `binary_sha256`) stay authoritative: provenance never substitutes for a digest check, and a base commit never identifies transformed contents. Every `candidate/*` receipt must share one `source_commit`; every control receipt's `base_commit` must equal it, with a distinct per-tree `transform`. Never invent a commit for a modified tree or claim a base commit identifies its transformed bytes.
+Frozen trees stay source-only, with no `.git` inside any root. Provenance lives in these external receipts, never in the trees. Content hashes (`source_digest`, `bench_source_sha256`, `lock_digest`, `binary_sha256`) stay authoritative. Provenance never substitutes for a digest check, and a base commit never identifies transformed contents. Every `candidate/*` receipt must share one `source_commit`. Every control receipt's `base_commit` must equal it, with a distinct per-tree `transform`. Never invent a commit for a modified tree. Never claim a base commit identifies its transformed bytes.
 
 Each entry in `source_baseline_evidence` and `dependency_baseline_evidence` must be a JSON object with exact required fields (additional informational fields are allowed):
 
@@ -198,7 +198,7 @@ Each target's `rows` list must match the table below in exact order and exact fi
 | T4 | 3 | `connect_unseen_signed_spend_block/flat` | `counted` | `connect_guard` | `sync_pipeline` | `units_per_iter: 1` |
 | T4 | 4..7 | `signature_verification/{ecdsa,schnorr}/{hit,miss}` | `criterion` | `diagnostic` | `signature_verification` | `units_per_iter: 64` |
 
-Before freezing a registration, confirm every Criterion ID with `--list` and every counted ID with `--mrp-list-counted` on the built executables (`insert_fill` and `candidate` list each counted ID with an `mrp_counted ` prefix; `sync_pipeline` lists each counted ID bare). The three T4 connect rows use the pinned `/flat` IDs from the table above and execute as `kind: "counted"` (`--mrp-counted`) rather than Criterion. No counted row is registered a second time as a Criterion row.
+Before you freeze a registration, confirm every Criterion ID with `--list` and every counted ID with `--mrp-list-counted` on the built executables. `insert_fill` and `candidate` list each counted ID with an `mrp_counted ` prefix, and `sync_pipeline` lists each counted ID bare. The three T4 connect rows use the pinned `/flat` IDs from the table above. They execute as `kind: "counted"` (`--mrp-counted`), not as Criterion. No counted row is registered a second time as a Criterion row.
 
 ### Canonical schedule, execution guarantees, and regeneration rules
 
@@ -282,7 +282,7 @@ Per-target evaluation in `measured_analyze.py`:
   - For each `connect_guard` row, the median regression is `(M_candidate - M_control) / M_control` and the p99 regression is `(p99_candidate - p99_control) / p99_control`. If either guard exceeds `GUARD_MEDIAN_MAX = 0.03` (3% median regression) or `GUARD_P99_MAX = 0.05` (5% p99 regression), T4 is `REGRESSION` (`keep = false`).
   - Otherwise, T4 is `NON_REGRESSION_EVIDENCED` with `keep: true` iff the primary row satisfies the promotion rule (`win_ratio >= 1.05` and `above_zero_noise`). The four `signature_verification/{ecdsa,schnorr}/{hit,miss}` rows are reported as `diagnostic`.
 
-Overall campaign verdict: `INCONCLUSIVE` if any target is `INCONCLUSIVE`; else `REGRESSION` if any target is `REGRESSION`; else `NON_REGRESSION_EVIDENCED` with per-target `keep` flags in `reasons`.
+The overall campaign verdict is `INCONCLUSIVE` if any target is `INCONCLUSIVE`. Otherwise it is `REGRESSION` if any target is `REGRESSION`. Otherwise it is `NON_REGRESSION_EVIDENCED`, with per-target `keep` flags in `reasons`.
 
 ### Percentile populations
 
@@ -302,19 +302,19 @@ Every verdict JSON records `metadata.authorities` as:
 
 ## Counted samples
 
-Criterion sizes iterations from warmup wall time, which includes untimed per-iteration setup and teardown (`iter_batched_ref` / `iter_custom`), but records only the timed span in `sample.json`. For benchmarks whose untimed setup or teardown dominates wall time, wall-time sizing can choose an iteration count whose recorded timed sum falls below the 1-second raw-interval floor.
+Criterion sizes iterations from warmup wall time, and that wall time includes untimed per-iteration setup and teardown (`iter_batched_ref` / `iter_custom`). Criterion records only the timed span in `sample.json`. In benchmarks where untimed setup or teardown dominates the wall, this sizing can choose a small iteration count. The recorded timed sum can then fall below the 1-second raw-interval floor.
 
-To enforce the 1-second measured-work floor directly without pilots, guessed repeat multipliers, retries, or threshold waivers, the 12 rows with substantial untimed setup/teardown use `kind: "counted"`:
+The 12 rows with substantial untimed setup and teardown use `kind: "counted"`. That enforces the 1-second measured-work floor directly, without pilots, guessed repeat multipliers, retries or threshold waivers:
 
 - T1 `insert_fill`: `mempool_insert_entry/fill/63-member-cluster`
 - T1 `candidate`: `mining_snapshot_operation/mining_snapshot/{64,512,2048,20000,50000,100000}`, `mining_snapshot_operation/mining_snapshot/chains/depth-25`, and `indexed_selection_read_guard/read_guard/100000`
 - T4 `sync_pipeline`: `connect_admission_throughput/flat`, `connect_admitted_signed_spend_block/flat`, and `connect_unseen_signed_spend_block/flat`
 
-All other Criterion rows (`fill/{200,800,3200,12800,51200}`, `assemble_candidate/end_to_end/*`, and `signature_verification/*`) remain `kind: "criterion"`, and T2/T3 remain `kind: "node"`.
+All other Criterion rows (`fill/{200,800,3200,12800,51200}`, `assemble_candidate/end_to_end/*` and `signature_verification/*`) remain `kind: "criterion"`. T2/T3 remain `kind: "node"`.
 
 ### Shared Rust sampler contract
 
-`tools/benchmark-support/measured_samples.rs` is a std-only Rust module included via a relative `#[path]` attribute in `crates/mempool/benches/insert_fill.rs`, `crates/mining/benches/candidate.rs`, and `crates/node/benches/sync_pipeline.rs`. It introduces no new crate or dependency and is pinned in `bench_fingerprints` across all five source trees.
+`tools/benchmark-support/measured_samples.rs` is a std-only Rust module. Three benches include it via a relative `#[path]` attribute: `crates/mempool/benches/insert_fill.rs`, `crates/mining/benches/candidate.rs` and `crates/node/benches/sync_pipeline.rs`. It introduces no new crate or dependency, and `bench_fingerprints` pins it across all five source trees.
 
 - **Public module surface**:
   - `pub(crate) fn run(row: &str, mut unit: impl FnMut() -> std::time::Duration)`
@@ -324,7 +324,7 @@ All other Criterion rows (`fill/{200,800,3200,12800,51200}`, `assemble_candidate
 
 ### Shared snapshot-order contract
 
-`tools/benchmark-support/snapshot_order.rs` is the deduplicated chunk-order fingerprint shared by `crates/mempool/benches/insert_fill.rs` and `crates/mining/benches/candidate.rs`, included via a relative `#[path]` attribute in both benches. It introduces no new crate or dependency and is pinned in `bench_fingerprints` across all five source trees.
+`tools/benchmark-support/snapshot_order.rs` holds the deduplicated chunk-order fingerprint. `crates/mempool/benches/insert_fill.rs` and `crates/mining/benches/candidate.rs` share it, and both benches include it via a relative `#[path]` attribute. It introduces no new crate or dependency, and `bench_fingerprints` pins it across all five source trees.
 
 - **Public module surface**:
   - `pub(crate) const FNV_OFFSET: u64`
@@ -336,7 +336,7 @@ All other Criterion rows (`fill/{200,800,3200,12800,51200}`, `assemble_candidate
 
 ### Wire format and single-validator rule
 
-Each counted sample is printed as one line on stdout: the literal prefix `MRP_COUNTED_SAMPLE ` (including one trailing ASCII space) followed by a compact JSON object with exact keys:
+Each counted sample is printed as one line on stdout. The line starts with the literal prefix `MRP_COUNTED_SAMPLE `, including one trailing ASCII space. A compact JSON object with exact keys follows:
 
 ```json
 {"bench":"<row_id>","sample":0,"warmup":true,"unit_ns":[1000000000],"unit_count":1,"total_ns":1000000000}
@@ -351,9 +351,9 @@ Each counted sample is printed as one line on stdout: the literal prefix `MRP_CO
 | `unit_count` | Integer equal to `len(unit_ns)`. |
 | `total_ns` | Integer equal to `sum(unit_ns)` (`<= 2^64 - 1`), `>= 1_000_000_000`, and satisfying the first-crossing rule `total_ns - unit_ns[-1] < 1_000_000_000` (all completed units prior to the final unit summed to strictly less than `1` s). |
 
-Auxiliary fixture diagnostics on stdout lines that do not start with `MRP_COUNTED_SAMPLE` are ignored by the parser and retained in `stdout.log`. Any line starting with `MRP_COUNTED_SAMPLE` that lacks the single space, carries invalid JSON, omits or adds keys, names the wrong `bench`, disorders or duplicates `sample` indices, violates `unit_count == len(unit_ns)` or `total_ns == sum(unit_ns)`, falls below `1_000_000_000` ns (warmup included), or violates the first-crossing stop rule raises `RegistrationError` and fails the case with `INCONCLUSIVE`.
+The parser ignores auxiliary fixture diagnostics on stdout lines that do not start with `MRP_COUNTED_SAMPLE`, and keeps them in `stdout.log`. A line raises `RegistrationError` and fails the case with `INCONCLUSIVE` when any of these conditions holds. The line starts with `MRP_COUNTED_SAMPLE` but lacks the single space. The line carries invalid JSON, omits a key or adds a key, or names the wrong `bench`. The line disorders or duplicates `sample` indices. The line violates `unit_count == len(unit_ns)` or `total_ns == sum(unit_ns)`. The line falls below `1_000_000_000` ns, warmup included, or violates the first-crossing stop rule.
 
-Counted records in `results.json` store `counted_stdout_path`, `counted_warmups_seen: 1`, `counted_warmup_samples` (the retained raw warmup JSON object), `counted_samples` (the ten retained raw measured JSON objects), and neutral numeric fields `sample_iters` (`unit_count` values), `sample_times_ns` (`total_ns` values), `normalized_ns` (`total_ns / unit_count` floats), `case_median_ns`, and `case_std_ns` (`criterion_sample_path` remains `null`; counted output is never labeled a Criterion artifact). `measured_runner.py` owns `parse_counted_stdout`, `counted_case_fields`, and the single authoritative `validate_counted_samples` function, which `measured_analyze.py` invokes through the hash-verified runner module on the retained raw objects.
+Counted records in `results.json` store `counted_stdout_path`, `counted_warmups_seen: 1`, `counted_warmup_samples` (the retained raw warmup JSON object) and `counted_samples` (the ten retained raw measured JSON objects). They also store neutral numeric fields: `sample_iters` (`unit_count` values), `sample_times_ns` (`total_ns` values), `normalized_ns` (`total_ns / unit_count` floats), `case_median_ns` and `case_std_ns`. `criterion_sample_path` remains `null`, because counted output is never labeled a Criterion artifact. `measured_runner.py` owns `parse_counted_stdout`, `counted_case_fields` and the single authoritative `validate_counted_samples` function. `measured_analyze.py` invokes that function through the hash-verified runner module, on the retained raw objects.
 
 ## Control trees
 

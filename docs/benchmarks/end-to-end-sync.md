@@ -21,7 +21,7 @@ Both lanes run under full validation (`--assume-valid-height 0`), strict-Rust cr
 | Restart at intermediate committed ancestor | recovered tip and coins equal; fence reopened only after reconciliation | `planned_not_executed` |
 | Stage histograms (`node.apply_block.*`) | inclusive per-stage histograms reported beside the wall, never summed | `planned_not_executed` |
 
-Targets are contracts, not measurements: no regression against the T02 baseline on any applicable cell (cost, latency, RSS, bytes not greater; throughput not less), and promotion of any optimization only by the acceptance rule below.
+The targets are contracts, not measurements. No applicable cell may regress against the T02 baseline: cost, latency, RSS and bytes must not increase, and throughput must not decrease. Any optimization is promoted only by the acceptance rule below.
 
 ## Required identities per sample
 
@@ -58,7 +58,7 @@ The retired machine-readable artifacts preserved every recorded field and stage 
 | Inferred `parverify` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `3023eb0` | 296.211s | 506.399 blocks/s | 2.210 GiB | rs-replay-150k-parverify (retired) |
 | Inferred `kernel` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `fb2227e` | 232.208s | 645.977 blocks/s | 2.219 GiB | rs-replay-150k-kernel (retired) |
 
-All five artifacts passed these structural checks when they were in the tree: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
+All five artifacts passed these structural checks when they were in the tree. The checks are: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
 
 ### Same-range observations
 
@@ -185,13 +185,13 @@ SHA-256 digests of the retired JSON artifacts, kept so an external copy can be m
 
 ### Full recorded stage timers
 
-These are historical measurements taken under the pre-#1195 metric names on
-retired artifacts; per the [observability boundary](../observability.md)
-(OBS-06) the fine-grained stage timers below moved to `tracing::` profile
-events and the surviving metric hooks are the
-[hot-path ledger](hot-path-ledger.toml) keys. The tables are
-evidence of what those runs cost, not a promise that every series still
-exists.
+These are historical measurements. They were taken on retired artifacts
+under the pre-#1195 metric names. Per the
+[observability boundary](../observability.md) (OBS-06), the fine-grained
+stage timers below moved to `tracing::` profile events. The surviving
+metric hooks are the [hot-path ledger](hot-path-ledger.toml) keys.
+The tables are evidence of what those runs cost. They do not promise
+that every series still exists.
 
 #### Current-campaign control, 0–150,000
 

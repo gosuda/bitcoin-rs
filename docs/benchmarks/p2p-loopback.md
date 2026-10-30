@@ -20,7 +20,7 @@ Required identities per sample: six identities of [`README.md`](README.md), enfo
 
 ## Comparator contract (prior text, not end-state proof)
 
-Harness `tools/benchmark-campaign/p2p_loopback.py`, tests `tools/benchmark-campaign/test_p2p_loopback.py`; addresses issue #35. Feeds Core 31.1 and bitcoin-rs the identical external peer experience (same frames, delays, ceilings, stalls, disconnects, order, parameters); compares externally observed wall time only after every custody and correctness gate passes.
+The harness is `tools/benchmark-campaign/p2p_loopback.py`, and its tests are `tools/benchmark-campaign/test_p2p_loopback.py`. It addresses issue #35. It feeds Core 31.1 and bitcoin-rs the identical external peer experience: the same frames, delays, ceilings, stalls, disconnects, order and parameters. It compares externally observed wall time only after every custody and correctness gate passes.
 
 - Config `p2p-loopback-config-v1` binds every arm: ordered complete-frame corpus (magic/padding/length/checksum validated at load); schedule (`send`/`stall`/`disconnect`, every frame exactly once, disconnect final); peer params (magic, version, services, timeouts, buffers, transcript digest); lifecycle (`fresh`/`restart`, generation, seeded/expected state); binaries SHA-256 pinned, `command[0]`/`restart_command[0]` MUST be the literal `{binary}` placeholder, expanded to a per-arm verified `0o500` copy re-hashed `O_NOFOLLOW` before every spawn.
 - Execution: listener on `127.0.0.1` at ephemeral port; `shell=False` list-argv substitution of `{binary}`, `{peer_host}`, `{peer_port}`, `{data_dir}`, `{state_path}`; magic-prefixed candidate multiplexing under one absolute arm deadline; `time.monotonic_ns` clocks; bounded inputs (frames ≤ 4,000,024 B, corpus/transcripts ≤ 16 MiB, schedules ≤ 4,096 steps; configs ≤ 40 MiB, argv ≤ 256, depth ≤ 32, `O_NOFOLLOW` regular files); binary custody one-descriptor open/hash/copy ≤ 1 GiB; pacing in 64 KiB chunks with fixed ceilings (connect ≤ 10 s, I/O ≤ 120 s, arm ≤ connect + 180 s); Linux `PR_SET_CHILD_SUBREAPER` ownership with TERM/KILL/reap-to-empty descendant drain; 7 pairs, even pairs Core-first, odd pairs bitcoin-rs-first.
@@ -32,4 +32,4 @@ Harness `tools/benchmark-campaign/p2p_loopback.py`, tests `tools/benchmark-campa
 python3 tools/benchmark-campaign/p2p_loopback.py --config <config.json> --output <result.json>
 ```
 
-Conclusion: loopback isolates protocol-facing overhead (framing, handshake, identical-stimulus processing), NOT download-bound IBD; host-level claims still need CONCEPTS.md *Matched-harness comparison*.
+Conclusion: loopback isolates protocol-facing overhead, which is framing, handshake and identical-stimulus processing. It is NOT download-bound IBD. Host-level claims still need CONCEPTS.md *Matched-harness comparison*.
