@@ -10,3 +10,10 @@
 - Preserve operator data. Schema changes must use the documented migration or replay path and must never reset data implicitly.
 - Run the smallest meaningful verification for the changed surface. Broad integration, reference, platform, and performance campaigns belong to their owning CI or evidence workflows.
 - Describe implemented behavior as implemented and target design as target design. Do not claim correctness, compatibility, durability, or performance without the evidence owned by that claim.
+- Keep each proof beside its owner. Put Kani harnesses in `src/<owner>/proofs.rs` behind `#[cfg(kani)]`, Rust reference models in `src/<owner>_model.rs`, and Lean proofs in `docs/lean/`, one file for each Rust owner module. Keep TLA+ models in `docs/models/<Model>/<SubMachine>.tla` for liveness only. Do not commit `sorry` or `admit`.
+- When you change a module that has a `proofs.rs` file, a `*_model.rs` model, or a Lean file in `docs/lean/`, run `./scripts/ci-pr.sh proofs`. CI does not run this stage.
+- When a test, Kani harness, reference model, Lean theorem, or TLA+ module proves a contract clause, put a tag line directly above it. The tag line holds only clause IDs: `// RCV-04, SYNC-05` in Rust, `-- RCV-04` in Lean, and `\* RCV-04` in TLA+.
+- Do not edit generated files. Run `cargo run --locked -p contract-index` to regenerate `docs/contracts/evidence-index.md` and the contract list in `docs/contracts/README.md`. Run `scripts/extract_lean.sh` to regenerate `docs/lean/Extracted/`.
+- Give each new test an expected value from a specification, an external vector, a reference implementation, or an invariant, never from the code under test. Make the test fail before the fix. Do not add snapshot, wording, or source-text tests.
+- Do not write source comments, except `// SAFETY:` comments, legal notices, contract tag lines, and rustdoc that states an invariant that no name, type, or test can carry.
+- Write contracts, policies, and other maintainer documents in ASD-STE100. Write operator guides in plain language.
