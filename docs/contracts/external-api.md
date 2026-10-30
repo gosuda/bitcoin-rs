@@ -172,6 +172,7 @@ wallet interoperability remain unverified.
 
 - Owner: `bip22_reject_reason` in `crates/node/src/mining.rs` for the `ApplyError` arms, delegating to `consensus_reject_reason` and `chain_reject_reason` in `crates/mining/src/bip22.rs`.
 - Proposal and `submitblock` project apply/consensus failures as Core `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`, `bad-cb-amount`, `high-hash`, `time-too-old`, …). Operational refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- The first failing check names the reason. Context-free checks run in Core `CheckBlock` order: merkle root and mutation, size limits, coinbase placement, transaction checks, then legacy sigops. Witness malleation and block weight run after them, in Core `ContextualCheckBlock` order. Owner: `verify_block_rules_precomputed` in `crates/consensus/src/verify_block.rs`.
 - A body without a coinbase holding a 64-byte witness-stripped transaction is a mutated body, not an invalid header, and still projects `bad-cb-missing`. A signet block failing BIP325 solution is `bad-signet-blksig`, checked at commit after block rules and not by proposal mode. Storage/UTXO/durable-head/internal-verifier failures propagate as `MiningControlError::Failed`, never as BIP22 rejection (same for `generateblock` prevalidation). Consensus `Display` remains log text; this mapping is the BIP22 wire owner.
 
 ### `API-20`: GBT `vbrequired` is always 0

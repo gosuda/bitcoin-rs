@@ -3,6 +3,7 @@
     reason = "reference failures must identify the failed fixture step"
 )]
 
+use bitcoin::hashes::Hash;
 use bitcoin_rs_consensus::verify_block::verify_block_non_contextual;
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};
@@ -144,4 +145,234 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
         );
     }
     core.stop().expect("stop reference process");
+}
+
+fn spawn_consensus_pair() -> Result<(ProcessNode, ProcessNode), Box<dyn std::error::Error>> {
+    let core = ProcessNode::spawn_with(Kind::Core, &SpawnOptions::default())?;
+    let node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(std::path::Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))),
+            ..SpawnOptions::default()
+        },
+    )?;
+    Ok((core, node))
+}
+
+fn regtest_genesis() -> bitcoin::Block {
+    bitcoin::constants::genesis_block(bitcoin::Network::Regtest)
+}
+
+fn mine(mut header: bitcoin::block::Header) -> bitcoin::block::Header {
+    header.nonce = 0;
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce = header.nonce.checked_add(1).expect("regtest PoW");
+    }
+    header
+}
+
+fn genesis_child_block(txdata: Vec<bitcoin::Transaction>) -> bitcoin::Block {
+    let genesis = regtest_genesis();
+    let mut block = bitcoin::Block {
+        header: bitcoin::block::Header {
+            version: bitcoin::block::Version::from_consensus(0x2000_0000),
+            prev_blockhash: genesis.block_hash(),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: genesis.header.time.checked_add(600).expect("regtest time"),
+            bits: genesis.header.bits,
+            nonce: 0,
+        },
+        txdata,
+    };
+    block.header.merkle_root = block.compute_merkle_root().expect("nonempty fixture");
+    block.header = mine(block.header);
+    block
+}
+
+fn coinbase_tx(
+    script_sig: Vec<u8>,
+    witness: bitcoin::Witness,
+    outputs: Vec<bitcoin::TxOut>,
+) -> bitcoin::Transaction {
+    bitcoin::Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::from_bytes(script_sig),
+            sequence: bitcoin::Sequence::MAX,
+            witness,
+        }],
+        output: outputs,
+    }
+}
+
+fn submit(
+    node: &mut ProcessNode,
+    block: &bitcoin::Block,
+) -> Result<sonic_rs::Value, Box<dyn std::error::Error>> {
+    Ok(node.rpc(
+        "submitblock",
+        &json!([bitcoin::consensus::encode::serialize_hex(block)]),
+    )?)
+}
+
+#[test]
+fn wrong_merkle_two_coinbase_body_is_a_merkle_failure_and_keeps_the_header()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut core, mut node) = spawn_consensus_pair()?;
+    let coinbase = coinbase_tx(
+        vec![0x02, 0x00],
+        bitcoin::Witness::new(),
+        vec![bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    );
+    let real = genesis_child_block(vec![coinbase.clone()]);
+    let mut damaged = real.clone();
+    let mut second = coinbase;
+    second.input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x02, 0x01]);
+    damaged.txdata.push(second);
+
+    let core_reason = submit(&mut core, &damaged)?;
+    assert_eq!(
+        core_reason,
+        json!("bad-txnmrklroot"),
+        "Core CheckBlock judges the merkle root before the coinbase count"
+    );
+    let node_reason = submit(&mut node, &damaged)?;
+    assert_eq!(
+        node_reason, core_reason,
+        "the node must report Core's first failing body check, not the later coinbase count"
+    );
+
+    let real_verdict = submit(&mut node, &real)?;
+    assert!(
+        real_verdict.is_null(),
+        "the real body for the same header must stay admissible: {real_verdict}"
+    );
+    core.stop()?;
+    node.stop()?;
+    Ok(())
+}
+
+#[test]
+fn over_weight_body_with_duplicate_inputs_names_the_transaction_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut core, mut node) = spawn_consensus_pair()?;
+    let reserved = [0_u8; 32];
+    let placeholder = {
+        let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        script.extend_from_slice(&[0_u8; 32]);
+        bitcoin::ScriptBuf::from_bytes(script)
+    };
+    let coinbase = coinbase_tx(
+        vec![0x02, 0x00],
+        bitcoin::Witness::from_slice(&[reserved]),
+        vec![
+            bitcoin::TxOut {
+                value: bitcoin::Amount::ZERO,
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0_u8; 900_000]),
+            },
+            bitcoin::TxOut {
+                value: bitcoin::Amount::ZERO,
+                script_pubkey: placeholder,
+            },
+        ],
+    );
+    let duplicated = bitcoin::TxIn {
+        previous_output: bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([9_u8; 32]),
+            vout: 0,
+        },
+        script_sig: bitcoin::ScriptBuf::new(),
+        sequence: bitcoin::Sequence::MAX,
+        witness: bitcoin::Witness::from_slice(&[vec![7_u8; 400_000]]),
+    };
+    let spend = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![duplicated.clone(), duplicated],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
+    };
+    let mut txs = vec![coinbase, spend];
+    let witness_root = bitcoin::Block {
+        header: regtest_genesis().header,
+        txdata: txs.clone(),
+    }
+    .witness_root()
+    .ok_or("witness root")?;
+    let commitment = bitcoin::block::Block::compute_witness_commitment(&witness_root, &reserved);
+    let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    script.extend_from_slice(commitment.as_byte_array());
+    txs[0].output[1].script_pubkey = bitcoin::ScriptBuf::from_bytes(script);
+    let block = genesis_child_block(txs);
+
+    assert!(
+        block.weight().to_wu() > 4_000_000,
+        "the fixture must exceed the block weight limit"
+    );
+    let stripped = 80
+        + 1
+        + block
+            .txdata
+            .iter()
+            .map(bitcoin::Transaction::base_size)
+            .sum::<usize>();
+    assert!(
+        stripped * 4 <= 4_000_000,
+        "the fixture must stay under the stripped size limit so the weight is the only size fault"
+    );
+
+    let core_reason = submit(&mut core, &block)?;
+    assert_eq!(
+        core_reason,
+        json!("bad-txns-inputs-duplicate"),
+        "Core CheckTransaction reports duplicated inputs before its weight limit"
+    );
+    let node_reason = submit(&mut node, &block)?;
+    assert_eq!(
+        node_reason, core_reason,
+        "the node must report Core's transaction failure, not the later weight limit"
+    );
+    core.stop()?;
+    node.stop()?;
+    Ok(())
+}
+
+#[test]
+fn stripped_size_body_names_the_size_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut core, mut node) = spawn_consensus_pair()?;
+    let coinbase = coinbase_tx(
+        vec![0x02, 0x00],
+        bitcoin::Witness::new(),
+        vec![bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0_u8; 1_000_000]),
+        }],
+    );
+    let block = genesis_child_block(vec![coinbase]);
+    assert!(
+        block.weight().to_wu() > 4_000_000,
+        "the fixture must also exceed the block weight limit"
+    );
+
+    let core_reason = submit(&mut core, &block)?;
+    assert_eq!(
+        core_reason,
+        json!("bad-blk-length"),
+        "Core CheckBlock reports the stripped size limit before the weight limit"
+    );
+    let node_reason = submit(&mut node, &block)?;
+    assert_eq!(
+        node_reason, core_reason,
+        "the node must report Core's stripped size limit, not the later weight limit"
+    );
+    core.stop()?;
+    node.stop()?;
+    Ok(())
 }

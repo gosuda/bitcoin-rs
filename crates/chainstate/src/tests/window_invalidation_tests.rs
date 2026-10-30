@@ -248,7 +248,7 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
     assert!(
         matches!(
             error.source,
-            ApplyError::Consensus(ConsensusError::EmptyBlock)
+            ApplyError::Consensus(ConsensusError::BlockBaseSize { .. })
         ),
         "got {:?}",
         error.source
