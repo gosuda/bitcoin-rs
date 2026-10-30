@@ -56,21 +56,21 @@ included — is self-authenticating against the recorded provenance.
 All six fixtures carry `interpreter_parity: true` for the kernel-vs-interpreter
 differential.
 
-Esplora data was fetched from `mempool.space` (the recorded source URLs);
-`blockstream.info` serves the identical transactions under the same API paths
-for independent cross-checking.
+Esplora data was fetched from `mempool.space`, and the manifest records each
+source URL. `blockstream.info` serves the identical transactions under the same
+API paths, for independent cross-checking.
 
 ## Flags
 
-`flags` strings parse via `VerifyFlags::from_core_names` and match the
+`flags` strings parse via `VerifyFlags::from_core_names`. They match the
 derivation in production's `bitcoin_rs_consensus::verify_flags`
-(`crates/consensus/src/verify_block.rs`): `P2SH` is set at every height
-**except** the network's BIP16 exception hash (`Network::is_bip16_p2sh_exception`:
-mainnet block 170060, testnet3 block 394), for which it is omitted (BIP16 is
-otherwise treated as always-on for supported validation paths — hence
-`P2SH`, never `NONE`, on the height-170/2812 legacy fixtures, where it is
-verdict-identical because no P2SH-pattern output is spent), and the remaining
-bits follow mainnet activation heights (BIP66 DERSIG ≥ 363,725; BIP65 CLTV ≥
-388,381; CSV ≥ 419,328; segwit WITNESS+NULLDUMMY ≥ 481,824; TAPROOT ≥
-709,632). They stay within `VerifyFlags::MANDATORY`, the set `kernel_bits()`
-forwards to `bitcoinkernel::verify`.
+(`crates/consensus/src/verify_block.rs`). `P2SH` is set at every height
+(`Network::is_bip16_p2sh_exception`: mainnet block 170060, testnet3 block 394).
+The code omits it for that hash. BIP16 is otherwise treated as always-on
+for supported validation paths. That rule gives `P2SH`, never `NONE`, on the
+height-170/2812 legacy fixtures. Both choices give the same verdict there,
+because no P2SH-pattern output is spent. The remaining bits follow mainnet
+activation heights: BIP66 DERSIG ≥ 363,725, BIP65 CLTV ≥ 388,381, CSV ≥
+419,328, segwit WITNESS+NULLDUMMY ≥ 481,824, and TAPROOT ≥ 709,632. They stay
+within `VerifyFlags::MANDATORY`, the set `kernel_bits()` forwards to
+`bitcoinkernel::verify`.

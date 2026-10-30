@@ -11,7 +11,7 @@ cargo install cargo-fuzz
 
 ## Running a target
 
-From the repository root (`p2p_message` shown; any target below works):
+Run this from the repository root. The example shows `p2p_message`, and any target below works:
 
 ```sh
 cargo +nightly fuzz run p2p_message
@@ -25,7 +25,7 @@ cargo +nightly fuzz run p2p_message
 | `script_eval`    | Production interpreter (`Interpreter::execute_with_prevouts`, fuzz-selected `VerifyFlags`) |
 | `utxo_snapshot`  | Strict native v4 loading; Core v2 metadata, compiled-anchor verification, fixture-body mutations |
 
-The snapshot target also embeds the [independent Core regtest-200 fixture](../crates/utxo/tests/fixtures/core-v2/README.md): 51-byte pinned header preserved, at most 256 input triples as little-endian body-offset/XOR-byte mutations; empty/no-op inputs exercise the complete positive fixture and reach coin decoding with no foreign-format seed. Fixture compiled in; no companion-corpus import needed for that arm.
+The snapshot target also embeds the [independent Core regtest-200 fixture](../crates/utxo/tests/fixtures/core-v2/README.md). The fixture keeps its 51-byte pinned header. It yields at most 256 input triples as little-endian body-offset/XOR-byte mutations. Empty and no-op inputs exercise the complete positive fixture and reach coin decoding with no foreign-format seed. The fixture is compiled in. That arm needs no companion-corpus import.
 
 ```sh
 cargo +nightly fuzz run p2p_message -- -max_total_time=60
@@ -83,16 +83,16 @@ cargo +nightly run --manifest-path fuzz/Cargo.toml --bin p2p_message \
   -- fuzz/artifacts/p2p_message/crash-<hash>
 ```
 
-`--manifest-path` is required: `fuzz/` is its own workspace, and the root workspace exposes only the `bitcoin-rs` binary (`no bin target named p2p_message`).
+`--manifest-path` is required. `fuzz/` is its own workspace, and the root workspace exposes only the `bitcoin-rs` binary (`no bin target named p2p_message`).
 
 ```sh
 RUST_BACKTRACE=1 cargo +nightly fuzz run p2p_message -- fuzz/artifacts/p2p_message/crash-<hash>
 ```
 
-Refresh seeds from qa-assets (CC0): clone beside this checkout (or set `FUZZ_CORPUS_DIR` to its `corpus/`) and run from root:
+To refresh seeds from qa-assets (CC0), clone beside this checkout, or set `FUZZ_CORPUS_DIR` to its `corpus/`. Then run this from the root:
 
 ```sh
 scripts/import-qa-assets.sh
 ```
 
-The script checks the clone's disk footprint, shallow-clones upstream, remaps seeds per harness framing, minimizes via `cargo fuzz cmin` (staged through a real `fuzz/corpus/<target>` directory, never a symlink), deletes the clone, and rewrites `fuzz/CORPUS_PROVENANCE.md`. `scripts/import-reference-corpora.sh` does the same for pinned bitcoin/bitcoin and btcsuite/btcd vectors, refreshing the `## Reference corpora` section.
+The script checks the clone's disk footprint and shallow-clones upstream. It remaps seeds per harness framing. It minimizes via `cargo fuzz cmin`, staged through a real `fuzz/corpus/<target>` directory and never a symlink. It deletes the clone, and it rewrites `fuzz/CORPUS_PROVENANCE.md`. `scripts/import-reference-corpora.sh` does the same for pinned bitcoin/bitcoin and btcsuite/btcd vectors. That script refreshes the `## Reference corpora` section.

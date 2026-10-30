@@ -92,7 +92,7 @@ Start a local `regtest` node bound to loopback first. The bare `bitcoin-rs` comm
 NODE_PID=$!
 ```
 
-On startup, `bitcoin-rs` initializes the regtest genesis block, writes a fresh per-start Basic-auth cookie (`__cookie__:<random>`) to `.bitcoin-rs-regtest/.cookie` (mode `0600` on Unix), and binds the HTTP listener on `127.0.0.1:18443`.
+On startup, `bitcoin-rs` initializes the regtest genesis block. It writes a fresh per-start Basic-auth cookie (`__cookie__:<random>`) to `.bitcoin-rs-regtest/.cookie`, with mode `0600` on Unix. It binds the HTTP listener on `127.0.0.1:18443`.
 
 ### 2. Query JSON-RPC and Esplora HTTP
 
@@ -118,9 +118,9 @@ wait "$NODE_PID"
 
 ### Mainnet, assume-valid, and kernel verification
 
-Running `./target/release/bitcoin-rs --data-dir .bitcoin-rs` without `--network` starts on `mainnet` using `fjall` storage, native Rust script verification, BIP324 v2 P2P transport, and loopback JSON-RPC on `127.0.0.1:8332`. Mainnet defaults to `--validation-mode assume-valid`, skipping historical script execution through the pinned assume-valid anchor (`938343`) while the active chain contains that anchor; pass `--validation-mode full` or `--assume-valid-height 0` to verify every script from genesis.
+Run `./target/release/bitcoin-rs --data-dir .bitcoin-rs` without `--network` to start on `mainnet`. This command uses `fjall` storage, native Rust script verification, BIP324 v2 P2P transport, and loopback JSON-RPC on `127.0.0.1:8332`. Mainnet defaults to `--validation-mode assume-valid`. That mode skips historical script execution through the pinned assume-valid anchor (`938343`) while the active chain contains that anchor. Pass `--validation-mode full` or `--assume-valid-height 0` to verify every script from genesis.
 
-Consult [docs/getting-started.md](docs/getting-started.md) for layered configuration precedence (defaults, `--config` TOML, `--bitcoin-conf`, `BITCOIN_RS_*` environment variables, and CLI flags), storage backends (`fjall`, `redb`, `rocksdb`), pruning, REST (`--rest=true`), ZMQ, and optional `--features kernel` / `--validation-engine kernel` builds.
+Consult [docs/getting-started.md](docs/getting-started.md) for the layered configuration precedence: defaults, `--config` TOML, `--bitcoin-conf`, `BITCOIN_RS_*` environment variables, and CLI flags. The same page covers storage backends (`fjall`, `redb`, `rocksdb`), pruning, REST (`--rest=true`), ZMQ, and optional `--features kernel` / `--validation-engine kernel` builds.
 
 ---
 
@@ -130,7 +130,7 @@ Bitcoin Core's conservatism, stability, and compatibility discipline are major r
 
 ### Why now?
 
-Bitcoin behavior can be checked against Bitcoin Core, `libbitcoinkernel`, historical chain data, consensus test vectors, fuzzing, and differential tests, which makes an independent implementation practical to verify.
+You can check Bitcoin behavior against Bitcoin Core, `libbitcoinkernel`, historical chain data, consensus test vectors, fuzzing, and differential tests. That makes an independent implementation practical to verify.
 
 ### What can be improved
 

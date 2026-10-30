@@ -48,15 +48,17 @@ Long-poll IDs retain `hash<sequence>` at fee revision zero, otherwise append
 
 ## Coinbase-budgeted templates
 
-A consumer that rebuilds the coinbase, such as a Stratum V2 pool, asks for room
-instead of refusing a body that left none. [`BlockTemplateRequest::coinbase_budget`](crate::BlockTemplateRequest::coinbase_budget)
-carries a [`CoinbaseBudget`](crate::CoinbaseBudget): the serialized bytes
-(`additional_size`) and BIP141 sigop cost (`additional_sigops`, already in
-cost units and never rescaled) of the outputs it will add. `None` is the
-ordinary template: selection, identity, long-poll id, reporting, and every
-existing caller are unchanged. Only template mode on the typed `MiningControl`
-surface carries a budget; `generate`, proposals, and the BIP22/BIP23 JSON
-surface never do.
+A consumer that rebuilds the coinbase, such as a Stratum V2 pool, asks for
+room instead of refusing a body that left none.
+[`BlockTemplateRequest::coinbase_budget`](crate::BlockTemplateRequest::coinbase_budget)
+carries a [`CoinbaseBudget`](crate::CoinbaseBudget). The budget holds the
+serialized bytes (`additional_size`) and the BIP141 sigop cost.
+`additional_sigops` is already in cost units and is never rescaled. Both values
+describe the outputs the consumer will add. `None` is the ordinary template.
+Selection, identity, long-poll id, reporting, and every existing caller are
+unchanged for it. Only template mode on the typed `MiningControl` surface
+carries a budget. `generate`, proposals, and the BIP22/BIP23 JSON surface never
+do.
 
 - **One rule, derived from the owner's coinbase.** The same selector
   (`select_packages`) serves ordinary, prepared, and budgeted selection. A
@@ -120,9 +122,10 @@ surface never do.
   to callers, or reused from the ordinary slot, stay alive after eviction for as
   long as their holders keep them.
 
-Consistency: selection reads the pool under one guard (snapshot isolation);
-cache publication, installs, and slot hand-off are linearizable under the
-coordinator mutex. Repeated identical requests and notifications are idempotent.
+Consistency: selection reads the pool under one guard, which gives snapshot
+isolation. Cache publication, installs, and slot hand-off are linearizable
+under the coordinator mutex. Repeated identical requests and notifications are
+idempotent.
 
 ## Projected selection and template preparation
 

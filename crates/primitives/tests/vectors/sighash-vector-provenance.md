@@ -19,6 +19,6 @@ self-generated pin.
   `crates/primitives/tests/differential.rs` with each synthetic pin commented
   to the exact BIP341/BIP342 section that defines the hashed fields.
 
-Regenerating fixtures from this crate's own implementation is forbidden here:
-if a vector must change, cite the new upstream commit in this file and the
+Regenerating fixtures from this crate's own implementation is forbidden here.
+If a vector must change, cite the new upstream commit in this file and the
 commit that imports it.

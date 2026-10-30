@@ -36,10 +36,10 @@ and any flag divergence is a miss that re-verifies. No throughput claim is made
 here.
 ## Contract ownership
 
-Mempool behavioral contracts are defined in `docs/contracts/`:
+The following contracts in `docs/contracts/` define mempool behavior:
 
 - **Mutation gateway and ordering**: Gateway serialization, atomic `MutationResult` records, per-change sequence assignments, and generation-validated admission/retry follow [`docs/contracts/mempool-mutations.md`](../../docs/contracts/mempool-mutations.md) (`MPL-01`, `MPL-02`, `MPL-04`).
 - **Relay standardness and policy**: Admission checks, limits, Core 31.1 replacement rules, and eviction ranking follow [`docs/contracts/mempool-policy.md`](../../docs/contracts/mempool-policy.md) (`POL-01`, `POL-05`).
 
-Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
+Part of [`bitcoin-rs`](../../README.md). See [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

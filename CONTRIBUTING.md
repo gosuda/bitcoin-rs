@@ -109,10 +109,10 @@ current base before `main` moves forward.
 ## Post-merge CI lanes
 
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
-tests and the main-only verification lanes on pushes to `main` and manual
-dispatch: bench smoke (with the witness-activation kernel regression and the
-SegWit-v0 kernel oracle), native-script evidence, the comparator corpus, and
-Core differential.
+tests and the main-only verification lanes. It triggers on pushes to `main` and
+on manual dispatch. The lanes are bench smoke, native-script evidence, the
+comparator corpus, and Core differential. Bench smoke includes the
+witness-activation kernel regression and the SegWit-v0 kernel oracle.
 Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the path-scoped
 [`fuzz-build.yml`](.github/workflows/fuzz-build.yml).
@@ -164,8 +164,8 @@ cargo bench -p bitcoin-rs-node --no-run \
 ```
 
 The same `bench-smoke` job also compiles the kernel-enabled binary-package
-benches (`--features rocksdb,fjall,redb,kernel`), runs the witness-activation
-kernel regression, and checks the SegWit-v0 kernel oracle with retained
+benches (`--features rocksdb,fjall,redb,kernel`). It runs the witness-activation
+kernel regression. It also checks the SegWit-v0 kernel oracle with retained
 diagnostics.
 
 ### Fuzzing
@@ -290,10 +290,10 @@ current coverage map.
 
 ### Architectural changes
 
-The project boundary is stable external contracts, replaceable internal
-architecture. Internal breaking changes are acceptable with clear rationale;
-breaking a supported external contract is a regression. For a change that
-reshapes internals, reviewers evaluate:
+The project boundary is stable external contracts and replaceable internal
+architecture. Internal breaking changes are acceptable with a clear rationale.
+Breaking a supported external contract is a regression. Reviewers evaluate
+these questions for a change that reshapes internals:
 
 1. **External contract preserved?** Consensus, P2P, and every affected
    supported external API keep observable behavior, proven with the
@@ -319,4 +319,4 @@ are redesigned, the stronger the external validation evidence must be.
 - [CONSTRAINTS.md](CONSTRAINTS.md): repository-wide project invariants
 - [CONCEPTS.md](CONCEPTS.md): domain terminology and concepts
 
-Documentation follows the [ownership policy](docs/policies/documentation.md): keep requirements with their enforcing owners and current execution evidence with CI or the PR.
+Documentation follows the [ownership policy](docs/policies/documentation.md). Keep requirements with their enforcing owners, and keep current execution evidence with CI or the PR.
