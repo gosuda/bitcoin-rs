@@ -460,6 +460,7 @@ fn registered_inbound(
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
     );
     table.publish_info(
         addr,

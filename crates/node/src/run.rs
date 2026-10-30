@@ -32,7 +32,12 @@ fn install_tracing(level: &str) {
 }
 
 fn build_filter_directive(level: &str) -> String {
-    if level.is_empty() || level == "info" {
+    if level == "off" {
+        // Core's `-printtoconsole=0` keeps the console fully silent; `off` is
+        // the tracing-native "no events anywhere" level and must not be
+        // re-qualified by the per-crate floors below.
+        "off".to_owned()
+    } else if level.is_empty() || level == "info" {
         DEFAULT_FILTER.to_owned()
     } else if level.contains(',') || level.contains('=') {
         level.to_owned()
@@ -83,7 +88,6 @@ mod tests {
             ("warn", "warn,fjall=warn,rocksdb=warn"),
             ("error", "error,fjall=warn,rocksdb=warn"),
             ("trace", "trace,fjall=warn,rocksdb=warn"),
-            ("off", "off,fjall=warn,rocksdb=warn"),
         ] {
             let directive = build_filter_directive(level);
             assert_eq!(directive, expected, "bare level {level:?}");
@@ -91,5 +95,16 @@ mod tests {
                 panic!("bare level {level:?} with per-target caps must parse: {error}")
             });
         }
+    }
+
+    /// `off` is the fully silent console level (Core's `-printtoconsole=0`
+    /// semantics): no per-crate floor may re-enable a target, so the whole
+    /// directive is the bare global `off`.
+    #[test]
+    fn off_is_fully_silent_without_per_crate_floors() {
+        let directive = build_filter_directive("off");
+        assert_eq!(directive, "off");
+        EnvFilter::try_new(&directive)
+            .unwrap_or_else(|error| panic!("bare off must parse: {error}"));
     }
 }

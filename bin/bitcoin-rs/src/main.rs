@@ -62,7 +62,10 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("bitcoin-rs: {error:#}");
+            // Core's init errors print `Error: <message>` on stderr
+            // (`InitError` -> `noui.cpp`); the functional framework matches
+            // startup failures against exactly that shape.
+            eprintln!("Error: {error:#}");
             ExitCode::FAILURE
         }
     }

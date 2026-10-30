@@ -359,6 +359,7 @@ impl NodeState {
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
+                user_agent: bitcoin_rs_primitives::sub_version(&config.p2p.ua_comments),
                 local_services: {
                     let history = if config.storage.prune_target_mb > 0 {
                         bitcoin::p2p::ServiceFlags::WITNESS

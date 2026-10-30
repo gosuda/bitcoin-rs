@@ -5,7 +5,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin_rs_primitives::USER_AGENT;
 
 use crate::connection::PeerLease;
 use crate::dispatch::dispatch_inbound;
@@ -20,6 +19,7 @@ pub fn version_message(
     start_height: i32,
     role: PeerRole,
     local_services: ServiceFlags,
+    user_agent: &str,
 ) -> VersionMessage {
     let socket = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
     let address = Address::new(&socket, local_services);
@@ -30,7 +30,7 @@ pub fn version_message(
         receiver: address.clone(),
         sender: address,
         nonce,
-        user_agent: USER_AGENT.to_owned(),
+        user_agent: user_agent.to_owned(),
         start_height,
         relay: role.relays_transactions(),
     }
@@ -101,6 +101,7 @@ pub fn start<S>(
     start_height: i32,
     role: PeerRole,
     local_services: ServiceFlags,
+    user_agent: &str,
 ) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
     if !role.relays_transactions() {
@@ -112,6 +113,7 @@ pub fn start<S>(
         start_height,
         role,
         local_services,
+        user_agent,
     )));
     messages.extend(feature_messages());
     messages
@@ -124,6 +126,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     our_nonce: u64,
     our_start_height: i32,
     local_services: ServiceFlags,
+    user_agent: &str,
     lease: &PeerLease,
     deadline: Instant,
 ) -> Result<(), PeerError> {
@@ -135,6 +138,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
         our_start_height,
         PeerRole::FullRelay,
         local_services,
+        user_agent,
     )))?;
     for response in responses {
         peer.send(&response)?;
