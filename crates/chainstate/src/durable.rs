@@ -555,14 +555,17 @@ fn apply_replayed_gap_block(
     hash: Hash256,
 ) -> Result<super::ConnectOutcome, ApplyError> {
     let proven = match load_block_undo(handles.undo_store.as_ref(), height, hash) {
-        Ok(undo) => Some(ProvenApply::AssumeValidSkipped(
+        Ok(undo) if restored.is_some() => Some(ProvenApply::AssumeValidSkipped(
             super::prepare::prepare_apply(
                 payload,
                 &UndoRowSpends(&undo),
                 handles.validation_engine,
             )?,
         )),
-        Err(UndoLoadError::Missing { .. }) => None,
+        // Cold recovery resolves inputs from the UTXO view it is rebuilding,
+        // not the previous run's undo-derived preparation. Still refuse a
+        // corrupt stored undo record through the existing error below.
+        Ok(_) | Err(UndoLoadError::Missing { .. }) => None,
         Err(_) => {
             return Err(ApplyError::DurableHeadGapUnrecoverable {
                 head_tip: head.tip,
@@ -577,7 +580,11 @@ fn apply_replayed_gap_block(
         handles,
         payload,
         proven,
-        BlockProvenance::LocalReplay,
+        if restored.is_none() {
+            BlockProvenance::ColdReplay
+        } else {
+            BlockProvenance::LocalReplay
+        },
         PublishMode::Replay {
             receipt: DurableReceipt::from_head(head),
             certify_head: height == head.height && hash == head.tip,
