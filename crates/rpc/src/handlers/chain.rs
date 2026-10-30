@@ -873,6 +873,26 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic(&v31::PruneBlockchain(i64::from(result.pruneheight)))
 }
 
+/// Core's hidden `syncwithvalidationinterfacequeue` (src/rpc/blockchain.cpp)
+/// waits until the validation-interface queue has drained. This node has no
+/// asynchronous callback queue between chain validation and the RPC surface:
+/// the equivalents of Core's validation-interface consumers (mempool update,
+/// block log, ZMQ publication, mining-generation signal) run synchronously
+/// inside the committed chain transition itself
+/// (`crates/node/src/chain_effects.rs` `on_connect`/`on_disconnect`), so none
+/// of them can still be pending once any RPC reply is written. The immediate
+/// null is therefore exact for that state. Declared deviation: the background
+/// derived-index reconcile loop (crates/index/src/runtime.rs) is woken
+/// asynchronously and is not awaited here; index-backed reads have their own
+/// catch-up fallback rather than relying on this call.
+pub(crate) fn syncwithvalidationinterfacequeue(
+    _ctx: &Arc<Context>,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    Ok(Value::new_null())
+}
+
 pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let control = ctx
