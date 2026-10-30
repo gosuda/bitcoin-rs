@@ -129,7 +129,7 @@ Queue accounting: per-connection 4,096 messages and 64 MiB; node aggregate one s
 - Observability: negotiated transport publishes in `PeerInfo::transport`; `getpeerinfo` reports Core-style `transport_protocol_type` (`v1`/`v2`) plus the v2 session id as hex in byte order (empty for v1); both ends derive the same id.
 - Bounds: garbage at most 4095 bytes; terminator scan reads only to its earliest possible end; contents above 1 + 12 + 4,000,000 bytes are refused pre-body; v2 payloads send at most 4,000,000 bytes; stalled packets retain only received bytes.
 
-## Live gaps
+## P2P synchronization and inbound eviction scope limits
 
 - Peer lifecycle boundary: header-request planning and getdata fan-out run in `BlockSync` behind the node `SyncChain` seam. Node owns applied-chain mutation; `P2pService` holds no shadow window.
 - Inbound eviction lacks Core's minimum-ping protection (no ping RTT measured); policy §7 item 12.

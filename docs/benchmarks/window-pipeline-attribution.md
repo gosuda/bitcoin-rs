@@ -1,4 +1,4 @@
-# Window pipeline and group commit attribution (ENG-91, #1607)
+# Window pipeline and group commit attribution
 
 Owns the measurement protocol, the evidence schema, and the promotion gates for the windowed block apply and its durable group commit (ENG-91, #1607). Records no measured value: every number lives in the files a run generates, never here (`HPA-08`, `HPA-12`). Status: `planned_not_executed`. No arm has run, so no cell, ratio, or percentile is on this page. Shared cell rules are in [README.md](README.md); the attribution method is in [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md).
 

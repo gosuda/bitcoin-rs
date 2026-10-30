@@ -14,7 +14,7 @@ backends = ["fjall", "rocksdb", "redb"]
 [cell_defaults]
 custody = "none"
 residual = "unmeasured"
-residual_blocker = "comparator in-tree, custody staged; live product arms blocked by absent bitcoin-rs offline state construction (#34, #41) and live-IBD product lane (#35) — see docs/benchmarks/data/comparator-lanes-20260913.md"
+residual_blocker = "comparator in-tree, custody staged; live product arms blocked by absent bitcoin-rs offline state construction (#34, #41) and live-IBD product lane (#35) — see docs/benchmarks/data/product-cell-comparator-lanes-2026-09-13.md"
 noise_floor = "unobserved"
 # Wave-2 observation, 650-comparators, 2026-09-13. Three worktree
 # repetitions of tools/benchmark-campaign/comp_lanes.py on c97d1094,
@@ -31,7 +31,7 @@ noise_floor = "unobserved"
 # against): C150/Cmodern archives and Core 31.1 bitcoind under
 # .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/.
 # Full method note, digests, and remaining residual statement:
-# docs/benchmarks/data/comparator-lanes-20260913.md. Per-cell histories
+# docs/benchmarks/data/product-cell-comparator-lanes-2026-09-13.md. Per-cell histories
 # stay empty; noise floor stays unobserved (HPA-03, HPA-08).
 
 # ---------------------------------------------------------------------------

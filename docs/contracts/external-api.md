@@ -276,13 +276,13 @@ wallet interoperability remain unverified.
 - Script lookup uses one bounded set; duplicate scripts keep the first descriptor's attribution. Unspents follow Core outpoint order. `raw`/`addr` use shared script-descriptor inference; pubkey descriptors keep specialized key/origin data and checksums.
 - The applied publication and UTXO view are captured under chain-transition read exclusion; creation hashes and confirmations use that retained publication even across a mid-projection reorg. Missing ancestry is unavailable, never fabricated. This bounded read blocks chain transitions; it is not Core's independent DB cursor. Active traversal observes the shared RPC shutdown lifecycle; blocking scan starts share the server's bounded blocking admission while status/abort stay ordinary. No second HTTP pool or scan index exists.
 
-## Live gaps
+## RPC differential testing and in-process embedding status
 
 - **Full Core differential suite**: versioned Core response structs, golden fixtures and differential lanes across all RPC methods are tracked under #78 (open).
 - **Typed embedding surface**: direct in-process application API as an alternative to the localhost JSON-RPC daemon boundary is tracked under #145 (open).
 
 ## Verification boundaries
 
-Handler tests, authenticated HTTP consumers, and the Core process comparator own separate API boundaries. Socket cancellation tests do not establish end-to-end Node::shutdown behavior. Live gaps above remain open; exact cases are registered with their source owners.
+Handler tests, authenticated HTTP consumers, and the Core process comparator own separate API boundaries. Socket cancellation tests do not establish end-to-end Node::shutdown behavior. The scope limits above remain open; exact cases are registered with their source owners.
 
 ## Vocabulary

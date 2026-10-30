@@ -38,7 +38,7 @@ Tier: in-tree reference vector evidence. Owners: `crates/script/tests/core_vecto
 cargo test --locked -p bitcoin-rs-script --test suite core_vectors:: && cargo test --locked -p bitcoin-rs-consensus --test suite vectors::
 ```
 ## 4. Native sighash checks against independent implementation
-Tier: in-tree differential evidence. Owners: `crates/consensus/tests/shared_sighash.rs` (native vs `rust-bitcoin` `sighash::SighashCache`), `crates/script/tests/proptest.rs` (`rust-bitcoin` sighash/Schnorr oracle), `crates/primitives/tests/differential.rs` (`sighash.json` legacy vectors), `crates/primitives/tests/bip_vectors.rs` (BIP143/BIP341; provenance `crates/primitives/tests/vectors/PROVENANCE.md`). Verifies exact digest equality for `SIGHASH_ALL/NONE/SINGLE/ANYONECANPAY/DEFAULT` across legacy, BIP143, BIP341.
+Tier: in-tree differential evidence. Owners: `crates/consensus/tests/shared_sighash.rs` (native vs `rust-bitcoin` `sighash::SighashCache`), `crates/script/tests/proptest.rs` (`rust-bitcoin` sighash/Schnorr oracle), `crates/primitives/tests/differential.rs` (`sighash.json` legacy vectors), `crates/primitives/tests/bip_vectors.rs` (BIP143/BIP341; provenance `crates/primitives/tests/vectors/sighash-vector-provenance.md`). Verifies exact digest equality for `SIGHASH_ALL/NONE/SINGLE/ANYONECANPAY/DEFAULT` across legacy, BIP143, BIP341.
 ```sh
 cargo test --locked -p bitcoin-rs-consensus --test suite shared_sighash:: && cargo test --locked -p bitcoin-rs-script --test suite proptest::
 cargo test --locked -p bitcoin-rs-primitives --test suite differential:: && cargo test --locked -p bitcoin-rs-primitives --test suite bip_vectors::
