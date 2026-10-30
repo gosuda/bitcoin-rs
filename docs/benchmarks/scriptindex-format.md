@@ -132,7 +132,7 @@ contract. A finding is **informational** if it confirms an existing decision.
 
 **No multi-GB corpus build was started.** The audit uses only:
 
-1. **In-repo fixtures** — the `MemoryStore` backend (`crates/index/tests/common/mod.rs`)
+1. **In-repo fixtures** — the `MemoryStore` backend (`crates/index/tests/support/common.rs`)
    and the test blocks constructed in `crates/index/tests/be_order.rs`.
 The disposable-fixture guard: any fixture created for this audit (the
 `be_order.rs` test blocks) is test-only, behind `#[test]`, and never shipped

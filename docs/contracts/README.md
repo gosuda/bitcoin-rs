@@ -16,18 +16,18 @@
 - [wallet-facing.md](wallet-facing.md): `WF-01`–`WF-03`.
 - [p2p-wire.md](p2p-wire.md): `P2P-01`–`P2P-11`.
 - [synchronization.md](synchronization.md): `CONV-1`, `SYNC-01`–`SYNC-07`.
-- [qa-corpus.md](qa-corpus.md): `QAC-01`.
-- [campaign-corpora.md](campaign-corpora.md): `CORP-01`–`CORP-05`.
+- [qa-corpus.md](qa-corpus.md): `QAC-01`–`QAC-05`.
+- [campaign-corpora.md](campaign-corpora.md): `CORP-00`–`CORP-06`.
 - [muhash-rpc.md](muhash-rpc.md): `MRPC-01`–`MRPC-03`.
 - [embedding.md](embedding.md): `EMB-01`–`EMB-10`.
 - [storage-footprint.md](storage-footprint.md): `FP-01`–`FP-04`.
 - [hot-path-attribution.md](hot-path-attribution.md): `HPA-01`–`HPA-13`.
 - [dependency-range.md](dependency-range.md): `DEP-01`–`DEP-03`.
 - [feature-matrix.md](feature-matrix.md): `FEAT-01`–`FEAT-02`.
-- [reference-set.md](reference-set.md): `REF-01`–`REF-07`.
+- [reference-set.md](reference-set.md): `REF-01`–`REF-04`, `REF-06`–`REF-07`.
 - [ecosystem-compatibility.md](ecosystem-compatibility.md): `ECO-01`–`ECO-09`.
 - [formal-verification.md](formal-verification.md): formal inventory.
-- [chainstate-journal-v1.md](chainstate-journal-v1.md): `JW-*-1`.
+- [chainstate-journal-v1.md](chainstate-journal-v1.md): `JW-*`.
 - [core-differential.md](core-differential.md): `CORE-01`–`CORE-06`.
 - [test-evidence.md](test-evidence.md): proof owners, deletions, coverage gaps.
 Tests map to contracts, not tasks; see [test-evidence.md](test-evidence.md).

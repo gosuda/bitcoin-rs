@@ -134,8 +134,7 @@ On daemon start, `NodeState::open` delegates authoritative recovery to
 `crates/chainstate/src/recovery.rs` and reconciles to the committed applied tip. Chain-event
 consumers therefore reconcile against the durable applied tip. System-level
 convergence after crash, lost write, and reorg is owned by
-[recovery.md](recovery.md). The recovery path does not restore an authenticated
-checkpoint or replay a journal as an authority.
+[recovery.md](recovery.md).
 
 ## Verification boundaries
 
