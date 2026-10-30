@@ -877,6 +877,7 @@ fn dial(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
         lease.node_id(),
         addr.into(),
@@ -1140,6 +1141,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
         lease.node_id(),
         peer_addr,
@@ -2520,6 +2522,7 @@ fn spawn_connection_writer(
     net_trace: Option<crate::net_trace::NetTrace>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let peer_addr = peer_addr.into();
+    let counters = std::sync::Arc::clone(stream.counters());
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
@@ -2532,6 +2535,7 @@ fn spawn_connection_writer(
                 close_rx,
                 &mut stream,
                 &mut transport,
+                &counters,
                 net_trace.as_ref(),
             );
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -2574,6 +2578,7 @@ fn write_ready_burst(
     outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) -> bool {
     let mut pending = Some(first);
@@ -2594,6 +2599,14 @@ fn write_ready_burst(
             crate::net_trace::outbound_message(net_trace, queued.message(), frame.payload());
         }
         let written = crate::wire::write_frames(writer, &frames);
+        if written.is_ok() {
+            // Charge each frame's wire size to its command once the burst
+            // left the socket; a failed write tears the connection down, so
+            // its partial traffic never becomes a visible peer row.
+            for (queued, frame) in burst.iter().zip(&frames) {
+                counters.record_msg_sent(queued.message().command().as_ref(), frame.wire_len());
+            }
+        }
         drop(burst);
         match written {
             Ok(()) => pending = leftover,
@@ -2611,13 +2624,14 @@ fn run_writer_loop(
     mut close_rx: crossbeam_channel::Receiver<()>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) {
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(first, outbound_rx, writer, transport, net_trace) {
+                if !write_ready_burst(first, outbound_rx, writer, transport, counters, net_trace) {
                     break;
                 }
             }

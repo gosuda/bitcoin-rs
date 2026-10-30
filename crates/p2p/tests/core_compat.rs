@@ -1247,8 +1247,9 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     let listener_shutdown = Arc::clone(&shutdown);
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
+    let peer_table = Arc::new(PeerTable::new());
     let shared = ConnectionShared::new(
-        Arc::new(PeerTable::new()),
+        Arc::clone(&peer_table),
         Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new())),
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
@@ -1274,10 +1275,57 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
         }
     };
     let outcome = drive_handshake_as_core(client, magic, network);
+    if let Ok(client) = outcome.as_ref() {
+        // Hold the socket open while sampling: the peer row (and its
+        // per-message counters) disappears as soon as the node sees EOF.
+        let _ = client;
+        assert_ping_pong_accounted(&peer_table)?;
+    }
+    drop(outcome);
     shutdown.store(true, Ordering::Relaxed);
     let listener_result = handle.join().map_err(|_| "listener thread panicked")?;
     listener_result?;
-    outcome
+    Ok(())
+}
+
+/// The live connection's per-message byte accounting must carry the framed
+/// ping the peer sent and the pong this node answered with, at or above the
+/// 29-byte threshold Core v31.1's functional `connect_nodes` waits on in
+/// `bytesrecv_per_msg['pong']` (`test_framework.py`).
+fn assert_ping_pong_accounted(peer_table: &PeerTable) -> Result<(), Box<dyn Error>> {
+    // The writer thread charges a frame's bucket after the socket accepted
+    // it, so poll briefly like the framework's wait_until instead of reading
+    // once and racing the writer.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let infos = peer_table.infos();
+        let Some(info) = infos.first() else {
+            return Err("handshake-complete peer never published its counters".into());
+        };
+        let recv_ping = info
+            .counters
+            .recv_per_message()
+            .into_iter()
+            .find(|(command, _)| *command == "ping");
+        let sent_pong = info
+            .counters
+            .sent_per_message()
+            .into_iter()
+            .find(|(command, _)| *command == "pong");
+        match (recv_ping, sent_pong) {
+            (Some(("ping", recv)), Some(("pong", sent))) if recv >= 29 && sent >= 29 => {
+                return Ok(());
+            }
+            _ if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            (recv, sent) => {
+                return Err(format!(
+                    "per-message ping/pong accounting missing or below the wire threshold: \
+                     received ping {recv:?}, sent pong {sent:?}"
+                )
+                .into());
+            }
+        }
+    }
 }
 
 fn connect_with_retry(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn Error>> {
@@ -1303,7 +1351,7 @@ fn drive_handshake_as_core(
     mut client: TcpStream,
     magic: Magic,
     network: Network,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<TcpStream, Box<dyn Error>> {
     client.set_read_timeout(Some(Duration::from_millis(50)))?;
 
     write_message(&mut client, magic, &version_for_handshake())?;
@@ -1377,7 +1425,7 @@ fn drive_handshake_as_core(
             other => return Err(format!("unexpected post-handshake message {other:?}").into()),
         }
     }
-    Ok(())
+    Ok(client)
 }
 
 fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared {

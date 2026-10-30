@@ -558,3 +558,158 @@ fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
     }
     Ok(())
 }
+
+#[test]
+fn message_account_names_round_trip_through_from_command() {
+    for account in MessageAccount::ALL {
+        if matches!(account, MessageAccount::Other) {
+            continue;
+        }
+        assert_eq!(
+            MessageAccount::from_command(account.name()),
+            Some(account),
+            "{} must classify back to itself",
+            account.name()
+        );
+    }
+}
+
+#[test]
+fn receive_buckets_cover_core_v31_known_commands() {
+    // Core v31.1 src/protocol.h ALL_NET_MESSAGE_TYPES, verbatim.
+    let core_known = [
+        "version",
+        "verack",
+        "addr",
+        "addrv2",
+        "sendaddrv2",
+        "inv",
+        "getdata",
+        "merkleblock",
+        "getblocks",
+        "getheaders",
+        "tx",
+        "headers",
+        "block",
+        "getaddr",
+        "mempool",
+        "ping",
+        "pong",
+        "notfound",
+        "filterload",
+        "filteradd",
+        "filterclear",
+        "sendheaders",
+        "feefilter",
+        "sendcmpct",
+        "cmpctblock",
+        "getblocktxn",
+        "blocktxn",
+        "getcfilters",
+        "cfilter",
+        "getcfheaders",
+        "cfheaders",
+        "getcfcheckpt",
+        "cfcheckpt",
+        "wtxidrelay",
+        "sendtxrcncl",
+        "feature",
+    ];
+    for command in core_known {
+        assert_eq!(
+            MessageAccount::receive(command).name(),
+            command,
+            "Core v31.1 known command must keep its own receive bucket"
+        );
+    }
+}
+
+#[test]
+fn unknown_and_post_v31_receives_fold_into_other() {
+    for command in ["frobnicate", "", "sendpackages", "staletip", "alert"] {
+        assert_eq!(
+            MessageAccount::receive(command),
+            MessageAccount::Other,
+            "{command:?} must fold into *other* like Core's receive accounting"
+        );
+    }
+}
+
+#[test]
+fn sends_are_attributed_to_their_own_command() {
+    assert_eq!(MessageAccount::send("staletip"), MessageAccount::StaleTip);
+    assert_eq!(
+        MessageAccount::send("sendpackages"),
+        MessageAccount::SendPackages
+    );
+    assert_eq!(MessageAccount::send("frobnicate"), MessageAccount::Other);
+}
+
+#[test]
+fn per_message_recording_counts_by_command_and_omits_zero_buckets() {
+    let counters = PeerCounters::default();
+    assert_eq!(
+        counters.sent_per_message(),
+        Vec::<(&'static str, u64)>::new()
+    );
+    assert_eq!(
+        counters.recv_per_message(),
+        Vec::<(&'static str, u64)>::new()
+    );
+
+    counters.record_msg_recv("pong", 32);
+    counters.record_msg_recv("pong", 32);
+    counters.record_msg_recv("frobnicate", 99);
+    counters.record_msg_sent("verack", 24);
+
+    assert_eq!(
+        counters.recv_per_message(),
+        vec![("pong", 64), ("*other*", 99)]
+    );
+    assert_eq!(counters.sent_per_message(), vec![("verack", 24)]);
+}
+
+#[test]
+fn a_framed_pong_satisfies_the_framework_wait_threshold() {
+    // Core v31.1's test_framework connect_nodes polls until
+    // bytesrecv_per_msg['pong'] >= 29; a pong frame is 24 header bytes
+    // plus its 8-byte nonce.
+    let mut frame = Vec::new();
+    crate::wire::write_message(
+        &mut frame,
+        bitcoin::p2p::Magic::BITCOIN,
+        &crate::wire::Message::Pong(0xfeed_face),
+    )
+    .unwrap_or_else(|error| panic!("encode pong: {error}"));
+
+    let counters = PeerCounters::default();
+    counters.record_msg_recv("pong", frame.len());
+
+    let pong = counters
+        .recv_per_message()
+        .into_iter()
+        .find(|(command, _)| *command == "pong")
+        .unwrap_or_else(|| panic!("pong bucket missing: {:?}", counters.recv_per_message()));
+    assert_eq!(pong, ("pong", 32));
+    assert!(pong.1 >= 29, "framed pong must clear the wait threshold");
+}
+
+#[test]
+fn per_message_recording_leaves_the_socket_aggregates_alone() {
+    let counters = PeerCounters::default();
+    counters.record_msg_recv("version", 86);
+    counters.record_msg_sent("ping", 32);
+    assert_eq!(counters.bytes_recv(), 0);
+    assert_eq!(counters.bytes_sent(), 0);
+    assert_eq!(counters.last_recv(), 0);
+    assert_eq!(counters.last_send(), 0);
+}
+
+#[test]
+fn equality_compares_per_message_buckets_too() {
+    let left = PeerCounters::default();
+    let right = PeerCounters::default();
+    assert_eq!(left, right);
+    right.record_msg_recv("pong", 32);
+    assert_ne!(left, right);
+}
