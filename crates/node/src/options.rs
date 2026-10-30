@@ -465,6 +465,11 @@ macro_rules! option_rows {
                     }
                 }
                 group p2p: P2pOverrides {
+                    ua_comments as ua_comments: Option<Vec<String>> {
+                        cli[#[arg(long = "uacomment", value_name = "COMMENT")]]
+                        toml each("ua_comments", parse_text)
+                        conf["uacomment"]
+                    }
                     magic as p2p_magic: Option<[u8; 4]> {
                         cli[#[arg(long = "p2p-magic", value_parser = parse_p2p_magic)]]
                         env["BITCOIN_RS_P2P_MAGIC", parse_p2p_magic]

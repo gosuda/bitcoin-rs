@@ -332,6 +332,9 @@ pub struct P2pConfig {
     pub fast_sync: bool,
     pub v2_transport: bool,
     pub relay_offers: bitcoin_rs_p2p::RelayOffers,
+    /// `-uacomment` values, composed into the subversion exactly as Core's
+    /// `InitSubversion` does (`crates/primitives` `sub_version`).
+    pub ua_comments: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -464,6 +467,7 @@ impl NodeConfig {
                         .stale_tip_prefers_blocks
                         .unwrap_or(false),
                 },
+                ua_comments: settings.p2p.ua_comments.clone().unwrap_or_default(),
             },
             rpc: RpcConfig {
                 bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
@@ -629,6 +633,7 @@ impl NodeConfig {
 
     fn validate_p2p_network(&self) -> Result<()> {
         self.validate_overlay()?;
+        self.validate_ua_comments()?;
         if self.p2p.magic != self.network.magic() {
             anyhow::ensure!(
                 self.network == Network::Mainnet,
@@ -643,6 +648,27 @@ impl NodeConfig {
                 "P2P magic overrides require --dns-seeds-enabled=false"
             );
         }
+        Ok(())
+    }
+
+    /// Core's `InitSubversion` (`src/init.cpp`): every `-uacomment` must sit
+    /// in the BIP-0014 safe subset and the composed subversion within
+    /// `MAX_SUBVERSION_LENGTH`, or startup fails with Core's messages.
+    fn validate_ua_comments(&self) -> Result<()> {
+        for comment in &self.p2p.ua_comments {
+            anyhow::ensure!(
+                bitcoin_rs_primitives::ua_comment_is_safe(comment),
+                "User Agent comment ({comment}) contains unsafe characters."
+            );
+        }
+        let sub_version = bitcoin_rs_primitives::sub_version(&self.p2p.ua_comments);
+        anyhow::ensure!(
+            sub_version.len() <= bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH,
+            "Total length of network version string ({}) exceeds maximum length ({}). \
+             Reduce the number or size of uacomments.",
+            sub_version.len(),
+            bitcoin_rs_primitives::MAX_SUBVERSION_LENGTH
+        );
         Ok(())
     }
 

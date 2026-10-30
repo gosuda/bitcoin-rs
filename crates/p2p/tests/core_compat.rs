@@ -284,6 +284,7 @@ fn version_for_handshake() -> Message {
         0,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     ))
 }
 
@@ -489,6 +490,7 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
         777,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
     let inv = vec![Inventory::Transaction(Txid::from_byte_array([9u8; 32]))];
     let cases = [
@@ -526,6 +528,7 @@ fn version_message_pins_core_31_handshake_fields() {
         777,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
 
     assert_eq!(version.version, PROTOCOL_VERSION);
@@ -565,6 +568,7 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
         0,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
 
     assert_eq!(peer.state, PeerState::VersionExchange);
@@ -1388,7 +1392,8 @@ fn drive_handshake_as_core(
                         0,
                         0,
                         PeerRole::FullRelay,
-                        ServiceFlags::NETWORK | ServiceFlags::WITNESS
+                        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                        USER_AGENT
                     )
                     .services
                 );
@@ -1480,6 +1485,7 @@ fn remote_version(services: ServiceFlags) -> Message {
         0,
         PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        USER_AGENT,
     );
     version.services = services;
     Message::Version(version)
@@ -1670,7 +1676,7 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
 #[test]
 fn pruned_version_message_advertises_network_limited_only() {
     let pruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK_LIMITED;
-    let version = version_message(1, 0, PeerRole::FullRelay, pruned);
+    let version = version_message(1, 0, PeerRole::FullRelay, pruned, USER_AGENT);
     assert!(version.services.has(ServiceFlags::NETWORK_LIMITED));
     assert!(!version.services.has(ServiceFlags::NETWORK));
     assert!(version.services.has(ServiceFlags::WITNESS));
@@ -1681,7 +1687,7 @@ fn pruned_version_message_advertises_network_limited_only() {
 #[test]
 fn unpruned_version_message_advertises_network() {
     let unpruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK;
-    let version = version_message(1, 0, PeerRole::FullRelay, unpruned);
+    let version = version_message(1, 0, PeerRole::FullRelay, unpruned, USER_AGENT);
     assert!(version.services.has(ServiceFlags::NETWORK));
     assert!(!version.services.has(ServiceFlags::NETWORK_LIMITED));
     assert!(version.services.has(ServiceFlags::WITNESS));

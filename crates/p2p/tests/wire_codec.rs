@@ -35,6 +35,7 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
             123,
             PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+            bitcoin_rs_primitives::USER_AGENT,
         )),
         Message::Verack,
         Message::Inv(vec![Inventory::Transaction(Txid::from_byte_array(

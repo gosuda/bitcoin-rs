@@ -425,6 +425,8 @@ pub struct NetworkHandles {
     pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     pub p2p: Arc<bitcoin_rs_p2p::P2pService>,
     pub local_services: u64,
+    /// The subversion this node advertises (`getnetworkinfo.subversion`).
+    pub user_agent: String,
     pub overlay: bitcoin_rs_p2p::overlay::OverlayConfig,
 }
 
@@ -602,6 +604,7 @@ impl Default for NetworkHandles {
             peer_table: p2p.table(),
             p2p,
             local_services: 0x09,
+            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
             overlay: bitcoin_rs_p2p::overlay::OverlayConfig::default(),
         }
     }

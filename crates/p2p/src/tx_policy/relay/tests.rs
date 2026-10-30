@@ -90,6 +90,7 @@ fn connect_at(
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+            bitcoin_rs_primitives::USER_AGENT,
         );
         let mut info = crate::PeerInfo::outbound_from_version(
             addr,
@@ -472,6 +473,7 @@ fn connect_on(
         0,
         crate::PeerRole::FullRelay,
         bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
     );
     let mut info = crate::PeerInfo::outbound_from_version(
         addr,

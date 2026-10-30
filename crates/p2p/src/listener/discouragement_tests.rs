@@ -1,5 +1,6 @@
 use super::*;
 use crate::{Message, PeerError, PeerLease, PeerRole};
+use bitcoin_rs_primitives::USER_AGENT;
 
 fn shared() -> ConnectionShared {
     let (headers, _) = crossbeam_channel::unbounded();
@@ -80,6 +81,7 @@ fn accepted_version_updates_once_without_replaying_on_later_steps()
                 0,
                 PeerRole::FullRelay,
                 ServiceFlags::from(9),
+                USER_AGENT,
             )),
         )?;
         let update_at = (!repeated_version).then_some(u64::try_from(wire.len())?);
@@ -92,6 +94,7 @@ fn accepted_version_updates_once_without_replaying_on_later_steps()
                     0,
                     PeerRole::FullRelay,
                     ServiceFlags::from(1),
+                    USER_AGENT,
                 )),
             )?;
         } else {
@@ -226,6 +229,7 @@ fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
             0,
             PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         );
         let mut info =
             crate::PeerInfo::outbound_from_version(address, local, &version, 0, 0, counters);
@@ -294,6 +298,7 @@ fn protected_handshake_discards_bad_order_without_extending_deadline()
                 0,
                 PeerRole::FullRelay,
                 ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                USER_AGENT,
             )),
         )?;
         crate::wire::write_message(&mut bytes, Magic::REGTEST, &Message::Verack)?;
