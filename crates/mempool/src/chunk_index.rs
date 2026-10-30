@@ -361,6 +361,7 @@ impl ChunkIndex {
         self.order.iter().map(move |key| self.view(pool, key))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;

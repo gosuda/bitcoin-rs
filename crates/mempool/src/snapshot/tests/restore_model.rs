@@ -4,6 +4,8 @@ use super::*;
     clippy::expect_used,
     reason = "all generated graph indices are bounded by four"
 )]
+const LINK_RECORDS: u64 = 8;
+
 fn graph(parents: &[Vec<usize>], fees: u32, nonfinal: u32, chain_state: u8) -> (Snapshot, Coins) {
     let mut rows: Vec<SavedTransaction> = Vec::new();
     let mut coins = Coins {
@@ -123,7 +125,7 @@ fn generated_small_graphs_match_direct_gateway_maximal_subsets() -> TestResult {
                 for state in 0..5 {
                     let (mut snapshot, chain) = graph(parents, fees, nonfinal, state);
                     let ids: Vec<_> = snapshot.transactions.iter().map(|row| row.txid).collect();
-                    for capacity in [0, snapshot.transactions[0].tx.vsize()] {
+                    for capacity in [0, crate::entry_memory_usage(&snapshot.transactions[0].tx)] {
                         let mut best = vec![0_u32];
                         for mask in 1..1_u32 << parents.len() {
                             let control = gateway(
@@ -315,10 +317,10 @@ fn subset_selection_respects_an_already_committed_pool_prefix() -> TestResult {
     let prefix = spend(funding, 99_000);
     let ids: Vec<_> = snapshot.transactions.iter().map(|row| row.txid).collect();
     let family: Vec<_> = snapshot.transactions.iter().collect();
-    let parent_size = family[0].tx.vsize();
-    let child_size = family[1].tx.vsize();
+    let parent_size = crate::entry_memory_usage(&family[0].tx);
+    let child_size = crate::entry_memory_usage(&family[1].tx) + LINK_RECORDS;
     for budget in [parent_size, parent_size + child_size] {
-        let capacity = prefix.vsize() + budget;
+        let capacity = crate::entry_memory_usage(&prefix) + budget;
         let mut best = vec![0_u32];
         for mask in 1..4 {
             let control = gateway(

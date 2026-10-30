@@ -37,7 +37,7 @@ impl Mempool {
         &self,
         target: u64,
     ) -> Result<EvictionInputs, crate::MempoolError> {
-        let size = self.total_vsize();
+        let size = self.dynamic_memory_usage();
         if size <= target {
             return Ok(EvictionInputs {
                 stamp: self.policy_stamp(),
@@ -59,12 +59,12 @@ impl Mempool {
                 incremental,
             ));
             for &member in chunk.members {
-                let entry = self.entry(member).ok_or(crate::MempoolError::FeeDiagram(
-                    crate::FeeDiagramError::Dependencies,
-                ))?;
                 selected.push(member);
+                let released = self
+                    .entry_memory(member)
+                    .ok_or(crate::FeeDiagramError::Dependencies)?;
                 projected = projected
-                    .checked_sub(u64::from(entry.vsize))
+                    .checked_sub(released)
                     .ok_or(crate::FeeDiagramError::Arithmetic)?;
             }
         }
@@ -141,7 +141,8 @@ mod tests {
         pool.insert_entry(high).expect("high");
         pool.insert_entry(low).expect("low");
 
-        let evicted = evict_lowest_fee_packages(&mut pool, 100).expect("eviction policy");
+        let evicted =
+            evict_lowest_fee_packages(&mut pool, unit(2)).expect("eviction policy");
         assert_eq!(
             evicted,
             vec![MutationChange {
@@ -160,7 +161,7 @@ mod tests {
         for (tag, fee) in [(1, 3_000), (2, 1_000), (3, 2_000)] {
             pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1, 0))?;
         }
-        let changes = evict_lowest_fee_packages(&mut pool, 100)?;
+        let changes = evict_lowest_fee_packages(&mut pool, unit(1))?;
         let ids: Vec<_> = changes.iter().map(|change| change.txid).collect();
         assert_eq!(
             ids,
@@ -182,7 +183,7 @@ mod tests {
         for (transaction, fee) in [(parent, 100), (child, 1_900), (tx(6), 500), (tx(7), 10_000)] {
             pool.insert_entry(MempoolEntry::new(Arc::new(transaction), 100, fee, 1, 1, 0))?;
         }
-        let changes = evict_lowest_fee_packages(&mut pool, 100)?;
+        let changes = evict_lowest_fee_packages(&mut pool, unit(7))?;
         assert_eq!(
             changes.iter().map(|change| change.txid).collect::<Vec<_>>(),
             expected
@@ -198,7 +199,7 @@ mod tests {
         for (tag, fee) in [(1, 3_000), (2, 1_000), (3, 2_000)] {
             pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1, 0))?;
         }
-        pool.limits.max_total_bytes = 200;
+        pool.limits.max_total_bytes = 2 * unit(1);
         let changes =
             pool.insert_entry(MempoolEntry::new(Arc::new(tx(4)), 100, 10_000, 1, 1, 0))?;
         assert_eq!(changes.removed_txids(), vec![tx(2).txid(), tx(3).txid()]);
@@ -210,7 +211,7 @@ mod tests {
     fn eviction_bumps_rolling_min_fee() {
         let mut pool = Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 1_000,
-            max_total_bytes: 400,
+            max_total_bytes: 2 * unit(1),
             ..MempoolLimits::default()
         });
         let low = tx(1);
@@ -221,7 +222,7 @@ mod tests {
             .expect("high");
         assert_eq!(pool.min_fee_sat_per_kvb(1_000), 1_000);
 
-        let evicted = evict_lowest_fee_packages(&mut pool, 200).expect("eviction policy");
+        let evicted = evict_lowest_fee_packages(&mut pool, unit(2)).expect("eviction policy");
         assert_eq!(evicted.len(), 1);
         assert_eq!(
             evicted[0].txid,
@@ -241,7 +242,7 @@ mod tests {
     fn eviction_of_a_negative_rate_chunk_leaves_the_floor() {
         let mut pool = Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 6,
+            max_total_bytes: 2 * unit(11),
             ..MempoolLimits::default()
         });
         let low = tx(11);
@@ -251,7 +252,7 @@ mod tests {
         pool.insert_entry(MempoolEntry::new(Arc::new(tx(12)), 3, 10_000, 1, 1, 0))
             .expect("high");
         pool.prioritise(low_txid, -1_100).expect("delta applies");
-        let evicted = evict_lowest_fee_packages(&mut pool, 3).expect("eviction policy");
+        let evicted = evict_lowest_fee_packages(&mut pool, unit(12)).expect("eviction policy");
         assert_eq!(evicted.len(), 1);
         assert_eq!(pool.min_fee_sat_per_kvb(1_000), 0);
     }
@@ -260,7 +261,7 @@ mod tests {
     fn stale_eviction_plan_neither_commits_nor_bumps() {
         let mut pool = Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 400,
+            max_total_bytes: 2 * unit(21),
             ..MempoolLimits::default()
         });
         let low = tx(21);
@@ -269,7 +270,7 @@ mod tests {
             .expect("low");
         pool.insert_entry(MempoolEntry::new(Arc::new(tx(22)), 200, 800, 1, 1, 0))
             .expect("high");
-        let plan = pool.capture_eviction(200).expect("capture").verify();
+        let plan = pool.capture_eviction(unit(22)).expect("capture").verify();
         pool.prioritise(low_txid, 1).expect("delta moves the stamp");
         assert!(matches!(
             pool.commit_pool_change(plan),
@@ -277,6 +278,40 @@ mod tests {
         ));
         assert_eq!(pool.len(), 2);
         assert_eq!(pool.min_fee_sat_per_kvb(1_000), 0);
+    }
+
+    #[test]
+    fn memory_bounds_the_pool_even_when_virtual_size_fits() {
+        let heavy = |label: u8| {
+            let mut heavy = tx(label);
+            heavy.outputs[0].script_pubkey = vec![label; 4_000].into();
+            heavy
+        };
+        let each = crate::pool::entry_memory_usage(&heavy(1));
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes: 3 * each + each / 2,
+            ..MempoolLimits::default()
+        });
+        for label in 1..=4_u8 {
+            let fee = 1_000 * u64::from(label);
+            pool.insert_entry(MempoolEntry::new(Arc::new(heavy(label)), 100, fee, 1, 1, 0))
+                .expect("a higher-paying arrival displaces the cheapest");
+        }
+        assert!(
+            pool.total_vsize() < pool.limits.max_total_bytes,
+            "control: the virtual sizes alone never reach the limit"
+        );
+        assert_eq!(
+            pool.len(),
+            3,
+            "four 4 KB transactions exceed a 3.5-transaction memory budget, so one is evicted"
+        );
+        assert!(!pool.contains_txid(&heavy(1).txid()), "the cheapest leaves first");
+    }
+
+    fn unit(label: u8) -> u64 {
+        crate::pool::entry_memory_usage(&tx(label))
     }
 
     fn tx(label: u8) -> Tx {
