@@ -183,9 +183,14 @@ fn bind_rpc_with_pool(
     let config = state.config();
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
+    let shutdown_request: Arc<dyn Fn() + Send + Sync> = {
+        let chainstate = Arc::clone(&chainstate);
+        Arc::new(move || chainstate.request_shutdown())
+    };
     let context = Context::from_handles(ContextHandles {
         silent_payments: config.rpc.silent_payments,
         compressed_transactions: config.rpc.compressed_transactions,
+        shutdown_request: Some(shutdown_request),
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),

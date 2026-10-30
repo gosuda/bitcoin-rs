@@ -257,7 +257,7 @@ declare_rows! {
     "waitfornewblock", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Durable active-tip waits. Timeout, cancellation, shutdown and recovery closure may return a durable in-progress reorg prefix. Arity errors retain Core -1 with concise usage rather than the full help body. Bounded admission returns -1 when full; wait responses close HTTP keep-alive. See docs/contracts/external-api.md#api-34-active-tip-waits.", "0.13.0", Some(crate::handlers::wait::waitfornewblock), Blocking;
     "help", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No per-method help text renderer.", "n/a", None;
     "logging", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Log-category controls not exposed over RPC.", "n/a", None;
-    "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;
+    "stop", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Answers Core's exact status string \"Bitcoin Core stopping\" (src/rpc/server.cpp), then triggers the node's single graceful-shutdown latch, the same chainstate latch SIGTERM/SIGINT use; the reply is written before teardown starts and the process exits 0. Core's hidden numeric wait argument is not honored: any argument is refused with the local parameter-shape error (crates/rpc/src/handlers/util.rs).", "0.14.0", Some(util::stop);
 
     "getaddrmaninfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Addrman table stats not exposed.", "n/a", None;
     "abortprivatebroadcast", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
