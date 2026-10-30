@@ -22,19 +22,7 @@ evaluation and commit.
 
 `pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It lives here rather than in a crate of its own, because it is a retention policy over rows this crate already owns.
 
-`stage_block_and_undo_prune` stages block-body and undo-row deletion together
-with prune-height metadata into one caller-owned atomic batch. Node wiring
-therefore commits them in a single backend commit.
-`reclaim_staged_flat_block_files` then deletes the staged flat block files.
-`PruneOutcome` reports the bytes and rows freed. The code prunes block bodies
-and undo rows against the durable tip rather than the in-memory tip. Retained
-bodies support local replay after a crash. Retained undo rows support
-disconnecting through recovered state. The per-row machinery is `block_pruner`
-(`block_body_key`, `BLOCK_DATA_CF`) and `undo` (`block_undo_key`,
-`ColumnFamily::UndoData`). `PrunePolicy` is defined in `pruning.rs`. It
-converts the configured mebibyte target to bytes and applies the reorg-safety
-retention floor. The pruning pass owns deletion. The node builds the policy
-from configuration and hands it in.
+`stage_block_and_undo_prune` stages block-body and undo-row deletion together with prune-height metadata into one caller-owned atomic batch. Node wiring therefore commits them in a single backend commit. `reclaim_staged_flat_block_files` then deletes the staged flat block files. `PruneOutcome` reports the bytes and rows freed. The code prunes block bodies and undo rows against the durable tip rather than the in-memory tip. Retained bodies support local replay after a crash. Retained undo rows support disconnecting through recovered state. The per-row machinery is `block_pruner` (`block_body_key`, `BLOCK_DATA_CF`) and `undo` (`block_undo_key`, `ColumnFamily::UndoData`). `PrunePolicy` is defined in `pruning.rs`. It converts the configured mebibyte target to bytes and applies the reorg-safety retention floor. The pruning pass owns deletion. The node builds the policy from configuration and hands it in.
 
 `block_body_key` and `BLOCK_DATA_CF` are not only pruning concerns. They are the block-body key schema, and the node reads bodies through them on the ordinary path.
 

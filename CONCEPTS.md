@@ -46,11 +46,12 @@ waiters. The node-owned coordinator is the single cache and long-poll waiter
 for that key. RPC does not keep a second template cache.
 
 ### Wallet-facing public surface
-What an external wallet is allowed to call: native Esplora HTTP at `/api` on
-the JSON-RPC listener (tip, fees, block-height checkpoints, address/script
-history and UTXOs, `POST /tx`), and the key-free node RPCs above. The consumer
-is a separate process, or the embeddable `Node` API. It does not receive
-`NodeState`, `UtxoSet`, or index types. See `docs/contracts/wallet-facing.md`.
+What an external wallet is allowed to call: native Esplora HTTP
+at `/api` on the JSON-RPC listener (tip, fees, block-height
+checkpoints, address/script history and UTXOs, `POST /tx`), and
+the key-free node RPCs above. The consumer is a separate process,
+or the embeddable `Node` API. It does not receive `NodeState`,
+`UtxoSet`, or index types. See `docs/contracts/wallet-facing.md`.
 
 ### Stable chainstate RPC read
 A whole-UTXO RPC read that shares the node's chain-transition mutex. The mutex
@@ -110,21 +111,7 @@ deadline. "Core differs: Core counts every received byte as activity; btcrs
 counts only frames that carry a message."
 
 ### Paused getdata tail
-The unserved remainder of one `getdata` that stopped because the session could
-not reserve send credit before building the next reply. The refusal came either
-from the connection's own bound or from the node's aggregate outbound budget
-(see "Outbound queue accounting" in `docs/policies/p2p-compatibility.md`). The
-remainder stays in request order, with the misses found before it. The
-connection reads nothing from the peer while it holds them. The misses go out
-in one `notfound` once a reservation for its exact length succeeds, and never
-without one. The remaining items resume once a fresh production reservation
-succeeds, and reads stay held until they do, so the peer's next reply has a
-slot. A dead writer, a cancelled lease, or a pause past 20 minutes ends the
-session. Time that the aggregate budget refused counts toward neither the 20
-minutes nor the request and receive ages. Shared saturation defers without
-cancelling. Only the connection's own bound keeps cancel-on-refusal. Every
-reply is built under a reservation taken before it exists, so no check-then-send
-race remains. "Core differs: Core keeps receiving into its buffer while paused and pauses processing of every message while its send buffer is full; btcrs stops reading the socket until the tail is served and holds reads only after a `getdata`, so any other message keeps the plain saturation policy."
+The unserved remainder of one `getdata` that stopped because the session could not reserve send credit before building the next reply. The refusal came either from the connection's own bound or from the node's aggregate outbound budget (see "Outbound queue accounting" in `docs/policies/p2p-compatibility.md`). The remainder stays in request order, with the misses found before it. The connection reads nothing from the peer while it holds them. The misses go out in one `notfound` once a reservation for its exact length succeeds, and never without one. The remaining items resume once a fresh production reservation succeeds, and reads stay held until they do, so the peer's next reply has a slot. A dead writer, a cancelled lease, or a pause past 20 minutes ends the session. Time that the aggregate budget refused counts toward neither the 20 minutes nor the request and receive ages. Shared saturation defers without cancelling. Only the connection's own bound keeps cancel-on-refusal. Every reply is built under a reservation taken before it exists, so no check-then-send race remains. "Core differs: Core keeps receiving into its buffer while paused and pauses processing of every message while its send buffer is full; btcrs stops reading the socket until the tail is served and holds reads only after a `getdata`, so any other message keeps the plain saturation policy."
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
@@ -157,16 +144,17 @@ No second lifecycle exists. The daemon's `run()` is a signal wrapper around
 the identical start and shutdown path.
 
 ### Data-dir lock
-The process-exclusive lock a node takes on its data directory before the
-schema check or process epoch runs (`crates/node/src/state/data_dir_lock.rs`).
-The lock file is `{datadir}/.lock`. Ownership is the open-file lock, never the
-file's existence, so a stale file after a crash opens normally. The lock has no
-owner of its own. Every store the node opens carries it and drops it after its
-own handle closes. The directory therefore stays locked until the last handle
-that can write it is gone. An open meanwhile fails as in use, never with a
-storage-backend lock error. Core differs: Core lets the same process lock a
-directory again. btcrs holds an open-file lock, so a second open fails even
-inside one process.
+The process-exclusive lock a node takes on its data directory before
+the schema check or process epoch runs
+(`crates/node/src/state/data_dir_lock.rs`). The lock file is
+`{datadir}/.lock`. Ownership is the open-file lock, never the file's
+existence, so a stale file after a crash opens normally. The lock has
+no owner of its own. Every store the node opens carries it and drops it
+after its own handle closes. The directory therefore stays locked until
+the last handle that can write it is gone. An open meanwhile fails as
+in use, never with a storage-backend lock error. Core differs: Core
+lets the same process lock a directory again. btcrs holds an open-file
+lock, so a second open fails even inside one process.
 
 ## Initial Block Download
 
@@ -203,12 +191,7 @@ The default mainnet configuration: `fjall` backend, multi-peer download (outboun
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. Owner: `NetworkProfile::for_selection` in `crates/node/src/config.rs`; layering is `ARCH-05` in `docs/contracts/architecture.md`.
 
 ### Sync regimes (download-bound vs processing-bound)
-The two cost regimes a sync measurement must name before its numbers mean
-anything. **Download-bound:** wall is decided by the network path, as in live
-IBD. **Processing-bound:** blocks are local and wall is decided by validation
-plus storage commit, as in reindex and replay. A node can rank differently in
-the two. A faster-than-X claim therefore needs the regime and validation
-posture stated.
+The two cost regimes a sync measurement must name before its numbers mean anything. **Download-bound:** wall is decided by the network path, as in live IBD. **Processing-bound:** blocks are local and wall is decided by validation plus storage commit, as in reindex and replay. A node can rank differently in the two. A faster-than-X claim therefore needs the regime and validation posture stated.
 
 ## Consensus validation
 
@@ -230,16 +213,7 @@ Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), compiled in when the `
 The pure-Rust script path in `crates/script`, the default `validation.engine` in every build — including `kernel` builds, where `validation.engine = "native"` still reaches it. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine and the default production engine.
 
 ### One-shot block parse
-Parsing each block exactly once on the apply path, then reusing that parse
-downstream for txids. On the `Kernel` arm only, it also reuses the borrowed
-`TransactionRef` objects that script preparation reuses. The `Native` arm reads
-the view's decoded transactions. `kernel::BlockParse`
-(`crates/consensus/src/kernel.rs`) is the one-shot parse. Its parse engine
-follows the selected `validation.engine`, so `Native` parses with the Rust
-parser and `Kernel` with `bitcoinkernel::Block::new`. The `Native` variant is
-compiled in every build. The `Kernel` variant exists only in `kernel`-feature
-builds, where selecting `validation.engine = "kernel"` reaches it. Any other
-selection fails closed with the unsupported-build error.
+Parsing each block exactly once on the apply path, then reusing that parse downstream for txids. On the `Kernel` arm only, it also reuses the borrowed `TransactionRef` objects that script preparation reuses. The `Native` arm reads the view's decoded transactions. `kernel::BlockParse` (`crates/consensus/src/kernel.rs`) is the one-shot parse. Its parse engine follows the selected `validation.engine`, so `Native` parses with the Rust parser and `Kernel` with `bitcoinkernel::Block::new`. The `Native` variant is compiled in every build. The `Kernel` variant exists only in `kernel`-feature builds, where selecting `validation.engine = "kernel"` reaches it. Any other selection fails closed with the unsupported-build error.
 
 ### Runtime-dispatched AVX2 Merkle
 Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on x86-64 hosts that advertise AVX2, selected at runtime. Hosts without AVX2, and trees too small to fill one 8-pair batch, use the allocation-free scalar spine. Both paths implement Bitcoin's odd-leaf duplication and mutated-tree rule.
@@ -248,17 +222,8 @@ Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on
 Blocks Core hardcodes in `consensus.script_flag_exceptions` to validate under a reduced flag set. As of Core v29: mainnet 170060 (P2SH) and 692261 (Taproot); testnet3 394. The P2SH waivers are reproduced by `Network::is_bip16_p2sh_exception` (by block hash); missing them wedges full-validation sync. The Taproot override needs no exception because `is_taproot_active` already height-gates TAPROOT. Compare *effective* flag sets, not raw overrides.
 
 ### Signet block solution
-The BIP325 signature a signet block carries after a 4-byte header inside its
-coinbase witness-commitment output. It proves that the block's signers approved
-the block, and signet proof of work alone is trivial. Connect checks it against
-the default signet challenge after the Merkle and witness bindings pass. It
-does this only when a block commits, and a proposal skips it, as Core does when
-it is not checking proof of work. Connect exempts the signet genesis. Custom
-challenges are unsupported.
-Core differs. Core checks the solution before the Merkle root and the rest of
-`CheckBlock`, so it reports `bad-signet-blksig` first. btcrs checks it after the
-block rules, so a body that fails both reports the earlier block-rule error here
-instead of `bad-signet-blksig`.
+The BIP325 signature a signet block carries after a 4-byte header inside its coinbase witness-commitment output. It proves that the block's signers approved the block, and signet proof of work alone is trivial. Connect checks it against the default signet challenge after the Merkle and witness bindings pass. It does this only when a block commits, and a proposal skips it, as Core does when it is not checking proof of work. Connect exempts the signet genesis. Custom challenges are unsupported.
+Core differs. Core checks the solution before the Merkle root and the rest of `CheckBlock`, so it reports `bad-signet-blksig` first. btcrs checks it after the block rules, so a body that fails both reports the earlier block-rule error here instead of `bad-signet-blksig`.
 
 ### Difficulty-1 target
 The network-independent reference target in Core's difficulty calculation:
@@ -372,46 +337,16 @@ State that connection writes and disconnection must account for. `coin_stats` ne
 ## Derived indexes
 
 ### TxIndex capability watermarks
-Versioned durable `(height, block hash)` cursors identifying the exact
-active-chain prefix each independently ready row family represents. `TxLookup`
-owns `TxConfirmed` (`--txindex`). `ScriptHistory` owns `Funding` and `Spending`
-(`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora
-without changing Core txindex advertisement). `ScriptLive` owns compact
-live-output locators (`--scriptindex=utxo` or `full`). It is rebuilt from the
-authoritative UTXO set rather than block history. `BlockHeaders` is shared
-rollback-integrity metadata. Its row order and count must never be read as the
-active chain. Equal cursors advance in one body scan and one atomic batch. A
-lagging cursor moves independently. Height alone cannot prove identity across a
-reorg. On startup the writer accepts the current row-format 5 marker. Startup
-recovery resets incompatible markers or unversioned cursorless tables for
-rebuild (`IndexWriter::open` in `crates/index/src/index/write.rs`, `open_writer`
-in `crates/index/src/runtime/startup.rs`). There is no in-place format upgrade.
-A crash-resumable reset marker makes restart finish deletion before the writer
-is exposed.
+Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`). `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement). `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`). It is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata. Its row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch. A lagging cursor moves independently. Height alone cannot prove identity across a reorg. On startup the writer accepts the current row-format 5 marker. Startup recovery resets incompatible markers or unversioned cursorless tables for rebuild (`IndexWriter::open` in `crates/index/src/index/write.rs`, `open_writer` in `crates/index/src/runtime/startup.rs`). There is no in-place format upgrade. A crash-resumable reset marker makes restart finish deletion before the writer is exposed.
 
 ### Coalesced TxIndex wake
 The nonblocking hint published after a committed `applied_tip.store`: an atomic revision incremented with `Release` plus `try_send` on a capacity-one channel. Tokens may coalesce or drop; the worker checks the authoritative revision before sleeping and also wakes on a bounded timeout.
 
 ### Complete derived-index query
-A query returns a result only when one snapshot proves that every capability it
-consumes covers the exact applied tip. The steps are: capture tip and revision,
-open one typed snapshot, check the required watermark(s) by height and hash, and
-recheck tip and revision before returning. Live UTXO answers also hold
-chain-transition authority across that check and the authoritative UTXO lookup,
-because apply commits coins before publishing the tip. Capability lag, worker
-failure, missing body, truncated scan, budget exhaustion, tip change, or ABA
-revision change return `Retry` or `Unavailable`. A configured-off capability
-returns `Unavailable` with a distinct disabled reason. None of these can become
-a false absence.
+A query returns a result only when one snapshot proves that every capability it consumes covers the exact applied tip. The steps are: capture tip and revision, open one typed snapshot, check the required watermark(s) by height and hash, and recheck tip and revision before returning. Live UTXO answers also hold chain-transition authority across that check and the authoritative UTXO lookup, because apply commits coins before publishing the tip. Capability lag, worker failure, missing body, truncated scan, budget exhaustion, tip change, or ABA revision change return `Retry` or `Unavailable`. A configured-off capability returns `Unavailable` with a distinct disabled reason. None of these can become a false absence.
 
 ### Identity-bearing key
-A key that says which producer wrote a row, not merely where it is. Funding,
-spending, and txid keys are an 8-byte prefix plus height, so two same-height
-blocks sharing a script collide. A second rollback of the first block would then
-delete the second block's rows. The block-header row is keyed by the 80-byte
-header whose hash is the block hash, so it is identity-bearing. Checking it
-before deleting stands in for rekeying the other families, which would break the
-electrs-compatible layout.
+A key that says which producer wrote a row, not merely where it is. Funding, spending, and txid keys are an 8-byte prefix plus height, so two same-height blocks sharing a script collide. A second rollback of the first block would then delete the second block's rows. The block-header row is keyed by the 80-byte header whose hash is the block hash, so it is identity-bearing. Checking it before deleting stands in for rekeying the other families, which would break the electrs-compatible layout.
 
 ### All-or-scan position fallback
 Index row values carry transaction byte positions without a block tag. The reader validates the whole position list (nonempty, strictly increasing, unique, in-bounds, no overflow), reads each range from the canonical `(height, full hash)` body, and exact-checks the decoded txid or scripthash. If any position fails it discards every tentative result for that row and scans the full block — never skipping one position and keeping the rest.
@@ -492,18 +427,7 @@ and every eviction reads an optimal order.
 Recording a statistic when its outcome is known rather than when the subject arrives. The fee estimator samples numerator and denominator together at the moment a confirmation target resolves, so both decay from the same block. A transaction leaving for an unrelated reason (eviction) is untracked without being sampled.
 
 ### Rolling minimum fee
-The admission and relay floor. It rises to the highest removed chunk's modified
-feerate plus the incremental relay fee whenever capacity eviction or replacement
-trim removes transactions. It holds decay until a block connects. Once a block
-has connected, the floor decays exponentially using an occupancy-scaled
-half-life: twelve hours at or above half capacity, six hours below half, and
-three hours below a quarter. It resets to zero once the decayed rate falls below
-half the incremental relay fee. btcrs keeps Core's state machine (`GetMinFee`,
-`trackPackageRemoved`, the `removeForBlock` stamp) behind one pool-owned mutex.
-It reads that state through `Mempool::min_fee_sat_per_kvb`. Core differs: Core
-measures capacity as allocator usage with a 100 sat/kvB incremental fee. btcrs
-measures total virtual size with 1000 sat/kvB, so its floor rises in larger
-steps.
+The admission and relay floor. It rises to the highest removed chunk's modified feerate plus the incremental relay fee whenever capacity eviction or replacement trim removes transactions. It holds decay until a block connects. Once a block has connected, the floor decays exponentially using an occupancy-scaled half-life: twelve hours at or above half capacity, six hours below half, and three hours below a quarter. It resets to zero once the decayed rate falls below half the incremental relay fee. btcrs keeps Core's state machine (`GetMinFee`, `trackPackageRemoved`, the `removeForBlock` stamp) behind one pool-owned mutex. It reads that state through `Mempool::min_fee_sat_per_kvb`. Core differs: Core measures capacity as allocator usage with a 100 sat/kvB incremental fee. btcrs measures total virtual size with 1000 sat/kvB, so its floor rises in larger steps.
 
 ### Mempool expiry
 Automatic removal of transactions strictly older than 336 hours (`now.saturating_sub(MEMPOOL_EXPIRY_SECS)`), evicted alongside all their in-pool descendants under reason `Expiry`. Expiry runs immediately after each committed single transaction or package admission and during reorg trim before any early return; read-only preview never mutates or expires entries. If an admitted transaction or package member is swept by the post-commit expiry pass, the admission fails with a mempool-full error.
@@ -565,21 +489,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) invokes. A local
-approximation never counts. Pull requests run the fast `fmt`, `deny`, `clippy`,
-and `test-crates` jobs. Merge-group requests add `test-binary` and
-`test-workspace` (backed by the pinned Core fixture) alongside
-[`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) (`kernel-consensus`
-and `full-node-compile`). [`.github/workflows/main.yml`](.github/workflows/main.yml)
-runs on `main` pushes and manual dispatch. It covers the full-node feature set
-with the C++ kernel and `--include-ignored` consensus vectors. It also runs
-`kernel-oracle` parity tests, `bench-smoke` compilation, Python comparator
-tests, `core-differential`, and `native-script` evidence. Those parity tests
-are not `#[ignore]`, and they are skipped if `--ignored` is passed. MSRV,
-dependency-range, and feature-matrix lanes run in
-[`.github/workflows/compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml).
-Apalache model checks run in
-[`.github/workflows/model-check-manual.yml`](.github/workflows/model-check-manual.yml).
-`cargo deny` failures are bug reports, not lint noise. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md#pull-request-verification).
+A branch is green only against [`scripts/ci-pr.sh`](scripts/ci-pr.sh), which [`.github/workflows/ci.yml`](.github/workflows/ci.yml) invokes. A local approximation never counts. Pull requests run the fast `fmt`, `deny`, `clippy`, and `test-crates` jobs. Merge-group requests add `test-binary` and `test-workspace` (backed by the pinned Core fixture) alongside [`ci-merge-gate.yml`](.github/workflows/ci-merge-gate.yml) (`kernel-consensus` and `full-node-compile`). [`.github/workflows/main.yml`](.github/workflows/main.yml) runs on `main` pushes and manual dispatch. It covers the full-node feature set with the C++ kernel and `--include-ignored` consensus vectors. It also runs `kernel-oracle` parity tests, `bench-smoke` compilation, Python comparator tests, `core-differential`, and `native-script` evidence. Those parity tests are not `#[ignore]`, and they are skipped if `--ignored` is passed. MSRV, dependency-range, and feature-matrix lanes run in [`.github/workflows/compatibility-campaign.yml`](.github/workflows/compatibility-campaign.yml). Apalache model checks run in [`.github/workflows/model-check-manual.yml`](.github/workflows/model-check-manual.yml). `cargo deny` failures are bug reports, not lint noise. See [`CONTRIBUTING.md`](CONTRIBUTING.md#pull-request-verification).

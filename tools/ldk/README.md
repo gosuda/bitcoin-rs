@@ -22,7 +22,6 @@ cargo test --locked -p bitcoin-rs-mempool --lib
 cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib chain_feed::tests
 ```
 
-The public consumer test starts a temporary fjall regtest Node. It reads
-genesis through real LDK traits. It checks byte conversions and fee fallback,
-and it exercises admission errors and settled polling. Then it shuts down and
-reopens.
+The public consumer test starts a temporary fjall regtest Node. It reads genesis
+through real LDK traits. It checks byte conversions and fee fallback, and it
+exercises admission errors and settled polling. Then it shuts down and reopens.
