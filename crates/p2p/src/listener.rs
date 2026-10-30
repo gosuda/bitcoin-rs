@@ -99,6 +99,7 @@ pub struct ConnectionShared {
     pub relay_offers: RelayOffers,
     pub(crate) overlay: Arc<crate::overlay::OverlayTransport>,
     pub(crate) shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
+    block_memory: Arc<crate::inbound::block_memory::BlockMemory>,
     pub dial_routes: crate::DialRoutes,
 }
 
@@ -159,6 +160,7 @@ impl ConnectionShared {
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
+            block_memory: Arc::default(),
             dial_routes: crate::DialRoutes::default(),
         }
     }
@@ -349,6 +351,7 @@ impl ConnectionShared {
         lease: &crate::PeerLease,
         peer_addr: impl Into<crate::PeerRemote>,
         payload: bitcoin_rs_primitives::BlockPayload,
+        memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) {
         let peer_addr = peer_addr.into();
         let source = lease.source(peer_addr.endpoint());
@@ -362,7 +365,7 @@ impl ConnectionShared {
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
             return;
         };
-        if self.forward_block(payload, source, Some(credit)) {
+        if self.forward_block(payload, source, Some(credit), memory_credit) {
             self.send_headers(source, vec![header], false);
         }
     }
@@ -372,8 +375,10 @@ impl ConnectionShared {
         payload: bitcoin_rs_primitives::BlockPayload,
         source: crate::PeerSource,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
+        memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     ) -> bool {
         let mut inbound = crate::InboundBlock::new(payload, Some(source), forward_credit);
+        inbound.memory_credit = memory_credit;
         loop {
             if self.is_session_cancelled() {
                 tracing::debug!(
@@ -1873,10 +1878,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
-        let (message, _raw, reply) = if let Some((message, reply)) = resumed {
-            (message, bytes::Bytes::new(), reply)
+        let (message, _raw, reply, memory_credit) = if let Some((message, reply)) = resumed {
+            (message, bytes::Bytes::new(), reply, None)
         } else {
-            let read_result = peer.read_message();
+            let read_result = peer.read_message_bounded(&shared.block_memory, || {
+                lease.is_cancelled() || shared.is_session_cancelled()
+            });
             if lease.is_cancelled() {
                 tracing::debug!(
                     peer_addr = %peer_addr,
@@ -1886,7 +1893,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             match read_result {
                 Ok(None) => continue,
-                Ok(Some((message, raw))) => {
+                Ok(Some((message, raw, memory_credit))) => {
                     keepalive.record_recv(Instant::now());
                     let Some(message) = enforce_relay_role(lease.role(), message)? else {
                         continue;
@@ -1922,7 +1929,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             continue;
                         }
                     };
-                    (message, raw, reply)
+                    (message, raw, reply, memory_credit)
                 }
                 Err(crate::wire::PeerError::Io(error))
                     if matches!(
@@ -2144,7 +2151,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 }
             }
             crate::Message::Block(payload) => {
-                shared.send_block(lease, peer_addr, payload);
+                shared.send_block(lease, peer_addr, payload, memory_credit);
             }
             crate::Message::Tx(tx) => forward_tx_if_relay_open(
                 shared,
@@ -2441,6 +2448,7 @@ fn handle_compact_outcome(
                 lease,
                 peer_addr,
                 bitcoin_rs_primitives::BlockPayload::from_local(block),
+                None,
             );
             None
         }

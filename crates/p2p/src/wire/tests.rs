@@ -46,7 +46,10 @@ fn observer_sees_valid_wire_payload_before_typed_decode() {
     let result = super::V1Receiver::default().read_message_with(
         &mut Cursor::new(&frame),
         Magic::REGTEST,
-        |command, payload| observed = Some((command.to_owned(), payload.to_vec())),
+        |command, payload| {
+            observed = Some((command.to_owned(), payload.to_vec()));
+            Ok(())
+        },
     );
     assert!(matches!(result, Err(PeerError::Encode(_))));
     assert_eq!(observed, Some(("version".to_owned(), Vec::new())));
@@ -58,6 +61,7 @@ fn observer_sees_valid_wire_payload_before_typed_decode() {
         Magic::REGTEST,
         |_, _| {
             observed_bad_checksum = true;
+            Ok(())
         },
     );
     assert!(matches!(result, Err(PeerError::BadChecksum)));
@@ -83,15 +87,15 @@ fn receiver_resumes_a_frame_split_by_poll_timeouts() -> Result<(), PeerError> {
 
     let mut receiver = super::V1Receiver::default();
     for stall in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
-        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+        let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()));
         assert!(
             matches!(&result, Err(PeerError::Io(error)) if error.kind() == stall),
             "a stall surfaces as a retryable timeout, got {result:?}"
         );
     }
-    let (first, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+    let (first, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()))?;
     assert_eq!(first, super::Message::Ping(42));
-    let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+    let (second, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()))?;
     assert_eq!(second, super::Message::Pong(7));
     Ok(())
 }
@@ -108,7 +112,7 @@ fn receiver_retains_only_received_bytes_for_a_stalled_frame() -> Result<(), Peer
         Inbound::Stall(ErrorKind::TimedOut),
     ]);
     let mut receiver = super::V1Receiver::default();
-    let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+    let result = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()));
     assert!(
         matches!(&result, Err(PeerError::Io(error)) if error.kind() == ErrorKind::TimedOut),
         "a stall surfaces as a retryable timeout, got {result:?}"
@@ -135,9 +139,9 @@ fn receiver_restarts_at_a_frame_boundary_after_a_rejected_frame() -> Result<(), 
     let mut stream = Cursor::new([corrupt, valid].concat());
 
     let mut receiver = super::V1Receiver::default();
-    let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {});
+    let rejected = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()));
     assert!(matches!(rejected, Err(PeerError::BadChecksum)));
-    let (message, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| {})?;
+    let (message, _) = receiver.read_message_with(&mut stream, Magic::REGTEST, |_, _| Ok(()))?;
     assert_eq!(message, super::Message::Pong(2));
     Ok(())
 }

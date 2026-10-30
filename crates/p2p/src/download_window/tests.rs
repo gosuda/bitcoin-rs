@@ -3178,6 +3178,7 @@ fn test_budget() -> SyncBudget {
         max_pending_bytes: usize::MAX,
         max_received_blocks: 128,
         max_received_bytes: usize::MAX,
+        max_retained_bytes: usize::MAX,
         max_peer_inflight: 128,
         fanout_peer_inflight: 128,
         min_peers_for_fanout: usize::MAX,

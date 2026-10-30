@@ -80,7 +80,7 @@ impl RecvTransport {
         &mut self,
         reader: &mut R,
         magic: Magic,
-        observe: impl FnOnce(&str, &[u8]),
+        observe: impl FnOnce(&str, &[u8]) -> Result<(), PeerError>,
     ) -> Result<Option<(Message, bytes::Bytes)>, PeerError> {
         match self {
             Self::V1(receiver) => receiver.read_message_with(reader, magic, observe).map(Some),
@@ -91,7 +91,7 @@ impl RecvTransport {
                 let Some((command, payload)) = msg_type::decode(&contents) else {
                     return Ok(None);
                 };
-                observe(&command, &payload);
+                observe(&command, &payload)?;
                 let message = decode_payload(&command, &payload)?;
                 Ok(Some((message, payload)))
             }
