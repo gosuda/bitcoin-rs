@@ -1656,3 +1656,26 @@ fn getchaintips_marks_active_from_applied_tip() {
         Some(expected.as_str())
     );
 }
+
+/// Core's syncwithvalidationinterfacequeue waits for its asynchronous
+/// validation-interface queue; this node's equivalent consumers run inside
+/// the committed chain transition itself (see the handler's doc comment),
+/// so nothing can be pending when the reply is written and the answer is
+/// Core's null.
+#[test]
+fn sync_with_validation_interface_queue_answers_null() {
+    let ctx = Arc::new(Context::new());
+    for params in [json!([]), Value::new_null()] {
+        let reply = syncwithvalidationinterfacequeue(&ctx, &params)
+            .unwrap_or_else(|err| panic!("params {params:?} must answer: {err}"));
+        assert!(reply.is_null(), "params {params:?}: {reply:?}");
+    }
+    let error = syncwithvalidationinterfacequeue(&ctx, &json!([1]))
+        .err()
+        .unwrap_or_else(|| panic!("an argument must be refused"));
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+    assert_eq!(
+        error.to_string(),
+        "invalid params: method does not accept parameters"
+    );
+}
