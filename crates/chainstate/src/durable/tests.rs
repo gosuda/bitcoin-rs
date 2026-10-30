@@ -15,6 +15,8 @@ use parking_lot::Mutex;
 use crate::test_fixtures::{MemoryBodies, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
+mod revalidation;
+
 fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Error>> {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis_tip = seed_genesis(&handles)?;

@@ -320,6 +320,8 @@ See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 - `full`: every script executes; `--assume-valid-height` is ignored.
 - `fast`: scripts are skipped for every block that lies on the best header chain strictly below its tip, so only the block at the tip executes scripts while catching up. Blocks on competing branches always run scripts. This trusts the most-work header chain and is independent of `--fast-sync`.
 
+Startup replay distinguishes cold revalidation from recovery after an accepted checkpoint; [the recovery contract](contracts/recovery.md#rcv-02-ordered-commit-protocol) defines that trust boundary.
+
 ```sh
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-mode full
 ```

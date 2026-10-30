@@ -309,6 +309,9 @@ impl AssumeValidGate {
 pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
+    /// Rebuilding without an accepted checkpoint cannot inherit script trust
+    /// from durable commits that may have used Fast/AssumeValid.
+    ColdReplay,
 }
 
 #[derive(Clone, Debug)]
@@ -973,6 +976,7 @@ impl Chainstate {
     ) -> bool {
         match provenance {
             BlockProvenance::LocalReplay => true,
+            BlockProvenance::ColdReplay => false,
             BlockProvenance::Network => match self.validation_mode {
                 ValidationMode::Full => false,
                 ValidationMode::AssumeValid => {
