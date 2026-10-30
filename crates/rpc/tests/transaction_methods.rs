@@ -511,3 +511,65 @@ fn createrawtransaction_rejects_duplicate_input() {
         .expect_err("duplicate input should be rejected");
     assert_eq!(err.code(), RpcError::INVALID_PARAMS);
 }
+
+const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
+const CONSENSUS_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the consensus size limit";
+
+#[test]
+fn broadcast_methods_refuse_hex_beyond_the_standard_size_limit_before_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let oversized = "00".repeat(400_001);
+    let broadcast = handler.dispatch("sendrawtransaction", &json!([oversized.as_str()]));
+    let preview = handler.dispatch("testmempoolaccept", &json!([[oversized.as_str()]]));
+    for (method, result) in [("sendrawtransaction", broadcast), ("testmempoolaccept", preview)] {
+        let error = result.err().ok_or("oversized broadcast hex must be refused")?;
+        assert!(
+            matches!(&error, RpcError::InvalidParameter(message) if message == BROADCAST_HEX_LIMIT_ERROR),
+            "{method} refused with the wrong boundary: {error:?}"
+        );
+    }
+    assert!(ctx.mempool.gateway.read().is_empty());
+    Ok(())
+}
+
+#[test]
+fn decoderawtransaction_refuses_hex_beyond_the_consensus_size_limit_before_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let oversized = "00".repeat(4_000_001);
+    let error = handler
+        .dispatch("decoderawtransaction", &json!([oversized.as_str()]))
+        .err()
+        .ok_or("oversized inspection hex must be refused")?;
+    assert!(
+        matches!(&error, RpcError::InvalidParameter(message) if message == CONSENSUS_HEX_LIMIT_ERROR),
+        "inspection refused with the wrong boundary: {error:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn decoderawtransaction_inspects_a_consensus_legal_non_standard_tx()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let mut big = make_tx(fund_utxo(&ctx, 0x70, 100_000_000), 1_000, script.clone());
+    big.outputs = (0..3_400)
+        .map(|_| TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone().into(),
+        })
+        .collect();
+    let raw = consensus_bytes(&big).to_lower_hex_string();
+    let result = handler.dispatch("decoderawtransaction", &json!([raw.as_str()]))?;
+    assert_eq!(
+        result.get("txid").and_then(|value| value.as_str()),
+        Some(big.txid().to_string().as_str()),
+        "inspection must decode a consensus-legal tx past the standard weight bound"
+    );
+    Ok(())
+}

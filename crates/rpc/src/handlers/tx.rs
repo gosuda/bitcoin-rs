@@ -474,7 +474,7 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             "maxburnamount is out of range".to_owned(),
         ));
     }
-    let tx = decode_tx(
+    let tx = decode_broadcast_tx(
         raw,
         "TX decode failed. Make sure the tx has at least one input.".to_owned(),
     )?;
@@ -538,7 +538,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 "raw transaction must be a string".to_owned(),
             ));
         };
-        txs.push(decode_tx(
+        txs.push(decode_broadcast_tx(
             raw,
             format!("TX decode failed: {raw} Make sure the tx has at least one input."),
         )?);
@@ -582,11 +582,20 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic_omitting_nulls(&rows)
 }
 
-pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn decoderawtransaction(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, &["hexstring"])?;
     let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
-    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    if cancellation.is_triggered() {
+        return Err(RpcError::Misc(
+            "transaction decode request cancelled; retry".to_owned(),
+        ));
+    }
+    let tx = decode_inspection_tx(raw, "TX decode failed".to_owned())?;
     let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
     if let Some(object) = value.as_object_mut() {
         object.remove(&"hex");
@@ -615,7 +624,7 @@ pub(crate) fn compressrawtransaction(
         ));
     }
     let compress_outpoints = optional_bool(params, 1, true)?;
-    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
+    let tx = decode_inspection_tx(raw, "TX decode failed".to_owned())?;
     ctx.chain.with_stable_chainstate(|| {
         let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
         let (compressed, warnings) = crate::compressed_tx::compress_transaction(
@@ -792,6 +801,37 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
 fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     let bytes = hex_decode(raw).map_err(|_| RpcError::Deserialization(message.clone()))?;
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
+}
+
+const MAX_BROADCAST_HEX_CHARS: u64 =
+    2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
+const MAX_INSPECT_HEX_CHARS: u64 = 2 * bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
+const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
+const CONSENSUS_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the consensus size limit";
+
+fn check_hex_len(raw: &str, limit: u64, error: &'static str) -> Result<(), &'static str> {
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > limit {
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
+    check_hex_len(raw, MAX_BROADCAST_HEX_CHARS, BROADCAST_HEX_LIMIT_ERROR)
+}
+
+fn check_inspect_hex_len(raw: &str) -> Result<(), &'static str> {
+    check_hex_len(raw, MAX_INSPECT_HEX_CHARS, CONSENSUS_HEX_LIMIT_ERROR)
+}
+
+fn decode_broadcast_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
+    check_broadcast_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
+    decode_tx(raw, message)
+}
+
+fn decode_inspection_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
+    check_inspect_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
+    decode_tx(raw, message)
 }
 
 /// Converts a BTC-denominated JSON value (number or string) to satoshis using exact

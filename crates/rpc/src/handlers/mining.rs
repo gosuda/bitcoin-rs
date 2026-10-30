@@ -405,6 +405,8 @@ fn parse_generateblock_transactions(
             transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
         }
+        super::tx::check_broadcast_hex_len(text)
+            .map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
         let bytes = Vec::<u8>::from_hex(text).map_err(|_| generateblock_tx_decode_failed(text))?;
         let tx: Tx = deserialize(&bytes).map_err(|_| generateblock_tx_decode_failed(text))?;
         transactions.push(GenerateTx::Raw(tx));

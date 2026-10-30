@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{Mempool, PolicyError, PrevoutMeta, RbfError};
 
-const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
+pub const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 
 const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
 

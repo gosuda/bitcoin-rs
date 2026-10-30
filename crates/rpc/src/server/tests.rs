@@ -136,6 +136,39 @@ fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
     }
 }
 
+/// A materializing inspection decode reserves the blocking budget before
+/// it decodes, so an exhausted budget refuses without allocating the
+/// transaction (#1741).
+#[test]
+fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    handler.configure_blocking_admission(2);
+    let held = match handler.reserve_blocking_request() {
+        Ok(held) => held,
+        Err(error) => panic!("the single blocking slot must be available: {error:?}"),
+    };
+    let mut valid_tx_hex = String::from("0200000001");
+    valid_tx_hex.push_str(&"00".repeat(32));
+    valid_tx_hex.push_str("ffffffff00ffffffff010100000000000000015100000000");
+    let refused = handler.dispatch(
+        "decoderawtransaction",
+        &sonic_rs::json!([valid_tx_hex.as_str()]),
+    );
+    assert!(
+        matches!(
+            &refused,
+            Err(RpcError::Misc(message)) if message == "RPC blocking request limit reached"
+        ),
+        "an exhausted budget must refuse before decode: {refused:?}"
+    );
+    drop(held);
+    let served = handler.dispatch(
+        "decoderawtransaction",
+        &sonic_rs::json!([valid_tx_hex.as_str()]),
+    );
+    assert!(served.is_ok(), "a free budget must serve the decode: {served:?}");
+}
+
 #[test]
 fn connection_admission_reserves_slots_for_other_peers() {
     let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
