@@ -288,6 +288,15 @@ fn environment_parses_script_index() {
 
 #[test]
 fn scripthash_limit_defaults_and_cli_override_environment() {
+    assert!(
+        load_file(
+            "--bitcoin-conf",
+            "scripthash-limit=-1",
+            &[],
+            std::iter::empty()
+        )
+        .is_err()
+    );
     for (flag, text) in [
         ("--config", "scripthash_limit = 7000"),
         ("--bitcoin-conf", "scripthash-limit=7000"),
