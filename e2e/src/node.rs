@@ -734,6 +734,24 @@ impl ProcessNode {
         self.take_datadir()
     }
 
+    /// Waits for the child to exit on its own and returns its exit code.
+    /// Lifecycle proofs use this to observe a graceful exit instead of
+    /// forcing one.
+    pub fn wait_exit_code(&mut self, timeout: Duration) -> Result<i32> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait()? {
+                return status.code().ok_or_else(|| {
+                    Error::Assertion("node exited by a signal, not by itself".into())
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(Error::Assertion(
+            "node did not exit within the bounded wait".into(),
+        ))
+    }
+
     fn stop_process(&mut self) -> Result<()> {
         match self.kind {
             Kind::Core => {

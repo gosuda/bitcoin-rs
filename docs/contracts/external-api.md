@@ -277,6 +277,13 @@ wallet interoperability remain unverified.
 - Script lookup uses one bounded set; duplicate scripts keep the first descriptor's attribution. Unspents follow Core outpoint order. `raw`/`addr` use shared script-descriptor inference; pubkey descriptors keep specialized key/origin data and checksums.
 - The applied publication and UTXO view are captured under chain-transition read exclusion; creation hashes and confirmations use that retained publication even across a mid-projection reorg. Missing ancestry is unavailable, never fabricated. This bounded read blocks chain transitions; it is not Core's independent DB cursor. Active traversal observes the shared RPC shutdown lifecycle; blocking scan starts share the server's bounded blocking admission while status/abort stay ordinary. No second HTTP pool or scan index exists.
 
+### `API-36`: `stop` lifecycle control
+
+- Owner: `stop` in `crates/rpc/src/handlers/util.rs`, triggering the node's single graceful-shutdown latch (`Chainstate::request_shutdown`, the same latch the SIGTERM/SIGINT handler trips). No second shutdown path exists.
+- The reply is Core 31.1's exact status string (`Bitcoin Core stopping`, `src/rpc/server.cpp`), dispatched before teardown can begin so it always reaches the client; the process then runs the ordinary teardown and exits 0. A context without attached node control (embedded/test use) answers `-32603`.
+- Declared deviation: Core's hidden numeric `wait` argument is not honored — any argument is refused with the local `-32602` shape error — and the node does not wait for other in-flight RPC connections to drain before exiting.
+- Proven by `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_core_status_and_exits_zero` (real binary, Core-shaped reply, exit code 0 within a bounded wait).
+
 ## Live gaps
 
 - **Full Core differential suite**: versioned Core response structs, golden fixtures and differential lanes across all RPC methods are tracked under #78 (open).
