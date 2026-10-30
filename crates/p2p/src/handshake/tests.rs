@@ -58,6 +58,37 @@ fn a_block_before_readiness_is_refused_before_materialization() -> Result<(), Pe
     Ok(())
 }
 
+#[test]
+fn expanding_commands_before_readiness_are_refused_before_materialization() -> Result<(), PeerError> {
+    let magic = Magic::BITCOIN;
+    for command in ["tx", "cmpctblock", "blocktxn", "pkgtxns"] {
+        let mut frame = Vec::new();
+        write_message(
+            &mut frame,
+            magic,
+            &Message::BlockPayload(bytes::Bytes::from(vec![0; 80])),
+        )?;
+        frame[4..16].fill(0);
+        frame[4..4 + command.len()].copy_from_slice(command.as_bytes());
+        let mut peer = Peer::new(ScriptedStream::new(frame), magic);
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_inbound(lease_tx);
+        let outcome = run_inbound_handshake(
+            &mut peer,
+            1,
+            0,
+            services(),
+            &lease,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(
+            matches!(&outcome, Err(PeerError::Incoming(error)) if matches!(**error, PeerError::Misbehavior("message received before handshake completed"))),
+            "{command} must be refused by the readiness rule before its payload is decoded, not by a decode error: {outcome:?}"
+        );
+    }
+    Ok(())
+}
+
 fn remote_version(version: u32) -> Message {
     Message::Version(VersionMessage {
         version,

@@ -452,8 +452,15 @@ impl ConnectionShared {
         }
     }
 
-    fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
-        let body = crate::InboundBody::from(crate::InboundTx::new(tx, source));
+    fn send_tx(
+        &self,
+        source: crate::PeerSource,
+        tx: bitcoin_rs_primitives::Tx,
+        memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
+    ) {
+        let body = crate::InboundBody::from(
+            crate::InboundTx::new(tx, source).with_memory_credit(memory_credit),
+        );
         let dropped = if let Some(channel) = &self.inbound_tx {
             if self.is_session_cancelled() {
                 Some(body)
@@ -2179,6 +2186,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                 shared,
                 lease.source(peer_addr.endpoint()),
                 tx,
+                memory_credit,
                 peer_addr,
                 tx_relay_open(),
             ),
@@ -2646,12 +2654,13 @@ fn forward_tx_if_relay_open(
     shared: &ConnectionShared,
     source: crate::PeerSource,
     tx: bitcoin_rs_primitives::Tx,
+    memory_credit: Option<crate::inbound::block_memory::BlockMemoryCredit>,
     peer_addr: impl Into<crate::PeerRemote>,
     relay_open: bool,
 ) {
     let peer_addr = peer_addr.into();
     if relay_open {
-        shared.send_tx(source, tx);
+        shared.send_tx(source, tx, memory_credit);
     } else {
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }

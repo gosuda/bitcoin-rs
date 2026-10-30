@@ -37,5 +37,18 @@ fuzz_target!(|data: &[u8]| {
     framed.extend_from_slice(payload);
 
     let mut cursor = Cursor::new(framed.as_slice());
-    let _ = bitcoin_rs_p2p::wire::read_message(&mut cursor, magic);
+    if let Ok((message, _raw)) = bitcoin_rs_p2p::wire::read_message(&mut cursor, magic) {
+        let decoded = match &message {
+            bitcoin_rs_p2p::Message::Block(payload) => {
+                payload.block().retained_heap_bytes()
+            }
+            bitcoin_rs_p2p::Message::Tx(tx) => tx.retained_heap_bytes(),
+            _ => return,
+        };
+        assert!(
+            payload.len() + decoded
+                <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+            "{command} decoded beyond its decode reservation"
+        );
+    }
 });

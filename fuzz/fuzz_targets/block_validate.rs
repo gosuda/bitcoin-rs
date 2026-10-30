@@ -27,6 +27,16 @@ fn validate_block(data: &[u8]) {
     let Ok(block) = bitcoin_rs_primitives::deserialize::<Block>(&encoded) else {
         return;
     };
+    assert_eq!(
+        bitcoin_rs_primitives::consensus_bytes(&block),
+        encoded,
+        "native decode must re-encode to the rust-bitcoin serialization"
+    );
+    assert!(
+        encoded.len() + block.retained_heap_bytes()
+            <= bitcoin_rs_primitives::layout::decode_reservation(encoded.len()),
+        "decoded block exceeds its decode reservation"
+    );
     let _ = verify_block_rules(&block);
     let view = AnyCoinView {
         coin: TxOut {
