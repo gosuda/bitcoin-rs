@@ -36,22 +36,33 @@ pub fn spawn_tx_ingress_consumer(
     };
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
-        .spawn(move || {
-            while !shutdown.load() {
-                let made_progress = consumer.process_retries();
-                let timeout = if made_progress {
-                    Duration::ZERO
-                } else {
-                    TX_INGRESS_POLL
-                };
-                let recv = tx_rx.recv_timeout(timeout);
-                match recv {
-                    Ok(body) => consumer.process_body(body),
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
+        .spawn(move || run_consumer_loop(&consumer, &shutdown, &tx_rx))
+}
+
+fn run_consumer_loop(
+    consumer: &TxIngressConsumer,
+    shutdown: &bitcoin_rs_chain::LatchReader,
+    tx_rx: &Receiver<bitcoin_rs_p2p::InboundBody>,
+) {
+    while !shutdown.load() {
+        let made_progress = consumer.process_retries();
+        if made_progress {
+            match tx_rx.try_recv() {
+                Ok(body) => consumer.process_body(body),
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
             }
-        })
+        } else {
+            crossbeam_channel::select! {
+                recv(tx_rx) -> recv => match recv {
+                    Ok(body) => consumer.process_body(body),
+                    Err(_) => break,
+                },
+                recv(shutdown.closed()) -> _ => break,
+                recv(crossbeam_channel::after(TX_INGRESS_POLL)) -> _ => {}
+            }
+        }
+    }
 }
 
 struct TxIngressConsumer {
