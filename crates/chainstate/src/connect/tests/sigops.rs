@@ -1,6 +1,7 @@
 //! Block budgets must survive script-proof and execution-skip paths (#1728).
 
 use super::*;
+use crate::test_fixtures::TestError;
 use crate::{AssumeValidGate, ValidationMode, WindowApplyDisposition};
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::regtest_fixture::merkle_root;
@@ -8,7 +9,7 @@ use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_script::{opcode::*, push_data};
 use sha2::{Digest, Sha256};
 
-fn funded_chain() -> Result<(crate::Chainstate, Tx, BlockHash), Box<dyn std::error::Error>> {
+fn funded_chain() -> TestResult<(crate::Chainstate, Tx, BlockHash)> {
     let chain = handles(Network::Regtest, Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
     seed_genesis(&chain)?;
     let mut funding = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
@@ -30,7 +31,8 @@ fn funded_chain() -> Result<(crate::Chainstate, Tx, BlockHash), Box<dyn std::err
 }
 
 fn remine(block: &mut Block) -> TestResult {
-    block.header.merkle_root = merkle_root(&block.txs).ok_or("missing merkle root")?;
+    block.header.merkle_root =
+        merkle_root(&block.txs).ok_or(TestError::Missing("missing merkle root"))?;
     mine_block_to_declared_target(block)?;
     Ok(())
 }
@@ -56,11 +58,7 @@ fn input(outpoint: OutPoint, script_sig: Vec<u8>, witness: Witness) -> TxIn {
     }
 }
 
-fn legacy_block(
-    parent: BlockHash,
-    funding: &Tx,
-    transactions: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
+fn legacy_block(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
     let mut block = legacy_block_body(parent, funding, transactions)?;
     remine(&mut block)?;
     Ok(block)
@@ -70,7 +68,7 @@ fn legacy_block_with_coinbase_sigop(
     parent: BlockHash,
     funding: &Tx,
     transactions: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
+) -> TestResult<Block> {
     let mut block = legacy_block_body(parent, funding, transactions)?;
     block.txs[0].outputs.push(TxOut {
         value: Amount::ZERO,
@@ -80,11 +78,7 @@ fn legacy_block_with_coinbase_sigop(
     Ok(block)
 }
 
-fn legacy_block_body(
-    parent: BlockHash,
-    funding: &Tx,
-    transactions: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
+fn legacy_block_body(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
     let mut block = mined_child(parent, 101)?;
     // Each input executes 200 non-push opcodes, within the script limit,
     // but legacy counting charges 100 * 20 * 4 = 8,000 per transaction.
@@ -133,7 +127,7 @@ fn check_budget(
     let snapshot = chain.chain_snapshot();
     let tip = chain
         .applied_tip_snapshot()
-        .ok_or("missing applied tip")?
+        .ok_or(TestError::Missing("missing applied tip"))?
         .hash;
     let head = chain.durable_head.load()?;
     let stats = chain.coin_stats.snapshot().to_bytes();
@@ -185,7 +179,7 @@ fn check_budget(
         assert_eq!(
             chain
                 .applied_tip_snapshot()
-                .ok_or("missing applied tip")?
+                .ok_or(TestError::Missing("missing applied tip"))?
                 .hash,
             tip
         );
@@ -202,7 +196,7 @@ fn check_budget(
         assert_eq!(
             chain
                 .applied_tip_snapshot()
-                .ok_or("missing applied tip")?
+                .ok_or(TestError::Missing("missing applied tip"))?
                 .hash,
             hash
         );
@@ -331,7 +325,7 @@ fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
                         .map(|tx| *tx.wtxid().0.as_byte_array()),
                 );
                 let root = bitcoin_rs_consensus::compute_merkle_root(&mut leaves)
-                    .ok_or("missing witness root")?;
+                    .ok_or(TestError::Missing("missing witness root"))?;
                 let commitment = double_sha256(&[root, [0; 32]].concat());
                 block.txs[0].outputs.push(TxOut {
                     value: Amount::ZERO,

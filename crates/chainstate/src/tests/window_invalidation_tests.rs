@@ -11,9 +11,11 @@ use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::Mutex;
 
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition, WindowApplyError};
-use crate::test_fixtures::{StagedFire, handles, seed_genesis, staging_recorder};
+use crate::test_fixtures::{
+    StagedFire, TestError, TestResult, handles, seed_genesis, staging_recorder,
+};
 
-fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static str> {
+fn empty_child(prev_blockhash: BlockHash, height: u32) -> TestResult<Block> {
     let mut block = Block {
         header: Header {
             version: 1,
@@ -26,14 +28,11 @@ fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static
         txs: Vec::new(),
     };
     bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut block.header)
-        .map_err(|_| "test nonce exhausted")?;
+        .map_err(|_| TestError::Exhausted("test nonce"))?;
     Ok(block)
 }
 
-fn coinbase_less_child(
-    prev_blockhash: BlockHash,
-    script_len: usize,
-) -> Result<Block, Box<dyn std::error::Error>> {
+fn coinbase_less_child(prev_blockhash: BlockHash, script_len: usize) -> TestResult<Block> {
     let tx = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -50,8 +49,8 @@ fn coinbase_less_child(
     };
     assert_eq!(tx.base_size(), 60 + script_len);
     let txs = vec![tx];
-    let merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&txs).ok_or("test body has no root")?;
+    let merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&txs)
+        .ok_or(TestError::Missing("test body has no root"))?;
     let mut header = Header {
         version: 1,
         prev_blockhash,
@@ -61,16 +60,16 @@ fn coinbase_less_child(
         nonce: 0,
     };
     bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut header)
-        .map_err(|_| "test nonce exhausted")?;
+        .map_err(|_| TestError::Exhausted("test nonce"))?;
     Ok(Block { header, txs })
 }
 
 fn deliver_coinbase_less_body(
     script_len: usize,
-) -> Result<(WindowApplyError, NodeStatus, NodeStatus, Hash256), Box<dyn std::error::Error>> {
+) -> TestResult<(WindowApplyError, NodeStatus, NodeStatus, Hash256)> {
     let genesis = Network::Regtest.genesis_block();
     let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&chainstate).map_err(|error: ApplyError| error.to_string())?;
+    seed_genesis(&chainstate)?;
     let block = coinbase_less_child(genesis.block_hash(), script_len)?;
     let hash = Hash256::from(block.block_hash());
     chainstate
@@ -82,31 +81,34 @@ fn deliver_coinbase_less_body(
         tree.lookup(hash)
             .and_then(|id| tree.node(id).ok())
             .map(|node| node.status)
-            .ok_or("the header must be in the tree after insert")?
+            .ok_or(TestError::Missing(
+                "the header must be in the tree after insert",
+            ))?
     };
 
     let payload = BlockPayload::from_local(block);
     let error = chainstate
         .apply_window(&[&payload])
         .err()
-        .ok_or("a coinbase-less body must not commit")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a coinbase-less body must not commit",
+        ))?;
     let tree = chainstate.block_tree.read();
     let after = tree
         .lookup(hash)
         .and_then(|id| tree.node(id).ok())
         .map(|node| node.status)
-        .ok_or("the header must stay in the tree")?;
+        .ok_or(TestError::Missing("the header must stay in the tree"))?;
     let applied = chainstate
         .applied_tip()
         .load_full()
         .map(|tip| tip.hash)
-        .ok_or("an applied tip must be published")?;
+        .ok_or(TestError::Missing("an applied tip must be published"))?;
     Ok((error, before, after, applied))
 }
 
 #[test]
-fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid() -> TestResult {
     let (error, before, after, applied) = deliver_coinbase_less_body(4)?;
     assert!(
         matches!(
@@ -139,8 +141,7 @@ fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid()
 }
 
 #[test]
-fn a_coinbase_less_body_of_another_size_still_poisons_its_header()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_coinbase_less_body_of_another_size_still_poisons_its_header() -> TestResult {
     let (error, _, status, _) = deliver_coinbase_less_body(0)?;
     assert!(
         matches!(
@@ -157,10 +158,10 @@ fn a_coinbase_less_body_of_another_size_still_poisons_its_header()
 }
 
 #[test]
-fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::error::Error>> {
+fn window_invalidation_reevaluates_assume_valid() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let mut handles: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&handles).map_err(|error: ApplyError| error.to_string())?;
+    seed_genesis(&handles)?;
 
     let anchor = empty_child(genesis.block_hash(), 1)?;
     let anchor_hash = Hash256::from(anchor.block_hash());
@@ -179,7 +180,9 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
 
     let anchor_payload = BlockPayload::from_local(anchor);
     let outcome = handles.apply_window(&[&anchor_payload]);
-    let error = outcome.err().ok_or("an empty block must not commit")?;
+    let error = outcome.err().ok_or(TestError::UnexpectedSuccess(
+        "an empty block must not commit",
+    ))?;
     assert_eq!(error.disposition, WindowApplyDisposition::Permanent);
     assert_eq!(error.invalidated.to_vec(), vec![anchor_hash]);
 
@@ -187,21 +190,19 @@ fn window_invalidation_reevaluates_assume_valid() -> Result<(), Box<dyn std::err
         !handles.assume_valid_gate.trusted(),
         "window invalidation must re-evaluate the assume-valid gate"
     );
-    let tip = handles
-        .chain_tip()
-        .load_full()
-        .ok_or("window invalidation must republish the best valid tip")?;
+    let tip = handles.chain_tip().load_full().ok_or(TestError::Missing(
+        "window invalidation must republish the best valid tip",
+    ))?;
     assert_eq!(tip.hash, Hash256::from(genesis.block_hash()));
     Ok(())
 }
 
 #[test]
-fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dyn std::error::Error>>
-{
+fn a_failing_window_stages_only_its_last_successful_block() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
     let chainstate: Chainstate = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    seed_genesis(&chainstate).map_err(|error: ApplyError| error.to_string())?;
+    seed_genesis(&chainstate)?;
     chainstate.durable_head.commit(
         None,
         &bitcoin_rs_storage::DurableHead {
@@ -239,12 +240,14 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
     let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
     chainstate
         .set_tip_staged(staging_recorder(&chainstate, &fires))
-        .map_err(|_| "the staged-tip hook installs once")?;
+        .map_err(|_| TestError::HookAlreadyInstalled("the staged-tip hook installs once"))?;
 
     let error = chainstate
         .apply_window(&payloads)
         .err()
-        .ok_or("an empty trailing body must not commit")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "an empty trailing body must not commit",
+        ))?;
     assert!(
         matches!(
             error.source,
@@ -286,9 +289,9 @@ fn a_failing_window_stages_only_its_last_successful_block() -> Result<(), Box<dy
         "the applied tip is still the pre-window tip at fire time"
     );
 
-    let applied = chainstate
-        .applied_tip_snapshot()
-        .ok_or("the committed prefix must publish an applied tip")?;
+    let applied = chainstate.applied_tip_snapshot().ok_or(TestError::Missing(
+        "the committed prefix must publish an applied tip",
+    ))?;
     assert_eq!(
         applied.hash, second_hash,
         "the failure-prefix flush publishes the last success, not the failure"

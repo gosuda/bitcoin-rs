@@ -1,6 +1,7 @@
 //! RCV-02/04 and ARCH-07b: root-selected snapshot recovery with real storage.
 use super::*;
 use crate::assumeutxo::{DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL, HistoricalAdvance};
+use crate::test_fixtures::{TestError, TestResult};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::BlockPayload;
 use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
@@ -10,10 +11,7 @@ use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::AtomicU32;
 
-fn open_persistent(
-    dir: &Path,
-    pinned: &AssumeUtxoData,
-) -> Result<Arc<Chainstate>, Box<dyn std::error::Error>> {
+fn open_persistent(dir: &Path, pinned: &AssumeUtxoData) -> TestResult<Arc<Chainstate>> {
     std::fs::create_dir_all(dir)?;
     crate::events::initialize_data_dir(dir)?;
     let store = Arc::new(FjallStore::open(dir.join("chainstate"))?);
@@ -27,7 +25,7 @@ fn open_persistent(
         .is_some_and(|head| !matches!(head.assumeutxo, AssumeUtxoDiskStatus::Uninitialized))
     {
         if head.is_some_and(|head| matches!(head.assumeutxo, AssumeUtxoDiskStatus::Failed { .. })) {
-            return Err("persisted validation failure".into());
+            return Err(TestError::UnexpectedSuccess("persisted validation failure"));
         }
         let initial = crate::recovery::restore_snapshot(dir, Network::Regtest, pinned)?;
         let stats = Arc::new(CoinStatsListener::new(initial.coin_stats));
@@ -44,7 +42,7 @@ fn open_persistent(
             Arc::new(crate::events::ChainEventPublisher::detached(0)),
         )
     } else {
-        Arc::try_unwrap(chainstate()).map_err(|_| "shared fixture")?
+        Arc::try_unwrap(chainstate()).map_err(|_| TestError::Missing("shared fixture"))?
     };
     active.durable_head = head_store;
     active.undo_store = Arc::new(KvUndoStore::new(store.clone()));
@@ -54,10 +52,7 @@ fn open_persistent(
     Ok(Arc::new(active))
 }
 
-fn activate(
-    dir: &Path,
-    fixture: &Fixture,
-) -> Result<(Arc<Chainstate>, AssumeUtxoManager), Box<dyn std::error::Error>> {
+fn activate(dir: &Path, fixture: &Fixture) -> TestResult<(Arc<Chainstate>, AssumeUtxoManager)> {
     let active = open_persistent(dir, &fixture.pinned)?;
     active.admit_headers(
         &fixture
@@ -83,12 +78,12 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
             .active
             .durable_head
             .load()?
-            .ok_or("prior head missing")?;
+            .ok_or(TestError::Missing("prior head missing"))?;
         let store = Arc::new(FjallStore::open(dir.path())?);
         let head = Arc::new(KvDurableHeadStore::new(store));
         head.commit(None, &prior, &CommitRecords::default())?;
         Arc::get_mut(&mut fixture.active)
-            .ok_or("shared fixture")?
+            .ok_or(TestError::Missing("shared fixture"))?
             .durable_head = head.clone();
         let manager = AssumeUtxoManager::open(
             Network::Regtest,
@@ -96,7 +91,9 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
             dir.path().to_path_buf(),
         )?;
         fixture.activate(&manager)?;
-        let next = head.load()?.ok_or("snapshot commit missing")?;
+        let next = head
+            .load()?
+            .ok_or(TestError::Missing("snapshot commit missing"))?;
         assert!(next.height < prior.height);
         assert_eq!(next.commit_id, prior.commit_id + 1);
         assert_eq!(next.tip, fixture.pinned.block_hash);
@@ -105,7 +102,7 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
             fixture
                 .active
                 .applied_tip_snapshot()
-                .ok_or("applied tip missing")?
+                .ok_or(TestError::Missing("applied tip missing"))?
                 .hash,
             next.tip
         );
@@ -150,7 +147,7 @@ fn finalize_snapshot_after_foreground_restart(
     let expected_stats = active.coin_stats.snapshot();
     let expected_tip = active
         .applied_tip_snapshot()
-        .ok_or("missing foreground tip")?
+        .ok_or(TestError::Missing("missing foreground tip"))?
         .hash;
     drop(manager);
     drop(active);
@@ -161,7 +158,7 @@ fn finalize_snapshot_after_foreground_restart(
     assert_eq!(
         active
             .applied_tip_snapshot()
-            .ok_or("missing recovered tip")?
+            .ok_or(TestError::Missing("missing recovered tip"))?
             .hash,
         expected_tip
     );
@@ -169,7 +166,7 @@ fn finalize_snapshot_after_foreground_restart(
     assert!(
         manager
             .historical_chainstate()
-            .ok_or("missing historical")?
+            .ok_or(TestError::Missing("missing historical"))?
             .applied_tip_snapshot()
             .is_none()
     );
@@ -222,7 +219,7 @@ fn rewind_below_the_snapshot_base(
     assert_eq!(
         active
             .applied_tip_snapshot()
-            .ok_or("missing rewound tip")?
+            .ok_or(TestError::Missing("missing rewound tip"))?
             .height,
         1
     );
@@ -230,7 +227,7 @@ fn rewind_below_the_snapshot_base(
         active
             .durable_head
             .load()?
-            .ok_or("missing head")?
+            .ok_or(TestError::Missing("missing head"))?
             .assumeutxo,
         AssumeUtxoDiskStatus::Uninitialized
     ));
@@ -274,7 +271,7 @@ fn verify_restart_after_rewind(
     assert_eq!(
         active
             .applied_tip_snapshot()
-            .ok_or("missing restarted ordinary tip")?
+            .ok_or(TestError::Missing("missing restarted ordinary tip"))?
             .height,
         1
     );
@@ -287,7 +284,10 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     let dir = tempfile::tempdir()?;
     let mut restart = SnapshotRestart::default();
     finalize_snapshot_after_foreground_restart(dir.path(), &fixture, &mut restart)?;
-    let child = restart.child.as_ref().ok_or("missing restart child")?;
+    let child = restart
+        .child
+        .as_ref()
+        .ok_or(TestError::Missing("missing restart child"))?;
     let mut rewound = CoinStats::default();
     rewind_below_the_snapshot_base(dir.path(), &fixture, child, &restart.stats, &mut rewound)?;
     verify_restart_after_rewind(dir.path(), &fixture, &rewound)
@@ -330,13 +330,17 @@ fn publish_unaccepted_historical_checkpoint(
             assert_eq!(*historical_hash, fixture.blocks[1].block_hash().0);
             *checkpoint
         }
-        other => return Err(format!("unexpected status after checkpoint: {other:?}").into()),
+        _ => {
+            return Err(TestError::UnexpectedSuccess(
+                "unexpected status after checkpoint",
+            ));
+        }
     };
     assert_eq!(checkpoint.height, 1);
     assert_eq!(checkpoint.hash, fixture.blocks[1].block_hash().0);
     let historical = manager
         .historical_chainstate()
-        .ok_or("missing historical")?;
+        .ok_or(TestError::Missing("missing historical"))?;
     let accepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
     let accepted_stats = historical.coin_stats.snapshot();
     historical
@@ -401,7 +405,9 @@ fn publish_two_historical_checkpoints(
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
         )?
     else {
-        return Err("unaccepted CURRENT generation was not published".into());
+        return Err(TestError::UnexpectedSuccess(
+            "unaccepted CURRENT generation was not published",
+        ));
     };
     assert_ne!(current.generation, checkpoint.checkpoint.generation);
     assert_eq!(current.applied_tip.height, 2);
@@ -429,10 +435,10 @@ fn restart_from_historical_checkpoint(
     )?;
     let historical = manager
         .historical_chainstate()
-        .ok_or("missing restored historical chainstate")?;
+        .ok_or(TestError::Missing("missing restored historical chainstate"))?;
     let restored_tip = historical
         .applied_tip_snapshot()
-        .ok_or("missing historical checkpoint tip")?;
+        .ok_or(TestError::Missing("missing historical checkpoint tip"))?;
     assert_eq!(restored_tip.height, 1);
     assert_eq!(restored_tip.hash, fixture.blocks[1].block_hash().0);
     assert_eq!(restored_tip.chain_tx_count.to_wire(), 2);
@@ -476,7 +482,9 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     restart_from_historical_checkpoint(
         dir.path(),
         &fixture,
-        unaccepted.coins.ok_or("missing accepted coins")?,
+        unaccepted
+            .coins
+            .ok_or(TestError::Missing("missing accepted coins"))?,
         &unaccepted.stats,
     )
 }
@@ -502,7 +510,7 @@ fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .find(|entry| entry.path().is_dir())
-        .ok_or("missing historical generation")?
+        .ok_or(TestError::Missing("missing historical generation"))?
         .path();
     let blocker = generation.join("operator-backup");
     std::fs::create_dir(&blocker)?;
@@ -637,7 +645,9 @@ fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
 
     let error = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)
         .err()
-        .ok_or("snapshot-base checkpoint accepted an impossible coin height")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "snapshot-base checkpoint accepted an impossible coin height",
+        ))?;
     assert!(matches!(
         error,
         crate::recovery::RecoveryError::Utxo(
@@ -802,7 +812,7 @@ fn crash_writer() -> TestResult {
     let mut active = open_persistent(&dir, &fixture.pinned)?;
     let inner = active.durable_head.clone();
     Arc::get_mut(&mut active)
-        .ok_or("shared crash fixture")?
+        .ok_or(TestError::Missing("shared crash fixture"))?
         .durable_head = Arc::new(KillPointHead {
         inner,
         phase: phase.clone(),
@@ -848,7 +858,9 @@ fn crash_writer() -> TestResult {
             publish_genesis_historical_checkpoint(&dir, &manager, block)?;
         }
     }
-    Err("crash failpoint was not reached".into())
+    Err(TestError::UnexpectedSuccess(
+        "crash failpoint was not reached",
+    ))
 }
 
 fn publish_genesis_historical_checkpoint(
@@ -856,7 +868,9 @@ fn publish_genesis_historical_checkpoint(
     manager: &AssumeUtxoManager,
     block: &bitcoin_rs_primitives::Block,
 ) -> TestResult {
-    let historical = manager.historical_chainstate().ok_or("missing history")?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or(TestError::Missing("missing history"))?;
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
     let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
         &data,
@@ -872,11 +886,11 @@ fn publish_genesis_historical_checkpoint(
         bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
     )?;
     let crate::checkpoint::CheckpointWrite::Published { reference } = write else {
-        return Err("missing genesis checkpoint".into());
+        return Err(TestError::Missing("missing genesis checkpoint"));
     };
     let mut status = manager.status()?;
     let AssumeUtxoDiskStatus::Validating { checkpoint, .. } = &mut status else {
-        return Err("missing validating status".into());
+        return Err(TestError::Missing("missing validating status"));
     };
     *checkpoint = Some(HistoricalCheckpointRef {
         checkpoint: reference,
@@ -901,8 +915,8 @@ fn run_crashing_writer(dir: &Path, phase: &str) -> TestResult {
         .spawn()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while !dir.join("kill-ready").exists() && std::time::Instant::now() < deadline {
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("{phase} child exited before kill: {status}").into());
+        if let Some(_status) = child.try_wait()? {
+            return Err(TestError::WorkerPanicked("child exited before kill"));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -928,7 +942,7 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
     assert_eq!(
         active
             .applied_tip_snapshot()
-            .ok_or("missing recovered tip")?
+            .ok_or(TestError::Missing("missing recovered tip"))?
             .height,
         if phase == "activation" { 2 } else { 3 }
     );
@@ -937,9 +951,9 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
         assert_eq!(
             manager
                 .historical_chainstate()
-                .ok_or("missing history")?
+                .ok_or(TestError::Missing("missing history"))?
                 .applied_tip_snapshot()
-                .ok_or("missing historical tip")?
+                .ok_or(TestError::Missing("missing historical tip"))?
                 .height,
             1
         );
@@ -950,9 +964,9 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
         assert_eq!(
             manager
                 .historical_chainstate()
-                .ok_or("missing history")?
+                .ok_or(TestError::Missing("missing history"))?
                 .applied_tip_snapshot()
-                .ok_or("missing historical tip")?
+                .ok_or(TestError::Missing("missing historical tip"))?
                 .height,
             historical_height
         );
@@ -966,7 +980,7 @@ fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -
         assert!(
             manager
                 .historical_chainstate()
-                .ok_or("missing history")?
+                .ok_or(TestError::Missing("missing history"))?
                 .applied_tip_snapshot()
                 .is_none()
         );
@@ -1037,7 +1051,7 @@ fn finalized_checkpoint_recovers_without_replaying_pruned_foreground_history() -
     assert_eq!(
         active
             .applied_tip_snapshot()
-            .ok_or("missing restored tip")?
+            .ok_or(TestError::Missing("missing restored tip"))?
             .hash,
         child.block_hash().0
     );
@@ -1086,7 +1100,7 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     let mut active = open_persistent(dir.path(), &fixture.pinned)?;
     let inner = active.durable_head.clone();
     Arc::get_mut(&mut active)
-        .ok_or("shared fixture")?
+        .ok_or(TestError::Missing("shared fixture"))?
         .durable_head = Arc::new(RejectTerminalHead { inner });
     active.admit_headers(
         &fixture
@@ -1104,8 +1118,8 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
     let mut invalid = fixture.blocks[1].clone();
     invalid.txs[0].inputs[0].script_sig = bitcoin_rs_primitives::Script::new();
-    invalid.header.merkle_root =
-        bitcoin_rs_chain::regtest_fixture::merkle_root(&invalid.txs).ok_or("merkle root")?;
+    invalid.header.merkle_root = bitcoin_rs_chain::regtest_fixture::merkle_root(&invalid.txs)
+        .ok_or(TestError::Missing("merkle root"))?;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut invalid)?;
     assert!(
         manager
@@ -1128,7 +1142,7 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
         active
             .durable_head
             .load()?
-            .ok_or("missing head")?
+            .ok_or(TestError::Missing("missing head"))?
             .assumeutxo,
         AssumeUtxoDiskStatus::Failed { .. }
     ));
@@ -1144,7 +1158,7 @@ fn assert_reopen_refuses_mismatched_receipt(dir: &Path, fixture: &Fixture) -> Te
         active
             .durable_head
             .load()?
-            .ok_or("missing head")?
+            .ok_or(TestError::Missing("missing head"))?
             .assumeutxo,
         AssumeUtxoDiskStatus::Failed { .. }
     ));
@@ -1170,7 +1184,7 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
         let mut active = open_persistent(dir.path(), &fixture.pinned)?;
         let inner = active.durable_head.clone();
         Arc::get_mut(&mut active)
-            .ok_or("shared fixture")?
+            .ok_or(TestError::Missing("shared fixture"))?
             .durable_head = Arc::new(RejectTerminalHead { inner });
         active.admit_headers(
             &fixture
@@ -1186,7 +1200,10 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
             manager.activate_pinned_snapshot(loaded.set, loaded.tip_hash, &fixture.pinned)
         }?;
         if mismatch {
-            let prior = active.durable_head.load()?.ok_or("missing head")?;
+            let prior = active
+                .durable_head
+                .load()?
+                .ok_or(TestError::Missing("missing head"))?;
             let mut next = prior;
             if let AssumeUtxoDiskStatus::Validating { chain_tx_count, .. } = &mut next.assumeutxo {
                 *chain_tx_count += 1;
@@ -1205,7 +1222,10 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
                 .is_err()
         );
         assert!(active.is_closed_for_recovery());
-        let head = active.durable_head.load()?.ok_or("missing head")?;
+        let head = active
+            .durable_head
+            .load()?
+            .ok_or(TestError::Missing("missing head"))?;
         assert!(matches!(
             head.assumeutxo,
             AssumeUtxoDiskStatus::Validating {
@@ -1217,7 +1237,7 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
             active
                 .block_body_store
                 .as_ref()
-                .ok_or("missing bodies")?
+                .ok_or(TestError::Missing("missing bodies"))?
                 .load_block_body(2, fixture.pinned.block_hash)?
                 .is_none()
         );
@@ -1264,7 +1284,7 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
     ));
     let mut seed = initial
         .script_live_seed
-        .ok_or("restart recovery must mint a seed")?;
+        .ok_or(TestError::Missing("restart recovery must mint a seed"))?;
     for block in &fixture.blocks {
         manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
     }
@@ -1275,8 +1295,7 @@ fn import_finalize_remove_archive_seed_completes() -> TestResult {
     let _ = std::fs::remove_dir_all(&archive);
     assert!(!archive.exists(), "the seed must not need its path");
 
-    let expected = u64::try_from(initial.utxo.len())
-        .map_err(|error| format!("coin count does not fit u64: {error}"))?;
+    let expected = u64::try_from(initial.utxo.len())?;
     assert!(expected > 0, "the fixture must hold live coins");
     let mut seen = 0_u64;
     seed.for_each_coin_raw(

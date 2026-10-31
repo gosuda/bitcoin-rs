@@ -12,12 +12,12 @@ use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::Mutex;
 
-use crate::test_fixtures::{MemoryBodies, handles, seed_genesis};
+use crate::test_fixtures::{MemoryBodies, TestError, TestResult, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
 mod revalidation;
 
-fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Error>> {
+fn restored_chainstate() -> TestResult<(Chainstate, Block)> {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis_tip = seed_genesis(&handles)?;
     handles.coin_stats.finish_block(0, 1);
@@ -57,8 +57,7 @@ fn install_arbitrary_head(
 }
 
 #[test]
-fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn std::error::Error>>
-{
+fn committed_gap_replays_to_head_without_recommitting_it() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -73,7 +72,9 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "replay did not publish an applied tip",
+        ))?;
     assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     assert_eq!(
         landed.chain_tx_count,
@@ -89,8 +90,7 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
 }
 
 #[test]
-fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
--> Result<(), Box<dyn std::error::Error>> {
+fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -110,7 +110,7 @@ fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
                     .push((staged.hash, Hash256::from(block.block_hash())));
             },
         ))
-        .map_err(|_| "the staged-tip hook installs once")?;
+        .map_err(|_| TestError::HookAlreadyInstalled("staged-tip"))?;
 
     super::reconcile_at_boot(&handles)?;
 
@@ -121,13 +121,15 @@ fn replay_of_a_committed_gap_never_fires_the_staged_tip_hook()
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "replay did not publish an applied tip",
+        ))?;
     assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     Ok(())
 }
 
 #[test]
-fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::error::Error>> {
+fn replay_publishes_the_receipt_certified_count() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -151,7 +153,9 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "replay did not publish an applied tip",
+        ))?;
     assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     assert_eq!(
         landed.chain_tx_count,
@@ -162,7 +166,7 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn replay_gap_skips_the_live_future_drift_recheck() -> Result<(), Box<dyn std::error::Error>> {
+fn replay_gap_skips_the_live_future_drift_recheck() -> TestResult {
     let (mut handles, mut child) = restored_chainstate()?;
     child.header.time = current_unix_seconds().saturating_add(4 * 60 * 60);
     bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut child.header)?;
@@ -179,13 +183,15 @@ fn replay_gap_skips_the_live_future_drift_recheck() -> Result<(), Box<dyn std::e
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "replay did not publish an applied tip",
+        ))?;
     assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     Ok(())
 }
 
 #[test]
-fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn committed_gap_with_missing_body_fails_closed() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let head = install_head(&mut handles, &child, Arc::new(MemoryBodies::default()))?;
 
@@ -219,7 +225,7 @@ fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::error::Error>> {
+fn cold_chainstate_replays_head_chain_from_genesis() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
     handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
@@ -242,7 +248,9 @@ fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("cold replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "cold replay did not publish an applied tip",
+        ))?;
     assert_eq!((landed.height, landed.hash), (1, head.tip));
     assert_eq!(
         landed.chain_tx_count,
@@ -257,8 +265,7 @@ fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn cold_chainstate_with_missing_genesis_body_fails_closed() -> Result<(), Box<dyn std::error::Error>>
-{
+fn cold_chainstate_with_missing_genesis_body_fails_closed() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
     handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
@@ -288,12 +295,12 @@ fn cold_chainstate_with_missing_genesis_body_fails_closed() -> Result<(), Box<dy
 }
 
 #[test]
-fn matching_durable_head_requires_no_replay() -> Result<(), Box<dyn std::error::Error>> {
+fn matching_durable_head_requires_no_replay() -> TestResult {
     let (mut handles, _) = restored_chainstate()?;
     let restored = handles
         .applied_tip
         .load_full()
-        .ok_or("restored tip missing")?;
+        .ok_or(TestError::Missing("restored tip missing"))?;
     let head = DurableHead {
         assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 3,
@@ -316,13 +323,12 @@ fn matching_durable_head_requires_no_replay() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
--> Result<(), Box<dyn std::error::Error>> {
+fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap() -> TestResult {
     let (handles, child) = restored_chainstate()?;
     let restored = handles
         .applied_tip
         .load_full()
-        .ok_or("restored tip missing")?;
+        .ok_or(TestError::Missing("restored tip missing"))?;
     let head = DurableHead {
         assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 4,
@@ -347,7 +353,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
 }
 
 #[test]
-fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::error::Error>> {
+fn wide_authenticated_gap_replays_to_durable_head() -> TestResult {
     let (mut handles, first) = restored_chainstate()?;
     let width = crate::window::DURABLE_HEAD_GROUP_BLOCKS + 1;
     let bodies = Arc::new(MemoryBodies::default());
@@ -375,7 +381,9 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
     let landed = handles
         .applied_tip
         .load_full()
-        .ok_or("wide replay did not publish an applied tip")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "wide replay did not publish an applied tip",
+        ))?;
     assert_eq!(
         (landed.height, landed.hash, landed.chain_tx_count.to_wire()),
         certified
@@ -390,12 +398,12 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn committed_gap_body_must_hash_to_the_head_identity() -> Result<(), Box<dyn std::error::Error>> {
+fn committed_gap_body_must_hash_to_the_head_identity() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let restored = handles
         .applied_tip
         .load_full()
-        .ok_or("restored tip missing")?;
+        .ok_or(TestError::Missing("restored tip missing"))?;
     let claimed = Hash256::from_le_bytes(&[0x55; 32]);
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(1, claimed, &consensus_bytes(&child))?;
@@ -424,12 +432,12 @@ fn committed_gap_body_must_hash_to_the_head_identity() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn committed_gap_must_descend_from_restored_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn committed_gap_must_descend_from_restored_tip() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
     let restored = handles
         .applied_tip
         .load_full()
-        .ok_or("restored tip missing")?;
+        .ok_or(TestError::Missing("restored tip missing"))?;
     let mut wrong_restored = (*restored).clone();
     wrong_restored.hash = Hash256::from_le_bytes(&[0x44; 32]);
     let child_hash = Hash256::from(child.block_hash());
@@ -460,12 +468,12 @@ fn committed_gap_must_descend_from_restored_tip() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn committed_gap_replay_failure_fails_closed() -> TestResult {
     let (mut handles, mut child) = restored_chainstate()?;
     let restored = handles
         .applied_tip
         .load_full()
-        .ok_or("restored tip missing")?;
+        .ok_or(TestError::Missing("restored tip missing"))?;
     child.header.merkle_root = Hash256::from_le_bytes(&[0x77; 32]);
     let child_hash = Hash256::from(child.block_hash());
     let bodies = Arc::new(MemoryBodies::default());
@@ -499,8 +507,7 @@ fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error:
 /// a progress checkpoint or a retry. The original writer error stays intact.
 #[cfg(feature = "fjall")]
 #[test]
-fn committed_gap_append_gap_does_not_enter_retention_relief()
--> Result<(), Box<dyn std::error::Error>> {
+fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
     use bitcoin_rs_storage::chainstate_journal::{
         FULL_REVALIDATION_MARKER, JournalEmit, JournalWriter, JournalWriterError,
         shared_journal_writer,

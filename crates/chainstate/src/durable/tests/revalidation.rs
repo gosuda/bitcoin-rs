@@ -23,7 +23,7 @@ use bitcoin_rs_script::{
 use bitcoin_rs_storage::chainstate_journal::{FULL_REVALIDATION_MARKER, JOURNAL_DIR_NAME};
 use bitcoin_rs_utxo::stats::CoinStatsListener;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use crate::test_fixtures::{TestError, TestResult};
 
 struct SpendView(OutPoint, TxOut);
 
@@ -88,8 +88,9 @@ fn commit_chain_with_checkpoint(
         opcode,
         Some(checkpoint_dir),
     )?;
-    let checkpoint_dir =
-        checkpoint_dir.ok_or("the accepted checkpoint directory must survive the commit")?;
+    let checkpoint_dir = checkpoint_dir.ok_or(TestError::UnexpectedSuccess(
+        "the accepted checkpoint directory must survive the commit",
+    ))?;
     Ok((chain, block, funding, checkpoint_dir))
 }
 fn commit_spent_script(
@@ -134,7 +135,7 @@ fn commit_spent_script(
     spend_block.txs.push(spend);
     spend_block.header.merkle_root =
         bitcoin_rs_chain::regtest_fixture::merkle_root(&spend_block.txs)
-            .ok_or("missing merkle root")?;
+            .ok_or(TestError::Missing("missing merkle root"))?;
     bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut spend_block)?;
     let successor = mined_child(spend_block.block_hash(), 102)?;
     chain.admit_headers(&[spend_block.header, successor.header])?;
@@ -186,7 +187,10 @@ fn prepare_cold_with_optional_marker(
     mode: ValidationMode,
     marker: Option<&[u8]>,
 ) -> TestResult<tempfile::TempDir> {
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     let journal_config = crate::ChainstateJournalConfig {
         enabled: false,
         ..crate::ChainstateJournalConfig::default()
@@ -235,7 +239,10 @@ fn prepare_warm(
     checkpoint_dir: tempfile::TempDir,
     mode: ValidationMode,
 ) -> TestResult<tempfile::TempDir> {
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     let initial = prepare_initial_chainstate(
         checkpoint_dir.path(),
         Network::Regtest,
@@ -249,7 +256,7 @@ fn prepare_warm(
     let tip = initial
         .applied_tip
         .clone()
-        .ok_or("missing checkpoint tip")?;
+        .ok_or(TestError::Missing("missing checkpoint tip"))?;
     assert_eq!(tip.height, 100);
     chain.validation_mode = mode;
     chain.coin_stats = Arc::new(CoinStatsListener::new(initial.coin_stats));
@@ -286,14 +293,14 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
             };
             let error = super::super::reconcile_at_boot(&chain)
                 .err()
-                .ok_or("a cold rebuild must verify scripts")?;
+                .ok_or(TestError::Missing("a cold rebuild must verify scripts"))?;
             assert!(
                 matches!(error, ApplyError::Consensus(ConsensusError::Script { .. })),
                 "{error:?}"
             );
             let tip = chain
                 .applied_tip_snapshot()
-                .ok_or("missing replay prefix")?;
+                .ok_or(TestError::Missing("missing replay prefix"))?;
             assert_eq!(
                 (tip.height, tip.hash),
                 (100, invalid.header.prev_blockhash.0)
@@ -314,7 +321,7 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
                 chain
                     .block_body_store
                     .as_ref()
-                    .ok_or("missing body store")?
+                    .ok_or(TestError::Missing("missing body store"))?
                     .load_block_body(101, hash)?,
                 Some(consensus_bytes(&invalid))
             );
@@ -347,14 +354,19 @@ fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
         } else {
             commit_chain(OP_PUSHNUM_1)?
         };
-        let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+        let head = chain
+            .durable_head
+            .load()?
+            .ok_or(TestError::Missing("missing durable head"))?;
         let dir = if marker {
             prepare_cold_with_marker(&mut chain, checkpoint_dir, ValidationMode::Full)?
         } else {
             prepare_cold(&mut chain, checkpoint_dir, ValidationMode::Full)?
         };
         super::super::reconcile_at_boot(&chain)?;
-        let tip = chain.applied_tip_snapshot().ok_or("missing replay tip")?;
+        let tip = chain
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("missing replay tip"))?;
         assert_eq!((tip.height, tip.hash), (head.height, head.tip));
         assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
         assert_eq!(chain.durable_head.load()?, Some(head));
@@ -385,7 +397,7 @@ fn cold_revalidation_still_refuses_corrupt_undo_instead_of_replacing_it() -> Tes
     let dir = prepare_cold_with_marker(&mut chain, Some(checkpoint_dir), ValidationMode::Full)?;
     let error = super::super::reconcile_at_boot(&chain)
         .err()
-        .ok_or("corrupt undo must fail closed")?;
+        .ok_or(TestError::Missing("corrupt undo must fail closed"))?;
     assert!(matches!(
         error,
         ApplyError::DurableHeadGapUnrecoverable {
@@ -409,10 +421,15 @@ fn cold_revalidation_still_refuses_corrupt_undo_instead_of_replacing_it() -> Tes
 #[test]
 fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> TestResult {
     let (mut chain, valid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::Full)?;
     super::super::reconcile_at_boot(&chain)?;
-    let tip = chain.applied_tip_snapshot().ok_or("missing replay tip")?;
+    let tip = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("missing replay tip"))?;
     assert_eq!((tip.height, tip.hash), (head.height, head.tip));
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
@@ -431,12 +448,17 @@ fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> 
 #[test]
 fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receipt() -> TestResult {
     let (mut chain, invalid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_RETURN)?;
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::AssumeValid)?;
     // An AssumeValid start trusts the committed gap above an accepted checkpoint,
     // so scripts are not re-verified and the gap replays to the stored head.
     super::super::reconcile_at_boot(&chain)?;
-    let tip = chain.applied_tip_snapshot().ok_or("missing replay tip")?;
+    let tip = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("missing replay tip"))?;
     assert_eq!((tip.height, tip.hash), (head.height, head.tip));
     assert_eq!(tip.chain_tx_count.to_wire(), head.chain_tx_count);
     assert_eq!(chain.durable_head.load()?, Some(head));
@@ -464,7 +486,10 @@ fn journal_off() -> crate::ChainstateJournalConfig {
 fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_script()
 -> TestResult {
     let (mut chain, invalid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_RETURN)?;
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     assert_eq!(
         chain.durable_head.load_attestation(&head)?,
         bitcoin_rs_storage::ScriptAttestation::AssumeValid,
@@ -502,14 +527,16 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
     let dir = prepare_cold(&mut chain, Some(checkpoint_dir), ValidationMode::Full)?;
     let error = super::super::reconcile_at_boot(&chain)
         .err()
-        .ok_or("a Full restart must execute the skipped script")?;
+        .ok_or(TestError::Missing(
+            "a Full restart must execute the skipped script",
+        ))?;
     assert!(
         matches!(error, ApplyError::Consensus(ConsensusError::Script { .. })),
         "{error:?}"
     );
     let tip = chain
         .applied_tip_snapshot()
-        .ok_or("missing replay prefix")?;
+        .ok_or(TestError::Missing("missing replay prefix"))?;
     assert_eq!(
         (tip.height, tip.hash),
         (100, invalid.header.prev_blockhash.0),
@@ -524,7 +551,10 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
 #[test]
 fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestResult {
     let (mut chain, _valid, _funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     assert_eq!(
         chain.durable_head.load_attestation(&head)?,
         bitcoin_rs_storage::ScriptAttestation::AssumeValid
@@ -550,7 +580,10 @@ fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestRes
 #[test]
 fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
     let (chain, _block, _funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
-    let head = chain.durable_head.load()?.ok_or("missing durable head")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
     let error = require_full_script_attestation(
         checkpoint_dir.path(),
         ValidationMode::Full,
@@ -559,7 +592,9 @@ fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
         true,
     )
     .err()
-    .ok_or("a pruned datadir cannot rebuild with full validation")?;
+    .ok_or(TestError::Missing(
+        "a pruned datadir cannot rebuild with full validation",
+    ))?;
     assert!(
         error.to_string().contains("--validation-mode assume-valid"),
         "{error}"

@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 
-use crate::test_fixtures::{handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 const RETIRED_APPLY_METRICS: &[&str] = &[
     "node.apply_block.contextual_header_seconds",
@@ -117,11 +117,10 @@ fn assert_names_absent(recorder: &NameRecorder, names: &[&str]) {
 }
 
 #[test]
-fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
--> Result<(), Box<dyn std::error::Error>> {
+fn retired_apply_stage_timings_stay_off_caller_thread_metrics() -> TestResult {
     let recorder = NameRecorder::default();
     let genesis = Network::Regtest.genesis_block();
-    metrics::with_local_recorder(&recorder, || -> Result<(), Box<dyn std::error::Error>> {
+    metrics::with_local_recorder(&recorder, || -> TestResult {
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&handles)?;
         let first = mined_child(genesis.block_hash(), 1)?;
@@ -141,11 +140,10 @@ fn retired_apply_stage_timings_stay_off_caller_thread_metrics()
 }
 
 #[test]
-fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
--> Result<(), Box<dyn std::error::Error>> {
+fn retired_group_and_check_timings_stay_off_caller_thread_metrics() -> TestResult {
     let recorder = NameRecorder::default();
     let genesis = Network::Regtest.genesis_block();
-    metrics::with_local_recorder(&recorder, || -> Result<(), Box<dyn std::error::Error>> {
+    metrics::with_local_recorder(&recorder, || -> TestResult {
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         let first = mined_child(genesis.block_hash(), 1)?;
         let second = mined_child(first.block_hash(), 2)?;
@@ -176,11 +174,10 @@ fn retired_group_and_check_timings_stay_off_caller_thread_metrics()
 }
 
 #[test]
-fn window_commit_emits_transition_and_flush_diagnostics() -> Result<(), Box<dyn std::error::Error>>
-{
+fn window_commit_emits_transition_and_flush_diagnostics() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let fields = ProfileFields::default();
-    capture_profile(&fields, || -> Result<(), Box<dyn std::error::Error>> {
+    capture_profile(&fields, || -> TestResult {
         let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         let first = mined_child(genesis.block_hash(), 1)?;
         let second = mined_child(first.block_hash(), 2)?;
@@ -253,7 +250,7 @@ fn capture_profile<T>(fields: &ProfileFields, action: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn proposal_emits_completed_validation_timings() -> Result<(), Box<dyn std::error::Error>> {
+fn proposal_emits_completed_validation_timings() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
     let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
@@ -278,8 +275,7 @@ fn proposal_emits_completed_validation_timings() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn rejected_header_emits_only_completed_validation_timings()
--> Result<(), Box<dyn std::error::Error>> {
+fn rejected_header_emits_only_completed_validation_timings() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
     let genesis = Network::Regtest.genesis_block();
@@ -301,8 +297,7 @@ fn rejected_header_emits_only_completed_validation_timings()
 }
 
 #[test]
-fn rejected_spend_keeps_resolution_and_dispatch_timings() -> Result<(), Box<dyn std::error::Error>>
-{
+fn rejected_spend_keeps_resolution_and_dispatch_timings() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
     let genesis = Network::Regtest.genesis_block();
@@ -313,7 +308,7 @@ fn rejected_spend_keeps_resolution_and_dispatch_timings() -> Result<(), Box<dyn 
     block.txs.push(spend);
     let mut leaves: Vec<_> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
     let root = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        .ok_or("test merkle root missing")?;
+        .ok_or(TestError::Missing("test merkle root missing"))?;
     block.header.merkle_root = bitcoin_rs_primitives::Hash256::from_le_bytes(&root);
     let fields = ProfileFields::default();
     let payload = bitcoin_rs_primitives::BlockPayload::from_local(block);

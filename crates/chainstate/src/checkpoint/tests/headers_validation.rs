@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn reader_rejects_mutated_linkage_and_invalid_pow_or_nbits()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (tree, best_tip_id, applied) = chain_with_applied_height(2, 1)?;
     let (bytes, written) = write_checkpoint(&tree, best_tip_id, applied)?;
 
@@ -14,7 +14,7 @@ fn reader_rejects_mutated_linkage_and_invalid_pow_or_nbits()
     let header_offset = headers::HEADER_PREFIX_LEN + 80;
     let mut invalid = header_from_row(&bad_pow[header_offset..header_offset + 80])?;
     while compact_is_met_by(invalid.bits, invalid.compute_hash().0) {
-        invalid.nonce = invalid.nonce.checked_add(1).ok_or("nonce exhausted")?;
+        invalid.nonce = invalid.nonce.checked_add(1).ok_or(TestError::Missing("nonce exhausted"))?;
     }
     bad_pow[header_offset..header_offset + 80].copy_from_slice(&headers::encode_header(&invalid)?);
     assert!(headers::read_headers(&mut Cursor::new(bad_pow), config(), written.metadata).is_err());

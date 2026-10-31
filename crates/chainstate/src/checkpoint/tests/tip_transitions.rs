@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn writer_refuses_a_best_tip_that_is_not_active() -> Result<(), Box<dyn std::error::Error>> {
+fn writer_refuses_a_best_tip_that_is_not_active() -> TestResult {
     let (tree, _, applied) = chain_with_applied_height(3, 1)?;
 
     assert!(matches!(
@@ -13,7 +13,7 @@ fn writer_refuses_a_best_tip_that_is_not_active() -> Result<(), Box<dyn std::err
 
 #[test]
 fn writer_refuses_an_applied_tip_off_the_active_best_ancestry()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (mut tree, best_tip_id, _) = chain_with_applied_height(3, 1)?;
     let genesis_hash = tree.node(NodeId::new(0))?.hash;
     let mut fork = mined_regtest_header(BlockHash(genesis_hash), 1)?;
@@ -41,7 +41,7 @@ fn writer_refuses_an_applied_tip_off_the_active_best_ancestry()
 }
 
 #[test]
-fn immutable_generation_resumes_best_ahead_of_applied() -> Result<(), Box<dyn std::error::Error>> {
+fn immutable_generation_resumes_best_ahead_of_applied() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(3, 1)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -64,7 +64,7 @@ fn immutable_generation_resumes_best_ahead_of_applied() -> Result<(), Box<dyn st
     ));
     let loaded = load_checkpoint(dir.path(), config())?;
     let CheckpointLoad::Complete(restored) = loaded else {
-        return Err("checkpoint did not restore complete chainstate".into());
+        return Err(TestError::UnexpectedSuccess("checkpoint did not restore complete chainstate"));
     };
     assert_eq!(restored.tree.tip().map(|tip| tip.height), Some(3));
     assert_eq!(restored.applied_tip.height, 1);
@@ -75,7 +75,7 @@ fn immutable_generation_resumes_best_ahead_of_applied() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn no_applied_tip_skips_without_changing_current() -> Result<(), Box<dyn std::error::Error>> {
+fn no_applied_tip_skips_without_changing_current() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -101,7 +101,7 @@ fn no_applied_tip_skips_without_changing_current() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn failed_publication_preserves_current() -> Result<(), Box<dyn std::error::Error>> {
+fn failed_publication_preserves_current() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;

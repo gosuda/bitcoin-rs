@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn round_trip_replays_consensus_validated_active_chain() -> Result<(), Box<dyn std::error::Error>> {
+fn round_trip_replays_consensus_validated_active_chain() -> TestResult {
     for (best_height, applied_height) in [(3, 1), (500, 499), (1_351, 1_350)] {
         let (tree, best_tip_id, applied) = chain_with_applied_height(best_height, applied_height)?;
         let written = write_checkpoint(&tree, best_tip_id, applied)?;
@@ -25,7 +25,7 @@ fn round_trip_replays_consensus_validated_active_chain() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::Error>> {
+fn reader_rejects_wrong_network_and_genesis() -> TestResult {
     let (tree, best_tip_id, applied) = chain_with_applied_height(1, 0)?;
     let written = write_checkpoint(&tree, best_tip_id, applied)?;
 
@@ -75,7 +75,7 @@ fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::
 /// Keep these offsets tied to that authoritative codec contract rather than treating
 /// them as incidental test fixture details.
 #[test]
-fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
+fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> TestResult {
     let (tree, best_tip_id, applied) = chain_with_applied_height(1, 0)?;
     let (bytes, written) = write_checkpoint(&tree, best_tip_id, applied)?;
 
@@ -102,7 +102,7 @@ fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> Result<(), Box<dyn st
 
 #[test]
 fn publication_selects_applied_ancestry_and_forgets_competing_fork()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let (mut tree, main_best_id, applied_point) = chain_with_applied_height(3, 1)?;
     let main_best_hash = tree.node(main_best_id)?.hash;
@@ -153,7 +153,7 @@ fn publication_selects_applied_ancestry_and_forgets_competing_fork()
 
     let loaded = load_checkpoint(dir.path(), config())?;
     let CheckpointLoad::Complete(restored) = loaded else {
-        return Err("checkpoint did not restore complete chainstate".into());
+        return Err(TestError::UnexpectedSuccess("checkpoint did not restore complete chainstate"));
     };
 
     assert_eq!(
@@ -175,7 +175,7 @@ fn publication_selects_applied_ancestry_and_forgets_competing_fork()
 }
 
 #[test]
-fn unsupported_utxo_codec_requires_explicit_resync() -> Result<(), Box<dyn std::error::Error>> {
+fn unsupported_utxo_codec_requires_explicit_resync() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -192,7 +192,7 @@ fn unsupported_utxo_codec_requires_explicit_resync() -> Result<(), Box<dyn std::
     })?;
 
     let Err(error) = load_checkpoint(dir.path(), config()) else {
-        return Err("unsupported UTXO codec unexpectedly loaded".into());
+        return Err(TestError::UnexpectedSuccess("unsupported UTXO codec unexpectedly loaded"));
     };
     let message = error.to_string();
     assert!(message.contains("unexpected payload codecs"));
@@ -202,7 +202,7 @@ fn unsupported_utxo_codec_requires_explicit_resync() -> Result<(), Box<dyn std::
 
 #[test]
 fn unsupported_utxo_snapshot_version_requires_explicit_resync()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(1, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -219,7 +219,7 @@ fn unsupported_utxo_snapshot_version_requires_explicit_resync()
     })?;
 
     let Err(CheckpointLoadError::Corrupt(reason)) = load_checkpoint(dir.path(), config()) else {
-        return Err("unsupported UTXO snapshot unexpectedly loaded".into());
+        return Err(TestError::UnexpectedSuccess("unsupported UTXO snapshot unexpectedly loaded"));
     };
     assert!(reason.contains("UTXO checkpoint version 3 is not current"));
     Ok(())
@@ -227,7 +227,7 @@ fn unsupported_utxo_snapshot_version_requires_explicit_resync()
 
 #[test]
 fn semantic_utxo_trailing_byte_with_rebound_hashes_requires_resync()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(1, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
@@ -261,14 +261,14 @@ fn semantic_utxo_trailing_byte_with_rebound_hashes_requires_resync()
     fs::write(&current_path, sonic_rs::to_vec(&current)?)?;
 
     let Err(error) = load_checkpoint(dir.path(), config()) else {
-        return Err("semantic UTXO corruption unexpectedly loaded".into());
+        return Err(TestError::UnexpectedSuccess("semantic UTXO corruption unexpectedly loaded"));
     };
     assert!(error.to_string().contains("full resync"));
     Ok(())
 }
 
 #[test]
-fn authenticated_inner_header_version_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+fn authenticated_inner_header_version_is_fatal() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;

@@ -17,9 +17,7 @@ use bitcoin_rs_script::{
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::{ApplyError, AssumeValidGate, BlockProvenance, Chainstate, ValidationMode};
-use crate::test_fixtures::{handles, seed_genesis};
-
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 struct SpendView(OutPoint, TxOut);
 
@@ -30,7 +28,7 @@ impl bitcoin_rs_consensus::UtxoView for SpendView {
 }
 
 fn remine(block: &mut Block) -> TestResult {
-    block.header.merkle_root = merkle_root(&block.txs).ok_or("missing merkle root")?;
+    block.header.merkle_root = merkle_root(&block.txs).ok_or(TestError::Missing("merkle root"))?;
     mine_block_to_declared_target(block)?;
     Ok(())
 }
@@ -119,7 +117,13 @@ fn assert_rejected_unchanged(
         ),
         "the script-invalid spend must be rejected, got {result:?}"
     );
-    assert_eq!(chain.applied_tip_snapshot().ok_or("tip")?.hash, tip_before);
+    assert_eq!(
+        chain
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .hash,
+        tip_before
+    );
     assert!(
         chain.utxo.get(funding).is_some(),
         "the funding coin must stay unspent"
@@ -136,7 +140,10 @@ fn assume_valid_without_matching_pin_does_not_skip_scripts() -> TestResult {
     chain.assume_valid_height = 101;
     chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(None));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
-    let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
+    let tip_before = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?
+        .hash;
     let failed = chain.apply_block(&BlockPayload::from_local(invalid));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
@@ -163,7 +170,10 @@ fn assume_valid_sibling_below_the_pin_runs_scripts() -> TestResult {
         chain.scripts_verified_upstream(BlockProvenance::Network, 101, pin.block_hash().0),
         "the pin itself is the reachability control"
     );
-    let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
+    let tip_before = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?
+        .hash;
     let failed = chain.apply_block(&BlockPayload::from_local(sibling));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
@@ -189,7 +199,13 @@ fn assume_valid_pin_at_its_own_height_still_skips_scripts() -> TestResult {
         "the pin is on the best header chain and may skip"
     );
     chain.apply_block(&BlockPayload::from_local(pin))?;
-    assert_eq!(chain.applied_tip_snapshot().ok_or("tip")?.height, 101);
+    assert_eq!(
+        chain
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .height,
+        101
+    );
     Ok(())
 }
 
@@ -219,7 +235,10 @@ fn assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin() -> TestResult {
         pin.block_hash().0,
     ))));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
-    let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
+    let tip_before = chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?
+        .hash;
     let failed = chain.apply_block(&BlockPayload::from_local(branch_block));
     assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())

@@ -7,11 +7,13 @@ use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::Mutex;
 
-use crate::test_fixtures::{StagedFire, handles, seed_genesis, staging_recorder};
+use crate::test_fixtures::{
+    StagedFire, TestError, TestResult, handles, seed_genesis, staging_recorder,
+};
 
 #[test]
 fn a_grouped_window_publishes_each_blocks_own_prefix_count()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
@@ -78,7 +80,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     let head = handles
         .durable_head
         .load()?
-        .ok_or("the group's one batch wrote the durable head")?;
+        .ok_or(TestError::Missing("the group's one batch wrote the durable head"))?;
     assert_eq!(head.height, 3);
     assert_eq!(head.tip, outcomes[2].hash);
     assert_eq!(
@@ -96,7 +98,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
 
 #[test]
 fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
@@ -137,7 +139,7 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
     let fires: Arc<Mutex<Vec<StagedFire>>> = Arc::new(Mutex::new(Vec::new()));
     handles
         .set_tip_staged(staging_recorder(&handles, &fires))
-        .map_err(|_| "the staged-tip hook installs once")?;
+        .map_err(|_| TestError::HookAlreadyInstalled("the staged-tip hook installs once"))?;
 
     let outcomes = handles.apply_window(&payloads)?;
     assert_eq!(outcomes.len(), 3, "one drained outcome per staged block");
@@ -162,13 +164,13 @@ fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
 
     let applied = handles
         .applied_tip_snapshot()
-        .ok_or("the group must publish an applied tip")?;
+        .ok_or(TestError::Missing("the group must publish an applied tip"))?;
     assert_eq!(applied.hash, third_hash);
     Ok(())
 }
 
 #[test]
-fn corrupted_window_bytes_fail_payload_construction() -> Result<(), Box<dyn std::error::Error>> {
+fn corrupted_window_bytes_fail_payload_construction() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
@@ -189,7 +191,7 @@ fn corrupted_window_bytes_fail_payload_construction() -> Result<(), Box<dyn std:
         "trailing bytes must fail construction, before any count is consulted"
     );
 
-    let applied = handles.applied_tip_snapshot().ok_or("seeded tip")?;
+    let applied = handles.applied_tip_snapshot().ok_or(TestError::Missing("seeded tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(genesis.block_hash()),
@@ -199,7 +201,7 @@ fn corrupted_window_bytes_fail_payload_construction() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn witness_only_mutation_fails_payload_construction() -> Result<(), Box<dyn std::error::Error>> {
+fn witness_only_mutation_fails_payload_construction() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
@@ -222,7 +224,7 @@ fn witness_only_mutation_fails_payload_construction() -> Result<(), Box<dyn std:
         "a witness count the stream cannot back must fail construction"
     );
 
-    let applied = handles.applied_tip_snapshot().ok_or("seeded tip")?;
+    let applied = handles.applied_tip_snapshot().ok_or(TestError::Missing("seeded tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(genesis.block_hash()),

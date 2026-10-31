@@ -7,9 +7,9 @@ use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 use bitcoin_rs_utxo::UtxoSet;
 
 use crate::CheckpointError;
-use crate::test_fixtures::MemoryBodies;
+use crate::test_fixtures::{MemoryBodies, TestResult};
 
-fn checkpoint_dirs(root: &std::path::Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+fn checkpoint_dirs(root: &std::path::Path) -> TestResult<BTreeSet<String>> {
     let mut dirs = BTreeSet::new();
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
@@ -22,7 +22,7 @@ fn checkpoint_dirs(root: &std::path::Path) -> Result<BTreeSet<String>, Box<dyn s
 
 #[test]
 fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let network = Network::Regtest;
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));

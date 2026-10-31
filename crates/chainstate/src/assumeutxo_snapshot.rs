@@ -427,7 +427,7 @@ pub(super) fn load_verified(
 mod tests {
     use super::*;
 
-    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    use crate::test_fixtures::{TestError, TestResult};
 
     fn native_fixture() -> TestResult<(Vec<u8>, &'static AssumeUtxoData)> {
         let core = include_bytes!("../../utxo/tests/fixtures/core-v2/core200.dat");
@@ -463,7 +463,7 @@ mod tests {
         let entry = archive
             .entries()?
             .next()
-            .ok_or("reservation entry must exist")??;
+            .ok_or(TestError::Missing("reservation entry must exist"))??;
         assert!(entry.file_type()?.is_file());
         archive.remove_file(name)?;
         let path = dir
@@ -496,10 +496,10 @@ mod tests {
         } else {
             None
         };
-        worker.join().map_err(|_| "cleanup worker panicked")?;
+        worker.join().map_err(|_| TestError::WorkerPanicked("cleanup worker panicked"))?;
         drop(rescue);
         assert!(
-            !observed.map_err(|_| "cleanup blocked on substituted FIFO")??,
+            !observed.map_err(|_| TestError::Blocked("cleanup blocked on substituted FIFO"))??,
             "cleanup must not block on a substituted FIFO"
         );
         assert!(std::fs::symlink_metadata(&path)?.file_type().is_fifo());

@@ -6,9 +6,9 @@ use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 
 use super::{JournalRecord, JournalReplayError, Mutation, replay_records, validate_replayed_head};
 use crate::test_fixtures::journal_coin as coin;
+use crate::test_fixtures::TestResult;
 use bitcoin_rs_storage::chainstate_journal::Coin;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type BaseState = (BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin);
 
 fn header(prev_blockhash: BlockHash, marker: u8, time: u32) -> Header {

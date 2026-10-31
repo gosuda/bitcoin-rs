@@ -20,7 +20,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 
 use super::{ApplyError, ResolvedUtxoView};
-use crate::test_fixtures::{handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 struct RejectingUndoStore {
     inner: InMemoryUndoStore,
@@ -62,8 +62,7 @@ impl UndoStore for RejectingUndoStore {
 }
 
 #[test]
-fn canonical_regtest_chain_connects_through_bip34_activation()
--> Result<(), Box<dyn std::error::Error>> {
+fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
     let network = Network::Regtest;
     let handles = handles(network, Arc::new(UtxoSet::new()));
     let genesis = network.genesis_block();
@@ -84,8 +83,7 @@ fn canonical_regtest_chain_connects_through_bip34_activation()
 }
 
 #[test]
-fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
--> Result<(), Box<dyn std::error::Error>> {
+fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
@@ -128,7 +126,8 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     };
     waiter
         .join()
-        .map_err(|_| std::io::Error::other("tip observer panicked"))??;
+        .map_err(|_| TestError::WorkerPanicked("tip observer"))?
+        .map_err(|_| TestError::Exhausted("waiter send"))?;
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
     assert!(
         remained_pending,
@@ -153,7 +152,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
 }
 
 #[test]
-fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::error::Error>> {
+fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
     let utxo = UtxoSet::new();
     let block = Block {
         header: Header {
@@ -202,7 +201,7 @@ fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::erro
         .restores()
         .iter()
         .find(|entry| entry.outpoint == reused)
-        .ok_or("undo does not restore overwritten coin")?;
+        .ok_or(TestError::Missing("undo does not restore overwritten coin"))?;
     assert_eq!(restored.txout, older);
     assert_eq!(restored.height, 91_722);
     assert!(restored.coinbase);
@@ -221,7 +220,7 @@ fn close_requests_shutdown() {
 }
 
 #[test]
-fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::error::Error>> {
+fn direct_transition_fatal_error_closes_admission() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let mut handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
@@ -257,8 +256,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));

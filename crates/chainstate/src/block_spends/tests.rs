@@ -18,10 +18,8 @@ use parking_lot::Mutex;
 
 use crate::{
     AssumeUtxoDiskStatus, Chainstate,
-    test_fixtures::{MemoryBodies, handles},
+    test_fixtures::{MemoryBodies, TestError, TestResult, handles},
 };
-
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Default)]
 struct Bodies {
@@ -72,7 +70,7 @@ struct Fixture {
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     blocks: Vec<Block>,
 }
-fn fixture(count: u32) -> Result<Fixture> {
+fn fixture(count: u32) -> TestResult<Fixture> {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let bodies = Arc::new(Bodies::default());
     let undo = Arc::new(InMemoryUndoStore::default());
@@ -85,7 +83,10 @@ fn fixture(count: u32) -> Result<Fixture> {
     chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
     let mut blocks = vec![genesis];
     for height in 1..=count {
-        let previous = blocks.last().ok_or("no parent")?.block_hash();
+        let previous = blocks
+            .last()
+            .ok_or(TestError::Missing("no parent"))?
+            .block_hash();
         let block = mined_regtest_child_at(previous, height)?;
         chain.apply_block(&BlockPayload::from_local(block.clone()))?;
         blocks.push(block);
@@ -101,12 +102,15 @@ fn fixture(count: u32) -> Result<Fixture> {
 fn hash(block: &Block) -> Hash256 {
     block.block_hash().into()
 }
-fn tip(chain: &Chainstate) -> Result<Hash256> {
-    Ok(chain.applied_tip_snapshot().ok_or("no applied tip")?.hash)
+fn tip(chain: &Chainstate) -> TestResult<Hash256> {
+    Ok(chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("no applied tip"))?
+        .hash)
 }
 
 #[test]
-fn read_uses_receipts_and_rejects_uncertified_old_branches() -> Result {
+fn read_uses_receipts_and_rejects_uncertified_old_branches() -> TestResult {
     let f = fixture(2)?;
     let old = hash(&f.blocks[2]);
     assert_eq!(f.chain.block_spends(old, tip(&f.chain)?)?.spent?.len(), 1);
@@ -136,9 +140,13 @@ fn read_uses_receipts_and_rejects_uncertified_old_branches() -> Result {
 }
 
 #[test]
-fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> Result {
+fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> TestResult {
     let f = fixture(2)?;
-    let prior = f.chain.durable_head.load()?.ok_or("no head")?;
+    let prior = f
+        .chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("no head"))?;
     let mut next = prior;
     next.commit_id += 1;
     next.assumeutxo = AssumeUtxoDiskStatus::Validating {
@@ -160,9 +168,9 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> Result {
         Err(HistoryUnavailable::Missing)
     ));
     let prior = next;
-    if let AssumeUtxoDiskStatus::Validating {
-        historical_height,
-        historical_hash,
+    if let &mut AssumeUtxoDiskStatus::Validating {
+        ref mut historical_height,
+        ref mut historical_hash,
         ..
     } = &mut next.assumeutxo
     {
@@ -181,9 +189,9 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> Result {
     *f.bodies.hook.lock() = Some(Box::new(move || {
         let mut advanced = next;
         advanced.commit_id += 1;
-        if let AssumeUtxoDiskStatus::Validating {
-            historical_height,
-            historical_hash,
+        if let &mut AssumeUtxoDiskStatus::Validating {
+            ref mut historical_height,
+            ref mut historical_hash,
             ..
         } = &mut advanced.assumeutxo
         {
@@ -203,7 +211,7 @@ fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> Result {
 }
 
 #[test]
-fn pruning_reservations_and_expired_leases_keep_typed_failures() -> Result {
+fn pruning_reservations_and_expired_leases_keep_typed_failures() -> TestResult {
     let f = fixture(600)?;
     let queried = hash(&f.blocks[1]);
     let reservation = f.retention.reserve(2);
@@ -237,7 +245,7 @@ fn pruning_reservations_and_expired_leases_keep_typed_failures() -> Result {
 }
 
 #[test]
-fn missing_and_corrupt_expected_undo_are_not_empty_success() -> Result {
+fn missing_and_corrupt_expected_undo_are_not_empty_success() -> TestResult {
     let f = fixture(1)?;
     let queried = hash(&f.blocks[1]);
     f.undo.remove_archived(1, queried);
@@ -259,7 +267,7 @@ fn missing_and_corrupt_expected_undo_are_not_empty_success() -> Result {
 }
 
 #[test]
-fn genesis_skips_undo_but_never_fabricates_missing_body() -> Result {
+fn genesis_skips_undo_but_never_fabricates_missing_body() -> TestResult {
     let mut f = fixture(1)?;
     let genesis = hash(&f.blocks[0]);
     f.undo.remove_archived(0, genesis);
@@ -276,7 +284,7 @@ fn genesis_skips_undo_but_never_fabricates_missing_body() -> Result {
 }
 
 #[test]
-fn certification_budget_stops_a_deep_side_anchor_before_body_io() -> Result {
+fn certification_budget_stops_a_deep_side_anchor_before_body_io() -> TestResult {
     use bitcoin_rs_chain::{NodeStatus, regtest_fixture::mined_regtest_header};
     let f = fixture(4100)?;
     let mut previous = f.blocks[0].block_hash();
@@ -298,7 +306,7 @@ fn certification_budget_stops_a_deep_side_anchor_before_body_io() -> Result {
 }
 
 #[test]
-fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Result {
+fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> TestResult {
     let f = fixture(101)?;
     let second = &f.blocks[2].txs[0];
     let first = &f.blocks[1].txs[0];
@@ -370,7 +378,7 @@ fn retained_inputs_preserve_transaction_and_input_order_after_disconnect() -> Re
 }
 
 #[test]
-fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Result {
+fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> TestResult {
     let f = fixture(1)?;
     let original = &f.blocks[1];
     let mut injected = original.clone();
@@ -425,7 +433,7 @@ fn retained_body_rejects_witness_changes_that_preserve_header_and_txids() -> Res
 }
 
 #[test]
-fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalikes() -> Result {
+fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalikes() -> TestResult {
     use bitcoin_rs_chain::NodeStatus;
     for (network, active) in [(Network::Mainnet, false), (Network::Regtest, true)] {
         let mut chain = handles(network, Arc::new(UtxoSet::new()));
@@ -459,7 +467,7 @@ fn retained_body_does_not_require_witness_for_pre_activation_commitment_lookalik
 }
 
 #[test]
-fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -> Result {
+fn retained_body_deployment_work_is_bounded_and_skipped_when_body_is_missing() -> TestResult {
     use bitcoin_rs_chain::NodeStatus;
     let mut chain = handles(Network::Mainnet, Arc::new(UtxoSet::new()));
     let bodies = Arc::new(Bodies::default());

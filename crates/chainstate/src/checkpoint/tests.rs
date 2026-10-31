@@ -21,6 +21,7 @@ use super::{
     CheckpointManifestV1, CheckpointWrite, CurrentV1, HEADERS_FILE, MANIFEST_FILE, UTXO_FILE,
     load_checkpoint,
 };
+use crate::test_fixtures::{TestError, TestResult};
 
 const NETWORK: Network = Network::Regtest;
 
@@ -28,7 +29,7 @@ fn mutate_authenticated_artifact(
     data_dir: &Path,
     artifact: &str,
     mutate: impl FnOnce(&mut Vec<u8>),
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     let root = data_dir.join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
     let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
@@ -55,7 +56,7 @@ fn mutate_authenticated_artifact(
             manifest.coinstats.bytes = length;
             manifest.coinstats.sha256 = digest;
         }
-        _ => return Err("unknown checkpoint artifact".into()),
+        _ => return Err(TestError::UnexpectedSuccess("unknown checkpoint artifact")),
     }
     let manifest_bytes = sonic_rs::to_vec(&manifest)?;
     fs::write(&manifest_path, &manifest_bytes)?;
@@ -66,7 +67,7 @@ fn mutate_authenticated_artifact(
 fn mutate_authenticated_manifest(
     data_dir: &Path,
     mutate: impl FnOnce(&mut CheckpointManifestV1),
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     let root = data_dir.join(CHECKPOINT_ROOT);
     let current_path = root.join(CURRENT_FILE);
     let mut current: CurrentV1 = sonic_rs::from_slice(&fs::read(&current_path)?)?;
@@ -105,7 +106,7 @@ fn config() -> headers::HeaderCheckpointConfig {
 }
 
 #[test]
-fn coinstats_wire_length_matches_the_encoded_length() -> Result<(), Box<dyn std::error::Error>> {
+fn coinstats_wire_length_matches_the_encoded_length() -> TestResult {
     assert_eq!(
         usize::try_from(bitcoin_rs_storage::checkpoint::COINSTATS_PAYLOAD_LEN)?,
         bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN,
@@ -128,7 +129,7 @@ fn write_checkpoint(
 fn chain_with_applied_height(
     best_height: u32,
     applied_height: u32,
-) -> Result<(BlockTree, NodeId, headers::HeaderCheckpointPoint), Box<dyn std::error::Error>> {
+) -> TestResult<(BlockTree, NodeId, headers::HeaderCheckpointPoint)> {
     let genesis = NETWORK.genesis_block().header;
     let mut tree = BlockTree::new();
     let mut current = accept_headers(

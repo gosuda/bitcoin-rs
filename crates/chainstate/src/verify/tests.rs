@@ -22,10 +22,10 @@ use parking_lot::Mutex;
 use super::{
     BodyDecodeError, CheckLevel, VerifyError, VerifyOutcome, VerifyRequest, verify_recent_blocks,
 };
-use crate::test_fixtures::handles;
+use crate::test_fixtures::{TestError, TestResult, handles};
 use crate::{Chainstate, ChainstateRole};
 
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T = ()> = TestResult<T>;
 
 const LEVELS: [CheckLevel; 4] = [
     CheckLevel::ReadBodies,
@@ -43,12 +43,11 @@ struct Bodies {
 
 impl Bodies {
     fn bytes(&self, height: u32, hash: Hash256) -> Result<Vec<u8>> {
-        Ok(self
-            .rows
+        self.rows
             .lock()
             .get(&(height, hash))
             .cloned()
-            .ok_or("fixture body is missing")?)
+            .ok_or(TestError::Missing("fixture body is missing"))
     }
 
     fn replace(&self, height: u32, hash: Hash256, bytes: Vec<u8>) {
@@ -132,7 +131,10 @@ fn fixture(children: u32) -> Result<Fixture> {
     chain.apply_block(&BlockPayload::from_local(genesis.clone()))?;
     let mut blocks = vec![genesis];
     for height in 1..=children {
-        let previous = blocks.last().ok_or("no parent")?.block_hash();
+        let previous = blocks
+            .last()
+            .ok_or(TestError::Missing("no parent"))?
+            .block_hash();
         let block = mined_regtest_child_at(previous, height)?;
         chain.apply_block(&BlockPayload::from_local(block.clone()))?;
         blocks.push(block);
@@ -179,9 +181,11 @@ impl Fixture {
     }
 
     fn damage(&self, level: CheckLevel, depth: Option<u32>) -> Result<VerifyError> {
-        Ok(verify_recent_blocks(&self.chain, request(level, depth))
+        verify_recent_blocks(&self.chain, request(level, depth))
             .err()
-            .ok_or("verification passed over damage")?)
+            .ok_or(TestError::UnexpectedSuccess(
+                "verification passed over damage",
+            ))
     }
 }
 
@@ -383,10 +387,14 @@ fn a_body_that_decodes_but_breaks_its_header_binding_needs_the_body_level() -> R
 #[test]
 fn a_body_with_valid_commitments_but_broken_transaction_rules_needs_the_body_level() -> Result {
     let f = fixture(4)?;
-    let tip = f.chain.applied_tip_snapshot().ok_or("no applied tip")?;
+    let tip = f
+        .chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("no applied tip"))?;
     let mut ruled = f.blocks[4].clone();
     ruled.txs[0].inputs[0].script_sig = Script::from_bytes(vec![0]);
-    ruled.header.merkle_root = merkle_root(&ruled.txs).ok_or("the tip keeps its transaction")?;
+    ruled.header.merkle_root =
+        merkle_root(&ruled.txs).ok_or(TestError::Missing("the tip keeps its transaction"))?;
     mine_header_to_declared_target(&mut ruled.header)?;
     let ruled_hash = Hash256::from(ruled.block_hash());
     f.bodies.replace(4, ruled_hash, consensus_bytes(&ruled));
@@ -464,7 +472,10 @@ fn a_witness_only_mutation_passes_core_levels_but_fails_the_startup_level() -> R
 #[test]
 fn a_header_that_misses_its_target_fails_the_body_level() -> Result {
     let f = fixture(4)?;
-    let tip = f.chain.applied_tip_snapshot().ok_or("no applied tip")?;
+    let tip = f
+        .chain
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("no applied tip"))?;
     let mut unmined = f.blocks[4].clone();
     loop {
         let hash = Hash256::from(unmined.header.compute_hash());
@@ -645,7 +656,9 @@ fn a_request_cancelled_before_admission_never_reads_or_pins() -> Result {
         cancellable_request(CheckLevel::CheckUndo, None, &cancellation),
     )
     .err()
-    .ok_or("a cancelled request must not pass")?;
+    .ok_or(TestError::UnexpectedSuccess(
+        "a cancelled request must not pass",
+    ))?;
     assert!(
         matches!(error, VerifyError::Interrupted),
         "cancellation is an operator stop, not damage: {error}"
@@ -668,7 +681,9 @@ fn a_request_cancelled_during_the_walk_interrupts_without_success() -> Result {
         cancellable_request(CheckLevel::CheckUndo, None, &cancellation),
     )
     .err()
-    .ok_or("a cancelled walk must not pass")?;
+    .ok_or(TestError::UnexpectedSuccess(
+        "a cancelled walk must not pass",
+    ))?;
     assert!(
         matches!(error, VerifyError::Interrupted),
         "the mid-walk latch must interrupt, not fail as damage: {error}"
@@ -683,7 +698,9 @@ fn a_recovery_closed_chainstate_is_unavailable_even_over_an_empty_window() -> Re
     f.chain.fail_closed_for_recovery();
     let error = verify_recent_blocks(&f.chain, request(CheckLevel::CheckUndo, None))
         .err()
-        .ok_or("a closed chainstate must not verify")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a closed chainstate must not verify",
+        ))?;
     assert!(
         matches!(error, VerifyError::ClosedForRecovery),
         "closure is fail-closed admission state, not damage: {error}"
@@ -697,7 +714,9 @@ fn a_recovery_closed_chainstate_is_unavailable_even_over_an_empty_window() -> Re
     empty.fail_closed_for_recovery();
     let error = verify_recent_blocks(&empty, request(CheckLevel::ReadBodies, None))
         .err()
-        .ok_or("a closed chainstate must not pass an empty window")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a closed chainstate must not pass an empty window",
+        ))?;
     assert!(matches!(error, VerifyError::ClosedForRecovery), "{error}");
     Ok(())
 }
@@ -711,7 +730,9 @@ fn closing_for_recovery_during_the_walk_refuses_success() -> Result {
     }));
     let error = verify_recent_blocks(&f.chain, request(CheckLevel::CheckUndo, None))
         .err()
-        .ok_or("a walk closed mid-read must not pass")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a walk closed mid-read must not pass",
+        ))?;
     assert!(
         matches!(error, VerifyError::ClosedForRecovery),
         "the closure must fail closed, not skip or pass: {error}"
@@ -774,7 +795,9 @@ fn a_request_cancelled_on_the_final_read_interrupts_before_success() -> Result {
         cancellable_request(CheckLevel::CheckUndo, Some(1), &cancellation),
     )
     .err()
-    .ok_or("a walk cancelled on its final read must not pass")?;
+    .ok_or(TestError::UnexpectedSuccess(
+        "a walk cancelled on its final read must not pass",
+    ))?;
     assert!(
         matches!(error, VerifyError::Interrupted),
         "the final-read latch must interrupt, not pass as success: {error}"
@@ -792,7 +815,9 @@ fn closing_for_recovery_on_the_final_read_refuses_success() -> Result {
     }));
     let error = verify_recent_blocks(&f.chain, request(CheckLevel::CheckUndo, Some(1)))
         .err()
-        .ok_or("a walk closed on its final read must not pass")?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a walk closed on its final read must not pass",
+        ))?;
     assert!(
         matches!(error, VerifyError::ClosedForRecovery),
         "the final-read closure must fail closed, not pass: {error}"

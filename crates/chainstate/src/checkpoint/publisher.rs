@@ -324,7 +324,7 @@ mod tests {
     use crate::checkpoint::CheckpointError;
     use bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
 
-    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    use crate::test_fixtures::{TestError, TestResult};
 
     #[test]
     fn full_revalidation_marker_clears_after_checkpoint_publication() -> TestResult {
@@ -355,7 +355,7 @@ mod tests {
 
         let error = match retire_full_revalidation_marker(dir.path()) {
             Err(error) => error,
-            Ok(()) => return Err("opening a file as the journal directory must fail".into()),
+            Ok(()) => return Err(TestError::UnexpectedSuccess("opening a file as the journal directory must fail")),
         };
         assert!(matches!(error, CheckpointError::FullRevalidationMarker(_)));
         Ok(())
@@ -372,7 +372,7 @@ mod tests {
         let (_, (), witness) =
             bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;
         let Some(witness) = witness else {
-            return Err("empty snapshot must mint a witness".into());
+            return Err(TestError::UnexpectedSuccess("empty snapshot must mint a witness"));
         };
         let reference = bitcoin_rs_storage::checkpoint::CheckpointReference {
             generation: 0,
@@ -434,9 +434,9 @@ mod tests {
             Some(Err(error)) => return Err(error.into()),
             None => None,
         };
-        join_result.map_err(|_| "checkpoint seed worker panicked")?;
+        join_result.map_err(|_| TestError::WorkerPanicked("checkpoint seed worker panicked"))?;
         drop(rescue);
-        observed.map_err(|_| "committed FIFO open must not block")?;
+        observed.map_err(|_| TestError::Blocked("committed FIFO open must not block"))?;
         assert!(cell.take().is_none(), "committed FIFO must not seal");
         assert!(
             std::fs::symlink_metadata(&fifo_path)?.file_type().is_fifo(),

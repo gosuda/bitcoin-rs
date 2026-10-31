@@ -21,15 +21,13 @@ use bitcoin_rs_storage::{
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::{ApplyError, Chainstate, WindowApplyDisposition};
-use crate::test_fixtures::{handles, seed_genesis};
-
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 /// The group cap `RCV-02` states: 64 blocks or 8 MiB of block data, whichever first.
 const GROUP_BLOCKS: usize = 64;
 
 fn remine(block: &mut Block) -> TestResult {
-    block.header.merkle_root = merkle_root(&block.txs).ok_or("test body has no merkle root")?;
+    block.header.merkle_root = merkle_root(&block.txs).ok_or(TestError::Missing("merkle root"))?;
     mine_block_to_declared_target(block)?;
     Ok(())
 }
@@ -182,7 +180,7 @@ fn node_id(chain: &Chainstate, hash: BlockHash) -> TestResult<NodeId> {
         .block_tree
         .read()
         .lookup(Hash256::from(hash))
-        .ok_or_else(|| format!("header {hash} is missing from the block tree").into())
+        .ok_or(TestError::Missing("header missing from the block tree"))
 }
 
 // RCV-02
@@ -232,7 +230,7 @@ fn a_window_commits_every_block_in_order() -> TestResult {
 
     let applied = chain
         .applied_tip_snapshot()
-        .ok_or("the window publishes a tip")?;
+        .ok_or(TestError::Missing("the window publishes a tip"))?;
     assert_eq!(
         applied.hash, expected[2].1,
         "the applied tip names the last block of the window"
@@ -240,7 +238,7 @@ fn a_window_commits_every_block_in_order() -> TestResult {
     let head = chain
         .durable_head
         .load()?
-        .ok_or("the window writes a head")?;
+        .ok_or(TestError::Missing("the window writes a head"))?;
     assert_eq!(
         (head.height, head.tip),
         (3, expected[2].1),
@@ -266,7 +264,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
         chain.apply_block(&BlockPayload::from_local(block.clone()))?;
         parent = block.block_hash();
     }
-    let funding = funding.ok_or("the fixture mined the funding coinbase")?;
+    let funding = funding.ok_or(TestError::Missing("the fixture mined the funding coinbase"))?;
 
     let first_spend = spend_tx(funding, 9_000);
     let first_spend_outpoint = OutPoint::new(first_spend.txid(), 0);
@@ -302,7 +300,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
     );
     let applied = chain
         .applied_tip_snapshot()
-        .ok_or("the window publishes a tip")?;
+        .ok_or(TestError::Missing("the window publishes a tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(blocks[1].block_hash()),
@@ -332,10 +330,9 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
     let payloads = dump_payloads(&blocks);
     let window: Vec<&BlockPayload> = payloads.iter().collect();
 
-    let error = chain
-        .apply_window(&window)
-        .err()
-        .ok_or("a body without a coinbase must not commit")?;
+    let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
+        "a body without a coinbase must not commit",
+    ))?;
     assert!(
         matches!(
             error.source,
@@ -381,7 +378,7 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
 
     let applied = chain
         .applied_tip_snapshot()
-        .ok_or("the prefix publishes a tip")?;
+        .ok_or(TestError::Missing("the prefix publishes a tip"))?;
     assert_eq!(
         (applied.height, applied.hash),
         (2, Hash256::from(blocks[1].block_hash())),
@@ -390,7 +387,7 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
     let head = chain
         .durable_head
         .load()?
-        .ok_or("the prefix writes a head")?;
+        .ok_or(TestError::Missing("the prefix writes a head"))?;
     assert_eq!(
         (head.height, head.tip),
         (2, Hash256::from(blocks[1].block_hash())),
@@ -442,7 +439,7 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     )?;
     let reorged = chain
         .applied_tip_snapshot()
-        .ok_or("the branch switch publishes a tip")?;
+        .ok_or(TestError::Missing("the branch switch publishes a tip"))?;
     assert_eq!(
         reorged.hash,
         Hash256::from(new_third_hash),
@@ -460,7 +457,9 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     let error = chain
         .apply_window(&mixed_window)
         .err()
-        .ok_or("a block from the replaced branch cannot extend the new tip")?;
+        .ok_or(TestError::Missing(
+            "a block from the replaced branch cannot extend the new tip",
+        ))?;
 
     assert_eq!(
         error.applied, 1,
@@ -488,13 +487,16 @@ fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestR
     );
     let applied = chain
         .applied_tip_snapshot()
-        .ok_or("the applied tip survives")?;
+        .ok_or(TestError::Missing("the applied tip survives"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(mixed[0].block_hash()),
         "the applied tip is the block that extended the reorged chain, not the stale one"
     );
-    let head = chain.durable_head.load()?.ok_or("the head survives")?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("the head survives"))?;
     assert_eq!(
         (head.height, head.tip),
         (4, Hash256::from(mixed[0].block_hash())),
@@ -545,7 +547,7 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
     };
     chain
         .set_tip_staged(hook)
-        .map_err(|_| "the staged-tip hook installs once")?;
+        .map_err(|_| TestError::HookAlreadyInstalled("staged-tip"))?;
     let payloads = dump_payloads(&blocks);
     let window: Vec<&BlockPayload> = payloads.iter().collect();
 
@@ -556,11 +558,12 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
         1,
         "the staged-tip hook runs once, inside the window's transition"
     );
-    let handle = closer
-        .lock()
-        .take()
-        .ok_or("the shutdown thread was spawned from the hook")?;
-    handle.join().map_err(|_| "the shutdown thread panicked")?;
+    let handle = closer.lock().take().ok_or(TestError::Missing(
+        "the shutdown thread was spawned from the hook",
+    ))?;
+    handle
+        .join()
+        .map_err(|_| TestError::WorkerPanicked("shutdown thread"))?;
     assert_eq!(
         outcomes.len(),
         3,
@@ -573,7 +576,7 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
     );
     let applied = chain
         .applied_tip_snapshot()
-        .ok_or("the window publishes a tip")?;
+        .ok_or(TestError::Missing("the window publishes a tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(blocks[2].block_hash()),
@@ -586,7 +589,7 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
     let refused = chain
         .apply_window(&window)
         .err()
-        .ok_or("closed admission refuses a new window")?;
+        .ok_or(TestError::Missing("closed admission refuses a new window"))?;
     assert!(
         matches!(refused.source, ApplyError::Shutdown),
         "a window after the shutdown is refused at admission, got {:?}",
@@ -598,7 +601,7 @@ fn a_window_holds_its_transition_until_a_concurrent_shutdown_acquires_it() -> Te
 // RCV-02
 #[test]
 fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> TestResult {
-    let body_blocks = u32::try_from(GROUP_BLOCKS.saturating_add(1)).map_err(|_| "group size")?;
+    let body_blocks = u32::try_from(GROUP_BLOCKS.saturating_add(1))?;
     let mut blocks = Vec::new();
     let mut parent = Network::Regtest.genesis_block().block_hash();
     for height in 1..=body_blocks {
@@ -618,10 +621,9 @@ fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> 
         apply_headers(&chain, &refs)?;
         let window: Vec<&BlockPayload> = payloads.iter().collect();
 
-        let error = chain
-            .apply_window(&window)
-            .err()
-            .ok_or("a failed durable head commit must abort the window")?;
+        let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
+            "a failed durable head commit must abort the window",
+        ))?;
 
         assert_eq!(
             error.disposition,
@@ -640,10 +642,10 @@ fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> 
         let head = chain
             .durable_head
             .load()?
-            .ok_or("the genesis head survives the crash")?;
+            .ok_or(TestError::Missing("the genesis head survives the crash"))?;
         let applied = chain
             .applied_tip_snapshot()
-            .ok_or("the pre-crash tip survives")?;
+            .ok_or(TestError::Missing("the pre-crash tip survives"))?;
         let expected_hash = committed_blocks
             .checked_sub(1)
             .and_then(|index| blocks.get(index))

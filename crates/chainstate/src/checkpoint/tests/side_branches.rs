@@ -1,7 +1,7 @@
 use super::*;
 use bitcoin_rs_chain::NodeStatus;
+use crate::test_fixtures::{TestError, TestResult};
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 struct Branched {
     tree: BlockTree,
@@ -41,7 +41,7 @@ fn branched() -> TestResult<Branched> {
     let (mut tree, main4, _) = chain_with_applied_height(4, 4)?;
     let at = |tree: &BlockTree, height| {
         tree.node_at_height_from(main4, height)
-            .ok_or("active height missing")
+            .ok_or(TestError::Missing("active height missing"))
     };
     let main2 = at(&tree, 2)?;
     let main3 = at(&tree, 3)?;
@@ -106,7 +106,7 @@ fn publish(
 fn restore(dir: &Path) -> TestResult<super::super::RestoredChainstate> {
     match load_checkpoint(dir, config())? {
         CheckpointLoad::Complete(restored) => Ok(*restored),
-        CheckpointLoad::Cold => Err("checkpoint did not restore".into()),
+        CheckpointLoad::Cold => Err(TestError::UnexpectedSuccess("checkpoint did not restore")),
     }
 }
 
@@ -180,7 +180,7 @@ fn valid_side_branches_survive_restart_in_learn_order() -> TestResult {
         if fixture.invalid.contains(&hash) {
             continue;
         }
-        let node = tree.node_by_hash(hash).ok_or("retained node missing")?;
+        let node = tree.node_by_hash(hash).ok_or(TestError::Missing("retained node missing"))?;
         let restored_parent = node
             .parent
             .map(|parent| tree.node(parent).map(|parent| parent.hash))
