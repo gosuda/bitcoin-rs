@@ -174,11 +174,6 @@ pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<
     Ok(false)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one dispatch arm per opcode family mirrors Core's EvalScript switch; \
-              splitting arms into helpers would obscure the shared state flow"
-)]
 pub(crate) fn eval_script(
     stack: &mut Stack,
     script: &[u8],
@@ -213,7 +208,7 @@ pub(crate) fn eval_script(
                 });
             }
         };
-        let opcode_byte = match instruction {
+        match instruction {
             Instruction::PushBytes(data) => {
                 let opcode_byte = script[instruction_start];
                 if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
@@ -230,57 +225,55 @@ pub(crate) fn eval_script(
                     }
                     push_bytes(stack, data)?;
                 }
-                instruction_start = script.len() - iter.remaining.len();
-                continue;
             }
-            Instruction::Op(op) => op,
-        };
+            Instruction::Op(opcode_byte) => {
+                if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
+                    if opcode_byte > opcode::OP_PUSHNUM_16 {
+                        op_count += 1;
+                        if op_count > MAX_OPS_PER_SCRIPT {
+                            return Err(ScriptError::Invalid {
+                                code: ScriptErrCode::OpCount,
+                            });
+                        }
+                    }
+                }
 
-        if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
-            if opcode_byte > opcode::OP_PUSHNUM_16 {
-                op_count += 1;
-                if op_count > MAX_OPS_PER_SCRIPT {
+                if is_disabled(opcode_byte) {
                     return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::OpCount,
+                        code: ScriptErrCode::DisabledOpcode,
                     });
                 }
+
+                if opcode_byte == OP_CODESEPARATOR
+                    && sigversion == SigVersion::Base
+                    && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
+                {
+                    return Err(ScriptError::Invalid {
+                        code: ScriptErrCode::OpCodeSeparator,
+                    });
+                }
+
+                let f_exec = conditions.all_true();
+                if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
+                    dispatch(
+                        opcode_byte,
+                        f_exec,
+                        stack,
+                        &mut altstack,
+                        &mut conditions,
+                        &mut op_count,
+                        require_minimal,
+                        flags,
+                        checker,
+                        sigversion,
+                        validation_weight_left,
+                        &mut codeseparator_pos,
+                        instruction_start,
+                        tapleaf_hash,
+                        script,
+                    )?;
+                }
             }
-        }
-
-        if is_disabled(opcode_byte) {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::DisabledOpcode,
-            });
-        }
-
-        if opcode_byte == OP_CODESEPARATOR
-            && sigversion == SigVersion::Base
-            && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
-        {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::OpCodeSeparator,
-            });
-        }
-
-        let f_exec = conditions.all_true();
-        if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
-            dispatch(
-                opcode_byte,
-                f_exec,
-                stack,
-                &mut altstack,
-                &mut conditions,
-                &mut op_count,
-                require_minimal,
-                flags,
-                checker,
-                sigversion,
-                validation_weight_left,
-                &mut codeseparator_pos,
-                instruction_start,
-                tapleaf_hash,
-                script,
-            )?;
         }
 
         if stack.len() + altstack.len() > MAX_STACK_SIZE {
