@@ -923,8 +923,9 @@ fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
 fn cancellation_during_ranged_scan_releases_reservation() {
     let ctx = Arc::new(Context::new());
     let xpub = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
-    let stop = Arc::new(core::sync::atomic::AtomicBool::new(true));
-    let cancel_reader = bitcoin_rs_chain::LatchReader::new(stop);
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    stop.trigger();
+    let cancel_reader = stop.reader();
 
     let result = super::scantxoutset(
         &ctx,

@@ -621,7 +621,8 @@ fn height_for_hash_returns_none_when_tree_empty() {
     assert!(ctx.chain.height_for_hash(unknown).is_none());
 }
 #[test]
-fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), crate::test_error::TestError> {
+fn block_by_height_prefers_tree_identity_over_stale_cache()
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -648,9 +649,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), crate:
         child.nonce = 1;
         let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)?;
         let child_hash = tree.node(child_id)?.hash;
-        let applied_tip = tree
-            .tip()
-            .ok_or("missing child tip")?;
+        let applied_tip = tree.tip().ok_or("missing child tip")?;
         ctx.chain
             .applied_tip
             .store(Some(Arc::new((*applied_tip).clone())));
@@ -675,7 +674,8 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), crate:
 }
 
 #[test]
-fn height_lookups_follow_applied_tip_when_header_fork_leads() -> Result<(), crate::test_error::TestError> {
+fn height_lookups_follow_applied_tip_when_header_fork_leads()
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -700,9 +700,7 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads() -> Result<(), crat
             nonce: 1,
         };
         let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
-        let applied_tip = tree
-            .tip()
-            .ok_or("missing applied tip")?;
+        let applied_tip = tree.tip().ok_or("missing applied tip")?;
         assert_eq!(applied_tip.tip_id, applied_id);
 
         let fork = Header {
@@ -823,9 +821,7 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             chain_network: Network::Mainnet,
             block_body_source: None,
             block_undo_source: None,
-            closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
-                false,
-            ))),
+            closed_for_recovery: bitcoin_rs_chain::LatchWriter::new().reader(),
             rollback_warnings: None,
         },
         mempool: MempoolHandles {

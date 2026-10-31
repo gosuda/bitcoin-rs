@@ -3,10 +3,10 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{ActiveTipWait, LatchReader, TipSnapshot, TipWaitCondition};
+use bitcoin_rs_chain::{ActiveTipWait, LatchReader, LatchWriter, TipSnapshot, TipWaitCondition};
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
@@ -153,8 +153,8 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     )
     .expect("bind");
     let address = server.local_addr().expect("address");
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let signal = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let signal = shutdown.reader();
     let server_thread = std::thread::spawn(move || server.serve_with_shutdown(signal));
     let waiting = send(
         address,
@@ -169,7 +169,7 @@ fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     assert_eq!(denied["error"]["code"].as_i64(), Some(-1));
     let ordinary = ordinary_rpc(address);
     assert_eq!(ordinary["result"], json!(0));
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     server_thread
         .join()
         .expect("server thread")
@@ -211,8 +211,8 @@ fn gbt_long_poll_counts_toward_the_blocking_quota() {
     )
     .expect("bind");
     let address = server.local_addr().expect("address");
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let signal = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let signal = shutdown.reader();
     let server_thread = std::thread::spawn(move || server.serve_with_shutdown(signal));
     let waiting = send(
         address,
@@ -252,7 +252,7 @@ fn gbt_long_poll_counts_toward_the_blocking_quota() {
     };
     assert!(plain_head.contains("Connection: close"));
     assert_eq!(plain["error"]["code"].as_i64(), Some(-32_601));
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     server_thread
         .join()
         .expect("server thread")
@@ -276,8 +276,8 @@ fn mixed_batch_and_notification_waits_share_admission_and_cancellation() {
         )
         .expect("bind");
         let address = server.local_addr().expect("address");
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let signal = Arc::clone(&shutdown);
+        let shutdown = LatchWriter::new();
+        let signal = shutdown.reader();
         let server_thread = std::thread::spawn(move || server.serve_with_shutdown(signal));
         let notification = json!({"jsonrpc":"2.0","method":"waitfornewblock","params":[]});
         let body = if notification_only {
@@ -299,7 +299,7 @@ fn mixed_batch_and_notification_waits_share_admission_and_cancellation() {
             )
             .expect("ordinary RPC");
         assert_eq!(ordinary["result"], json!(0));
-        shutdown.store(true, Ordering::Release);
+        shutdown.trigger();
         server_thread.join().expect("server thread").expect("exit");
         let (head, answer) = read(waiting);
         if notification_only {
@@ -327,8 +327,8 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
     )
     .expect("old bind");
     let old_addr = old.local_addr().expect("old address");
-    let old_shutdown = Arc::new(AtomicBool::new(false));
-    let old_signal = Arc::clone(&old_shutdown);
+    let old_shutdown = LatchWriter::new();
+    let old_signal = old_shutdown.reader();
     let old_thread = std::thread::spawn(move || old.serve_with_shutdown(old_signal));
     let old_wait = send(
         old_addr,
@@ -346,15 +346,15 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
     )
     .expect("new bind over same context");
     let new_addr = new.local_addr().expect("new address");
-    let new_shutdown = Arc::new(AtomicBool::new(false));
-    let new_signal = Arc::clone(&new_shutdown);
+    let new_shutdown = LatchWriter::new();
+    let new_signal = new_shutdown.reader();
     let new_thread = std::thread::spawn(move || new.serve_with_shutdown(new_signal));
     let new_wait = send(
         new_addr,
         &json!({"id":2,"method":"waitforblockheight","params":[1]}),
     );
     observable.wait_for_waiters(2);
-    old_shutdown.store(true, Ordering::Release);
+    old_shutdown.trigger();
     old_thread.join().expect("old server").expect("old exit");
     assert_eq!(read(old_wait).1["result"]["height"].as_u64(), Some(0));
     new_wait
@@ -375,7 +375,7 @@ fn rebinding_context_keeps_old_and_new_cancellation_and_budgets_separate() {
         )
         .expect("replacement ordinary RPC");
     assert_eq!(ordinary["result"], json!(0));
-    new_shutdown.store(true, Ordering::Release);
+    new_shutdown.trigger();
     new_thread.join().expect("new server").expect("new exit");
     assert_eq!(read(new_wait).1["result"]["height"].as_u64(), Some(0));
 }
@@ -394,8 +394,8 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
     .expect("bind");
     server.max_connections = 1;
     let address = server.local_addr().expect("address");
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let signal = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let signal = shutdown.reader();
     let task = std::thread::spawn(move || server.serve_with_shutdown(signal));
     let (head, answer) = read(send(
         address,
@@ -405,6 +405,6 @@ fn one_connection_server_rejects_waits_before_they_can_occupy_the_only_worker() 
     assert_eq!(answer["error"]["code"].as_i64(), Some(-1));
     let ordinary = ordinary_rpc(address);
     assert_eq!(ordinary["result"], json!(0));
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     task.join().expect("server").expect("exit");
 }

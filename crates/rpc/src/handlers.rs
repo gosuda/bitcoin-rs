@@ -33,7 +33,7 @@ pub fn live_registry() -> impl Iterator<Item = &'static str> {
 #[derive(Debug)]
 pub struct Handler {
     ctx: Arc<Context>,
-    stop: Arc<core::sync::atomic::AtomicBool>,
+    stop: bitcoin_rs_chain::LatchWriter,
     blocking_requests: parking_lot::Mutex<(usize, usize)>,
 }
 
@@ -42,7 +42,7 @@ impl Handler {
     pub fn new(ctx: Arc<Context>) -> Self {
         Self {
             ctx,
-            stop: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            stop: bitcoin_rs_chain::LatchWriter::new(),
             blocking_requests: parking_lot::Mutex::new((0, 16)),
         }
     }
@@ -66,11 +66,11 @@ impl Handler {
     }
 
     pub(crate) fn is_stopping(&self) -> bool {
-        self.stop.load(core::sync::atomic::Ordering::Acquire)
+        self.stop.reader().is_triggered()
     }
 
     pub(crate) fn stop(&self) {
-        self.stop.store(true, core::sync::atomic::Ordering::Release);
+        self.stop.trigger();
         if let Some(owner) = &self.ctx.chain.active_tip_wait {
             owner.wake_waiters();
         }
@@ -107,7 +107,7 @@ impl Handler {
             })
             .transpose()?;
         let _active = self.ctx.active_calls.begin(method);
-        let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.stop));
+        let cancellation = self.stop.reader();
         match handler {
             crate::registry::Dispatch::Immediate(handler) => handler(&self.ctx, params),
             crate::registry::Dispatch::Cancellable(handler) => {

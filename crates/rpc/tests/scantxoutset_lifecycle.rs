@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::support::TestError;
@@ -55,8 +52,8 @@ fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
         false,
     )?;
     let address = server.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let flag = shutdown.reader();
     let serving = std::thread::spawn(move || server.serve_with_shutdown(flag));
     let mut control = Connection::new(address);
     let result = (|| -> TestResult<()> {
@@ -88,7 +85,7 @@ fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
                         call(&mut control, "scantxoutset", json!(["start", []]))?["error"]["code"],
                         json!(-8)
                     );
-                    shutdown.store(true, Ordering::Release);
+                    shutdown.trigger();
                 }
                 CancellationMode::Abort => {
                     assert_eq!(
@@ -108,7 +105,7 @@ fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
         operation?;
         Ok(())
     })();
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     serving.join().map_err(|_| "server panicked")??;
     result
 }

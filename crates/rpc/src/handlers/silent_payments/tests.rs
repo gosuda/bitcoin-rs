@@ -81,11 +81,11 @@ fn moved_tip_and_recovery_after_source_read_refuse_publication() -> Result {
     for close in [false, true] {
         let (mut ctx, block) = fixture()?;
         let applied = ctx.chain.applied_tip.clone();
-        let closed = Arc::new(core::sync::atomic::AtomicBool::new(false));
-        ctx.chain.closed_for_recovery = bitcoin_rs_chain::LatchReader::new(closed.clone());
+        let closed = bitcoin_rs_chain::LatchWriter::new();
+        ctx.chain.closed_for_recovery = closed.reader();
         ctx.chain.block_undo_source = Some(Arc::new(Source(move |_, _| {
             if close {
-                closed.store(true, core::sync::atomic::Ordering::Release);
+                closed.trigger();
             } else {
                 let mut tip = applied
                     .load_full()

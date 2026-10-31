@@ -557,9 +557,7 @@ impl ChainHandles {
             applied_tip,
             active_tip_wait: None,
             progress,
-            closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
-                false,
-            ))),
+            closed_for_recovery: bitcoin_rs_chain::LatchWriter::new().reader(),
             blocks: BlockLogReader::fixture_empty(),
             utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(utxo)),
             coin_stats: Arc::new(coin_stats_listener),

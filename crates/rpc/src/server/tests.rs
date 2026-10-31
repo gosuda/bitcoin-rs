@@ -1,6 +1,7 @@
 mod listeners;
 
 use super::*;
+use bitcoin_rs_chain::LatchWriter;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::context::Context;
@@ -245,11 +246,11 @@ fn prepare_http_socket_disables_nagle() {
 fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
     let server = accept_test_server()?;
     let handler = Arc::clone(&server.handler);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
     let (parked, ready) = crossbeam_channel::bounded(1);
     let handle = thread::spawn(move || {
-        server.serve_accept_loop(&shutdown_clone.into(), RpcSurface::Shared, |listener| {
+        server.serve_accept_loop(&shutdown_reader, RpcSurface::Shared, |listener| {
             let result = listener.accept();
             if result
                 .as_ref()
@@ -265,7 +266,7 @@ fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
         .expect("idle accept");
     thread::sleep(Duration::from_millis(45));
     let start = Instant::now();
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     handle.join().expect("join serve thread")?;
     let elapsed = start.elapsed();
     eprintln!("idle RPC listener shutdown: {elapsed:?}");
@@ -274,6 +275,49 @@ fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
         "idle shutdown took {elapsed:?}"
     );
     assert!(handler.is_stopping());
+    Ok(())
+}
+
+#[test]
+fn serve_accept_loop_cancels_promptly_on_idle_socket() -> io::Result<()> {
+    let server = accept_test_server()?;
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let reader = shutdown.reader();
+    let (parked_tx, parked_rx) = crossbeam_channel::bounded(1);
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+
+    let handle = thread::spawn(move || {
+        let result = server.serve_accept_loop(&reader, RpcSurface::Shared, |listener| {
+            let result = listener.accept();
+            if result
+                .as_ref()
+                .is_err_and(|err| err.kind() == io::ErrorKind::WouldBlock)
+            {
+                let _ = parked_tx.send(());
+            }
+            result
+        });
+        let _ = done_tx.send(result);
+    });
+
+    parked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server must reach idle accept state");
+
+    let start = Instant::now();
+    shutdown.trigger();
+
+    let exit_result = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server thread must exit within 5s after latch trigger");
+
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(10),
+        "idle accept shutdown took {elapsed:?}, expected under 10ms"
+    );
+    exit_result?;
+    handle.join().expect("join server thread");
     Ok(())
 }
 
@@ -408,9 +452,9 @@ fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
         false,
     )?;
     let addr = server.listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
-    let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
+    let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_reader));
 
     let mut stream = TcpStream::connect(addr)?;
     write!(
@@ -431,7 +475,7 @@ fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
         "expected a framing error status, got {code}"
     );
 
-    shutdown.store(true, Ordering::SeqCst);
+    shutdown.trigger();
     drop(handle.join().expect("server thread"));
     Ok(())
 }
@@ -619,9 +663,9 @@ fn listener_directory_table_is_closed_over_http() -> std::io::Result<()> {
         false,
     )?;
     let addr = server.listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
-    let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
+    let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_reader));
 
     let status = |method: &str, path: &str| -> std::io::Result<u16> {
         let mut stream = TcpStream::connect(addr)?;
@@ -647,7 +691,7 @@ fn listener_directory_table_is_closed_over_http() -> std::io::Result<()> {
     assert_eq!(status("POST", "/")?, 401);
     assert_eq!(status("GET", "/api/blocks/tip/height")?, 200);
 
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     handle.join().expect("join serve thread")?;
     Ok(())
 }
@@ -1479,12 +1523,12 @@ fn accept_test_server() -> io::Result<RpcServer> {
 fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
     let server = accept_test_server()?;
     let addr = server.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
     let (idle_tx, idle_rx) = crossbeam_channel::bounded(1);
     let (accepted_tx, accepted_rx) = crossbeam_channel::unbounded();
     let handle = thread::spawn(move || {
-        server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
+        server.serve_accept_loop(&shutdown_reader, RpcSurface::Shared, |listener| {
             let result = listener.accept();
             match &result {
                 Ok(_) => {
@@ -1515,7 +1559,7 @@ fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
         }
         Ok(latencies)
     })();
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     handle.join().expect("accept thread")?;
     let latencies = result?;
     eprintln!("new-connection accept delays at phases 0/13/37/61/89 ms: {latencies:?}");
@@ -1532,8 +1576,8 @@ fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
 fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
     let server = accept_test_server()?;
     let addr = server.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
     let handle = thread::spawn(move || {
         let mut errors = vec![
             io::Error::from(io::ErrorKind::Interrupted),
@@ -1558,7 +1602,7 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
         errors.push(io::Error::from_raw_os_error(10024));
         let mut errors = errors.into_iter();
         let start = Instant::now();
-        server.serve_accept_loop(&stop.into(), RpcSurface::Shared, |listener| {
+        server.serve_accept_loop(&shutdown_reader, RpcSurface::Shared, |listener| {
             if let Some(error) = errors.next() {
                 return Err(error);
             }
@@ -1576,7 +1620,7 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
         client.read_to_string(&mut response)?;
         Ok(response)
     })();
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     handle.join().expect("accept thread")?;
     assert!(response?.starts_with("HTTP/1.1 401"));
     Ok(())
@@ -1585,19 +1629,19 @@ fn accept_recovers_from_resource_and_connection_errors() -> io::Result<()> {
 #[test]
 fn repeated_accept_errors_back_off_and_observe_shutdown() -> io::Result<()> {
     let server = accept_test_server()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&shutdown);
+    let shutdown = LatchWriter::new();
+    let shutdown_reader = shutdown.reader();
     let start = Instant::now();
     let mut attempts = 0;
-    server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
+    server.serve_accept_loop(&shutdown_reader, RpcSurface::Shared, |_| {
         attempts += 1;
         if attempts == 3 {
-            stop.store(true, Ordering::Release);
+            shutdown.trigger();
         }
         Err(io::Error::other("resource temporarily exhausted"))
     })?;
     assert_eq!(attempts, 3);
-    assert!(start.elapsed() >= ACCEPT_ERROR_BACKOFF * 3);
+    assert!(start.elapsed() >= ACCEPT_ERROR_BACKOFF * 2);
     Ok(())
 }
 
@@ -1605,9 +1649,10 @@ fn repeated_accept_errors_back_off_and_observe_shutdown() -> io::Result<()> {
 fn invalid_listener_errors_are_returned() -> io::Result<()> {
     for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::NotConnected] {
         let server = accept_test_server()?;
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = LatchWriter::new();
+        let shutdown_reader = shutdown.reader();
         let mut attempts = 0;
-        let result = server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |_| {
+        let result = server.serve_accept_loop(&shutdown_reader, RpcSurface::Shared, |_| {
             attempts += 1;
             Err(kind.into())
         });

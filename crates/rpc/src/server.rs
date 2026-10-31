@@ -27,7 +27,8 @@ const MAX_DRAIN_BYTES: usize = 64 * 1_024;
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
-const ACCEPT_SHUTDOWN_CHECK: Duration = Duration::from_millis(20);
+const LISTENER_TOKEN: mio::Token = mio::Token(0);
+const WAKER_TOKEN: mio::Token = mio::Token(1);
 
 const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 
@@ -121,6 +122,10 @@ impl RpcServer {
         mut accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
+        let handler_clone = Arc::clone(&self.handler);
+        let _handler_guard = shutdown.on_cancel(move || {
+            handler_clone.stop();
+        });
         self.handler
             .configure_blocking_admission(per_source_limit(self.max_connections));
         let mut readiness = mio::Poll::new()?;
@@ -129,8 +134,13 @@ impl RpcServer {
         let mut listener = mio::net::TcpListener::from_std(listener);
         readiness
             .registry()
-            .register(&mut listener, mio::Token(0), mio::Interest::READABLE)?;
-        let mut events = mio::Events::with_capacity(1);
+            .register(&mut listener, LISTENER_TOKEN, mio::Interest::READABLE)?;
+        let waker = Arc::new(mio::Waker::new(readiness.registry(), WAKER_TOKEN)?);
+        let waker_cancel = Arc::clone(&waker);
+        let _cancel_guard = shutdown.on_cancel(move || {
+            let _ = waker_cancel.wake();
+        });
+        let mut events = mio::Events::with_capacity(2);
         let active = Arc::new(Mutex::new(ActiveConnections::default()));
         while !shutdown.is_triggered() {
             match accept(&listener) {
@@ -144,14 +154,7 @@ impl RpcServer {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    while !shutdown.is_triggered() {
-                        match readiness.poll(&mut events, Some(ACCEPT_SHUTDOWN_CHECK)) {
-                            Ok(()) if !events.is_empty() => break,
-                            Ok(()) => {}
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
+                    wait_for_accept_readiness(shutdown, &mut readiness, &mut events)?;
                 }
                 Err(error) => match error.kind() {
                     io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted => {
@@ -160,14 +163,15 @@ impl RpcServer {
                     io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => return Err(error),
                     _ => {
                         warn!(%error, "rpc accept failed; retrying after backoff");
-                        thread::sleep(ACCEPT_ERROR_BACKOFF);
+                        if !wait_accept_backoff(shutdown) {
+                            break;
+                        }
                     }
                 },
             }
         }
         Ok(())
     }
-
     fn handle_accept(
         &self,
         active: &Arc<Mutex<ActiveConnections>>,
@@ -212,6 +216,32 @@ impl RpcServer {
                 }
             })?;
         Ok(())
+    }
+}
+
+fn wait_for_accept_readiness(
+    shutdown: &bitcoin_rs_chain::LatchReader,
+    readiness: &mut mio::Poll,
+    events: &mut mio::Events,
+) -> io::Result<()> {
+    while !shutdown.is_triggered() {
+        match readiness.poll(events, None) {
+            Ok(()) if !events.is_empty() => break,
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn wait_accept_backoff(shutdown: &bitcoin_rs_chain::LatchReader) -> bool {
+    if shutdown.is_triggered() {
+        return false;
+    }
+    crossbeam_channel::select! {
+        recv(crossbeam_channel::after(ACCEPT_ERROR_BACKOFF)) -> _ => true,
+        recv(shutdown.closed()) -> _ => false,
     }
 }
 
