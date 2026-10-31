@@ -71,6 +71,12 @@ impl ConditionStack {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CodeSeparator {
+    opcode_pos: u32,
+    byte_offset: Option<usize>,
+}
+
 fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i64, ScriptError> {
     if bytes.len() > max_size {
         return Err(ScriptError::Invalid {
@@ -200,7 +206,11 @@ pub(crate) fn eval_script(
     let mut conditions = ConditionStack::new();
     let mut altstack = Stack::new();
     let mut op_count: usize = 0;
-    let mut codeseparator_pos: u32 = CODESEPARATOR_POSITION;
+    let mut code_separator = CodeSeparator {
+        opcode_pos: CODESEPARATOR_POSITION,
+        byte_offset: None,
+    };
+    let mut opcode_pos: u32 = 0;
     let mut instruction_start: usize = 0;
     let mut iter = instructions(script);
 
@@ -230,6 +240,8 @@ pub(crate) fn eval_script(
                     }
                     push_bytes(stack, data)?;
                 }
+                check_stack_depth(stack, &altstack)?;
+                opcode_pos = opcode_pos.saturating_add(1);
                 instruction_start = script.len() - iter.remaining.len();
                 continue;
             }
@@ -276,19 +288,16 @@ pub(crate) fn eval_script(
                 checker,
                 sigversion,
                 validation_weight_left,
-                &mut codeseparator_pos,
+                opcode_pos,
+                &mut code_separator,
                 instruction_start,
                 tapleaf_hash,
                 script,
             )?;
         }
 
-        if stack.len() + altstack.len() > MAX_STACK_SIZE {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            });
-        }
-
+        check_stack_depth(stack, &altstack)?;
+        opcode_pos = opcode_pos.saturating_add(1);
         instruction_start = script.len() - iter.remaining.len();
     }
 
@@ -306,6 +315,15 @@ fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
         .map_err(|_| ScriptError::Invalid {
             code: ScriptErrCode::StackSize,
         })
+}
+
+fn check_stack_depth(stack: &Stack, altstack: &Stack) -> Result<(), ScriptError> {
+    if stack.len() + altstack.len() > MAX_STACK_SIZE {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::StackSize,
+        });
+    }
+    Ok(())
 }
 
 const fn is_disabled(op: u8) -> bool {
@@ -359,7 +377,8 @@ fn dispatch(
     checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     validation_weight_left: &mut Option<i64>,
-    codeseparator_pos: &mut u32,
+    opcode_pos: u32,
+    code_separator: &mut CodeSeparator,
     instruction_start: usize,
     tapleaf_hash: Option<&Hash256>,
     script: &[u8],
@@ -725,10 +744,8 @@ fn dispatch(
             push_bytes(stack, &digest)?;
         }
         OP_CODESEPARATOR => {
-            *codeseparator_pos =
-                u32::try_from(instruction_start + 1).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::ScriptSize,
-                })?;
+            code_separator.opcode_pos = opcode_pos;
+            code_separator.byte_offset = Some(instruction_start + 1);
         }
         OP_CHECKSIG | OP_CHECKSIGVERIFY => {
             let pubkey = stack.pop().map_err(|_| invalid_stack())?;
@@ -736,8 +753,7 @@ fn dispatch(
             let success = eval_checksig(
                 &item_bytes(&sig),
                 &item_bytes(&pubkey),
-                instruction_start,
-                *codeseparator_pos,
+                *code_separator,
                 script,
                 flags,
                 checker,
@@ -769,8 +785,7 @@ fn dispatch(
             let success = eval_checksig(
                 &item_bytes(&sig),
                 &item_bytes(&pubkey),
-                instruction_start,
-                *codeseparator_pos,
+                *code_separator,
                 script,
                 flags,
                 checker,
@@ -798,8 +813,7 @@ fn dispatch(
                 checker,
                 sigversion,
                 op_count,
-                *codeseparator_pos,
-                instruction_start,
+                *code_separator,
                 script,
                 op == OP_CHECKMULTISIGVERIFY,
             )?;
@@ -835,15 +849,11 @@ fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     }
 }
 
-fn script_code(codeseparator_pos: u32, instruction_start: usize, script: &[u8]) -> Vec<u8> {
-    if codeseparator_pos == CODESEPARATOR_POSITION {
-        return script.to_vec();
+fn script_code(byte_offset: Option<usize>, script: &[u8]) -> Vec<u8> {
+    match byte_offset {
+        None => script.to_vec(),
+        Some(start) => script.get(start..).unwrap_or_default().to_vec(),
     }
-    let start = usize::try_from(codeseparator_pos).unwrap_or(0);
-    if start >= script.len() || start > instruction_start {
-        return script.to_vec();
-    }
-    script.get(start..).unwrap_or_default().to_vec()
 }
 
 pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
@@ -877,8 +887,7 @@ pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
 fn eval_checksig(
     sig: &[u8],
     pubkey: &[u8],
-    instruction_start: usize,
-    codeseparator_pos: u32,
+    code_separator: CodeSeparator,
     script: &[u8],
     flags: VerifyFlags,
     checker: &TxSignatureChecker<'_>,
@@ -888,7 +897,7 @@ fn eval_checksig(
 ) -> Result<bool, ScriptError> {
     match sigversion {
         SigVersion::Base | SigVersion::WitnessV0 => {
-            let mut code = script_code(codeseparator_pos, instruction_start, script);
+            let mut code = script_code(code_separator.byte_offset, script);
             if sigversion == SigVersion::Base {
                 let needle = push_data(sig);
                 let (cleaned, found) = remove_all(&code, &needle);
@@ -930,7 +939,7 @@ fn eval_checksig(
                         sig,
                         pubkey,
                         tapleaf_hash,
-                        codeseparator_pos,
+                        code_separator.opcode_pos,
                     )?;
                 }
             } else if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_PUBKEYTYPE) {
@@ -958,8 +967,7 @@ fn check_multisig(
     checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     op_count: &mut usize,
-    codeseparator_pos: u32,
-    instruction_start: usize,
+    code_separator: CodeSeparator,
     script: &[u8],
     verify_only: bool,
 ) -> Result<(), ScriptError> {
@@ -1010,7 +1018,7 @@ fn check_multisig(
         return Err(invalid_stack());
     }
 
-    let mut code = script_code(codeseparator_pos, instruction_start, script);
+    let mut code = script_code(code_separator.byte_offset, script);
     if sigversion == SigVersion::Base {
         for index in 0..sigs {
             let sig_item = stack
@@ -1088,3 +1096,6 @@ fn check_multisig(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod consensus_tests;
