@@ -341,7 +341,7 @@ fn direct_and_current_selection_share_publication_digest_validation()
         .join(generation_name(reference.generation))
         .join(MANIFEST_FILE);
     let mut bytes = fs::read(&manifest_path)?;
-    bytes.push(b' '); // Still valid JSON with unchanged manifest semantics.
+    bytes.push(b' ');
     fs::write(&manifest_path, bytes)?;
     for selection in [
         open_current_checkpoint(&data)?,

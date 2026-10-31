@@ -385,3 +385,27 @@ where
         complete: true,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_condition_matches_pre_batch_value() {
+        let absent = WriteCondition::Absent {
+            cf: ColumnFamily::TxConfirmed,
+            key: b"k",
+        };
+        assert!(absent.matches(None));
+        assert!(!absent.matches(Some(b"v")));
+
+        let equals = WriteCondition::Equals {
+            cf: ColumnFamily::TxConfirmed,
+            key: b"k",
+            expected: b"v",
+        };
+        assert!(!equals.matches(None));
+        assert!(equals.matches(Some(b"v")));
+        assert!(!equals.matches(Some(b"w")));
+    }
+}
