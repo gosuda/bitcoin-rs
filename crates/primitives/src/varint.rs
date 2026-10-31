@@ -115,6 +115,9 @@ fn unreachable_small_value() -> ! {
     unreachable!("compact-size branch bounds guarantee integer width")
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use super::{VarintError, decode, encode, encoded_len};

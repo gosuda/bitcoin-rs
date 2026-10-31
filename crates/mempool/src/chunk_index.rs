@@ -573,5 +573,8 @@ fn component_index(component: ComponentId) -> usize {
     usize::try_from(component).unwrap_or(usize::MAX)
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests;

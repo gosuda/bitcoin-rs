@@ -71,6 +71,8 @@ pub struct ByteSpan {
     len: u32,
 }
 
+#[cfg(kani)]
+mod proofs;
 #[cfg(test)]
 mod tests;
 

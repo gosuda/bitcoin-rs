@@ -229,6 +229,9 @@ impl<'a> IntoIterator for &'a Witness {
     }
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use super::{Script, Witness};
