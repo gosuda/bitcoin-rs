@@ -1145,6 +1145,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea0095f6103c2a8b44acd6fd15960c801dafebf02e21940360833e0673f48ba7"
 
 [[package]]
+name = "contract-index"
+version = "0.15.0"
+dependencies = [
+ "clap",
+ "tempfile",
+]
+
+[[package]]
 name = "corepc-types"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
