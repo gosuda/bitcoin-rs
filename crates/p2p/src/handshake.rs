@@ -182,7 +182,7 @@ fn read_handshake_message<S: Read>(
         }
         let state = peer.state;
         match peer.read_message_admitted(|command, _| {
-            if command == "block" {
+            if crate::inbound::block_memory::expands_on_decode(command) {
                 crate::fsm::require_ready(state)
             } else {
                 Ok(())

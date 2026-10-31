@@ -93,7 +93,7 @@ impl Reconstruction {
             + filled
                 .iter()
                 .flatten()
-                .map(|tx: &Tx| tx.total_size())
+                .map(retained_tx_bytes)
                 .sum::<usize>();
 
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
@@ -270,10 +270,15 @@ fn fill_from_hints(
         let Some(body) = body else {
             continue;
         };
-        *retained_bytes += body.total_size();
+        *retained_bytes += retained_tx_bytes(&body);
         filled[slot] = Some(body);
     }
     Ok(())
+}
+
+/// Heap a reconstruction holds for one decoded transaction; the wire frame is not retained.
+fn retained_tx_bytes(tx: &Tx) -> usize {
+    core::mem::size_of::<Tx>().saturating_add(tx.retained_heap_bytes())
 }
 
 fn place_prefills(compact: &HeaderAndShortIds, total: usize) -> Option<Vec<Option<Tx>>> {

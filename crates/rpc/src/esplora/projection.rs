@@ -333,7 +333,6 @@ impl<'a> Projection<'a> {
                     input
                         .witness
                         .iter()
-                        .map(Vec::as_slice)
                         .map(DisplayHex::to_lower_hex_string)
                         .collect()
                 }),
@@ -724,7 +723,7 @@ fn inner_scripts(
     let witness_script = is_witness_script
         .then(|| input.witness.last())
         .flatten()
-        .cloned();
+        .map(<[u8]>::to_vec);
     (redeem, witness_script)
 }
 

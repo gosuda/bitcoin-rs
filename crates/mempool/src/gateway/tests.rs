@@ -74,6 +74,10 @@ impl metrics::Recorder for CounterKeyRecorder {
     }
 }
 
+fn unit() -> u64 {
+    crate::pool::entry_memory_usage(&tx(1))
+}
+
 fn tx(label: u8) -> Tx {
     Tx {
         version: 2,
@@ -602,7 +606,7 @@ fn insert_reports_accepted_then_policy_evictions() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -1036,7 +1040,7 @@ fn refused_insertion_preserves_state_and_publishes_nothing() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -1081,7 +1085,7 @@ fn rejected_replacement_preserves_pool_history_and_publication() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 1_000,
+            max_total_bytes: unit() * 5 / 2,
             ..MempoolLimits::default()
         }))),
         Some((dyn_observer(&observer), BodyInterest::Metadata)),
@@ -1109,7 +1113,9 @@ fn rejected_replacement_preserves_pool_history_and_publication() {
         )
         .expect("bystander in");
 
-    let replacement = prevout_spend(prev, 100, 0x52);
+    let mut replacement = prevout_spend(prev, 100, 0x52);
+    replacement.outputs[0].script_pubkey =
+        vec![0x52; usize::try_from(unit()).unwrap_or(usize::MAX)].into();
     let replacement_txid = replacement.txid();
     observer.seen.lock().clear();
 
@@ -1585,7 +1591,7 @@ fn block_and_size_limit_removals_are_not_retained() {
     assert_eq!(gateway.reconstruction_tx_by_wtxid(mined.wtxid()), None);
 
     let trimmed = gateway
-        .enforce_size_limit(AdmissionOrigin::Rpc, 100)
+        .enforce_size_limit(AdmissionOrigin::Rpc, unit())
         .expect("size trim");
     assert_eq!(trimmed.removed_txids().len(), 1);
     for resident in [&first, &second] {
@@ -2244,7 +2250,7 @@ fn floor_trim_gateway_with_filler() -> MempoolGateway {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         None,
@@ -2339,7 +2345,7 @@ fn admission_prepared_before_a_floor_raise_is_retried() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 1_000,
+            max_total_bytes: unit() * 3 / 2,
             ..MempoolLimits::default()
         }))),
         None,
@@ -2363,7 +2369,19 @@ fn admission_prepared_before_a_floor_raise_is_retried() {
     let error = gateway
         .insert_entry(
             AdmissionOrigin::Rpc,
-            MempoolEntry::new(Arc::new(tx(92)), 950, 100, 1, 7, 0),
+            MempoolEntry::new(
+                Arc::new({
+                    let mut padded = tx(92);
+                    padded.outputs[0].script_pubkey =
+                        vec![92; usize::try_from(unit()).unwrap_or(usize::MAX)].into();
+                    padded
+                }),
+                950,
+                100,
+                1,
+                7,
+                0,
+            ),
         )
         .expect_err("oversized");
     assert_eq!(error, crate::MempoolError::Full);
@@ -2389,7 +2407,7 @@ fn remove_for_block_stamps_the_floor_for_decay() {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 1_000,
-            max_total_bytes: 400,
+            max_total_bytes: 2 * unit(),
             ..MempoolLimits::default()
         }))),
         None,
@@ -2409,7 +2427,7 @@ fn remove_for_block_stamps_the_floor_for_decay() {
         )
         .expect("high");
     gateway
-        .enforce_size_limit(AdmissionOrigin::Rpc, 200)
+        .enforce_size_limit(AdmissionOrigin::Rpc, unit())
         .expect("eviction");
     assert_eq!(gateway.read().min_fee_sat_per_kvb(1_000), 3_000);
     gateway.remove_for_block(AdmissionOrigin::Rpc, &[], &[], 8, 1_000);

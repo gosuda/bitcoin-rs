@@ -399,7 +399,7 @@ fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
     let gateway = MempoolGateway::new(
         std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
-            max_total_bytes: 150,
+            max_total_bytes: bitcoin_rs_mempool::entry_memory_usage(&sequence_tx(5)) * 3 / 2,
             ..MempoolLimits::default()
         }))),
         Some((observer, bitcoin_rs_mempool::BodyInterest::Bodies)),

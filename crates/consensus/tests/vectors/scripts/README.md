@@ -1,7 +1,7 @@
 # Kernel script-parity fixture corpus
 
 Per-transaction script-verdict fixtures for
-`crates/consensus/tests/kernel_block_parity.rs` (plan 2026-06-10-001, R4/U3).
+`crates/consensus/tests/kernel_block_parity.rs`.
 One JSON per script class; each carries the raw transaction hex, its expected
 `txid` **and** `wtxid`, **every** input's prevout (scriptPubKey hex + amount
 in sats — the kernel taproot path needs all prevouts for
@@ -38,7 +38,7 @@ included — is self-authenticating against the recorded provenance.
   whose every input spends a P2PKH (`pubkeyhash`) prevout, found by a forward
   scan from genesis (height 2812).
 - **`p2sh_spend`** is post-activation (BIP16 activated at height ≈173,805,
-  satisfying R4's `≥ 173,805` bound). Height 400,000 was chosen after
+  height >= 173,805 after BIP16 activation). Height 400,000 was chosen after
   mechanical scans of the activation window (173,805–173,905 plus spot blocks
   at 183k/200k/220k/250k/290k/320k) found no all-P2SH-input spend — organic
   P2SH usage stayed rare for years after activation. The redeem script is a

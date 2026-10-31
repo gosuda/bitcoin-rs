@@ -789,7 +789,9 @@ fn rpc_package_fee_failure_precedence_preserves_other_planner_errors() -> TestRe
         let parent = spend(&[coin(841)], &outputs, false);
         let child = spend(&[OutPoint::new(parent.txid(), 0)], &[99_999], true);
         if full {
-            gateway.pool.write().limits.max_total_bytes = parent.vsize() + child.vsize() - 1;
+            gateway.pool.write().limits.max_total_bytes = crate::pool::entry_memory_usage(&parent)
+                + crate::pool::entry_memory_usage(&child)
+                - 1;
         }
         let chain = Coins(vec![(
             coin(841),
@@ -876,7 +878,8 @@ fn rpc_package_capacity_and_replacement_refusals_preserve_authoritative_state() 
             script_pubkey: Script::from_bytes(vec![0x51]),
         },
     )]);
-    gateway.pool.write().limits.max_total_bytes = parent.vsize() + child.vsize() - 1;
+    gateway.pool.write().limits.max_total_bytes =
+        crate::pool::entry_memory_usage(&parent) + crate::pool::entry_memory_usage(&child) - 1;
     let result = gateway.submit_rpc_package(&[parent, child], None, unix_time_secs(), &chain)?;
     assert_eq!(
         result.package_error,
@@ -974,7 +977,7 @@ fn package_count_order_conflicts_and_weight_boundaries() -> TestResult {
         assert_eq!(oracle.weight().to_wu(), 202_000);
     }
     assert!(check_structure(&weighted).is_ok());
-    let mut padding = weighted[1].inputs[0].witness[0].clone();
+    let mut padding = weighted[1].inputs[0].witness[0].to_vec();
     padding.push(0);
     weighted[1].inputs[0].witness = Witness::from_stack(vec![padding]);
     assert_eq!(

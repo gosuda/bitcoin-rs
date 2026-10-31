@@ -214,7 +214,7 @@ fn insert_replayed_header(
             JournalReplayError::HeaderRebuildRejected(format!(
                 "height {}: parent {} missing from checkpoint tree",
                 record.height,
-                bitcoin_rs_primitives::encode::hex_encode(&record.prev_hash)
+                bitcoin_rs_primitives::hex::hex_encode(&record.prev_hash)
             ))
         })?;
     let node_id = match tree.lookup(Hash256::from_le_bytes(&record.block_hash)) {

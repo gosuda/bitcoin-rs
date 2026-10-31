@@ -1264,6 +1264,29 @@ fn broadcast_rejections_are_400_without_mutation() {
     }
 }
 
+/// The broadcast predecode gate refuses oversized hex before any decode,
+/// with no admission side effects (#1741).
+#[test]
+fn broadcast_refuses_hex_beyond_the_standard_size_limit_before_decode() {
+    for path in ["/api/tx", "/esplora/tx"] {
+        let observer = Arc::new(BroadcastObserver::default());
+        let ctx = Arc::new(Context::new_with_mempool_observer(observer.clone()));
+        let handler = Handler::new(Arc::clone(&ctx));
+        let sequence = ctx.mempool.gateway.read().sequence_number();
+        let oversized = "00".repeat(400_001);
+        let response = dispatch_post(&handler, path, oversized.as_bytes());
+        assert_eq!(response.status, 400, "{path}");
+        assert_eq!(response.content_type, "text/plain");
+        assert_eq!(
+            response.body,
+            b"transaction hex exceeds the broadcast size limit"
+        );
+        assert!(ctx.mempool.gateway.read().is_empty());
+        assert_eq!(ctx.mempool.gateway.read().sequence_number(), sequence);
+        assert!(observer.0.lock().is_empty());
+    }
+}
+
 /// The 0.1 BTC/kvB HTTP cap is fixed. RPC's zero override still opts
 /// out only for that RPC call, and the observer receives its RPC origin.
 #[test]

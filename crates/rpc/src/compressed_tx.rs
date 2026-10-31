@@ -607,7 +607,7 @@ fn compressed_signature(input: &TxIn, kind: &PrevoutKind) -> Option<CompressedSi
             let item = input.witness.first()?;
             match item.len() {
                 64 => Some(CompressedSig {
-                    sig: item.as_slice().try_into().ok()?,
+                    sig: item.try_into().ok()?,
                     pubkey_hash: None,
                     hash_type: None,
                     standard: true,

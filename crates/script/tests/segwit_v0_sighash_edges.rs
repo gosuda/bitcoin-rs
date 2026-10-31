@@ -2,7 +2,7 @@
 
 use bitcoin::consensus::{deserialize as oracle_decode, encode::VarInt, serialize};
 use bitcoin_rs_primitives::{
-    Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, deserialize,
+    Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, Witness, deserialize,
 };
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
@@ -111,7 +111,7 @@ fn verify_witness(
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &[],
-        witness,
+        &Witness::from_stack(witness.to_vec()),
         flags,
         &prevouts,
         tx,

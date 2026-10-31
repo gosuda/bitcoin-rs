@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-consensus",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chainstate"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-index"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mining"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-node"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-primitives"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-rpc"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin_hashes 0.14.101",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-primitives",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",

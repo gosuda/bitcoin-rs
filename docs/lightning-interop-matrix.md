@@ -13,7 +13,7 @@ This document maintains the independent empirical qualification record for exter
 
 In strict compliance with `ECO-08` and `ECO-09`:
 1. **Unmodified Binaries Only**: Verification requires released or revision-pinned upstream binaries running unmodified. No downstream forks, mock shims, or monkey patches are permitted.
-2. **No Version Spoofing or Fake RPCs**: `bitcoin-rs` reports its truthful `client_version()` (`1400` from crate version `0.14.0`). We strictly refuse to spoof Core version numbers (e.g. `290000`) or synthesize mock wallet RPCs to force external tools to pass.
+2. **No Version Spoofing or Fake RPCs**: `bitcoin-rs` reports its truthful `client_version()` (`1500` from crate version `0.15.0`). We strictly refuse to spoof Core version numbers (e.g. `290000`) or synthesize mock wallet RPCs to force external tools to pass.
 3. **No Wallet Emulation**: `bitcoin-rs` strictly maintains a [`NO_WALLET`](contracts/wallet-facing.md) boundary. Targets requiring Core wallet RPCs (such as `gettransaction`) are recorded as blocked under `NO_WALLET`.
 4. **Differential Oracle Comparison**: Bitcoin Core 31.1 (`<bitcoind-bin>`) serves solely as a differential comparator for suspected failures to distinguish target-side defects from node discrepancies. Core 31.1 is never a fallback, replacement, or surrogate pass.
 5. **No Nearest-Version Substitution**: Targets without approved pins in the Step 30 specification must remain `not exercised` naming the missing pin prerequisite. Substituting unapproved newer releases is forbidden.
@@ -110,7 +110,7 @@ Each target scenario is evaluated across five distinct observable behaviors:
   - Serving lifecycle: `src/main.rs`, `src/service.rs` (binary daemon only, `pub(crate) struct NodeService`)
 - **Normal Zero-Fee-Default Mode**: Planned probe requires `bitcoin-rs` regtest configured with `--txindex=true`, `--scriptindex=full`, and `--rest=true` via standard `[bitcoind]` RPC. Intended to probe basic daemon lifecycle, block sync, transaction broadcast, and restart.
 - **Advanced Mode (`enable_zero_fee_commitments = true`)**:
-  - Requires `getnetworkinfo.version >= 290000` (Core 29.0+). `bitcoin-rs` truthfully reports `1400` from `PKG_VERSION = 0.14.0` (`crates/primitives/src/version.rs`, `crates/rpc/src/handlers/network.rs`). This is a version-identity gate failure, not a capability failure. `bitcoin-rs` strictly refuses version spoofing.
+  - Requires `getnetworkinfo.version >= 290000` (Core 29.0+). `bitcoin-rs` truthfully reports `1500` from `PKG_VERSION = 0.15.0` (`crates/primitives/src/version.rs`, `crates/rpc/src/handlers/network.rs`). This is a version-identity gate failure, not a capability failure. `bitcoin-rs` strictly refuses version spoofing.
   - Requires all-V3 `submitpackage` package relay, TRUC, P2A, and ephemeral dust (Issue #1574 / PR #1667).
   - Both gates are recorded separately in the matrix and JSON evidence.
 

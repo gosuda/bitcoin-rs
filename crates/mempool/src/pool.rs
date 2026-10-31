@@ -133,6 +133,7 @@ struct Derived {
     free_components: Vec<u32>,
     chunks: ChunkIndex,
     total_vsize: u64,
+    inner_usage: u64,
     total_fee: u128,
     fee_rate_aggregates: std::collections::BTreeMap<u64, FeeRateAggregate>,
 }
@@ -140,6 +141,9 @@ struct Derived {
 impl Derived {
     fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
         self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
+        self.inner_usage = self
+            .inner_usage
+            .saturating_sub(entry_memory_usage(&entry.tx));
         self.total_fee -= u128::from(entry.fee);
         match self.fee_rate_aggregates.entry(entry.fee_rate) {
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
@@ -299,6 +303,7 @@ impl EntryArena {
             .filter_map(|(index, slot)| slot.as_ref().map(|live| (index, &live.entry)))
     }
 
+    #[cfg(test)]
     fn iter_links(&self) -> impl Iterator<Item = &GraphLinks> {
         self.slots
             .iter()
@@ -514,7 +519,7 @@ impl Mempool {
             let mut rolling = self.rolling_min_fee.lock();
             rolling.current(
                 now,
-                self.total_vsize(),
+                self.dynamic_memory_usage(),
                 self.limits.max_total_bytes,
                 incremental,
             )
@@ -690,6 +695,10 @@ impl Mempool {
                 slot.links.parents.insert(position, id);
             }
         }
+        self.derived.inner_usage = self
+            .derived
+            .inner_usage
+            .saturating_add(link_memory_usage(parents.len() + children.len(), 2));
         if let Some(slot) = self.entries.slot_mut(id) {
             slot.links = GraphLinks { parents, children };
         }
@@ -725,6 +734,10 @@ impl Mempool {
         let added_fee = entry.fee;
         let added_fee_rate = entry.fee_rate;
         self.derived.total_vsize = self.derived.total_vsize.saturating_add(added_vsize);
+        self.derived.inner_usage = self
+            .derived
+            .inner_usage
+            .saturating_add(entry_memory_usage(&tx));
         self.derived.total_fee += u128::from(added_fee);
         let aggregate = self
             .derived
@@ -1014,66 +1027,48 @@ impl Mempool {
         }
     }
 
+    /// Estimated live heap of the pool, maintained as entries and links change.
+    ///
+    /// Each entry contributes its transaction heap, its slot in every index, and its links; the
+    /// unit is bytes of memory, not virtual size.
     #[must_use]
-    pub fn dynamic_memory_usage(&self) -> u64 {
-        use core::mem::size_of;
+    pub const fn dynamic_memory_usage(&self) -> u64 {
+        self.derived.inner_usage
+    }
 
-        let arena = u64::try_from(self.entries.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
-
-        let transactions = self
+    #[cfg(test)]
+    pub(crate) fn recount_memory_usage(&self) -> u64 {
+        let entries = self
             .entries
             .iter()
-            .map(|(_index, entry)| transaction_heap_usage(&entry.tx))
+            .map(|(_, entry)| entry_memory_usage(&entry.tx))
             .fold(0_u64, u64::saturating_add);
-
-        let by_txid = u64::try_from(self.derived.by_txid.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
-        let funding = u64::try_from(self.derived.funding.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
-        let spending = u64::try_from(self.derived.spending.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(SpendingKey, EntryId)>()).unwrap_or(0));
-        let by_wtxid = u64::try_from(self.derived.by_wtxid.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(Wtxid, EntryId)>()).unwrap_or(0));
-        let by_time = u64::try_from(self.derived.by_time.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(u64, EntryId)>()).unwrap_or(0));
-        let unbroadcast = u64::try_from(self.derived.unbroadcast.len())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<Wtxid>()).unwrap_or(0));
-        let links = self.entries.iter_links().fold(0_u64, |total, link| {
-            let payload = link
-                .parents
-                .capacity()
-                .saturating_add(link.children.capacity());
-            total.saturating_add(
-                u64::try_from(payload)
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0)),
-            )
-        });
-        let components = u64::try_from(self.derived.components.capacity())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<ComponentSummary>()).unwrap_or(0));
-        let chunks = self.derived.chunks.dynamic_memory_usage();
-
-        arena
-            .saturating_add(transactions)
-            .saturating_add(by_txid)
-            .saturating_add(by_wtxid)
-            .saturating_add(by_time)
-            .saturating_add(unbroadcast)
-            .saturating_add(funding)
-            .saturating_add(spending)
-            .saturating_add(links)
-            .saturating_add(components)
-            .saturating_add(chunks)
+        let links = self
+            .entries
+            .iter_links()
+            .map(|links| link_memory_usage(links.parents.len() + links.children.len(), 1))
+            .fold(0_u64, u64::saturating_add);
+        entries.saturating_add(links)
     }
+
+    /// Memory released by removing one entry, not counting the mirrored record in each neighbour.
+    pub(crate) fn entry_memory(&self, id: EntryId) -> Option<u64> {
+        let entry = self.entry(id)?;
+        let links = self.links(id)?;
+        Some(
+            entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(
+                links.parents.len() + links.children.len(),
+                1,
+            )),
+        )
+    }
+
+    /// Memory an admitted entry adds: its own cost and the link records it creates on both sides.
+    pub(crate) fn admission_memory(&self, entry: &MempoolEntry) -> u64 {
+        let edges = self.in_pool_parents(&entry.tx).len() + self.in_pool_children(entry.txid).len();
+        entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(edges, 2))
+    }
+
     #[must_use]
     pub fn estimate_fee_rate(&self, conf_target_blocks: u32) -> Option<FeeRate> {
         self.estimator.estimate(conf_target_blocks)
@@ -1789,6 +1784,10 @@ impl Mempool {
                     survivor_seeds.push(*child);
                 }
             }
+            self.derived.inner_usage = self.derived.inner_usage.saturating_sub(link_memory_usage(
+                retired.links.parents.len() + retired.links.children.len(),
+                2,
+            ));
             self.derived.account_remove(*id, &entry);
             self.push_change(changes, entry.txid, MutationOutcome::Removed(*reason));
             self.estimator.tx_left(&entry.txid);
@@ -2246,28 +2245,49 @@ pub(crate) fn transaction_heap_usage(tx: &Tx) -> u64 {
     for input in &tx.inputs {
         total =
             total.saturating_add(u64::try_from(input.script_sig.capacity()).unwrap_or(u64::MAX));
-        total = total.saturating_add(
-            u64::try_from(
-                input
-                    .witness
-                    .capacity()
-                    .saturating_mul(size_of::<Vec<u8>>())
-                    .saturating_add(
-                        input
-                            .witness
-                            .iter()
-                            .map(std::vec::Vec::capacity)
-                            .sum::<usize>(),
-                    ),
-            )
-            .unwrap_or(u64::MAX),
-        );
+        total = total
+            .saturating_add(u64::try_from(input.witness.retained_heap_bytes()).unwrap_or(u64::MAX));
     }
     for output in &tx.outputs {
         total = total
             .saturating_add(u64::try_from(output.script_pubkey.capacity()).unwrap_or(u64::MAX));
     }
     total
+}
+
+pub(crate) fn link_memory_usage(edges: usize, sides: usize) -> u64 {
+    u64::try_from(
+        edges
+            .saturating_mul(sides)
+            .saturating_mul(core::mem::size_of::<EntryId>()),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// Upper bound of what one entry costs inside the chunk index: its order key, and room for its
+/// member id, txid and chunk slot in the component vectors, which grow by doubling.
+pub(crate) const fn chunk_index_memory_per_entry() -> usize {
+    use core::mem::size_of;
+
+    size_of::<crate::chunk_index::ChunkKey>()
+        + 2 * (size_of::<EntryId>()
+            + size_of::<Txid>()
+            + size_of::<crate::chunk_index::ChunkSlot>())
+}
+
+/// Heap one live entry holds apart from its links: the transaction and one record per index.
+pub fn entry_memory_usage(tx: &Tx) -> u64 {
+    use core::mem::size_of;
+
+    let per_entry = size_of::<Option<LiveEntry>>()
+        + size_of::<(Txid, IndexedEntry)>()
+        + size_of::<(Wtxid, EntryId)>()
+        + size_of::<(u64, EntryId)>()
+        + size_of::<Wtxid>()
+        + chunk_index_memory_per_entry()
+        + tx.outputs.len() * size_of::<(ScriptHash, EntryId)>()
+        + tx.inputs.len() * size_of::<(SpendingKey, EntryId)>();
+    transaction_heap_usage(tx).saturating_add(u64::try_from(per_entry).unwrap_or(u64::MAX))
 }
 
 #[must_use]
@@ -2516,68 +2536,67 @@ mod dynamic_memory_usage_tests {
     }
 
     #[test]
-    fn the_arena_is_charged_after_the_pool_is_cleared() {
-        use core::mem::size_of;
-
+    fn a_cleared_pool_reports_zero_usage() {
         let mut pool = pool_with(64, 64);
+        assert!(pool.dynamic_memory_usage() > 0);
         pool.clear();
-
-        let capacity = u64::try_from(pool.entries.capacity()).unwrap_or(0);
-        assert!(
-            capacity > 0,
-            "the fixture must leave a grown arena behind, or this proves nothing"
-        );
-        let arena =
-            capacity.saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
-        let cleared = pool.dynamic_memory_usage();
         assert_eq!(
-            cleared, arena,
-            "a cleared pool must report its arena and nothing else: {cleared} vs {arena}"
-        );
-
-        let fresh = Mempool::new(MempoolLimits {
-            max_total_bytes: 0,
-            ..MempoolLimits::default()
-        })
-        .dynamic_memory_usage();
-        assert_eq!(fresh, 0, "a pool that never grew holds nothing");
-        assert!(
-            cleared > fresh,
-            "a drained pool and a fresh one must not report the same footprint"
+            pool.dynamic_memory_usage(),
+            0,
+            "usage follows live entries, so a drained pool holds nothing"
         );
     }
 
     #[test]
-    fn the_chunk_index_is_charged_for_what_it_holds() {
-        const COUNT: u64 = 32;
-
-        let mut pool = pool_with(u8::try_from(COUNT).unwrap_or(0), 64);
-        let index = pool.derived.chunks.dynamic_memory_usage();
-        assert!(index > 0, "a populated index must report a nonzero cost");
-
-        let with_index = pool.dynamic_memory_usage();
-        pool.derived.chunks = ChunkIndex::default();
-        let without_index = pool.dynamic_memory_usage();
-        assert_eq!(
-            with_index.saturating_sub(without_index),
-            index,
-            "the pool must charge the index what the index says it costs"
+    fn usage_covers_what_the_chunk_index_measures_for_itself() {
+        let pool = pool_with(32, 64);
+        let measured = pool.derived.chunks.dynamic_memory_usage();
+        let charged = 32 * u64::try_from(chunk_index_memory_per_entry()).unwrap_or(u64::MAX);
+        assert!(measured > 0, "a populated index must report a nonzero cost");
+        assert!(
+            charged >= measured,
+            "the per-entry charge {charged} must cover the index's own count {measured}"
         );
     }
 
-    #[test]
-    fn usage_accounts_the_acceptance_time_index() {
-        use core::mem::size_of;
-
-        let mut pool = pool_with(4, 64);
-        let with_index = pool.dynamic_memory_usage();
-        pool.derived.by_time.clear();
-        let without_index = pool.dynamic_memory_usage();
-        assert_eq!(
-            with_index.saturating_sub(without_index),
-            4_u64.saturating_mul(u64::try_from(size_of::<(u64, EntryId)>()).unwrap_or(0)),
-            "the pool must charge one acceptance-time entry per pooled transaction"
-        );
+    proptest::proptest! {
+        #[test]
+        fn incremental_usage_equals_a_full_recount_after_any_insert_and_removal_sequence(
+            ops in proptest::collection::vec((proptest::bool::ANY, 0_u8..24, 0_u8..24), 1..60)
+        ) {
+            let mut pool = Mempool::new(MempoolLimits {
+                max_total_bytes: 0,
+                ..MempoolLimits::default()
+            });
+            let mut known: Vec<Txid> = Vec::new();
+            for (insert, pick, parent_pick) in ops {
+                if insert {
+                    let mut tx = tx_with(usize::from(pick) + 1, pick);
+                    if let Some(parent) = known.get(usize::from(parent_pick) % known.len().max(1)) {
+                        tx.inputs[0].previous_output = OutPoint::new(*parent, 0);
+                    }
+                    let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
+                    let txid = entry.txid;
+                    if pool.insert_entry(entry).is_ok() {
+                        known.push(txid);
+                    }
+                } else {
+                    let ids: Vec<EntryId> = pool
+                        .entries
+                        .iter()
+                        .filter_map(|(index, _)| EntryId::try_from(index).ok())
+                        .collect();
+                    if let Some(&id) = ids.get(usize::from(pick) % ids.len().max(1)) {
+                        let mut changes = Vec::new();
+                        pool.remove_entries_with_reasons(
+                            &[(id, crate::mutation::RemovalReason::PolicyEviction)],
+                            &mut changes,
+                        );
+                    }
+                }
+                proptest::prop_assert_eq!(pool.dynamic_memory_usage(), pool.recount_memory_usage());
+            }
+        }
     }
 }
 

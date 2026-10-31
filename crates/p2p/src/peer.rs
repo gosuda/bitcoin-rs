@@ -418,9 +418,9 @@ impl<S: Read> Peer<S> {
     > {
         let mut credit = None;
         let Some((message, raw)) = self.read_message_admitted(|command, payload| {
-            if command == "block" {
+            if crate::inbound::block_memory::expands_on_decode(command) {
                 credit = Some(memory.reserve(
-                    bitcoin_rs_primitives::layout::ParsedBlock::decode_heap_bound(payload.len()),
+                    bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
                     cancelled,
                 )?);
             }
@@ -429,13 +429,17 @@ impl<S: Read> Peer<S> {
         else {
             return Ok(None);
         };
-        if let (Message::Block(payload), Some(credit)) = (&message, credit.as_mut()) {
-            credit.retain(
+        match (&message, credit.as_mut()) {
+            (Message::Block(payload), Some(credit)) => credit.retain(
                 payload
                     .bytes()
                     .len()
                     .saturating_add(payload.block().retained_heap_bytes()),
-            )?;
+            )?,
+            (Message::Tx(tx), Some(credit)) => {
+                credit.retain(tx.total_size().saturating_add(tx.retained_heap_bytes()))?;
+            }
+            _ => {}
         }
         Ok(Some((message, raw, credit)))
     }

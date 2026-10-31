@@ -35,7 +35,7 @@ pub(crate) fn submitpackage(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         let raw = raw
             .as_str()
             .ok_or_else(|| RpcError::InvalidType("raw transaction must be a string".to_owned()))?;
-        let tx = decode_tx(
+        let tx = decode_broadcast_tx(
             raw,
             "TX decode failed. Make sure the tx has at least one input.".to_owned(),
         )?;

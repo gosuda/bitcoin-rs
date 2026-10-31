@@ -14,8 +14,7 @@ use crate::ScriptEngine;
 use crate::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, ValidationEngine};
 
-const LOCKTIME_THRESHOLD: u32 = 500_000_000;
-const SEQUENCE_FINAL: u32 = 0xffff_ffff;
+use bitcoin_rs_primitives::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 

@@ -199,8 +199,8 @@ pub(crate) struct ReplacementInputs {
         crate::pool::fee_policy::PolicyGraph,
     )>,
     entry: crate::pool::PreparedInsert,
-    projected_vsize: u64,
-    max_vsize: u64,
+    projected_memory: u64,
+    max_memory: u64,
     limits: crate::MempoolLimits,
     incremental_relay_fee: u64,
     fee_estimation: FeeEstimation,
@@ -257,8 +257,8 @@ impl ReplacementInputs {
         };
         after_graph.check_limits(self.limits)?;
         let needs_trim = self.enforcement != LimitEnforcement::Deferred
-            && self.max_vsize > 0
-            && self.projected_vsize > self.max_vsize;
+            && self.max_memory > 0
+            && self.projected_memory > self.max_memory;
         let after_chunks = if self.direct.is_empty() && (!needs_trim || self.trim_graph.is_some()) {
             Vec::new()
         } else {
@@ -277,7 +277,7 @@ impl ReplacementInputs {
         let mut removed = self.evicted.clone();
         let mut removal_priority: Vec<_> = self.evicted.iter().copied().collect();
         removal_priority.sort_unstable();
-        let mut size = self.projected_vsize;
+        let mut size = self.projected_memory;
         let mut bump = None;
         if needs_trim {
             let trim_graph = self.trim_graph.as_ref().unwrap_or(&after_graph);
@@ -287,7 +287,7 @@ impl ReplacementInputs {
                 after_chunks
             };
             for chunk in trim_chunks.iter().rev() {
-                if size <= self.max_vsize {
+                if size <= self.max_memory {
                     break;
                 }
                 bump = bump.max(trim_bump(
@@ -308,12 +308,12 @@ impl ReplacementInputs {
                     if removed.insert(id) {
                         removal_priority.push(id);
                         size = size
-                            .checked_sub(u64::from(node.vsize))
+                            .checked_sub(node.memory)
                             .ok_or(RbfError::ArithmeticOverflow)?;
                     }
                 }
             }
-            if size > self.max_vsize {
+            if size > self.max_memory {
                 return Err(refuse_full(self.stamp, bump));
             }
         }
@@ -446,20 +446,20 @@ impl Mempool {
                 });
             }
         }
-        let removed_vsize = evicted.iter().try_fold(0_u64, |total, &id| {
-            let entry = self.entry(id).ok_or(RbfError::InconsistentGraph)?;
+        let removed_memory = evicted.iter().try_fold(0_u64, |total, &id| {
+            let released = self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?;
             total
-                .checked_add(u64::from(entry.vsize))
+                .checked_add(released)
                 .ok_or(RbfError::ArithmeticOverflow)
         })?;
-        let mut projected_vsize = self
-            .total_vsize()
-            .checked_sub(removed_vsize)
-            .and_then(|size| size.checked_add(u64::from(entry.vsize)))
+        let mut projected_memory = self
+            .dynamic_memory_usage()
+            .checked_sub(removed_memory)
+            .and_then(|size| size.checked_add(self.admission_memory(&entry)))
             .ok_or(RbfError::ArithmeticOverflow)?;
         let include_all = enforcement != LimitEnforcement::Deferred
             && self.limits.max_total_bytes > 0
-            && projected_vsize > self.limits.max_total_bytes;
+            && projected_memory > self.limits.max_total_bytes;
         let graphs = if conflicts.is_empty() && !include_all {
             None
         } else {
@@ -472,10 +472,8 @@ impl Mempool {
                 let mut excluded_trim = excluded.clone();
                 for &id in &expired {
                     if excluded_trim.insert(id) {
-                        projected_vsize = projected_vsize
-                            .checked_sub(u64::from(
-                                self.entry(id).ok_or(RbfError::InconsistentGraph)?.vsize,
-                            ))
+                        projected_memory = projected_memory
+                            .checked_sub(self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?)
                             .ok_or(RbfError::ArithmeticOverflow)?;
                     }
                 }
@@ -486,8 +484,8 @@ impl Mempool {
                     .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
                     .any(|id| expired.contains(&id));
                 if expires {
-                    projected_vsize = projected_vsize
-                        .checked_sub(u64::from(entry.vsize))
+                    projected_memory = projected_memory
+                        .checked_sub(self.admission_memory(&entry))
                         .ok_or(RbfError::ArithmeticOverflow)?;
                 }
                 let candidates = if expires {
@@ -511,8 +509,8 @@ impl Mempool {
             evicted: excluded,
             graphs,
             entry,
-            projected_vsize,
-            max_vsize: self.limits.max_total_bytes,
+            projected_memory,
+            max_memory: self.limits.max_total_bytes,
             limits: self.limits,
             incremental_relay_fee: self.policy_snapshot().incremental_relay_fee_sat_per_kvb,
             fee_estimation,

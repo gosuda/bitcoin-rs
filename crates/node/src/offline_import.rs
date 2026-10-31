@@ -185,7 +185,7 @@ pub fn run_offline_import(
     if total != manifest_doc.archive_bytes {
         bail!("archive size does not match the manifest");
     }
-    let digest = bitcoin_rs_primitives::encode::hex_encode(&hasher.finalize());
+    let digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize());
     if digest != manifest_doc.archive_sha256.to_ascii_lowercase() {
         bail!("archive digest does not match the manifest");
     }
@@ -503,16 +503,8 @@ fn namespace_has_content(path: &Path) -> bool {
 }
 
 fn parse_magic_hex(text: &str) -> Result<[u8; 4]> {
-    if text.len() != 8 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("network magic must be 8 hex characters");
-    }
-    let mut out = [0u8; 4];
-    for (index, chunk) in out.iter_mut().enumerate() {
-        let byte: u8 = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
-            .with_context(|| "network magic is not hex")?;
-        *chunk = byte;
-    }
-    Ok(out)
+    bitcoin_rs_primitives::hex::hex_decode_array(text)
+        .map_err(|_| anyhow::anyhow!("network magic must be 8 hex characters"))
 }
 
 fn check_manifest_shape(doc: &Manifest) -> Result<()> {

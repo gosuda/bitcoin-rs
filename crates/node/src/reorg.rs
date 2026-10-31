@@ -75,7 +75,7 @@ fn trim_after_reorg(
         bitcoin_rs_primitives::unix_time_secs(),
     );
     let max_bytes = gateway.max_total_bytes();
-    if max_bytes == 0 || gateway.read().total_vsize() <= max_bytes {
+    if max_bytes == 0 || gateway.read().dynamic_memory_usage() <= max_bytes {
         return Ok(());
     }
     gateway

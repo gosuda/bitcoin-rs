@@ -1148,7 +1148,7 @@ impl MempoolGateway {
         })
     }
 
-    /// The configured total-size ceiling of the underlying pool, in vbytes.
+    /// The configured memory ceiling of the underlying pool, in bytes of dynamic memory usage.
     #[must_use]
     pub fn max_total_bytes(&self) -> u64 {
         self.pool.read().limits.max_total_bytes

@@ -224,7 +224,7 @@ pub fn commit_publication(
         version: CURRENT_VERSION,
         generation,
         directory: paths.directory.clone(),
-        manifest_sha256: bitcoin_rs_primitives::encode::hex_encode(&reference.manifest_sha256),
+        manifest_sha256: bitcoin_rs_primitives::hex::hex_encode(&reference.manifest_sha256),
     };
     let current_bytes = sonic_rs::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;

@@ -1,7 +1,5 @@
 //! Checked borrowed wire layout for blocks and transactions.
 
-use std::ops::Range;
-
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -19,10 +17,51 @@ use crate::{
     reason = "the fixed 80-byte header fits in u64"
 )]
 const HEADER_LEN: u64 = Header::LEN as u64;
-const MIN_TX_LEN: u64 = 10;
-const MIN_INPUT_LEN: u64 = 41;
-const MIN_OUTPUT_LEN: u64 = 9;
-const MIN_WITNESS_ITEM_LEN: u64 = 1;
+/// Wire bytes every element of a kind consumes outside the bytes of the elements it contains.
+const MIN_TX_LEN: usize = 10;
+const MIN_INPUT_LEN: usize = 41;
+const MIN_OUTPUT_LEN: usize = 9;
+const MIN_WITNESS_ITEM_LEN: usize = 1;
+const MIN_SCRIPT_BYTE_LEN: usize = 1;
+
+const TX_DECODE_BYTES: usize = core::mem::size_of::<ParsedTransaction<'static>>()
+    + core::mem::size_of::<ByteSpan>()
+    + core::mem::size_of::<Tx>();
+const INPUT_DECODE_BYTES: usize =
+    core::mem::size_of::<InputLayout>() + core::mem::size_of::<TxIn>();
+const OUTPUT_DECODE_BYTES: usize =
+    core::mem::size_of::<OutputLayout>() + core::mem::size_of::<TxOut>();
+const WITNESS_ITEM_DECODE_BYTES: usize = core::mem::size_of::<u32>();
+const SCRIPT_BYTE_DECODE_BYTES: usize = 1;
+
+const fn larger(left: usize, right: usize) -> usize {
+    if left > right { left } else { right }
+}
+
+/// Upper bound on decode heap, in multiples of the wire length, over every element kind.
+const DECODE_EXPANSION: usize = larger(
+    larger(
+        TX_DECODE_BYTES.div_ceil(MIN_TX_LEN),
+        INPUT_DECODE_BYTES.div_ceil(MIN_INPUT_LEN),
+    ),
+    larger(
+        larger(
+            OUTPUT_DECODE_BYTES.div_ceil(MIN_OUTPUT_LEN),
+            WITNESS_ITEM_DECODE_BYTES.div_ceil(MIN_WITNESS_ITEM_LEN),
+        ),
+        SCRIPT_BYTE_DECODE_BYTES.div_ceil(MIN_SCRIPT_BYTE_LEN),
+    ),
+);
+
+/// Bytes a decoder may hold live for `wire_len` wire bytes.
+///
+/// The reservation is the wire image plus the parse scratch and the materialized block. Each
+/// element kind spends at least its exclusive minimum of wire bytes, and those bytes are disjoint,
+/// so the per-element factors never double count.
+#[must_use]
+pub const fn decode_reservation(wire_len: usize) -> usize {
+    wire_len.saturating_mul(1 + DECODE_EXPANSION)
+}
 /// Fixed serialized input outpoint length: 32-byte txid plus 4-byte vout.
 const OUTPOINT_LEN: u64 = 36;
 
@@ -36,6 +75,8 @@ pub struct ByteSpan {
 mod tests;
 
 impl ByteSpan {
+    const EMPTY: Self = Self { start: 0, len: 0 };
+
     fn checked(start: u64, len: u64, limit: u64) -> Result<Self, DecodeError> {
         let available = usize::try_from(limit.saturating_sub(start)).unwrap_or(usize::MAX);
         let end = start
@@ -74,36 +115,6 @@ impl ByteSpan {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MetadataRange {
-    start: u32,
-    end: u32,
-}
-
-impl MetadataRange {
-    const EMPTY: Self = Self { start: 0, end: 0 };
-
-    fn new(start: u64, end: u64, limit: u64) -> Result<Self, DecodeError> {
-        let available = usize::try_from(limit.saturating_sub(start)).unwrap_or(usize::MAX);
-        if end < start || end > limit {
-            return Err(impossible(available));
-        }
-        let start = u32::try_from(start).map_err(|_| impossible(available))?;
-        let end = u32::try_from(end).map_err(|_| impossible(available))?;
-        Ok(Self { start, end })
-    }
-
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.end == self.start
-    }
-
-    #[must_use]
-    pub fn as_range(self) -> Range<usize> {
-        widen(self.start)..widen(self.end)
-    }
-}
-
 fn widen(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
@@ -113,6 +124,10 @@ fn impossible(available: usize) -> DecodeError {
         needed: usize::MAX,
         available,
     }
+}
+
+fn count_capacity(count: u64) -> usize {
+    usize::try_from(count).unwrap_or(usize::MAX)
 }
 
 fn widening(len: usize) -> u64 {
@@ -155,8 +170,8 @@ impl ImageCursor<'_> {
         Ok((value, span))
     }
 
-    fn require_count(&self, count: u64, min_item_len: u64) -> Result<(), DecodeError> {
-        let min_needed = min_item_len.saturating_mul(count);
+    fn require_count(&self, count: u64, min_item_len: usize) -> Result<(), DecodeError> {
+        let min_needed = widening(min_item_len).saturating_mul(count);
         let remaining = self.remaining();
         if min_needed > remaining {
             return Err(DecodeError::EndOfData {
@@ -182,7 +197,8 @@ pub struct InputLayout {
     outpoint: ByteSpan,
     script_sig: ByteSpan,
     sequence: ByteSpan,
-    witness: MetadataRange,
+    witness: ByteSpan,
+    witness_items: u32,
 }
 
 impl InputLayout {
@@ -197,9 +213,15 @@ impl InputLayout {
         self.script_sig
     }
 
+    /// Span of the witness item region: every item's length prefix and bytes, after the item count.
     #[must_use]
-    pub const fn witness(&self) -> MetadataRange {
+    pub const fn witness(&self) -> ByteSpan {
         self.witness
+    }
+
+    #[must_use]
+    pub const fn witness_items(&self) -> u32 {
+        self.witness_items
     }
 }
 
@@ -228,7 +250,6 @@ pub struct ParsedTransaction<'a> {
     segwit: bool,
     inputs: Vec<InputLayout>,
     outputs: Vec<OutputLayout>,
-    witness_spans: Vec<ByteSpan>,
 }
 
 impl<'a> ParsedTransaction<'a> {
@@ -281,7 +302,7 @@ impl<'a> ParsedTransaction<'a> {
         }
         cur.require_count(input_count_value, MIN_INPUT_LEN)?;
 
-        let mut inputs = Vec::new();
+        let mut inputs = Vec::with_capacity(count_capacity(input_count_value));
         for _ in 0..input_count_value {
             let outpoint = cur.take(OUTPOINT_LEN)?;
             let (script_len, _len_span) = cur.read_compact()?;
@@ -291,7 +312,8 @@ impl<'a> ParsedTransaction<'a> {
                 outpoint,
                 script_sig,
                 sequence,
-                witness: MetadataRange::EMPTY,
+                witness: ByteSpan::EMPTY,
+                witness_items: 0,
             });
         }
 
@@ -300,7 +322,7 @@ impl<'a> ParsedTransaction<'a> {
             None => cur.read_compact()?,
         };
         cur.require_count(output_count_value, MIN_OUTPUT_LEN)?;
-        let mut outputs = Vec::new();
+        let mut outputs = Vec::with_capacity(count_capacity(output_count_value));
         for _ in 0..output_count_value {
             let value = cur.take(8)?;
             let (script_len, _len_span) = cur.read_compact()?;
@@ -311,21 +333,20 @@ impl<'a> ParsedTransaction<'a> {
             });
         }
 
-        let mut witness_spans = Vec::new();
         if segwit {
             for input in &mut inputs {
                 let (item_count, _count_span) = cur.read_compact()?;
                 cur.require_count(item_count, MIN_WITNESS_ITEM_LEN)?;
-                let first = widening(witness_spans.len());
+                let region_start = cur.pos;
                 for _ in 0..item_count {
                     let (item_len, _len_span) = cur.read_compact()?;
-                    let item = cur.take(item_len)?;
-                    witness_spans.push(item);
+                    cur.take(item_len)?;
                 }
-                let limit = widening(witness_spans.len());
-                input.witness = MetadataRange::new(first, limit, limit)?;
+                input.witness =
+                    ByteSpan::checked(region_start, cur.pos - region_start, cur.limit())?;
+                input.witness_items = u32::try_from(item_count).map_err(|_| impossible(0))?;
             }
-            if inputs.iter().all(|input| input.witness.is_empty()) {
+            if inputs.iter().all(|input| input.witness_items == 0) {
                 return Err(DecodeError::SuperfluousWitness);
             }
         }
@@ -345,7 +366,6 @@ impl<'a> ParsedTransaction<'a> {
             segwit,
             inputs,
             outputs,
-            witness_spans,
         })
     }
 
@@ -369,9 +389,37 @@ impl<'a> ParsedTransaction<'a> {
         &self.outputs
     }
 
+    /// Spans of the items of one input's witness, in order. The region was validated at parse time.
+    pub fn witness_item_spans(&self, input: usize) -> impl Iterator<Item = ByteSpan> + '_ {
+        let layout = self.inputs.get(input);
+        let (region, items) = layout.map_or((ByteSpan::EMPTY, 0), |layout| {
+            (layout.witness, layout.witness_items)
+        });
+        let mut cursor = ImageCursor {
+            image: self.bytes,
+            pos: u64::from(region.start()),
+        };
+        (0..items).map(move |_| {
+            let (len, _len_span) = cursor
+                .read_compact()
+                .unwrap_or_else(|_| unreachable!("witness region was validated at parse time"));
+            cursor
+                .take(len)
+                .unwrap_or_else(|_| unreachable!("witness region was validated at parse time"))
+        })
+    }
+
+    /// Heap bytes held by this parse itself, which is transient scratch beside the wire image.
     #[must_use]
-    pub fn witness_spans(&self) -> &[ByteSpan] {
-        &self.witness_spans
+    pub fn scratch_heap_bytes(&self) -> usize {
+        self.inputs
+            .capacity()
+            .saturating_mul(core::mem::size_of::<InputLayout>())
+            .saturating_add(
+                self.outputs
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<OutputLayout>()),
+            )
     }
 
     #[must_use]
@@ -434,6 +482,22 @@ impl<'a> ParsedTransaction<'a> {
         ]
     }
 
+    fn materialize_witness(&self, input: usize) -> Witness {
+        let item_bytes = self
+            .witness_item_spans(input)
+            .map(|span| widen(span.len()))
+            .fold(0_usize, usize::saturating_add);
+        let items = self
+            .inputs
+            .get(input)
+            .map_or(0, |layout| widen(layout.witness_items));
+        let mut witness = Witness::with_capacity(items, item_bytes);
+        for span in self.witness_item_spans(input) {
+            witness.push(slice_at(self.bytes, span));
+        }
+        witness
+    }
+
     #[must_use]
     pub fn materialize(&self) -> Tx {
         let mut version_reader = slice_at(self.bytes, self.version_span);
@@ -448,7 +512,8 @@ impl<'a> ParsedTransaction<'a> {
         let inputs = self
             .inputs
             .iter()
-            .map(|layout| {
+            .enumerate()
+            .map(|(index, layout)| {
                 let mut outpoint_reader = slice_at(self.bytes, layout.outpoint);
                 let txid = Txid(Hash256::from_le_bytes(
                     &read_array::<32>(&mut outpoint_reader)
@@ -466,13 +531,7 @@ impl<'a> ParsedTransaction<'a> {
                         read_u32_le(&mut sequence_reader)
                             .unwrap_or_else(|_| unreachable!("validated sequence span")),
                     ),
-                    witness: Witness::from_stack(
-                        layout
-                            .witness
-                            .as_range()
-                            .map(|index| slice_at(self.bytes, self.witness_spans[index]).to_vec())
-                            .collect(),
-                    ),
+                    witness: self.materialize_witness(index),
                 }
             })
             .collect();
@@ -514,43 +573,6 @@ pub struct ParsedBlock<'a> {
 }
 
 impl<'a> ParsedBlock<'a> {
-    /// Conservative peak heap bound for parsing and materializing a wire image.
-    /// Counts both simultaneously live representations, vector growth in the
-    /// parser, and copied scripts/witness data. It is an allocation bound, not
-    /// a consensus limit or a measurement of allocator/RSS overhead.
-    #[must_use]
-    pub fn decode_heap_bound(wire_len: usize) -> usize {
-        let txs = wire_len / usize::try_from(MIN_TX_LEN).unwrap_or(usize::MAX);
-        let inputs = wire_len / usize::try_from(MIN_INPUT_LEN).unwrap_or(usize::MAX);
-        let outputs = wire_len / usize::try_from(MIN_OUTPUT_LEN).unwrap_or(usize::MAX);
-        // Each parser Vec grows geometrically. Nested input/output/witness
-        // vectors may each have the minimum allocation in every transaction.
-        let grown = |count: usize, vectors: usize| {
-            count
-                .saturating_mul(2)
-                .saturating_add(vectors.saturating_mul(4))
-        };
-        let arrays = [
-            (
-                grown(txs, 1),
-                core::mem::size_of::<ParsedTransaction<'_>>() + core::mem::size_of::<ByteSpan>(),
-            ),
-            (grown(inputs, txs), core::mem::size_of::<InputLayout>()),
-            (grown(outputs, txs), core::mem::size_of::<OutputLayout>()),
-            (grown(wire_len, txs), core::mem::size_of::<ByteSpan>()),
-            // Materialize collects exact-length iterators, without growth.
-            (txs, core::mem::size_of::<Tx>()),
-            (inputs, core::mem::size_of::<TxIn>()),
-            (outputs, core::mem::size_of::<TxOut>()),
-            (wire_len, core::mem::size_of::<Vec<u8>>()),
-        ];
-        arrays
-            .into_iter()
-            .fold(wire_len.saturating_mul(3), |bound, (count, size)| {
-                bound.saturating_add(count.saturating_mul(size))
-            })
-    }
-
     pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
@@ -583,8 +605,8 @@ impl<'a> ParsedBlock<'a> {
         let (tx_count_value, tx_count_span) = cur.read_compact()?;
         cur.require_count(tx_count_value, MIN_TX_LEN)?;
 
-        let mut tx_spans = Vec::new();
-        let mut txs = Vec::new();
+        let mut tx_spans = Vec::with_capacity(count_capacity(tx_count_value));
+        let mut txs = Vec::with_capacity(count_capacity(tx_count_value));
         for _ in 0..tx_count_value {
             let tx = ParsedTransaction::parse_at(image, &mut cur.pos)?;
             tx_spans.push(tx.span());
@@ -640,6 +662,25 @@ impl<'a> ParsedBlock<'a> {
         let start = widen(span.start());
         let end = usize::try_from(span.end()).ok()?;
         self.bytes.get(start..end)
+    }
+
+    /// Heap bytes held by this parse itself, which is transient scratch beside the wire image.
+    #[must_use]
+    pub fn scratch_heap_bytes(&self) -> usize {
+        self.tx_spans
+            .capacity()
+            .saturating_mul(core::mem::size_of::<ByteSpan>())
+            .saturating_add(
+                self.txs
+                    .capacity()
+                    .saturating_mul(core::mem::size_of::<ParsedTransaction<'_>>()),
+            )
+            .saturating_add(
+                self.txs
+                    .iter()
+                    .map(ParsedTransaction::scratch_heap_bytes)
+                    .fold(0_usize, usize::saturating_add),
+            )
     }
 
     #[must_use]

@@ -234,11 +234,7 @@ fn manifest_network_matches_configured_identity() {
 #[test]
 fn offline_import_pins_full_validation_mode() {
     use bitcoin_rs_chainstate::ValidationMode;
-    for inherited in [
-        ValidationMode::Full,
-        ValidationMode::AssumeValid,
-        ValidationMode::Fast,
-    ] {
+    for inherited in [ValidationMode::Full, ValidationMode::AssumeValid] {
         assert_eq!(
             resolve_offline_validation_mode(inherited),
             ValidationMode::Full
@@ -325,7 +321,7 @@ fn two_block_archive() -> TwoBlockArchive {
     hasher.update(&corpus);
     let manifest = format!(
         r#"{{"schema":"core-framed-archive-manifest-v1","network":"regtest","network_magic":"fabfb5da","start_height":0,"stop_height":1,"archive_sha256":"{digest}","archive_bytes":{bytes},"blocks":[{blocks}]}}"#,
-        digest = bitcoin_rs_primitives::encode::hex_encode(&hasher.finalize()),
+        digest = bitcoin_rs_primitives::hex::hex_encode(&hasher.finalize()),
         bytes = corpus.len(),
         blocks = entries.join(",")
     );

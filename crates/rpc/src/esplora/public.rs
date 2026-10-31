@@ -143,7 +143,11 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
             let Ok(hex) = core::str::from_utf8(body) else {
                 return bad_request("transaction body must be UTF-8 hex");
             };
-            let transaction = Vec::<u8>::from_hex(hex.trim())
+            let hex = hex.trim();
+            if let Err(error) = crate::handlers::tx::check_broadcast_hex_len(hex) {
+                return bad_request(error);
+            }
+            let transaction = Vec::<u8>::from_hex(hex)
                 .ok()
                 .and_then(|bytes| deserialize::<Tx>(&bytes).ok());
             let Some(transaction) = transaction else {

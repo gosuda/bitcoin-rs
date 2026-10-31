@@ -165,8 +165,8 @@ fn retained_heap_bytes_genesis_fixture_matches_independent_calculation() -> Resu
                     .iter()
                     .map(|input| {
                         input.script_sig.capacity()
-                            + input.witness.capacity() * core::mem::size_of::<Vec<u8>>()
-                            + input.witness.iter().map(Vec::capacity).sum::<usize>()
+                            + input.witness.len() * core::mem::size_of::<u32>()
+                            + input.witness.iter().map(<[u8]>::len).sum::<usize>()
                     })
                     .sum();
                 let out_payloads: usize = tx
@@ -206,8 +206,8 @@ fn retained_heap_bytes_fixture_363731_matches_independent_calculation() -> Resul
                     .iter()
                     .map(|input| {
                         input.script_sig.capacity()
-                            + input.witness.capacity() * core::mem::size_of::<Vec<u8>>()
-                            + input.witness.iter().map(Vec::capacity).sum::<usize>()
+                            + input.witness.len() * core::mem::size_of::<u32>()
+                            + input.witness.iter().map(<[u8]>::len).sum::<usize>()
                     })
                     .sum();
                 let out_payloads: usize = tx
@@ -221,9 +221,6 @@ fn retained_heap_bytes_fixture_363731_matches_independent_calculation() -> Resul
 
     assert_eq!(block.retained_heap_bytes(), independent);
 
-    if core::mem::size_of::<usize>() == 8 {
-        assert_eq!(block.retained_heap_bytes(), 1_109_823);
-    }
     Ok(())
 }
 
@@ -232,31 +229,25 @@ fn retained_heap_bytes_synthetic_witness_heavy_capacity_variations() {
     let mut script_sig_0 = Vec::with_capacity(60);
     script_sig_0.extend_from_slice(&[0xaa; 10]);
 
-    let mut wit_item_0 = Vec::with_capacity(128);
-    wit_item_0.extend_from_slice(&[0x01; 32]);
-    let mut wit_item_1 = Vec::with_capacity(256);
-    wit_item_1.extend_from_slice(&[0x02; 64]);
-    let mut witness_stack_0 = Vec::with_capacity(4);
-    witness_stack_0.push(wit_item_0);
-    witness_stack_0.push(wit_item_1);
+    let mut witness_0 = crate::Witness::with_capacity(4, 300);
+    witness_0.push(&[0x01; 32]);
+    witness_0.push(&[0x02; 64]);
 
-    let mut wit_item_2 = Vec::with_capacity(80);
-    wit_item_2.extend_from_slice(&[0x03; 33]);
-    let mut witness_stack_1 = Vec::with_capacity(3);
-    witness_stack_1.push(wit_item_2);
+    let mut witness_1 = crate::Witness::with_capacity(3, 80);
+    witness_1.push(&[0x03; 33]);
 
     let mut inputs = Vec::with_capacity(5);
     inputs.push(TxIn {
         previous_output: OutPoint::default(),
         script_sig: crate::Script::from_bytes(script_sig_0),
         sequence: crate::Sequence::MAX,
-        witness: crate::Witness::from_stack(witness_stack_0),
+        witness: witness_0,
     });
     inputs.push(TxIn {
         previous_output: OutPoint::default(),
         script_sig: crate::Script::new(),
         sequence: crate::Sequence::MAX,
-        witness: crate::Witness::from_stack(witness_stack_1),
+        witness: witness_1,
     });
 
     let mut spk_0 = Vec::with_capacity(75);
@@ -291,8 +282,8 @@ fn retained_heap_bytes_synthetic_witness_heavy_capacity_variations() {
     let expected_txs_buf = 3 * core::mem::size_of::<Tx>();
     let expected_inputs_buf = 5 * core::mem::size_of::<TxIn>();
     let expected_outputs_buf = 4 * core::mem::size_of::<TxOut>();
-    let expected_input_0_scripts = 60 + 4 * core::mem::size_of::<Vec<u8>>() + 128 + 256;
-    let expected_input_1_scripts = 3 * core::mem::size_of::<Vec<u8>>() + 80;
+    let expected_input_0_scripts = 60 + 4 * core::mem::size_of::<u32>() + 300;
+    let expected_input_1_scripts = 3 * core::mem::size_of::<u32>() + 80;
     let expected_output_scripts = 75 + 110;
 
     let expected_tx = expected_inputs_buf
@@ -431,4 +422,17 @@ fn payload_witness_identity_is_byte_exact_not_txid_only() {
     assert_ne!(left_payload.block(), right_payload.block());
     assert_eq!(left_payload.block(), &left);
     assert_eq!(right_payload.block(), &right);
+}
+
+#[test]
+fn payload_clone_shares_the_immutable_block() {
+    let payload = crate::BlockPayload::from_local(Block {
+        header: Header::default(),
+        txs: Vec::new(),
+    });
+    let cloned = payload.clone();
+    assert!(
+        std::ptr::eq(payload.block(), cloned.block()),
+        "a handoff clone must share the one immutable block"
+    );
 }

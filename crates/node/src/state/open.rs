@@ -144,12 +144,22 @@ impl NodeState {
             resume_source,
             journal_bootstrap,
             script_live_seed,
-        } = prepare_initial_chainstate(
-            &config.data_dir,
-            config.network,
-            config.chainstate_journal,
-            durable_head.load()?.as_ref(),
-        )?;
+        } = {
+            let head = durable_head.load()?;
+            bitcoin_rs_chainstate::recovery::require_full_script_attestation(
+                &config.data_dir,
+                config.validation.mode,
+                head.as_ref(),
+                durable_head.as_ref(),
+                config.storage.prune_target_mb > 0,
+            )?;
+            prepare_initial_chainstate(
+                &config.data_dir,
+                config.network,
+                config.chainstate_journal,
+                head.as_ref(),
+            )?
+        };
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
                 height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height),

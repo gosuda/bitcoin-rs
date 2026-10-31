@@ -2,7 +2,7 @@
 
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::encode::hex_encode;
+use bitcoin_rs_primitives::hex::hex_encode;
 pub(crate) use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_ARTIFACT_LEN;
 pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_CODEC;

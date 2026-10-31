@@ -62,7 +62,6 @@ pub mod verify;
 pub enum ValidationMode {
     Full,
     AssumeValid,
-    Fast,
 }
 
 impl ValidationMode {
@@ -71,7 +70,6 @@ impl ValidationMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "full" => Some(Self::Full),
             "assume-valid" | "assume_valid" | "assumevalid" => Some(Self::AssumeValid),
-            "fast" => Some(Self::Fast),
             _ => None,
         }
     }
@@ -257,8 +255,14 @@ impl AssumeValidGate {
         let anchor = network
             .assume_valid_anchor()
             .filter(|(height, _)| *height == configured_height);
+        if configured_height > 0 && anchor.is_none() {
+            tracing::warn!(
+                configured_height,
+                "assume-valid height has no matching network pin; scripts will not be skipped"
+            );
+        }
         Self {
-            trusted: AtomicBool::new(anchor.is_none()),
+            trusted: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             anchor,
         }
@@ -268,10 +272,15 @@ impl AssumeValidGate {
     #[must_use]
     fn with_anchor(anchor: Option<(u32, Hash256)>) -> Self {
         Self {
-            trusted: AtomicBool::new(anchor.is_none()),
+            trusted: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             anchor,
         }
+    }
+
+    #[must_use]
+    fn pin(&self) -> Option<(u32, Hash256)> {
+        self.anchor
     }
 
     #[must_use]
@@ -281,6 +290,7 @@ impl AssumeValidGate {
 
     fn evaluate(&self, tree: &BlockTree) {
         let Some((pinned_height, pinned_hash)) = self.anchor else {
+            self.trusted.store(false, Ordering::Relaxed);
             return;
         };
         let Some(tip) = tree.tip() else {
@@ -310,7 +320,7 @@ pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
     /// Rebuilding without an accepted checkpoint cannot inherit script trust
-    /// from durable commits that may have used Fast/AssumeValid.
+    /// from durable commits that may have used `AssumeValid`.
     ColdReplay,
 }
 
@@ -980,16 +990,24 @@ impl Chainstate {
             BlockProvenance::Network => match self.validation_mode {
                 ValidationMode::Full => false,
                 ValidationMode::AssumeValid => {
-                    self.assume_valid_height > 0
-                        && height <= self.assume_valid_height
-                        && self.assume_valid_gate.trusted()
-                }
-                ValidationMode::Fast => {
+                    let Some((pinned_height, pinned_hash)) = self.assume_valid_gate.pin() else {
+                        return false;
+                    };
+                    if self.assume_valid_height == 0 || height > self.assume_valid_height {
+                        return false;
+                    }
+                    if height > pinned_height {
+                        return false;
+                    }
+                    if !self.assume_valid_gate.trusted() {
+                        return false;
+                    }
                     let tree = self.block_tree.read();
                     let Some(header_tip) = tree.tip() else {
                         return false;
                     };
-                    height < header_tip.height
+                    tree.node_at_height_from(header_tip.tip_id, pinned_height)
+                        .is_some_and(|pin_id| tree.lookup(pinned_hash) == Some(pin_id))
                         && tree
                             .node_at_height_from(header_tip.tip_id, height)
                             .is_some_and(|id| tree.lookup(hash) == Some(id))

@@ -1,3 +1,19 @@
+# Validation default contract
+
+## Clauses
+
+### `VAL-01`: The production default engine is a measured decision
+
+The production default is `native` (`validation.engine = "native"`).
+[Getting started](../getting-started.md#validation-engine) owns the option
+spelling and resolution order. A different production default needs
+product-cell promotion evidence under
+[HPA-13](hot-path-attribution.md#hpa-13-promotion-and-regression-thresholds);
+a compiled `kernel` capability, a microbenchmark, or a historical verdict
+does not change the default.
+
+### `VAL-02`: The native interpreter is the complete portable engine
+
 - `Interpreter::execute_with_prevouts` and `PreparedTransaction::verify_input` in
   `crates/script/src/interpreter.rs` verify every consensus spend class:
   legacy and P2SH through `eval::eval_script`, SegWit v0 through BIP143,
@@ -25,7 +41,7 @@
   `CheckTransaction` before script verification). `tx_valid` accepts no
   skips.
 
-### Native Taproot witness rules
+#### Native Taproot witness rules
 
 - Bare P2TR is recognized in the existing witness-program path when witness
   verification is active. Taproot verification runs only with its activation
@@ -62,7 +78,7 @@
   Block proposals isolate consensus from annex relay policy. Fixture keys exist only in test targets; no performance claim
   or production signing capability follows from these checks.
 
-### Admission signature cache
+#### Admission signature cache
 
 - `PreparedAdmission::verify_scripts` constructs a local `SignatureCache`.
   Native verification shares this cache across the `STANDARD` pass and the next-block script pass.

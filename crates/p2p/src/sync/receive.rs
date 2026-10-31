@@ -409,7 +409,7 @@ impl BlockSync {
                         serialized_bytes = payload.bytes().len(),
                         transactions = payload.block().txs.len(),
                         coinbase_witness_items = witness.map_or(0, bitcoin_rs_primitives::Witness::len),
-                        coinbase_witness_first_bytes = witness.and_then(|stack| stack.first()).map_or(0, Vec::len),
+                        coinbase_witness_first_bytes = witness.and_then(|stack| stack.first()).map_or(0, <[u8]>::len),
                         "block sync: body/header binding failed; rejecting delivery"
                     );
                     reject_deliveries.push((hash, source));

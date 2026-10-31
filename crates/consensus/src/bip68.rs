@@ -1,9 +1,9 @@
 use crate::ConsensusError;
 
-/// BIP68 disable flag (`1 << 31`).
-pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
-const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
-const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
+use bitcoin_rs_primitives::{
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG,
+};
+
 const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
 
 pub fn check_sequence_lock(

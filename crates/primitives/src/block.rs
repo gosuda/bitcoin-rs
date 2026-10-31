@@ -1,5 +1,7 @@
 //! Native block type and block-level hashing helpers.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 
 use crate::{
@@ -65,19 +67,25 @@ impl Block {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockPayload {
-    block: Block,
+    block: Arc<Block>,
     bytes: Bytes,
 }
 
 impl BlockPayload {
     pub fn from_raw(raw: Bytes) -> Result<Self, DecodeError> {
         let block = deserialize::<Block>(&raw)?;
-        Ok(Self { block, bytes: raw })
+        Ok(Self {
+            block: Arc::new(block),
+            bytes: raw,
+        })
     }
 
     pub fn from_local(block: Block) -> Self {
         let bytes = Bytes::from(consensus_bytes(&block));
-        Self { block, bytes }
+        Self {
+            block: Arc::new(block),
+            bytes,
+        }
     }
 
     #[expect(
@@ -89,12 +97,18 @@ impl BlockPayload {
         let block = Block::consensus_decode(&mut reader)?;
         let consumed = raw.len() - reader.len();
         let bytes = Bytes::copy_from_slice(&raw[..consumed]);
-        Ok((Self { block, bytes }, consumed))
+        Ok((
+            Self {
+                block: Arc::new(block),
+                bytes,
+            },
+            consumed,
+        ))
     }
 
     #[must_use]
     pub fn block(&self) -> &Block {
-        &self.block
+        self.block.as_ref()
     }
 
     #[must_use]
@@ -104,7 +118,7 @@ impl BlockPayload {
 
     #[must_use]
     pub fn into_block(self) -> Block {
-        self.block
+        Arc::try_unwrap(self.block).unwrap_or_else(|block| (*block).clone())
     }
 }
 

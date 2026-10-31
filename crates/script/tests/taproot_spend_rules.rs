@@ -3,7 +3,7 @@
 use bitcoin_rs_e2e::helpers::taproot as fixture;
 
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_primitives::{Script, Tx, TxOut};
+use bitcoin_rs_primitives::{Script, Tx, TxOut, Witness};
 use bitcoin_rs_script::{
     Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, SignatureCache, VerifyFlags,
 };
@@ -257,7 +257,7 @@ fn signature_cache_warmed_still_rejects_flipped_signature_byte() {
         "warmup"
     );
     let mut bad = tx;
-    bad.inputs[0].witness[0][0] ^= 0x01;
+    bad.inputs[0].witness = flip_first_byte(&bad.inputs[0].witness, 0);
     let uncached = verify_cached(&bad, &output, VerifyFlags::MANDATORY, None);
     assert!(
         uncached != Ok(true),
@@ -396,4 +396,10 @@ fn op_success_policy_rejection_precedes_stack_limits() {
             case.name
         );
     }
+}
+
+fn flip_first_byte(witness: &Witness, item: usize) -> Witness {
+    let mut stack: Vec<Vec<u8>> = witness.iter().map(<[u8]>::to_vec).collect();
+    stack[item][0] ^= 0x01;
+    Witness::from_stack(stack)
 }

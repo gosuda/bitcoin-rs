@@ -618,7 +618,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
 #[test]
 fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<dyn Error>> {
     let limits = MempoolLimits {
-        max_total_bytes: 4_000,
+        max_total_bytes: 3 * unit(),
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
@@ -649,6 +649,10 @@ fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<
     assert_eq!(pool.len(), 3);
     assert_eq!(pool.total_vsize(), 4_000);
     Ok(())
+}
+
+fn unit() -> u64 {
+    bitcoin_rs_mempool::entry_memory_usage(&tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF))
 }
 
 const T0: u64 = 1_700_000_000;
@@ -705,8 +709,14 @@ fn gateway_over(pool: Mempool) -> MempoolGateway {
 }
 
 fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Error>> {
+    let wide = |label: u8| {
+        let mut wide = tx(outpoint(label, 0), 1_000, 0xFF_FF_FF_FF);
+        wide.outputs[0].script_pubkey =
+            Script::from_bytes(vec![0x51; usize::try_from(unit()).unwrap_or(0)]);
+        wide
+    };
     let limits = MempoolLimits {
-        max_total_bytes: 4_000,
+        max_total_bytes: 2 * unit() + bitcoin_rs_mempool::entry_memory_usage(&wide(3)) + unit() / 4,
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
@@ -720,7 +730,7 @@ fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Er
         1_000,
         2 * evicted_rate,
     ))?;
-    let evicted = tx(outpoint(3, 0), 1_000, 0xFF_FF_FF_FF);
+    let evicted = wide(3);
     let evicted_txid = txid(&evicted);
     pool.insert_entry(entry(evicted, 2_000, 2 * evicted_rate))?;
     assert_eq!(pool.total_vsize(), 4_000, "the pool is exactly full");
@@ -746,7 +756,7 @@ fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Er
 fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted()
 -> Result<(), Box<dyn Error>> {
     let limits = MempoolLimits {
-        max_total_bytes: 4_000,
+        max_total_bytes: 4 * unit(),
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);

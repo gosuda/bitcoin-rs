@@ -61,9 +61,7 @@ pub enum IndexBundleDirError {
 
 pub fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, String> {
     ValidationMode::parse(value).ok_or_else(|| {
-        format!(
-            "invalid validation-mode value `{value}`: expected `full`, `assume-valid`, or `fast`"
-        )
+        format!("invalid validation-mode value `{value}`: expected `full` or `assume-valid`")
     })
 }
 

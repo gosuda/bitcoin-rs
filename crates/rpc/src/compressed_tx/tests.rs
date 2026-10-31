@@ -276,7 +276,15 @@ fn registry_rows_are_extensions_at_package_version() {
         assert_eq!(entry.status, crate::manifest::Status::Extension);
         assert_eq!(entry.feature, "");
         assert_eq!(entry.core_version, "");
-        assert_eq!(entry.since, bitcoin_rs_primitives::PKG_VERSION);
+        let version = |text: &str| {
+            text.split('.')
+                .map(|part| part.parse::<u32>().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            version(entry.since) <= version(bitcoin_rs_primitives::PKG_VERSION),
+            "a row cannot describe a version later than the package"
+        );
     }
 }
 

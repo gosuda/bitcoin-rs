@@ -344,7 +344,7 @@ fn testmempoolaccept_allows_a_transaction_without_admitting_it() {
 fn testmempoolaccept_reports_the_witness_txid() {
     let ctx = Arc::new(Context::new());
     let mut tx = spending_tx(4, 90_000);
-    tx.inputs[0].witness.push(vec![1_u8; 8]);
+    tx.inputs[0].witness.push(&[1_u8; 8]);
     assert_ne!(
         tx.txid().to_string(),
         tx.wtxid().to_string(),

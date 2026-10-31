@@ -1,6 +1,7 @@
 use super::*;
 
 mod admission_tests;
+mod assumevalid_trust_tests;
 mod chain_tx_count_tests;
 mod checkpoint_debt_tests;
 mod observability_tests;

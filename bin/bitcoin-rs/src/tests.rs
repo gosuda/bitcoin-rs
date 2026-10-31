@@ -399,10 +399,15 @@ fn validation_mode_defaults_to_assume_valid_and_layers_flag_over_environment() {
 
     let config = resolved(
         &["bitcoin-rs", "--validation-mode", "full"],
-        &[("BITCOIN_RS_VALIDATION_MODE", "fast")],
+        &[("BITCOIN_RS_VALIDATION_MODE", "assume-valid")],
     );
     assert_eq!(config.validation.mode, ValidationMode::Full);
     assert_eq!(ValidationMode::parse("lenient"), None);
+    assert_eq!(
+        ValidationMode::parse("fast"),
+        None,
+        "the removed fast mode is refused"
+    );
 }
 
 #[test]

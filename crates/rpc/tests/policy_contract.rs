@@ -382,11 +382,15 @@ fn preview_verdict(
 #[test]
 fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    let cheap = tx(staged_outpoint(0x85), 1_000, 0xffff_ffff);
+    let unit =
+        bitcoin_rs_mempool::entry_memory_usage(&tx(staged_outpoint(0x86), 1_000, 0xffff_ffff));
+    let mut cheap = tx(staged_outpoint(0x85), 1_000, 0xffff_ffff);
+    cheap.outputs[0].script_pubkey =
+        Script::from_bytes(vec![0x51; usize::try_from(2 * unit).unwrap_or(0)]);
     let cheap_txid = rpc_txid(&cheap);
     {
         let mut pool = ctx.mempool.gateway.pool().write();
-        pool.limits.max_total_bytes = 500;
+        pool.limits.max_total_bytes = bitcoin_rs_mempool::entry_memory_usage(&cheap) + 2 * unit;
         pool.insert_entry(seeded_entry(Arc::new(cheap), 300, 300))?;
         let middle = tx(staged_outpoint(0x86), 1_000, 0xffff_ffff);
         pool.insert_entry(seeded_entry(Arc::new(middle), 100, 200))?;
@@ -1247,16 +1251,23 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
     };
     let (high_txid, low_txid, mid_txid) = {
         let mut pool = ctx.mempool.gateway.pool().write();
-        let high = tx(root(0x90), 1_000, 0xffff_ffff);
+        let unit = bitcoin_rs_mempool::entry_memory_usage(&tx(root(0x90), 1_000, 0xffff_ffff));
+        let heavy = |label: u8| {
+            let mut heavy = tx(root(label), 1_000, 0xffff_ffff);
+            heavy.outputs[0].script_pubkey =
+                Script::from_bytes(vec![0x51; usize::try_from(2 * unit).unwrap_or(0)]);
+            heavy
+        };
+        let high = heavy(0x90);
         let high_txid = high.txid();
         pool.insert_entry(seeded_entry(Arc::new(high), 1_000, 3_000))?;
-        let low = tx(root(0x91), 1_000, 0xffff_ffff);
+        let low = heavy(0x91);
         let low_txid = low.txid();
         pool.insert_entry(seeded_entry(Arc::new(low), 1_000, 1_000))?;
-        let mid = tx(root(0x92), 1_000, 0xffff_ffff);
+        let mid = heavy(0x92);
         let mid_txid = mid.txid();
         pool.insert_entry(seeded_entry(Arc::new(mid), 1_000, 2_000))?;
-        pool.limits.max_total_bytes = 2_000;
+        pool.limits.max_total_bytes = 5 * unit + unit / 2;
         (high_txid, low_txid, mid_txid)
     };
     let overflow = tx(fund_utxo(&ctx, 0x93, 106_000), 100_000, 0xffff_ffff);
@@ -1284,7 +1295,7 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
         );
         assert_eq!(pool.len(), 2);
         assert!(
-            pool.total_vsize() <= 2_000,
+            pool.dynamic_memory_usage() <= pool.limits.max_total_bytes,
             "pool must fit the size bound again"
         );
     }

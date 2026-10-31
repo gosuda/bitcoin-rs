@@ -11,6 +11,14 @@ use crate::wire::PeerError;
 // frame must fit on its own; retaining queued blocks can only delay decoding.
 pub(crate) const BLOCK_INGRESS_BYTES: usize = 512 * 1024 * 1024;
 
+/// Commands whose typed decoding allocates far more heap than their wire length.
+pub(crate) fn expands_on_decode(command: &str) -> bool {
+    matches!(
+        command,
+        "block" | "cmpctblock" | "blocktxn" | "tx" | "pkgtxns"
+    )
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BlockMemory {
     used: Mutex<usize>,

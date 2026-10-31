@@ -29,6 +29,7 @@ pub(crate) struct GraphNode {
     pub(crate) txid: Txid,
     pub(crate) value: FeeWeight,
     pub(crate) vsize: u32,
+    pub(crate) memory: u64,
     pub(crate) affected: bool,
 }
 
@@ -177,6 +178,7 @@ impl Mempool {
                 id: Some(id),
                 txid: entry.txid,
                 vsize: entry.vsize,
+                memory: self.entry_memory(id).ok_or(RbfError::InconsistentGraph)?,
                 affected: affected.contains(&id),
                 value: FeeWeight {
                     fee,
@@ -235,6 +237,7 @@ impl Mempool {
                 id: None,
                 txid: candidate.txid,
                 vsize: candidate.vsize,
+                memory: self.admission_memory(candidate),
                 affected: true,
                 value: FeeWeight {
                     fee: self.modified_fee_for(candidate.txid, candidate.fee)?,

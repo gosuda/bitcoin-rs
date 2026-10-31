@@ -51,7 +51,8 @@ fn cycled(seed: &[u8], len: usize) -> Vec<u8> {
 }
 
 fn witness_aware_prevout(input: &TxIn) -> TxOut {
-    let stack: &[Vec<u8>] = &input.witness;
+    let items: Vec<&[u8]> = input.witness.iter().collect();
+    let stack = items.as_slice();
     let script_pubkey = match stack {
         [item] => [vec![0x51, 0x20], cycled(item, 32)].concat(),
         [_, second] => [vec![0x00, 0x14], cycled(second, 20)].concat(),

@@ -124,8 +124,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
             saw_non_coinbase = true;
             if tx.version >= 2 {
                 has_bip68_sequence_locks |= tx.inputs.iter().any(|input| {
-                    input.sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG
-                        == 0
+                    input.sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
                 });
             }
             spent_input_count = spent_input_count.saturating_add(input_count);
@@ -237,10 +236,17 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ScriptsRan {
+    Executed,
+    Skipped,
+}
+
 #[expect(
     clippy::as_conversions,
     clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    reason = "profiling microsecond counts saturate below u64::MAX"
 )]
 pub(super) fn verify_block_transactions(
     handles: &Chainstate,
@@ -251,17 +257,17 @@ pub(super) fn verify_block_transactions(
     provenance: BlockProvenance,
     script_source: &bitcoin_rs_consensus::kernel::BlockScriptSource,
     script_cache: Option<&bitcoin_rs_consensus::ScriptExecutionCache>,
-) -> core::result::Result<(), ApplyError> {
+) -> core::result::Result<ScriptsRan, ApplyError> {
     debug_assert_eq!(view.txs().len(), view.txids().len());
     if tx_plan.only_coinbase {
         for tx in view.txs() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
         }
-        return Ok(());
+        return Ok(ScriptsRan::Executed);
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);
     if skip_scripts {
-        return run_non_script_checks_only(
+        run_non_script_checks_only(
             view.txs(),
             tx_plan,
             resolved,
@@ -269,7 +275,8 @@ pub(super) fn verify_block_transactions(
             context.height,
             context.locktime_cutoff,
             context.flags,
-        );
+        )?;
+        return Ok(ScriptsRan::Skipped);
     }
     let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
@@ -298,5 +305,5 @@ pub(super) fn verify_block_transactions(
         "script_verify: profile"
     );
     script_input_result?;
-    Ok(())
+    Ok(ScriptsRan::Executed)
 }

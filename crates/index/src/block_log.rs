@@ -267,7 +267,7 @@ impl BlockRecord {
     #[must_use]
     pub fn header_hex(&self) -> String {
         self.header.as_ref().map_or_else(String::new, |bytes| {
-            bitcoin_rs_primitives::encode::hex_encode(bytes.as_slice())
+            bitcoin_rs_primitives::hex::hex_encode(bytes.as_slice())
         })
     }
 }

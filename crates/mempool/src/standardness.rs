@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::{Mempool, PolicyError, PrevoutMeta, RbfError};
 
-const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
+pub const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 
 const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
 
@@ -184,7 +184,7 @@ pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>
     let resolved = finality.resolved_prevouts.unwrap_or(&empty_set);
     for input in &tx.inputs {
         let sequence = input.sequence.to_consensus();
-        if sequence & bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
             continue;
         }
         let (prevout_height, prevout_mtp) =

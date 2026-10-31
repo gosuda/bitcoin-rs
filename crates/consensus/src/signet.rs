@@ -20,7 +20,7 @@ const OP_0: u8 = 0x00;
 const OP_PUSHDATA1: u8 = 0x4c;
 const OP_PUSHDATA2: u8 = 0x4d;
 const OP_PUSHDATA4: u8 = 0x4e;
-const OP_RETURN: u8 = 0x6a;
+use bitcoin_rs_script::opcode::OP_RETURN;
 
 pub fn check_signet_block_solution(block: &Block, challenge: &[u8]) -> Result<(), ConsensusError> {
     if block.block_hash().0 == Network::Signet.genesis_block_hash() {

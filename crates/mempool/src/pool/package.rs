@@ -19,20 +19,21 @@ impl Mempool {
         now: u64,
     ) -> Result<PreparedPackage, AcceptanceRejectReason> {
         let expiry_time = entries.iter().map(|entry| entry.time).max().unwrap_or(0);
-        let size = entries.iter().try_fold(self.total_vsize(), |sum, entry| {
-            sum.checked_add(u64::from(entry.vsize))
-                .ok_or(PolicyError::FeeArithmetic)
-        })?;
+        let size = entries
+            .iter()
+            .try_fold(self.dynamic_memory_usage(), |sum, entry| {
+                sum.checked_add(self.admission_memory(entry))
+                    .ok_or(PolicyError::FeeArithmetic)
+            })?;
         let cutoff = expiry_time.saturating_sub(crate::policy::MEMPOOL_EXPIRY_SECS);
         let expired_ids = self.expired_entry_ids(expiry_time);
         let mut expired_txids: HashSet<Txid> = expired_ids
             .iter()
             .filter_map(|id| self.entry(*id).map(|e| e.txid))
             .collect();
-        let mut expired_vsize = expired_ids
+        let mut expired_memory = expired_ids
             .iter()
-            .filter_map(|id| self.entry(*id))
-            .map(|entry| u64::from(entry.vsize))
+            .filter_map(|id| self.entry_memory(*id))
             .sum::<u64>();
 
         let mut expired_pending_indices = HashSet::new();
@@ -52,8 +53,8 @@ impl Mempool {
                 if is_expired_root || spends_expired {
                     expired_pending_indices.insert(idx);
                     expired_txids.insert(entry.txid);
-                    expired_vsize = expired_vsize
-                        .checked_add(u64::from(entry.vsize))
+                    expired_memory = expired_memory
+                        .checked_add(self.admission_memory(entry))
                         .ok_or(PolicyError::FeeArithmetic)?;
                     changed = true;
                 }
@@ -61,7 +62,7 @@ impl Mempool {
         }
 
         let size = size
-            .checked_sub(expired_vsize)
+            .checked_sub(expired_memory)
             .ok_or(PolicyError::FeeArithmetic)?;
         if self.limits.max_total_bytes != 0 && size > self.limits.max_total_bytes {
             return Err(MempoolError::Full.into());

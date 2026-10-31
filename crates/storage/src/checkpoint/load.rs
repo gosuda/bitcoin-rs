@@ -6,7 +6,7 @@ use super::{
     CheckpointManifestV1, CurrentV1, MANIFEST_FILE, MANIFEST_FORMAT, MANIFEST_VERSION,
     MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
-use bitcoin_rs_primitives::encode::hex_encode;
+use bitcoin_rs_primitives::hex::hex_encode;
 use cap_std::fs::{Dir, File};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};

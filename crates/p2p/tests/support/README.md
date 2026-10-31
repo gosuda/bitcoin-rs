@@ -33,7 +33,9 @@ four unchanged maps and checks the official Tried236/New795 anchors. The 224 row
 in `core-addrman-asmap-v31.1.json` include exact map bytes/hashes, ASN0 fallback,
 linked IPv4 endpoint distinctions, Internal sources and two fixed secrets.
 The reproduction script also writes `asmap.tsv`; the binary maps remain the
-existing #1477 fixtures and the official map in the pinned Core source tree.
+checked-in `asmap-core-v31.1.raw`, `asmap-linked-ipv4-core-v31.1.raw`, and
+`asmap-source-quota-core-v31.1.raw` fixtures and the official map in the pinned
+Core source tree.
 
 `core-addrman-collision-driver.cpp` additionally links the same unmodified Core
 translation units to exercise Good_, MakeTried, ResolveCollisions and collision

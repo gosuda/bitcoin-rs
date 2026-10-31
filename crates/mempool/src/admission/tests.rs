@@ -511,9 +511,9 @@ fn peer_policy_refusal_gate_counts_witness_spare_capacity() {
     let packed =
         nonstandard_with_heap_usage(coin, 3, crate::gateway::EXTRA_TXN_MAX_MEMORY_BYTES - 100);
     let mut roomy_outer = packed.clone();
-    roomy_outer.inputs[0].witness = Witness::from_stack(Vec::with_capacity(8));
+    roomy_outer.inputs[0].witness = Witness::with_capacity(32, 0);
     let mut roomy_item = packed.clone();
-    roomy_item.inputs[0].witness = Witness::from_stack(vec![Vec::with_capacity(128)]);
+    roomy_item.inputs[0].witness = Witness::with_capacity(1, 128);
     for roomy in [&roomy_outer, &roomy_item] {
         assert!(crate::pool::transaction_heap_usage(&packed) < limit);
         assert!(
@@ -2103,6 +2103,14 @@ fn funded_chain(outpoint: OutPoint, value: u64) -> Coins {
     )])
 }
 
+fn one_entry_ceiling() -> u64 {
+    let unit = crate::pool::entry_memory_usage(&standard_spend(
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
+        1,
+    ));
+    unit + unit / 2
+}
+
 fn seed_rolling_floor_via_capacity_eviction(gateway: &Arc<MempoolGateway>, now: u64) {
     let markers = [100u8, 101, 102, 103, 104];
     let funded = Coins(
@@ -2273,9 +2281,9 @@ fn reconsider_disconnected_does_not_register_with_the_estimator() {
 #[test]
 #[expect(clippy::expect_used)]
 fn reconsider_disconnected_admits_below_floor_then_trims_once() {
-    const CEILING: u64 = 150;
+    let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
-        max_total_bytes: CEILING,
+        max_total_bytes: ceiling,
         ..crate::MempoolLimits::default()
     };
     let log = Arc::new(ReorgBatchLog::default());
@@ -2332,7 +2340,7 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         "a below-floor re-admission must not be refused"
     );
     assert!(
-        gateway.read().total_vsize() > CEILING,
+        gateway.read().dynamic_memory_usage() > ceiling,
         "no size trim may run during the walk"
     );
 
@@ -2340,13 +2348,13 @@ fn reconsider_disconnected_admits_below_floor_then_trims_once() {
     assert!(swept.is_empty(), "the funded family stays supported");
 
     let trimmed = gateway
-        .enforce_size_limit(AdmissionOrigin::Reorg, CEILING)
+        .enforce_size_limit(AdmissionOrigin::Reorg, ceiling)
         .expect("settlement trim");
     change.finish().expect("finish");
 
     assert!(!trimmed.changes.is_empty(), "the trim must act");
     assert!(
-        gateway.read().total_vsize() <= CEILING,
+        gateway.read().dynamic_memory_usage() <= ceiling,
         "one trim over the settled pool must reach the ceiling"
     );
 
@@ -2412,9 +2420,9 @@ fn assert_reorg_publication_order(batches: &[ReorgBatch], admissions: &[Txid], t
 #[test]
 #[expect(clippy::expect_used)]
 fn reconsider_control_refuses_fresh_relay_below_floor() {
-    const CEILING: u64 = 150;
+    let ceiling = one_entry_ceiling();
     let limits = crate::MempoolLimits {
-        max_total_bytes: CEILING,
+        max_total_bytes: ceiling,
         ..crate::MempoolLimits::default()
     };
     let control = Arc::new(MempoolGateway::new(
@@ -2665,7 +2673,7 @@ fn expiry_capacity_ordering_under_pressure() {
                 let observer: Arc<dyn crate::MempoolObserver> = log.clone();
                 let gateway = MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits {
-                        max_total_bytes: 100,
+                        max_total_bytes: one_entry_ceiling(),
                         ..crate::MempoolLimits::default()
                     }))),
                     Some((observer, crate::BodyInterest::Metadata)),
@@ -2783,7 +2791,7 @@ fn child_of_a_stale_parent_expires_with_it_and_is_refused_as_full() {
         let observer: Arc<dyn crate::MempoolObserver> = log.clone();
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits {
-                max_total_bytes: 100,
+                max_total_bytes: one_entry_ceiling(),
                 ..crate::MempoolLimits::default()
             }))),
             Some((observer, crate::BodyInterest::Metadata)),

@@ -116,6 +116,7 @@ fn non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots() {
         ),
         (|txs| txs[1].inputs.clear(), ConsensusError::EmptyInputs),
         (|txs| txs[1].outputs.clear(), ConsensusError::EmptyOutputs),
+        (|txs| txs[0].outputs.clear(), ConsensusError::EmptyOutputs),
         (
             |txs| txs[1].outputs[0].value = Amount::from_sat(u64::MAX),
             ConsensusError::OutputValueOverflow,
@@ -189,6 +190,52 @@ fn non_contextual_size_and_aggregate_legacy_sigops_have_core_boundaries() {
             size: 1_000_001,
             max: 1_000_000
         })
+    );
+}
+
+#[test]
+fn verify_block_rules_rejects_coinbase_empty_outputs() {
+    let mut coinbase = coinbase_tx();
+    coinbase.outputs.clear();
+    let block = block_with_transactions(vec![coinbase]);
+    assert_eq!(
+        verify_block_rules(&block),
+        Err(ConsensusError::EmptyOutputs),
+        "coinbase with empty outputs must be rejected by verify_block_rules"
+    );
+}
+
+#[test]
+fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
+    // 79,996 cost = 19,999 legacy sigops (cost = sigops * 4) in coinbase output
+    let mut coinbase = coinbase_tx();
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 19_999]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
+        Ok(()),
+        "79,996 legacy sigop cost is within budget"
+    );
+
+    // 80,000 cost = 20,000 legacy sigops in coinbase output
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_000]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase.clone()])),
+        Ok(()),
+        "80,000 legacy sigop cost is at exact budget"
+    );
+
+    // 80,004 cost = 20,001 legacy sigops in coinbase output
+    coinbase.outputs[0].script_pubkey =
+        Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001]);
+    assert_eq!(
+        verify_block_rules(&block_with_transactions(vec![coinbase])),
+        Err(ConsensusError::SigopsLimit {
+            cost: 80_004,
+            max: 80_000,
+        }),
+        "80,004 legacy sigop cost exceeds budget"
     );
 }
 

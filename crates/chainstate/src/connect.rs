@@ -7,7 +7,7 @@ use super::SameBlockSpentSet;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
-use super::prepare::{prepare_apply, verify_block_transactions};
+use super::prepare::{ScriptsRan, prepare_apply, verify_block_transactions};
 use super::tx_count_delta_for;
 use super::window::{PendingBlockCommit, PublishMode};
 use super::{
@@ -20,7 +20,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
 use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
-use bitcoin_rs_storage::CommitRecords;
+use bitcoin_rs_storage::{CommitRecords, ScriptAttestation};
 use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
 use hashbrown::HashMap;
 use std::sync::Arc;
@@ -199,8 +199,8 @@ pub(super) fn apply_block_admitted<'b>(
     {
         bitcoin_rs_consensus::check_signet_block_solution(block, challenge)?;
     }
+    check_block_finality(block, height, locktime_cutoff)?;
     if intent == ApplyIntent::Commit {
-        check_block_finality(block, height, locktime_cutoff)?;
         check_bip34(handles, block, height)?;
     }
     if intent == ApplyIntent::Commit
@@ -228,7 +228,7 @@ pub(super) fn apply_block_admitted<'b>(
         None
     };
     let script_verify_result = if transactions_proven {
-        Ok(())
+        Ok(ScriptsRan::Executed)
     } else {
         verify_block_transactions(
             handles,
@@ -257,7 +257,12 @@ pub(super) fn apply_block_admitted<'b>(
         },
         "apply_block: profile"
     );
-    script_verify_result?;
+    let scripts_ran = script_verify_result?;
+    let attestation = match (provenance, scripts_ran) {
+        (BlockProvenance::LocalReplay, _) => None,
+        (_, ScriptsRan::Skipped) => Some(ScriptAttestation::AssumeValid),
+        (_, ScriptsRan::Executed) => Some(ScriptAttestation::Full),
+    };
 
     // Sigop cost is a block budget, including coinbase and contextual
     // P2SH/witness costs. A script proof or assume-valid skips execution,
@@ -484,6 +489,7 @@ pub(super) fn apply_block_admitted<'b>(
                 &CommitRecords {
                     undo_rows,
                     body_rows,
+                    attestation,
                 },
             )?;
             tracing::debug!(
@@ -521,6 +527,7 @@ pub(super) fn apply_block_admitted<'b>(
                 undo_record,
                 prev_hash,
                 journal_record,
+                attestation,
             });
             return Ok(ApplyFinish::Committed(Box::new(outcome)));
         }
@@ -699,7 +706,7 @@ fn check_bip68_sequence_locks(
         }
         for tx_input in &tx.inputs {
             let sequence = tx_input.sequence;
-            if sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+            if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
                 continue;
             }
             let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {

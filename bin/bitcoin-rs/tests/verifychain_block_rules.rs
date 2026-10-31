@@ -91,6 +91,7 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
 
     for (fault, reason) in [
         ("coinbase length", "bad-cb-length"),
+        ("coinbase empty outputs", "bad-txns-vout-empty"),
         ("output value", "bad-txns-vout-toolarge"),
         ("duplicate input", "bad-txns-inputs-duplicate"),
         ("legacy sigops", "bad-blk-sigops"),
@@ -100,6 +101,9 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
         match fault {
             "coinbase length" => {
                 block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0]);
+            }
+            "coinbase empty outputs" => {
+                block.txdata[0].output.clear();
             }
             "output value" => {
                 block.txdata[0].output[0].value = bitcoin::Amount::from_sat(2_100_000_000_000_001);

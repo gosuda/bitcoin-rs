@@ -6,7 +6,7 @@ use thiserror::Error;
 pub struct MempoolLimits {
     /// Maximum distinct clusters containing direct replacement conflicts.
     pub max_replacement_clusters: u32,
-    /// Set to 0 to disable size-bound eviction.
+    /// Bound on dynamic memory usage in bytes; 0 disables size-bound eviction.
     pub max_total_bytes: u64,
     pub min_relay_fee_sat_per_kvb: u64,
     /// Maximum number of transactions in one cluster, including the candidate.

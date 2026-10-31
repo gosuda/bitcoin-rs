@@ -13,6 +13,9 @@ Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
 (`bip9`, `bip30`, `bip34`, `bip68`, `bip113`), surfaced through the
 `verify_transaction` family (with median-time-past and borrowed variants),
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
+`verify_block` enforces shared transaction structure and the legacy block sigop
+budget, distinguishing them from contextual, input-dependent sigop budgets
+evaluated during block connection.
 `compute_merkle_root` is the sole pairwise SHA-256d fold (AVX2 or spine) used by
 block rules, witness-commitment checks, and mining candidate assembly.
 `check_signet_block_solution` verifies a signet block's BIP325 solution; it is

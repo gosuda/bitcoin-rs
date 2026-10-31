@@ -182,7 +182,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = interpreter.execute_with_prevouts(
         &script_pubkey,
         &script_sig,
-        &witness,
+        &bitcoin_rs_primitives::Witness::from_stack(witness.clone()),
         flags,
         std::slice::from_ref(&prevout),
         &tx,
