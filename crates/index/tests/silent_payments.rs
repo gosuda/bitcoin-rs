@@ -12,8 +12,9 @@ use bitcoin_rs_utxo::{
     contract::{BlockSpends, BlockSpendsError, HistoryUnavailable},
 };
 use serde::Deserialize;
+use crate::support::error::TestError;
 
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T = ()> = std::result::Result<T, TestError>;
 
 #[derive(Deserialize)]
 struct Vector {

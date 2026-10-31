@@ -79,7 +79,7 @@ fn raw_op_return_check_matches_script_prefix_semantics() {
 }
 
 #[test]
-fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
     let script = vec![0x51, 0x01];
     let tx = tx(spent_outpoint(1, 0), script.clone());
     let (_dir, mut writer) = writer()?;
@@ -96,7 +96,7 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Er
 
 /// Proves that inverted heights make ascending key byte order newest first.
 #[test]
-fn iter_funding_rows_height_order_is_newest_first() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_height_order_is_newest_first() -> Result<(), crate::portable::TestError> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
@@ -117,7 +117,7 @@ fn iter_funding_rows_height_order_is_newest_first() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn std::error::Error>>
+fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), crate::portable::TestError>
 {
     let script = vec![0x51, 0x05];
     let scripthash = ScriptHash::from_script_bytes(&script);
@@ -153,7 +153,7 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn iter_spending_rows_returns_indexed_rows() -> Result<(), crate::portable::TestError> {
     let outpoint = spent_outpoint(2, 3);
     let tx = tx(outpoint, vec![0x51, 0x02]);
     let (_dir, mut writer) = writer()?;
@@ -176,7 +176,7 @@ fn rollback_fixture_block() -> Block {
 }
 
 #[test]
-fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -210,7 +210,7 @@ fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_without_a_watermark_is_rejected() -> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -225,7 +225,7 @@ fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn a_second_rollback_is_rejected_once_the_watermark_is_gone()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -311,7 +311,7 @@ impl bitcoin_rs_storage::KvStore for FailingWriteStore {
 }
 
 #[test]
-fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), crate::portable::TestError> {
     let dir = tempfile::tempdir()?;
     let candidate = rollback_fixture_block();
     let body = consensus_bytes(&candidate);
@@ -344,7 +344,7 @@ fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::er
 
 #[test]
 fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, mut writer) = writer()?;
     let shared_script = vec![0x51];
 
@@ -391,7 +391,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let (_dir, writer) = writer()?;
     let anchor = IndexWatermark {
         height: 41,
@@ -426,7 +426,7 @@ fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
     Ok(())
 }
 
-fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
+fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), crate::portable::TestError> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);
     Ok((dir, IndexWriter::open(store, 1)?))
@@ -436,7 +436,7 @@ fn put_funding_row(
     store: &RocksDbStore,
     scripthash: ScriptHash,
     height: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::portable::TestError> {
     let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
     row[crate::types::HASH_PREFIX_LEN..]
         .copy_from_slice(&crate::types::encode_history_height(height));
@@ -446,7 +446,7 @@ fn put_funding_row(
     Ok(())
 }
 
-fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, Box<dyn std::error::Error>> {
+fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, crate::portable::TestError> {
     let mut rows = Vec::new();
     for cf in [
         ColumnFamily::TxConfirmed,

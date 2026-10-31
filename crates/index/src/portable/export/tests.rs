@@ -2,11 +2,11 @@ use super::*;
 use crate::types::ScriptHash;
 use crate::{ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow};
 use bitcoin_rs_primitives::{OutPoint, Txid};
+use crate::portable::TestError;
 use std::cell::Cell;
-use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), TestError>;
 
 thread_local! {
     static SYNC_CALLS: Cell<u32> = const { Cell::new(0) };
@@ -35,7 +35,7 @@ fn fail_every_sync(dir: &Path) -> Result<(), IndexBundleError> {
     Err(injected(dir))
 }
 
-fn stage(publication: &mut Publication, dir: &Path) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+fn stage(publication: &mut Publication, dir: &Path) -> Result<(PathBuf, PathBuf), TestError> {
     let artifact = dir.join(BundleFamily::TxLookup.file_name());
     let mut file = publication.create_new(&artifact)?;
     file.write_all(b"artifact")?;

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::support::common::MemoryStore;
+use crate::support::{TestError, common::MemoryStore};
 use bitcoin_rs_index::types::ScriptHistoryOccurrence;
 use bitcoin_rs_index::{
     IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
@@ -178,8 +178,7 @@ fn occurred(
 
 // IDX-02, IDX-09
 #[test]
-fn writer_stores_one_occurrence_per_script_height_and_transaction()
--> Result<(), Box<dyn std::error::Error>> {
+fn writer_stores_one_occurrence_per_script_height_and_transaction() -> Result<(), TestError> {
     let chain = build_chain();
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
@@ -212,8 +211,7 @@ fn writer_stores_one_occurrence_per_script_height_and_transaction()
 
 // IDX-06
 #[test]
-fn rollback_removes_exactly_the_disconnected_block_rows() -> Result<(), Box<dyn std::error::Error>>
-{
+fn rollback_removes_exactly_the_disconnected_block_rows() -> Result<(), TestError> {
     let chain = build_chain();
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
@@ -260,7 +258,7 @@ fn rollback_removes_exactly_the_disconnected_block_rows() -> Result<(), Box<dyn 
 
 // IDX-05, IDX-10
 #[test]
-fn reopen_serves_the_same_occurrence_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn reopen_serves_the_same_occurrence_rows() -> Result<(), TestError> {
     let chain = build_chain();
     let store = Arc::new(MemoryStore::default());
     let script = ScriptHash::from_script_bytes(&script_for(3));
@@ -296,8 +294,7 @@ fn reopen_serves_the_same_occurrence_rows() -> Result<(), Box<dyn std::error::Er
 
 // IDX-05
 #[test]
-fn format_5_marker_refuses_and_rebuilds_the_derived_store() -> Result<(), Box<dyn std::error::Error>>
-{
+fn format_5_marker_refuses_and_rebuilds_the_derived_store() -> Result<(), TestError> {
     let chain = build_chain();
     let store = Arc::new(MemoryStore::default());
     store.put(
@@ -334,8 +331,7 @@ fn format_5_marker_refuses_and_rebuilds_the_derived_store() -> Result<(), Box<dy
 
 // IDX-10
 #[test]
-fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), Box<dyn std::error::Error>>
-{
+fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestError> {
     let chain = build_chain();
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;

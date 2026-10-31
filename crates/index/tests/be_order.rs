@@ -1,6 +1,6 @@
 //! Big-endian key-order vs numeric-height-order contract tests.
 
-use crate::support::common;
+use crate::support::{TestError, common};
 
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
 }
 
 #[test]
-fn funding_rows_iterate_newest_height_first() -> Result<(), Box<dyn std::error::Error>> {
+fn funding_rows_iterate_newest_height_first() -> Result<(), TestError> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
@@ -34,7 +34,7 @@ fn funding_rows_iterate_newest_height_first() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn spending_rows_also_use_numeric_height_order() -> Result<(), Box<dyn std::error::Error>> {
+fn spending_rows_also_use_numeric_height_order() -> Result<(), TestError> {
     let outpoint = spent_outpoint(7, 0);
     let store = Arc::new(MemoryStore::default());
     put_spending_row(&store, &outpoint, 1)?;

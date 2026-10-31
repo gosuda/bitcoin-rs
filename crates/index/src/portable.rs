@@ -188,11 +188,52 @@ fn sync_dir(_dir: &Path) -> Result<(), IndexBundleError> {
 }
 
 #[cfg(test)]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestError {
+    #[error(transparent)]
+    IndexBundle(#[from] IndexBundleError),
+    #[error(transparent)]
+    Index(#[from] crate::IndexError),
+    #[error(transparent)]
+    Storage(#[from] bitcoin_rs_storage::StorageError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Sonic(#[from] sonic_rs::Error),
+    #[error(transparent)]
+    HexToBytes(#[from] bitcoin::hex::HexToBytesError),
+    #[error(transparent)]
+    HexToArray(#[from] bitcoin::hex::HexToArrayError),
+    #[error(transparent)]
+    ConsensusEncode(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Bip158(#[from] bitcoin::bip158::Error),
+    #[error(transparent)]
+    Query(#[from] crate::query_api::TxQueryError),
+    #[error(transparent)]
+    Historical(#[from] crate::query_api::HistoricalQueryError),
+    #[error("missing {0}")]
+    Missing(&'static str),
+}
+
+#[cfg(test)]
+impl From<&'static str> for TestError {
+    fn from(s: &'static str) -> Self {
+        Self::Missing(s)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
 
-    type TestResult = Result<(), Box<dyn Error>>;
+    type TestResult = Result<(), TestError>;
 
     /// An incomplete bundle names the first height whose count differs, so an
     /// omitted record cannot silently receive the complete watermark.

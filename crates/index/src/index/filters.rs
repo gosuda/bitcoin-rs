@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_filters_match_pinned_core_vectors() -> Result<(), Box<dyn std::error::Error>> {
+    fn basic_filters_match_pinned_core_vectors() -> Result<(), crate::portable::TestError> {
         let vectors: Vec<sonic_rs::Value> =
             sonic_rs::from_str(include_str!("../../tests/data/blockfilters-core-31.1.json"))?;
         for vector in vectors.into_iter().skip(1) {
@@ -194,8 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn same_block_spends_resolve_locally_and_empty_filters_encode_zero() -> Result<(), crate::portable::TestError> {
         use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, consensus::serialize};
 
         let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);

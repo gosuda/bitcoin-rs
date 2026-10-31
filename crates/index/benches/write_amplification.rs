@@ -11,6 +11,24 @@ mod bench_runner {
     use bitcoin_rs_primitives::{Hash256, encode};
     use bitcoin_rs_storage::{KvStore, PrefixScanLimit};
 
+    #[derive(Debug, thiserror::Error)]
+    enum BenchError {
+        #[error(transparent)]
+        Index(#[from] bitcoin_rs_index::IndexError),
+        #[error(transparent)]
+        Storage(#[from] bitcoin_rs_storage::StorageError),
+        #[error(transparent)]
+        TryFromInt(#[from] std::num::TryFromIntError),
+        #[error("missing {0}")]
+        Missing(&'static str),
+    }
+
+    impl From<&'static str> for BenchError {
+        fn from(value: &'static str) -> Self {
+            Self::Missing(value)
+        }
+    }
+
     const CHAIN_BLOCKS: u32 = 20_000;
 
     const REORG_DEPTH: u32 = 6;
@@ -200,7 +218,7 @@ mod bench_runner {
         backend: &'static str,
         store: &Arc<S>,
         dir: &Path,
-    ) -> Result<RunReport, Box<dyn std::error::Error>>
+    ) -> Result<RunReport, BenchError>
     where
         S: KvStore + Send + Sync + 'static,
     {

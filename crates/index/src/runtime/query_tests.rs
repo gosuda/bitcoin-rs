@@ -284,7 +284,7 @@ impl BlockBodySource for SingleBlockBody {
 }
 
 impl QueryFixture {
-    fn new(config: FixtureConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(config: FixtureConfig) -> Result<Self, crate::portable::TestError> {
         let mut tree = BlockTree::new();
         let mut tip_id = tree.insert_header(config.block.header, NodeStatus::HeaderValid)?;
         let mut heights = vec![tree.node(tip_id)?.height];
@@ -392,7 +392,7 @@ impl QueryFixture {
 }
 
 #[test]
-fn unusable_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
+fn unusable_worker_makes_queries_unavailable() -> Result<(), crate::portable::TestError> {
     for publish in [true, false] {
         let block = Network::Regtest.genesis_block();
         let txid = block.txs[0].txid();
@@ -436,7 +436,7 @@ fn unusable_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::CompactFilterQuery;
     let block = Network::Regtest.genesis_block();
     let hash = Hash256::from(block.block_hash());
@@ -590,7 +590,7 @@ fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txi
 }
 
 #[test]
-fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn transaction_rejects_watermark_from_rival_tip() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -620,7 +620,7 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error::Error>> {
+fn transaction_rejects_incomplete_prefix_scan() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -648,7 +648,7 @@ fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error
 
 #[test]
 fn transaction_reports_unavailable_when_indexed_body_is_missing()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -704,7 +704,7 @@ fn engine_with_body_source(
     block: &Block,
     scans: Vec<ScanResponse>,
     body_source: Option<Arc<dyn BlockBodySource>>,
-) -> Result<DerivedIndexQueryEngine, Box<dyn std::error::Error>> {
+) -> Result<DerivedIndexQueryEngine, crate::portable::TestError> {
     let mut tree = BlockTree::new();
     let tip_id = tree.insert_header(block.header, NodeStatus::HeaderValid)?;
     let node = tree.node(tip_id)?;
@@ -749,13 +749,13 @@ fn engine_with_body_error(
     block: &Block,
     scans: Vec<ScanResponse>,
     error: bitcoin_rs_chain::BlockBodyReadError,
-) -> Result<DerivedIndexQueryEngine, Box<dyn std::error::Error>> {
+) -> Result<DerivedIndexQueryEngine, crate::portable::TestError> {
     engine_with_body_source(block, scans, Some(Arc::new(FailingBody { error })))
 }
 
 #[test]
 fn transaction_reports_unavailable_when_body_source_returns_none()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -782,7 +782,7 @@ fn transaction_reports_unavailable_when_body_source_returns_none()
 
 #[test]
 fn history_snapshot_reports_unavailable_when_a_funding_body_is_missing()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let block = Network::Regtest.genesis_block();
     let tx = &block.txs[0];
@@ -822,7 +822,7 @@ fn history_snapshot_reports_unavailable_when_a_funding_body_is_missing()
 }
 
 #[test]
-fn transaction_reports_storage_when_body_read_fails() -> Result<(), Box<dyn std::error::Error>> {
+fn transaction_reports_storage_when_body_read_fails() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -846,7 +846,7 @@ fn transaction_reports_storage_when_body_read_fails() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn transaction_reports_storage_when_body_is_corrupt() -> Result<(), Box<dyn std::error::Error>> {
+fn transaction_reports_storage_when_body_is_corrupt() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
@@ -870,7 +870,7 @@ fn transaction_reports_storage_when_body_is_corrupt() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn empty_position_rows_are_refused_before_body_reads() -> Result<(), Box<dyn std::error::Error>> {
+fn empty_position_rows_are_refused_before_body_reads() -> Result<(), crate::portable::TestError> {
     let (block, outpoint, scripthash, _) = block_with_spending_transaction()?;
     let txid = block.txs[0].txid();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -920,7 +920,7 @@ fn empty_position_rows_are_refused_before_body_reads() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn std::error::Error>> {
+fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), crate::portable::TestError> {
     let (block, outpoint, _, spend_txid) = block_with_spending_transaction()?;
     let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -953,7 +953,7 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
 
 #[test]
 fn confirmed_history_serves_stored_occurrences_without_block_bodies()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let (block, outpoint, scripthash, spend_txid) = block_with_spending_transaction()?;
     let funding_txid = block.txs[0].txid();
@@ -1052,7 +1052,7 @@ impl BlockBodySource for MultiBlockBody {
 fn seed_utxo_reader(
     adds: Vec<(OutPoint, TxOut, bool, u32)>,
     tip: Hash256,
-) -> Result<Option<bitcoin_rs_utxo::UtxoReader>, Box<dyn std::error::Error>> {
+) -> Result<Option<bitcoin_rs_utxo::UtxoReader>, crate::portable::TestError> {
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
     if adds.is_empty() {
         return Ok(None);
@@ -1116,7 +1116,7 @@ fn paying_chain() -> Result<(Block, Vec<Block>, ScriptHash), std::io::Error> {
 }
 
 #[test]
-fn outpoint_value_returns_confirmed_output_value() -> Result<(), Box<dyn std::error::Error>> {
+fn outpoint_value_returns_confirmed_output_value() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let expected = block.txs[0].outputs[0].value.to_sat();
@@ -1142,7 +1142,7 @@ fn outpoint_value_returns_confirmed_output_value() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn outpoint_value_returns_none_for_out_of_range_vout() -> Result<(), Box<dyn std::error::Error>> {
+fn outpoint_value_returns_none_for_out_of_range_vout() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let vout = u32::try_from(block.txs[0].outputs.len())
@@ -1169,7 +1169,7 @@ fn outpoint_value_returns_none_for_out_of_range_vout() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::error::Error>> {
+fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let known = block.txs[0].txid();
     let unknown = Txid(Hash256::from_le_bytes(&[0xa5; 32]));
@@ -1200,7 +1200,7 @@ fn outpoint_value_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::err
 
 #[test]
 fn funding_prefix_scan_ignores_occurrences_of_other_scripts()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let funding_txid = block.txs[0].txid();
@@ -1250,7 +1250,7 @@ fn funding_prefix_scan_ignores_occurrences_of_other_scripts()
 }
 
 #[test]
-fn history_summary_never_consults_spender_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn history_summary_never_consults_spender_rows() -> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let (block, outpoint, scripthash, _) = block_with_spending_transaction()?;
     let funding_txid = block.txs[0].txid();
@@ -1302,7 +1302,7 @@ fn history_summary_never_consults_spender_rows() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), Box<dyn std::error::Error>> {
+fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), crate::portable::TestError> {
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let real = OutPoint {
         txid: block.txs[0].txid(),
@@ -1353,7 +1353,7 @@ fn live_prefix_scan_ignores_coins_paying_other_scripts() -> Result<(), Box<dyn s
 
 #[test]
 fn confirmed_history_orders_funding_rows_by_height_then_txid()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let (genesis, chain, scripthash) = paying_chain()?;
     let mut funded: Vec<(u32, Txid)> = vec![(0, genesis.txs[0].txid())];
@@ -1417,7 +1417,7 @@ fn confirmed_history_orders_funding_rows_by_height_then_txid()
 }
 
 #[test]
-fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), Box<dyn std::error::Error>>
+fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), crate::portable::TestError>
 {
     let (genesis, chain, scripthash) = paying_chain()?;
     let coin_value = genesis.txs[0].outputs[0].value.to_sat();
@@ -1478,7 +1478,7 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), Box<dyn 
 
 #[test]
 fn confirmed_history_filters_a_shared_prefix_by_exact_script()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     use crate::types::ScriptHistoryOccurrence;
     let (genesis, chain, scripthash) = paying_chain()?;
     let mut other_bytes = scripthash.to_byte_array();
@@ -1765,7 +1765,7 @@ struct HistoricalFixture {
 fn tip_snapshot_for(
     tree: &BlockTree,
     tip_id: NodeId,
-) -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+) -> Result<TipSnapshot, crate::portable::TestError> {
     let node = tree.node(tip_id)?;
     Ok(TipSnapshot {
         tip_id,
@@ -1779,7 +1779,7 @@ fn tip_snapshot_for(
 fn watermark_for(
     tree: &BlockTree,
     node_id: NodeId,
-) -> Result<IndexWatermark, Box<dyn std::error::Error>> {
+) -> Result<IndexWatermark, crate::portable::TestError> {
     let node = tree.node(node_id)?;
     Ok(IndexWatermark {
         height: node.height,
@@ -1803,7 +1803,7 @@ impl HistoricalFixture {
         tree: BlockTree,
         tip_id: NodeId,
         config: HistoricalConfig,
-    ) -> Result<(Self, Arc<MovingBody>), Box<dyn std::error::Error>> {
+    ) -> Result<(Self, Arc<MovingBody>), crate::portable::TestError> {
         let HistoricalConfig {
             tx_watermark,
             sh_watermark,
@@ -1850,7 +1850,7 @@ impl HistoricalFixture {
 }
 
 #[test]
-fn historical_extension_during_read_keeps_same_anchor() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_extension_during_read_keeps_same_anchor() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let tip_block = child_block(&block, vec![block.txs[0].clone()])?;
@@ -1910,7 +1910,7 @@ fn historical_extension_during_read_keeps_same_anchor() -> Result<(), Box<dyn st
 
 #[test]
 fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut tree = BlockTree::new();
@@ -1995,7 +1995,7 @@ fn historical_wake_without_tip_move_stays_valid_while_strict_retries()
 }
 
 #[test]
-fn historical_reorg_above_anchor_stays_valid() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_reorg_above_anchor_stays_valid() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let txid = genesis.txs[0].txid();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
@@ -2057,7 +2057,7 @@ fn historical_reorg_above_anchor_stays_valid() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), Box<dyn std::error::Error>>
+fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), crate::portable::TestError>
 {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
@@ -2117,7 +2117,7 @@ fn historical_reset_completing_after_snapshot_stays_valid() -> Result<(), Box<dy
 }
 
 #[test]
-fn historical_reorg_below_anchor_retries() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_reorg_below_anchor_retries() -> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let txid = genesis.txs[0].txid();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
@@ -2192,7 +2192,7 @@ fn historical_reorg_below_anchor_retries() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn historical_unknown_watermark_hash_retries() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_unknown_watermark_hash_retries() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut tree = BlockTree::new();
@@ -2237,7 +2237,7 @@ fn historical_unknown_watermark_hash_retries() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let main_child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
     let stale_child = {
@@ -2296,7 +2296,7 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
 
 #[test]
 fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let txid = genesis.txs[0].txid();
     let child = child_block(&genesis, vec![genesis.txs[0].clone()])?;
@@ -2360,7 +2360,7 @@ fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
 }
 
 #[test]
-fn historical_full_history_positive_floor_is_unproven() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_full_history_positive_floor_is_unproven() -> Result<(), crate::portable::TestError> {
     let (block, _, scripthash, _) = block_with_spending_transaction()?;
     let child = child_block(&block, vec![block.txs[0].clone()])?;
     let mut tree = BlockTree::new();
@@ -2402,7 +2402,7 @@ fn historical_full_history_positive_floor_is_unproven() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), Box<dyn std::error::Error>>
+fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), crate::portable::TestError>
 {
     let (block, outpoint, _, _) = block_with_spending_transaction()?;
     let child = child_block(&block, vec![block.txs[0].clone()])?;
@@ -2443,7 +2443,7 @@ fn historical_standalone_spender_scoped_none_above_floor() -> Result<(), Box<dyn
 }
 
 #[test]
-fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), crate::portable::TestError> {
     let (genesis, chain, scripthash) = paying_chain()?;
     let mut script_tree = BlockTree::new();
     let mut script_tip_id = script_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
@@ -2514,7 +2514,7 @@ fn historical_mixed_cap_script_anchors_at_sh_watermark() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), crate::portable::TestError> {
     let (genesis, chain, _scripthash) = paying_chain()?;
     let mut tx_tree = BlockTree::new();
     let mut tx_tip_id = tx_tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
@@ -2569,7 +2569,7 @@ fn historical_mixed_cap_tx_anchors_at_tx_watermark() -> Result<(), Box<dyn std::
 
 #[test]
 fn historical_duplicate_txid_returns_earliest_verified_and_skips_stale()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut target = genesis.txs[0].clone();
     target.outputs[0].value = target.outputs[0].value.saturating_add(Amount::from_sat(7));
@@ -2622,7 +2622,7 @@ fn historical_duplicate_txid_returns_earliest_verified_and_skips_stale()
 }
 
 #[test]
-fn historical_no_covered_prefix_for_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
+fn historical_no_covered_prefix_for_reset_claim() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut tree = BlockTree::new();
@@ -2660,7 +2660,7 @@ fn historical_no_covered_prefix_for_reset_claim() -> Result<(), Box<dyn std::err
 
 #[test]
 fn historical_budgets_truncation_and_missing_map_to_shared()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
     let mut truncated_tree = BlockTree::new();
@@ -2725,7 +2725,7 @@ fn historical_budgets_truncation_and_missing_map_to_shared()
 }
 
 #[test]
-fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), Box<dyn std::error::Error>>
+fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), crate::portable::TestError>
 {
     let block = Network::Regtest.genesis_block();
     let txid = block.txs[0].txid();
@@ -2787,7 +2787,7 @@ fn historical_budgets_health_and_capability_map_to_shared() -> Result<(), Box<dy
 
 #[test]
 fn historical_deep_stale_branch_exhausts_shared_ancestry_budget()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::portable::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;

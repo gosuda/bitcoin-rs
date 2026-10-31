@@ -374,14 +374,13 @@ impl<'a> BodyReader<'a> {
 mod tests {
     use super::*;
     use std::cell::Cell;
-    use std::error::Error;
     use std::sync::Arc;
 
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_chain::{BlockBodyReadError, BlockTree};
     use bitcoin_rs_primitives::CompactTarget;
 
-    type TestResult = Result<(), Box<dyn Error>>;
+    type TestResult = Result<(), crate::portable::TestError>;
 
     fn fixture_header(prev: BlockHash, height: u32) -> Header {
         let mut merkle = [0_u8; 32];

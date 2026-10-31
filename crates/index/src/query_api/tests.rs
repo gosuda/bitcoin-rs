@@ -205,7 +205,7 @@ mod script_live_outage_engine_tests {
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, crate::portable::TestError>;
 
     fn coinbase_tx(height: u32, extra: i64) -> Transaction {
         Transaction {
@@ -398,8 +398,7 @@ impl ScriptIndexQuery for CompleteHistory {
 
 // IDX-02
 #[test]
-fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
--> Result<(), Box<dyn std::error::Error>> {
+fn default_history_page_skips_the_cursor_and_restarts_when_unknown() -> Result<(), crate::portable::TestError> {
     let record = |id: u8, height| ScriptHistoryRecord {
         txid: Txid(Hash256::from_le_bytes(&[id; 32])),
         height,
