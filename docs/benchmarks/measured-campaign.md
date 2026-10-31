@@ -333,6 +333,7 @@ All other Criterion rows (`fill/{200,800,3200,12800,51200}`, `assemble_candidate
   - `pub(crate) fn snapshot_order_fingerprint(pool: &Mempool) -> u64`
   - `pub(crate) fn assert_snapshot_topological(pool: &Mempool)`
 - **Equivalence**: moving these identical bodies here preserves every emitted fingerprint, output schema, and measured operation byte for byte. The fingerprint stays a diagnostic identity signal; structural assertions carry equivalence.
+- **Determinism**: FNV-1a folds MUST stay deterministic across processes, because standard-library hashers randomize their keys per process.
 
 ### Wire format and single-validator rule
 
