@@ -1,9 +1,8 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -256,7 +255,7 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle, Ru
 pub(crate) struct MetricsServer {
     #[cfg(test)]
     local_addr: SocketAddr,
-    stop: Arc<AtomicBool>,
+    cancel: bitcoin_rs_chain::LatchWriter,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -267,6 +266,8 @@ impl MetricsServer {
         identity: &EvidenceIdentity,
     ) -> Result<Self, RunError> {
         let shutdown = shutdown.into();
+        let cancel = shutdown.child();
+        let cancel_reader = cancel.reader();
         let listener = TcpListener::bind(addr)?;
         #[cfg(test)]
         let local_addr = listener.local_addr()?;
@@ -274,16 +275,13 @@ impl MetricsServer {
         listener.local_addr()?;
         let handle = prometheus_handle(identity)?;
         describe_node_metrics();
-        listener.set_nonblocking(true)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
         let thread = thread::Builder::new()
             .name("bitcoin-rs-metrics".into())
-            .spawn(move || serve_metrics(&listener, &handle, &thread_stop, &shutdown))?;
+            .spawn(move || serve_metrics(&listener, &handle, &cancel_reader))?;
         Ok(Self {
             #[cfg(test)]
             local_addr,
-            stop,
+            cancel,
             thread: Some(thread),
         })
     }
@@ -295,7 +293,7 @@ impl MetricsServer {
     }
 
     pub(crate) fn stop_and_join(&mut self) -> Result<(), RunError> {
-        self.stop.store(true, Ordering::Release);
+        self.cancel.trigger();
         if let Some(thread) = self.thread.take() {
             thread
                 .join()
@@ -326,23 +324,35 @@ pub(crate) fn start_metrics(
 fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
-    stop: &Arc<AtomicBool>,
-    shutdown: &bitcoin_rs_chain::LatchReader,
+    cancel: &bitcoin_rs_chain::LatchReader,
 ) {
-    loop {
-        if stop.load(Ordering::Acquire) || shutdown.is_triggered() {
-            break;
-        }
+    let Ok(local_addr) = listener.local_addr() else {
+        return;
+    };
+    let connect_addr = match local_addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        ),
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            addr.port(),
+        ),
+        addr => addr,
+    };
+    let _guard = cancel.on_cancel(move || {
+        let _ = TcpStream::connect(connect_addr);
+    });
+    while !cancel.is_triggered() {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                if cancel.is_triggered() {
+                    break;
+                }
                 let _ = stream.set_nodelay(true);
-                let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                 serve_scrape(&mut stream, handle);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
@@ -385,9 +395,9 @@ pub(crate) fn spawn_readiness_sampler(
         .spawn(move || {
             while !shutdown.is_triggered() {
                 publish_txindex_readiness(source.as_ref());
-                let deadline = Instant::now() + READINESS_SAMPLE_INTERVAL;
-                while !shutdown.is_triggered() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(100));
+                crossbeam_channel::select! {
+                    recv(shutdown.closed()) -> _ => break,
+                    recv(crossbeam_channel::after(READINESS_SAMPLE_INTERVAL)) -> _ => {}
                 }
             }
         })

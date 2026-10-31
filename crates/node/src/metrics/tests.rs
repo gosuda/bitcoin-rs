@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use parking_lot::{Mutex, const_mutex};
 
 use super::{
     CorpusIdentity, EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex,
-    TXINDEX_READINESS_GAUGE, publish_txindex_readiness, start_metrics,
+    TXINDEX_READINESS_GAUGE, publish_txindex_readiness, spawn_readiness_sampler, start_metrics,
 };
 
 pub(super) static SERVER_TEST_LOCK: Mutex<()> = const_mutex(());
@@ -21,7 +21,7 @@ impl MetricsServer {
     pub(crate) fn with_worker_for_test(worker: thread::JoinHandle<()>) -> Self {
         Self {
             local_addr: unused_ephemeral(),
-            stop: Arc::new(AtomicBool::new(false)),
+            cancel: bitcoin_rs_chain::LatchWriter::new(),
             thread: Some(worker),
         }
     }
@@ -195,11 +195,11 @@ fn two_sequential_servers_in_one_process_both_serve() {
 #[test]
 fn shutdown_exits_the_listener_thread() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let mut server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let mut server = MetricsServer::bind(unused_ephemeral(), shutdown.reader(), &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     let addr = server.local_addr();
-    shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     let deadline = Instant::now() + Duration::from_secs(10);
     while TcpListener::bind(addr).is_err() {
         if Instant::now() >= deadline {
@@ -314,4 +314,47 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     server
         .stop_and_join()
         .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
+}
+
+#[test]
+fn readiness_sampler_stops_promptly_on_cancellation() {
+    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let reader = writer.reader();
+    let source = Arc::new(FixedSource::enabled(CapabilityState::Ready));
+    let worker = spawn_readiness_sampler(source, reader)
+        .unwrap_or_else(|error| panic!("spawn readiness sampler: {error}"));
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let handle = std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = tx.send(());
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    writer.trigger();
+    let res = rx.recv_timeout(Duration::from_millis(100));
+    assert!(
+        res.is_ok(),
+        "readiness sampler did not exit promptly: timed out waiting for trigger"
+    );
+    assert!(handle.join().is_ok(), "thread panicked");
+}
+
+#[test]
+fn metrics_listener_stops_promptly_on_cancellation() {
+    let _guard = SERVER_TEST_LOCK.lock();
+    let writer = bitcoin_rs_chain::LatchWriter::new();
+    let reader = writer.reader();
+    let mut server = MetricsServer::bind(unused_ephemeral(), reader, &identity())
+        .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let handle = std::thread::spawn(move || {
+        let res = server.stop_and_join();
+        let _ = tx.send(res);
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    writer.trigger();
+    let Ok(outcome) = rx.recv_timeout(Duration::from_secs(5)) else {
+        panic!("join deadline exceeded: metrics server did not stop within 5 seconds");
+    };
+    assert!(outcome.is_ok(), "stop_and_join failed: {outcome:?}");
+    assert!(handle.join().is_ok(), "thread panicked");
 }
