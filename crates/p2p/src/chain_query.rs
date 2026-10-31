@@ -240,6 +240,126 @@ impl ActiveChainQuery {
             })
             .map_err(|_| PeerError::Misbehavior("getblocktxn index out of range"))
     }
+
+    fn resolve_filter_range(
+        &self,
+        pending: &FilterRequest,
+        bounds: &FilterBounds,
+    ) -> Result<Option<u32>, PeerError> {
+        let end = self.applied_tip.load_full().and_then(|tip| {
+            self.block_tree
+                .read()
+                .active_height_of(tip.tip_id, bounds.stop_hash)
+        });
+        if let Some(expected_end) = pending.expected_end
+            && end != Some(expected_end)
+        {
+            return Err(PeerError::Io(std::io::Error::other(
+                "compact filter range interrupted",
+            )));
+        }
+        let Some(end) = end else {
+            return Ok(None);
+        };
+        if bounds.step == 1 && (end < bounds.start || end - bounds.start >= bounds.limit) {
+            return Ok(None);
+        }
+        Ok(Some(end))
+    }
+}
+
+struct FilterBounds {
+    start: u32,
+    stop_hash: Hash256,
+    stop_block_hash: bitcoin::BlockHash,
+    limit: u32,
+    step: u32,
+}
+
+fn parse_filter_bounds(request: &Message) -> Option<FilterBounds> {
+    use bitcoin::hashes::Hash as _;
+    let (filter_type, start, stop, limit, step) = match request {
+        Message::GetCFilters(r) => (r.filter_type, r.start_height, r.stop_hash, 1000, 1),
+        Message::GetCFHeaders(r) => (r.filter_type, r.start_height, r.stop_hash, 2000, 1),
+        Message::GetCFCheckpt(r) => (r.filter_type, 1000, r.stop_hash, u32::MAX, 1000),
+        _ => return None,
+    };
+    if filter_type != 0 {
+        return None;
+    }
+    let stop_hash = Hash256::from_le_bytes(stop.as_byte_array());
+    Some(FilterBounds {
+        start,
+        stop_hash,
+        stop_block_hash: stop,
+        limit,
+        step,
+    })
+}
+
+fn send_filter_aggregate_response(
+    request: &Message,
+    stop: bitcoin::BlockHash,
+    previous_header: [u8; 32],
+    hashes: Vec<bitcoin::bip158::FilterHash>,
+    headers: Vec<bitcoin::bip158::FilterHeader>,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    use bitcoin::bip158::FilterHeader;
+    use bitcoin::p2p::message_filter::{CFCheckpt, CFHeaders};
+    match request {
+        Message::GetCFHeaders(_) => send(Message::CFHeaders(CFHeaders {
+            filter_type: 0,
+            stop_hash: stop,
+            previous_filter_header: FilterHeader::from_byte_array(previous_header),
+            filter_hashes: hashes,
+        })),
+        Message::GetCFCheckpt(_) => send(Message::CFCheckpt(CFCheckpt {
+            filter_type: 0,
+            stop_hash: stop,
+            filter_headers: headers,
+        })),
+        _ => Ok(()),
+    }
+}
+#[derive(Clone, Copy)]
+struct StreamProgress {
+    emitted: u32,
+    halted: bool,
+    retry: bool,
+}
+
+fn evaluate_stream_progress(
+    pending: &FilterRequest,
+    bounds: &FilterBounds,
+    end: u32,
+    progress: StreamProgress,
+) -> Result<Option<FilterServing>, PeerError> {
+    use bitcoin::p2p::message_filter::GetCFilters;
+    if progress.emitted > 0 && progress.halted {
+        return Ok(Some(FilterServing::Pending(FilterRequest {
+            request: Message::GetCFilters(GetCFilters {
+                filter_type: 0,
+                start_height: bounds.start + progress.emitted,
+                stop_hash: bounds.stop_block_hash,
+            }),
+            expected_end: Some(end),
+        })));
+    }
+    if progress.emitted > 0 && progress.emitted != end - bounds.start + 1 {
+        return Err(PeerError::Io(std::io::Error::other(
+            "compact filter range interrupted",
+        )));
+    }
+    if progress.emitted == 0 && (progress.halted || progress.retry) {
+        return Ok(Some(FilterServing::Pending(pending.clone())));
+    }
+    if progress.emitted == 0 && pending.expected_end.is_some() {
+        return Err(PeerError::Io(std::io::Error::other(
+            "compact filter range interrupted",
+        )));
+    }
+    Ok(None)
 }
 
 impl core::fmt::Debug for ActiveChainQuery {
@@ -255,50 +375,23 @@ impl ChainQuery for ActiveChainQuery {
             .is_some_and(|index| index.filter_index_info().is_ok_and(|info| info.synced))
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep BIP157 bounds, bounded catch-up and streaming in one serving owner"
-    )]
     fn serve_compact_filters(
         &self,
         pending: &FilterRequest,
         headroom: &dyn Fn() -> bool,
         send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<FilterServing, PeerError> {
-        use bitcoin::bip158::{FilterHash, FilterHeader};
-        use bitcoin::p2p::message_filter::{CFCheckpt, CFHeaders, CFilter, GetCFilters};
-        let request = &pending.request;
+        use bitcoin::bip158::FilterHash;
+        use bitcoin::p2p::message_filter::CFilter;
         let Some(index) = &self.compact_filters else {
             return Ok(FilterServing::Done);
         };
-        let (kind, start, stop, limit, step) = match request {
-            Message::GetCFilters(r) => (r.filter_type, r.start_height, r.stop_hash, 1000, 1),
-            Message::GetCFHeaders(r) => (r.filter_type, r.start_height, r.stop_hash, 2000, 1),
-            Message::GetCFCheckpt(r) => (r.filter_type, 1000, r.stop_hash, u32::MAX, 1000),
-            _ => return Ok(FilterServing::Done),
-        };
-        if kind != 0 {
-            return Ok(FilterServing::Done);
-        }
-        let stop_hash = Hash256::from_le_bytes(stop.as_byte_array());
-        let end = self.applied_tip.load_full().and_then(|tip| {
-            self.block_tree
-                .read()
-                .active_height_of(tip.tip_id, stop_hash)
-        });
-        if let Some(expected_end) = pending.expected_end
-            && end != Some(expected_end)
-        {
-            return Err(PeerError::Io(std::io::Error::other(
-                "compact filter range interrupted",
-            )));
-        }
-        let Some(end) = end else {
+        let Some(bounds) = parse_filter_bounds(&pending.request) else {
             return Ok(FilterServing::Done);
         };
-        if step == 1 && (end < start || end - start >= limit) {
+        let Some(end) = self.resolve_filter_range(pending, &bounds)? else {
             return Ok(FilterServing::Done);
-        }
+        };
         if !headroom() {
             return Ok(FilterServing::Pending(pending.clone()));
         }
@@ -307,75 +400,62 @@ impl ChainQuery for ActiveChainQuery {
         let mut send_error = None;
         let mut emitted = 0_u32;
         let mut halted = false;
-        let result = index.for_each_filter(start, stop_hash, step, &mut |hash, filter| {
-            if !headroom() {
-                halted = true;
-                return false;
-            }
-            match request {
-                Message::GetCFilters(_) => {
-                    if let Err(error) = send(Message::CFilter(CFilter {
-                        filter_type: 0,
-                        block_hash: bitcoin::BlockHash::from_byte_array(hash.to_le_bytes()),
-                        filter: filter.filter,
-                    })) {
-                        send_error = Some(error);
-                        return false;
+        let result = index.for_each_filter(
+            bounds.start,
+            bounds.stop_hash,
+            bounds.step,
+            &mut |hash, filter| {
+                if !headroom() {
+                    halted = true;
+                    return false;
+                }
+                match &pending.request {
+                    Message::GetCFilters(_) => {
+                        if let Err(error) = send(Message::CFilter(CFilter {
+                            filter_type: 0,
+                            block_hash: bitcoin::BlockHash::from_byte_array(hash.to_le_bytes()),
+                            filter: filter.filter,
+                        })) {
+                            send_error = Some(error);
+                            return false;
+                        }
+                        emitted += 1;
                     }
-                    emitted += 1;
+                    Message::GetCFHeaders(_) => {
+                        hashes.push(FilterHash::from_byte_array(filter.hash));
+                    }
+                    Message::GetCFCheckpt(_) => {
+                        headers.push(bitcoin::bip158::FilterHeader::from_byte_array(
+                            filter.header,
+                        ));
+                    }
+                    _ => {}
                 }
-                Message::GetCFHeaders(_) => hashes.push(FilterHash::from_byte_array(filter.hash)),
-                Message::GetCFCheckpt(_) => {
-                    headers.push(FilterHeader::from_byte_array(filter.header));
-                }
-                _ => {}
-            }
-            true
-        });
+                true
+            },
+        );
         if let Some(error) = send_error {
             return Err(error);
         }
-        if emitted > 0 && halted {
-            return Ok(FilterServing::Pending(FilterRequest {
-                request: Message::GetCFilters(GetCFilters {
-                    filter_type: 0,
-                    start_height: start + emitted,
-                    stop_hash: stop,
-                }),
-                expected_end: Some(end),
-            }));
-        }
-        if emitted > 0 && emitted != end - start + 1 {
-            return Err(PeerError::Io(std::io::Error::other(
-                "compact filter range interrupted",
-            )));
-        }
-        if emitted == 0 && (halted || matches!(result, Err(bitcoin_rs_index::TxQueryError::Retry)))
-        {
-            return Ok(FilterServing::Pending(pending.clone()));
-        }
-        if emitted == 0 && pending.expected_end.is_some() {
-            return Err(PeerError::Io(std::io::Error::other(
-                "compact filter range interrupted",
-            )));
+        let progress = StreamProgress {
+            emitted,
+            halted,
+            retry: matches!(result, Err(bitcoin_rs_index::TxQueryError::Retry)),
+        };
+        if let Some(serving) = evaluate_stream_progress(pending, &bounds, end, progress)? {
+            return Ok(serving);
         }
         let Ok(Some(previous_header)) = result else {
             return Ok(FilterServing::Done);
         };
-        match request {
-            Message::GetCFHeaders(_) => send(Message::CFHeaders(CFHeaders {
-                filter_type: 0,
-                stop_hash: stop,
-                previous_filter_header: FilterHeader::from_byte_array(previous_header),
-                filter_hashes: hashes,
-            }))?,
-            Message::GetCFCheckpt(_) => send(Message::CFCheckpt(CFCheckpt {
-                filter_type: 0,
-                stop_hash: stop,
-                filter_headers: headers,
-            }))?,
-            _ => {}
-        }
+        send_filter_aggregate_response(
+            &pending.request,
+            bounds.stop_block_hash,
+            previous_header,
+            hashes,
+            headers,
+            send,
+        )?;
         Ok(FilterServing::Done)
     }
     fn headers_after(

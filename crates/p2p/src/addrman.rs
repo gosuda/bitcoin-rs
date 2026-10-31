@@ -102,6 +102,27 @@ struct Candidate {
     last_count_attempt: u64,
 }
 impl Candidate {
+    fn new(
+        creation_id: u64,
+        endpoint: PeerEndpoint,
+        services: Option<u64>,
+        source: Source,
+        last_seen: u64,
+    ) -> Self {
+        Self {
+            creation_id,
+            endpoint,
+            services,
+            source,
+            last_seen,
+            last_success: 0,
+            failures: 0,
+            tried: false,
+            new_buckets: Vec::new(),
+            last_attempt: 0,
+            last_count_attempt: 0,
+        }
+    }
     fn allows_unknown_services(&self) -> bool {
         self.last_success == 0 && matches!(self.source, Source::Internal(_))
     }
@@ -576,10 +597,78 @@ impl Manager {
             }
         }
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One learn pass owns admission, bucket placement, and eviction in table order"
-    )]
+    fn update_existing_entry(
+        &mut self,
+        index: usize,
+        services: Option<u64>,
+        seen: u64,
+        now: u64,
+        time_penalty: u64,
+    ) -> Option<usize> {
+        let entry = &mut self.stored.records[index];
+        let before = (entry.last_seen, entry.services);
+        let interval = if now.saturating_sub(seen) < 24 * 60 * 60 {
+            60 * 60
+        } else {
+            24 * 60 * 60
+        };
+        if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
+            entry.last_seen = seen.saturating_sub(time_penalty);
+        }
+        if let Some(services) = services.filter(|bits| *bits != 0 || entry.services.is_some()) {
+            entry.services = Some(entry.services.unwrap_or(0) | services);
+        }
+        if before != (entry.last_seen, entry.services) {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        if seen <= entry.last_seen || entry.tried || entry.new_buckets.len() >= MAX_NEW_REFS {
+            return None;
+        }
+        let refs = entry.new_buckets.len();
+        if refs != 0 && self.rng.gen_range(0..(1_usize << refs)) != 0 {
+            return None;
+        }
+        Some(refs)
+    }
+
+    fn can_evict_new_occupant(
+        &self,
+        occupant: u32,
+        addr: PeerEndpoint,
+        now: u64,
+        refs: usize,
+    ) -> bool {
+        let old = &self.stored.records[usize::try_from(occupant).unwrap_or_default()];
+        if old.endpoint == addr {
+            return false;
+        }
+        let final_pending = old.new_buckets.len() == 1 && self.pending.contains_key(&old.endpoint);
+        if final_pending || !(old.terrible(now) || old.new_buckets.len() > 1 && refs == 0) {
+            return false;
+        }
+        true
+    }
+
+    fn get_or_insert_entry(
+        &mut self,
+        candidate: Candidate,
+        next_creation_id: u64,
+    ) -> Option<usize> {
+        let addr = candidate.endpoint;
+        if let Some(index) = self.by_addr.get(&addr).copied() {
+            Some(index)
+        } else {
+            if self.stored.records.len() >= MAX_RECORDS {
+                return None;
+            }
+            let index = self.stored.records.len();
+            self.stored.records.push(candidate);
+            self.by_addr.insert(addr, index);
+            self.next_creation_id = next_creation_id;
+            Some(index)
+        }
+    }
+
     fn learn(
         &mut self,
         addr: PeerEndpoint,
@@ -604,32 +693,16 @@ impl Manager {
         };
         let time_penalty = if self_source { 0 } else { time_penalty };
         let existing = self.by_addr.get(&addr).copied();
-        let mut refs = 0;
-        if let Some(index) = existing {
-            let entry = &mut self.stored.records[index];
-            let before = (entry.last_seen, entry.services);
-            let interval = if now.saturating_sub(seen) < 24 * 60 * 60 {
-                60 * 60
-            } else {
-                24 * 60 * 60
+        let refs = if let Some(index) = existing {
+            let Some(existing_refs) =
+                self.update_existing_entry(index, services, seen, now, time_penalty)
+            else {
+                return false;
             };
-            if entry.last_seen < seen.saturating_sub(interval).saturating_sub(time_penalty) {
-                entry.last_seen = seen.saturating_sub(time_penalty);
-            }
-            if let Some(services) = services.filter(|bits| *bits != 0 || entry.services.is_some()) {
-                entry.services = Some(entry.services.unwrap_or(0) | services);
-            }
-            if before != (entry.last_seen, entry.services) {
-                self.revision = self.revision.wrapping_add(1);
-            }
-            if seen <= entry.last_seen || entry.tried || entry.new_buckets.len() >= MAX_NEW_REFS {
-                return false;
-            }
-            refs = entry.new_buckets.len();
-            if refs != 0 && self.rng.gen_range(0..(1_usize << refs)) != 0 {
-                return false;
-            }
-        }
+            existing_refs
+        } else {
+            0
+        };
         let bucket = new_bucket(
             &self.stored.secret,
             addr,
@@ -638,16 +711,8 @@ impl Manager {
         );
         let slot = self.new_slot(addr, bucket);
         let occupant = self.new[slot];
-        if occupant != EMPTY_SLOT {
-            let old = &self.stored.records[usize::try_from(occupant).unwrap_or_default()];
-            if old.endpoint == addr {
-                return false;
-            }
-            let final_pending =
-                old.new_buckets.len() == 1 && self.pending.contains_key(&old.endpoint);
-            if final_pending || !(old.terrible(now) || old.new_buckets.len() > 1 && refs == 0) {
-                return false;
-            }
+        if occupant != EMPTY_SLOT && !self.can_evict_new_occupant(occupant, addr, now, refs) {
+            return false;
         }
         if existing.is_none() && self.stored.records.len() == MAX_RECORDS && occupant == EMPTY_SLOT
         {
@@ -660,29 +725,15 @@ impl Manager {
             return false;
         };
         self.clear_new(slot);
-        let index = if let Some(index) = self.by_addr.get(&addr).copied() {
-            index
-        } else {
-            if self.stored.records.len() >= MAX_RECORDS {
-                return false;
-            }
-            let index = self.stored.records.len();
-            self.stored.records.push(Candidate {
-                creation_id: self.next_creation_id,
-                endpoint: addr,
-                services,
-                source,
-                last_seen: seen.saturating_sub(time_penalty),
-                last_success: 0,
-                failures: 0,
-                tried: false,
-                new_buckets: Vec::new(),
-                last_attempt: 0,
-                last_count_attempt: 0,
-            });
-            self.by_addr.insert(addr, index);
-            self.next_creation_id = next_creation_id;
-            index
+        let candidate = Candidate::new(
+            self.next_creation_id,
+            addr,
+            services,
+            source,
+            seen.saturating_sub(time_penalty),
+        );
+        let Some(index) = self.get_or_insert_entry(candidate, next_creation_id) else {
+            return false;
         };
         self.stored.records[index]
             .new_buckets
@@ -1713,34 +1764,32 @@ fn validate_current(
     Ok(())
 }
 
-fn read_book(
-    path: &Path,
-    magic: Option<[u8; 4]>,
-    allow_local: bool,
-    groups: &NetGroups,
-) -> io::Result<Option<Loaded>> {
-    #[derive(Deserialize)]
-    struct Header {
-        #[serde(default)]
-        format: FormatMarker,
-        version: u32,
-        magic: [u8; 4],
+#[derive(Deserialize)]
+struct AddressBookHeader {
+    #[serde(default)]
+    format: FormatMarker,
+    version: u32,
+    magic: [u8; 4],
+}
+
+#[derive(Default)]
+enum FormatMarker {
+    #[default]
+    Absent,
+    Null,
+    Present(String),
+}
+
+impl<'de> Deserialize<'de> for FormatMarker {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => Self::Null,
+            Some(value) => Self::Present(value),
+        })
     }
-    #[derive(Default)]
-    enum FormatMarker {
-        #[default]
-        Absent,
-        Null,
-        Present(String),
-    }
-    impl<'de> Deserialize<'de> for FormatMarker {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            Ok(match Option::<String>::deserialize(deserializer)? {
-                None => Self::Null,
-                Some(value) => Self::Present(value),
-            })
-        }
-    }
+}
+
+fn read_address_book_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1760,7 +1809,21 @@ fn read_book(
     if Sha256::digest(&bytes[..payload_len])[..] != bytes[payload_len..] {
         return Err(invalid("address book checksum"));
     }
-    let header: Header = sonic_rs::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
+    Ok(Some(bytes))
+}
+
+fn read_book(
+    path: &Path,
+    magic: Option<[u8; 4]>,
+    allow_local: bool,
+    groups: &NetGroups,
+) -> io::Result<Option<Loaded>> {
+    let Some(bytes) = read_address_book_file(path)? else {
+        return Ok(None);
+    };
+    let payload_len = bytes.len() - 32;
+    let header: AddressBookHeader =
+        sonic_rs::from_slice(&bytes[..payload_len]).map_err(io::Error::other)?;
     if matches!(header.format, FormatMarker::Absent) && (1..=9).contains(&header.version) {
         return Ok(Some(Loaded {
             stored: None,
@@ -1771,7 +1834,6 @@ fn read_book(
     if magic.is_some_and(|magic| magic != header.magic) {
         return Err(invalid("address book network"));
     }
-
     if !matches!(&header.format, FormatMarker::Present(value) if value == FORMAT)
         || header.version != SCHEMA_VERSION
     {
