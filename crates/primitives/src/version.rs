@@ -103,6 +103,10 @@ mod tests {
 
     /// Core's `SAFE_CHARS_UA_COMMENT` accepts ASCII alphanumerics plus
     /// ` .,;-_?@` and nothing else (`util_tests.cpp` pins the complement).
+    /// A comment at the limit is itself safe but composes a subversion over
+    /// `MAX_SUBVERSION_LENGTH` — the node-level guard (`validate_ua_comments`)
+    /// rejects it at startup; that enforcement is tested in
+    /// `crates/node/src/config/tests.rs`.
     #[test]
     fn ua_comment_safety_matches_cores_bip14_subset() {
         for accepted in ["testnode0", "foo bar", "a.,;-_?@"] {
@@ -111,6 +115,9 @@ mod tests {
         for refused in ["/", ":", "(", ")", "\u{20b3}", "\u{1f3c3}", "\0"] {
             assert!(!ua_comment_is_safe(refused), "{refused:?} is unsafe");
         }
-        assert!("a".repeat(MAX_SUBVERSION_LENGTH).len() <= MAX_SUBVERSION_LENGTH);
+        assert!(
+            sub_version(&["a".repeat(MAX_SUBVERSION_LENGTH)]).len() > MAX_SUBVERSION_LENGTH,
+            "a comment at the max length pushes the composed subversion over the limit"
+        );
     }
 }
