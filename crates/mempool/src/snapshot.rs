@@ -222,47 +222,17 @@ impl Snapshot {
         let mut ids = hashbrown::HashSet::new();
         for _ in 0..count {
             check_deadline(deadline)?;
-            let time = u64::from_le_bytes(take(&mut input)?);
-            let unbroadcast = match take::<1>(&mut input)? {
-                [0] => false,
-                [1] => true,
-                _ => return Err(invalid("invalid initial broadcast flag")),
-            };
-            let sigop_cost = u32::from_le_bytes(take(&mut input)?);
-            if sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST {
-                return Err(invalid("snapshot transaction exceeds standard sigop cost"));
-            }
-            let len = usize::try_from(u32::from_le_bytes(take(&mut input)?))
-                .map_err(|_| invalid("transaction size overflow"))?;
-            if len == 0 || len > MAX_TX_BYTES {
-                return Err(invalid("snapshot transaction exceeds its size bound"));
-            }
-            let (raw, rest) = input
-                .split_at_checked(len)
-                .ok_or_else(|| invalid("truncated transaction"))?;
-            input = rest;
-            let tx: Tx = deserialize(raw).map_err(|_| invalid("invalid snapshot transaction"))?;
-            if consensus_bytes(&tx) != raw {
-                return Err(invalid("noncanonical snapshot transaction"));
-            }
-            let txid = tx.txid();
-            if !ids.insert(txid) {
+            let saved = decode_saved_transaction(&mut input)?;
+            if !ids.insert(saved.txid) {
                 return Err(invalid("duplicate snapshot transaction"));
             }
-            transactions.push(SavedTransaction {
-                tx: Arc::new(tx),
-                txid,
-                time,
-                unbroadcast,
-                sigop_cost,
-            });
+            transactions.push(saved);
         }
         let mut deltas = Vec::new();
         let mut ids = hashbrown::HashSet::new();
         for _ in 0..delta_count {
             check_deadline(deadline)?;
-            let txid = Txid(Hash256::from_le_bytes(&take(&mut input)?));
-            let delta = i64::from_le_bytes(take(&mut input)?);
+            let (txid, delta) = decode_fee_delta(&mut input)?;
             if !ids.insert(txid) {
                 return Err(invalid("duplicate snapshot fee delta"));
             }
@@ -299,6 +269,45 @@ impl Snapshot {
         crate::fee_diagram::topological(&parents, &(0..self.transactions.len()).collect::<Vec<_>>())
             .map_err(|_| invalid("cyclic snapshot dependencies"))
     }
+}
+fn decode_saved_transaction(input: &mut &[u8]) -> io::Result<SavedTransaction> {
+    let time = u64::from_le_bytes(take(input)?);
+    let unbroadcast = match take::<1>(input)? {
+        [0] => false,
+        [1] => true,
+        _ => return Err(invalid("invalid initial broadcast flag")),
+    };
+    let sigop_cost = u32::from_le_bytes(take(input)?);
+    if sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST {
+        return Err(invalid("snapshot transaction exceeds standard sigop cost"));
+    }
+    let len = usize::try_from(u32::from_le_bytes(take(input)?))
+        .map_err(|_| invalid("transaction size overflow"))?;
+    if len == 0 || len > MAX_TX_BYTES {
+        return Err(invalid("snapshot transaction exceeds its size bound"));
+    }
+    let (raw, rest) = input
+        .split_at_checked(len)
+        .ok_or_else(|| invalid("truncated transaction"))?;
+    *input = rest;
+    let tx: Tx = deserialize(raw).map_err(|_| invalid("invalid snapshot transaction"))?;
+    if consensus_bytes(&tx) != raw {
+        return Err(invalid("noncanonical snapshot transaction"));
+    }
+    let txid = tx.txid();
+    Ok(SavedTransaction {
+        tx: Arc::new(tx),
+        txid,
+        time,
+        unbroadcast,
+        sigop_cost,
+    })
+}
+
+fn decode_fee_delta(input: &mut &[u8]) -> io::Result<(Txid, i64)> {
+    let txid = Txid(Hash256::from_le_bytes(&take(input)?));
+    let delta = i64::from_le_bytes(take(input)?);
+    Ok((txid, delta))
 }
 
 pub struct PreparedSnapshot {
