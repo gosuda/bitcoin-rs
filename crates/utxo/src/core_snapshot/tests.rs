@@ -5,7 +5,8 @@ use std::io::{self, Cursor, Read};
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint, varint};
 
 use super::{
-    Decoder, SnapshotError, SnapshotLimits, read_and_verify, read_metadata, write_core_v2,
+    CoreV2Base, Decoder, SnapshotError, SnapshotLimits, read_and_verify, read_metadata,
+    write_core_v2,
 };
 use crate::record::{OwnedUtxoOut, UtxoRecord};
 
@@ -573,10 +574,12 @@ fn writer_emits_byte_identical_core200_snapshot_and_roundtrips_read_and_verify()
         .with_stable_view(|view| {
             write_core_v2(
                 view,
-                Network::Regtest,
-                loaded.metadata.base_block_hash,
-                loaded.anchor.height,
-                loaded.metadata.coins_count,
+                &CoreV2Base {
+                    network: Network::Regtest,
+                    base_hash: loaded.metadata.base_block_hash,
+                    base_height: loaded.anchor.height,
+                    coins_count: loaded.metadata.coins_count,
+                },
                 &mut written,
                 &|| false,
             )
@@ -650,10 +653,12 @@ fn writer_script_compression_encodes_odd_even_y_and_offcurve_fallback() {
         .with_stable_view(|view| {
             write_core_v2(
                 view,
-                Network::Regtest,
-                base_hash,
-                100,
-                6,
+                &CoreV2Base {
+                    network: Network::Regtest,
+                    base_hash,
+                    base_height: 100,
+                    coins_count: 6,
+                },
                 &mut written,
                 &|| false,
             )
@@ -689,10 +694,12 @@ fn writer_cancellation_polls_every_5000_coins() {
     let res = loaded.set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            loaded.anchor.height,
-            loaded.metadata.coins_count,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: loaded.anchor.height,
+                coins_count: loaded.metadata.coins_count,
+            },
             &mut written,
             &|| true,
         )
@@ -715,10 +722,12 @@ fn writer_cancellation_polls_every_5000_coins() {
     let res_large = large_set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            100,
-            5005,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: 100,
+                coins_count: 5005,
+            },
             &mut written_large,
             &|| {
                 if poll_called.get() {
@@ -747,10 +756,12 @@ fn writer_declared_coin_count_mismatch_fails_closed() {
     let res_low = loaded.set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            loaded.anchor.height,
-            100,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: loaded.anchor.height,
+                coins_count: 100,
+            },
             &mut written,
             &|| false,
         )
@@ -767,10 +778,12 @@ fn writer_declared_coin_count_mismatch_fails_closed() {
     let res_high = loaded.set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            loaded.anchor.height,
-            300,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: loaded.anchor.height,
+                coins_count: 300,
+            },
             &mut written,
             &|| false,
         )
@@ -821,10 +834,12 @@ fn writer_io_failure_propagates_as_snapshot_error() {
     let res = loaded.set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            loaded.anchor.height,
-            loaded.metadata.coins_count,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: loaded.anchor.height,
+                coins_count: loaded.metadata.coins_count,
+            },
             &mut failing,
             &|| false,
         )
@@ -838,10 +853,12 @@ fn writer_io_failure_propagates_as_snapshot_error() {
     let res_coins = loaded.set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            loaded.metadata.base_block_hash,
-            loaded.anchor.height,
-            loaded.metadata.coins_count,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash: loaded.metadata.base_block_hash,
+                base_height: loaded.anchor.height,
+                coins_count: loaded.metadata.coins_count,
+            },
             &mut failing_coins,
             &|| false,
         )
@@ -863,10 +880,12 @@ fn writer_rejects_output_with_max_vout_as_invalid_outpoint() {
     let res = set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            base_hash,
-            100,
-            1,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash,
+                base_height: 100,
+                coins_count: 1,
+            },
             &mut written,
             &|| false,
         )
@@ -899,10 +918,12 @@ fn writer_encodes_highest_encodable_height_for_both_coinbase_variants() {
             .with_stable_view(|view| {
                 write_core_v2(
                     view,
-                    Network::Regtest,
-                    base_hash,
-                    max_height,
-                    1,
+                    &CoreV2Base {
+                        network: Network::Regtest,
+                        base_hash,
+                        base_height: max_height,
+                        coins_count: 1,
+                    },
                     &mut written,
                     &|| false,
                 )
@@ -942,10 +963,12 @@ fn writer_rejects_next_height_as_varint_overflow_for_both_coinbase_variants() {
         let res = set.with_stable_view(|view| {
             write_core_v2(
                 view,
-                Network::Regtest,
-                base_hash,
-                overflow_height,
-                1,
+                &CoreV2Base {
+                    network: Network::Regtest,
+                    base_hash,
+                    base_height: overflow_height,
+                    coins_count: 1,
+                },
                 &mut written,
                 &|| false,
             )
@@ -977,10 +1000,12 @@ fn writer_preserves_invalid_height_precedence_over_varint_overflow() {
     let res = set.with_stable_view(|view| {
         write_core_v2(
             view,
-            Network::Regtest,
-            base_hash,
-            base_height,
-            1,
+            &CoreV2Base {
+                network: Network::Regtest,
+                base_hash,
+                base_height,
+                coins_count: 1,
+            },
             &mut written,
             &|| false,
         )
@@ -1058,10 +1083,12 @@ fn core_file_cursor_order_and_hash_numeric_order_diverge_at_16512() {
         .with_stable_view(|view| {
             write_core_v2(
                 view,
-                Network::Regtest,
-                base_hash,
-                200,
-                2,
+                &CoreV2Base {
+                    network: Network::Regtest,
+                    base_hash,
+                    base_height: 200,
+                    coins_count: 2,
+                },
                 &mut written,
                 &|| false,
             )

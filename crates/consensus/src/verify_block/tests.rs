@@ -498,6 +498,7 @@ fn duplicate_inputs_precede_the_block_weight_limit() {
 }
 
 #[test]
+#[expect(clippy::expect_used)]
 fn the_stripped_size_limit_precedes_the_block_weight_limit() {
     let mut tx = coinbase_tx();
     tx.outputs[0].script_pubkey = Script::from_bytes(vec![0; 1_000_001]);
@@ -571,7 +572,7 @@ fn assert_sixty_four_byte_mutation(txs: Vec<Tx>, label: &str) {
             "rules, {label}, segwit_active {segwit_active}"
         );
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Err(ConsensusError::SixtyFourByteMutation),
             "binding, {label}, segwit_active {segwit_active}"
         );
@@ -607,7 +608,7 @@ fn binding_reports_a_wrong_root_before_the_sixty_four_byte_mutation() {
     block.header.merkle_root = Hash256::from_le_bytes(&[0xff; 32]);
     for segwit_active in [false, true] {
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Err(ConsensusError::MerkleRoot),
             "segwit_active {segwit_active}"
         );
@@ -626,7 +627,7 @@ fn sixty_byte_body_without_coinbase_stays_missing_coinbase_and_binds() {
             "segwit_active {segwit_active}"
         );
         assert_eq!(
-            check_block_body_binding(&block, segwit_active),
+            check_block_body_binding(&block, BlockRuleContext { segwit_active }),
             Ok(()),
             "a coinbase-less body of another size is bound to its header"
         );
@@ -651,7 +652,7 @@ fn a_body_with_a_coinbase_is_never_a_sixty_four_byte_mutation() {
                 "segwit_active {segwit_active}"
             );
             assert_eq!(
-                check_block_body_binding(&block, segwit_active),
+                check_block_body_binding(&block, BlockRuleContext { segwit_active }),
                 Ok(()),
                 "segwit_active {segwit_active}"
             );

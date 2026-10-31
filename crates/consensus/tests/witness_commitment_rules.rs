@@ -57,8 +57,8 @@ fn single(tx: Tx) -> Block {
     block(vec![tx], root)
 }
 
-fn rules(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
-    if segwit_active {
+fn rules(block: &Block, context: BlockRuleContext) -> Result<(), ConsensusError> {
+    if context.segwit_active {
         return verify_block_rules(block);
     }
     let txids = block.txs.iter().map(Tx::txid).collect();
@@ -66,7 +66,7 @@ fn rules(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
     if view.facts().has_witness() {
         let _ = view.witness_ids();
     }
-    verify_block_rules_precomputed(block, BlockRuleContext { segwit_active }, view.facts())
+    verify_block_rules_precomputed(block, context, view.facts())
 }
 
 #[test]
@@ -89,12 +89,15 @@ fn staging_gate_and_block_rules_agree_on_witness_commitment_shapes() {
     for (witness, commitment, active, expected) in cases {
         let block = single(coinbase(witness, commitment));
         let shape = format!("witness={witness:?} commitment={commitment:?} active={active}");
+        let context = BlockRuleContext {
+            segwit_active: active,
+        };
         assert_eq!(
-            check_block_body_binding(&block, active),
+            check_block_body_binding(&block, context),
             expected,
             "gate {shape}"
         );
-        assert_eq!(rules(&block, active), expected, "rules {shape}");
+        assert_eq!(rules(&block, context), expected, "rules {shape}");
     }
 }
 
@@ -126,12 +129,15 @@ fn witness_without_commitment_is_unexpected_even_outside_coinbase() {
     };
     let block = block(txs, Hash256::from_le_bytes(&root));
     for active in [false, true] {
+        let context = BlockRuleContext {
+            segwit_active: active,
+        };
         assert_eq!(
-            check_block_body_binding(&block, active),
+            check_block_body_binding(&block, context),
             Err(ConsensusError::UnexpectedWitness)
         );
         assert_eq!(
-            rules(&block, active),
+            rules(&block, context),
             Err(ConsensusError::UnexpectedWitness)
         );
     }
@@ -144,7 +150,12 @@ fn altered_non_witness_transaction_is_rejected() {
     malformed.txs[0].outputs[0].value = Amount::from_sat(49);
     assert_eq!(malformed.block_hash(), expected_hash);
     assert_eq!(
-        check_block_body_binding(&malformed, true),
+        check_block_body_binding(
+            &malformed,
+            BlockRuleContext {
+                segwit_active: true
+            }
+        ),
         Err(ConsensusError::MerkleRoot)
     );
 }
@@ -158,7 +169,12 @@ fn merkle_mutation_is_rejected() {
     };
     let mutated = block(vec![tx.clone(), tx], Hash256::from_le_bytes(&root));
     assert_eq!(
-        check_block_body_binding(&mutated, true),
+        check_block_body_binding(
+            &mutated,
+            BlockRuleContext {
+                segwit_active: true
+            }
+        ),
         Err(ConsensusError::MerkleMutation)
     );
 }

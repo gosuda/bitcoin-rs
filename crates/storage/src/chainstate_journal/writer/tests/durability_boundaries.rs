@@ -1,4 +1,5 @@
 use super::*;
+use crate::chainstate_journal::CheckpointBase;
 
 #[test]
 fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> TestResult {
@@ -128,7 +129,13 @@ fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     ));
 
     writer.freeze()?;
-    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 1,
+        height: 0,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 0,
+    })?;
     writer.resume()?;
     assert!(!writer.requires_compaction()?);
     writer.prepare_for_apply()?;

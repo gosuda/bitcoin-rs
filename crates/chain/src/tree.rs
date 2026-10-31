@@ -278,75 +278,73 @@ impl BlockTree {
 
     #[must_use]
     pub fn block_locator(&self, tip_id: NodeId, max_entries: usize) -> Vec<Hash256> {
-        let mut locator = Vec::with_capacity(max_entries.min(32));
-
-        if max_entries > 0
-            && self.active_by_height.is_trusted()
-            && self.active_by_height.last() == Some(tip_id)
-            && let Ok(tip) = self.node(tip_id)
-        {
-            let mut target_height = tip.height;
-            let mut step = 1_u32;
-            let mut indexed = true;
-
-            while locator.len() < max_entries {
-                let Some(node_id) = self.active_by_height.get(target_height) else {
-                    indexed = false;
-                    break;
-                };
-                let Ok(node) = self.node(node_id) else {
-                    indexed = false;
-                    break;
-                };
-                if (locator.is_empty() && node_id != tip_id) || node.height != target_height {
-                    indexed = false;
-                    break;
-                }
-
-                let parent_matches = if target_height == 0 {
-                    node.parent.is_none()
-                } else {
-                    matches!(
-                        (
-                            node.parent,
-                            self.active_by_height.get(target_height - 1),
-                        ),
-                        (Some(parent), Some(expected)) if parent == expected
-                    )
-                };
-                if !parent_matches {
-                    indexed = false;
-                    break;
-                }
-                if let Some(child_height) = target_height.checked_add(1)
-                    && let Some(child_id) = self.active_by_height.get(child_height)
-                {
-                    let Ok(child) = self.node(child_id) else {
-                        indexed = false;
-                        break;
-                    };
-                    if child.parent != Some(node_id) {
-                        indexed = false;
-                        break;
-                    }
-                }
-
-                locator.push(node.hash);
-                if target_height == 0 {
-                    break;
-                }
-                target_height = target_height.saturating_sub(step);
-                if locator.len() > 10 {
-                    step = step.saturating_mul(2);
-                }
-            }
-
-            if indexed {
-                return locator;
-            }
-            locator.clear();
+        if let Some(locator) = self.indexed_block_locator(tip_id, max_entries) {
+            return locator;
         }
+        self.walked_block_locator(tip_id, max_entries)
+    }
 
+    fn indexed_block_locator(&self, tip_id: NodeId, max_entries: usize) -> Option<Vec<Hash256>> {
+        if max_entries == 0
+            || !self.active_by_height.is_trusted()
+            || self.active_by_height.last() != Some(tip_id)
+        {
+            return None;
+        }
+        let tip = self.node(tip_id).ok()?;
+        let mut locator = Vec::with_capacity(max_entries.min(32));
+        let mut target_height = tip.height;
+        let mut step = 1_u32;
+        while locator.len() < max_entries {
+            let node_id = self.active_by_height.get(target_height)?;
+            let node = self.node(node_id).ok()?;
+            if (locator.is_empty() && node_id != tip_id)
+                || node.height != target_height
+                || !self.active_height_step_is_consistent(node_id, node, target_height)
+            {
+                return None;
+            }
+            locator.push(node.hash);
+            if target_height == 0 {
+                break;
+            }
+            target_height = target_height.saturating_sub(step);
+            if locator.len() > 10 {
+                step = step.saturating_mul(2);
+            }
+        }
+        Some(locator)
+    }
+
+    fn active_height_step_is_consistent(
+        &self,
+        node_id: NodeId,
+        node: &BlockTreeNode,
+        height: u32,
+    ) -> bool {
+        let parent_matches = if height == 0 {
+            node.parent.is_none()
+        } else {
+            matches!(
+                (node.parent, self.active_by_height.get(height - 1)),
+                (Some(parent), Some(expected)) if parent == expected
+            )
+        };
+        if !parent_matches {
+            return false;
+        }
+        let Some(child_height) = height.checked_add(1) else {
+            return true;
+        };
+        let Some(child_id) = self.active_by_height.get(child_height) else {
+            return true;
+        };
+        self.node(child_id)
+            .is_ok_and(|child| child.parent == Some(node_id))
+    }
+
+    fn walked_block_locator(&self, tip_id: NodeId, max_entries: usize) -> Vec<Hash256> {
+        let mut locator = Vec::with_capacity(max_entries.min(32));
         let mut current = tip_id;
         let mut step: u64 = 1;
         while locator.len() < max_entries {
@@ -354,28 +352,31 @@ impl BlockTree {
                 break;
             };
             locator.push(node.hash);
-
-            let mut walker = current;
-            let mut walked = false;
-            for _ in 0..step {
-                let Ok(walker_node) = self.node(walker) else {
-                    break;
-                };
-                let Some(parent) = walker_node.parent else {
-                    break;
-                };
-                walker = parent;
-                walked = true;
-            }
-            if !walked {
+            let Some(walker) = self.walk_parent_steps(current, step) else {
                 break;
-            }
+            };
             current = walker;
             if locator.len() > 10 {
                 step = step.saturating_mul(2);
             }
         }
         locator
+    }
+
+    fn walk_parent_steps(&self, from: NodeId, steps: u64) -> Option<NodeId> {
+        let mut walker = from;
+        let mut walked = false;
+        for _ in 0..steps {
+            let Ok(node) = self.node(walker) else {
+                break;
+            };
+            let Some(parent) = node.parent else {
+                break;
+            };
+            walker = parent;
+            walked = true;
+        }
+        walked.then_some(walker)
     }
     #[must_use]
     pub fn node_at_height_from(&self, start_id: NodeId, target_height: u32) -> Option<NodeId> {

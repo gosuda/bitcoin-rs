@@ -1,4 +1,4 @@
-//! Cold recovery must not inherit script trust from AssumeValid commits (#1730).
+//! Cold recovery must not inherit script trust from `AssumeValid` commits (#1730).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use crate::{
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
-    consensus_bytes,
+    Amount, Block, BlockHash, BlockPayload, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+    Witness, consensus_bytes,
 };
 use bitcoin_rs_script::{
     VerifyFlags,
@@ -50,10 +50,7 @@ fn write_accepted_checkpoint(dir: &Path, chain: &Chainstate) -> TestResult {
     Ok(())
 }
 
-fn commit_chain(
-    opcode: u8,
-    save_checkpoint_at_100: bool,
-) -> TestResult<(Chainstate, Block, OutPoint, Option<tempfile::TempDir>)> {
+fn chain_at_height_100() -> TestResult<(Chainstate, OutPoint, TxOut, BlockHash)> {
     let (mut chain, first) = restored_chainstate()?;
     let bodies = Arc::new(MemoryBodies::default());
     let genesis = Network::Regtest.genesis_block();
@@ -61,20 +58,48 @@ fn commit_chain(
     chain.block_body_store = Some(bodies);
     chain.apply_block(&BlockPayload::from_local(first.clone()))?;
     let funding = OutPoint::new(first.txs[0].txid(), 0);
+    let funding_output = first.txs[0].outputs[0].clone();
     let mut parent = first.block_hash();
     for height in 2..=100 {
         let child = mined_child(parent, height)?;
         chain.apply_block(&BlockPayload::from_local(child.clone()))?;
         parent = child.block_hash();
     }
-    let checkpoint_dir = if save_checkpoint_at_100 {
-        let dir = tempfile::tempdir()?;
-        crate::events::initialize_data_dir(dir.path())?;
-        write_accepted_checkpoint(dir.path(), &chain)?;
-        Some(dir)
-    } else {
-        None
-    };
+    Ok((chain, funding, funding_output, parent))
+}
+fn commit_chain(
+    opcode: u8,
+) -> TestResult<(Chainstate, Block, OutPoint, Option<tempfile::TempDir>)> {
+    let (chain, funding, funding_output, parent) = chain_at_height_100()?;
+    commit_spent_script(chain, funding, funding_output, parent, opcode, None)
+}
+fn commit_chain_with_checkpoint(
+    opcode: u8,
+) -> TestResult<(Chainstate, Block, OutPoint, tempfile::TempDir)> {
+    let (chain, funding, funding_output, parent) = chain_at_height_100()?;
+    let checkpoint_dir = tempfile::tempdir()?;
+    crate::events::initialize_data_dir(checkpoint_dir.path())?;
+    write_accepted_checkpoint(checkpoint_dir.path(), &chain)?;
+    let (chain, block, funding, checkpoint_dir) = commit_spent_script(
+        chain,
+        funding,
+        funding_output,
+        parent,
+        opcode,
+        Some(checkpoint_dir),
+    )?;
+    let checkpoint_dir =
+        checkpoint_dir.ok_or("the accepted checkpoint directory must survive the commit")?;
+    Ok((chain, block, funding, checkpoint_dir))
+}
+fn commit_spent_script(
+    mut chain: Chainstate,
+    funding: OutPoint,
+    funding_output: TxOut,
+    parent: BlockHash,
+    opcode: u8,
+    checkpoint_dir: Option<tempfile::TempDir>,
+) -> TestResult<(Chainstate, Block, OutPoint, Option<tempfile::TempDir>)> {
     let mut spend_block = mined_child(parent, 101)?;
     let spend = Tx {
         version: 2,
@@ -94,7 +119,7 @@ fn commit_chain(
     // script verdict before AssumeValid deliberately skips it during block connect.
     let verdict = bitcoin_rs_consensus::verify_transaction(
         &spend,
-        &SpendView(funding, first.txs[0].outputs[0].clone()),
+        &SpendView(funding, funding_output),
         101,
         0,
         VerifyFlags::MANDATORY,
@@ -125,53 +150,69 @@ fn commit_chain(
     Ok((chain, spend_block, funding, checkpoint_dir))
 }
 
+const FULL_REVALIDATION_MARKER_TEXT: &[u8] = b"journal fork crossed below checkpoint base\n";
+
+fn write_full_revalidation_marker(dir: &Path, marker: &[u8]) -> TestResult {
+    let journal = dir.join(JOURNAL_DIR_NAME);
+    std::fs::create_dir_all(&journal)?;
+    std::fs::write(journal.join(FULL_REVALIDATION_MARKER), marker)?;
+    Ok(())
+}
+
 fn prepare_cold(
     chain: &mut Chainstate,
     checkpoint_dir: Option<tempfile::TempDir>,
-    marker: bool,
     mode: ValidationMode,
+) -> TestResult<tempfile::TempDir> {
+    prepare_cold_with_optional_marker(chain, checkpoint_dir, mode, None)
+}
+
+fn prepare_cold_with_marker(
+    chain: &mut Chainstate,
+    checkpoint_dir: Option<tempfile::TempDir>,
+    mode: ValidationMode,
+) -> TestResult<tempfile::TempDir> {
+    prepare_cold_with_optional_marker(
+        chain,
+        checkpoint_dir,
+        mode,
+        Some(FULL_REVALIDATION_MARKER_TEXT),
+    )
+}
+
+fn prepare_cold_with_optional_marker(
+    chain: &mut Chainstate,
+    checkpoint_dir: Option<tempfile::TempDir>,
+    mode: ValidationMode,
+    marker: Option<&[u8]>,
 ) -> TestResult<tempfile::TempDir> {
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     let journal_config = crate::ChainstateJournalConfig {
         enabled: false,
         ..crate::ChainstateJournalConfig::default()
     };
-    let dir = match checkpoint_dir {
-        Some(dir) => {
-            if marker {
-                // Prove selector validity: without the marker, this accepted checkpoint
-                // restores as ResumeSource::Checkpoint with applied_tip at height 100.
-                let baseline = prepare_initial_chainstate(
-                    dir.path(),
-                    Network::Regtest,
-                    journal_config,
-                    Some(&head),
-                )?;
-                assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
-                assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
-
-                let journal = dir.path().join(JOURNAL_DIR_NAME);
-                std::fs::create_dir_all(&journal)?;
-                std::fs::write(
-                    journal.join(FULL_REVALIDATION_MARKER),
-                    b"journal fork crossed below checkpoint base\n",
-                )?;
-            }
-            dir
+    let dir = if let Some(dir) = checkpoint_dir {
+        if let Some(marker) = marker {
+            // Prove selector validity: without the marker, this accepted checkpoint
+            // restores as ResumeSource::Checkpoint with applied_tip at height 100.
+            let baseline = prepare_initial_chainstate(
+                dir.path(),
+                Network::Regtest,
+                journal_config,
+                Some(&head),
+            )?;
+            assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
+            assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
+            write_full_revalidation_marker(dir.path(), marker)?;
         }
-        None => {
-            let dir = tempfile::tempdir()?;
-            crate::events::initialize_data_dir(dir.path())?;
-            if marker {
-                let journal = dir.path().join(JOURNAL_DIR_NAME);
-                std::fs::create_dir_all(&journal)?;
-                std::fs::write(
-                    journal.join(FULL_REVALIDATION_MARKER),
-                    b"journal fork crossed below checkpoint base\n",
-                )?;
-            }
-            dir
+        dir
+    } else {
+        let dir = tempfile::tempdir()?;
+        crate::events::initialize_data_dir(dir.path())?;
+        if let Some(marker) = marker {
+            write_full_revalidation_marker(dir.path(), marker)?;
         }
+        dir
     };
     let initial =
         prepare_initial_chainstate(dir.path(), Network::Regtest, journal_config, Some(&head))?;
@@ -226,64 +267,71 @@ fn prepare_warm(
 #[test]
 fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evidence() -> TestResult
 {
-    for (mode, marker) in [
-        (ValidationMode::Full, true),
-        (ValidationMode::AssumeValid, true),
-        (ValidationMode::Full, false),
-        (ValidationMode::AssumeValid, false),
-    ] {
-        let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, marker)?;
-        let head = chain.durable_head.load()?;
-        let hash = invalid.block_hash().0;
-        let undo = chain.undo_store.load_undo(101, hash)?;
-        let dir = prepare_cold(&mut chain, checkpoint_dir, marker, mode)?;
-        let error = super::super::reconcile_at_boot(&chain)
-            .err()
-            .ok_or("a cold rebuild must verify scripts")?;
-        assert!(
-            matches!(error, ApplyError::Consensus(ConsensusError::Script { .. })),
-            "{error:?}"
-        );
-        let tip = chain
-            .applied_tip_snapshot()
-            .ok_or("missing replay prefix")?;
-        assert_eq!(
-            (tip.height, tip.hash),
-            (100, invalid.header.prev_blockhash.0)
-        );
-        assert_eq!(chain.chain_snapshot().tip_hash, tip.hash);
-        assert_eq!(chain.chain_snapshot().tip_height, 100);
-        assert_eq!(chain.coin_stats.snapshot().height, 100);
-        assert!(chain.utxo.get(&funding).is_some());
-        assert!(
-            chain
-                .utxo
-                .get(&OutPoint::new(invalid.txs[1].txid(), 0))
-                .is_none()
-        );
-        assert_eq!(chain.durable_head.load()?, head);
-        assert_eq!(chain.undo_store.load_undo(101, hash)?, undo);
-        assert_eq!(
-            chain
-                .block_body_store
-                .as_ref()
-                .ok_or("missing body store")?
-                .load_block_body(101, hash)?,
-            Some(consensus_bytes(&invalid))
-        );
-        assert!(matches!(
-            chain.begin_transition(),
-            Err(ApplyError::Shutdown)
-        ));
-        if marker {
-            assert_eq!(
-                std::fs::read(
-                    dir.path()
-                        .join(JOURNAL_DIR_NAME)
-                        .join(FULL_REVALIDATION_MARKER)
-                )?,
-                b"journal fork crossed below checkpoint base\n"
+    for mode in [ValidationMode::Full, ValidationMode::AssumeValid] {
+        for marker in [false, true] {
+            let (mut chain, invalid, funding, checkpoint_dir) = if marker {
+                let (chain, invalid, funding, checkpoint_dir) =
+                    commit_chain_with_checkpoint(OP_RETURN)?;
+                (chain, invalid, funding, Some(checkpoint_dir))
+            } else {
+                commit_chain(OP_RETURN)?
+            };
+            let head = chain.durable_head.load()?;
+            let hash = invalid.block_hash().0;
+            let undo = chain.undo_store.load_undo(101, hash)?;
+            let dir = if marker {
+                prepare_cold_with_marker(&mut chain, checkpoint_dir, mode)?
+            } else {
+                prepare_cold(&mut chain, checkpoint_dir, mode)?
+            };
+            let error = super::super::reconcile_at_boot(&chain)
+                .err()
+                .ok_or("a cold rebuild must verify scripts")?;
+            assert!(
+                matches!(error, ApplyError::Consensus(ConsensusError::Script { .. })),
+                "{error:?}"
             );
+            let tip = chain
+                .applied_tip_snapshot()
+                .ok_or("missing replay prefix")?;
+            assert_eq!(
+                (tip.height, tip.hash),
+                (100, invalid.header.prev_blockhash.0)
+            );
+            assert_eq!(chain.chain_snapshot().tip_hash, tip.hash);
+            assert_eq!(chain.chain_snapshot().tip_height, 100);
+            assert_eq!(chain.coin_stats.snapshot().height, 100);
+            assert!(chain.utxo.get(&funding).is_some());
+            assert!(
+                chain
+                    .utxo
+                    .get(&OutPoint::new(invalid.txs[1].txid(), 0))
+                    .is_none()
+            );
+            assert_eq!(chain.durable_head.load()?, head);
+            assert_eq!(chain.undo_store.load_undo(101, hash)?, undo);
+            assert_eq!(
+                chain
+                    .block_body_store
+                    .as_ref()
+                    .ok_or("missing body store")?
+                    .load_block_body(101, hash)?,
+                Some(consensus_bytes(&invalid))
+            );
+            assert!(matches!(
+                chain.begin_transition(),
+                Err(ApplyError::Shutdown)
+            ));
+            if marker {
+                assert_eq!(
+                    std::fs::read(
+                        dir.path()
+                            .join(JOURNAL_DIR_NAME)
+                            .join(FULL_REVALIDATION_MARKER)
+                    )?,
+                    b"journal fork crossed below checkpoint base\n"
+                );
+            }
         }
     }
     Ok(())
@@ -292,9 +340,19 @@ fn cold_revalidation_rejects_script_invalid_commits_and_preserves_recovery_evide
 #[test]
 fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
     for marker in [false, true] {
-        let (mut chain, valid, funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, marker)?;
+        let (mut chain, valid, funding, checkpoint_dir) = if marker {
+            let (chain, valid, funding, checkpoint_dir) =
+                commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
+            (chain, valid, funding, Some(checkpoint_dir))
+        } else {
+            commit_chain(OP_PUSHNUM_1)?
+        };
         let head = chain.durable_head.load()?.ok_or("missing durable head")?;
-        let dir = prepare_cold(&mut chain, checkpoint_dir, marker, ValidationMode::Full)?;
+        let dir = if marker {
+            prepare_cold_with_marker(&mut chain, checkpoint_dir, ValidationMode::Full)?
+        } else {
+            prepare_cold(&mut chain, checkpoint_dir, ValidationMode::Full)?
+        };
         super::super::reconcile_at_boot(&chain)?;
         let tip = chain.applied_tip_snapshot().ok_or("missing replay tip")?;
         assert_eq!((tip.height, tip.hash), (head.height, head.tip));
@@ -320,11 +378,11 @@ fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
 
 #[test]
 fn cold_revalidation_still_refuses_corrupt_undo_instead_of_replacing_it() -> TestResult {
-    let (mut chain, valid, _, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
+    let (mut chain, valid, _, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
     let head = chain.durable_head.load()?;
     let hash = valid.block_hash().0;
     chain.undo_store.persist_undo(101, hash, b"corrupt")?;
-    let dir = prepare_cold(&mut chain, checkpoint_dir, true, ValidationMode::Full)?;
+    let dir = prepare_cold_with_marker(&mut chain, Some(checkpoint_dir), ValidationMode::Full)?;
     let error = super::super::reconcile_at_boot(&chain)
         .err()
         .ok_or("corrupt undo must fail closed")?;
@@ -350,8 +408,7 @@ fn cold_revalidation_still_refuses_corrupt_undo_instead_of_replacing_it() -> Tes
 
 #[test]
 fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> TestResult {
-    let (mut chain, valid, funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
-    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let (mut chain, valid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::Full)?;
     super::super::reconcile_at_boot(&chain)?;
@@ -373,8 +430,7 @@ fn valid_warm_revalidation_reuses_the_durable_receipt_and_undo_preparation() -> 
 
 #[test]
 fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receipt() -> TestResult {
-    let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, true)?;
-    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let (mut chain, invalid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_RETURN)?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::AssumeValid)?;
     // An AssumeValid start trusts the committed gap above an accepted checkpoint,
@@ -407,8 +463,7 @@ fn journal_off() -> crate::ChainstateJournalConfig {
 #[test]
 fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_script()
 -> TestResult {
-    let (mut chain, invalid, funding, checkpoint_dir) = commit_chain(OP_RETURN, true)?;
-    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let (mut chain, invalid, funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_RETURN)?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     assert_eq!(
         chain.durable_head.load_attestation(&head)?,
@@ -444,12 +499,7 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
         false,
     )?;
     assert!(requires_full_revalidation(checkpoint_dir.path()));
-    let dir = prepare_cold(
-        &mut chain,
-        Some(checkpoint_dir),
-        false,
-        ValidationMode::Full,
-    )?;
+    let dir = prepare_cold(&mut chain, Some(checkpoint_dir), ValidationMode::Full)?;
     let error = super::super::reconcile_at_boot(&chain)
         .err()
         .ok_or("a Full restart must execute the skipped script")?;
@@ -473,8 +523,7 @@ fn full_start_over_an_assume_valid_commit_rebuilds_cold_and_rejects_the_invalid_
 // RCV-02
 #[test]
 fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestResult {
-    let (mut chain, _valid, _funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
-    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let (mut chain, _valid, _funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     assert_eq!(
         chain.durable_head.load_attestation(&head)?,
@@ -487,12 +536,7 @@ fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestRes
         chain.durable_head.as_ref(),
         false,
     )?;
-    let _dir = prepare_cold(
-        &mut chain,
-        Some(checkpoint_dir),
-        false,
-        ValidationMode::Full,
-    )?;
+    let _dir = prepare_cold(&mut chain, Some(checkpoint_dir), ValidationMode::Full)?;
     super::super::reconcile_at_boot(&chain)?;
     assert_eq!(
         chain.durable_head.load_attestation(&head)?,
@@ -505,8 +549,7 @@ fn a_completed_full_cold_rebuild_attests_the_head_as_fully_executed() -> TestRes
 // RCV-02
 #[test]
 fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
-    let (chain, _block, _funding, checkpoint_dir) = commit_chain(OP_PUSHNUM_1, true)?;
-    let checkpoint_dir = checkpoint_dir.ok_or("missing checkpoint dir")?;
+    let (chain, _block, _funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
     let head = chain.durable_head.load()?.ok_or("missing durable head")?;
     let error = require_full_script_attestation(
         checkpoint_dir.path(),

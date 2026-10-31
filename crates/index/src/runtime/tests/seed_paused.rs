@@ -486,15 +486,17 @@ impl SeedFixture {
             let txids = block.txids();
             if height > 0 {
                 let (_, undo, _) = bitcoin_rs_utxo::contract::build_block_changes(
-                    &block,
-                    height,
-                    &txids,
-                    None,
-                    0,
-                    0,
+                    &bitcoin_rs_utxo::contract::BlockChangeInputs {
+                        block: &block,
+                        height,
+                        txids: &txids,
+                        same_block_spent: None,
+                        add_capacity: 0,
+                        remove_capacity: 0,
+                        overwritten: None,
+                        max_script_size: crate::MAX_LIVE_SCRIPT_SIZE,
+                    },
                     &coins,
-                    None,
-                    crate::MAX_LIVE_SCRIPT_SIZE,
                 )
                 .expect("undo batch");
                 let record = bitcoin_rs_utxo::contract::persist_block_undo(

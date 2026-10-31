@@ -140,8 +140,12 @@ impl WindowGroup {
             commit_us = commit_started.elapsed().as_micros(),
             "durable_head: group commit"
         );
+        Ok(self.finish_commit(handles, receipt.commit_id))
+    }
+
+    fn finish_commit(&mut self, handles: &Chainstate, commit_id: u64) -> Vec<ConnectOutcome> {
         for pending in &mut self.pending {
-            pending.outcome.commit_id = receipt.commit_id;
+            pending.outcome.commit_id = commit_id;
         }
         for pending in &mut self.pending {
             emit_journal_record(
@@ -158,9 +162,9 @@ impl WindowGroup {
                 handles.publish_applied(&pending.outcome.tip, crate::events::HintKind::Connected);
                 pending.outcome
             })
-            .collect::<Vec<_>>();
+            .collect();
         metrics::counter!("node.durable_head.group_flushes").increment(1);
-        Ok(published)
+        published
     }
 
     fn abandon(&mut self) {
@@ -342,100 +346,159 @@ fn invalidate_permanent_failure(
 }
 
 pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
-    use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
-    use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
+    use WindowApplyDisposition::{Fatal, Operational, Permanent};
     match error {
         ApplyError::UtxoCommit(_)
         | ApplyError::DurableHeadCommit(_)
         | ApplyError::DurableHeadLineage { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. } => Fatal,
-        ApplyError::ProofOfWork { .. }
-        | ApplyError::TargetAboveLimit
-        | ApplyError::Chain(
-            bitcoin_rs_chain::ChainError::BadVersion { .. }
-            | bitcoin_rs_chain::ChainError::TimewarpAttack { .. }
-            | bitcoin_rs_chain::ChainError::TimestampTooEarly { .. }
-            | bitcoin_rs_chain::ChainError::NbitsMismatch { .. },
-        ) => Permanent,
-        ApplyError::Consensus(error) => match error {
-            ConsensusError::MerkleRoot
-            | ConsensusError::MerkleMutation
-            | ConsensusError::SixtyFourByteMutation
-            | ConsensusError::WitnessNonceSize
-            | ConsensusError::WitnessCommitment
-            | ConsensusError::UnexpectedWitness => BodyMutated,
-            ConsensusError::Encoding(_)
-            | ConsensusError::PrevoutMatrixSize { .. }
-            | ConsensusError::PrevoutCount { .. }
-            | ConsensusError::PrevoutMismatch { .. }
-            | ConsensusError::UnsupportedEngine { .. }
-            | ConsensusError::Kernel(_)
-            | ConsensusError::Script {
-                engine: ScriptEngine::Kernel,
-                ..
-            } => Operational,
-            _ => Permanent,
-        },
-        _ => Operational,
+        ApplyError::ProofOfWork { .. } | ApplyError::TargetAboveLimit => Permanent,
+        ApplyError::Chain(error) => classify_chain_error(error),
+        ApplyError::Consensus(error) => classify_consensus_error(error),
+        ApplyError::Shutdown
+        | ApplyError::ConcurrentChainChange
+        | ApplyError::ChainChangeGenerationOverflow
+        | ApplyError::PrevHashMismatch { .. }
+        | ApplyError::HeightOverflow(_)
+        | ApplyError::VoutOverflow { .. }
+        | ApplyError::TxidCountMismatch { .. }
+        | ApplyError::BlockValueOverflow
+        | ApplyError::BlockOutputsExceedInputs
+        | ApplyError::BlockBodyPersistence(_)
+        | ApplyError::UndoPersistence(_)
+        | ApplyError::JournalBackpressure(_)
+        | ApplyError::UndoPrevoutMissing { .. }
+        | ApplyError::UndoLoad(_)
+        | ApplyError::DisconnectNotTip { .. }
+        | ApplyError::DisconnectBodyMismatch { .. }
+        | ApplyError::DisconnectOffDurableHead { .. }
+        | ApplyError::RecoveryPublication(_)
+        | ApplyError::CoinStatsRewind(_)
+        | ApplyError::DisconnectBelowSnapshotBase { .. }
+        | ApplyError::PruneDuringHistoricalValidation { .. }
+        | ApplyError::ConnectPastHistoricalTarget { .. }
+        | ApplyError::HistoricalTargetHashMismatch { .. } => Operational,
     }
 }
 
-#[expect(clippy::too_many_lines)]
-fn prove_window<'a, 'h>(
-    handles: &'h Chainstate,
-    payloads: &[&'a BlockPayload],
-) -> ProvenWindow<'a, 'h> {
-    if payloads.is_empty() {
-        return ProvenWindow::default();
+fn classify_chain_error(error: &bitcoin_rs_chain::ChainError) -> WindowApplyDisposition {
+    use WindowApplyDisposition::{Operational, Permanent};
+    match error {
+        bitcoin_rs_chain::ChainError::BadVersion { .. }
+        | bitcoin_rs_chain::ChainError::TimewarpAttack { .. }
+        | bitcoin_rs_chain::ChainError::TimestampTooEarly { .. }
+        | bitcoin_rs_chain::ChainError::NbitsMismatch { .. } => Permanent,
+        bitcoin_rs_chain::ChainError::NodeIdOverflow { .. }
+        | bitcoin_rs_chain::ChainError::UnknownNode { .. }
+        | bitcoin_rs_chain::ChainError::DuplicateHeader { .. }
+        | bitcoin_rs_chain::ChainError::KnownInvalidHeader { .. }
+        | bitcoin_rs_chain::ChainError::MissingParent { .. }
+        | bitcoin_rs_chain::ChainError::InvalidParent { .. }
+        | bitcoin_rs_chain::ChainError::NonContinuousHeader { .. }
+        | bitcoin_rs_chain::ChainError::ZeroTarget { .. }
+        | bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }
+        | bitcoin_rs_chain::ChainError::InvalidPow { .. }
+        | bitcoin_rs_chain::ChainError::ChainworkOverflow { .. }
+        | bitcoin_rs_chain::ChainError::HeightOverflow { .. }
+        | bitcoin_rs_chain::ChainError::NoCommonAncestor { .. }
+        | bitcoin_rs_chain::ChainError::TimestampTooFarAhead { .. } => Operational,
     }
-    let Some(applied) = handles.applied_tip.load_full() else {
-        return ProvenWindow::default();
-    };
+}
 
-    let context_started = quanta::Instant::now();
+fn classify_consensus_error(
+    error: &bitcoin_rs_consensus::ConsensusError,
+) -> WindowApplyDisposition {
+    use WindowApplyDisposition::{BodyMutated, Operational, Permanent};
+    use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
+    match error {
+        ConsensusError::MerkleRoot
+        | ConsensusError::MerkleMutation
+        | ConsensusError::SixtyFourByteMutation
+        | ConsensusError::WitnessNonceSize
+        | ConsensusError::WitnessCommitment
+        | ConsensusError::UnexpectedWitness => BodyMutated,
+        ConsensusError::Encoding(_)
+        | ConsensusError::PrevoutMatrixSize { .. }
+        | ConsensusError::PrevoutCount { .. }
+        | ConsensusError::PrevoutMismatch { .. }
+        | ConsensusError::UnsupportedEngine { .. }
+        | ConsensusError::Kernel(_)
+        | ConsensusError::Script {
+            engine: ScriptEngine::Kernel,
+            ..
+        } => Operational,
+        ConsensusError::EmptyInputs
+        | ConsensusError::EmptyOutputs
+        | ConsensusError::CoinbaseScriptSigSize { .. }
+        | ConsensusError::NullPrevout { .. }
+        | ConsensusError::DuplicateInput { .. }
+        | ConsensusError::MissingPrevout { .. }
+        | ConsensusError::OutputValueOverflow
+        | ConsensusError::InputsLessThanOutputs { .. }
+        | ConsensusError::Script { .. }
+        | ConsensusError::SigopsLimit { .. }
+        | ConsensusError::EmptyBlock
+        | ConsensusError::MissingCoinbase
+        | ConsensusError::ExtraCoinbase { .. }
+        | ConsensusError::CoinbaseAmount { .. }
+        | ConsensusError::BlockValueOverflow
+        | ConsensusError::BlockWeight { .. }
+        | ConsensusError::BlockBaseSize { .. }
+        | ConsensusError::SignetSolution
+        | ConsensusError::Bip { .. } => Permanent,
+    }
+}
+
+fn window_contexts(
+    handles: &Chainstate,
+    applied: &bitcoin_rs_chain::TipSnapshot,
+    payloads: &[&BlockPayload],
+) -> Option<Vec<BlockValidationContext>> {
+    let tree = handles.block_tree.read();
     let mut contexts = Vec::with_capacity(payloads.len());
-    {
-        let tree = handles.block_tree.read();
-        let mut parent_id = applied.tip_id;
-        let mut parent_hash = applied.hash;
-        for (index, &payload) in payloads.iter().enumerate() {
-            let block = payload.block();
-            let hash = block.block_hash().0;
-            if block.header.prev_blockhash.0 != parent_hash {
-                return ProvenWindow::default();
-            }
-            let Some(height) = u32::try_from(index)
-                .ok()
-                .and_then(|offset| applied.height.checked_add(offset))
-                .and_then(|height| height.checked_add(1))
-            else {
-                return ProvenWindow::default();
-            };
-            let softfork =
-                bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
-            let cutoff = bitcoin_rs_consensus::locktime_cutoff(
-                softfork.csv_active,
-                tree.median_time_past_at(parent_id).unwrap_or(0),
-                block.header.time,
-            );
-            let Some(node_id) = tree.lookup(hash) else {
-                return ProvenWindow::default();
-            };
-            contexts.push(BlockValidationContext {
-                hash,
-                parent: parent_hash,
-                height,
-                flags: bitcoin_rs_consensus::verify_flags(handles.network, height, hash, softfork),
-                locktime_cutoff: cutoff,
-            });
-            parent_id = node_id;
-            parent_hash = hash;
+    let mut parent_id = applied.tip_id;
+    let mut parent_hash = applied.hash;
+    for (index, &payload) in payloads.iter().enumerate() {
+        let block = payload.block();
+        let hash = block.block_hash().0;
+        if block.header.prev_blockhash.0 != parent_hash {
+            return None;
         }
+        let height = u32::try_from(index)
+            .ok()
+            .and_then(|offset| applied.height.checked_add(offset))
+            .and_then(|height| height.checked_add(1))?;
+        let softfork =
+            bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
+        let locktime_rule = if softfork.csv_active {
+            bitcoin_rs_consensus::LocktimeRule::MedianTimePast
+        } else {
+            bitcoin_rs_consensus::LocktimeRule::CandidateTime
+        };
+        let cutoff = bitcoin_rs_consensus::locktime_cutoff(
+            locktime_rule,
+            tree.median_time_past_at(parent_id).unwrap_or(0),
+            block.header.time,
+        );
+        let node_id = tree.lookup(hash)?;
+        contexts.push(BlockValidationContext {
+            hash,
+            parent: parent_hash,
+            height,
+            flags: bitcoin_rs_consensus::verify_flags(handles.network, height, hash, softfork),
+            locktime_cutoff: cutoff,
+        });
+        parent_id = node_id;
+        parent_hash = hash;
     }
+    Some(contexts)
+}
 
-    metrics::histogram!("node.window.context_seconds")
-        .record(context_started.elapsed().as_secs_f64());
-
+fn prepare_window<'a>(
+    handles: &Chainstate,
+    payloads: &[&'a BlockPayload],
+    contexts: &[BlockValidationContext],
+) -> Option<Vec<PreparedApply<'a>>> {
     let parse_started = quanta::Instant::now();
     let parsed: Vec<core::result::Result<_, ApplyError>> = payloads
         .par_iter()
@@ -450,10 +513,10 @@ fn prove_window<'a, 'h>(
         bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
     );
     let mut prepared = Vec::with_capacity(payloads.len());
-    for ((&payload, parsed), context) in payloads.iter().zip(parsed).zip(&contexts) {
+    for ((&payload, parsed), context) in payloads.iter().zip(parsed).zip(contexts) {
         let block = payload.block();
         let Ok((script_source, facts)) = parsed else {
-            return ProvenWindow::default();
+            return None;
         };
         let tx_plan = plan_block_transactions(block, facts.txids());
         let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
@@ -467,7 +530,7 @@ fn prove_window<'a, 'h>(
             )
             .is_err()
         {
-            return ProvenWindow::default();
+            return None;
         }
         prepared.push(PreparedApply {
             script_source,
@@ -476,14 +539,20 @@ fn prove_window<'a, 'h>(
             resolved,
         });
     }
-
     metrics::histogram!("node.window.prepare_seconds")
         .record(prepare_started.elapsed().as_secs_f64());
+    Some(prepared)
+}
 
-    for ((&payload, unit), context) in payloads.iter().zip(prepared.iter_mut()).zip(&contexts) {
+fn window_commitments_match(
+    payloads: &[&BlockPayload],
+    prepared: &mut [PreparedApply<'_>],
+    contexts: &[BlockValidationContext],
+) -> bool {
+    for ((&payload, unit), context) in payloads.iter().zip(prepared.iter_mut()).zip(contexts) {
         let block = payload.block();
         if !unit.view.merkle_root_matches(block.header.merkle_root) {
-            return ProvenWindow::default();
+            return false;
         }
         if context
             .flags
@@ -495,89 +564,129 @@ fn prove_window<'a, 'h>(
                 bitcoin_rs_consensus::verify_block::block_witness_commitment_matches(block, wtxids)
             };
             if !commitment_matches {
-                return ProvenWindow::default();
+                return false;
             }
         }
     }
+    true
+}
 
+type WindowScriptProof<'h> = (
+    Option<bitcoin_rs_consensus::WindowCacheTakes<'h>>,
+    Vec<usize>,
+    Vec<bool>,
+);
+
+fn prove_window_scripts<'a, 'h>(
+    handles: &'h Chainstate,
+    payloads: &[&'a BlockPayload],
+    prepared: &mut [PreparedApply<'a>],
+    contexts: &[BlockValidationContext],
+) -> Option<WindowScriptProof<'h>> {
     let mut takes = handles
         .script_cache
         .as_deref()
         .map(bitcoin_rs_consensus::WindowCacheTakes::new);
     let mut take_starts = Vec::with_capacity(prepared.len());
     let mut skipped = vec![false; prepared.len()];
+    let checks_started = quanta::Instant::now();
+    let mut units = Vec::with_capacity(prepared.len());
+    for (index, ((&payload, unit), context)) in payloads
+        .iter()
+        .zip(prepared.iter_mut())
+        .zip(contexts)
+        .enumerate()
     {
-        let checks_started = quanta::Instant::now();
-        let mut units = Vec::with_capacity(prepared.len());
-        for (index, ((&payload, unit), context)) in payloads
-            .iter()
-            .zip(prepared.iter_mut())
-            .zip(&contexts)
-            .enumerate()
-        {
-            let block = payload.block();
-            if let Some(takes) = takes.as_ref() {
-                take_starts.push(takes.checkpoint());
-            }
-            if handles.scripts_verified_upstream(
-                BlockProvenance::Network,
-                context.height,
-                context.hash,
-            ) {
-                skipped[index] = true;
-                continue;
-            }
-            let Ok(resolved) = resolve_block_prevouts(
-                Arc::clone(&unit.resolved),
-                &block.txs,
-                &unit.tx_plan,
-                context.height,
-                unit.view.txids(),
-            ) else {
-                if let Some(takes) = takes.take() {
-                    takes.rollback();
-                }
-                return ProvenWindow::default();
-            };
-            unit.view.set_resolved(resolved);
-            if let Ok(checks) = bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
-                &mut unit.view,
-                context.height,
-                context.locktime_cutoff,
-                context.flags,
-                &unit.script_source,
-                takes.as_mut(),
-            ) {
-                units.push(checks);
-            } else {
-                if let Some(takes) = takes.take() {
-                    takes.rollback();
-                }
-                return ProvenWindow::default();
-            }
+        let block = payload.block();
+        if let Some(takes) = takes.as_ref() {
+            take_starts.push(takes.checkpoint());
         }
-        let checks_us = checks_started.elapsed().as_micros();
-        let verify_started = quanta::Instant::now();
-        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
-        let verify_us = verify_started.elapsed();
-        metrics::histogram!("node.window.verify_seconds").record(verify_us.as_secs_f64());
-        tracing::debug!(
-            checks_us,
-            verify_us = verify_us.as_micros(),
-            units = units.len(),
-            "prove_window: profile"
-        );
-        if verdict.is_err() {
+        if handles.scripts_verified_upstream(BlockProvenance::Network, context.height, context.hash)
+        {
+            skipped[index] = true;
+            continue;
+        }
+        let Ok(resolved) = resolve_block_prevouts(
+            Arc::clone(&unit.resolved),
+            &block.txs,
+            &unit.tx_plan,
+            context.height,
+            unit.view.txids(),
+        ) else {
             if let Some(takes) = takes.take() {
                 takes.rollback();
             }
-            return ProvenWindow::default();
-        }
-        if !units.is_empty() {
-            metrics::counter!("node.window.verify_success_total").increment(1);
+            return None;
+        };
+        unit.view.set_resolved(resolved);
+        if let Ok(checks) = bitcoin_rs_consensus::verify_tx::prepare_block_script_checks(
+            &mut unit.view,
+            context.height,
+            context.locktime_cutoff,
+            context.flags,
+            &unit.script_source,
+            takes.as_mut(),
+        ) {
+            units.push(checks);
+        } else {
+            if let Some(takes) = takes.take() {
+                takes.rollback();
+            }
+            return None;
         }
     }
+    let checks_us = checks_started.elapsed().as_micros();
+    let verify_started = quanta::Instant::now();
+    let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
+    let verify_us = verify_started.elapsed();
+    metrics::histogram!("node.window.verify_seconds").record(verify_us.as_secs_f64());
+    tracing::debug!(
+        checks_us,
+        verify_us = verify_us.as_micros(),
+        units = units.len(),
+        "prove_window: profile"
+    );
+    if verdict.is_err() {
+        if let Some(takes) = takes.take() {
+            takes.rollback();
+        }
+        return None;
+    }
+    if !units.is_empty() {
+        metrics::counter!("node.window.verify_success_total").increment(1);
+    }
+    Some((takes, take_starts, skipped))
+}
 
+fn prove_window<'a, 'h>(
+    handles: &'h Chainstate,
+    payloads: &[&'a BlockPayload],
+) -> ProvenWindow<'a, 'h> {
+    if payloads.is_empty() {
+        return ProvenWindow::default();
+    }
+    let Some(applied) = handles.applied_tip.load_full() else {
+        return ProvenWindow::default();
+    };
+
+    let context_started = quanta::Instant::now();
+    let Some(contexts) = window_contexts(handles, &applied, payloads) else {
+        return ProvenWindow::default();
+    };
+    metrics::histogram!("node.window.context_seconds")
+        .record(context_started.elapsed().as_secs_f64());
+
+    let Some(mut prepared) = prepare_window(handles, payloads, &contexts) else {
+        return ProvenWindow::default();
+    };
+    if !window_commitments_match(payloads, &mut prepared, &contexts) {
+        return ProvenWindow::default();
+    }
+    let Some((takes, take_starts, skipped)) =
+        prove_window_scripts(handles, payloads, &mut prepared, &contexts)
+    else {
+        return ProvenWindow::default();
+    };
     let proven = prepared
         .into_iter()
         .zip(contexts)

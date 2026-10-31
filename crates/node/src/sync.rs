@@ -199,8 +199,11 @@ impl SyncChain for NodeSyncChain {
                     .segwit_active
                 })
         };
-        bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
-            .map_err(|error| -> SyncChainError { Box::new(error) })
+        bitcoin_rs_consensus::check_block_body_binding(
+            block,
+            bitcoin_rs_consensus::BlockRuleContext { segwit_active },
+        )
+        .map_err(|error| -> SyncChainError { Box::new(error) })
     }
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::{TipSnapshot, softfork_state};
-use bitcoin_rs_consensus::check_block_body_binding;
+use bitcoin_rs_consensus::{BlockRuleContext, check_block_body_binding};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
@@ -433,7 +433,7 @@ impl<'a> Projection<'a> {
                 .and_then(|node| node.parent);
             softfork_state(&tree, self.ctx.chain.chain_network, parent, record.height).segwit_active
         };
-        check_block_body_binding(&block, segwit_active).map_err(|_| {
+        check_block_body_binding(&block, BlockRuleContext { segwit_active }).map_err(|_| {
             internal_error("stored block transaction or witness commitment mismatch")
         })?;
         Ok((record, block))

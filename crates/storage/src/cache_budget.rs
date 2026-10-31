@@ -29,18 +29,23 @@ pub fn clamp_dbcache_bytes(dbcache_mb: u64) -> u64 {
     bytes.clamp(MIN_DBCACHE_BYTES, MAX_DBCACHE_BYTES)
 }
 
-/// Divides a clamped cache budget across the enabled persistent namespaces.
+/// Divides a clamped cache budget across chainstate and the transaction index.
 ///
-/// Shares floor to whole bytes; the rounding remainder (and every disabled
-/// namespace's share) is redistributed to chainstate. The returned shares
-/// therefore always sum to at most `total_bytes`.
+/// Shares floor to whole bytes; the rounding remainder is redistributed to
+/// chainstate. The returned shares therefore always sum to at most `total_bytes`.
 #[must_use]
-pub fn split_cache_budget(total_bytes: u64, txindex_enabled: bool) -> Vec<CacheBudgetShare> {
-    let txindex_bytes = if txindex_enabled {
-        total_bytes * TXINDEX_CACHE_SHARE_PCT / 100
-    } else {
-        0
-    };
+pub fn split_cache_budget_with_txindex(total_bytes: u64) -> Vec<CacheBudgetShare> {
+    cache_shares(total_bytes, total_bytes * TXINDEX_CACHE_SHARE_PCT / 100)
+}
+
+/// Gives the whole clamped cache budget to chainstate and no share to the
+/// transaction index.
+#[must_use]
+pub fn split_cache_budget_without_txindex(total_bytes: u64) -> Vec<CacheBudgetShare> {
+    cache_shares(total_bytes, 0)
+}
+
+fn cache_shares(total_bytes: u64, txindex_bytes: u64) -> Vec<CacheBudgetShare> {
     let chainstate_bytes = total_bytes.saturating_sub(txindex_bytes);
     vec![
         CacheBudgetShare {

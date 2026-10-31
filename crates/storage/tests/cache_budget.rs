@@ -1,18 +1,22 @@
 use bitcoin_rs_storage::cache_budget::{
     CHAINSTATE_CACHE_SHARE_PCT, MAX_DBCACHE_BYTES, MIN_DBCACHE_BYTES, TXINDEX_CACHE_SHARE_PCT,
-    clamp_dbcache_bytes, split_cache_budget,
+    clamp_dbcache_bytes, split_cache_budget_with_txindex, split_cache_budget_without_txindex,
 };
 
 #[test]
 fn shares_sum_within_budget_for_every_enabled_combination() {
+    let splits = [
+        split_cache_budget_with_txindex,
+        split_cache_budget_without_txindex,
+    ];
     for mb in [0_u64, 1, 16, 17, 333, 450, 999, 1 << 20, u64::MAX] {
         let total = clamp_dbcache_bytes(mb);
         assert!(
             (MIN_DBCACHE_BYTES..=MAX_DBCACHE_BYTES).contains(&total),
             "clamped budget {total} escaped the documented bounds for input {mb}"
         );
-        for txindex in [true, false] {
-            let shares = split_cache_budget(total, txindex);
+        for split in splits {
+            let shares = split(total);
             let sum = shares.iter().map(|share| share.bytes).sum::<u64>();
             assert!(
                 sum <= total,
@@ -25,11 +29,11 @@ fn shares_sum_within_budget_for_every_enabled_combination() {
 #[test]
 fn disabled_namespaces_redistribute_to_chainstate() {
     let total = clamp_dbcache_bytes(450);
-    let shares = split_cache_budget(total, false);
+    let shares = split_cache_budget_without_txindex(total);
     assert_eq!(shares[0].bytes, total, "chainstate takes the full budget");
     assert_eq!(shares[1].bytes, 0);
 
-    let shares = split_cache_budget(total, true);
+    let shares = split_cache_budget_with_txindex(total);
     assert_eq!(
         shares[1].bytes,
         total * TXINDEX_CACHE_SHARE_PCT / 100,
@@ -45,7 +49,7 @@ fn disabled_namespaces_redistribute_to_chainstate() {
 #[test]
 fn exact_percentages_at_a_clean_budget() {
     let total = clamp_dbcache_bytes(1000);
-    let shares = split_cache_budget(total, true);
+    let shares = split_cache_budget_with_txindex(total);
     assert_eq!(shares[0].bytes, total * CHAINSTATE_CACHE_SHARE_PCT / 100);
     assert_eq!(shares[1].bytes, total * TXINDEX_CACHE_SHARE_PCT / 100);
 }
@@ -54,7 +58,7 @@ fn exact_percentages_at_a_clean_budget() {
 fn minimum_budget_split_with_all_namespaces_enabled() {
     let total = clamp_dbcache_bytes(16);
     assert_eq!(total, MIN_DBCACHE_BYTES);
-    let shares = split_cache_budget(total, true);
+    let shares = split_cache_budget_with_txindex(total);
     assert_eq!(
         shares[0].bytes, 13_421_773,
         "chainstate keeps the remainder"

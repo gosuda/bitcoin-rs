@@ -81,98 +81,156 @@ fn parallel_shared_digests_match_reference_for_each_input_context() {
             let (cache, tx, prevouts, reference, reference_prevouts) =
                 (&cache, &tx, &prevouts, &reference, &reference_prevouts);
             scope.spawn(move || {
-                let mut oracle = OracleCache::new(reference);
-                for mode in MODES {
-                    let raw = u32::from(mode.to_u8());
-                    let legacy_script = bitcoin::Script::from_bytes(&[0x51, 0x52]);
-                    assert_eq!(
-                        cache
-                            .legacy_signature_hash(input, legacy_script.as_bytes(), raw)
-                            .expect("legacy"),
-                        Hash256::from_le_bytes(
-                            oracle
-                                .legacy_signature_hash(input, legacy_script, raw)
-                                .expect("oracle legacy")
-                                .as_byte_array()
-                        ),
-                    );
-                    if mode != Sighash::Default {
-                        let script = bitcoin::Script::from_bytes(&[0x51, 0xab, 0x52]);
-                        let value = prevouts[input].value;
-                        assert_eq!(
-                            cache
-                                .segwit_v0_signature_hash(input, script.as_bytes(), value, mode)
-                                .expect("BIP143"),
-                            Hash256::from_le_bytes(
-                                oracle
-                                    .p2wsh_signature_hash(
-                                        input,
-                                        script,
-                                        bitcoin::Amount::from_sat(value.to_sat()),
-                                        EcdsaSighashType::from_consensus(raw)
-                                    )
-                                    .expect("oracle BIP143")
-                                    .as_byte_array()
-                            ),
-                        );
-                    }
-                    for annex in [None, Some(&[0x50, 0x01][..]), Some(&[0x50, 0x02, 0x03][..])] {
-                        let leaf = bitcoin::TapLeafHash::from_script(
-                            bitcoin::Script::from_bytes(&[0x51, 0xab, 0xac]),
-                            bitcoin::taproot::LeafVersion::TapScript,
-                        );
-                        for separator in [None, Some(u32::MAX), Some(0), Some(2)] {
-                            let native_leaf = separator.map(|position| {
-                                (Hash256::from_le_bytes(leaf.as_byte_array()), position)
-                            });
-                            let result = cache.taproot_signature_hash(
-                                input,
-                                prevouts,
-                                annex,
-                                native_leaf,
-                                mode,
-                            );
-                            let expected = oracle.taproot_signature_hash(
-                                input,
-                                &Prevouts::All(reference_prevouts),
-                                annex.map(|bytes| Annex::new(bytes).expect("annex")),
-                                separator.map(|position| (leaf, position)),
-                                TapSighashType::from_consensus_u8(mode.to_u8()).expect("mode"),
-                            );
-                            if input >= tx.outputs.len()
-                                && matches!(mode, Sighash::Single | Sighash::SingleAnyoneCanPay)
-                            {
-                                assert!(expected.is_err());
-                                assert_eq!(
-                                    result,
-                                    Err(SighashError::SingleMissingOutput {
-                                        input_index: input,
-                                        outputs_length: tx.outputs.len()
-                                    })
-                                );
-                            } else {
-                                assert_eq!(
-                                    result.expect("BIP341"),
-                                    Hash256::from_le_bytes(
-                                        expected.expect("oracle BIP341").as_byte_array()
-                                    )
-                                );
-                            }
-                        }
-                    }
-                }
+                let context = SharedContext {
+                    tx,
+                    prevouts,
+                    reference_prevouts,
+                };
+                compare_input_contexts(cache, reference, &context, input);
             });
         }
     });
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one mixed independently signed transaction fixture"
-)]
+struct SharedContext<'a> {
+    tx: &'a Tx,
+    prevouts: &'a [TxOut],
+    reference_prevouts: &'a [bitcoin::TxOut],
+}
+
+fn compare_input_contexts(
+    cache: &SighashCache<'_>,
+    reference: &bitcoin::Transaction,
+    context: &SharedContext<'_>,
+    input: usize,
+) {
+    let mut oracle = OracleCache::new(reference);
+    for mode in MODES {
+        let raw = u32::from(mode.to_u8());
+        assert_legacy_digest_matches(cache, &oracle, input, raw);
+        if mode != Sighash::Default {
+            assert_bip143_digest_matches(cache, &mut oracle, context, input, mode);
+        }
+        assert_taproot_digests_match(cache, &mut oracle, context, input, mode);
+    }
+}
+
+fn assert_legacy_digest_matches(
+    cache: &SighashCache<'_>,
+    oracle: &OracleCache<&bitcoin::Transaction>,
+    input: usize,
+    raw: u32,
+) {
+    let legacy_script = bitcoin::Script::from_bytes(&[0x51, 0x52]);
+    assert_eq!(
+        cache
+            .legacy_signature_hash(input, legacy_script.as_bytes(), raw)
+            .expect("legacy"),
+        Hash256::from_le_bytes(
+            oracle
+                .legacy_signature_hash(input, legacy_script, raw)
+                .expect("oracle legacy")
+                .as_byte_array()
+        ),
+    );
+}
+
+fn assert_bip143_digest_matches(
+    cache: &SighashCache<'_>,
+    oracle: &mut OracleCache<&bitcoin::Transaction>,
+    context: &SharedContext<'_>,
+    input: usize,
+    mode: Sighash,
+) {
+    let raw = u32::from(mode.to_u8());
+    let script = bitcoin::Script::from_bytes(&[0x51, 0xab, 0x52]);
+    let value = context.prevouts[input].value;
+    assert_eq!(
+        cache
+            .segwit_v0_signature_hash(input, script.as_bytes(), value, mode)
+            .expect("BIP143"),
+        Hash256::from_le_bytes(
+            oracle
+                .p2wsh_signature_hash(
+                    input,
+                    script,
+                    bitcoin::Amount::from_sat(value.to_sat()),
+                    EcdsaSighashType::from_consensus(raw)
+                )
+                .expect("oracle BIP143")
+                .as_byte_array()
+        ),
+    );
+}
+
+fn assert_taproot_digests_match(
+    cache: &SighashCache<'_>,
+    oracle: &mut OracleCache<&bitcoin::Transaction>,
+    context: &SharedContext<'_>,
+    input: usize,
+    mode: Sighash,
+) {
+    let leaf = bitcoin::TapLeafHash::from_script(
+        bitcoin::Script::from_bytes(&[0x51, 0xab, 0xac]),
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
+    for annex in [None, Some(&[0x50, 0x01][..]), Some(&[0x50, 0x02, 0x03][..])] {
+        for separator in [None, Some(u32::MAX), Some(0), Some(2)] {
+            let native_leaf =
+                separator.map(|position| (Hash256::from_le_bytes(leaf.as_byte_array()), position));
+            let result =
+                cache.taproot_signature_hash(input, context.prevouts, annex, native_leaf, mode);
+            let expected = oracle.taproot_signature_hash(
+                input,
+                &Prevouts::All(context.reference_prevouts),
+                annex.map(|bytes| Annex::new(bytes).expect("annex")),
+                separator.map(|position| (leaf, position)),
+                TapSighashType::from_consensus_u8(mode.to_u8()).expect("mode"),
+            );
+            if input >= context.tx.outputs.len()
+                && matches!(mode, Sighash::Single | Sighash::SingleAnyoneCanPay)
+            {
+                assert!(expected.is_err());
+                assert_eq!(
+                    result,
+                    Err(SighashError::SingleMissingOutput {
+                        input_index: input,
+                        outputs_length: context.tx.outputs.len()
+                    })
+                );
+            } else {
+                assert_eq!(
+                    result.expect("BIP341"),
+                    Hash256::from_le_bytes(expected.expect("oracle BIP341").as_byte_array())
+                );
+            }
+        }
+    }
+}
+
 fn signed_fixture() -> (Tx, Vec<TxOut>) {
     let (mut tx, mut prevouts) = fixture(42, 42);
     tx.lock_time = LockTime::ZERO;
+    let signing = signing_fixture();
+    assign_output_scripts(&mut prevouts, &signing);
+    let reference = oracle_tx(&tx);
+    let reference_prevouts = oracle_prevouts(&prevouts);
+    sign_inputs(&mut tx, &reference, &reference_prevouts, &signing);
+    (tx, prevouts)
+}
+
+struct SigningFixture {
+    key: SecretKey,
+    keypair: Keypair,
+    script: Vec<u8>,
+    witness_script: Vec<u8>,
+    tapscript: bitcoin::ScriptBuf,
+    leaf: bitcoin::TapLeafHash,
+    control: Vec<u8>,
+    output_key: [u8; 32],
+}
+
+fn signing_fixture() -> SigningFixture {
     let key = SecretKey::from_slice(&[7; 32]).expect("test key");
     let pubkey = PublicKey::from_secret_key(SECP256K1, &key);
     let keypair = Keypair::from_secret_key(SECP256K1, &key);
@@ -195,98 +253,143 @@ fn signed_fixture() -> (Tx, Vec<TxOut>) {
         .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript))
         .expect("control block")
         .serialize();
+    SigningFixture {
+        key,
+        keypair,
+        script,
+        witness_script,
+        tapscript,
+        leaf,
+        control,
+        output_key: tree.output_key().serialize(),
+    }
+}
+
+fn assign_output_scripts(prevouts: &mut [TxOut], fixture: &SigningFixture) {
     for (index, output) in prevouts.iter_mut().enumerate() {
         output.script_pubkey = match index % 4 {
-            0 => Script::from_bytes(script.clone()),
+            0 => Script::from_bytes(fixture.script.clone()),
             1 => {
                 let mut program = vec![0, 32];
-                program
-                    .extend_from_slice(bitcoin::WScriptHash::hash(&witness_script).as_byte_array());
+                program.extend_from_slice(
+                    bitcoin::WScriptHash::hash(&fixture.witness_script).as_byte_array(),
+                );
                 Script::from_bytes(program)
             }
             _ => {
                 let mut program = vec![opcode::OP_PUSHNUM_1, 32];
                 let output_key = if index % 4 == 2 {
-                    keypair.x_only_public_key().0.serialize()
+                    fixture.keypair.x_only_public_key().0.serialize()
                 } else {
-                    tree.output_key().serialize()
+                    fixture.output_key
                 };
                 program.extend_from_slice(&output_key);
                 Script::from_bytes(program)
             }
         };
     }
-    let reference = oracle_tx(&tx);
-    let reference_prevouts = oracle_prevouts(&prevouts);
-    let mut oracle = OracleCache::new(&reference);
+}
+
+fn sign_inputs(
+    tx: &mut Tx,
+    reference: &bitcoin::Transaction,
+    reference_prevouts: &[bitcoin::TxOut],
+    fixture: &SigningFixture,
+) {
     for (index, input) in tx.inputs.iter_mut().enumerate() {
         let mode = MODES[index % MODES.len()];
         if index % 4 >= 2 {
-            let scriptpath = index % 4 == 3;
-            let mode = if scriptpath { mode } else { Sighash::Default };
-            let annex = [0x50, u8::try_from(index).expect("small index")];
-            let digest = oracle
-                .taproot_signature_hash(
-                    index,
-                    &Prevouts::All(&reference_prevouts),
-                    Some(Annex::new(&annex).expect("annex")),
-                    scriptpath.then_some((leaf, u32::MAX)),
-                    TapSighashType::from_consensus_u8(mode.to_u8()).expect("mode"),
-                )
-                .expect("taproot digest");
-            let mut signature = SECP256K1
-                .sign_schnorr_no_aux_rand(&Message::from_digest(digest.to_byte_array()), &keypair)
-                .serialize()
-                .to_vec();
-            if mode != Sighash::Default {
-                signature.push(mode.to_u8());
-            }
-            input.witness = if scriptpath {
-                Witness::from_stack(vec![
-                    signature,
-                    tapscript.to_bytes(),
-                    control.clone(),
-                    annex.to_vec(),
-                ])
-            } else {
-                Witness::from_stack(vec![signature, annex.to_vec()])
-            };
+            sign_taproot_input(input, index, mode, reference, reference_prevouts, fixture);
         } else {
-            let mode = if mode == Sighash::Default {
-                Sighash::All
-            } else {
-                mode
-            };
-            let script = bitcoin::Script::from_bytes(&script);
-            let digest = if index % 4 == 0 {
-                oracle
-                    .legacy_signature_hash(index, script, u32::from(mode.to_u8()))
-                    .expect("legacy digest")
-                    .to_byte_array()
-            } else {
-                oracle
-                    .p2wsh_signature_hash(
-                        index,
-                        script,
-                        reference_prevouts[index].value,
-                        EcdsaSighashType::from_consensus(u32::from(mode.to_u8())),
-                    )
-                    .expect("BIP143 digest")
-                    .to_byte_array()
-            };
-            let mut signature = SECP256K1
-                .sign_ecdsa(&Message::from_digest(digest), &key)
-                .serialize_der()
-                .to_vec();
-            signature.push(mode.to_u8());
-            if index % 4 == 0 {
-                input.script_sig = Script::from_bytes(push_data(&signature));
-            } else {
-                input.witness = Witness::from_stack(vec![signature, witness_script.clone()]);
-            }
+            sign_ecdsa_input(input, index, mode, reference, reference_prevouts, fixture);
         }
     }
-    (tx, prevouts)
+}
+
+fn sign_taproot_input(
+    input: &mut TxIn,
+    index: usize,
+    mode: Sighash,
+    reference: &bitcoin::Transaction,
+    reference_prevouts: &[bitcoin::TxOut],
+    fixture: &SigningFixture,
+) {
+    let scriptpath = index % 4 == 3;
+    let mode = if scriptpath { mode } else { Sighash::Default };
+    let annex = [0x50, u8::try_from(index).expect("small index")];
+    let mut oracle = OracleCache::new(reference);
+    let digest = oracle
+        .taproot_signature_hash(
+            index,
+            &Prevouts::All(reference_prevouts),
+            Some(Annex::new(&annex).expect("annex")),
+            scriptpath.then_some((fixture.leaf, u32::MAX)),
+            TapSighashType::from_consensus_u8(mode.to_u8()).expect("mode"),
+        )
+        .expect("taproot digest");
+    let mut signature = SECP256K1
+        .sign_schnorr_no_aux_rand(
+            &Message::from_digest(digest.to_byte_array()),
+            &fixture.keypair,
+        )
+        .serialize()
+        .to_vec();
+    if mode != Sighash::Default {
+        signature.push(mode.to_u8());
+    }
+    input.witness = if scriptpath {
+        Witness::from_stack(vec![
+            signature,
+            fixture.tapscript.to_bytes(),
+            fixture.control.clone(),
+            annex.to_vec(),
+        ])
+    } else {
+        Witness::from_stack(vec![signature, annex.to_vec()])
+    };
+}
+
+fn sign_ecdsa_input(
+    input: &mut TxIn,
+    index: usize,
+    mode: Sighash,
+    reference: &bitcoin::Transaction,
+    reference_prevouts: &[bitcoin::TxOut],
+    fixture: &SigningFixture,
+) {
+    let mode = if mode == Sighash::Default {
+        Sighash::All
+    } else {
+        mode
+    };
+    let script = bitcoin::Script::from_bytes(&fixture.script);
+    let mut oracle = OracleCache::new(reference);
+    let digest = if index.is_multiple_of(4) {
+        oracle
+            .legacy_signature_hash(index, script, u32::from(mode.to_u8()))
+            .expect("legacy digest")
+            .to_byte_array()
+    } else {
+        oracle
+            .p2wsh_signature_hash(
+                index,
+                script,
+                reference_prevouts[index].value,
+                EcdsaSighashType::from_consensus(u32::from(mode.to_u8())),
+            )
+            .expect("BIP143 digest")
+            .to_byte_array()
+    };
+    let mut signature = SECP256K1
+        .sign_ecdsa(&Message::from_digest(digest), &fixture.key)
+        .serialize_der()
+        .to_vec();
+    signature.push(mode.to_u8());
+    if index.is_multiple_of(4) {
+        input.script_sig = Script::from_bytes(push_data(&signature));
+    } else {
+        input.witness = Witness::from_stack(vec![signature, fixture.witness_script.clone()]);
+    }
 }
 
 fn verify_block(

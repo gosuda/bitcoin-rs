@@ -23,12 +23,8 @@ const BIP30_DUPLICATE_TXID_EXCEPTIONS: [(u32, Hash256); 2] = [
     ),
 ];
 
-pub fn check_bip30(
-    height: u32,
-    block_hash: Hash256,
-    has_duplicate_txid: bool,
-) -> Result<(), ConsensusError> {
-    if !has_duplicate_txid || is_bip30_exception(height, block_hash) {
+pub fn check_duplicate_txid(height: u32, block_hash: Hash256) -> Result<(), ConsensusError> {
+    if is_bip30_exception(height, block_hash) {
         return Ok(());
     }
     Err(ConsensusError::Bip {
@@ -50,7 +46,7 @@ pub fn is_bip30_exception(height: u32, block_hash: Hash256) -> bool {
 mod tests {
     use bitcoin_rs_primitives::Hash256;
 
-    use super::{BIP30_DUPLICATE_TXID_EXCEPTIONS, check_bip30, is_bip30_exception};
+    use super::{BIP30_DUPLICATE_TXID_EXCEPTIONS, check_duplicate_txid, is_bip30_exception};
 
     fn exception(height: u32) -> Hash256 {
         BIP30_DUPLICATE_TXID_EXCEPTIONS
@@ -68,8 +64,8 @@ mod tests {
 
     #[test]
     fn documented_duplicate_txid_exception_blocks_pass() {
-        assert_eq!(check_bip30(91_842, exception(91_842), true), Ok(()));
-        assert_eq!(check_bip30(91_880, exception(91_880), true), Ok(()));
+        assert_eq!(check_duplicate_txid(91_842, exception(91_842)), Ok(()));
+        assert_eq!(check_duplicate_txid(91_880, exception(91_880)), Ok(()));
         assert!(is_bip30_exception(91_842, exception(91_842)));
         assert!(is_bip30_exception(91_880, exception(91_880)));
     }
@@ -78,8 +74,8 @@ mod tests {
     fn a_different_block_at_an_exception_height_is_not_exempt() {
         assert!(!is_bip30_exception(91_842, other_hash()));
         assert!(!is_bip30_exception(91_880, other_hash()));
-        assert!(check_bip30(91_842, other_hash(), true).is_err());
-        assert!(check_bip30(91_880, other_hash(), true).is_err());
+        assert!(check_duplicate_txid(91_842, other_hash()).is_err());
+        assert!(check_duplicate_txid(91_880, other_hash()).is_err());
     }
 
     #[test]
@@ -90,20 +86,14 @@ mod tests {
 
     #[test]
     fn original_coinbase_duplicate_txid_heights_fail() {
-        assert!(check_bip30(91_722, other_hash(), true).is_err());
-        assert!(check_bip30(91_812, other_hash(), true).is_err());
+        assert!(check_duplicate_txid(91_722, other_hash()).is_err());
+        assert!(check_duplicate_txid(91_812, other_hash()).is_err());
         assert!(!is_bip30_exception(91_722, other_hash()));
         assert!(!is_bip30_exception(91_812, other_hash()));
     }
 
     #[test]
     fn other_duplicate_txids_fail() {
-        assert!(check_bip30(91_723, other_hash(), true).is_err());
-    }
-
-    #[test]
-    fn a_block_without_a_duplicate_txid_always_passes() {
-        assert_eq!(check_bip30(91_723, other_hash(), false), Ok(()));
-        assert_eq!(check_bip30(91_842, exception(91_842), false), Ok(()));
+        assert!(check_duplicate_txid(91_723, other_hash()).is_err());
     }
 }

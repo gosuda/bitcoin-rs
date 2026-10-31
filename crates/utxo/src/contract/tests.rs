@@ -549,7 +549,19 @@ fn block_with_short_txids() -> (Block, Vec<Txid>) {
 fn a_short_txid_list_is_refused_at_every_height() {
     let (block, txids) = block_with_short_txids();
     for height in [0, HEIGHT] {
-        let outcome = build_block_changes(&block, height, &txids, None, 4, 4, &NoSpend, None, 64);
+        let outcome = build_block_changes(
+            &BlockChangeInputs {
+                block: &block,
+                height,
+                txids: &txids,
+                same_block_spent: None,
+                add_capacity: 4,
+                remove_capacity: 4,
+                overwritten: None,
+                max_script_size: 64,
+            },
+            &NoSpend,
+        );
         assert!(
             matches!(
                 outcome,

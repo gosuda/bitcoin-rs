@@ -62,8 +62,11 @@ impl TestChain {
                 bitcoin_rs_chain::softfork_state(tree, self.network, node.parent, node.height)
                     .segwit_active
             });
-        bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
-            .map_err(|error| -> SyncChainError { Box::new(error) })
+        bitcoin_rs_consensus::check_block_body_binding(
+            block,
+            bitcoin_rs_consensus::BlockRuleContext { segwit_active },
+        )
+        .map_err(|error| -> SyncChainError { Box::new(error) })
     }
 
     #[must_use]

@@ -111,10 +111,11 @@ impl NodeState {
         let epoch = initialize_data_dir(&config.data_dir)?;
 
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
-        let cache_shares = bitcoin_rs_storage::split_cache_budget(
-            cache_budget,
-            !derived_index_capabilities(&config).is_empty(),
-        );
+        let cache_shares = if derived_index_capabilities(&config).is_empty() {
+            bitcoin_rs_storage::split_cache_budget_without_txindex(cache_budget)
+        } else {
+            bitcoin_rs_storage::split_cache_budget_with_txindex(cache_budget)
+        };
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
         let (storage, block_files) =

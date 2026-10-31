@@ -154,7 +154,11 @@ impl Chainstate {
                 ))?
                 .active_at_block
         };
-        bitcoin_rs_consensus::check_block_body_binding(&block, segwit_active).map_err(|_| {
+        bitcoin_rs_consensus::check_block_body_binding(
+            &block,
+            bitcoin_rs_consensus::BlockRuleContext { segwit_active },
+        )
+        .map_err(|_| {
             BlockSpendsError::Corrupt("block body does not match its header commitments")
         })?;
         drop(bytes);

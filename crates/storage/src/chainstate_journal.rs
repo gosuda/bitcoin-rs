@@ -3,7 +3,7 @@ mod record;
 mod replay;
 mod writer;
 
-pub use emit::{JournalEmit, SharedJournalWriter, shared_journal_writer};
+pub use emit::{CheckpointBase, JournalEmit, SharedJournalWriter, shared_journal_writer};
 pub(crate) use record::crc32c;
 pub use record::{Coin, JournalRecord, Mutation};
 pub use replay::{JournalReplayBase, JournalReplayError, ReplayedHead, replay_committed_range};

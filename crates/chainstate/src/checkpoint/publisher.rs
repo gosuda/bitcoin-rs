@@ -120,29 +120,30 @@ impl CheckpointPublisher {
             .as_ref()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
         let mut result = self.publish_frozen(applied_tip.as_deref(), retirement);
-        let retire_full_revalidation_marker =
-            !matches!(retirement, DisconnectRetirement::RecoveryProgress);
-
         if let (Ok(CheckpointWrite::Published { reference }), Some(tip), Some(writer)) =
             (&result, applied_tip.as_ref(), journal.as_mut())
         {
             let compact_result = self.tip_prev_hash(tip).and_then(|tip_prev_hash| {
-                writer
-                    .compact_to_checkpoint(
-                        reference.generation,
-                        tip.height,
-                        tip.hash.to_le_bytes(),
-                        tip_prev_hash.to_le_bytes(),
-                        chain_tx_count,
-                        retire_full_revalidation_marker,
+                let base = bitcoin_rs_storage::chainstate_journal::CheckpointBase {
+                    generation: reference.generation,
+                    height: tip.height,
+                    hash: tip.hash.to_le_bytes(),
+                    prev_hash: tip_prev_hash.to_le_bytes(),
+                    chain_tx_count,
+                };
+                let compacted = match retirement {
+                    DisconnectRetirement::Ordinary | DisconnectRetirement::Recovered => {
+                        writer.compact_to_checkpoint(base)
+                    }
+                    DisconnectRetirement::RecoveryProgress => {
+                        writer.compact_to_checkpoint_for_recovery(base)
+                    }
+                };
+                compacted.map_err(|error| {
+                    CheckpointError::Store(
+                        bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(error.to_string()),
                     )
-                    .map_err(|error| {
-                        CheckpointError::Store(
-                            bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
-                                error.to_string(),
-                            ),
-                        )
-                    })
+                })
             });
             if let Err(error) = compact_result {
                 result = Err(error);
@@ -309,7 +310,7 @@ impl CheckpointPublisher {
         if len != witness.byte_len() {
             return;
         }
-        let _ = cell.offer(VerifiedSnapshotArtifact::seal(
+        cell.offer(VerifiedSnapshotArtifact::seal(
             file.into_std(),
             witness,
             SeedProvenance::Checkpoint(reference),
@@ -405,7 +406,7 @@ mod tests {
                 reference,
                 witness,
             );
-            let _ = sender.send(());
+            let _receiver_gone = sender.send(());
         });
         let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
         let rescue: Option<std::io::Result<cap_std::fs::File>> = if observed.is_err() {

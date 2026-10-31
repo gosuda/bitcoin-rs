@@ -241,15 +241,10 @@ pub(crate) fn restore_snapshot(
 }
 
 fn cold_initial_chainstate(
-    data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
     journal_config: ChainstateJournalConfig,
-    reset_journal: bool,
-) -> Result<InitialChainstate, RecoveryError> {
-    if journal_config.enabled && reset_journal {
-        drop(reset_journal_dir(data_dir)?);
-    }
-    Ok(InitialChainstate {
+) -> InitialChainstate {
+    InitialChainstate {
         utxo: UtxoSet::new(),
         coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
         tree: bitcoin_rs_chain::BlockTree::new(),
@@ -265,16 +260,21 @@ fn cold_initial_chainstate(
             chain_tx_count: 1,
             config: journal_config,
         }),
-    })
+    }
 }
 
-#[expect(clippy::too_many_lines)]
-pub fn prepare_initial_chainstate(
+fn discard_journal_and_start_cold(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
     journal_config: ChainstateJournalConfig,
-    durable_head: Option<&bitcoin_rs_storage::DurableHead>,
 ) -> Result<InitialChainstate, RecoveryError> {
+    if journal_config.enabled {
+        drop(reset_journal_dir(data_dir)?);
+    }
+    Ok(cold_initial_chainstate(network, journal_config))
+}
+
+fn open_checkpoint_data_dir(data_dir: &Path) -> Result<cap_std::fs::Dir, RecoveryError> {
     let checkpoint_data_dir =
         bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir).map_err(|source| {
             RecoveryError::OpenDataDir {
@@ -288,60 +288,92 @@ pub fn prepare_initial_chainstate(
             source,
         },
     )?;
-    let anchor = durable_head
-        .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, &head.assumeutxo))
-        .transpose()?
-        .flatten();
-    let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {
+    Ok(checkpoint_data_dir)
+}
+
+fn header_checkpoint_config(
+    network: bitcoin_rs_primitives::Network,
+) -> crate::checkpoint::headers::HeaderCheckpointConfig {
+    crate::checkpoint::headers::HeaderCheckpointConfig {
         network,
         genesis: network.genesis_block_hash(),
-    };
-    if requires_full_revalidation(data_dir) {
+    }
+}
+
+fn full_revalidation_cold_start(
+    network: bitcoin_rs_primitives::Network,
+    journal_config: ChainstateJournalConfig,
+) -> InitialChainstate {
+    metrics::counter!(
+        "node.chainstate_journal.fallback_total",
+        "reason" => "full_revalidation_marker"
+    )
+    .increment(1);
+    tracing::warn!(
+        restore_source = "cold",
+        reason = "fork_below_checkpoint_base",
+        "chainstate restore requires full validation"
+    );
+    cold_initial_chainstate(network, journal_config)
+}
+
+fn no_checkpoint_cold_start(
+    data_dir: &Path,
+    network: bitcoin_rs_primitives::Network,
+    journal_config: ChainstateJournalConfig,
+) -> Result<InitialChainstate, RecoveryError> {
+    if journal_config.enabled {
         metrics::counter!(
             "node.chainstate_journal.fallback_total",
-            "reason" => "full_revalidation_marker"
+            "reason" => "no_checkpoint"
         )
         .increment(1);
-        tracing::warn!(
-            restore_source = "cold",
-            reason = "fork_below_checkpoint_base",
-            "chainstate restore requires full validation"
-        );
-        return cold_initial_chainstate(data_dir, network, journal_config, false);
     }
-    if let Some(pinned) = anchor {
-        return restore_snapshot(data_dir, network, pinned);
-    }
-    let checkpoint_load =
-        crate::checkpoint::load_checkpoint_from_dir(&checkpoint_data_dir, checkpoint_config)?;
-    let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
-        if journal_config.enabled {
-            metrics::counter!(
-                "node.chainstate_journal.fallback_total",
-                "reason" => "no_checkpoint"
-            )
-            .increment(1);
-        }
-        tracing::info!(
-            restore_source = "cold",
-            reason = "no_complete_checkpoint",
-            "chainstate restore selected"
-        );
-        return cold_initial_chainstate(data_dir, network, journal_config, true);
-    };
-    let restored = *restored;
-    if !journal_config.enabled {
-        tracing::info!(
-            restore_source = "checkpoint",
-            height = restored.applied_tip.height,
-            hash = %restored.applied_tip.hash,
-            chain_tx_count = restored.applied_tip.chain_tx_count.to_wire(),
-            reason = "journal_disabled",
-            "chainstate restore selected"
-        );
-        return restored_initial(restored, journal_config);
-    }
+    tracing::info!(
+        restore_source = "cold",
+        reason = "no_complete_checkpoint",
+        "chainstate restore selected"
+    );
+    discard_journal_and_start_cold(data_dir, network, journal_config)
+}
 
+fn checkpoint_without_journal(
+    restored: crate::checkpoint::RestoredChainstate,
+    journal_config: ChainstateJournalConfig,
+) -> Result<InitialChainstate, RecoveryError> {
+    tracing::info!(
+        restore_source = "checkpoint",
+        height = restored.applied_tip.height,
+        hash = %restored.applied_tip.hash,
+        chain_tx_count = restored.applied_tip.chain_tx_count.to_wire(),
+        reason = "journal_disabled",
+        "chainstate restore selected"
+    );
+    restored_initial(restored, journal_config)
+}
+
+fn recover_checkpoint(
+    data_dir: &Path,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
+    journal_config: ChainstateJournalConfig,
+) -> Result<InitialChainstate, RecoveryError> {
+    drop(reset_journal_dir(data_dir)?);
+    let reloaded =
+        crate::checkpoint::load_checkpoint_from_dir(checkpoint_data_dir, checkpoint_config)?;
+    let crate::checkpoint::CheckpointLoad::Complete(reloaded) = reloaded else {
+        return Err(RecoveryError::CheckpointDisappeared);
+    };
+    restored_initial(*reloaded, journal_config)
+}
+
+fn replay_checkpoint_journal(
+    data_dir: &Path,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
+    journal_config: ChainstateJournalConfig,
+    restored: crate::checkpoint::RestoredChainstate,
+) -> Result<InitialChainstate, RecoveryError> {
     let crate::checkpoint::RestoredChainstate {
         generation: base_generation,
         tree,
@@ -363,44 +395,8 @@ pub fn prepare_initial_chainstate(
     );
     let replay_seconds = replay_started.elapsed().as_secs_f64();
     drop(journal_dir);
-    match replay {
-        Ok(replayed) => {
-            let replayed_records = replayed.applied_tip.height.saturating_sub(base_height);
-            let (restore_source, resume_source) = if replayed_records == 0 {
-                ("checkpoint", ResumeSource::Checkpoint)
-            } else {
-                ("journal", ResumeSource::Journal)
-            };
-            tracing::info!(
-                restore_source,
-                checkpoint_generation = base_generation,
-                checkpoint_height = base_height,
-                height = replayed.applied_tip.height,
-                hash = %replayed.applied_tip.hash,
-                replayed_records,
-                chain_tx_count = replayed.applied_tip.chain_tx_count.to_wire(),
-                replay_seconds,
-                "chainstate restore selected"
-            );
-            let bootstrap = JournalBootstrap {
-                open_existing: true,
-                base_generation,
-                height: replayed.applied_tip.height,
-                block_hash: replayed.applied_tip.hash.to_le_bytes(),
-                prev_hash: [0_u8; 32],
-                chain_tx_count: replayed.applied_tip.chain_tx_count.to_wire(),
-                config: journal_config,
-            };
-            Ok(InitialChainstate {
-                utxo: replayed.utxo,
-                coin_stats: replayed.coin_stats,
-                tree: replayed.tree,
-                applied_tip: Some(replayed.applied_tip),
-                resume_source,
-                journal_bootstrap: Some(bootstrap),
-                script_live_seed: seed,
-            })
-        }
+    let replayed = match replay {
+        Ok(replayed) => replayed,
         Err(error) => {
             let reason = error.reason();
             metrics::counter!(
@@ -420,15 +416,101 @@ pub fn prepare_initial_chainstate(
                 replay_seconds,
                 "chainstate journal rejected; checkpoint recovery selected"
             );
-            drop(reset_journal_dir(data_dir)?);
-            let reloaded = crate::checkpoint::load_checkpoint_from_dir(
-                &checkpoint_data_dir,
+            return recover_checkpoint(
+                data_dir,
+                checkpoint_data_dir,
                 checkpoint_config,
-            )?;
-            let crate::checkpoint::CheckpointLoad::Complete(reloaded) = reloaded else {
-                return Err(RecoveryError::CheckpointDisappeared);
-            };
-            restored_initial(*reloaded, journal_config)
+                journal_config,
+            );
         }
+    };
+    Ok(replayed_initial(
+        *replayed,
+        base_generation,
+        base_height,
+        replay_seconds,
+        journal_config,
+        seed,
+    ))
+}
+
+fn replayed_initial(
+    replayed: crate::journal::ReplayedState,
+    base_generation: u64,
+    base_height: u32,
+    replay_seconds: f64,
+    journal_config: ChainstateJournalConfig,
+    seed: Option<VerifiedSnapshotArtifact>,
+) -> InitialChainstate {
+    let replayed_records = replayed.applied_tip.height.saturating_sub(base_height);
+    let (restore_source, resume_source) = if replayed_records == 0 {
+        ("checkpoint", ResumeSource::Checkpoint)
+    } else {
+        ("journal", ResumeSource::Journal)
+    };
+    tracing::info!(
+        restore_source,
+        checkpoint_generation = base_generation,
+        checkpoint_height = base_height,
+        height = replayed.applied_tip.height,
+        hash = %replayed.applied_tip.hash,
+        replayed_records,
+        chain_tx_count = replayed.applied_tip.chain_tx_count.to_wire(),
+        replay_seconds,
+        "chainstate restore selected"
+    );
+    let bootstrap = JournalBootstrap {
+        open_existing: true,
+        base_generation,
+        height: replayed.applied_tip.height,
+        block_hash: replayed.applied_tip.hash.to_le_bytes(),
+        prev_hash: [0_u8; 32],
+        chain_tx_count: replayed.applied_tip.chain_tx_count.to_wire(),
+        config: journal_config,
+    };
+    InitialChainstate {
+        utxo: replayed.utxo,
+        coin_stats: replayed.coin_stats,
+        tree: replayed.tree,
+        applied_tip: Some(replayed.applied_tip),
+        resume_source,
+        journal_bootstrap: Some(bootstrap),
+        script_live_seed: seed,
     }
+}
+
+pub fn prepare_initial_chainstate(
+    data_dir: &Path,
+    network: bitcoin_rs_primitives::Network,
+    journal_config: ChainstateJournalConfig,
+    durable_head: Option<&bitcoin_rs_storage::DurableHead>,
+) -> Result<InitialChainstate, RecoveryError> {
+    let checkpoint_data_dir = open_checkpoint_data_dir(data_dir)?;
+    let anchor = durable_head
+        .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, &head.assumeutxo))
+        .transpose()?
+        .flatten();
+    let checkpoint_config = header_checkpoint_config(network);
+    if requires_full_revalidation(data_dir) {
+        return Ok(full_revalidation_cold_start(network, journal_config));
+    }
+    if let Some(pinned) = anchor {
+        return restore_snapshot(data_dir, network, pinned);
+    }
+    let checkpoint_load =
+        crate::checkpoint::load_checkpoint_from_dir(&checkpoint_data_dir, checkpoint_config)?;
+    let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
+        return no_checkpoint_cold_start(data_dir, network, journal_config);
+    };
+    let restored = *restored;
+    if !journal_config.enabled {
+        return checkpoint_without_journal(restored, journal_config);
+    }
+    replay_checkpoint_journal(
+        data_dir,
+        &checkpoint_data_dir,
+        checkpoint_config,
+        journal_config,
+        restored,
+    )
 }

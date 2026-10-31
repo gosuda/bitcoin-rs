@@ -214,13 +214,16 @@ fn write_sidecar(
         file.write_all(b"\n")?;
         file.sync_all()?;
         drop(file);
-        if let Ok(data) = std::fs::read(&current) {
-            if valid(&data) {
+        match std::fs::read(&current) {
+            Ok(data) if valid(&data) => {
                 let _ = std::fs::remove_file(&prev);
                 std::fs::rename(&current, &prev)?;
-            } else {
+            }
+            Ok(_) => {
                 let _ = std::fs::remove_file(&current);
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         std::fs::rename(&tmp, &current)?;
         let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;

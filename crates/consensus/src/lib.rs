@@ -29,25 +29,35 @@ pub use bip9::{
 };
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 
+/// The timestamp a block's locktime cutoff is measured against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocktimeRule {
+    /// BIP113 active: the cutoff is the previous median time past.
+    MedianTimePast,
+    /// BIP113 inactive: the cutoff is the candidate block time.
+    CandidateTime,
+}
+
 #[must_use]
 pub const fn locktime_cutoff(
-    csv_active: bool,
+    rule: LocktimeRule,
     prev_median_time_past: u32,
     candidate_time: u32,
 ) -> u32 {
-    if csv_active {
-        prev_median_time_past
-    } else {
-        candidate_time
+    match rule {
+        LocktimeRule::MedianTimePast => prev_median_time_past,
+        LocktimeRule::CandidateTime => candidate_time,
     }
 }
 
 #[cfg(test)]
 mod bip113_tests {
+    use super::{LocktimeRule, locktime_cutoff};
+
     #[test]
     fn locktime_cutoff_rule_switches_on_csv_activation() {
-        assert_eq!(super::locktime_cutoff(true, 500, 999), 500);
-        assert_eq!(super::locktime_cutoff(false, 500, 999), 999);
+        assert_eq!(locktime_cutoff(LocktimeRule::MedianTimePast, 500, 999), 500);
+        assert_eq!(locktime_cutoff(LocktimeRule::CandidateTime, 500, 999), 999);
     }
 }
 

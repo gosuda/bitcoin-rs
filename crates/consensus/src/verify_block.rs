@@ -87,7 +87,7 @@ pub fn verify_block_rules_precomputed(
     verify_block_merkle_and_size(block, facts)?;
     verify_coinbase_placement(&block.txs)?;
     verify_block_transactions_and_legacy_sigops(&block.txs)?;
-    verify_block_witness_rules(block, context.segwit_active, facts)?;
+    verify_block_witness_rules(block, context, facts)?;
     verify_block_weight(facts)
 }
 
@@ -143,13 +143,13 @@ fn verify_coinbase_placement(txs: &[Tx]) -> Result<(), ConsensusError> {
 
 fn verify_block_witness_rules(
     block: &Block,
-    segwit_active: bool,
+    context: BlockRuleContext,
     facts: &BlockFacts,
 ) -> Result<(), ConsensusError> {
     if let Some(wtxids) = facts.wtxids() {
-        return check_witness_malleation(block, segwit_active, wtxids);
+        return check_witness_malleation(block, context, wtxids);
     }
-    if segwit_active && witness_commitment(block).is_some() {
+    if context.segwit_active && witness_commitment(block).is_some() {
         return Err(ConsensusError::WitnessNonceSize);
     }
     if facts.has_witness() {
@@ -368,10 +368,10 @@ fn witness_commitment(block: &Block) -> Option<&[u8]> {
 
 fn check_witness_malleation(
     block: &Block,
-    expect_commitment: bool,
+    context: BlockRuleContext,
     wtxids: &[Wtxid],
 ) -> Result<(), ConsensusError> {
-    if expect_commitment {
+    if context.segwit_active {
         if let Some(commitment) = witness_commitment(block) {
             let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
                 return Err(ConsensusError::WitnessNonceSize);
@@ -393,9 +393,19 @@ fn check_witness_malleation(
 
 #[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
-    check_witness_malleation(block, true, wtxids).is_ok()
+    check_witness_malleation(
+        block,
+        BlockRuleContext {
+            segwit_active: true,
+        },
+        wtxids,
+    )
+    .is_ok()
 }
-pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {
+pub fn check_block_body_binding(
+    block: &Block,
+    context: BlockRuleContext,
+) -> Result<(), ConsensusError> {
     let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
     verify_merkle_root_with_txids(block, &txids)?;
     if is_sixty_four_byte_mutation(&block.txs) {
@@ -406,7 +416,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
-    if segwit_active && commitment.is_some() {
+    if context.segwit_active && commitment.is_some() {
         let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
             return Err(ConsensusError::WitnessNonceSize);
         };
@@ -415,7 +425,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
         }
     }
     let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
-    check_witness_malleation(block, segwit_active, &wtxids)
+    check_witness_malleation(block, context, &wtxids)
 }
 
 fn witness_commitment_hash_matches(

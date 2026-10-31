@@ -21,6 +21,10 @@ pub fn genesis_time() -> u32 {
     Network::Regtest.genesis_block().header.time
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "each expect guards a bound the preceding branch establishes"
+)]
 #[must_use]
 pub fn script_num_push(value: i64) -> Vec<u8> {
     if value == 0 {
@@ -30,14 +34,14 @@ pub fn script_num_push(value: i64) -> Vec<u8> {
         return vec![0x4f];
     }
     if (1..=16).contains(&value) {
-        let small = u8::try_from(value).unwrap_or_default();
+        let small = u8::try_from(value).expect("1..=16 fits a u8");
         return vec![0x50 + small];
     }
     let negative = value < 0;
     let mut magnitude = value.unsigned_abs();
     let mut bytes = Vec::new();
     while magnitude > 0 {
-        bytes.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
+        bytes.push(u8::try_from(magnitude & 0xff).expect("a masked byte is below 256"));
         magnitude >>= 8;
     }
     if let Some(last) = bytes.last_mut() {
@@ -48,7 +52,10 @@ pub fn script_num_push(value: i64) -> Vec<u8> {
         }
     }
     let mut out = Vec::with_capacity(bytes.len() + 1);
-    out.push(u8::try_from(bytes.len()).unwrap_or_default());
+    out.push(
+        u8::try_from(bytes.len())
+            .expect("an i64 magnitude serializes to at most 9 script-number bytes"),
+    );
     out.extend_from_slice(&bytes);
     out
 }

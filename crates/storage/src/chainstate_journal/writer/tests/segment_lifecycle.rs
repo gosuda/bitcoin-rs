@@ -1,4 +1,5 @@
 use super::*;
+use crate::chainstate_journal::CheckpointBase;
 use std::io::Write;
 
 #[test]
@@ -222,7 +223,13 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
         return Err("frozen writer accepted an append".into());
     };
     assert!(matches!(error, JournalWriterError::NotOpen { .. }));
-    writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 1,
+        height: 1,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 3,
+    })?;
     writer.resume()?;
     assert_eq!(writer.state(), WriterState::Open);
     writer.append(&sample_record(2))?;
@@ -239,7 +246,13 @@ fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResu
     )?;
 
     writer.freeze()?;
-    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false)?;
+    writer.compact_to_checkpoint_for_recovery(CheckpointBase {
+        generation: 1,
+        height: 0,
+        hash: [1; 32],
+        prev_hash: [0; 32],
+        chain_tx_count: 0,
+    })?;
     writer.resume()?;
 
     assert!(writer.dir.open(FULL_REVALIDATION_MARKER).is_ok());
@@ -258,7 +271,13 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     ));
     assert_eq!(writer.state(), WriterState::Open);
     assert!(matches!(
-        writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        writer.compact_to_checkpoint_for_recovery(CheckpointBase {
+            generation: 1,
+            height: 0,
+            hash: [1; 32],
+            prev_hash: [0; 32],
+            chain_tx_count: 0,
+        }),
         Err(JournalWriterError::NotOpen {
             state: "not frozen"
         })
@@ -273,7 +292,13 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     frozen.freeze()?;
     frozen.mark_append_gap(1);
     assert!(matches!(
-        frozen.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        frozen.compact_to_checkpoint_for_recovery(CheckpointBase {
+            generation: 1,
+            height: 0,
+            hash: [1; 32],
+            prev_hash: [0; 32],
+            chain_tx_count: 0,
+        }),
         Err(JournalWriterError::AppendGap { height: 1 })
     ));
     Ok(())
@@ -313,7 +338,13 @@ fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResul
         })
     ));
     writer.freeze()?;
-    writer.compact_to_checkpoint(7, 5, [5; 32], [4; 32], 15, true)?;
+    writer.compact_to_checkpoint(CheckpointBase {
+        generation: 7,
+        height: 5,
+        hash: [5; 32],
+        prev_hash: [4; 32],
+        chain_tx_count: 15,
+    })?;
     assert_eq!(
         writer
             .dir

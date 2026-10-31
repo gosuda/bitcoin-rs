@@ -377,4 +377,5 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used)]
 mod tests;

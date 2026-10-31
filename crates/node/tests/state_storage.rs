@@ -55,9 +55,13 @@ fn assert_chainstate_cache_share(backend: &str) -> Result<()> {
     config.storage.dbcache_mb = 64;
     config.p2p.listen.clear();
 
-    let expected =
-        bitcoin_rs_storage::split_cache_budget(clamp_budget(&config), txindex_enabled(&config))[0]
-            .bytes;
+    let budget = clamp_budget(&config);
+    let shares = if txindex_enabled(&config) {
+        bitcoin_rs_storage::split_cache_budget_with_txindex(budget)
+    } else {
+        bitcoin_rs_storage::split_cache_budget_without_txindex(budget)
+    };
+    let expected = shares[0].bytes;
     assert_ne!(
         expected,
         engine_default_cache_bytes(backend),

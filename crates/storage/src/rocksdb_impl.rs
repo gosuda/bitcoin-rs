@@ -14,6 +14,29 @@ pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
 
+/// One write's durability: its `storage.writes_total` label and whether it
+/// crosses the `Sync` boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteDurability {
+    Default,
+    Deferred,
+    Durable,
+}
+
+impl WriteDurability {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Deferred => "deferred",
+            Self::Durable => "durable",
+        }
+    }
+
+    const fn syncs(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+}
+
 pub struct RocksDbStore {
     db: rust_rocksdb::DB,
     write_lock: parking_lot::Mutex<()>,
@@ -122,24 +145,23 @@ impl RocksDbStore {
     fn write_with_durability(
         &self,
         batch: BufferedWriteBatch,
-        durability: &'static str,
-        sync: bool,
+        durability: WriteDurability,
     ) -> Result<(), StorageError> {
-        count_write(durability, batch.encoded_bytes);
+        count_write(durability.label(), batch.encoded_bytes);
         #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
             return Err(fault.injected_error());
         }
         #[cfg(any(test, feature = "test-seam"))]
-        let sync_fault = if sync {
+        let sync_fault = if durability.syncs() {
             self.faults.take_at(crate::trait_::PersistBoundary::Sync)
         } else {
             None
         };
         #[cfg(any(test, feature = "test-seam"))]
-        let effective_sync = sync_fault.is_none() && sync;
+        let effective_sync = sync_fault.is_none() && durability.syncs();
         #[cfg(not(any(test, feature = "test-seam")))]
-        let effective_sync = sync;
+        let effective_sync = durability.syncs();
         let rocks_batch = self.rocks_batch(batch)?;
         let outcome = if effective_sync {
             let mut write_options = WriteOptions::default();
@@ -235,17 +257,17 @@ impl KvStore for RocksDbStore {
 
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
-        self.write_with_durability(batch, "default", false)
+        self.write_with_durability(batch, WriteDurability::Default)
     }
 
     fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
-        self.write_with_durability(batch, "deferred", false)
+        self.write_with_durability(batch, WriteDurability::Deferred)
     }
 
     fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
-        self.write_with_durability(batch, "durable", true)
+        self.write_with_durability(batch, WriteDurability::Durable)
     }
 
     fn write_durable_if(
@@ -263,7 +285,7 @@ impl KvStore for RocksDbStore {
                 return Ok(false);
             }
         }
-        self.write_with_durability(batch, "durable", true)?;
+        self.write_with_durability(batch, WriteDurability::Durable)?;
         Ok(true)
     }
 

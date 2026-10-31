@@ -120,15 +120,24 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
     Ok(())
 }
 
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One datadir must survive the complete activation, convergence, reorg and restart sequence"
-)]
-fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() -> TestResult {
-    let fixture = Fixture::new()?;
-    let dir = tempfile::tempdir()?;
-    let (active, manager) = activate(dir.path(), &fixture)?;
+#[derive(Default)]
+struct SnapshotRestart {
+    child: Option<bitcoin_rs_primitives::Block>,
+    stats: CoinStats,
+}
+
+#[derive(Default)]
+struct UnacceptedCheckpoint {
+    coins: Option<bitcoin_rs_primitives::Hash256>,
+    stats: CoinStats,
+}
+
+fn finalize_snapshot_after_foreground_restart(
+    dir: &Path,
+    fixture: &Fixture,
+    out: &mut SnapshotRestart,
+) -> TestResult {
+    let (active, manager) = activate(dir, fixture)?;
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
         fixture.blocks[2].block_hash(),
         3,
@@ -146,9 +155,8 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     drop(manager);
     drop(active);
 
-    let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager =
-        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
+    let active = open_persistent(dir, &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
     assert_eq!(
         active
@@ -190,18 +198,26 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
     assert!(active.role().is_ordinary());
     assert_eq!(active.chain_events.snapshot(), events);
     assert_eq!(active.coin_stats.snapshot(), expected_stats);
-    drop(manager);
-    drop(active);
+    out.child = Some(child);
+    out.stats = expected_stats;
+    Ok(())
+}
 
-    let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager =
-        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
+fn rewind_below_the_snapshot_base(
+    dir: &Path,
+    fixture: &Fixture,
+    child: &bitcoin_rs_primitives::Block,
+    expected_stats: &CoinStats,
+    rewound: &mut CoinStats,
+) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
-    assert_eq!(active.coin_stats.snapshot(), expected_stats);
-    active.begin_transition()?.disconnect(&child)?;
+    assert_eq!(active.coin_stats.snapshot(), *expected_stats);
+    active.begin_transition()?.disconnect(child)?;
     active.begin_transition()?.disconnect(&fixture.blocks[2])?;
     assert_eq!(
         active
@@ -222,12 +238,17 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
         manager.chainstates_summary()?.status,
         AssumeUtxoDiskStatus::Uninitialized
     ));
-    let rewound_stats = active.coin_stats.snapshot();
-    drop(manager);
-    drop(active);
-    let active = open_persistent(dir.path(), &fixture.pinned)?;
-    let manager =
-        AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
+    *rewound = active.coin_stats.snapshot();
+    Ok(())
+}
+
+fn verify_restart_after_rewind(
+    dir: &Path,
+    fixture: &Fixture,
+    rewound_stats: &CoinStats,
+) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
     assert!(manager.chainstates_summary()?.active_chainstate.validated);
     let recovered_stats = active.coin_stats.snapshot();
     assert_eq!(
@@ -261,14 +282,23 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Exercise orphan publication, retirement and suffix replay in one datadir"
-)]
-fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> TestResult {
+fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
-    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    let mut restart = SnapshotRestart::default();
+    finalize_snapshot_after_foreground_restart(dir.path(), &fixture, &mut restart)?;
+    let child = restart.child.as_ref().ok_or("missing restart child")?;
+    let mut rewound = CoinStats::default();
+    rewind_below_the_snapshot_base(dir.path(), &fixture, child, &restart.stats, &mut rewound)?;
+    verify_restart_after_rewind(dir.path(), &fixture, &rewound)
+}
+
+fn publish_unaccepted_historical_checkpoint(
+    dir: &Path,
+    fixture: &Fixture,
+    out: &mut UnacceptedCheckpoint,
+) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
     active.admit_headers(
         &fixture
             .blocks
@@ -279,7 +309,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active.clone(),
-        dir.path().to_path_buf(),
+        dir.to_path_buf(),
         1,
     )?;
     {
@@ -289,16 +319,16 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[1].clone()))?;
     let status = manager.status()?;
-    let checkpoint = match status {
+    let checkpoint = match &status {
         AssumeUtxoDiskStatus::Validating {
             checkpoint: Some(checkpoint),
             historical_height,
             historical_hash,
             ..
         } => {
-            assert_eq!(historical_height, 1);
-            assert_eq!(historical_hash, fixture.blocks[1].block_hash().0);
-            checkpoint
+            assert_eq!(*historical_height, 1);
+            assert_eq!(*historical_hash, fixture.blocks[1].block_hash().0);
+            *checkpoint
         }
         other => return Err(format!("unexpected status after checkpoint: {other:?}").into()),
     };
@@ -315,7 +345,39 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         .connect(&BlockPayload::from_local(fixture.blocks[2].clone()))?;
     let unaccepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
     assert_ne!(unaccepted_coins, accepted_coins);
-    let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
+    publish_two_historical_checkpoints(
+        dir,
+        &historical,
+        checkpoint,
+        unaccepted_coins,
+        fixture.blocks[2].block_hash().0,
+    )?;
+    assert_eq!(
+        manager.status()?,
+        status,
+        "publication cannot advance the durable head"
+    );
+    drop(historical);
+    assert!(
+        dir.join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
+            .join("CURRENT")
+            .exists()
+    );
+    drop(manager);
+    drop(active);
+    out.coins = Some(accepted_coins);
+    out.stats = accepted_stats;
+    Ok(())
+}
+
+fn publish_two_historical_checkpoints(
+    dir: &Path,
+    historical: &Chainstate,
+    checkpoint: HistoricalCheckpointRef,
+    unaccepted_coins: bitcoin_rs_primitives::Hash256,
+    expected_tip: bitcoin_rs_primitives::Hash256,
+) -> TestResult {
+    let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
     let config = crate::checkpoint::headers::HeaderCheckpointConfig {
         network: Network::Regtest,
         genesis: Network::Regtest.genesis_block_hash(),
@@ -343,34 +405,26 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     };
     assert_ne!(current.generation, checkpoint.checkpoint.generation);
     assert_eq!(current.applied_tip.height, 2);
-    assert_eq!(current.applied_tip.hash, fixture.blocks[2].block_hash().0);
+    assert_eq!(current.applied_tip.hash, expected_tip);
     assert_eq!(current.coin_stats.tx_count, 3);
     assert_eq!(
         current.utxo.lock_stable_view().hash_serialized_3()?,
         unaccepted_coins
     );
-    assert_eq!(
-        manager.status()?,
-        status,
-        "publication cannot advance the durable head"
-    );
-    drop(current);
-    drop(historical);
-    drop(data);
-    assert!(
-        dir.path()
-            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
-            .join("CURRENT")
-            .exists()
-    );
-    drop(manager);
-    drop(active);
+    Ok(())
+}
 
-    let active = open_persistent(dir.path(), &fixture.pinned)?;
+fn restart_from_historical_checkpoint(
+    dir: &Path,
+    fixture: &Fixture,
+    accepted_coins: bitcoin_rs_primitives::Hash256,
+    accepted_stats: &CoinStats,
+) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
     let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
         Network::Regtest,
         active,
-        dir.path().to_path_buf(),
+        dir.to_path_buf(),
         1,
     )?;
     let historical = manager
@@ -382,16 +436,14 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     assert_eq!(restored_tip.height, 1);
     assert_eq!(restored_tip.hash, fixture.blocks[1].block_hash().0);
     assert_eq!(restored_tip.chain_tx_count.to_wire(), 2);
-    assert_eq!(historical.coin_stats.snapshot(), accepted_stats);
+    assert_eq!(historical.coin_stats.snapshot(), *accepted_stats);
     assert_eq!(
         historical.utxo.lock_stable_view().hash_serialized_3()?,
         accepted_coins
     );
-    let generations = std::fs::read_dir(
-        dir.path()
-            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT),
-    )?
-    .collect::<Result<Vec<_>, _>>()?;
+    let generations =
+        std::fs::read_dir(dir.join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT))?
+            .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
         generations
             .iter()
@@ -407,17 +459,27 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
     assert_eq!(
-        std::fs::read_dir(
-            dir.path()
-                .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
-        )?
-        .count(),
+        std::fs::read_dir(dir.join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT))?
+            .count(),
         0,
         "finalized commit must retire the last historical checkpoint"
     );
     Ok(())
 }
 
+#[test]
+fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let mut unaccepted = UnacceptedCheckpoint::default();
+    publish_unaccepted_historical_checkpoint(dir.path(), &fixture, &mut unaccepted)?;
+    restart_from_historical_checkpoint(
+        dir.path(),
+        &fixture,
+        unaccepted.coins.ok_or("missing accepted coins")?,
+        &unaccepted.stats,
+    )
+}
 #[test]
 fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
     let fixture = Fixture::new()?;
@@ -783,37 +845,133 @@ fn crash_writer() -> TestResult {
     for (height, block) in fixture.blocks.iter().enumerate() {
         manager.step_historical(&BlockPayload::from_local((*block).clone()))?;
         if checkpoint_phase && height == 0 {
-            let historical = manager.historical_chainstate().ok_or("missing history")?;
-            let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&dir)?;
-            let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
-                &data,
-                crate::checkpoint::headers::HeaderCheckpointConfig {
-                    network: Network::Regtest,
-                    genesis: Network::Regtest.genesis_block_hash(),
-                },
-                &historical.block_tree,
-                &historical.utxo,
-                &historical.coin_stats,
-                historical.applied_tip_snapshot().as_deref(),
-                bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
-                bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
-            )?;
-            let crate::checkpoint::CheckpointWrite::Published { reference } = write else {
-                return Err("missing genesis checkpoint".into());
-            };
-            let mut status = manager.status()?;
-            let AssumeUtxoDiskStatus::Validating { checkpoint, .. } = &mut status else {
-                return Err("missing validating status".into());
-            };
-            *checkpoint = Some(HistoricalCheckpointRef {
-                checkpoint: reference,
-                height: 0,
-                hash: block.block_hash().0,
-            });
-            manager.persist_status(status, None)?;
+            publish_genesis_historical_checkpoint(&dir, &manager, block)?;
         }
     }
     Err("crash failpoint was not reached".into())
+}
+
+fn publish_genesis_historical_checkpoint(
+    dir: &Path,
+    manager: &AssumeUtxoManager,
+    block: &bitcoin_rs_primitives::Block,
+) -> TestResult {
+    let historical = manager.historical_chainstate().ok_or("missing history")?;
+    let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
+    let (write, _historical_witness) = crate::checkpoint::write_checkpoint_from_dir_at(
+        &data,
+        crate::checkpoint::headers::HeaderCheckpointConfig {
+            network: Network::Regtest,
+            genesis: Network::Regtest.genesis_block_hash(),
+        },
+        &historical.block_tree,
+        &historical.utxo,
+        &historical.coin_stats,
+        historical.applied_tip_snapshot().as_deref(),
+        bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+        bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
+    )?;
+    let crate::checkpoint::CheckpointWrite::Published { reference } = write else {
+        return Err("missing genesis checkpoint".into());
+    };
+    let mut status = manager.status()?;
+    let AssumeUtxoDiskStatus::Validating { checkpoint, .. } = &mut status else {
+        return Err("missing validating status".into());
+    };
+    *checkpoint = Some(HistoricalCheckpointRef {
+        checkpoint: reference,
+        height: 0,
+        hash: block.block_hash().0,
+    });
+    manager.persist_status(status, None)?;
+    Ok(())
+}
+
+fn run_crashing_writer(dir: &Path, phase: &str) -> TestResult {
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "assumeutxo::tests::recovery::crash_writer",
+            "--nocapture",
+        ])
+        .env("BITCOIN_RS_SNAPSHOT_KILL_DIR", dir)
+        .env("BITCOIN_RS_SNAPSHOT_KILL_PHASE", phase)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !dir.join("kill-ready").exists() && std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("{phase} child exited before kill: {status}").into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let ready = dir.join("kill-ready").exists();
+    child.kill()?;
+    child.wait()?;
+    assert!(ready, "{phase} failed to reach its durable boundary");
+    Ok(())
+}
+
+fn verify_recovered_snapshot_phase(fixture: &Fixture, dir: &Path, phase: &str) -> TestResult {
+    let historical_root = dir.join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT);
+    if phase == "finalized" {
+        assert!(historical_root.join("CURRENT").exists());
+        assert!(std::fs::read_dir(&historical_root)?.count() > 1);
+    }
+    let active = open_persistent(dir, &fixture.pinned)?;
+    if phase == "import" {
+        assert!(active.applied_tip_snapshot().is_none());
+        return Ok(());
+    }
+    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
+    assert_eq!(
+        active
+            .applied_tip_snapshot()
+            .ok_or("missing recovered tip")?
+            .height,
+        if phase == "activation" { 2 } else { 3 }
+    );
+    if phase.starts_with("checkpoint-") {
+        let historical_height = u32::from(phase != "checkpoint-published");
+        assert_eq!(
+            manager
+                .historical_chainstate()
+                .ok_or("missing history")?
+                .applied_tip_snapshot()
+                .ok_or("missing historical tip")?
+                .height,
+            1
+        );
+        drop(manager);
+        drop(active);
+        let active = open_persistent(dir, &fixture.pinned)?;
+        let manager = AssumeUtxoManager::open(Network::Regtest, active, dir.to_path_buf())?;
+        assert_eq!(
+            manager
+                .historical_chainstate()
+                .ok_or("missing history")?
+                .applied_tip_snapshot()
+                .ok_or("missing historical tip")?
+                .height,
+            historical_height
+        );
+    } else if phase == "finalized" || phase == "checking" {
+        assert!(active.role().is_ordinary());
+        if phase == "finalized" {
+            assert_eq!(std::fs::read_dir(&historical_root)?.count(), 0);
+        }
+    } else {
+        assert!(active.role().is_assumed_active());
+        assert!(
+            manager
+                .historical_chainstate()
+                .ok_or("missing history")?
+                .applied_tip_snapshot()
+                .is_none()
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -830,89 +988,8 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
         "checkpoint-committed",
     ] {
         let dir = tempfile::tempdir()?;
-        let mut child = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "assumeutxo::tests::recovery::crash_writer",
-                "--nocapture",
-            ])
-            .env("BITCOIN_RS_SNAPSHOT_KILL_DIR", dir.path())
-            .env("BITCOIN_RS_SNAPSHOT_KILL_PHASE", phase)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !dir.path().join("kill-ready").exists() && std::time::Instant::now() < deadline {
-            if let Some(status) = child.try_wait()? {
-                return Err(format!("{phase} child exited before kill: {status}").into());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let ready = dir.path().join("kill-ready").exists();
-        child.kill()?;
-        child.wait()?;
-        assert!(ready, "{phase} failed to reach its durable boundary");
-        let historical_root = dir
-            .path()
-            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT);
-        if phase == "finalized" {
-            assert!(historical_root.join("CURRENT").exists());
-            assert!(std::fs::read_dir(&historical_root)?.count() > 1);
-        }
-        let active = open_persistent(dir.path(), &fixture.pinned)?;
-        if phase == "import" {
-            assert!(active.applied_tip_snapshot().is_none());
-            continue;
-        }
-        let manager =
-            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf())?;
-        assert_eq!(
-            active
-                .applied_tip_snapshot()
-                .ok_or("missing recovered tip")?
-                .height,
-            if phase == "activation" { 2 } else { 3 }
-        );
-        if phase.starts_with("checkpoint-") {
-            let historical_height = u32::from(phase != "checkpoint-published");
-            assert_eq!(
-                manager
-                    .historical_chainstate()
-                    .ok_or("missing history")?
-                    .applied_tip_snapshot()
-                    .ok_or("missing historical tip")?
-                    .height,
-                1
-            );
-            drop(manager);
-            drop(active);
-            let active = open_persistent(dir.path(), &fixture.pinned)?;
-            let manager =
-                AssumeUtxoManager::open(Network::Regtest, active, dir.path().to_path_buf())?;
-            assert_eq!(
-                manager
-                    .historical_chainstate()
-                    .ok_or("missing history")?
-                    .applied_tip_snapshot()
-                    .ok_or("missing historical tip")?
-                    .height,
-                historical_height
-            );
-        } else if phase == "finalized" || phase == "checking" {
-            assert!(active.role().is_ordinary());
-            if phase == "finalized" {
-                assert_eq!(std::fs::read_dir(historical_root)?.count(), 0);
-            }
-        } else {
-            assert!(active.role().is_assumed_active());
-            assert!(
-                manager
-                    .historical_chainstate()
-                    .ok_or("missing history")?
-                    .applied_tip_snapshot()
-                    .is_none()
-            );
-        }
+        run_crashing_writer(dir.path(), phase)?;
+        verify_recovered_snapshot_phase(&fixture, dir.path(), phase)?;
     }
     Ok(())
 }
@@ -1055,6 +1132,33 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     Ok(())
 }
 
+fn assert_reopen_refuses_mismatched_receipt(dir: &Path, fixture: &Fixture) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
+    let reopened = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf());
+    assert!(reopened.is_err());
+    assert!(active.is_closed_for_recovery());
+    assert!(matches!(
+        active
+            .durable_head
+            .load()?
+            .ok_or("missing head")?
+            .assumeutxo,
+        AssumeUtxoDiskStatus::Failed { .. }
+    ));
+    Ok(())
+}
+
+fn assert_reopen_finalizes_after_rejected_write(dir: &Path, fixture: &Fixture) -> TestResult {
+    let active = open_persistent(dir, &fixture.pinned)?;
+    let reopened = AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.to_path_buf())?;
+    assert!(matches!(
+        reopened.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    assert!(active.role().is_ordinary());
+    Ok(())
+}
+
 #[test]
 fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestResult {
     for mismatch in [false, true] {
@@ -1116,27 +1220,10 @@ fn failed_terminal_write_must_be_rechecked_before_restart_can_serve() -> TestRes
         );
         drop(manager);
         drop(active);
-        let active = open_persistent(dir.path(), &fixture.pinned)?;
-        let reopened =
-            AssumeUtxoManager::open(Network::Regtest, active.clone(), dir.path().to_path_buf());
         if mismatch {
-            assert!(reopened.is_err());
-            assert!(active.is_closed_for_recovery());
-            assert!(matches!(
-                active
-                    .durable_head
-                    .load()?
-                    .ok_or("missing head")?
-                    .assumeutxo,
-                AssumeUtxoDiskStatus::Failed { .. }
-            ));
+            assert_reopen_refuses_mismatched_receipt(dir.path(), &fixture)?;
         } else {
-            let reopened = reopened?;
-            assert!(matches!(
-                reopened.status()?,
-                AssumeUtxoDiskStatus::Finalized { .. }
-            ));
-            assert!(active.role().is_ordinary());
+            assert_reopen_finalizes_after_rejected_write(dir.path(), &fixture)?;
         }
     }
     Ok(())

@@ -15,7 +15,7 @@ use bitcoin_rs_storage::{
     InMemoryUndoStore, StorageError, UndoStore,
 };
 use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::build_block_changes;
+use bitcoin_rs_utxo::contract::{BlockChangeInputs, build_block_changes};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 
@@ -184,15 +184,17 @@ fn bip30_overwrite_undo_restores_original_coin() -> Result<(), Box<dyn std::erro
         external: HashMap::new(),
     };
     let (_changes, undo, _totals) = build_block_changes(
-        &block,
-        91_842,
-        &txids,
-        None,
-        1,
-        0,
+        &BlockChangeInputs {
+            block: &block,
+            height: 91_842,
+            txids: &txids,
+            same_block_spent: None,
+            add_capacity: 1,
+            remove_capacity: 0,
+            overwritten: Some(&utxo),
+            max_script_size: MAX_SCRIPT_SIZE,
+        },
         &resolved,
-        Some(&utxo),
-        MAX_SCRIPT_SIZE,
     )?;
 
     assert_eq!(undo.removes(), []);

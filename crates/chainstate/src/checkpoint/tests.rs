@@ -104,6 +104,16 @@ fn config() -> headers::HeaderCheckpointConfig {
     }
 }
 
+#[test]
+fn coinstats_wire_length_matches_the_encoded_length() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        usize::try_from(bitcoin_rs_storage::checkpoint::COINSTATS_PAYLOAD_LEN)?,
+        bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN,
+        "the CoinStats wire payload length must equal the in-memory encoded length"
+    );
+    Ok(())
+}
+
 fn write_checkpoint(
     tree: &BlockTree,
     best_tip_id: NodeId,

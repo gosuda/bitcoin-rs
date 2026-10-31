@@ -40,10 +40,10 @@ use bitcoin_rs_storage::checkpoint::decode_hex;
 use bitcoin_rs_storage::checkpoint::network_name;
 #[cfg(test)]
 use bitcoin_rs_storage::checkpoint::open_data_dir;
+use bitcoin_rs_storage::checkpoint::{ArtifactDigest, CheckpointStage};
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
 use bitcoin_rs_utxo::snapshot::{SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
-use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsAccumulator, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoSet, read_snapshot_strict_v4_witnessed, write_snapshot_witnessed};
 use cap_std::fs::{Dir, File};
@@ -137,9 +137,6 @@ pub enum CheckpointSetupError {
     #[error("checkpointing requires a block body store")]
     MissingBlockBodyStore,
 }
-
-#[expect(clippy::as_conversions)]
-const _: () = assert!(COINSTATS_PAYLOAD_LEN as usize == COIN_STATS_ENCODED_LEN);
 
 pub(crate) fn load_checkpoint_from_dir(
     data_dir: &Dir,
@@ -369,6 +366,34 @@ fn load_payloads_inner(
     headers: &headers::RestoredHeaders,
     reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
 ) -> Result<(UtxoSet, CoinStats, VerifiedSnapshotArtifact), CheckpointError> {
+    let (utxo_file, coinstats_file, expected_applied) =
+        verify_payload_files(generation_dir, manifest)?;
+    let (snapshot, derived, witness, utxo_file) =
+        read_checkpoint_snapshot(utxo_file, manifest.utxo.bytes, expected_applied.height)?;
+    validate_snapshot_payload(manifest, &snapshot, &expected_applied)?;
+    let coin_stats = read_coinstats(coinstats_file, manifest)?;
+    validate_derived_stats(manifest, &snapshot, derived, &coin_stats)?;
+    let applied = headers.tree.node(headers.applied_tip_id)?;
+    if (applied.height, applied.hash) != (snapshot.height, snapshot.tip_hash) {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "restored header and UTXO applied tips differ".to_owned(),
+        )));
+    }
+    let expected_sha: [u8; 32] = decode_hex(&manifest.utxo.sha256)?;
+    if witness.sha256() != expected_sha || witness.byte_len() != manifest.utxo.bytes {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "UTXO witness digest does not match manifest".to_owned(),
+        )));
+    }
+    let seed =
+        VerifiedSnapshotArtifact::seal(utxo_file, witness, SeedProvenance::Checkpoint(reference));
+    Ok((snapshot.set, coin_stats, seed))
+}
+
+fn verify_payload_files(
+    generation_dir: &Dir,
+    manifest: &CheckpointManifestV1,
+) -> Result<(File, File, headers::HeaderCheckpointTip), CheckpointError> {
     require_filename(&manifest.utxo.file, UTXO_FILE).map_err(CheckpointError::Store)?;
     require_filename(&manifest.coinstats.file, COINSTATS_FILE).map_err(CheckpointError::Store)?;
     if manifest.coinstats.bytes != COINSTATS_ARTIFACT_LEN {
@@ -383,7 +408,7 @@ fn load_payloads_inner(
         &manifest.utxo.sha256,
     )
     .map_err(CheckpointError::Store)?;
-    let mut coinstats_file = verify_artifact(
+    let coinstats_file = verify_artifact(
         generation_dir,
         COINSTATS_FILE,
         manifest.coinstats.bytes,
@@ -391,8 +416,14 @@ fn load_payloads_inner(
     )
     .map_err(CheckpointError::Store)?;
     let expected_applied = parse_tip(&manifest.applied_tip)?;
-    let (snapshot, mut derived, witness, utxo_file) =
-        read_checkpoint_snapshot(utxo_file, manifest.utxo.bytes, expected_applied.height)?;
+    Ok((utxo_file, coinstats_file, expected_applied))
+}
+
+fn validate_snapshot_payload(
+    manifest: &CheckpointManifestV1,
+    snapshot: &bitcoin_rs_utxo::SnapshotLoad,
+    expected_applied: &headers::HeaderCheckpointTip,
+) -> Result<(), CheckpointError> {
     if (snapshot.height, snapshot.tip_hash) != (expected_applied.height, expected_applied.hash) {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "UTXO tip does not match manifest applied tip".to_owned(),
@@ -414,6 +445,14 @@ fn load_payloads_inner(
             "UTXO MuHash trailer digest does not match manifest".to_owned(),
         )));
     }
+    Ok(())
+}
+
+fn read_coinstats(
+    coinstats_file: File,
+    manifest: &CheckpointManifestV1,
+) -> Result<CoinStats, CheckpointError> {
+    let mut coinstats_file = coinstats_file;
     let mut bytes = Vec::with_capacity(usize::try_from(COINSTATS_ARTIFACT_LEN).map_err(|_| {
         CheckpointError::Store(StoreError::Invalid(
             "CoinStats artifact length does not fit usize".to_owned(),
@@ -423,8 +462,17 @@ fn load_payloads_inner(
     let payload = coinstats_artifact_payload(&bytes).map_err(CheckpointError::Store)?;
     let coin_stats = CoinStats::from_bytes(payload)?;
     validate_coinstats_manifest(&coin_stats, &manifest.coinstats)?;
+    Ok(coin_stats)
+}
+
+fn validate_derived_stats(
+    manifest: &CheckpointManifestV1,
+    snapshot: &bitcoin_rs_utxo::SnapshotLoad,
+    mut derived: CoinStats,
+    coin_stats: &CoinStats,
+) -> Result<(), CheckpointError> {
     derived.tx_count = coin_stats.tx_count;
-    if derived != coin_stats {
+    if derived != *coin_stats {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "CoinStats does not match loaded UTXO traversal".to_owned(),
         )));
@@ -439,21 +487,7 @@ fn load_payloads_inner(
             "UTXO trailer does not match restored CoinStats".to_owned(),
         )));
     }
-    let applied = headers.tree.node(headers.applied_tip_id)?;
-    if (applied.height, applied.hash) != (snapshot.height, snapshot.tip_hash) {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "restored header and UTXO applied tips differ".to_owned(),
-        )));
-    }
-    let expected_sha: [u8; 32] = decode_hex(&manifest.utxo.sha256)?;
-    if witness.sha256() != expected_sha || witness.byte_len() != manifest.utxo.bytes {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "UTXO witness digest does not match manifest".to_owned(),
-        )));
-    }
-    let seed =
-        VerifiedSnapshotArtifact::seal(utxo_file, witness, SeedProvenance::Checkpoint(reference));
-    Ok((snapshot.set, coin_stats, seed))
+    Ok(())
 }
 fn read_checkpoint_snapshot(
     utxo_file: File,
@@ -544,10 +578,237 @@ pub(crate) fn write_checkpoint_from_dir(
     )
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Keep checkpoint artifact ordering and manifest construction together"
-)]
+macro_rules! write_stage_artifact {
+    ($stage:expr, $name:expr, $write_fp:ident, $sync_fp:ident, $write:expr) => {{
+        #[cfg(any(test, feature = "test-seam"))]
+        {
+            $stage.write_artifact_with_failpoints(
+                $name,
+                CheckpointFailpoint::$write_fp,
+                CheckpointFailpoint::$sync_fp,
+                $write,
+            )
+        }
+        #[cfg(not(any(test, feature = "test-seam")))]
+        {
+            $stage.write_artifact($name, $write)
+        }
+    }};
+}
+
+fn begin_checkpoint_stage(
+    data_dir: &Dir,
+    root_name: &str,
+    retention: bitcoin_rs_storage::checkpoint::CheckpointRetention,
+) -> Result<CheckpointStage, CheckpointError> {
+    #[cfg(any(test, feature = "test-seam"))]
+    {
+        bitcoin_rs_storage::checkpoint::begin_publication_at_with_failpoint(
+            data_dir,
+            root_name,
+            retention,
+            NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
+        )
+        .map_err(CheckpointError::Store)
+    }
+    #[cfg(not(any(test, feature = "test-seam")))]
+    {
+        bitcoin_rs_storage::checkpoint::begin_publication_at(data_dir, root_name, retention)
+            .map_err(CheckpointError::Store)
+    }
+}
+
+fn write_headers_artifact(
+    stage: &CheckpointStage,
+    block_tree: &RwLock<BlockTree>,
+    config: headers::HeaderCheckpointConfig,
+    applied_tip: &TipSnapshot,
+) -> Result<(headers::HeaderCheckpointWrite, ArtifactDigest), CheckpointError> {
+    let tree = block_tree.read();
+    write_stage_artifact!(stage, HEADERS_FILE, HeadersWrite, HeadersSync, |writer| {
+        let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
+        let point = headers::HeaderCheckpointPoint {
+            height: applied_tip.height,
+            hash: applied_tip.hash,
+        };
+        let metadata = if tree.tip_id() == Some(best_tip_id) {
+            headers::write_headers(writer, &tree, config, best_tip_id, point)?
+        } else {
+            headers::write_selected_headers(writer, &tree, config, best_tip_id, point)?
+        };
+        Ok::<_, CheckpointError>(metadata)
+    })
+}
+
+type UtxoArtifact = (
+    [u8; 384],
+    CoinStatsAccumulator,
+    Option<V4Witness>,
+    ArtifactDigest,
+);
+
+fn write_utxo_artifact(
+    stage: &CheckpointStage,
+    utxo: &UtxoSet,
+    applied_tip: &TipSnapshot,
+) -> Result<UtxoArtifact, CheckpointError> {
+    let (utxo_result, utxo_digest) =
+        write_stage_artifact!(stage, UTXO_FILE, UtxoWrite, UtxoSync, |writer| {
+            let (trailer, accumulator, witness) = write_snapshot_witnessed(
+                utxo,
+                &applied_tip.hash,
+                applied_tip.height,
+                writer,
+                CoinStatsAccumulator::with_parallel_muhash(applied_tip.height),
+            )?;
+            Ok::<_, CheckpointError>((trailer, accumulator, witness))
+        })?;
+    let (trailer, accumulator, witness) = utxo_result;
+    Ok((trailer, accumulator, witness, utxo_digest))
+}
+
+fn write_coinstats_artifact(
+    stage: &CheckpointStage,
+    stats: &CoinStats,
+) -> Result<ArtifactDigest, CheckpointError> {
+    let ((), stats_digest) = write_stage_artifact!(
+        stage,
+        COINSTATS_FILE,
+        CoinStatsWrite,
+        CoinStatsSync,
+        |writer| {
+            writer.write_all(&COINSTATS_MAGIC)?;
+            writer.write_all(&COINSTATS_VERSION.to_le_bytes())?;
+            writer.write_all(&COINSTATS_PAYLOAD_LEN.to_le_bytes())?;
+            writer.write_all(&stats.to_bytes())?;
+            Ok::<_, CheckpointError>(())
+        }
+    )?;
+    Ok(stats_digest)
+}
+
+fn check_coinstats_listener(
+    applied_tip: &TipSnapshot,
+    chain_tx_count: ChainTxCount,
+    listener_stats: &CoinStats,
+) -> Result<(), CheckpointError> {
+    if listener_stats.height != applied_tip.height {
+        return Err(CheckpointError::Store(StoreError::Invalid(format!(
+            "CoinStats height {} does not match applied height {}",
+            listener_stats.height, applied_tip.height
+        ))));
+    }
+    validate_chain_tx_count(chain_tx_count, listener_stats)
+}
+
+fn gated_witness(
+    root_name: &str,
+    stage_witness: Option<V4Witness>,
+    utxo_digest: &ArtifactDigest,
+    fused_stats: &CoinStats,
+    listener_stats: &CoinStats,
+) -> Option<V4Witness> {
+    match stage_witness {
+        Some(witness)
+            if root_name == CHECKPOINT_ROOT
+                && witness.sha256() == utxo_digest.sha256
+                && witness.byte_len() == utxo_digest.bytes
+                && fused_stats.height == listener_stats.height
+                && fused_stats.total_amount == listener_stats.total_amount
+                && fused_stats.bogo_size == listener_stats.bogo_size
+                && fused_stats.utxo_count == listener_stats.utxo_count
+                && fused_stats.muhash.finalize() == listener_stats.muhash.finalize() =>
+        {
+            Some(witness)
+        }
+        _ => None,
+    }
+}
+
+fn check_best_tip_unchanged(
+    block_tree: &RwLock<BlockTree>,
+    applied_tip: &TipSnapshot,
+    expected: &headers::HeaderCheckpointTip,
+) -> Result<(), CheckpointError> {
+    let tree = block_tree.read();
+    let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
+    let best = tree.node(best_tip_id)?;
+    if best.hash != expected.hash
+        || best.height != expected.height
+        || best.chainwork != expected.chainwork
+    {
+        return Err(CheckpointError::Store(StoreError::Invalid(
+            "best header tip changed during checkpoint".to_owned(),
+        )));
+    }
+    Ok(())
+}
+
+struct ManifestInputs<'a> {
+    config: headers::HeaderCheckpointConfig,
+    generation: u64,
+    headers_meta: headers::HeaderCheckpointWrite,
+    chain_tx_count: ChainTxCount,
+    headers_digest: &'a ArtifactDigest,
+    utxo_digest: &'a ArtifactDigest,
+    record_count: u64,
+    stats: &'a CoinStats,
+    trailer: [u8; 384],
+    stats_digest: &'a ArtifactDigest,
+}
+
+fn checkpoint_manifest(input: &ManifestInputs<'_>) -> CheckpointManifestV1 {
+    let stats = input.stats;
+    CheckpointManifestV1 {
+        format: MANIFEST_FORMAT.to_owned(),
+        version: MANIFEST_VERSION,
+        generation: input.generation,
+        network: network_name(input.config.network).to_owned(),
+        network_magic: hex_encode(&input.config.network.magic()),
+        genesis_hash: input.config.genesis.to_string_be(),
+        applied_tip: manifest_tip(
+            input.headers_meta.metadata.applied,
+            input.chain_tx_count.to_wire(),
+        ),
+        best_header_tip: manifest_tip(input.headers_meta.metadata.best, 0),
+        headers: HeadersArtifactV1 {
+            file: HEADERS_FILE.to_owned(),
+            codec: HEADER_CODEC.to_owned(),
+            version: input.headers_meta.metadata.version,
+            bytes: input.headers_digest.bytes,
+            sha256: hex_encode(&input.headers_digest.sha256),
+            header_count: input.headers_meta.metadata.header_count,
+            best_chain_sha256: hex_encode(&input.headers_meta.metadata.best_chain_commitment),
+            applied_chain_sha256: hex_encode(
+                &input.headers_meta.metadata.applied_prefix_commitment,
+            ),
+        },
+        utxo: UtxoArtifactV1 {
+            file: UTXO_FILE.to_owned(),
+            codec: UTXO_CODEC.to_owned(),
+            version: UTXO_VERSION,
+            bytes: input.utxo_digest.bytes,
+            sha256: hex_encode(&input.utxo_digest.sha256),
+            record_count: input.record_count,
+            output_count: stats.utxo_count,
+            muhash_trailer_sha256: hex_encode(&Sha256::digest(input.trailer)),
+        },
+        coinstats: CoinStatsArtifactV1 {
+            file: COINSTATS_FILE.to_owned(),
+            codec: COINSTATS_CODEC.to_owned(),
+            version: COINSTATS_VERSION,
+            bytes: input.stats_digest.bytes,
+            sha256: hex_encode(&input.stats_digest.sha256),
+            height: stats.height,
+            total_amount: stats.total_amount,
+            bogo_size: stats.bogo_size,
+            tx_count: stats.tx_count,
+            utxo_count: stats.utxo_count,
+            muhash: hex_encode(&stats.muhash.finalize()),
+        },
+    }
+}
+
 pub(crate) fn write_checkpoint_from_dir_at(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,
@@ -562,170 +823,47 @@ pub(crate) fn write_checkpoint_from_dir_at(
         return Ok((CheckpointWrite::SkippedNoAppliedTip, None));
     };
     let chain_tx_count = applied_tip.chain_tx_count;
-    macro_rules! write_stage_artifact {
-        ($stage:expr, $name:expr, $write_fp:ident, $sync_fp:ident, $write:expr) => {{
-            #[cfg(any(test, feature = "test-seam"))]
-            {
-                $stage.write_artifact_with_failpoints(
-                    $name,
-                    CheckpointFailpoint::$write_fp,
-                    CheckpointFailpoint::$sync_fp,
-                    $write,
-                )
-            }
-            #[cfg(not(any(test, feature = "test-seam")))]
-            {
-                $stage.write_artifact($name, $write)
-            }
-        }};
-    }
-    #[cfg(any(test, feature = "test-seam"))]
-    let stage = bitcoin_rs_storage::checkpoint::begin_publication_at_with_failpoint(
-        data_dir,
-        root_name,
-        retention,
-        NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
-    )
-    .map_err(CheckpointError::Store)?;
-    #[cfg(not(any(test, feature = "test-seam")))]
-    let stage =
-        bitcoin_rs_storage::checkpoint::begin_publication_at(data_dir, root_name, retention)
-            .map_err(CheckpointError::Store)?;
-    let (headers_meta, headers_digest) = {
-        let tree = block_tree.read();
-        let (meta, digest) =
-            write_stage_artifact!(stage, HEADERS_FILE, HeadersWrite, HeadersSync, |writer| {
-                let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
-                let point = headers::HeaderCheckpointPoint {
-                    height: applied_tip.height,
-                    hash: applied_tip.hash,
-                };
-                let metadata = if tree.tip_id() == Some(best_tip_id) {
-                    headers::write_headers(writer, &tree, config, best_tip_id, point)?
-                } else {
-                    headers::write_selected_headers(writer, &tree, config, best_tip_id, point)?
-                };
-                Ok::<_, CheckpointError>(metadata)
-            })?;
-        (meta, digest)
-    };
-    let (utxo_result, utxo_digest) =
-        write_stage_artifact!(stage, UTXO_FILE, UtxoWrite, UtxoSync, |writer| {
-            let (trailer, acc, witness) = write_snapshot_witnessed(
-                utxo,
-                &applied_tip.hash,
-                applied_tip.height,
-                writer,
-                CoinStatsAccumulator::with_parallel_muhash(applied_tip.height),
-            )?;
-            Ok::<_, CheckpointError>((trailer, acc, witness))
-        })?;
-    let (trailer, accumulator, stage_witness) = utxo_result;
+    let stage = begin_checkpoint_stage(data_dir, root_name, retention)?;
+    let (headers_meta, headers_digest) =
+        write_headers_artifact(&stage, block_tree, config, applied_tip)?;
+    let (trailer, accumulator, stage_witness, utxo_digest) =
+        write_utxo_artifact(&stage, utxo, applied_tip)?;
     let listener_stats = coin_stats.snapshot();
-    if listener_stats.height != applied_tip.height {
-        return Err(CheckpointError::Store(StoreError::Invalid(format!(
-            "CoinStats height {} does not match applied height {}",
-            listener_stats.height, applied_tip.height
-        ))));
-    }
-    validate_chain_tx_count(chain_tx_count, &listener_stats)?;
+    check_coinstats_listener(applied_tip, chain_tx_count, &listener_stats)?;
     let mut fused_stats = accumulator.into_stats();
     fused_stats.tx_count = listener_stats.tx_count;
-    let gate_witness = match stage_witness {
-        Some(witness)
-            if root_name == CHECKPOINT_ROOT
-                && witness.sha256() == utxo_digest.sha256
-                && witness.byte_len() == utxo_digest.bytes
-                && fused_stats.height == listener_stats.height
-                && fused_stats.total_amount == listener_stats.total_amount
-                && fused_stats.bogo_size == listener_stats.bogo_size
-                && fused_stats.utxo_count == listener_stats.utxo_count
-                && fused_stats.muhash.finalize() == listener_stats.muhash.finalize() =>
-        {
-            Some(witness)
-        }
-        _ => None,
-    };
+    let gate_witness = gated_witness(
+        root_name,
+        stage_witness,
+        &utxo_digest,
+        &fused_stats,
+        &listener_stats,
+    );
     let record_count = utxo.record_count();
     if trailer == [0_u8; 384] {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "scanned UTXO snapshot has a zero MuHash trailer".to_owned(),
         )));
     }
-    let persisted_stats = fused_stats;
-    let ((), stats_digest) = write_stage_artifact!(
-        stage,
-        COINSTATS_FILE,
-        CoinStatsWrite,
-        CoinStatsSync,
-        |writer| {
-            writer.write_all(&COINSTATS_MAGIC)?;
-            writer.write_all(&COINSTATS_VERSION.to_le_bytes())?;
-            writer.write_all(&COINSTATS_PAYLOAD_LEN.to_le_bytes())?;
-            writer.write_all(&persisted_stats.to_bytes())?;
-            Ok::<_, CheckpointError>(())
-        }
-    )?;
-    let tree = block_tree.read();
-    let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
-    let best = tree.node(best_tip_id)?;
-    if best.hash != headers_meta.metadata.best.hash
-        || best.height != headers_meta.metadata.best.height
-        || best.chainwork != headers_meta.metadata.best.chainwork
-    {
-        return Err(CheckpointError::Store(StoreError::Invalid(
-            "best header tip changed during checkpoint".to_owned(),
-        )));
-    }
-    drop(tree);
+    let stats_digest = write_coinstats_artifact(&stage, &fused_stats)?;
+    check_best_tip_unchanged(block_tree, applied_tip, &headers_meta.metadata.best)?;
     let record_count = u64::try_from(record_count).map_err(|_| {
         CheckpointError::Store(StoreError::Invalid(
             "UTXO record count does not fit u64".to_owned(),
         ))
     })?;
-    let manifest = CheckpointManifestV1 {
-        format: MANIFEST_FORMAT.to_owned(),
-        version: MANIFEST_VERSION,
+    let manifest = checkpoint_manifest(&ManifestInputs {
+        config,
         generation: stage.generation(),
-        network: network_name(config.network).to_owned(),
-        network_magic: hex_encode(&config.network.magic()),
-        genesis_hash: config.genesis.to_string_be(),
-        applied_tip: manifest_tip(headers_meta.metadata.applied, chain_tx_count.to_wire()),
-        best_header_tip: manifest_tip(headers_meta.metadata.best, 0),
-        headers: HeadersArtifactV1 {
-            file: HEADERS_FILE.to_owned(),
-            codec: HEADER_CODEC.to_owned(),
-            version: headers_meta.metadata.version,
-            bytes: headers_digest.bytes,
-            sha256: hex_encode(&headers_digest.sha256),
-            header_count: headers_meta.metadata.header_count,
-            best_chain_sha256: hex_encode(&headers_meta.metadata.best_chain_commitment),
-            applied_chain_sha256: hex_encode(&headers_meta.metadata.applied_prefix_commitment),
-        },
-        utxo: UtxoArtifactV1 {
-            file: UTXO_FILE.to_owned(),
-            codec: UTXO_CODEC.to_owned(),
-            version: UTXO_VERSION,
-            bytes: utxo_digest.bytes,
-            sha256: hex_encode(&utxo_digest.sha256),
-            record_count,
-            output_count: persisted_stats.utxo_count,
-            muhash_trailer_sha256: hex_encode(&Sha256::digest(trailer)),
-        },
-        coinstats: CoinStatsArtifactV1 {
-            file: COINSTATS_FILE.to_owned(),
-            codec: COINSTATS_CODEC.to_owned(),
-            version: COINSTATS_VERSION,
-            bytes: stats_digest.bytes,
-            sha256: hex_encode(&stats_digest.sha256),
-            height: persisted_stats.height,
-            total_amount: persisted_stats.total_amount,
-            bogo_size: persisted_stats.bogo_size,
-            tx_count: persisted_stats.tx_count,
-            utxo_count: persisted_stats.utxo_count,
-            muhash: hex_encode(&persisted_stats.muhash.finalize()),
-        },
-    };
+        headers_meta,
+        chain_tx_count,
+        headers_digest: &headers_digest,
+        utxo_digest: &utxo_digest,
+        record_count,
+        stats: &fused_stats,
+        trailer,
+        stats_digest: &stats_digest,
+    });
     let reference = commit_publication(stage, &manifest)?;
     Ok((CheckpointWrite::Published { reference }, gate_witness))
 }

@@ -3,7 +3,7 @@
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
-use bitcoin_rs_consensus::locktime_cutoff;
+use bitcoin_rs_consensus::{LocktimeRule, locktime_cutoff};
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +66,12 @@ impl MiningChainContext {
 
     #[must_use]
     pub(crate) const fn locktime_cutoff(&self, candidate_time: u32) -> u32 {
-        locktime_cutoff(self.csv_active, self.prev_median_time_past, candidate_time)
+        let rule = if self.csv_active {
+            LocktimeRule::MedianTimePast
+        } else {
+            LocktimeRule::CandidateTime
+        };
+        locktime_cutoff(rule, self.prev_median_time_past, candidate_time)
     }
 }
 

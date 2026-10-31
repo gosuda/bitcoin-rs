@@ -1,6 +1,7 @@
 use super::record::{FRAME_HEADER_LEN, JournalRecord, MAX_PAYLOAD_LEN, decode_record};
 use super::writer::{HeadMarker, read_head_bytes};
 use bitcoin_rs_primitives::hex::hex_encode;
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, thiserror::Error)]
 pub enum JournalReplayError {
@@ -72,10 +73,7 @@ pub(crate) fn stream_committed_range(
         ));
     }
 
-    let mut expected_height = base_tip_height.checked_add(1).ok_or_else(|| {
-        JournalReplayError::CommittedRangeInvalid("base tip height overflow".to_owned())
-    })?;
-    let mut expected_prev = base_tip_hash;
+    let mut cursor = ReplayCursor::new(base_tip_height, base_tip_hash)?;
     let mut record_count = 0_u64;
     for generation in &generations {
         let end = if *generation == head.journal_gen {
@@ -89,8 +87,7 @@ pub(crate) fn stream_committed_range(
                 *generation,
                 head,
                 end,
-                &mut expected_height,
-                &mut expected_prev,
+                &mut cursor,
                 &mut apply_record,
             )?)
             .ok_or_else(|| {
@@ -117,53 +114,101 @@ pub(crate) fn checked_frame_len(payload_len: u32) -> Result<usize, JournalReplay
         })
 }
 
-pub(crate) fn stream_segment(
-    dir: &cap_std::fs::Dir,
+/// Height and previous hash the next retained record must carry.
+pub(crate) struct ReplayCursor {
+    height: u32,
+    prev_hash: [u8; 32],
+}
+
+impl ReplayCursor {
+    fn new(base_tip_height: u32, base_tip_hash: [u8; 32]) -> Result<Self, JournalReplayError> {
+        let height = base_tip_height.checked_add(1).ok_or_else(|| {
+            JournalReplayError::CommittedRangeInvalid("base tip height overflow".to_owned())
+        })?;
+        Ok(Self {
+            height,
+            prev_hash: base_tip_hash,
+        })
+    }
+
+    fn accept(&mut self, record: &JournalRecord) -> Result<(), JournalReplayError> {
+        if record.height != self.height || record.prev_hash != self.prev_hash {
+            return Err(JournalReplayError::CommittedRangeInvalid(format!(
+                "contiguity break at height {}: expected ({}, {}), found ({}, {})",
+                record.height,
+                self.height,
+                hex_encode(&self.prev_hash),
+                record.height,
+                hex_encode(&record.prev_hash)
+            )));
+        }
+        self.height = record.height.checked_add(1).ok_or_else(|| {
+            JournalReplayError::CommittedRangeInvalid("record height overflow".to_owned())
+        })?;
+        self.prev_hash = record.block_hash;
+        Ok(())
+    }
+}
+
+struct SegmentFrames {
+    reader: std::io::BufReader<cap_std::fs::File>,
     generation: u64,
-    head: &HeadMarker,
-    window_end: u64,
-    expected_height: &mut u32,
-    expected_prev: &mut [u8; 32],
-    apply_record: &mut impl FnMut(&JournalRecord) -> Result<(), JournalReplayError>,
-) -> Result<u64, JournalReplayError> {
-    use std::io::{Read, Seek, SeekFrom};
+    offset: u64,
+    end: u64,
+}
 
-    let frame_header_len = u64::try_from(FRAME_HEADER_LEN).map_err(|_| {
-        JournalReplayError::CommittedRangeInvalid("frame header size overflow".to_owned())
-    })?;
+impl SegmentFrames {
+    fn open(
+        dir: &cap_std::fs::Dir,
+        generation: u64,
+        head: &HeadMarker,
+        window_end: u64,
+    ) -> Result<Self, JournalReplayError> {
+        let name = super::writer::segment_name(generation);
+        let file = dir.open(name.as_str()).map_err(|error| {
+            JournalReplayError::CommittedRangeInvalid(format!("open segment {generation}: {error}"))
+        })?;
+        let length = file.metadata().map_err(|error| {
+            JournalReplayError::CommittedRangeInvalid(format!("stat segment {generation}: {error}"))
+        })?;
+        let offset = if generation == head.start_gen {
+            head.start_offset
+        } else {
+            0
+        };
+        let mut reader = std::io::BufReader::new(file);
+        reader.seek(SeekFrom::Start(offset)).map_err(|error| {
+            JournalReplayError::CommittedRangeInvalid(format!(
+                "seek segment {generation} to {offset}: {error}"
+            ))
+        })?;
+        Ok(Self {
+            reader,
+            generation,
+            offset,
+            end: window_end.min(length.len()),
+        })
+    }
 
-    let name = super::writer::segment_name(generation);
-    let file = dir.open(name.as_str()).map_err(|error| {
-        JournalReplayError::CommittedRangeInvalid(format!("open segment {generation}: {error}"))
-    })?;
-    let length = file.metadata().map_err(|error| {
-        JournalReplayError::CommittedRangeInvalid(format!("stat segment {generation}: {error}"))
-    })?;
-    let end = window_end.min(length.len());
-    let mut offset = if generation == head.start_gen {
-        head.start_offset
-    } else {
-        0
-    };
-    let mut reader = std::io::BufReader::new(file);
-    reader.seek(SeekFrom::Start(offset)).map_err(|error| {
-        JournalReplayError::CommittedRangeInvalid(format!(
-            "seek segment {generation} to {offset}: {error}"
-        ))
-    })?;
-    let mut record_count = 0_u64;
-
-    while offset < end {
+    fn next_record(&mut self) -> Result<Option<JournalRecord>, JournalReplayError> {
+        let generation = self.generation;
+        let offset = self.offset;
+        if offset >= self.end {
+            return Ok(None);
+        }
+        let frame_header_len = u64::try_from(FRAME_HEADER_LEN).map_err(|_| {
+            JournalReplayError::CommittedRangeInvalid("frame header size overflow".to_owned())
+        })?;
         if offset
             .checked_add(frame_header_len)
-            .is_none_or(|header_end| header_end > end)
+            .is_none_or(|header_end| header_end > self.end)
         {
             return Err(JournalReplayError::CommittedRangeInvalid(format!(
                 "segment {generation}: truncated frame header at offset {offset}"
             )));
         }
         let mut header = [0_u8; FRAME_HEADER_LEN];
-        reader.read_exact(&mut header).map_err(|error| {
+        self.reader.read_exact(&mut header).map_err(|error| {
             JournalReplayError::CommittedRangeInvalid(format!(
                 "segment {generation}: read frame header at offset {offset}: {error}"
             ))
@@ -179,7 +224,7 @@ pub(crate) fn stream_segment(
         })?;
         if offset
             .checked_add(frame_len)
-            .is_none_or(|frame_end| frame_end > end)
+            .is_none_or(|frame_end| frame_end > self.end)
         {
             return Err(JournalReplayError::CommittedRangeInvalid(format!(
                 "segment {generation}: truncated frame at offset {offset}"
@@ -188,7 +233,7 @@ pub(crate) fn stream_segment(
         let mut frame = Vec::with_capacity(frame_size);
         frame.extend_from_slice(&header);
         frame.resize(frame_size, 0);
-        reader
+        self.reader
             .read_exact(&mut frame[FRAME_HEADER_LEN..])
             .map_err(|error| {
                 JournalReplayError::CommittedRangeInvalid(format!(
@@ -200,23 +245,25 @@ pub(crate) fn stream_segment(
                 "segment {generation} offset {offset}: {error}"
             ))
         })?;
-        if record.height != *expected_height || record.prev_hash != *expected_prev {
-            return Err(JournalReplayError::CommittedRangeInvalid(format!(
-                "contiguity break at height {}: expected ({}, {}), found ({}, {})",
-                record.height,
-                *expected_height,
-                hex_encode(expected_prev),
-                record.height,
-                hex_encode(&record.prev_hash)
-            )));
-        }
-        *expected_height = record.height.checked_add(1).ok_or_else(|| {
-            JournalReplayError::CommittedRangeInvalid("record height overflow".to_owned())
-        })?;
-        *expected_prev = record.block_hash;
-        offset = offset.checked_add(frame_len).ok_or_else(|| {
+        self.offset = offset.checked_add(frame_len).ok_or_else(|| {
             JournalReplayError::CommittedRangeInvalid("frame offset overflow".to_owned())
         })?;
+        Ok(Some(record))
+    }
+}
+
+pub(crate) fn stream_segment(
+    dir: &cap_std::fs::Dir,
+    generation: u64,
+    head: &HeadMarker,
+    window_end: u64,
+    cursor: &mut ReplayCursor,
+    apply_record: &mut impl FnMut(&JournalRecord) -> Result<(), JournalReplayError>,
+) -> Result<u64, JournalReplayError> {
+    let mut frames = SegmentFrames::open(dir, generation, head, window_end)?;
+    let mut record_count = 0_u64;
+    while let Some(record) = frames.next_record()? {
+        cursor.accept(&record)?;
         apply_record(&record)?;
         record_count = record_count.checked_add(1).ok_or_else(|| {
             JournalReplayError::CommittedRangeInvalid("record count overflow".to_owned())

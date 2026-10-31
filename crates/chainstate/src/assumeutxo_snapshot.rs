@@ -91,7 +91,8 @@ fn write_archive<T>(
                 let file = file.into_std();
                 if let Err(error) = file.lock() {
                     drop(file);
-                    let _ = directory.remove_file(&temporary);
+                    let _abandoned_reservation_reclaimed_at_startup =
+                        directory.remove_file(&temporary);
                     return Err(error.into());
                 }
                 reserved = Some((temporary, file));
@@ -113,7 +114,7 @@ fn write_archive<T>(
         Ok(write_result)
     })();
     if result.is_err() {
-        let _ = directory.remove_file(&temporary);
+        let _abandoned_reservation_reclaimed_at_startup = directory.remove_file(&temporary);
     }
     result
 }
@@ -482,7 +483,7 @@ mod tests {
                 Network::Regtest,
                 pinned,
             );
-            let _ = sender.send(result);
+            let _receiver_gone = sender.send(result);
         });
         let observed = receiver.recv_timeout(std::time::Duration::from_secs(5));
         let rescue = if observed.is_err() {
@@ -580,7 +581,7 @@ mod tests {
         let state =
             bitcoin_rs_utxo::core_snapshot::VerifiedSnapshotState::verify(bare.set, pinned)?;
         let dir_new = tempfile::tempdir()?;
-        let _ = write_coins_sealed(dir_new.path(), state, pinned)?;
+        write_coins_sealed(dir_new.path(), state, pinned)?;
         let archive_name = pinned.block_hash.to_string();
         let old_bytes = std::fs::read(
             dir_old

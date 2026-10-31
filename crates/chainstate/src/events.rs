@@ -247,7 +247,7 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64, DataDirErro
             .map_err(|source| DataDirError::SyncDataDir { source })
     })();
     if allocation.is_err() {
-        let _ = dir.remove_file(PROCESS_EPOCH_TEMP);
+        let _stale_temp_reclaimed_by_the_next_allocation = dir.remove_file(PROCESS_EPOCH_TEMP);
     }
     allocation?;
 

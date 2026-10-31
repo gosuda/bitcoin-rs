@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::{
     UtxoError, UtxoSet, UtxoSetView,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
+    shard::ShardTable,
     snapshot::{SerializedUtxoHasher, SnapshotCoin, SnapshotCoinObserver},
     stats::{CoinStats, CoinStatsAccumulator, scan_coin_stats},
 };
@@ -333,111 +334,156 @@ pub struct CoreV2WriteReport {
 /// does not match `coins_count`.
 pub fn write_core_v2<W: Write + ?Sized>(
     view: &UtxoSetView<'_>,
-    network: Network,
-    base_hash: Hash256,
-    base_height: u32,
-    coins_count: u64,
+    base: &CoreV2Base,
     writer: &mut W,
     should_stop: &dyn Fn() -> bool,
 ) -> Result<CoreV2WriteReport, SnapshotError> {
     if should_stop() {
         return Err(SnapshotError::Interrupted);
     }
+    write_v2_header(writer, base)?;
+    let mut encoder = CoreV2Encoder {
+        writer,
+        base_height: base.base_height,
+        coins_count: base.coins_count,
+        coins_written: 0,
+        last_polled_coins: 0,
+        total_bytes: HEADER_BYTES,
+        commitment: SerializedUtxoHasher::new(),
+        varint_buf: Vec::with_capacity(10),
+        should_stop,
+    };
+    for shard_idx in 0_u8..=u8::MAX {
+        let shard = view.shard(usize::from(shard_idx));
+        shard.with_table(|table| encoder.write_table(table))?;
+    }
+    encoder.finish()
+}
 
+pub struct CoreV2Base {
+    pub network: Network,
+    pub base_hash: Hash256,
+    pub base_height: u32,
+    pub coins_count: u64,
+}
+
+fn write_v2_header<W: Write + ?Sized>(
+    writer: &mut W,
+    base: &CoreV2Base,
+) -> Result<(), SnapshotError> {
     writer.write_all(&MAGIC)?;
     writer.write_all(&VERSION.to_le_bytes())?;
-    writer.write_all(&network.magic())?;
-    writer.write_all(&base_hash.to_le_bytes())?;
-    writer.write_all(&coins_count.to_le_bytes())?;
+    writer.write_all(&base.network.magic())?;
+    writer.write_all(&base.base_hash.to_le_bytes())?;
+    writer.write_all(&base.coins_count.to_le_bytes())?;
+    Ok(())
+}
 
-    let mut total_bytes: u64 = HEADER_BYTES;
-    let mut coins_written: u64 = 0;
-    let mut last_polled_coins: u64 = 0;
-    let mut commitment = SerializedUtxoHasher::new();
-    let mut varint_buf = Vec::with_capacity(10);
+struct CoreV2Encoder<'w, W: Write + ?Sized> {
+    writer: &'w mut W,
+    base_height: u32,
+    coins_count: u64,
+    coins_written: u64,
+    last_polled_coins: u64,
+    total_bytes: u64,
+    commitment: SerializedUtxoHasher,
+    varint_buf: Vec<u8>,
+    should_stop: &'w dyn Fn() -> bool,
+}
 
-    for shard_idx in 0_u8..=u8::MAX {
-        view.shard(usize::from(shard_idx)).with_table(|table| {
-            let mut records: Vec<&UtxoRecord> = table.table.iter().collect();
-            records.sort_unstable_by(|left, right| {
-                left.txid().to_le_bytes().cmp(&right.txid().to_le_bytes())
-            });
-
-            for record in records {
-                let txid_bytes = record.txid().to_le_bytes();
-                let mut outputs: Vec<crate::record::OneUtxoOut<'_>> = record.outputs().collect();
-                if outputs.is_empty() {
-                    continue;
-                }
-                outputs.sort_unstable_by(|left, right| {
-                    crate::compress::cmp_core_varint_key(left.vout, right.vout)
-                });
-                let mut commitment_outputs: Vec<_> = record.outputs().collect();
-                commitment_outputs.sort_unstable_by_key(|output| output.vout);
-
-                let group_count =
-                    u64::try_from(outputs.len()).map_err(|_| SnapshotError::LimitExceeded {
-                        resource: "coins per txid",
-                        actual: u64::MAX,
-                        limit: u64::from(u32::MAX),
-                    })?;
-
-                writer.write_all(&txid_bytes)?;
-                total_bytes = total_bytes
-                    .checked_add(32)
-                    .ok_or(SnapshotError::VarIntOverflow)?;
-
-                let group_encoded = varint::encode(group_count);
-                writer.write_all(group_encoded.as_slice())?;
-                total_bytes = total_bytes
-                    .checked_add(u64::try_from(group_encoded.len()).unwrap_or(0))
-                    .ok_or(SnapshotError::VarIntOverflow)?;
-
-                for output in outputs {
-                    let entry_bytes =
-                        write_output_entry(writer, &output, base_height, &mut varint_buf)?;
-                    total_bytes = total_bytes
-                        .checked_add(entry_bytes)
-                        .ok_or(SnapshotError::VarIntOverflow)?;
-
-                    coins_written = coins_written
-                        .checked_add(1)
-                        .ok_or(SnapshotError::VarIntOverflow)?;
-
-                    if coins_written > coins_count {
-                        return Err(SnapshotError::DeclaredCoinCountMismatch {
-                            declared: coins_count,
-                            actual: coins_written,
-                        });
-                    }
-
-                    if coins_written.saturating_sub(last_polled_coins) >= 5000 {
-                        last_polled_coins = coins_written;
-                        if should_stop() {
-                            return Err(SnapshotError::Interrupted);
-                        }
-                    }
-                }
-                for output in commitment_outputs {
-                    commitment.add(txid_bytes, output, Some(base_height))?;
-                }
-            }
-            Ok::<(), SnapshotError>(())
-        })?;
-    }
-
-    if coins_written != coins_count {
-        return Err(SnapshotError::DeclaredCoinCountMismatch {
-            declared: coins_count,
-            actual: coins_written,
+impl<W: Write + ?Sized> CoreV2Encoder<'_, W> {
+    fn write_table(&mut self, table: &ShardTable) -> Result<(), SnapshotError> {
+        let mut records: Vec<&UtxoRecord> = table.table.iter().collect();
+        records.sort_unstable_by(|left, right| {
+            left.txid().to_le_bytes().cmp(&right.txid().to_le_bytes())
         });
+        for record in records {
+            self.write_record(record)?;
+        }
+        Ok(())
     }
 
-    Ok(CoreV2WriteReport {
-        bytes: total_bytes,
-        coins: coins_written,
-        txoutset_hash: commitment.finish(),
-    })
+    fn write_record(&mut self, record: &UtxoRecord) -> Result<(), SnapshotError> {
+        let txid_bytes = record.txid().to_le_bytes();
+        let mut outputs: Vec<OneUtxoOut<'_>> = record.outputs().collect();
+        if outputs.is_empty() {
+            return Ok(());
+        }
+        outputs.sort_unstable_by(|left, right| {
+            crate::compress::cmp_core_varint_key(left.vout, right.vout)
+        });
+        let mut commitment_outputs: Vec<_> = record.outputs().collect();
+        commitment_outputs.sort_unstable_by_key(|output| output.vout);
+
+        let group_count =
+            u64::try_from(outputs.len()).map_err(|_| SnapshotError::LimitExceeded {
+                resource: "coins per txid",
+                actual: u64::MAX,
+                limit: u64::from(u32::MAX),
+            })?;
+
+        self.write_counted(&txid_bytes)?;
+        let group_encoded = varint::encode(group_count);
+        self.write_counted(group_encoded.as_slice())?;
+        for output in outputs {
+            let entry_bytes =
+                write_output_entry(self.writer, &output, self.base_height, &mut self.varint_buf)?;
+            self.add_bytes(entry_bytes)?;
+            self.count_coin()?;
+        }
+        for output in commitment_outputs {
+            self.commitment
+                .add(txid_bytes, output, Some(self.base_height))?;
+        }
+        Ok(())
+    }
+
+    fn write_counted(&mut self, bytes: &[u8]) -> Result<(), SnapshotError> {
+        self.writer.write_all(bytes)?;
+        self.add_bytes(u64::try_from(bytes.len()).unwrap_or(0))
+    }
+
+    fn add_bytes(&mut self, extra: u64) -> Result<(), SnapshotError> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(extra)
+            .ok_or(SnapshotError::VarIntOverflow)?;
+        Ok(())
+    }
+
+    fn count_coin(&mut self) -> Result<(), SnapshotError> {
+        self.coins_written = self
+            .coins_written
+            .checked_add(1)
+            .ok_or(SnapshotError::VarIntOverflow)?;
+        if self.coins_written > self.coins_count {
+            return Err(SnapshotError::DeclaredCoinCountMismatch {
+                declared: self.coins_count,
+                actual: self.coins_written,
+            });
+        }
+        if self.coins_written.saturating_sub(self.last_polled_coins) >= 5000 {
+            self.last_polled_coins = self.coins_written;
+            if (self.should_stop)() {
+                return Err(SnapshotError::Interrupted);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<CoreV2WriteReport, SnapshotError> {
+        if self.coins_written != self.coins_count {
+            return Err(SnapshotError::DeclaredCoinCountMismatch {
+                declared: self.coins_count,
+                actual: self.coins_written,
+            });
+        }
+        Ok(CoreV2WriteReport {
+            bytes: self.total_bytes,
+            coins: self.coins_written,
+            txoutset_hash: self.commitment.finish(),
+        })
+    }
 }
 
 fn write_output_entry<W: Write + ?Sized>(
@@ -446,6 +492,26 @@ fn write_output_entry<W: Write + ?Sized>(
     base_height: u32,
     varint_buf: &mut Vec<u8>,
 ) -> Result<u64, SnapshotError> {
+    let code = entry_code(output, base_height)?;
+    let mut written = 0_u64;
+    written = add_written(written, write_vout_entry(writer, output.vout)?)?;
+    written = add_written(
+        written,
+        write_core_varint_entry(writer, u64::from(code), varint_buf)?,
+    )?;
+    let compressed_amount = crate::compress::compress_amount(output.value)?;
+    written = add_written(
+        written,
+        write_core_varint_entry(writer, compressed_amount, varint_buf)?,
+    )?;
+    written = add_written(
+        written,
+        write_script_entry(writer, output.script_pubkey, varint_buf)?,
+    )?;
+    Ok(written)
+}
+
+fn entry_code(output: &OneUtxoOut<'_>, base_height: u32) -> Result<u32, SnapshotError> {
     if output.vout == u32::MAX {
         return Err(SnapshotError::InvalidOutpoint {
             vout: u64::from(output.vout),
@@ -457,70 +523,74 @@ fn write_output_entry<W: Write + ?Sized>(
             base_height,
         });
     }
-
     let raw_code = (u64::from(output.height) << 1) | u64::from(output.coinbase);
-    let code = u32::try_from(raw_code).map_err(|_| SnapshotError::VarIntOverflow)?;
+    u32::try_from(raw_code).map_err(|_| SnapshotError::VarIntOverflow)
+}
 
-    let mut written: u64 = 0;
+fn write_vout_entry<W: Write + ?Sized>(writer: &mut W, vout: u32) -> Result<u64, SnapshotError> {
+    let encoded = varint::encode(u64::from(vout));
+    writer.write_all(encoded.as_slice())?;
+    Ok(counted(encoded.len()))
+}
 
-    let vout_encoded = varint::encode(u64::from(output.vout));
-    writer.write_all(vout_encoded.as_slice())?;
-    written = written
-        .checked_add(u64::try_from(vout_encoded.len()).unwrap_or(0))
-        .ok_or(SnapshotError::VarIntOverflow)?;
-
+fn write_core_varint_entry<W: Write + ?Sized>(
+    writer: &mut W,
+    value: u64,
+    varint_buf: &mut Vec<u8>,
+) -> Result<u64, SnapshotError> {
     varint_buf.clear();
-    crate::compress::write_core_varint(u64::from(code), varint_buf);
+    crate::compress::write_core_varint(value, varint_buf);
     writer.write_all(varint_buf)?;
+    Ok(counted(varint_buf.len()))
+}
+
+fn write_script_entry<W: Write + ?Sized>(
+    writer: &mut W,
+    script: &[u8],
+    varint_buf: &mut Vec<u8>,
+) -> Result<u64, SnapshotError> {
+    let Some((script_code, payload)) = crate::compress::compress_script(script) else {
+        return write_raw_script_entry(writer, script, varint_buf);
+    };
+    let mut written = write_core_varint_entry(writer, script_code, varint_buf)?;
+    writer.write_all(payload)?;
     written = written
-        .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
+        .checked_add(counted(payload.len()))
         .ok_or(SnapshotError::VarIntOverflow)?;
-
-    let compressed_amount = crate::compress::compress_amount(output.value)?;
-    varint_buf.clear();
-    crate::compress::write_core_varint(compressed_amount, varint_buf);
-    writer.write_all(varint_buf)?;
-    written = written
-        .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
-        .ok_or(SnapshotError::VarIntOverflow)?;
-
-    if let Some((script_code, payload)) = crate::compress::compress_script(output.script_pubkey) {
-        varint_buf.clear();
-        crate::compress::write_core_varint(script_code, varint_buf);
-        writer.write_all(varint_buf)?;
-        written = written
-            .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
-            .ok_or(SnapshotError::VarIntOverflow)?;
-
-        writer.write_all(payload)?;
-        written = written
-            .checked_add(u64::try_from(payload.len()).unwrap_or(0))
-            .ok_or(SnapshotError::VarIntOverflow)?;
-    } else {
-        let script_len = output.script_pubkey.len();
-        if script_len > 10_000 {
-            return Err(SnapshotError::InvalidScriptLength {
-                length: u64::try_from(script_len).unwrap_or(u64::MAX),
-            });
-        }
-        let script_code = u64::try_from(script_len)
-            .map_err(|_| SnapshotError::VarIntOverflow)?
-            .checked_add(6)
-            .ok_or(SnapshotError::VarIntOverflow)?;
-        varint_buf.clear();
-        crate::compress::write_core_varint(script_code, varint_buf);
-        writer.write_all(varint_buf)?;
-        written = written
-            .checked_add(u64::try_from(varint_buf.len()).unwrap_or(0))
-            .ok_or(SnapshotError::VarIntOverflow)?;
-
-        writer.write_all(output.script_pubkey)?;
-        written = written
-            .checked_add(u64::try_from(output.script_pubkey.len()).unwrap_or(0))
-            .ok_or(SnapshotError::VarIntOverflow)?;
-    }
-
     Ok(written)
+}
+
+fn write_raw_script_entry<W: Write + ?Sized>(
+    writer: &mut W,
+    script: &[u8],
+    varint_buf: &mut Vec<u8>,
+) -> Result<u64, SnapshotError> {
+    let script_len = script.len();
+    if script_len > 10_000 {
+        return Err(SnapshotError::InvalidScriptLength {
+            length: u64::try_from(script_len).unwrap_or(u64::MAX),
+        });
+    }
+    let script_code = u64::try_from(script_len)
+        .map_err(|_| SnapshotError::VarIntOverflow)?
+        .checked_add(6)
+        .ok_or(SnapshotError::VarIntOverflow)?;
+    let mut written = write_core_varint_entry(writer, script_code, varint_buf)?;
+    writer.write_all(script)?;
+    written = written
+        .checked_add(counted(script.len()))
+        .ok_or(SnapshotError::VarIntOverflow)?;
+    Ok(written)
+}
+
+fn counted(extra: usize) -> u64 {
+    u64::try_from(extra).unwrap_or(0)
+}
+
+fn add_written(total: u64, extra: u64) -> Result<u64, SnapshotError> {
+    total
+        .checked_add(extra)
+        .ok_or(SnapshotError::VarIntOverflow)
 }
 
 fn check_limit(resource: &'static str, actual: u64, limit: u64) -> Result<(), SnapshotError> {

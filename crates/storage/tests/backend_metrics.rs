@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget};
+use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget_with_txindex};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
@@ -13,7 +13,7 @@ use metrics::{
 };
 
 fn txindex_share() -> u64 {
-    let share = split_cache_budget(MIN_DBCACHE_BYTES, true)[1].bytes;
+    let share = split_cache_budget_with_txindex(MIN_DBCACHE_BYTES)[1].bytes;
     assert_eq!(share, 3_355_443, "txindex keeps a floored 20% of 16 MiB");
     share
 }

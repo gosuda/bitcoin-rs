@@ -18,7 +18,7 @@ use bitcoin_rs_rpc::context::{
 use bitcoin_rs_storage::checkpoint::fs::{HAS_ATOMIC_NOREPLACE_RENAME, rename_noreplace};
 use bitcoin_rs_storage::checkpoint::{create_file, open_data_dir, sync_dir};
 use bitcoin_rs_utxo::core_snapshot::{
-    CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
+    CoreV2Base, CoreV2WriteReport, SnapshotError, SnapshotLimits, read_verified, write_core_v2,
 };
 use bitcoin_rs_utxo::{SeedOfferCell, SeedProvenance, V4Witness, VerifiedSnapshotArtifact};
 use parking_lot::Mutex;
@@ -423,7 +423,17 @@ impl SnapshotControl {
             .ok_or(SnapshotExportError::ChainTxCountUnknown)?;
         let coins = u64::try_from(view.len())
             .map_err(|error| SnapshotExportError::Write(std::io::Error::other(error)))?;
-        let report = write_core_v2(&view, self.network, tip.hash, tip.height, coins, sink, stop)?;
+        let report = write_core_v2(
+            &view,
+            &CoreV2Base {
+                network: self.network,
+                base_hash: tip.hash,
+                base_height: tip.height,
+                coins_count: coins,
+            },
+            sink,
+            stop,
+        )?;
         Ok(Encoded {
             report,
             base_hash: tip.hash,

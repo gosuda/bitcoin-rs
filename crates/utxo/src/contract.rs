@@ -365,25 +365,17 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
 /// resolved prevout.
 ///
 /// Genesis returns empty mutations.
-#[expect(clippy::too_many_arguments)]
 pub fn build_block_changes<'a>(
-    block: &'a Block,
-    height: u32,
-    txids: &[Txid],
-    same_block_spent: Option<&HashSet<OutPoint>>,
-    add_capacity: usize,
-    remove_capacity: usize,
+    inputs: &BlockChangeInputs<'a, '_>,
     resolved: &impl SpentOutputLookup,
-    overwritten: Option<&UtxoSet>,
-    max_script_size: usize,
 ) -> Result<(BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals), BlockChangeError> {
-    if block.txs.len() != txids.len() {
+    if inputs.block.txs.len() != inputs.txids.len() {
         return Err(BlockChangeError::TxidCountMismatch {
-            transactions: block.txs.len(),
-            txids: txids.len(),
+            transactions: inputs.block.txs.len(),
+            txids: inputs.txids.len(),
         });
     }
-    if height == 0 {
+    if inputs.height == 0 {
         return Ok((
             BlockChanges::default(),
             UndoBatch::empty(),
@@ -391,79 +383,160 @@ pub fn build_block_changes<'a>(
         ));
     }
 
-    let net_same_block_spends = same_block_spent.is_some_and(|s| !s.is_empty());
-    let mut changes = BlockChanges::with_capacity(add_capacity, remove_capacity);
-    let mut undo = UndoBatch::empty();
-    let mut totals = BlockValueTotals::default();
-    for (tx, txid) in block.txs.iter().zip(txids) {
-        let txid = *txid;
+    let mut builder =
+        ChangeBuilder::with_capacity(inputs.add_capacity, inputs.remove_capacity, inputs.height);
+    for (tx, txid) in inputs.block.txs.iter().zip(inputs.txids) {
+        builder.add_outputs(tx, *txid, inputs)?;
+        if !tx.is_coinbase() {
+            builder.add_spends(tx, inputs, resolved)?;
+        }
+    }
+    Ok(builder.finish())
+}
+
+pub struct BlockChangeInputs<'a, 'b> {
+    pub block: &'a Block,
+    pub height: u32,
+    pub txids: &'b [Txid],
+    pub same_block_spent: Option<&'b HashSet<OutPoint>>,
+    pub add_capacity: usize,
+    pub remove_capacity: usize,
+    pub overwritten: Option<&'b UtxoSet>,
+    pub max_script_size: usize,
+}
+
+impl BlockChangeInputs<'_, '_> {
+    fn contains(&self, outpoint: OutPoint) -> bool {
+        self.same_block_spent
+            .is_some_and(|spends| spends.contains(&outpoint))
+    }
+
+    fn is_unstorable(&self, txout: &TxOut) -> bool {
+        txout.script_pubkey.first() == Some(&0x6a)
+            || txout.script_pubkey.len() > self.max_script_size
+    }
+}
+
+struct ChangeBuilder<'a> {
+    changes: BlockChanges<&'a TxOut>,
+    undo: UndoBatch,
+    totals: BlockValueTotals,
+    height: u32,
+}
+
+impl<'a> ChangeBuilder<'a> {
+    fn with_capacity(adds: usize, removes: usize, height: u32) -> Self {
+        Self {
+            changes: BlockChanges::with_capacity(adds, removes),
+            undo: UndoBatch::empty(),
+            totals: BlockValueTotals::default(),
+            height,
+        }
+    }
+
+    fn finish(self) -> (BlockChanges<&'a TxOut>, UndoBatch, BlockValueTotals) {
+        (self.changes, self.undo, self.totals)
+    }
+
+    fn add_outputs(
+        &mut self,
+        tx: &'a Tx,
+        txid: Txid,
+        inputs: &BlockChangeInputs<'_, '_>,
+    ) -> Result<(), BlockChangeError> {
         let coinbase = tx.is_coinbase();
         for (vout_idx, txout) in tx.outputs.iter().enumerate() {
-            let value = txout.value.to_sat();
             let vout =
                 u32::try_from(vout_idx).map_err(|_| BlockChangeError::VoutOverflow { txid })?;
             let outpoint = OutPoint::new(txid, vout);
-            let same_block =
-                net_same_block_spends && same_block_spent.is_some_and(|s| s.contains(&outpoint));
-            if coinbase {
-                totals.coinbase_out = totals
-                    .coinbase_out
-                    .checked_add(value)
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-            } else if !same_block {
-                totals.created_out = totals
-                    .created_out
-                    .checked_add(value)
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-            }
-            if same_block
-                || txout.script_pubkey.first() == Some(&0x6a)
-                || txout.script_pubkey.len() > max_script_size
-            {
+            let same_block = inputs.contains(outpoint);
+            self.account_output_value(coinbase, same_block, txout.value.to_sat())?;
+            if same_block || inputs.is_unstorable(txout) {
                 continue;
             }
-            let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
-            changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-            match replaced {
-                Some(previous) => undo.restore(UtxoAdd::new(
-                    outpoint,
-                    previous.txout,
-                    previous.coinbase,
-                    previous.height,
-                )),
-                None => undo.remove(outpoint),
-            }
+            self.stage_created(outpoint, txout, coinbase, inputs.overwritten);
         }
+        Ok(())
+    }
 
-        if !coinbase {
-            for tx_input in &tx.inputs {
-                let previous_output = tx_input.previous_output;
-                if net_same_block_spends
-                    && same_block_spent.is_some_and(|s| s.contains(&previous_output))
-                {
-                    continue;
-                }
-                changes.remove(previous_output);
-                let spent = resolved.entry(&tx_input.previous_output).ok_or(
-                    BlockChangeError::UndoPrevoutMissing {
-                        txid: previous_output.txid,
-                        vout: previous_output.vout,
-                    },
-                )?;
-                totals.spent_in = totals
-                    .spent_in
-                    .checked_add(spent.txout.value.to_sat())
-                    .ok_or(BlockChangeError::BlockValueOverflow)?;
-                undo.restore(UtxoAdd::new(
-                    previous_output,
-                    spent.txout.clone(),
-                    spent.coinbase,
-                    spent.height,
-                ));
-            }
+    fn account_output_value(
+        &mut self,
+        coinbase: bool,
+        same_block: bool,
+        value: u64,
+    ) -> Result<(), BlockChangeError> {
+        let total = if coinbase {
+            &mut self.totals.coinbase_out
+        } else if !same_block {
+            &mut self.totals.created_out
+        } else {
+            return Ok(());
+        };
+        *total = total
+            .checked_add(value)
+            .ok_or(BlockChangeError::BlockValueOverflow)?;
+        Ok(())
+    }
+
+    fn stage_created(
+        &mut self,
+        outpoint: OutPoint,
+        txout: &'a TxOut,
+        coinbase: bool,
+        overwritten: Option<&UtxoSet>,
+    ) {
+        let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
+        self.changes
+            .add(UtxoAdd::new(outpoint, txout, coinbase, self.height));
+        match replaced {
+            Some(previous) => self.undo.restore(UtxoAdd::new(
+                outpoint,
+                previous.txout,
+                previous.coinbase,
+                previous.height,
+            )),
+            None => self.undo.remove(outpoint),
         }
     }
-    Ok((changes, undo, totals))
+
+    fn add_spends(
+        &mut self,
+        tx: &Tx,
+        inputs: &BlockChangeInputs<'_, '_>,
+        resolved: &impl SpentOutputLookup,
+    ) -> Result<(), BlockChangeError> {
+        for tx_input in &tx.inputs {
+            let previous_output = tx_input.previous_output;
+            if inputs.contains(previous_output) {
+                continue;
+            }
+            self.changes.remove(previous_output);
+            let spent =
+                resolved
+                    .entry(&previous_output)
+                    .ok_or(BlockChangeError::UndoPrevoutMissing {
+                        txid: previous_output.txid,
+                        vout: previous_output.vout,
+                    })?;
+            self.account_spent_value(spent.txout.value.to_sat())?;
+            self.undo.restore(UtxoAdd::new(
+                previous_output,
+                spent.txout.clone(),
+                spent.coinbase,
+                spent.height,
+            ));
+        }
+        Ok(())
+    }
+
+    fn account_spent_value(&mut self, value: u64) -> Result<(), BlockChangeError> {
+        self.totals.spent_in = self
+            .totals
+            .spent_in
+            .checked_add(value)
+            .ok_or(BlockChangeError::BlockValueOverflow)?;
+        Ok(())
+    }
 }
 
 pub fn persist_block_undo(

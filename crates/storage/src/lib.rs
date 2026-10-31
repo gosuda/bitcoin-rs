@@ -12,7 +12,10 @@ pub use block_file::{
     encode_block_file_max_height,
 };
 
-pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget};
+pub use cache_budget::{
+    CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget_with_txindex,
+    split_cache_budget_without_txindex,
+};
 
 pub use column_families::ColumnFamily;
 

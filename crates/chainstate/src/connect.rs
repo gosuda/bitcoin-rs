@@ -21,7 +21,10 @@ use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, UtxoView};
 use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Txid, consensus_bytes};
 use bitcoin_rs_storage::{CommitRecords, ScriptAttestation};
-use bitcoin_rs_utxo::contract::{BlockChangeError, build_block_changes};
+use bitcoin_rs_utxo::contract::{
+    BlockChangeError, BlockChangeInputs, BlockChanges, BlockValueTotals, UndoBatch, UndoRecord,
+    build_block_changes,
+};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -45,29 +48,39 @@ pub(super) fn apply_committed_block_admitted<'b>(
     }
 }
 
-#[expect(clippy::too_many_lines)]
-pub(super) fn apply_block_admitted<'b>(
+#[derive(Default)]
+struct ApplyTimings {
+    block_rules: std::time::Duration,
+    bip30_bip34: std::time::Duration,
+    script_verify: std::time::Duration,
+    utxo_commit: std::time::Duration,
+    block_body_persist: std::time::Duration,
+    block_tree_insert: std::time::Duration,
+    coin_stats: std::time::Duration,
+}
+
+fn application_predecessor(
     handles: &Chainstate,
-    payload: &'b BlockPayload,
-    proven: Option<ProvenApply<'b>>,
-    provenance: BlockProvenance,
-    intent: ApplyIntent,
-    publication: PublishMode<'_>,
-) -> core::result::Result<ApplyFinish, ApplyError> {
-    let block = payload.block();
-    let total_started = quanta::Instant::now();
-    let block_hash = block.block_hash().0;
-    let prev_hash = block.header.prev_blockhash.0;
-    let (prior, height) = match &publication {
+    block_hash: Hash256,
+    prev_hash: Hash256,
+    publication: &PublishMode<'_>,
+) -> core::result::Result<(Option<Arc<TipSnapshot>>, u32), ApplyError> {
+    match publication {
         PublishMode::Grouped(group) => match group.predecessor(prev_hash)? {
-            Some((tip, height)) => (Some(tip), height),
-            None => applied_predecessor(handles, block_hash, prev_hash)?,
+            Some((tip, height)) => Ok((Some(tip), height)),
+            None => applied_predecessor(handles, block_hash, prev_hash),
         },
         PublishMode::Now | PublishMode::Replay { .. } => {
-            applied_predecessor(handles, block_hash, prev_hash)?
+            applied_predecessor(handles, block_hash, prev_hash)
         }
-    };
+    }
+}
 
+fn check_historical_target(
+    handles: &Chainstate,
+    height: u32,
+    block_hash: Hash256,
+) -> core::result::Result<(), ApplyError> {
     if let crate::assumeutxo::ChainstateRole::Historical {
         base_height,
         base_hash,
@@ -87,20 +100,33 @@ pub(super) fn apply_block_admitted<'b>(
             });
         }
     }
+    Ok(())
+}
 
-    if !matches!(publication, PublishMode::Replay { .. }) {
-        let contextual_header_started =
-            tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-        let contextual_header_result =
-            validate_contextual_block_header(handles, block, height, prior.as_deref());
-        tracing::debug!(
-            height,
-            %block_hash,
-            contextual_header_us = contextual_header_started.map(|start| start.elapsed().as_micros()),
-            "apply_block: profile"
-        );
-        contextual_header_result?;
-    }
+fn check_contextual_header(
+    handles: &Chainstate,
+    block: &Block,
+    height: u32,
+    prior: Option<&TipSnapshot>,
+    block_hash: Hash256,
+) -> core::result::Result<(), ApplyError> {
+    let contextual_header_started =
+        tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
+    let contextual_header_result = validate_contextual_block_header(handles, block, height, prior);
+    tracing::debug!(
+        height,
+        %block_hash,
+        contextual_header_us = contextual_header_started.map(|start| start.elapsed().as_micros()),
+        "apply_block: profile"
+    );
+    contextual_header_result
+}
+
+fn prepare_journal_for_apply(
+    handles: &Chainstate,
+    height: u32,
+    intent: ApplyIntent,
+) -> core::result::Result<(), ApplyError> {
     if intent == ApplyIntent::Commit
         && let Some(journal) = handles.journal.read().clone()
     {
@@ -114,7 +140,16 @@ pub(super) fn apply_block_admitted<'b>(
             return Err(ApplyError::JournalBackpressure(Box::new(error)));
         }
     }
+    Ok(())
+}
 
+fn check_self_pow(
+    handles: &Chainstate,
+    block: &Block,
+    block_hash: Hash256,
+    height: u32,
+    intent: ApplyIntent,
+) -> core::result::Result<(), ApplyError> {
     let pow_self_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let pow_self_result =
         bitcoin_rs_chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
@@ -126,15 +161,29 @@ pub(super) fn apply_block_admitted<'b>(
     );
     match pow_self_result {
         Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }) => {
-            return Err(ApplyError::TargetAboveLimit);
+            Err(ApplyError::TargetAboveLimit)
         }
         Err(_) if intent == ApplyIntent::Commit => {
-            return Err(ApplyError::ProofOfWork { hash: block_hash });
+            Err(ApplyError::ProofOfWork { hash: block_hash })
         }
-        _ => {}
+        _ => Ok(()),
     }
+}
 
-    let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
+struct ValidationContexts {
+    validation: BlockValidationContext,
+    softfork: bitcoin_rs_chain::SoftforkState,
+    median_time_past: u32,
+}
+
+fn validation_contexts(
+    handles: &Chainstate,
+    block: &Block,
+    height: u32,
+    block_hash: Hash256,
+    prior: Option<&TipSnapshot>,
+) -> ValidationContexts {
+    let (prev_median_time_past, softfork_state) = if let Some(tip) = prior {
         let tree = handles.block_tree.read();
         let mtp = tree.median_time_past_at(tip.tip_id).unwrap_or(0);
         let softfork_state =
@@ -147,202 +196,303 @@ pub(super) fn apply_block_admitted<'b>(
             bitcoin_rs_chain::softfork_state(&tree, handles.network, None, height),
         )
     };
+    let locktime_rule = if softfork_state.csv_active {
+        bitcoin_rs_consensus::LocktimeRule::MedianTimePast
+    } else {
+        bitcoin_rs_consensus::LocktimeRule::CandidateTime
+    };
     let locktime_cutoff = bitcoin_rs_consensus::locktime_cutoff(
-        softfork_state.csv_active,
+        locktime_rule,
         prev_median_time_past,
         block.header.time,
     );
     let verify_flags =
         bitcoin_rs_consensus::verify_flags(handles.network, height, block_hash, softfork_state);
-    let validation_context = BlockValidationContext {
-        hash: block_hash,
-        parent: prev_hash,
-        height,
-        flags: verify_flags,
-        locktime_cutoff,
-    };
-    let (prepared, transactions_proven) = match proven {
-        Some(ProvenApply::Proven(proof)) if proof.context == validation_context => {
-            (proof.prepared, true)
-        }
-        Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
-        Some(ProvenApply::Proven(_)) | None => (
+    ValidationContexts {
+        validation: BlockValidationContext {
+            hash: block_hash,
+            parent: block.header.prev_blockhash.0,
+            height,
+            flags: verify_flags,
+            locktime_cutoff,
+        },
+        softfork: softfork_state,
+        median_time_past: prev_median_time_past,
+    }
+}
+
+fn prepare_block<'b>(
+    handles: &Chainstate,
+    payload: &'b BlockPayload,
+    proven: Option<ProvenApply<'b>>,
+    context: &BlockValidationContext,
+) -> core::result::Result<(PreparedApply<'b>, bool), ApplyError> {
+    match proven {
+        Some(ProvenApply::Proven(proof)) if &proof.context == context => Ok((proof.prepared, true)),
+        Some(ProvenApply::AssumeValidSkipped(prepared)) => Ok((prepared, false)),
+        Some(ProvenApply::Proven(_)) | None => Ok((
             prepare_apply(payload, handles.utxo.as_ref(), handles.validation_engine)?,
             false,
-        ),
-    };
-    let PreparedApply {
-        script_source,
-        mut view,
-        tx_plan,
-        resolved,
-    } = prepared;
+        )),
+    }
+}
 
-    let block_rules_started = quanta::Instant::now();
-    let needs_wtxids = softfork_state.segwit_active && tx_plan.has_witness;
-    if needs_wtxids {
-        view.witness_ids();
-    }
-    let block_rules_result = bitcoin_rs_consensus::verify_block_rules_precomputed(
-        block,
-        bitcoin_rs_consensus::BlockRuleContext {
-            segwit_active: softfork_state.segwit_active,
-        },
-        view.facts(),
-    );
-    let block_rules_dur = block_rules_started.elapsed();
-    metrics::histogram!("node.apply_block.block_rules_seconds")
-        .record(block_rules_dur.as_secs_f64());
-    block_rules_result?;
-    if intent == ApplyIntent::Commit
-        && let Some(challenge) = handles.network.signet_challenge()
-    {
-        bitcoin_rs_consensus::check_signet_block_solution(block, challenge)?;
-    }
-    check_block_finality(block, height, locktime_cutoff)?;
-    if intent == ApplyIntent::Commit {
-        check_bip34(handles, block, height)?;
-    }
-    if intent == ApplyIntent::Commit
-        && softfork_state.segwit_active
-        && let Some(hook) = handles.pow_valid_block.get()
-        && handles
-            .applied_tip_snapshot()
-            .is_some_and(|tip| tip.hash == prev_hash)
-    {
-        hook(block, block_hash, height);
-    }
-    let bip30_bip34_started = quanta::Instant::now();
-    let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
-    let bip30_bip34_result =
-        check_bip30_and_bip34(handles, block, height, view.txids(), previous_tip_id);
-    let bip30_bip34_dur = bip30_bip34_started.elapsed();
-    metrics::histogram!("node.apply_block.bip30_bip34_seconds")
-        .record(bip30_bip34_dur.as_secs_f64());
-    bip30_bip34_result?;
+struct BlockRules<'a, 'b> {
+    handles: &'a Chainstate,
+    block: &'b Block,
+    block_hash: Hash256,
+    prev_hash: Hash256,
+    context: &'b BlockValidationContext,
+    softfork: bitcoin_rs_chain::SoftforkState,
+    prior_tip_id: Option<NodeId>,
+    intent: ApplyIntent,
+}
 
-    let script_verify_started = quanta::Instant::now();
-    let script_cache = if intent == ApplyIntent::Commit {
-        handles.script_cache.as_deref()
-    } else {
-        None
-    };
-    let script_verify_result = if transactions_proven {
-        Ok(ScriptsRan::Executed)
-    } else {
-        verify_block_transactions(
-            handles,
-            &mut view,
-            &tx_plan,
-            Arc::clone(&resolved),
-            &validation_context,
-            provenance,
-            &script_source,
-            script_cache,
-        )
-    };
-    let script_verify_dur = script_verify_started.elapsed();
-    metrics::histogram!("node.apply_block.script_verify_seconds")
-        .record(script_verify_dur.as_secs_f64());
-    tracing::debug!(
-        height,
-        %block_hash,
-        script_verify_us = script_verify_dur.as_micros(),
-        script_dispatch = if tx_plan.only_coinbase {
-            "coinbase_only"
-        } else if tx_plan.needs_local_utxo_overlay {
-            "serial_overlay"
+impl BlockRules<'_, '_> {
+    fn check(
+        &self,
+        view: &mut bitcoin_rs_consensus::BlockView<'_>,
+        has_witness: bool,
+        timings: &mut ApplyTimings,
+    ) -> core::result::Result<(), ApplyError> {
+        let needs_wtxids = self.softfork.segwit_active && has_witness;
+        if needs_wtxids {
+            view.witness_ids();
+        }
+        let block_rules_started = quanta::Instant::now();
+        let block_rules_result = bitcoin_rs_consensus::verify_block_rules_precomputed(
+            self.block,
+            bitcoin_rs_consensus::BlockRuleContext {
+                segwit_active: self.softfork.segwit_active,
+            },
+            view.facts(),
+        );
+        let block_rules_dur = block_rules_started.elapsed();
+        metrics::histogram!("node.apply_block.block_rules_seconds")
+            .record(block_rules_dur.as_secs_f64());
+        timings.block_rules = block_rules_dur;
+        block_rules_result?;
+        if self.intent == ApplyIntent::Commit
+            && let Some(challenge) = self.handles.network.signet_challenge()
+        {
+            bitcoin_rs_consensus::check_signet_block_solution(self.block, challenge)?;
+        }
+        check_block_finality(
+            self.block,
+            self.context.height,
+            self.context.locktime_cutoff,
+        )?;
+        if self.intent == ApplyIntent::Commit {
+            check_bip34(self.handles, self.block, self.context.height)?;
+        }
+        if self.intent == ApplyIntent::Commit
+            && self.softfork.segwit_active
+            && let Some(hook) = self.handles.pow_valid_block.get()
+            && self
+                .handles
+                .applied_tip_snapshot()
+                .is_some_and(|tip| tip.hash == self.prev_hash)
+        {
+            hook(self.block, self.block_hash, self.context.height);
+        }
+        let bip30_bip34_started = quanta::Instant::now();
+        let bip30_bip34_result = check_bip30_and_bip34(
+            self.handles,
+            self.block,
+            self.context.height,
+            view.txids(),
+            self.prior_tip_id,
+        );
+        let bip30_bip34_dur = bip30_bip34_started.elapsed();
+        metrics::histogram!("node.apply_block.bip30_bip34_seconds")
+            .record(bip30_bip34_dur.as_secs_f64());
+        timings.bip30_bip34 = bip30_bip34_dur;
+        bip30_bip34_result
+    }
+}
+
+struct ScriptVerification<'a, 'b> {
+    handles: &'a Chainstate,
+    view: &'a mut bitcoin_rs_consensus::BlockView<'b>,
+    tx_plan: &'a BlockTxPlan,
+    resolved: &'a Arc<ResolvedUtxoView>,
+    context: &'a BlockValidationContext,
+    provenance: BlockProvenance,
+    script_source: &'a bitcoin_rs_consensus::kernel::BlockScriptSource,
+    transactions_proven: bool,
+    intent: ApplyIntent,
+}
+
+impl ScriptVerification<'_, '_> {
+    fn run(&mut self, timings: &mut ApplyTimings) -> core::result::Result<ScriptsRan, ApplyError> {
+        let script_verify_started = quanta::Instant::now();
+        let script_cache = if self.intent == ApplyIntent::Commit {
+            self.handles.script_cache.as_deref()
         } else {
-            "parallel"
-        },
-        "apply_block: profile"
-    );
-    let scripts_ran = script_verify_result?;
-    let attestation = match (provenance, scripts_ran) {
-        (BlockProvenance::LocalReplay, _) => None,
-        (_, ScriptsRan::Skipped) => Some(ScriptAttestation::AssumeValid),
-        (_, ScriptsRan::Executed) => Some(ScriptAttestation::Full),
-    };
+            None
+        };
+        let script_verify_result = if self.transactions_proven {
+            Ok(ScriptsRan::Executed)
+        } else {
+            verify_block_transactions(
+                self.handles,
+                self.view,
+                self.tx_plan,
+                Arc::clone(self.resolved),
+                self.context,
+                self.provenance,
+                self.script_source,
+                script_cache,
+            )
+        };
+        let script_verify_dur = script_verify_started.elapsed();
+        metrics::histogram!("node.apply_block.script_verify_seconds")
+            .record(script_verify_dur.as_secs_f64());
+        timings.script_verify = script_verify_dur;
+        tracing::debug!(
+            height = self.context.height,
+            %self.context.hash,
+            script_verify_us = script_verify_dur.as_micros(),
+            script_dispatch = if self.tx_plan.only_coinbase {
+                "coinbase_only"
+            } else if self.tx_plan.needs_local_utxo_overlay {
+                "serial_overlay"
+            } else {
+                "parallel"
+            },
+            "apply_block: profile"
+        );
+        script_verify_result
+    }
+}
 
-    // Sigop cost is a block budget, including coinbase and contextual
-    // P2SH/witness costs. A script proof or assume-valid skips execution,
-    // never this check, which precedes UTXO mutation and applied-tip publication.
-    check_block_sigops(
-        block,
-        &tx_plan,
-        view.txids(),
-        Arc::clone(&resolved),
-        height,
-        verify_flags,
-    )?;
+struct BudgetChecks<'a, 'b> {
+    handles: &'a Chainstate,
+    block: &'b Block,
+    block_hash: Hash256,
+    tx_plan: &'b BlockTxPlan,
+    txids: &'b [Txid],
+    resolved: Arc<ResolvedUtxoView>,
+    context: &'b BlockValidationContext,
+    median_time_past: u32,
+    softfork: bitcoin_rs_chain::SoftforkState,
+    previous_tip_id: Option<NodeId>,
+}
 
-    let coinbase_maturity_started =
-        tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let coinbase_maturity_result =
-        check_coinbase_maturity(block, &tx_plan, view.txids(), Arc::clone(&resolved), height);
-    tracing::debug!(
-        height,
-        %block_hash,
-        coinbase_maturity_us = coinbase_maturity_started.map(|start| start.elapsed().as_micros()),
-        "apply_block: profile"
-    );
-    coinbase_maturity_result?;
-    let bip68_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
-    let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
-    let bip68_result = check_bip68_sequence_locks(
-        handles,
-        block,
-        &tx_plan,
-        view.txids(),
-        Arc::clone(&resolved),
-        Bip68Context {
-            validation: &validation_context,
-            median_time_past: prev_median_time_past,
-            softfork_state,
-            previous_tip_id,
-        },
-    );
-    tracing::debug!(
-        height,
-        %block_hash,
-        bip68_us = bip68_started.map(|start| start.elapsed().as_micros()),
-        "apply_block: profile"
-    );
-    bip68_result?;
-    let txids = view.into_txids();
-    let same_block_spent = tx_plan.same_block_spent;
-    let same_block_spent_len = same_block_spent
-        .as_ref()
-        .map_or(0_usize, SameBlockSpentSet::len);
-    let utxo_add_capacity = tx_plan
+impl BudgetChecks<'_, '_> {
+    fn run(&self) -> core::result::Result<(), ApplyError> {
+        check_block_sigops(
+            self.block,
+            self.tx_plan,
+            self.txids,
+            Arc::clone(&self.resolved),
+            self.context.height,
+            self.context.flags,
+        )?;
+
+        let coinbase_maturity_started =
+            tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
+        let coinbase_maturity_result = check_coinbase_maturity(
+            self.block,
+            self.tx_plan,
+            self.txids,
+            Arc::clone(&self.resolved),
+            self.context.height,
+        );
+        tracing::debug!(
+            height = self.context.height,
+            %self.block_hash,
+            coinbase_maturity_us = coinbase_maturity_started.map(|start| start.elapsed().as_micros()),
+            "apply_block: profile"
+        );
+        coinbase_maturity_result?;
+        let bip68_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
+        let bip68_result = check_bip68_sequence_locks(
+            self.handles,
+            self.block,
+            self.tx_plan,
+            self.txids,
+            Arc::clone(&self.resolved),
+            Bip68Context {
+                validation: self.context,
+                median_time_past: self.median_time_past,
+                softfork_state: self.softfork,
+                previous_tip_id: self.previous_tip_id,
+            },
+        );
+        tracing::debug!(
+            height = self.context.height,
+            %self.block_hash,
+            bip68_us = bip68_started.map(|start| start.elapsed().as_micros()),
+            "apply_block: profile"
+        );
+        bip68_result
+    }
+}
+
+struct ChangeRequest<'a, 'b> {
+    handles: &'a Chainstate,
+    block: &'b Block,
+    block_hash: Hash256,
+    height: u32,
+    txids: &'a [Txid],
+    tx_plan: &'a BlockTxPlan,
+    resolved: &'a Arc<ResolvedUtxoView>,
+}
+
+fn build_block_changes_checked<'b>(
+    request: &ChangeRequest<'_, 'b>,
+) -> core::result::Result<
+    (
+        BlockChanges<&'b bitcoin_rs_primitives::TxOut>,
+        UndoBatch,
+        BlockValueTotals,
+    ),
+    ApplyError,
+> {
+    let same_block_spent = request.tx_plan.same_block_spent.as_ref();
+    let same_block_spent_len = same_block_spent.map_or(0_usize, SameBlockSpentSet::len);
+    let utxo_add_capacity = request
+        .tx_plan
         .created_output_count
         .saturating_sub(same_block_spent_len);
-    let utxo_remove_capacity = tx_plan
+    let utxo_remove_capacity = request
+        .tx_plan
         .spent_input_count
-        .saturating_sub(tx_plan.same_block_spent_input_count);
+        .saturating_sub(request.tx_plan.same_block_spent_input_count);
 
     let utxo_changes_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let utxo_changes_result = build_block_changes(
-        block,
-        height,
-        &txids,
-        same_block_spent.as_ref(),
-        utxo_add_capacity,
-        utxo_remove_capacity,
-        resolved.as_ref(),
-        bitcoin_rs_consensus::bip30::is_bip30_exception(height, block_hash)
-            .then(|| handles.utxo.as_ref()),
-        MAX_SCRIPT_SIZE,
+        &BlockChangeInputs {
+            block: request.block,
+            height: request.height,
+            txids: request.txids,
+            same_block_spent,
+            add_capacity: utxo_add_capacity,
+            remove_capacity: utxo_remove_capacity,
+            overwritten: bitcoin_rs_consensus::bip30::is_bip30_exception(
+                request.height,
+                request.block_hash,
+            )
+            .then(|| request.handles.utxo.as_ref()),
+            max_script_size: MAX_SCRIPT_SIZE,
+        },
+        request.resolved.as_ref(),
     );
     tracing::debug!(
-        height,
-        %block_hash,
+        height = request.height,
+        %request.block_hash,
         utxo_changes_us = utxo_changes_started.map(|start| start.elapsed().as_micros()),
         "apply_block: profile"
     );
-    let (changes, undo, value_totals) =
-        utxo_changes_result.map_err(|e| map_block_change_error(&e))?;
+    utxo_changes_result.map_err(|e| map_block_change_error(&e))
+}
 
+fn check_coinbase_value(
+    handles: &Chainstate,
+    height: u32,
+    value_totals: &BlockValueTotals,
+) -> core::result::Result<(), ApplyError> {
     if height > 0 {
         let fees = value_totals
             .fees()
@@ -354,17 +504,41 @@ pub(super) fn apply_block_admitted<'b>(
             handles.network.subsidy_halving_interval(),
         )?;
     }
+    Ok(())
+}
 
-    if intent == ApplyIntent::Propose {
-        return Ok(ApplyFinish::Proposed);
-    }
+struct BlockOutcomeInputs<'a, 'b> {
+    handles: &'a Chainstate,
+    payload: &'b BlockPayload,
+    block: &'b Block,
+    block_hash: Hash256,
+    height: u32,
+    txids: Vec<Txid>,
+    resolved: Arc<ResolvedUtxoView>,
+    flags: bitcoin_rs_script::VerifyFlags,
+    undo: &'b UndoBatch,
+    total_started: quanta::Instant,
+}
 
+struct PersistedPayload {
+    undo_record: UndoRecord,
+    tip: TipSnapshot,
+    block_bytes: bytes::Bytes,
+    block_connected_dur: std::time::Duration,
+    coin_stats_height_delta: i64,
+}
+
+fn persist_payload(
+    input: &BlockOutcomeInputs<'_, '_>,
+    changes: &BlockChanges<&bitcoin_rs_primitives::TxOut>,
+    timings: &mut ApplyTimings,
+) -> core::result::Result<PersistedPayload, ApplyError> {
     let undo_persist_started = quanta::Instant::now();
     let undo_persist_result = bitcoin_rs_utxo::contract::persist_block_undo(
-        handles.undo_store.as_ref(),
-        height,
-        block_hash,
-        &undo,
+        input.handles.undo_store.as_ref(),
+        input.height,
+        input.block_hash,
+        input.undo,
     )
     .map_err(ApplyError::UndoPersistence);
     metrics::histogram!("node.apply_block.undo_persist_seconds")
@@ -372,182 +546,491 @@ pub(super) fn apply_block_admitted<'b>(
     let undo_record = undo_persist_result?;
 
     let block_bytes: bytes::Bytes = {
-        let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
+        let needs_body =
+            input.handles.block_body_store.is_some() || input.handles.capture_block_bytes;
         if needs_body {
-            payload.bytes().clone()
+            input.payload.bytes().clone()
         } else {
             bytes::Bytes::new()
         }
     };
 
     let block_body_persist_started = quanta::Instant::now();
-    let block_body_persist_result = match &handles.block_body_store {
+    let block_body_persist_result = match &input.handles.block_body_store {
         Some(store) => store
-            .persist_block_body_value(height, block_hash, block_bytes.clone())
+            .persist_block_body_value(input.height, input.block_hash, block_bytes.clone())
             .map_err(ApplyError::BlockBodyPersistence),
         None => Ok(()),
     };
     let block_body_persist_dur = block_body_persist_started.elapsed();
     metrics::histogram!("node.apply_block.block_body_persist_seconds")
         .record(block_body_persist_dur.as_secs_f64());
+    timings.block_body_persist = block_body_persist_dur;
     block_body_persist_result?;
 
     let block_tree_insert_started = quanta::Instant::now();
-    let tip = applied_header_tip(handles, block_hash, block, height)?;
+    let tip = applied_header_tip(input.handles, input.block_hash, input.block, input.height)?;
     let block_tree_insert_dur = block_tree_insert_started.elapsed();
     metrics::histogram!("node.apply_block.block_tree_insert_seconds")
         .record(block_tree_insert_dur.as_secs_f64());
+    timings.block_tree_insert = block_tree_insert_dur;
 
     let utxo_commit_started = quanta::Instant::now();
-    let utxo_commit_result =
-        bitcoin_rs_utxo::contract::commit_block_changes(&handles.utxo, &changes, &block_hash);
+    let utxo_commit_result = bitcoin_rs_utxo::contract::commit_block_changes(
+        &input.handles.utxo,
+        changes,
+        &input.block_hash,
+    );
     let utxo_commit_dur = utxo_commit_started.elapsed();
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
+    timings.utxo_commit = utxo_commit_dur;
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
-    let block_connected_dur = total_started.elapsed();
+    let block_connected_dur = input.total_started.elapsed();
     let coin_stats_height_delta =
-        i64::from(height) - i64::from(handles.coin_stats.snapshot().height);
+        i64::from(input.height) - i64::from(input.handles.coin_stats.snapshot().height);
+    Ok(PersistedPayload {
+        undo_record,
+        tip,
+        block_bytes,
+        block_connected_dur,
+        coin_stats_height_delta,
+    })
+}
 
+fn finish_block_outcome(
+    input: BlockOutcomeInputs<'_, '_>,
+    persisted: PersistedPayload,
+    timings: &mut ApplyTimings,
+) -> (ConnectOutcome, UndoRecord, i64) {
+    let handles = input.handles;
     debug_assert!(
-        handles.block_tree.read().node_by_hash(block_hash).is_some(),
+        handles
+            .block_tree
+            .read()
+            .node_by_hash(input.block_hash)
+            .is_some(),
         "block {} is entering the record log with no block-tree node; \
          its header would be unrecoverable",
-        block_hash.to_string_be()
+        input.block_hash.to_string_be()
     );
-    let tx_count_delta = tx_count_delta_for(block);
+    let tx_count_delta = tx_count_delta_for(input.block);
     let coin_stats_started = quanta::Instant::now();
-    handles.coin_stats.finish_block(height, tx_count_delta);
+    handles
+        .coin_stats
+        .finish_block(input.height, tx_count_delta);
     let coin_stats_dur = coin_stats_started.elapsed();
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
-    let total_dur = total_started.elapsed();
+    timings.coin_stats = coin_stats_dur;
+    let total_dur = input.total_started.elapsed();
     metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
     metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
     emit_block_connected(
-        block,
-        &block_hash,
-        height,
-        &txids,
-        &resolved,
-        verify_flags,
-        block_connected_dur,
+        input.block,
+        &input.block_hash,
+        input.height,
+        &input.txids,
+        &input.resolved,
+        input.flags,
+        persisted.block_connected_dur,
     );
     tracing::debug!(
-        height,
-        %block_hash,
-        tx_count = block.txs.len(),
-        block_rules_us = block_rules_dur.as_micros(),
-        bip30_bip34_us = bip30_bip34_dur.as_micros(),
-        script_verify_us = script_verify_dur.as_micros(),
-        utxo_commit_us = utxo_commit_dur.as_micros(),
-        block_body_persist_us = block_body_persist_dur.as_micros(),
-        block_tree_insert_us = block_tree_insert_dur.as_micros(),
-        coin_stats_us = coin_stats_dur.as_micros(),
+        height = input.height,
+        %input.block_hash,
+        tx_count = input.block.txs.len(),
+        block_rules_us = timings.block_rules.as_micros(),
+        bip30_bip34_us = timings.bip30_bip34.as_micros(),
+        script_verify_us = timings.script_verify.as_micros(),
+        utxo_commit_us = timings.utxo_commit.as_micros(),
+        block_body_persist_us = timings.block_body_persist.as_micros(),
+        block_tree_insert_us = timings.block_tree_insert.as_micros(),
+        coin_stats_us = timings.coin_stats.as_micros(),
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    let raw_txs = handles
-        .capture_rawtx
-        .then(|| block.txs.iter().map(consensus_bytes).collect::<Vec<_>>());
-    let mut outcome = ConnectOutcome {
-        tip,
+    let raw_txs = handles.capture_rawtx.then(|| {
+        input
+            .block
+            .txs
+            .iter()
+            .map(consensus_bytes)
+            .collect::<Vec<_>>()
+    });
+    let outcome = ConnectOutcome {
+        tip: persisted.tip,
         commit_id: 0,
-        height,
-        hash: block_hash,
-        txids,
-        block_bytes,
+        height: input.height,
+        hash: input.block_hash,
+        txids: input.txids,
+        block_bytes: persisted.block_bytes,
         raw_txs,
     };
-    let commit_id = match publication {
-        PublishMode::Now => {
-            tracing::debug!(height, %block_hash, "apply_block: tail begin");
-            if let Some(hook) = handles.tip_staged.get()
-                && handles
-                    .applied_tip_snapshot()
-                    .is_some_and(|tip| tip.hash == prev_hash)
-            {
-                hook(&outcome.tip, block);
-            }
-            let durable_sync_started = quanta::Instant::now();
-            sync_appended_blocks(handles)?;
-            let durable_sync_us = durable_sync_started.elapsed().as_micros();
-            let undo_rows = vec![(height, block_hash, undo_record.as_bytes())];
-            let body_rows = stored_body_row(handles, height, block_hash)?
-                .into_iter()
-                .collect();
-            let durable_commit_started = quanta::Instant::now();
-            let receipt = commit_connect_head(
+    (
+        outcome,
+        persisted.undo_record,
+        persisted.coin_stats_height_delta,
+    )
+}
+
+struct Publication<'a, 'p, 'b> {
+    handles: &'a Chainstate,
+    block: &'b Block,
+    outcome: ConnectOutcome,
+    publication: PublishMode<'p>,
+    undo: UndoBatch,
+    changes: BlockChanges<&'b bitcoin_rs_primitives::TxOut>,
+    undo_record: UndoRecord,
+    attestation: Option<ScriptAttestation>,
+    prev_hash: Hash256,
+    coin_stats_height_delta: i64,
+}
+
+impl Publication<'_, '_, '_> {
+    fn run(self) -> core::result::Result<ApplyFinish, ApplyError> {
+        let Publication {
+            handles,
+            block,
+            mut outcome,
+            publication,
+            undo,
+            changes,
+            undo_record,
+            attestation,
+            prev_hash,
+            coin_stats_height_delta,
+        } = self;
+        let commit_id = match publication {
+            PublishMode::Now => commit_now(
                 handles,
-                &ConnectCommitFacts {
-                    prev_hash,
-                    tip: block_hash,
-                    height,
-                    chain_tx_count_after: outcome.tip.chain_tx_count.to_wire(),
-                    undo_extent: Some((height, block_hash)),
-                },
-                &CommitRecords {
-                    undo_rows,
-                    body_rows,
-                    attestation,
-                },
-            )?;
-            tracing::debug!(
-                height,
-                %block_hash,
-                durable_sync_us,
-                durable_commit_us = durable_commit_started.elapsed().as_micros(),
-                "apply_block: publish profile"
-            );
-            outcome.tip = receipt.certify(outcome.tip);
-            receipt.commit_id
-        }
-        PublishMode::Replay {
-            receipt,
-            certify_head,
-        } => {
-            let commit_id = receipt.commit_id;
-            if certify_head {
-                outcome.tip = receipt.certify(outcome.tip);
-            }
-            commit_id
-        }
-        PublishMode::Grouped(group) => {
-            let journal_record = build_journal_record(
                 block,
-                height,
-                block_hash,
+                &mut outcome,
+                &undo_record,
+                attestation,
+                prev_hash,
+            )?,
+            PublishMode::Replay {
+                receipt,
+                certify_head,
+            } => {
+                let commit_id = receipt.commit_id;
+                if certify_head {
+                    outcome.tip = receipt.certify(outcome.tip);
+                }
+                commit_id
+            }
+            PublishMode::Grouped(group) => {
+                let journal_record = build_journal_record(
+                    block,
+                    outcome.height,
+                    outcome.hash,
+                    prev_hash,
+                    &undo,
+                    &changes,
+                    coin_stats_height_delta,
+                );
+                group.stage(PendingBlockCommit {
+                    outcome: outcome.clone(),
+                    undo_record,
+                    prev_hash,
+                    journal_record,
+                    attestation,
+                });
+                return Ok(ApplyFinish::Committed(Box::new(outcome)));
+            }
+        };
+        emit_journal_record(
+            handles,
+            build_journal_record(
+                block,
+                outcome.height,
+                outcome.hash,
                 prev_hash,
                 &undo,
                 &changes,
                 coin_stats_height_delta,
-            );
-            group.stage(PendingBlockCommit {
-                outcome: outcome.clone(),
-                undo_record,
-                prev_hash,
-                journal_record,
-                attestation,
-            });
-            return Ok(ApplyFinish::Committed(Box::new(outcome)));
+            ),
+            outcome.height,
+        );
+        handles.publish_applied(&outcome.tip, crate::events::HintKind::Connected);
+        outcome.commit_id = commit_id;
+        Ok(ApplyFinish::Committed(Box::new(outcome)))
+    }
+}
+
+struct BlockValidation<'a, 'b, 'c> {
+    handles: &'a Chainstate,
+    block: &'b Block,
+    block_hash: Hash256,
+    prev_hash: Hash256,
+    context: &'c BlockValidationContext,
+    softfork: bitcoin_rs_chain::SoftforkState,
+    median_time_past: u32,
+    prior_tip_id: Option<NodeId>,
+    provenance: BlockProvenance,
+    intent: ApplyIntent,
+    transactions_proven: bool,
+    prepared: PreparedApply<'b>,
+}
+
+type BlockValidationOutcome = (
+    Vec<Txid>,
+    BlockTxPlan,
+    Arc<ResolvedUtxoView>,
+    Option<ScriptAttestation>,
+);
+
+impl BlockValidation<'_, '_, '_> {
+    fn run(
+        self,
+        timings: &mut ApplyTimings,
+    ) -> core::result::Result<BlockValidationOutcome, ApplyError> {
+        let PreparedApply {
+            script_source,
+            mut view,
+            tx_plan,
+            resolved,
+        } = self.prepared;
+        BlockRules {
+            handles: self.handles,
+            block: self.block,
+            block_hash: self.block_hash,
+            prev_hash: self.prev_hash,
+            context: self.context,
+            softfork: self.softfork,
+            prior_tip_id: self.prior_tip_id,
+            intent: self.intent,
         }
-    };
-    emit_journal_record(
+        .check(&mut view, tx_plan.has_witness, timings)?;
+
+        let scripts_ran = ScriptVerification {
+            handles: self.handles,
+            view: &mut view,
+            tx_plan: &tx_plan,
+            resolved: &resolved,
+            context: self.context,
+            provenance: self.provenance,
+            script_source: &script_source,
+            transactions_proven: self.transactions_proven,
+            intent: self.intent,
+        }
+        .run(timings)?;
+        let attestation = match (self.provenance, scripts_ran) {
+            (BlockProvenance::LocalReplay, _) => None,
+            (_, ScriptsRan::Skipped) => Some(ScriptAttestation::AssumeValid),
+            (_, ScriptsRan::Executed) => Some(ScriptAttestation::Full),
+        };
+
+        BudgetChecks {
+            handles: self.handles,
+            block: self.block,
+            block_hash: self.block_hash,
+            tx_plan: &tx_plan,
+            txids: view.txids(),
+            resolved: Arc::clone(&resolved),
+            context: self.context,
+            median_time_past: self.median_time_past,
+            softfork: self.softfork,
+            previous_tip_id: self.prior_tip_id,
+        }
+        .run()?;
+
+        Ok((view.into_txids(), tx_plan, resolved, attestation))
+    }
+}
+
+struct CommitRequest<'a, 'p, 'b> {
+    handles: &'a Chainstate,
+    payload: &'b BlockPayload,
+    block: &'b Block,
+    block_hash: Hash256,
+    prev_hash: Hash256,
+    height: u32,
+    intent: ApplyIntent,
+    flags: bitcoin_rs_script::VerifyFlags,
+    txids: Vec<Txid>,
+    resolved: Arc<ResolvedUtxoView>,
+    tx_plan: BlockTxPlan,
+    attestation: Option<ScriptAttestation>,
+    publication: PublishMode<'p>,
+    total_started: quanta::Instant,
+}
+
+fn commit_application(
+    request: CommitRequest<'_, '_, '_>,
+    timings: &mut ApplyTimings,
+) -> core::result::Result<ApplyFinish, ApplyError> {
+    let CommitRequest {
         handles,
-        build_journal_record(
+        payload,
+        block,
+        block_hash,
+        prev_hash,
+        height,
+        intent,
+        flags,
+        txids,
+        resolved,
+        tx_plan,
+        attestation,
+        publication,
+        total_started,
+    } = request;
+    let (changes, undo, value_totals) = build_block_changes_checked(&ChangeRequest {
+        handles,
+        block,
+        block_hash,
+        height,
+        txids: &txids,
+        tx_plan: &tx_plan,
+        resolved: &resolved,
+    })?;
+    check_coinbase_value(handles, height, &value_totals)?;
+    if intent == ApplyIntent::Propose {
+        return Ok(ApplyFinish::Proposed);
+    }
+
+    let persist_input = BlockOutcomeInputs {
+        handles,
+        payload,
+        block,
+        block_hash,
+        height,
+        txids,
+        resolved,
+        flags,
+        undo: &undo,
+        total_started,
+    };
+    let persisted = persist_payload(&persist_input, &changes, timings)?;
+    let (outcome, undo_record, coin_stats_height_delta) =
+        finish_block_outcome(persist_input, persisted, timings);
+    Publication {
+        handles,
+        block,
+        outcome,
+        publication,
+        undo,
+        changes,
+        undo_record,
+        attestation,
+        prev_hash,
+        coin_stats_height_delta,
+    }
+    .run()
+}
+
+fn commit_now(
+    handles: &Chainstate,
+    block: &Block,
+    outcome: &mut ConnectOutcome,
+    undo_record: &UndoRecord,
+    attestation: Option<ScriptAttestation>,
+    prev_hash: Hash256,
+) -> core::result::Result<u64, ApplyError> {
+    tracing::debug!(height = outcome.height, %outcome.hash, "apply_block: tail begin");
+    if let Some(hook) = handles.tip_staged.get()
+        && handles
+            .applied_tip_snapshot()
+            .is_some_and(|tip| tip.hash == prev_hash)
+    {
+        hook(&outcome.tip, block);
+    }
+    let durable_sync_started = quanta::Instant::now();
+    sync_appended_blocks(handles)?;
+    let durable_sync_us = durable_sync_started.elapsed().as_micros();
+    let undo_rows = vec![(outcome.height, outcome.hash, undo_record.as_bytes())];
+    let body_rows = stored_body_row(handles, outcome.height, outcome.hash)?
+        .into_iter()
+        .collect();
+    let durable_commit_started = quanta::Instant::now();
+    let receipt = commit_connect_head(
+        handles,
+        &ConnectCommitFacts {
+            prev_hash,
+            tip: outcome.hash,
+            height: outcome.height,
+            chain_tx_count_after: outcome.tip.chain_tx_count.to_wire(),
+            undo_extent: Some((outcome.height, outcome.hash)),
+        },
+        &CommitRecords {
+            undo_rows,
+            body_rows,
+            attestation,
+        },
+    )?;
+    tracing::debug!(
+        height = outcome.height,
+        %outcome.hash,
+        durable_sync_us,
+        durable_commit_us = durable_commit_started.elapsed().as_micros(),
+        "apply_block: publish profile"
+    );
+    outcome.tip = receipt.certify(outcome.tip.clone());
+    Ok(receipt.commit_id)
+}
+
+pub(super) fn apply_block_admitted<'b>(
+    handles: &Chainstate,
+    payload: &'b BlockPayload,
+    proven: Option<ProvenApply<'b>>,
+    provenance: BlockProvenance,
+    intent: ApplyIntent,
+    publication: PublishMode<'_>,
+) -> core::result::Result<ApplyFinish, ApplyError> {
+    let block = payload.block();
+    let total_started = quanta::Instant::now();
+    let block_hash = block.block_hash().0;
+    let prev_hash = block.header.prev_blockhash.0;
+    let (prior, height) = application_predecessor(handles, block_hash, prev_hash, &publication)?;
+    check_historical_target(handles, height, block_hash)?;
+    if !matches!(publication, PublishMode::Replay { .. }) {
+        check_contextual_header(handles, block, height, prior.as_deref(), block_hash)?;
+    }
+    prepare_journal_for_apply(handles, height, intent)?;
+    check_self_pow(handles, block, block_hash, height, intent)?;
+
+    let ValidationContexts {
+        validation,
+        softfork,
+        median_time_past,
+    } = validation_contexts(handles, block, height, block_hash, prior.as_deref());
+    let (prepared, transactions_proven) = prepare_block(handles, payload, proven, &validation)?;
+    let mut timings = ApplyTimings::default();
+    let (txids, tx_plan, resolved, attestation) = BlockValidation {
+        handles,
+        block,
+        block_hash,
+        prev_hash,
+        context: &validation,
+        softfork,
+        median_time_past,
+        prior_tip_id: prior.as_deref().map(|tip| tip.tip_id),
+        provenance,
+        intent,
+        transactions_proven,
+        prepared,
+    }
+    .run(&mut timings)?;
+    commit_application(
+        CommitRequest {
+            handles,
+            payload,
             block,
-            height,
             block_hash,
             prev_hash,
-            &undo,
-            &changes,
-            coin_stats_height_delta,
-        ),
-        height,
-    );
-    handles.publish_applied(&outcome.tip, crate::events::HintKind::Connected);
-    outcome.commit_id = commit_id;
-    Ok(ApplyFinish::Committed(Box::new(outcome)))
+            height,
+            intent,
+            flags: validation.flags,
+            txids,
+            resolved,
+            tx_plan,
+            attestation,
+            publication,
+            total_started,
+        },
+        &mut timings,
+    )
 }
 
 fn emit_block_connected(
@@ -715,37 +1198,12 @@ fn check_bip68_sequence_locks(
             let prevout_mtp = if bitcoin_rs_consensus::bip68::sequence_lock_is_time_based(
                 sequence.to_consensus(),
             ) {
-                if entry.height == height {
-                    mtp
-                } else if let Some(cached) = prevout_mtp_by_height.get(&entry.height) {
-                    *cached
-                } else {
-                    let Some(previous_tip_id) = context.previous_tip_id else {
-                        return Err(ApplyError::Consensus(
-                            bitcoin_rs_consensus::ConsensusError::Bip {
-                                bip: "BIP68",
-                                reason: "missing previous tip for time-based sequence lock"
-                                    .to_owned(),
-                            },
-                        ));
-                    };
-                    let tree = handles.block_tree.read();
-                    let Some(prevout_mtp) =
-                        tree.median_time_past_before_height(previous_tip_id, entry.height)
-                    else {
-                        return Err(ApplyError::Consensus(
-                            bitcoin_rs_consensus::ConsensusError::Bip {
-                                bip: "BIP68",
-                                reason: format!(
-                                    "missing prevout ancestry at height {} for time-based sequence lock",
-                                    entry.height.saturating_sub(1)
-                                ),
-                            },
-                        ));
-                    };
-                    prevout_mtp_by_height.insert(entry.height, prevout_mtp);
-                    prevout_mtp
-                }
+                prevout_median_time_past(
+                    handles,
+                    context,
+                    entry.height,
+                    &mut prevout_mtp_by_height,
+                )?
             } else {
                 0
             };
@@ -762,6 +1220,43 @@ fn check_bip68_sequence_locks(
         view.add_outputs(tx_index, *txid, tx.outputs.len())?;
     }
     Ok(())
+}
+
+fn prevout_median_time_past(
+    handles: &Chainstate,
+    context: Bip68Context<'_>,
+    entry_height: u32,
+    cache: &mut HashMap<u32, u32>,
+) -> core::result::Result<u32, ApplyError> {
+    if entry_height == context.validation.height {
+        return Ok(context.median_time_past);
+    }
+    if let Some(cached) = cache.get(&entry_height) {
+        return Ok(*cached);
+    }
+    let Some(previous_tip_id) = context.previous_tip_id else {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP68",
+                reason: "missing previous tip for time-based sequence lock".to_owned(),
+            },
+        ));
+    };
+    let tree = handles.block_tree.read();
+    let Some(prevout_mtp) = tree.median_time_past_before_height(previous_tip_id, entry_height)
+    else {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP68",
+                reason: format!(
+                    "missing prevout ancestry at height {} for time-based sequence lock",
+                    entry_height.saturating_sub(1)
+                ),
+            },
+        ));
+    };
+    cache.insert(entry_height, prevout_mtp);
+    Ok(prevout_mtp)
 }
 
 fn check_bip30_and_bip34(
@@ -786,7 +1281,9 @@ fn check_bip30_and_bip34(
         }
     }
     let block_hash = block.block_hash().0;
-    bitcoin_rs_consensus::bip30::check_bip30(height, block_hash, has_duplicate)?;
+    if has_duplicate {
+        bitcoin_rs_consensus::bip30::check_duplicate_txid(height, block_hash)?;
+    }
     check_bip34(handles, block, height)?;
     Ok(())
 }

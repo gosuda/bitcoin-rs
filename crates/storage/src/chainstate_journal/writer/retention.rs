@@ -6,7 +6,14 @@ use super::WriterState;
 use super::clear_full_revalidation_marker;
 use super::parse_segment_name;
 use crate::KvStore;
+use crate::chainstate_journal::CheckpointBase;
 use std::time::Instant;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevalidationMarker {
+    Retire,
+    Keep,
+}
 
 impl<S: KvStore> JournalWriter<S> {
     pub fn configure(&mut self, policy: super::JournalPolicy) -> Result<(), JournalWriterError> {
@@ -170,39 +177,35 @@ impl<S: KvStore> JournalWriter<S> {
 
     pub(crate) fn compact_to_checkpoint(
         &mut self,
-        checkpoint_generation: u64,
-        tip_height: u32,
-        tip_hash: [u8; 32],
-        tip_prev_hash: [u8; 32],
-        chain_tx_count: u64,
-        retire_full_revalidation_marker: bool,
+        base: CheckpointBase,
     ) -> Result<(), JournalWriterError> {
-        if self.state != WriterState::Frozen {
-            return Err(JournalWriterError::NotOpen {
-                state: match self.state {
-                    WriterState::Open => "not frozen",
-                    WriterState::Compacted => "already compacted",
-                    WriterState::Frozen => unreachable!("guarded above"),
-                },
-            });
-        }
-        if let Some(height) = self.append_gap_height {
-            return Err(JournalWriterError::AppendGap { height });
-        }
-        if !self.generation_invalidated
-            && (self.durable.height != tip_height
-                || self.durable_block_hash != tip_hash
-                || self.durable_chain_tx_count != chain_tx_count)
-        {
-            return Err(JournalWriterError::CursorMismatch(format!(
-                "checkpoint tip {tip_height} does not match frozen journal head {}",
-                self.durable.height
-            )));
-        }
+        self.compact_to_checkpoint_with(base, RevalidationMarker::Retire)
+    }
+
+    pub(crate) fn compact_to_checkpoint_for_recovery(
+        &mut self,
+        base: CheckpointBase,
+    ) -> Result<(), JournalWriterError> {
+        self.compact_to_checkpoint_with(base, RevalidationMarker::Keep)
+    }
+
+    fn compact_to_checkpoint_with(
+        &mut self,
+        base: CheckpointBase,
+        marker: RevalidationMarker,
+    ) -> Result<(), JournalWriterError> {
+        let CheckpointBase {
+            generation: checkpoint_generation,
+            height: tip_height,
+            hash: tip_hash,
+            prev_hash: tip_prev_hash,
+            chain_tx_count,
+        } = base;
+        self.check_compact_preconditions(tip_height, tip_hash, chain_tx_count)?;
         let new_segment_gen = self.segment_gen.checked_add(1).ok_or_else(|| {
             JournalWriterError::CursorMismatch("segment generation overflow".to_owned())
         })?;
-        let marker = HeadMarker {
+        let head = HeadMarker {
             base_generation: checkpoint_generation,
             base_height: tip_height,
             base_hash: tip_hash,
@@ -217,7 +220,7 @@ impl<S: KvStore> JournalWriter<S> {
             chain_tx_count,
             record_count: 0,
         };
-        self.write_head_atomic(&marker)?;
+        self.write_head_atomic(&head)?;
 
         self.base_generation = checkpoint_generation;
         self.base_height = tip_height;
@@ -243,6 +246,44 @@ impl<S: KvStore> JournalWriter<S> {
         self.generation_invalidated = false;
         self.state = WriterState::Compacted;
 
+        self.remove_retained_segments(marker)
+    }
+
+    fn check_compact_preconditions(
+        &self,
+        tip_height: u32,
+        tip_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
+        if self.state != WriterState::Frozen {
+            return Err(JournalWriterError::NotOpen {
+                state: match self.state {
+                    WriterState::Open => "not frozen",
+                    WriterState::Compacted => "already compacted",
+                    WriterState::Frozen => unreachable!("guarded above"),
+                },
+            });
+        }
+        if let Some(height) = self.append_gap_height {
+            return Err(JournalWriterError::AppendGap { height });
+        }
+        if !self.generation_invalidated
+            && (self.durable.height != tip_height
+                || self.durable_block_hash != tip_hash
+                || self.durable_chain_tx_count != chain_tx_count)
+        {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "checkpoint tip {tip_height} does not match frozen journal head {}",
+                self.durable.height
+            )));
+        }
+        Ok(())
+    }
+
+    fn remove_retained_segments(
+        &self,
+        marker: RevalidationMarker,
+    ) -> Result<(), JournalWriterError> {
         let entries: Vec<String> = self
             .dir
             .entries()?
@@ -253,7 +294,7 @@ impl<S: KvStore> JournalWriter<S> {
         for name in entries {
             self.dir.remove_file(name)?;
         }
-        if retire_full_revalidation_marker {
+        if marker == RevalidationMarker::Retire {
             clear_full_revalidation_marker(&self.dir)?;
         }
         crate::checkpoint::fs::sync_dir(&self.dir)?;

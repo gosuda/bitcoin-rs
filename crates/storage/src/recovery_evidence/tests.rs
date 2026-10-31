@@ -454,3 +454,37 @@ fn foreign_genesis_current_cannot_displace_valid_prev() {
         "valid .prev survives a wrong-format current"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_current_is_never_replaced_by_a_new_publication() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let w1 = AppliedTipWitness::new(G, 1, 100, "aaa", 1000);
+    let w2 = AppliedTipWitness::new(G, 2, 200, "bbb", 2000);
+    write_witness(dir.path(), &w1).expect("write w1");
+    let current = witness_file(dir.path());
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o000))
+        .expect("make current unreadable");
+
+    let refusal = write_witness(dir.path(), &w2);
+    assert!(
+        matches!(refusal, Err(EvidenceError::Io(_))),
+        "a read error on the current record must refuse publication instead of \
+         discarding it, got {refusal:?}"
+    );
+    assert!(
+        !witness_tmp(dir.path()).exists(),
+        "a refused publication removes its staged tmp"
+    );
+
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o644))
+        .expect("restore permissions");
+    let kept = std::fs::read(&current).expect("current record still readable");
+    assert_eq!(
+        AppliedTipWitness::decode(&kept, G),
+        Some(w1),
+        "the refused publication leaves the last valid record in place"
+    );
+}

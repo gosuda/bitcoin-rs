@@ -115,7 +115,7 @@ fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), C
     for engine in engines() {
         let mut fixture = WitnessFixture::new(1);
         fixture.tx.inputs[0].witness = with_item(&fixture.tx.inputs[0].witness, 0, |item| {
-            item.push(opcode::OP_PUSHNUM_1)
+            item.push(opcode::OP_PUSHNUM_1);
         });
         let block = fixture.block(engine)?;
         for (flags, witness_active) in [
