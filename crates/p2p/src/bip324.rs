@@ -8,7 +8,7 @@ mod packet;
 mod reader;
 
 pub(crate) use handshake::{Established, Handshake, Step};
-pub(crate) use packet::SendCipher;
+pub(crate) use packet::{PACKET_OVERHEAD, SendCipher};
 pub(crate) use reader::{PacketReader, is_poll_timeout};
 
 /// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
@@ -59,7 +59,7 @@ mod vector_tests {
         let result = receiver.read_message(
             &mut std::io::Cursor::new(frame),
             bitcoin::p2p::Magic::REGTEST,
-            |command, payload| {
+            |command, payload, _wire_len| {
                 assert_eq!(command, "block");
                 assert_eq!(payload.len(), 80);
                 called = true;

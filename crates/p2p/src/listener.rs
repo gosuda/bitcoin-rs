@@ -883,6 +883,7 @@ fn dial(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
         lease.node_id(),
         addr.into(),
@@ -1150,6 +1151,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
+    peer.account_message_bytes(std::sync::Arc::clone(&counters));
     peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
         lease.node_id(),
         peer_addr,
@@ -1479,7 +1481,10 @@ impl Keepalive {
         let probe_owed = self
             .last_ping
             .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
-        if probe_owed && idle {
+        // Core initializes a peer's `m_ping_start` to the clock epoch, so the
+        // first `MaybeSendPing` pass after VERACK owes a probe without waiting
+        // for silence (v31.1 net_processing.cpp); later probes stay idle-gated.
+        if probe_owed && (self.last_ping.is_none() || idle) {
             KeepaliveAction::Ping
         } else {
             KeepaliveAction::Idle
@@ -1493,15 +1498,32 @@ mod keepalive_tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn probes_owe_one_ping_per_idle_interval() {
+    fn first_probe_is_owed_immediately() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
         assert_eq!(
             keepalive.next_action(t0),
+            KeepaliveAction::Ping,
+            "Core's m_ping_start initializes to the clock epoch, so the first pass after the handshake pings without waiting for silence"
+        );
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
+            KeepaliveAction::Idle,
+            "after the first probe a busy-enough connection sends no keepalive"
+        );
+    }
+
+    #[test]
+    fn probes_owe_one_ping_per_idle_interval() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle,
             "a busy-enough connection sends no keepalive"
         );
-        keepalive.record_send(t0);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL),
             KeepaliveAction::Ping,
@@ -2531,6 +2553,7 @@ fn spawn_connection_writer(
     net_trace: Option<crate::net_trace::NetTrace>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let peer_addr = peer_addr.into();
+    let counters = std::sync::Arc::clone(stream.counters());
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
@@ -2543,6 +2566,7 @@ fn spawn_connection_writer(
                 close_rx,
                 &mut stream,
                 &mut transport,
+                &counters,
                 net_trace.as_ref(),
             );
             let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -2585,6 +2609,7 @@ fn write_ready_burst(
     outbound_rx: &crossbeam_channel::Receiver<crate::QueuedFrame>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) -> bool {
     let mut pending = Some(first);
@@ -2605,6 +2630,14 @@ fn write_ready_burst(
             crate::net_trace::outbound_message(net_trace, queued.message(), frame.payload());
         }
         let written = crate::wire::write_frames(writer, &frames);
+        if written.is_ok() {
+            // Charge each frame's wire size to its command once the burst
+            // left the socket; a failed write tears the connection down, so
+            // its partial traffic never becomes a visible peer row.
+            for (queued, frame) in burst.iter().zip(&frames) {
+                counters.record_msg_sent(queued.message().command().as_ref(), frame.wire_len());
+            }
+        }
         drop(burst);
         match written {
             Ok(()) => pending = leftover,
@@ -2622,13 +2655,14 @@ fn run_writer_loop(
     mut close_rx: crossbeam_channel::Receiver<()>,
     writer: &mut dyn std::io::Write,
     transport: &mut crate::transport::SendTransport,
+    counters: &crate::PeerCounters,
     net_trace: Option<&crate::net_trace::NetTrace>,
 ) {
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(first, outbound_rx, writer, transport, net_trace) {
+                if !write_ready_burst(first, outbound_rx, writer, transport, counters, net_trace) {
                     break;
                 }
             }
@@ -3388,6 +3422,16 @@ mod address_tests {
     use crate::{Message, PeerState};
     use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 
+    /// The message loop originates one keepalive ping on its first pass; the
+    /// once-per-connection assertions below strip that probe so they keep
+    /// judging only the address replies.
+    fn keepalive_probes_stripped(replies: Vec<Message>) -> Vec<Message> {
+        replies
+            .into_iter()
+            .filter(|message| !matches!(message, Message::Ping(_)))
+            .collect()
+    }
+
     #[test]
     fn local_dial_cancellation_is_not_attempt_evidence_but_tcp_failure_is() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3499,7 +3543,7 @@ mod address_tests {
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
         assert_eq!(book.len(), 1);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::Addr(addresses)] = replies.as_slice() else {
             panic!("expected exactly one addr response: {replies:?}");
         };
@@ -3547,7 +3591,7 @@ mod address_tests {
         let mut peer = Peer::new(std::io::Cursor::new(input), shared.magic);
         peer.state = PeerState::Ready;
         let _ = run_message_loop(&mut peer, source, &lease, &shared, None);
-        let replies = receiver.drain_messages();
+        let replies = keepalive_probes_stripped(receiver.drain_messages());
         let [Message::AddrV2(rows)] = replies.as_slice() else {
             panic!("expected exactly one addrv2 response: {replies:?}");
         };

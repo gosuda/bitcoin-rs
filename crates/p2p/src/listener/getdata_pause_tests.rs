@@ -288,6 +288,7 @@ impl Served {
                         close,
                         &mut gated,
                         &mut SendTransport::V1(MAGIC),
+                        &crate::PeerCounters::default(),
                         None,
                     );
                     let _ = gated.socket.shutdown(Shutdown::Both);
@@ -400,7 +401,8 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     let unknown_tx = Inventory::Transaction(bitcoin::Txid::from_byte_array([7; 32]));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
     let notfound_len = wire_len_of(&Message::NotFound(vec![unknown_tx]))?;
-    let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
+    let ping_len = wire_len_of(&Message::Ping(3))?;
+    let budget = OutboundBudget::with_block_reserve(100, 2 * block_len + ping_len - 1, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
     };
@@ -413,7 +415,8 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     ]))?;
     served.client.send(&Message::Ping(7))?;
 
-    let parked = (2, block_len + notfound_len);
+    // The originated keepalive probe takes one slot ahead of the request.
+    let parked = (3, ping_len + block_len + notfound_len);
     wait_until("block A and the notfound to be queued", || {
         served.budget.pending() == parked
     })?;
@@ -429,9 +432,16 @@ fn saturated_getdata_parks_tail_and_serves_it_after_drain() -> TestResult {
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 4)?;
+    let received = read_messages(&mut served.client, 5)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected five drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Block(bitcoin_rs_primitives::BlockPayload::from_local(block_a)),
             Message::NotFound(vec![unknown_tx]),
@@ -486,6 +496,7 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
     let (block_a, block_b) = (block(4), block(5));
     let (entry_a, entry_b) = (scripted(&block_a), scripted(&block_b));
     let block_len = wire_len_of(&Message::BlockPayload(entry_a.1.clone()))?;
+    let ping_len = wire_len_of(&Message::Ping(3))?;
     let budget = OutboundBudget::with_block_reserve(100, 2 * block_len - 1, block_len);
     let chain = ScriptedChain {
         blocks: vec![entry_a, entry_b],
@@ -496,7 +507,7 @@ fn lease_cancel_ends_a_parked_session() -> TestResult {
         inventory_of(&block_b),
     ]))?;
     wait_until("block A to be queued", || {
-        served.budget.pending() == (1, block_len)
+        served.budget.pending() == (2, ping_len + block_len)
     })?;
     std::thread::sleep(Duration::from_millis(200));
 
@@ -528,8 +539,10 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
 
     served.client.send(&Message::GetData(items))?;
 
-    let full = (3, 3 * tx_len);
-    wait_until("three transactions to be queued", || {
+    // The originated keepalive probe holds one of the three item slots, so
+    // two transactions queue before the flood parks.
+    let full = (3, 2 * tx_len + wire_len_of(&Message::Ping(0))?);
+    wait_until("the probe and two transactions to be queued", || {
         served.budget.pending() == full
     })?;
     std::thread::sleep(Duration::from_millis(300));
@@ -544,14 +557,21 @@ fn tiny_item_flood_pauses_at_the_item_cap_and_drains_in_order() -> TestResult {
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 6)?;
+    let received = read_messages(&mut served.client, 7)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected seven drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Tx(txs[0].clone()),
             Message::Tx(txs[1].clone()),
-            Message::Tx(txs[2].clone()),
             Message::NotFound(vec![unknown]),
+            Message::Tx(txs[2].clone()),
             Message::Tx(txs[3].clone()),
             Message::Tx(txs[4].clone()),
         ],
@@ -595,8 +615,9 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     ]))?;
     served.client.send(&Message::Ping(11))?;
 
-    let full = (3, 3 * tx_len);
-    wait_until("three transactions to be queued", || {
+    // The originated keepalive probe holds one of the three item slots.
+    let full = (3, 2 * tx_len + wire_len_of(&Message::Ping(0))?);
+    wait_until("the probe and two transactions to be queued", || {
         served.budget.pending() == full
     })?;
     std::thread::sleep(Duration::from_millis(300));
@@ -611,9 +632,16 @@ fn a_getdata_that_fills_the_last_slot_parks_its_trailing_notfound_and_the_next_p
     );
 
     served.open_gate();
-    let received = read_messages(&mut served.client, 5)?;
+    let received = read_messages(&mut served.client, 6)?;
+    let [probe, drained @ ..] = &received[..] else {
+        panic!("expected six drained messages, got {received:?}");
+    };
+    assert!(
+        matches!(probe, Message::Ping(_)),
+        "the originated keepalive probe drains first: {received:?}"
+    );
     assert_eq!(
-        received,
+        drained,
         vec![
             Message::Tx(txs[0].clone()),
             Message::Tx(txs[1].clone()),

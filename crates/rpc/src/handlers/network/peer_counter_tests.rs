@@ -356,3 +356,46 @@ fn getnetworkinfo_timeoffset_is_zero_without_peers() {
         Some(0)
     );
 }
+
+#[test]
+fn getpeerinfo_projects_per_message_byte_accounting() {
+    use std::collections::BTreeMap;
+
+    let counters = Arc::new(PeerCounters::default());
+    // A received pong frame (24 header + 8 nonce) and an unaccounted
+    // command folding into *other*, plus one sent version frame.
+    counters.record_msg_recv("pong", 32);
+    counters.record_msg_recv("frobnicate", 99);
+    counters.record_msg_sent("version", 86);
+
+    let ctx = context_with(vec![peer(
+        "127.0.0.1:9103",
+        "10.0.0.2:51234",
+        0,
+        Arc::clone(&counters),
+    )]);
+    let entry = first_peer(&ctx);
+    let map = |key: &str| -> BTreeMap<String, u64> {
+        let value = sonic_rs::to_string(
+            entry
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} missing: {entry:?}")),
+        )
+        .unwrap_or_else(|error| panic!("serialize {key} failed: {error}"));
+        sonic_rs::from_str(&value).unwrap_or_else(|error| panic!("parse {key} failed: {error}"))
+    };
+
+    assert_eq!(
+        map("bytesrecv_per_msg"),
+        BTreeMap::from([("*other*".to_owned(), 99), ("pong".to_owned(), 32)])
+    );
+    assert_eq!(
+        map("bytessent_per_msg"),
+        BTreeMap::from([("version".to_owned(), 86)])
+    );
+
+    // Core v31.1's functional connect_nodes polls exactly this predicate
+    // on every multi-node setup (test_framework.py check_bytesrecv).
+    let pong = map("bytesrecv_per_msg")["pong"];
+    assert!(pong >= 29, "a framed pong must clear the framework wait");
+}
