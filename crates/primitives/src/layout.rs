@@ -53,9 +53,11 @@ const DECODE_EXPANSION: usize = larger(
     ),
 );
 
-/// Bytes a decoder may hold live for `wire_len` wire bytes: the wire image plus the parse scratch
-/// and the materialized block. Each element kind spends at least its exclusive minimum of wire
-/// bytes, and those bytes are disjoint, so the per-element factors never double count.
+/// Bytes a decoder may hold live for `wire_len` wire bytes.
+///
+/// The bound covers the wire image, the parse scratch and the materialized block. Each element
+/// kind spends at least its exclusive minimum of wire bytes, and those bytes are disjoint, so the
+/// per-element factors never double count.
 #[must_use]
 pub const fn decode_reservation(wire_len: usize) -> usize {
     wire_len.saturating_mul(1 + DECODE_EXPANSION)
