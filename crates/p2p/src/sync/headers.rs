@@ -8,7 +8,6 @@ use super::HeaderRequestKind;
 use super::HeaderRequestState;
 use super::LOCATOR_MAX_ENTRIES;
 use super::chain::HeaderAdmission;
-use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::headers_presync::HeaderAnchor;
@@ -202,7 +201,7 @@ impl BlockSync {
                     );
                 }
                 HeaderAdmission::Refused(error) => {
-                    self.request_ancestry_after_refusal(source, &error);
+                    self.request_ancestry_after_refusal(source, error.as_ref());
                 }
             }
         }
@@ -297,7 +296,11 @@ impl BlockSync {
             .then_some(height)
     }
 
-    fn request_ancestry_after_refusal(&self, source: Option<PeerSource>, error: &SyncChainError) {
+    fn request_ancestry_after_refusal(
+        &self,
+        source: Option<PeerSource>,
+        error: &(dyn core::error::Error + Send + Sync),
+    ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
         if last.is_none_or(|last| now.duration_since(last) >= HEADER_REQUEST_TIMEOUT) {
@@ -960,7 +963,7 @@ impl BlockSync {
                 if let Some(mut state) = dropped {
                     state.finalize();
                 }
-                self.request_ancestry_after_refusal(Some(source), &error);
+                self.request_ancestry_after_refusal(Some(source), error.as_ref());
                 return None;
             }
             return Some(admission);

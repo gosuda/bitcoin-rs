@@ -14,6 +14,15 @@ fn standalone(max_messages: usize, max_bytes: usize, reserve: usize) -> Arc<Outb
         reserve,
     ))
 }
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
 
 fn charge(budget: &Arc<OutboundBudget>, bytes: usize) -> OutboundCredit {
     budget
@@ -46,13 +55,8 @@ fn shared_lease(shared: &Arc<SharedOutboundBudget>) -> (PeerLease, Receiver<Queu
     (PeerLease::new(tx).with_shared_budget(shared), rx)
 }
 
-fn peer_info(
-    addr: crate::PeerEndpoint,
-    conn_time: u64,
-) -> Result<crate::PeerInfo, Box<dyn std::error::Error>> {
-    let ip = addr
-        .as_ip()
-        .ok_or_else(|| std::io::Error::other("ip test peer"))?;
+fn peer_info(addr: crate::PeerEndpoint, conn_time: u64) -> Result<crate::PeerInfo, TestError> {
+    let ip = addr.as_ip().ok_or(TestError::Missing("ip test peer"))?;
     Ok(crate::PeerInfo {
         addr: addr.into(),
         endpoint: Some(addr),
@@ -118,7 +122,7 @@ fn direction_distinguishes_inbound_from_outbound_leases() {
 }
 
 #[test]
-fn stale_connection_cannot_publish_over_replacement() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_connection_cannot_publish_over_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_450));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -150,7 +154,7 @@ fn stale_connection_cannot_publish_over_replacement() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn stale_disconnect_source_preserves_replacement() -> Result<(), Box<dyn std::error::Error>> {
+fn stale_disconnect_source_preserves_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_451));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -176,8 +180,7 @@ fn stale_disconnect_source_preserves_replacement() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn ready_snapshot_keeps_identity_across_same_address_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn ready_snapshot_keeps_identity_across_same_address_replacement() -> TestResult {
     let table = crate::PeerTable::new();
     let addr = PeerEndpoint::from(([127, 0, 0, 1], 18_452));
     let (old_tx, _old_rx) = crossbeam_channel::unbounded();
@@ -185,7 +188,7 @@ fn ready_snapshot_keeps_identity_across_same_address_replacement()
     table.register(addr, old.clone());
     assert!(table.publish_info(addr, &old, peer_info(addr, 1)?));
     let Some(snapshot) = table.ready_peers().pop() else {
-        return Err(std::io::Error::other("ready peer snapshot missing").into());
+        return Err(TestError::Missing("ready peer snapshot missing"));
     };
 
     let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();

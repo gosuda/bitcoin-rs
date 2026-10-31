@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::error::Error;
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
@@ -20,7 +19,33 @@ use crate::bip324::reader::{MAX_RECV_CONTENTS_LEN, is_poll_timeout};
 use crate::transport::establish;
 use crate::{PeerError, PeerLease};
 
-type TestResult = Result<(), Box<dyn Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Packet(#[from] crate::bip324::packet::PacketError),
+    #[error(transparent)]
+    Transport(#[from] super::super::TransportError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    TryFromSlice(#[from] std::array::TryFromSliceError),
+    #[error(transparent)]
+    Hkdf(#[from] hkdf::InvalidLength),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("unexpected step: {0}")]
+    UnexpectedStep(String),
+    #[error("unexpected v1 peer")]
+    UnexpectedV1,
+    #[error("handshake did not finish")]
+    HandshakeIncomplete,
+    #[error("decoys alone must not establish")]
+    DecoysEstablished,
+}
+
+type TestResult = Result<(), TestError>;
 
 const MAGIC: Magic = Magic::REGTEST;
 
@@ -67,7 +92,7 @@ fn connect(
     seed: u64,
     max_read: usize,
     first_message: Option<&[u8]>,
-) -> Result<Connected, Box<dyn Error>> {
+) -> Result<Connected, TestError> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut initiator = Handshake::initiator(MAGIC, &mut rng);
     let mut responder = Handshake::responder(MAGIC, &mut rng);
@@ -93,7 +118,7 @@ fn connect(
                     }
                     done_initiator = Some(*established);
                 }
-                Ok(Step::V1(_)) => return Err("initiator reported a v1 peer".into()),
+                Ok(Step::V1(_)) => return Err(TestError::UnexpectedV1),
                 Err(error) if is_poll_timeout(&error) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -103,7 +128,7 @@ fn connect(
                 Ok(Step::Send) => to_initiator.bytes.extend(responder.take_outbound()),
                 Ok(Step::Yield) => {}
                 Ok(Step::Established(established)) => done_responder = Some(*established),
-                Ok(Step::V1(_)) => return Err("responder reported a v1 peer".into()),
+                Ok(Step::V1(_)) => return Err(TestError::UnexpectedV1),
                 Err(error) if is_poll_timeout(&error) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -119,7 +144,7 @@ fn connect(
             to_initiator,
             to_responder,
         }),
-        _ => Err("handshake did not finish".into()),
+        _ => Err(TestError::HandshakeIncomplete),
     }
 }
 
@@ -218,7 +243,7 @@ fn responder_hands_a_v1_peer_back_after_sixteen_bytes() -> TestResult {
     };
     match responder.advance(&mut inbox)? {
         Step::V1(prefix) => assert_eq!(prefix[..], header[..V1_PREFIX_LEN]),
-        other => return Err(format!("expected v1, got {other:?}").into()),
+        other => return Err(TestError::UnexpectedStep(format!("{other:?}"))),
     }
     assert_eq!(
         responder.take_outbound(),
@@ -299,11 +324,7 @@ impl ScriptedInitiator {
         }
     }
 
-    fn open(
-        &self,
-        responder: &mut Handshake,
-        inbox: &mut Inbox,
-    ) -> Result<Session, Box<dyn Error>> {
+    fn open(&self, responder: &mut Handshake, inbox: &mut Inbox) -> Result<Session, TestError> {
         inbox.bytes.extend(self.ellswift.to_array());
         inbox.bytes.extend(&self.garbage);
         let mut sent = Vec::new();
@@ -311,12 +332,12 @@ impl ScriptedInitiator {
             match responder.advance(inbox) {
                 Ok(Step::Send) => sent.extend(responder.take_outbound()),
                 Err(error) if is_poll_timeout(&error) => break,
-                other => return Err(format!("responder left the handshake: {other:?}").into()),
+                other => return Err(TestError::UnexpectedStep(format!("{other:?}"))),
             }
         }
         let theirs: [u8; ELLSWIFT_LEN] = sent
             .get(..ELLSWIFT_LEN)
-            .ok_or("responder sent no key")?
+            .ok_or(TestError::Missing("responder sent no key"))?
             .try_into()?;
         let secret = shared_secret(
             self.secret_key,
@@ -350,7 +371,7 @@ fn finish(
 fn scripted(
     seed: u64,
     garbage_len: usize,
-) -> Result<(ScriptedInitiator, Handshake, Inbox, Session), Box<dyn Error>> {
+) -> Result<(ScriptedInitiator, Handshake, Inbox, Session), TestError> {
     let mut rng = StdRng::seed_from_u64(seed);
     let initiator = ScriptedInitiator::new(&mut rng, garbage_len);
     let mut responder = Handshake::responder(MAGIC, &mut rng);
@@ -460,8 +481,8 @@ fn each_decoy_before_the_version_yields_once() -> TestResult {
         match responder.advance(&mut inbox) {
             Ok(Step::Send) => drop(responder.take_outbound()),
             Ok(Step::Yield) => yielded += 1,
-            Ok(Step::Established(_)) => return Err("decoys alone must not establish".into()),
-            Ok(Step::V1(_)) => return Err("unexpected v1".into()),
+            Ok(Step::Established(_)) => return Err(TestError::DecoysEstablished),
+            Ok(Step::V1(_)) => return Err(TestError::UnexpectedV1),
             Err(error) if is_poll_timeout(&error) => break,
             Err(error) => return Err(error.into()),
         }
@@ -474,7 +495,7 @@ fn each_decoy_before_the_version_yields_once() -> TestResult {
             Step::Send => drop(responder.take_outbound()),
             Step::Yield => yielded += 1,
             Step::Established(_) => break,
-            Step::V1(_) => return Err("unexpected v1".into()),
+            Step::V1(_) => return Err(TestError::UnexpectedV1),
         }
     }
     assert_eq!(

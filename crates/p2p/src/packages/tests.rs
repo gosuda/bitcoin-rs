@@ -1,7 +1,19 @@
 use super::*;
 use bitcoin_rs_primitives::{Script, TxOut, deserialize};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error(transparent)]
+    Decode(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Package(#[from] PackageError),
+    #[error("displayed hash is not 32 bytes")]
+    InvalidHashLength,
+}
+
+type TestResult = Result<(), TestError>;
 
 const TX_1: &str = "02000000000101964b8aa63509579ca6086e6012eeaa4c2f4dd1e283da29b67c8eea38b3c6fd220000000000fdffffff0294c618000000000017a9145afbbb42f4e83312666d0697f9e66259912ecde38768fa2c0000000000160014897388a0889390fd0e153a22bb2cf9d8f019faf50247304402200547406380719f84d68cf4e96cc3e4a1688309ef475b150be2b471c70ea562aa02206d255f5acc40fd95981874d77201d2eb07883657ce1c796513f32b6079545cdf0121023ae77335cefcb5ab4c1dc1fb0d2acfece184e593727d7d5906c78e564c7c11d125cf0c00";
 const TX_2: &str = "01000000010b26e9b7735eb6aabdf358bab62f9816a21ba9ebdb719d5299e88607d722c190000000008b4830450220070aca44506c5cef3a16ed519d7c3c39f8aab192c4e1c90d065f37b8a4af6141022100a8e160b856c2d43d27d8fba71e5aef6405b8643ac4cb7cb3c462aced7f14711a0141046d11fee51b0e60666d5049a9101a72741df480b96ee26488a4d3466b95c9a40ac5eeef87e10a5cd336c19a84565f80fa6c547957b7700ff4dfbdefe76036c339ffffffff021bff3d11000000001976a91404943fdd508053c75000106d3bc6e2754dbcff1988ac2f15de00000000001976a914a266436d2965547608b9e15d9032a7b9d64fa43188ac00000000";
@@ -55,18 +67,18 @@ fn too_many(count: u64) -> PackageError {
     }
 }
 
-fn wtxid_of(displayed: &str) -> Result<Wtxid, Box<dyn std::error::Error>> {
+fn wtxid_of(displayed: &str) -> Result<Wtxid, TestError> {
     let bytes: [u8; 32] = unhex(&internal_hex(displayed))?
         .try_into()
-        .map_err(|_| "displayed hash is not 32 bytes")?;
+        .map_err(|_| TestError::InvalidHashLength)?;
     Ok(Wtxid(Hash256::from_le_bytes(&bytes)))
 }
 
-fn wtxids_of(displayed: &[&str]) -> Result<Vec<Wtxid>, Box<dyn std::error::Error>> {
+fn wtxids_of(displayed: &[&str]) -> Result<Vec<Wtxid>, TestError> {
     displayed.iter().map(|hash| wtxid_of(hash)).collect()
 }
 
-fn core_txs() -> Result<[Tx; 3], Box<dyn std::error::Error>> {
+fn core_txs() -> Result<[Tx; 3], TestError> {
     Ok([
         deserialize(&unhex(TX_1)?)?,
         deserialize(&unhex(TX_2)?)?,
@@ -83,7 +95,7 @@ fn synthetic_wtxids(count: usize) -> Vec<Wtxid> {
         .collect()
 }
 
-fn oracle(displayed: &[&str]) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+fn oracle(displayed: &[&str]) -> Result<[u8; 32], TestError> {
     let mut sorted = displayed.to_vec();
     sorted.sort_unstable();
     let mut engine = Sha256::new();
@@ -101,7 +113,7 @@ fn sha256_of(parts: &[Vec<u8>]) -> [u8; 32] {
     engine.finalize().into()
 }
 
-fn list_wire(displayed: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn list_wire(displayed: &[&str]) -> Result<Vec<u8>, TestError> {
     let mut hex = format!("{:02x}", displayed.len());
     for hash in displayed {
         hex.push_str(&internal_hex(hash));
@@ -109,7 +121,7 @@ fn list_wire(displayed: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> 
     Ok(unhex(&hex)?)
 }
 
-fn pkgtxns_wire(order: &[usize]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn pkgtxns_wire(order: &[usize]) -> Result<Vec<u8>, TestError> {
     let mut hex = format!("{:02x}", order.len());
     for &index in order {
         hex.push_str(TXS[index]);

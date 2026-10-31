@@ -19,7 +19,7 @@ use bitcoin_rs_primitives::{
 };
 use parking_lot::RwLock;
 
-use super::getdata_pause_tests::{FAILSAFE, MAGIC, TestResult, wait_until, wire_len_of};
+use super::getdata_pause_tests::{FAILSAFE, MAGIC, wait_until, wire_len_of};
 use super::{
     ListenerError, bind_listener, configure_peer_stream, run_outbound_handshake, serve, test_shared,
 };
@@ -32,7 +32,38 @@ use crate::{
     PeerTable, RecentBlockSlot,
 };
 
-type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error(transparent)]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+    #[error(transparent)]
+    Pause(#[from] super::getdata_pause_tests::TestError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("failure: {0}")]
+    Failure(String),
+}
+
+type Fallible<T> = Result<T, TestError>;
+type TestResult = Result<(), TestError>;
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
 
 type Frame = (Message, bytes::Bytes);
 
@@ -94,7 +125,7 @@ fn registry_block(block: &Block) -> Result<RegistryBlock, bitcoin::consensus::en
 fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<Block> {
     let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
     let root = bitcoin_rs_consensus::compute_merkle_root(&mut leaves)
-        .ok_or("a fixture block holds a transaction")?;
+        .ok_or(TestError::Missing("a fixture block holds a transaction"))?;
     let block = Block {
         header: Header {
             version: 1,
@@ -107,7 +138,9 @@ fn child_block(prev_blockhash: BlockHash, nonce: u32, txs: Vec<Tx>) -> Fallible<
         txs,
     };
     if !registry_block(&block)?.check_merkle_root() {
-        return Err("the fixture's merkle root is not the wire decoder's".into());
+        return Err(TestError::Missing(
+            "the fixture's merkle root is not the wire decoder's",
+        ));
     }
     Ok(block)
 }
@@ -201,11 +234,15 @@ impl Node {
         while !thread.is_finished() {
             if Instant::now() >= deadline {
                 self.listener = Some(thread);
-                return Err("the listener did not stop within the failsafe".into());
+                return Err(TestError::Missing(
+                    "the listener did not stop within the failsafe",
+                ));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let served = thread.join().map_err(|_| "the listener thread panicked")?;
+        let served = thread
+            .join()
+            .map_err(|_| TestError::Missing("the listener thread panicked"))?;
         served?;
         Ok(())
     }
@@ -215,7 +252,8 @@ impl Node {
         self.join_listener()?;
         wait_until("every session to leave the peer table", || {
             self.table.sessions().is_empty()
-        })
+        })?;
+        Ok(())
     }
 }
 
@@ -333,7 +371,7 @@ fn session_of(node: &Node, client: &Client) -> Fallible<PeerSession> {
         });
         found.is_some()
     })?;
-    found.ok_or_else(|| "the client's session vanished".into())
+    found.ok_or(TestError::Missing("the client's session vanished"))
 }
 
 fn counters_of(session: &PeerSession) -> Fallible<Arc<PeerCounters>> {
@@ -341,7 +379,7 @@ fn counters_of(session: &PeerSession) -> Fallible<Arc<PeerCounters>> {
         &session
             .info
             .as_ref()
-            .ok_or("the session published no metadata")?
+            .ok_or(TestError::Missing("the session published no metadata"))?
             .counters,
     ))
 }
@@ -371,11 +409,10 @@ fn a_held_block_answers_a_negotiated_compact_getdata_over_a_real_socket() -> Tes
     let compact = Inventory::CompactBlock(wire_block_hash(held_hash));
     let messages = messages_of(client.request(vec![compact])?);
     let [Message::CmpctBlock(cmpct)] = messages.as_slice() else {
-        return Err(format!(
+        return Err(TestError::Failure(format!(
             "a negotiated compact getdata for the held block must yield one cmpctblock \
              before the pong and no notfound, got {messages:?}"
-        )
-        .into());
+        )));
     };
 
     let registry = registry_block(&held)?;
@@ -437,7 +474,9 @@ fn saturate(
 ) -> Fallible<(usize, usize)> {
     let per_hog = OUTBOUND_QUEUE_MAX_BYTES.div_ceil(frame_len) * 2 + 1;
     if per_hog > MAX_INV_PER_MSG {
-        return Err(format!("{per_hog} frames exceed one getdata").into());
+        return Err(TestError::Failure(format!(
+            "{per_hog} frames exceed one getdata"
+        )));
     }
     for hog in hogs.iter_mut() {
         hog.send(&Message::GetData(vec![item; per_hog]))?;
@@ -638,7 +677,9 @@ fn the_saturated_aggregate_refuses_a_second_connection_until_the_first_closes() 
     let delivered = victim.read_through_pong(nonce)?;
     let [(Message::Block(block), raw)] = delivered.as_slice() else {
         let received: Vec<&Message> = delivered.iter().map(|(message, _)| message).collect();
-        return Err(format!("the victim's body must precede its pong, got {received:?}").into());
+        return Err(TestError::Failure(format!(
+            "the victim's body must precede its pong, got {received:?}"
+        )));
     };
     assert_eq!(block.block(), &blocks[2]);
     assert_eq!(&raw[..], victim_payload.as_slice());

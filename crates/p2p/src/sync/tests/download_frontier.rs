@@ -135,8 +135,7 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     Ok(())
 }
 
-fn pending_reorg_fixture()
--> Result<(SyncHarness, TipSnapshot, Vec<Block>), Box<dyn std::error::Error>> {
+fn pending_reorg_fixture() -> Result<(SyncHarness, TipSnapshot, Vec<Block>), TestError> {
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
     let losing1 = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)

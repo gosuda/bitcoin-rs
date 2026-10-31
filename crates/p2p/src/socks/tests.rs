@@ -10,6 +10,22 @@ fn fake_socks_no_auth(connect_reply: u8) -> io::Result<(SocketAddr, mpsc::Receiv
     fake_socks(false, connect_reply)
 }
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error(transparent)]
+    Recv(#[from] std::sync::mpsc::RecvError),
+    #[error(transparent)]
+    Dial(#[from] crate::endpoint::DialFailure),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
+
 fn fake_socks(
     auth_required: bool,
     connect_reply: u8,
@@ -84,7 +100,7 @@ fn fake_socks(
 }
 
 #[test]
-fn tor_dial_uses_exact_domain_transcript() -> Result<(), Box<dyn std::error::Error>> {
+fn tor_dial_uses_exact_domain_transcript() -> TestResult {
     let (proxy, rx) = fake_socks_auth(0x00)?;
     let onion = format!("{}.onion", "a".repeat(56));
     assert_eq!(onion.len(), 62);
@@ -106,8 +122,7 @@ fn tor_dial_uses_exact_domain_transcript() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
--> Result<(), Box<dyn std::error::Error>> {
+fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     let (tx, rx) = mpsc::channel();
@@ -132,7 +147,9 @@ fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
         true,
         Duration::from_secs(5),
     ) else {
-        return Err("no-auth selection must fail an isolation dial".into());
+        return Err(TestError::Missing(
+            "no-auth selection must fail an isolation dial",
+        ));
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(rx.recv()?, 0, "no CONNECT may be sent");
@@ -140,7 +157,7 @@ fn isolation_dial_refuses_no_auth_selection_and_sends_no_connect()
 }
 
 #[test]
-fn ip_dial_uses_literal_address_without_auth() -> Result<(), Box<dyn std::error::Error>> {
+fn ip_dial_uses_literal_address_without_auth() -> TestResult {
     let (proxy, rx) = fake_socks_no_auth(0x00)?;
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
     let stream = socks_connect(
@@ -159,7 +176,7 @@ fn ip_dial_uses_literal_address_without_auth() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn dead_proxy_is_a_transport_error() -> Result<(), Box<dyn std::error::Error>> {
+fn dead_proxy_is_a_transport_error() -> TestResult {
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
     let Err(error) = socks_connect(
         "127.0.0.1:1".parse()?,
@@ -167,14 +184,14 @@ fn dead_proxy_is_a_transport_error() -> Result<(), Box<dyn std::error::Error>> {
         false,
         Duration::from_secs(2),
     ) else {
-        return Err("dead proxy must fail".into());
+        return Err(TestError::Missing("dead proxy must fail"));
     };
     assert_ne!(error.kind(), io::ErrorKind::Unsupported);
     Ok(())
 }
 
 #[test]
-fn refused_connect_is_a_transport_error() -> Result<(), Box<dyn std::error::Error>> {
+fn refused_connect_is_a_transport_error() -> TestResult {
     let (proxy, _rx) = fake_socks_no_auth(0x05)?;
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
     let Err(error) = socks_connect(
@@ -183,14 +200,14 @@ fn refused_connect_is_a_transport_error() -> Result<(), Box<dyn std::error::Erro
         false,
         Duration::from_secs(5),
     ) else {
-        return Err("refused connect must fail".into());
+        return Err(TestError::Missing("refused connect must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     Ok(())
 }
 
 #[test]
-fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std::error::Error>> {
+fn unresolvable_onion_never_falls_back_to_direct_tcp() -> TestResult {
     let (proxy, _rx) = fake_socks_auth(0x05)?;
     let onion = format!("{}.onion", "z".repeat(56));
     let Err(error) = socks_connect(
@@ -199,7 +216,7 @@ fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std
         true,
         Duration::from_secs(5),
     ) else {
-        return Err("must fail".into());
+        return Err(TestError::Missing("must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     assert!(error.counts_as_peer_failure());
@@ -207,7 +224,7 @@ fn unresolvable_onion_never_falls_back_to_direct_tcp() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::Error>> {
+fn nonzero_rsv_is_rejected_as_invalid_data() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -229,7 +246,7 @@ fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::E
         false,
         Duration::from_secs(5),
     ) else {
-        return Err("nonzero RSV must fail".into());
+        return Err(TestError::Missing("nonzero RSV must fail"));
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert!(!error.counts_as_peer_failure());
@@ -237,8 +254,7 @@ fn nonzero_rsv_is_rejected_as_invalid_data() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable()
--> Result<(), Box<dyn std::error::Error>> {
+fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable() -> TestResult {
     for reply_code in [0x03, 0x04, 0x06] {
         let (proxy, _rx) = fake_socks_no_auth(reply_code)?;
         let target: SocketAddr = "203.0.113.7:8333".parse()?;
@@ -248,7 +264,7 @@ fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable()
             false,
             Duration::from_secs(5),
         ) else {
-            return Err("must fail".into());
+            return Err(TestError::Missing("must fail"));
         };
         assert!(
             !error.counts_as_peer_failure(),
@@ -259,7 +275,7 @@ fn network_unreachable_and_ttl_expired_are_transport_not_peer_unreachable()
 }
 
 #[test]
-fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std::error::Error>> {
+fn slow_trickle_handshake_exceeds_absolute_deadline() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -284,7 +300,7 @@ fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std:
         false,
         Duration::from_millis(200),
     ) else {
-        return Err("slow trickle must exceed deadline".into());
+        return Err(TestError::Missing("slow trickle must exceed deadline"));
     };
     let elapsed = started.elapsed();
     assert!(
@@ -308,7 +324,7 @@ fn slow_trickle_handshake_exceeds_absolute_deadline() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn partial_byte_trickle_does_not_extend_deadline() -> Result<(), Box<dyn std::error::Error>> {
+fn partial_byte_trickle_does_not_extend_deadline() -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let proxy = listener.local_addr()?;
     std::thread::spawn(move || -> io::Result<()> {
@@ -336,7 +352,9 @@ fn partial_byte_trickle_does_not_extend_deadline() -> Result<(), Box<dyn std::er
         false,
         Duration::from_millis(200),
     ) else {
-        return Err("partial byte trickle must not extend absolute deadline".into());
+        return Err(TestError::Missing(
+            "partial byte trickle must not extend absolute deadline",
+        ));
     };
     let elapsed = started.elapsed();
     assert!(

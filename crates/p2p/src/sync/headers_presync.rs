@@ -539,13 +539,13 @@ mod tests {
     use bitcoin_rs_chain::{ChainWork, block_work, current_unix_seconds, regtest_fixture};
     use bitcoin_rs_primitives::{BlockHash, Hash256, Header, HeadersSyncParams, Network};
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult = Result<(), crate::test_support::TestError>;
 
     const CORE_COMMITMENTS_PER_HOUR: u64 = 6;
     const CORE_MAX_FUTURE_BLOCK_TIME_SECONDS: u64 = 2 * 60 * 60;
     const BATCH: u32 = 256;
 
-    fn anchor(median_time_past: u32) -> Result<HeaderAnchor, Box<dyn std::error::Error>> {
+    fn anchor(median_time_past: u32) -> Result<HeaderAnchor, crate::test_support::TestError> {
         let mut header = regtest_fixture::mined_regtest_header(BlockHash::default(), 0)?;
         header.time = median_time_past;
         regtest_fixture::mine_header_to_declared_target(&mut header)?;
@@ -564,13 +564,13 @@ mod tests {
     fn mined_batch(
         prev: Hash256,
         first_height: u32,
-    ) -> Result<(Vec<Header>, Hash256), Box<dyn std::error::Error>> {
+    ) -> Result<(Vec<Header>, Hash256), crate::test_support::TestError> {
         let mut headers = Vec::with_capacity(usize::try_from(BATCH).unwrap_or(0));
         let mut cursor = BlockHash::from(prev);
         for offset in 0..BATCH {
             let header =
                 regtest_fixture::mined_regtest_header(cursor, first_height.saturating_add(offset))?;
-            cursor = BlockHash::from(header.compute_hash());
+            cursor = header.compute_hash();
             headers.push(header);
         }
         Ok((headers, Hash256::from(cursor)))
@@ -626,16 +626,15 @@ mod tests {
             }
         }
         let Some(error) = refusal else {
-            return Err(format!(
+            return Err(crate::test_support::TestError::Unexpected(format!(
                 "headerssync.cpp caps retained commitments at 6 per commitment period of elapsed time; \
                  a low-work chain of {height} headers was absorbed without refusal"
-            )
-            .into());
+            )));
         };
         let HeaderSyncError::MaxCommitments { height: refused } = error else {
-            return Err(
-                format!("the commitment cap must refuse an over-long chain, got {error}").into(),
-            );
+            return Err(crate::test_support::TestError::Unexpected(format!(
+                "the commitment cap must refuse an over-long chain, got {error}"
+            )));
         };
         let refused = u64::from(refused);
         assert!(

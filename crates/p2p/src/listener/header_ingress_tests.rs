@@ -39,7 +39,9 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     assert_eq!(carried.headers, vec![expected]);
     assert!(!carried.wire_response);
     done_rx.recv_timeout(Duration::from_secs(3))?;
-    worker.join().map_err(|_| "header forward panicked")?;
+    worker
+        .join()
+        .map_err(|_| crate::test_support::TestError::Panicked("header forward panicked"))?;
     Ok(())
 }
 
@@ -67,7 +69,9 @@ fn full_header_ingress_observes_session_and_lease_cancellation() -> TestResult {
             stop.cancel();
         }
         done_rx.recv_timeout(Duration::from_secs(3))?;
-        worker.join().map_err(|_| "header forward panicked")?;
+        worker
+            .join()
+            .map_err(|_| crate::test_support::TestError::Panicked("header forward panicked"))?;
         assert_eq!(headers_rx.len(), 1, "cancelled wait must not enqueue");
     }
     Ok(())
@@ -90,7 +94,9 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
     assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
     drop(headers_rx);
     done_rx.recv_timeout(Duration::from_secs(3))?;
-    worker.join().map_err(|_| "header forward panicked")?;
+    worker
+        .join()
+        .map_err(|_| crate::test_support::TestError::Panicked("header forward panicked"))?;
     Ok(())
 }
 
@@ -124,7 +130,11 @@ fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
         sync.tick();
         let addr = test_addr(9792, 0)?;
         let _outbound_rx = connect_peer(&peers, synthetic_peer(addr, i32::try_from(BATCHES)?));
-        let lease = peers.lease(addr).ok_or("missing load-test connection")?;
+        let lease = peers
+            .lease(addr)
+            .ok_or(crate::test_support::TestError::Missing(
+                "missing load-test connection",
+            ))?;
         let source = lease.source(addr.endpoint());
         let mut shared = test_shared(peers, headers_tx, blocks_tx);
         shared.block_sync = Some(Arc::clone(&sync));
@@ -174,7 +184,9 @@ fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
             std::thread::yield_now();
         }
         stop.store(true);
-        producer.join().map_err(|_| "load producer panicked")?;
+        producer
+            .join()
+            .map_err(|_| crate::test_support::TestError::Panicked("load producer panicked"))?;
         assert!(
             headers_rx.is_empty() && blocks_rx.is_empty(),
             "ingress must make progress"
@@ -182,7 +194,10 @@ fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
         assert!(peak_depth <= CAPACITY);
         if !wire_response {
             assert_eq!(
-                applied.load_full().ok_or("no applied tip")?.height,
+                applied
+                    .load_full()
+                    .ok_or(crate::test_support::TestError::Missing("no applied tip"))?
+                    .height,
                 u32::try_from(BATCHES)?
             );
         }

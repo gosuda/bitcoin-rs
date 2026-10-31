@@ -1,7 +1,7 @@
 use super::test_support::{ScriptedBranchSwitch, TestChain, mined_chain, synced_ibd_latch};
 use crate::PeerRemote;
 use crate::test_support::{
-    OrFail, TestResult, connect_peer, current_source, synthetic_peer, test_addr,
+    OrFail, TestError, TestResult, connect_peer, current_source, synthetic_peer, test_addr,
 };
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -865,7 +865,7 @@ struct ExhaustionFixture {
     block2_hash: BlockHash,
 }
 
-fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error::Error>> {
+fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, TestError> {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
@@ -965,7 +965,7 @@ struct DeterministicProxyFixture {
     blocks: Vec<Block>,
 }
 
-fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, Box<dyn std::error::Error>> {
+fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, TestError> {
     let (tree, blocks) = mined_chain(
         DETERMINISTIC_PROXY_TIP_HEIGHT,
         DETERMINISTIC_PROXY_HEADER_HEIGHT - DETERMINISTIC_PROXY_TIP_HEIGHT,
@@ -1014,10 +1014,7 @@ struct ApplyCacheFixture {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
 }
 
-fn apply_cache_fixture(
-    body_height: u32,
-    header_only: u32,
-) -> Result<ApplyCacheFixture, Box<dyn std::error::Error>> {
+fn apply_cache_fixture(body_height: u32, header_only: u32) -> Result<ApplyCacheFixture, TestError> {
     let (tree, blocks) = mined_chain(body_height, header_only)?;
     let SyncHarness {
         sync,
@@ -1195,10 +1192,7 @@ fn unrequested_body_admission_matches_core_acceptance() -> TestResult {
 
 #[test]
 fn unrequested_body_gate_rejects_below_floor_and_below_applied_work() -> TestResult {
-    fn snapshot(
-        tree: &BlockTree,
-        hash: Hash256,
-    ) -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+    fn snapshot(tree: &BlockTree, hash: Hash256) -> Result<TipSnapshot, TestError> {
         let node_id = tree.lookup(hash).ok_or("missing fixture block")?;
         let node = tree.node(node_id)?;
         Ok(TipSnapshot {
@@ -1313,7 +1307,7 @@ impl SyncHarness {
 pub(crate) fn sync_with_header_chain_and_ibd(
     height: u32,
     ibd: Arc<InitialBlockDownload>,
-) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+) -> Result<SyncFixture, TestError> {
     let (tree, blocks) = mined_chain(height, 0)?;
     let expected = blocks.iter().map(Block::block_hash).collect();
     let harness = SyncHarness::with_ibd(tree, ibd);
@@ -1336,14 +1330,14 @@ type SyncFixture = (
 
 type InboundBlockSender = crossbeam_channel::Sender<crate::InboundBlock>;
 
-fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+fn sync_with_header_chain(height: u32) -> Result<SyncFixture, TestError> {
     let (fixture, _inbound_blocks_tx) = sync_with_header_chain_and_blocks(height)?;
     Ok(fixture)
 }
 
 fn sync_with_header_chain_and_blocks(
     height: u32,
-) -> Result<(SyncFixture, InboundBlockSender), Box<dyn std::error::Error>> {
+) -> Result<(SyncFixture, InboundBlockSender), TestError> {
     let (tree, blocks) = mined_chain(height, 0)?;
     let expected = blocks.iter().map(Block::block_hash).collect();
     let SyncHarness {
@@ -1369,7 +1363,7 @@ type MinedChainFixture = (
     InboundBlockSender,
 );
 
-fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::error::Error>> {
+fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, TestError> {
     let (tree, blocks) = mined_chain(count, 0)?;
     let SyncHarness {
         sync,
@@ -1398,7 +1392,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> Te
         let fixture_payload = BlockPayload::from_local(block.clone());
         chain
             .commit_window(&[&fixture_payload])
-            .map_err(|error| format!("fixture commit: {error:?}"))?;
+            .map_err(|error| crate::test_support::TestError::Commit(format!("{error:?}")))?;
     }
     chain
         .historical
@@ -1549,9 +1543,7 @@ fn wedge_budget(pending_timeout: Duration) -> super::SyncBudget {
     .with_pending_timeout_override(pending_timeout)
 }
 
-fn staged_count_wedge(
-    budget: super::SyncBudget,
-) -> Result<WedgeFixture, Box<dyn std::error::Error>> {
+fn staged_count_wedge(budget: super::SyncBudget) -> Result<WedgeFixture, TestError> {
     let ((sync, peers, block_tree, applied_tip, expected), blocks_tx) =
         sync_with_header_chain_and_blocks(64)?;
     let peer_count = budget.min_peers_for_fanout;
@@ -1585,9 +1577,7 @@ fn staged_count_wedge(
     Ok((sync, peers, expected, rxs, blocks_tx))
 }
 
-fn next_getdata(
-    rx: &crate::test_support::MessageReceiver,
-) -> Result<Vec<Inventory>, Box<dyn std::error::Error>> {
+fn next_getdata(rx: &crate::test_support::MessageReceiver) -> Result<Vec<Inventory>, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetData(inventory) = message {
             return Ok(inventory);
@@ -1605,10 +1595,7 @@ fn assert_no_getdata(rx: &crate::test_support::MessageReceiver) -> TestResult {
     Ok(())
 }
 
-fn header_chain_block(
-    expected: &[BlockHash],
-    height: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
+fn header_chain_block(expected: &[BlockHash], height: u32) -> Result<Block, TestError> {
     let index = usize::try_from(height.checked_sub(1).ok_or("height must be >= 1")?)?;
     let prev_blockhash = if index == 0 {
         genesis_header().compute_hash()
@@ -1789,9 +1776,7 @@ fn assert_histogram(recorder: &TestRecorder, name: &str) {
     }
 }
 
-fn witness_block_inventory(
-    inventory: Vec<Inventory>,
-) -> Result<Vec<BlockHash>, Box<dyn std::error::Error>> {
+fn witness_block_inventory(inventory: Vec<Inventory>) -> Result<Vec<BlockHash>, TestError> {
     inventory
         .into_iter()
         .map(|item| match item {
@@ -1812,10 +1797,7 @@ fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
     header
 }
 
-fn far_future_header(
-    prev_blockhash: BlockHash,
-    height: u32,
-) -> Result<Header, Box<dyn std::error::Error>> {
+fn far_future_header(prev_blockhash: BlockHash, height: u32) -> Result<Header, TestError> {
     let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)?;
     header.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
     regtest_fixture::mine_header_to_declared_target(&mut header)?;
@@ -1829,7 +1811,7 @@ struct HeaderSyncFixture {
     peers: Arc<PeerTable>,
 }
 
-fn header_sync_with_genesis() -> Result<HeaderSyncFixture, Box<dyn std::error::Error>> {
+fn header_sync_with_genesis() -> Result<HeaderSyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1859,7 +1841,7 @@ fn genesis_header() -> Header {
     Network::Regtest.genesis_block().header
 }
 
-fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::error::Error>> {
+fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -2272,7 +2254,7 @@ struct PunishmentFixture {
     _peer_rx: crate::test_support::MessageReceiver,
 }
 
-fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>> {
+fn punishment_fixture() -> Result<PunishmentFixture, TestError> {
     let (mut tree, blocks) = mined_chain(1, 0)?;
     let chain_tip = tree.tip_handle();
     let block_tree = Arc::new(RwLock::new(tree));
@@ -2425,18 +2407,15 @@ struct NotFoundFixture {
 }
 
 impl NotFoundFixture {
-    fn two_peers(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+    fn two_peers(budget: super::SyncBudget) -> Result<Self, TestError> {
         Self::connect(budget, true)
     }
 
-    fn owner_only(budget: super::SyncBudget) -> Result<Self, Box<dyn std::error::Error>> {
+    fn owner_only(budget: super::SyncBudget) -> Result<Self, TestError> {
         Self::connect(budget, false)
     }
 
-    fn connect(
-        budget: super::SyncBudget,
-        with_alternate: bool,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    fn connect(budget: super::SyncBudget, with_alternate: bool) -> Result<Self, TestError> {
         let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(3)?;
         install_budget(&sync, budget);
         let owner = test_addr(9_810, 0)?;

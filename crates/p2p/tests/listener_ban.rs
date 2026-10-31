@@ -1,5 +1,4 @@
 use bitcoin_rs_primitives::PeerEndpoint;
-use std::error::Error;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -15,8 +14,20 @@ use bitcoin_rs_p2p::{
 };
 use parking_lot::RwLock;
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    Listener(#[from] bitcoin_rs_p2p::listener::ListenerError),
+    #[error(transparent)]
+    SubnetParse(#[from] bitcoin_rs_p2p::SubnetParseError),
+}
+
 #[test]
-fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), Box<dyn Error>> {
+fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), TestError> {
     let helper = TcpListener::bind(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -63,7 +74,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
 }
 
 #[test]
-fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
+fn inbound_ban_drops_connection_pre_handshake() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -106,7 +117,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> {
+fn network_inactive_drops_inbound_pre_handshake() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -136,7 +147,7 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
 }
 
 #[test]
-fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>> {
+fn network_active_blocks_outbound_until_reenabled() -> Result<(), TestError> {
     let helper = TcpListener::bind(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -185,7 +196,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error>> {
+fn cancelled_start_refuses_outbound_before_connect() -> Result<(), TestError> {
     let helper = TcpListener::bind(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -227,7 +238,7 @@ fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn Error>> {
+fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -379,7 +390,7 @@ fn accept_one_connection(listener: &TcpListener, shutdown: &Arc<AtomicBool>) -> 
     Ok(false)
 }
 
-fn join_accept(handle: thread::JoinHandle<io::Result<bool>>) -> Result<bool, Box<dyn Error>> {
+fn join_accept(handle: thread::JoinHandle<io::Result<bool>>) -> Result<bool, TestError> {
     match handle.join() {
         Ok(Ok(accepted)) => Ok(accepted),
         Ok(Err(error)) => Err(error.into()),
@@ -389,7 +400,7 @@ fn join_accept(handle: thread::JoinHandle<io::Result<bool>>) -> Result<bool, Box
 
 fn join_listener(
     handle: thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), TestError> {
     match handle.join() {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error.into()),
@@ -403,7 +414,7 @@ fn teardown_epoch(
     shutdown: &AtomicBool,
     serve_handle: thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>,
     outbound_handle: thread::JoinHandle<Result<(), bitcoin_rs_p2p::PeerError>>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), TestError> {
     session_cancel.store(true, Ordering::Relaxed);
     peer_table.cancel_all();
     shutdown.store(true, Ordering::Relaxed);

@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
+use super::TestError;
 use super::settlement_faults::deliver_headers;
 use super::settlement_faults::next_locator;
 use bitcoin_rs_primitives::Hash256;
@@ -63,7 +64,7 @@ type PresyncFixture = (
     Arc<PeerTable>,
 );
 
-fn presync_fixture(minimum_work: ChainWork) -> Result<PresyncFixture, Box<dyn std::error::Error>> {
+fn presync_fixture(minimum_work: ChainWork) -> Result<PresyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1070,9 +1071,7 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
     Ok(())
 }
 
-fn presync_fixture_refusing(
-    minimum_work: ChainWork,
-) -> Result<PresyncFixture, Box<dyn std::error::Error>> {
+fn presync_fixture_refusing(minimum_work: ChainWork) -> Result<PresyncFixture, TestError> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

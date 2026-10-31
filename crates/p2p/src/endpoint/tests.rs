@@ -2,6 +2,12 @@ use super::*;
 use bitcoin_rs_primitives::endpoint::tor_v3_payload;
 use std::net::{IpAddr, Ipv4Addr};
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+}
+
 fn tor_endpoint() -> PeerEndpoint {
     PeerEndpoint::TorV3 {
         key: [3u8; 32],
@@ -10,7 +16,7 @@ fn tor_endpoint() -> PeerEndpoint {
 }
 
 #[test]
-fn parse_format_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+fn parse_format_round_trips() -> Result<(), TestError> {
     for endpoint in [
         PeerEndpoint::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333)),
         PeerEndpoint::Ip("[::1]:8333".parse::<SocketAddr>()?),
@@ -295,7 +301,7 @@ fn overlay_dial_is_unavailable_without_fallback() {
 }
 
 #[test]
-fn dead_onion_proxy_is_transport_not_peer_failure() -> Result<(), Box<dyn std::error::Error>> {
+fn dead_onion_proxy_is_transport_not_peer_failure() -> Result<(), TestError> {
     let routes = DialRoutes {
         onion: Some("127.0.0.1:1".parse()?),
         ..DialRoutes::default()
@@ -343,8 +349,7 @@ fn route_table_denial_prefilters_unroutable_endpoints() {
 }
 
 #[test]
-fn direct_tcp_classifies_only_refusal_as_peer_unreachable() -> Result<(), Box<dyn std::error::Error>>
-{
+fn direct_tcp_classifies_only_refusal_as_peer_unreachable() -> Result<(), TestError> {
     let unused_port: SocketAddr = "127.0.0.1:1".parse()?;
     let Err(error) = connect_peer_stream(
         PeerEndpoint::Ip(unused_port),

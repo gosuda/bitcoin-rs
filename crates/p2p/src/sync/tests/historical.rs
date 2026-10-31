@@ -3,7 +3,7 @@ use crate::download_window::default_sync_budget;
 
 type HistoricalFixture = (SyncHarness, Arc<TestChain>, Vec<Block>);
 
-fn fixture(count: u32) -> Result<HistoricalFixture, Box<dyn std::error::Error>> {
+fn fixture(count: u32) -> Result<HistoricalFixture, TestError> {
     let (tree, blocks) = mined_chain(count, 0)?;
     let mut harness = SyncHarness::new(tree);
     let chain = Arc::new(TestChain::new(
@@ -197,7 +197,7 @@ fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
     let payloads: Vec<&BlockPayload> = owned_payloads.iter().collect();
     chain
         .commit_window(&payloads)
-        .map_err(|error| format!("fixture commit: {error:?}"))?;
+        .map_err(|error| crate::test_support::TestError::Commit(format!("{error:?}")))?;
     let addr = test_addr(28205, 0)?;
     let _rx = connect_peer(&harness.peers, synthetic_peer(addr, 7));
     harness.sync.advance_historical();

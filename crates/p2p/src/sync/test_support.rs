@@ -66,7 +66,7 @@ impl TestChain {
             block,
             bitcoin_rs_consensus::BlockRuleContext { segwit_active },
         )
-        .map_err(|error| -> SyncChainError { Box::new(error) })
+        .map_err(SyncChainError::from)
     }
 
     #[must_use]
@@ -231,7 +231,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("scripted commit failure")),
+                    source: std::io::Error::other("scripted commit failure").into(),
                 });
             }
             let Some(node_id) = tree.lookup(hash) else {
@@ -239,7 +239,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("commit block not in tree")),
+                    source: std::io::Error::other("commit block not in tree").into(),
                 });
             };
             let coinbase_shaped = |tx: &Tx| {
@@ -256,7 +256,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Permanent,
                     invalidated,
-                    source: Box::new(std::io::Error::other("extra coinbase")),
+                    source: std::io::Error::other("extra coinbase").into(),
                 });
             }
             if !block.txs.is_empty() {
@@ -274,7 +274,7 @@ impl SyncChain for TestChain {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
-                    source: Box::new(std::io::Error::other("commit node missing")),
+                    source: std::io::Error::other("commit node missing").into(),
                 });
             };
             self.applied_tip.store(Some(Arc::new(TipSnapshot {
@@ -369,7 +369,7 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
 pub(crate) fn mined_chain(
     body_height: u32,
     header_only: u32,
-) -> Result<(BlockTree, Vec<Block>), Box<dyn std::error::Error>> {
+) -> Result<(BlockTree, Vec<Block>), crate::test_support::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let mut tip_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;

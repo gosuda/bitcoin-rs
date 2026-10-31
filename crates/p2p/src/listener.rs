@@ -2816,8 +2816,7 @@ mod outbound_tests {
     use crate::peer_info::PeerRole;
 
     #[test]
-    fn spawn_outbound_connection_to_closed_port_fails_quickly()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn spawn_outbound_connection_to_closed_port_fails_quickly() -> std::io::Result<()> {
         let listener = TcpListener::bind(
             PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
                 .socket_addr()
@@ -3067,7 +3066,7 @@ mod inbound_admission_tests {
     use crate::PeerTable;
 
     #[test]
-    fn inbound_admission_over_cap_drops_stream() -> Result<(), Box<dyn std::error::Error>> {
+    fn inbound_admission_over_cap_drops_stream() -> crate::test_support::TestResult {
         let listener = bind_listener(
             PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
                 .socket_addr()

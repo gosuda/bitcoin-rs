@@ -171,9 +171,16 @@ mod tests {
             assert_eq!(field, [plain[0], plain[1], plain[2]]);
         }
     }
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Cipher(#[from] chacha20poly1305::Error),
+        #[error(transparent)]
+        Auth(#[from] AuthFailed),
+    }
 
     #[test]
-    fn packet_cipher_round_trips_across_rekeys() -> Result<(), Box<dyn std::error::Error>> {
+    fn packet_cipher_round_trips_across_rekeys() -> Result<(), TestError> {
         let mut sender = FsChaCha20Poly1305::new([5; 32]);
         let mut receiver = FsChaCha20Poly1305::new([5; 32]);
         for value in 0..(2 * REKEY_INTERVAL + 3) {
@@ -188,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn packet_cipher_rejects_any_tampering() -> Result<(), Box<dyn std::error::Error>> {
+    fn packet_cipher_rejects_any_tampering() -> Result<(), TestError> {
         let plain = *b"contents";
         for tamper in 0..3 {
             let mut sender = FsChaCha20Poly1305::new([9; 32]);

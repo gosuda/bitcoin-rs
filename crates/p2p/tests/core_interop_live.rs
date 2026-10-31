@@ -8,10 +8,18 @@ use sonic_rs::{JsonValueTrait, Value};
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
 const SCHEMA: &str = "bitcoin-rs-core-differential-v4";
 
-type LiveError = Box<dyn std::error::Error>;
+#[derive(Debug, thiserror::Error)]
+enum LiveError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Sonic(#[from] sonic_rs::Error),
+    #[error("{0}")]
+    Message(String),
+}
 
 fn main_error(message: impl std::fmt::Display) -> LiveError {
-    Box::<std::io::Error>::new(std::io::Error::other(message.to_string())).into()
+    LiveError::Message(message.to_string())
 }
 
 fn evidence_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, LiveError> {
@@ -65,9 +73,9 @@ fn version_is_pinned_line(parsed: &str, pinned: &str) -> bool {
 
 fn load_evidence() -> Result<Value, LiveError> {
     let path = std::env::var(EVIDENCE_ENV).map_err(|_| {
-        format!(
+        main_error(format!(
             "{EVIDENCE_ENV} must point at the evidence JSON from scripts/run-p2p-core-interop.sh"
-        )
+        ))
     })?;
     let raw = std::fs::read_to_string(PathBuf::from(&path))?;
     Ok(sonic_rs::from_str(&raw)?)

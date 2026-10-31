@@ -18,7 +18,27 @@ use bitcoin_rs_primitives::Network;
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
-pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
+#[derive(Debug, thiserror::Error)]
+pub enum SyncChainError {
+    #[error(transparent)]
+    Apply(#[from] bitcoin_rs_chainstate::ApplyError),
+    #[error(transparent)]
+    AssumeUtxo(#[from] bitcoin_rs_chainstate::assumeutxo::AssumeUtxoError),
+    #[error(transparent)]
+    BodyBinding(#[from] bitcoin_rs_consensus::ConsensusError),
+    #[error(transparent)]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&'static str> for SyncChainError {
+    fn from(msg: &'static str) -> Self {
+        Self::Message(msg.to_owned())
+    }
+}
 
 pub struct WindowCommitError {
     pub applied: usize,
@@ -83,6 +103,7 @@ pub trait SyncChain: Send + Sync {
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize;
 
+    #[expect(clippy::result_large_err)]
     fn commit_window(&self, payloads: &[&BlockPayload]) -> Result<usize, WindowCommitError>;
 
     fn switch_to_branch(

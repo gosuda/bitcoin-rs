@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn descendant_of_an_invalidated_block_spares_the_sender()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> Result<(), crate::test_support::TestError> {
         let mut tree = BlockTree::new();
         let genesis = mined_header(BlockHash::default(), 900_000);
         let genesis_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;

@@ -152,13 +152,22 @@ impl RngCore for CountingRng {
         self.inner.try_fill_bytes(dest)
     }
 }
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+type TestResult = Result<(), TestError>;
 
 fn clock_peer(
     table: &PeerTable,
     remote: &str,
     bind: &str,
     inbound: bool,
-) -> Result<(PeerSource, MessageReceiver), Box<dyn std::error::Error>> {
+) -> Result<(PeerSource, MessageReceiver), TestError> {
     let connected = connect_at(
         table,
         remote
@@ -191,8 +200,7 @@ fn clock(table: &PeerTable, source: PeerSource) -> Instant {
 }
 
 #[test]
-fn nontransaction_inventory_does_not_create_relay_state_or_clocks()
--> Result<(), Box<dyn std::error::Error>> {
+fn nontransaction_inventory_does_not_create_relay_state_or_clocks() -> TestResult {
     let table = PeerTable::new();
     let (source, _) = clock_peer(&table, "8.8.8.8:1000", "10.0.0.1:8333", true)?;
     table.note_transaction_inventory(source, &[]);
@@ -238,8 +246,7 @@ fn inbound_clock_key_uses_network_class_and_canonical_bind_endpoint() {
 }
 
 #[test]
-fn inbound_peers_share_cycles_without_suppressing_due_siblings()
--> Result<(), Box<dyn std::error::Error>> {
+fn inbound_peers_share_cycles_without_suppressing_due_siblings() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -280,8 +287,7 @@ fn inbound_peers_share_cycles_without_suppressing_due_siblings()
 }
 
 #[test]
-fn inbound_future_clock_survives_all_creation_paths_and_reconnects()
--> Result<(), Box<dyn std::error::Error>> {
+fn inbound_future_clock_survives_all_creation_paths_and_reconnects() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -338,8 +344,7 @@ fn inbound_future_clock_survives_all_creation_paths_and_reconnects()
 }
 
 #[test]
-fn empty_inbound_ticks_advance_the_shared_clock_without_admissions()
--> Result<(), Box<dyn std::error::Error>> {
+fn empty_inbound_ticks_advance_the_shared_clock_without_admissions() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -366,8 +371,7 @@ fn empty_inbound_ticks_advance_the_shared_clock_without_admissions()
 }
 
 #[test]
-fn different_inbound_keys_and_outbound_peers_sample_independently()
--> Result<(), Box<dyn std::error::Error>> {
+fn different_inbound_keys_and_outbound_peers_sample_independently() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -755,8 +759,7 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
     );
 }
 #[test]
-fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();
     let now = Instant::now();
@@ -768,10 +771,10 @@ fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection()
         .endpoint
         .ok_or_else(|| std::io::Error::other("identified fixture"))?;
     let Some(lease) = table.lease(endpoint) else {
-        return Err(std::io::Error::other("live fixture lease").into());
+        return Err(TestError::Missing("live fixture lease"));
     };
     let Some(mut info) = table.info_of(endpoint) else {
-        return Err(std::io::Error::other("published fixture info").into());
+        return Err(TestError::Missing("published fixture info"));
     };
     info.relay_transactions = false;
     table.publish_info(endpoint, &lease, info);

@@ -1,5 +1,28 @@
 use super::*;
 use crate::{Message, PeerError, PeerLease, PeerRole};
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error(transparent)]
+    Sonic(#[from] sonic_rs::Error),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Missing(msg)
+    }
+}
+
+type TestResult = Result<(), TestError>;
 
 fn shared() -> ConnectionShared {
     let (headers, _) = crossbeam_channel::unbounded();
@@ -46,8 +69,7 @@ impl std::io::Write for ServiceUpdateScript {
 }
 
 #[test]
-fn accepted_version_updates_once_without_replaying_on_later_steps()
--> Result<(), Box<dyn std::error::Error>> {
+fn accepted_version_updates_once_without_replaying_on_later_steps() -> TestResult {
     for (repeated_version, protected) in
         [(true, false), (true, true), (false, false), (false, true)]
     {
@@ -144,8 +166,7 @@ fn accepted_version_updates_once_without_replaying_on_later_steps()
 }
 
 #[test]
-fn only_current_remote_protocol_faults_change_automatic_avoidance()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalid_wire_session_closes_and_refuses_the_link_with_reconnection_delay() -> TestResult {
     let shared = shared();
     let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
     let stale = lease(false, false);
@@ -197,8 +218,7 @@ fn only_current_remote_protocol_faults_change_automatic_avoidance()
 }
 
 #[test]
-fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
--> Result<(), Box<dyn std::error::Error>> {
+fn manual_and_protected_local_connections_never_discourage_an_ip() -> TestResult {
     for inbound in [false, true] {
         let shared = shared();
         let address: PeerEndpoint = "8.8.8.8:8333".parse()?;
@@ -236,7 +256,9 @@ fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
         io::Write::write_all(&mut sender, &malformed)?;
         io::Write::write_all(&mut sender, &malformed)?;
         let Err(error) = run_connected_session(&mut peer, address, &shared, lease, rx, info) else {
-            return Err("malformed frames must close the session with an error".into());
+            return Err(TestError::Missing(
+                "malformed frames must close the session with an error",
+            ));
         };
         assert!(matches!(error, PeerError::Incoming(_)));
         assert!(probe.is_cancelled());
@@ -251,8 +273,7 @@ fn invalid_wire_session_closes_and_refuses_the_next_automatic_admission()
 }
 
 #[test]
-fn manual_protected_and_local_connections_never_discourage_an_ip()
--> Result<(), Box<dyn std::error::Error>> {
+fn protected_handshake_discards_bad_order_without_extending_deadline() -> TestResult {
     for (ip, manual, noban) in [
         ("8.8.8.8", true, false),
         ("8.8.4.4", false, true),
@@ -280,8 +301,7 @@ fn manual_protected_and_local_connections_never_discourage_an_ip()
 }
 
 #[test]
-fn protected_handshake_discards_bad_order_without_extending_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+fn only_current_remote_protocol_faults_change_automatic_avoidance() -> TestResult {
     for manual in [false, true] {
         let lease = lease(manual, !manual);
         let mut bytes = Vec::new();

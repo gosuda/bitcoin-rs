@@ -5,7 +5,7 @@ use bitcoin_rs_primitives::{BlockHash, Network};
 
 use super::*;
 
-type TestError = Box<dyn std::error::Error>;
+type TestError = crate::test_support::TestError;
 
 struct Fixture {
     tree: BlockTree,

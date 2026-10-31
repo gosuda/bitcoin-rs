@@ -474,11 +474,13 @@ fn live_inbound_count_ignores_outbound_leases() {
 }
 
 #[test]
-fn removal_releases_inbound_capacity() -> Result<(), Box<dyn std::error::Error>> {
+fn removal_releases_inbound_capacity() -> crate::test_support::TestResult {
     let table = PeerTable::new();
     let registered = table
         .try_register_inbound(addr(1), inbound_lease(), &[], 1, 0, &active_network())
-        .ok_or("capacity must admit the first inbound lease")?;
+        .ok_or(crate::test_support::TestError::Missing(
+            "capacity must admit the first inbound lease",
+        ))?;
     assert!(table.remove_current(addr(1), &registered));
     assert_eq!(table.live_inbound_count(), 0);
     assert!(

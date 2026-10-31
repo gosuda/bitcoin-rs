@@ -105,7 +105,17 @@ mod tests {
     use crate::bip324::packet::{RecvCipher, SendCipher};
     use crate::recv::RECEIVE_CHUNK;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Packet(#[from] crate::bip324::packet::PacketError),
+        #[error(transparent)]
+        Transport(#[from] super::super::TransportError),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+    }
+
+    type TestResult = Result<(), TestError>;
 
     struct Dribble(VecDeque<u8>);
 

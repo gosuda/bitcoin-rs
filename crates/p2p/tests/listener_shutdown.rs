@@ -1,8 +1,7 @@
 use bitcoin::p2p::Magic;
-use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
+use bitcoin_rs_p2p::listener::{ConnectionShared, ListenerError, bind_listener, serve};
 use bitcoin_rs_p2p::{ListenerExtras, NetworkActivity, PeerTable};
 use bitcoin_rs_primitives::PeerEndpoint;
-use std::error::Error;
 use std::io;
 use std::net::{Ipv4Addr, TcpStream};
 use std::sync::Arc;
@@ -10,6 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+    #[error(transparent)]
+    RecvTimeout(#[from] mpsc::RecvTimeoutError),
+}
 
 struct ServeGuard {
     shutdown: Arc<AtomicBool>,
@@ -24,7 +33,7 @@ impl ServeGuard {
         }
     }
 
-    fn join(mut self) -> Result<(), Box<dyn Error>> {
+    fn join(mut self) -> Result<(), TestError> {
         self.shutdown.store(true, Ordering::Relaxed);
         match self.handle.take() {
             Some(handle) => handle
@@ -45,7 +54,7 @@ impl Drop for ServeGuard {
 }
 
 #[test]
-fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
+fn serve_exits_when_flag_set() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()
@@ -100,7 +109,7 @@ fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn serve_returns_without_accepting_when_flag_preset() -> Result<(), Box<dyn Error>> {
+fn serve_returns_without_accepting_when_flag_preset() -> Result<(), TestError> {
     let listener = bind_listener(
         PeerEndpoint::from((Ipv4Addr::LOCALHOST, 0))
             .socket_addr()

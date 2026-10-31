@@ -11,8 +11,8 @@ struct TwoBranches {
     winning_hashes: Vec<BlockHash>,
 }
 
-fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
-    let snapshot = |tree: &BlockTree, tip_id| -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+fn two_branches() -> Result<TwoBranches, TestError> {
+    let snapshot = |tree: &BlockTree, tip_id| -> Result<TipSnapshot, TestError> {
         let node = tree.node(tip_id)?;
         Ok(TipSnapshot {
             tip_id,
@@ -249,7 +249,7 @@ fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-    let snapshot = |tree: &BlockTree, tip_id| -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+    let snapshot = |tree: &BlockTree, tip_id| -> Result<TipSnapshot, TestError> {
         let node = tree.node(tip_id)?;
         Ok(TipSnapshot {
             tip_id,

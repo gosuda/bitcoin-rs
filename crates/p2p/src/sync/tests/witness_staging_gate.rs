@@ -57,7 +57,7 @@ type SegwitSyncFixture = (
     crossbeam_channel::Sender<InboundHeaders>,
 );
 
-fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>> {
+fn segwit_sync_fixture() -> Result<SegwitSyncFixture, TestError> {
     let (tree, _blocks) = mined_chain(0, 0)?;
     let harness = SyncHarness::new(tree);
     let sync = harness.sync;

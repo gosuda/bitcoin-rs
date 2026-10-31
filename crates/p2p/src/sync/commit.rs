@@ -131,7 +131,7 @@ impl BlockSync {
                     }
                     failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
                     if error.disposition == WindowApplyDisposition::Fatal {
-                        self.note_fatal_settlement(stopped, error.source.as_ref());
+                        self.note_fatal_settlement(stopped, &error.source);
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,

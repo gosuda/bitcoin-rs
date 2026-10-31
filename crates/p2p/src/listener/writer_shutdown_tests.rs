@@ -111,8 +111,18 @@ fn peer_info(addr: PeerEndpoint, start_height: i32) -> crate::PeerInfo {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    TryRecv(#[from] crossbeam_channel::TryRecvError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+}
+
 #[test]
-fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error>> {
+fn sinks_stamp_exact_connection_source() -> Result<(), TestError> {
     let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
     let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -122,8 +132,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
     let serialized = bytes::Bytes::from(block_bytes);
-    let payload = bitcoin_rs_primitives::BlockPayload::from_raw(serialized.clone())
-        .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+    let payload = bitcoin_rs_primitives::BlockPayload::from_raw(serialized.clone())?;
     let source = lease.source(Some(addr));
 
     shared.send_headers(&lease, source, Vec::new(), true);
@@ -137,7 +146,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Error>> {
+fn send_block_forwards_the_blocks_header() -> Result<(), TestError> {
     let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -146,8 +155,7 @@ fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Err
     let lease = crate::PeerLease::new(tx);
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
-    let payload = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(block_bytes))
-        .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+    let payload = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(block_bytes))?;
     let header = payload.block().header;
     let source = lease.source(Some(addr));
 
@@ -164,7 +172,7 @@ fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn send_block_unblocks_when_session_is_cancelled() -> Result<(), Box<dyn std::error::Error>> {
+fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
     let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -174,11 +182,9 @@ fn send_block_unblocks_when_session_is_cancelled() -> Result<(), Box<dyn std::er
     let lease = crate::PeerLease::new(tx);
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let first_bytes = bitcoin::consensus::encode::serialize(&genesis);
-    let first = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(first_bytes))
-        .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+    let first = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(first_bytes))?;
     let second_bytes = first.bytes().clone();
-    let second = bitcoin_rs_primitives::BlockPayload::from_raw(second_bytes)
-        .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+    let second = bitcoin_rs_primitives::BlockPayload::from_raw(second_bytes)?;
     shared.send_block(&lease, addr, first, None);
 
     let blocked = std::thread::spawn(move || {

@@ -13,6 +13,13 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
     Witness, Wtxid, deserialize,
 };
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Peer(#[from] crate::PeerError),
+    #[error(transparent)]
+    Mempool(#[from] bitcoin_rs_mempool::MempoolError),
+}
 
 use super::{
     ChainQuery, FilterRequest, FilterServing, InventoryServing, MAX_LOCATOR_HASHES,
@@ -424,8 +431,7 @@ fn invalid_getblocktxn_indexes_disconnect() {
 }
 
 #[test]
-fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated() -> Result<(), TestError> {
     struct GatedChain {
         observed: AtomicUsize,
         loads: AtomicUsize,
@@ -1066,8 +1072,7 @@ fn dummy_tx(byte: u8) -> Tx {
 }
 
 #[test]
-fn getdata_completes_initial_broadcast_only_after_successful_send()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_completes_initial_broadcast_only_after_successful_send() -> Result<(), TestError> {
     use super::serve_getdata;
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_mempool::{

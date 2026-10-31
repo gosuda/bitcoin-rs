@@ -117,9 +117,16 @@ mod tests {
     use super::*;
     use bitcoin_rs_primitives::PeerEndpoint;
 
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        TryFromInt(#[from] std::num::TryFromIntError),
+        #[error(transparent)]
+        AddrParse(#[from] std::net::AddrParseError),
+    }
+
     #[test]
-    fn avoidance_is_bounded_expires_and_does_not_refresh_on_repetition()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn avoidance_is_bounded_expires_and_does_not_refresh_on_repetition() -> Result<(), TestError> {
         let now = Instant::now();
         let mut entries = DiscouragedPeers::default();
         let first = PeerAddress::Ip(IpAddr::from([8, 8, 8, 8]));
@@ -181,8 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_addresses_share_identity_and_local_exemptions()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn mapped_addresses_share_identity_and_local_exemptions() -> Result<(), TestError> {
         let now = Instant::now();
         let mut entries = DiscouragedPeers::default();
         entries.insert("::ffff:8.8.8.8".parse::<std::net::IpAddr>()?, now);

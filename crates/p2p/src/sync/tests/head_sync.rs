@@ -4,7 +4,7 @@ use bitcoin_rs_primitives::BlockPayload;
 
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
-) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
+) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
             return Ok(request);
@@ -1146,7 +1146,7 @@ type CompactGateFixture = (
     crate::test_support::MessageReceiver,
 );
 
-fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::error::Error>> {
+fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, TestError> {
     let (tree, blocks) = mined_chain(2, 0)?;
     let harness = SyncHarness::new(tree);
     let peer = test_addr(port, 0)?;
@@ -1158,7 +1158,7 @@ fn compact_gate_fixture(port: usize) -> Result<CompactGateFixture, Box<dyn std::
 fn tip_child(
     tip: &Block,
     coinbase_height: u32,
-) -> Result<bitcoin_rs_primitives::Header, Box<dyn std::error::Error>> {
+) -> Result<bitcoin_rs_primitives::Header, TestError> {
     Ok(regtest_fixture::mined_block_with_prev_hash(
         tip.block_hash(),
         3,

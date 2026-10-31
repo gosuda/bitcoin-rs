@@ -2,7 +2,7 @@ use super::*;
 
 fn next_getheaders(
     rx: &crate::test_support::MessageReceiver,
-) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
+) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, TestError> {
     while let Ok(message) = rx.try_recv() {
         if let Message::GetHeaders(request) = message {
             return Ok(request);
@@ -195,7 +195,11 @@ fn frontier_probe_preserves_another_live_header_request() -> TestResult {
     let frontier = sync.observe_frontier(sync.observe_chain_frontier(), now);
     let probe_source = match frontier.plan().header_action {
         super::super::HeaderAction::Probe(source) => source,
-        action => return Err(format!("expected a frontier probe, got {action:?}").into()),
+        action => {
+            return Err(crate::test_support::TestError::Unexpected(format!(
+                "expected a frontier probe, got {action:?}"
+            )));
+        }
     };
     let (existing_source, existing_rx, probe_rx) = if probe_source == first_source {
         (second_source, &second_rx, &first_rx)

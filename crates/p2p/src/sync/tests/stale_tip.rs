@@ -248,8 +248,6 @@ fn in_flight_bodies_hold_staleness_off() {
         "bodies still arriving is progress, not a stalled tip"
     );
 }
-type TestError = Box<dyn std::error::Error>;
-
 struct RetainerFixture {
     tree: BlockTree,
     genesis: NodeId,

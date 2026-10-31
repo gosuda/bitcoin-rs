@@ -217,10 +217,9 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestRe
             return Ok(());
         }
     }
-    Err(format!(
+    Err(crate::test_support::TestError::Liveness(format!(
         "a peer that holds the frontier block and answers every request must be asked for it; \
          applied tip stayed at {:?}",
         applied_tip.load_full().map(|tip| tip.height)
-    )
-    .into())
+    )))
 }

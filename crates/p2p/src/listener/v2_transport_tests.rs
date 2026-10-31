@@ -18,7 +18,35 @@ use crate::connection::QueuedFrame;
 use crate::transport::{Negotiated, SendTransport, TransportProtocol, establish};
 use crate::{Message, Peer, PeerError, PeerLease, PeerRole, PeerTable, wire};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error(transparent)]
+    RecvTimeout(#[from] crossbeam_channel::RecvTimeoutError),
+    #[error(transparent)]
+    Listener(#[from] crate::listener::ListenerError),
+    #[error("missing: {0}")]
+    Missing(&'static str),
+    #[error("failure: {0}")]
+    Failure(String),
+}
+
+impl From<&'static str> for TestError {
+    fn from(msg: &'static str) -> Self {
+        Self::Failure(msg.to_string())
+    }
+}
+
+impl From<String> for TestError {
+    fn from(msg: String) -> Self {
+        Self::Failure(msg)
+    }
+}
+
+type TestResult = Result<(), TestError>;
 
 const MAGIC: Magic = Magic::BITCOIN;
 
@@ -51,7 +79,7 @@ fn deadline() -> Instant {
 
 type Listening = (PeerEndpoint, Arc<AtomicBool>, std::thread::JoinHandle<()>);
 
-fn listen(shared: ConnectionShared) -> Result<Listening, Box<dyn std::error::Error>> {
+fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
     let listener = bind_listener(
         PeerEndpoint::from(([127, 0, 0, 1], 0))
             .socket_addr()
@@ -66,7 +94,7 @@ fn listen(shared: ConnectionShared) -> Result<Listening, Box<dyn std::error::Err
     Ok((addr.into(), shutdown, handle))
 }
 
-fn connect(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn std::error::Error>> {
+fn connect(addr: PeerEndpoint) -> Result<TcpStream, TestError> {
     let stream = TcpStream::connect(
         addr.socket_addr()
             .unwrap_or_else(|| panic!("expected IP fixture")),
@@ -75,10 +103,7 @@ fn connect(addr: PeerEndpoint) -> Result<TcpStream, Box<dyn std::error::Error>> 
     Ok(stream)
 }
 
-fn read_until(
-    peer: &mut Peer<TcpStream>,
-    wanted: &Message,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn read_until(peer: &mut Peer<TcpStream>, wanted: &Message) -> Result<(), TestError> {
     let deadline = deadline();
     while Instant::now() < deadline {
         match peer.read_message() {
@@ -92,7 +117,7 @@ fn read_until(
             Err(error) => return Err(error.into()),
         }
     }
-    Err(format!("{wanted:?} never arrived").into())
+    Err(TestError::Missing("the wanted message never arrived"))
 }
 
 fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotiated) -> TestResult {
@@ -468,7 +493,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
     let writer =
         spawn_decoy_then_ping_writer(server, Arc::clone(&stop), writer_lease.clone(), done);
 
-    let result = (|| -> Result<(Result<(), PeerError>, Duration), Box<dyn std::error::Error>> {
+    let result = (|| -> Result<(Result<(), PeerError>, Duration), TestError> {
         let mut stream = connect(addr.into())?;
         let mut handshake = Handshake::responder(MAGIC, &mut StdRng::seed_from_u64(5));
         let negotiated = establish(&mut stream, &mut handshake, MAGIC, &lease(), deadline())?;
@@ -506,7 +531,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
         cancel_handle.cancel();
         let outcome = loop_handle
             .join()
-            .map_err(|_| -> Box<dyn std::error::Error> { "loop panicked".into() })?;
+            .map_err(|_| TestError::Missing("loop panicked"))?;
         if started.elapsed() >= Duration::from_secs(2) {
             return Err("lease cancel must end a decoy-only session promptly".into());
         }
@@ -517,13 +542,13 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
     wait_for_writer_done(&done_wait);
     let writer_failure = writer
         .join()
-        .map_err(|_| -> Box<dyn std::error::Error> { "decoy writer panicked".into() });
+        .map_err(|_| TestError::Missing("decoy writer panicked"));
     let (outcome, elapsed) = result?;
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(
         elapsed < Duration::from_secs(2),
         "lease cancel must end a decoy-only session promptly"
     );
-    writer_failure?.map_err(|error| format!("decoy writer failed: {error}"))?;
+    writer_failure?.map_err(TestError::Failure)?;
     Ok(())
 }
