@@ -1275,17 +1275,21 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
         }
     };
     let outcome = drive_handshake_as_core(client, magic, network);
-    if let Ok(client) = outcome.as_ref() {
+    // Propagate the handshake result and the accounting check together, but
+    // only after the unconditional listener shutdown and join below: an early
+    // `?` here would leak the listener thread, and dropping the handshake
+    // error would let a failed handshake pass the test.
+    let result = outcome.and_then(|client| {
         // Hold the socket open while sampling: the peer row (and its
         // per-message counters) disappears as soon as the node sees EOF.
-        let _ = client;
-        assert_ping_pong_accounted(&peer_table)?;
-    }
-    drop(outcome);
+        let checked = assert_ping_pong_accounted(&peer_table);
+        drop(client);
+        checked
+    });
     shutdown.store(true, Ordering::Relaxed);
     let listener_result = handle.join().map_err(|_| "listener thread panicked")?;
     listener_result?;
-    Ok(())
+    result
 }
 
 /// The live connection's per-message byte accounting must carry both ping
