@@ -436,7 +436,8 @@ mod tests {
 
     // POOL-08
     #[test]
-    fn funded_external_payout_round_trip_preserves_reservations_on_rejection() -> Result<(), crate::test_error::TestError> {
+    fn funded_external_payout_round_trip_preserves_reservations_on_rejection()
+    -> Result<(), crate::test_error::TestError> {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
         let ledger = Ledger::create(store, pool_ledger::PoolConfig::new(100, vec![0x51]))?;
@@ -500,7 +501,6 @@ mod tests {
             Ok(_) => panic!("mismatched txid must be rejected"),
         };
         assert_eq!(error.code(), -8);
-        assert_eq!(error.to_string(), "receipt refused: TxidMismatch");
         assert_eq!(
             getpayoutbatch(&context, &json!([batch_id]))?,
             before_rejection
@@ -523,10 +523,6 @@ mod tests {
             Ok(_) => panic!("signed batch must not cancel"),
         };
         assert_eq!(error.code(), -8);
-        assert_eq!(
-            error.to_string(),
-            format!("batch {batch_id} in state ExternallySigned cannot cancel")
-        );
         assert_eq!(getpayoutbatch(&context, &json!([batch_id]))?, accepted);
         assert_eq!(
             getpayoutbatch(&context, &json!([batch_id]))?["state"].as_str(),

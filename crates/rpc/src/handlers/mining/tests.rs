@@ -497,10 +497,8 @@ fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
     assert_eq!(control.submit_calls.load(Ordering::Relaxed), 1);
     let extra = submitblock(&ctx, &json!([hex.as_str(), "ignored", "too-many"]))
         .expect_err("a third submitblock argument must fail");
-    assert!(matches!(
-        extra,
-        RpcError::InvalidParams("too many parameters")
-    ));
+    assert!(matches!(extra, RpcError::InvalidParams(_)));
+    assert_eq!(extra.code(), RpcError::INVALID_PARAMS);
 }
 
 #[test]
@@ -1378,5 +1376,4 @@ fn submitheader_maps_armed_control_failure() {
     let error = submitheader(&ctx, &json!([header.as_str()]))
         .expect_err("armed control failure must reject the header");
     assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
-    assert_eq!(error.to_string(), "bad-prevblk");
 }

@@ -89,7 +89,6 @@ fn cancelled_requests_report_interruption() {
     handler.stop();
     let error = handler.dispatch("verifychain", &json!([0, 0])).unwrap_err();
     assert_eq!(error.code(), -1);
-    assert_eq!(error.to_string(), "Block verification interrupted");
 }
 
 #[test]

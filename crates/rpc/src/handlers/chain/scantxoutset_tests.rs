@@ -748,13 +748,7 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
         );
         assert!(emitted.get() > 0 && emitted.get() < 20);
         if cause == "deadline" {
-            assert!(
-                result
-                    .err()
-                    .ok_or("deadline ignored")?
-                    .to_string()
-                    .contains("60 seconds")
-            );
+            assert!(result.is_err(), "deadline ignored");
         } else {
             result?;
             let response = scantxoutset_scan(

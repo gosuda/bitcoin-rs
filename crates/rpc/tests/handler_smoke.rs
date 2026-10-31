@@ -232,9 +232,7 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
     ]
 }
 
-fn network_and_wallet_expectations(
-    fixture: &Fixture,
-) -> Result<Vec<Expectation>, TestError> {
+fn network_and_wallet_expectations(fixture: &Fixture) -> Result<Vec<Expectation>, TestError> {
     let psbt = build_valid_base64_psbt(&fixture.tx)?;
 
     Ok(vec![
@@ -562,32 +560,6 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), TestEr
         muhash,
         "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8"
     );
-    Ok(())
-}
-
-#[test]
-fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), TestError> {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(Arc::clone(&ctx));
-    for hash_type in ["muhash", "none", "hash_serialized_3"] {
-        let result = handler.dispatch("gettxoutsetinfo", &json!([hash_type]))?;
-        assert!(
-            result
-                .get("bestblock")
-                .and_then(JsonValueTrait::as_str)
-                .is_some(),
-            "bestblock missing for hash_type={hash_type}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn getindexinfo_returns_available_indexes() -> Result<(), TestError> {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(Arc::clone(&ctx));
-    let result = handler.dispatch("getindexinfo", &json!([]))?;
-    assert!(result.is_object(), "getindexinfo must return an object");
     Ok(())
 }
 

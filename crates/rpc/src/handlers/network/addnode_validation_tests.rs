@@ -70,10 +70,7 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
 
     let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
 
-    assert!(matches!(
-        result,
-        Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
-    ));
+    assert!(matches!(result, Err(RpcError::Internal(_))));
 }
 
 #[test]

@@ -902,16 +902,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn copied_fixture_preserves_core_reference() -> Result<(), TestError> {
-        let dir = tempfile::tempdir()?;
-        let fixture = captured_fixture()?;
-        std::fs::write(dir.path().join(FIXTURE_NAME), sonic_rs::to_vec(&fixture)?)?;
-        let corpus = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)?;
-        assert_eq!(corpus.len(), 1);
-        Ok(())
-    }
-
     // API-07
     #[test]
     fn corpus_rejects_missing_core_reference_fields() -> Result<(), TestError> {

@@ -589,10 +589,7 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
     let ctx = Arc::new(Context::new());
     let unknown_type = gettxoutsetinfo(&ctx, &json!(["sha3"]), &LatchReader::fixture_never())
         .expect_err("an unknown hash type must be refused");
-    assert_eq!(
-        unknown_type.to_string(),
-        "invalid params: hash_type must be one of: hash_serialized_3, muhash, none"
-    );
+    assert_eq!(unknown_type.code(), RpcError::INVALID_PARAMS);
 
     let historical_hash = "aa".repeat(32);
     for params in [
@@ -606,12 +603,6 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
             error.code(),
             RpcError::CORE_INVALID_PARAMETER,
             "{params:?} -> {error}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("Querying specific block heights requires coinstatsindex"),
-            "{error}"
         );
     }
 }

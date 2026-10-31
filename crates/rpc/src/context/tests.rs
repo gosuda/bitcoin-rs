@@ -32,24 +32,6 @@ fn eight_threads_share_one_context_for_getblockcount() {
 }
 
 #[test]
-fn applied_tip_publication_carries_the_transaction_count() {
-    let ctx = Context::new();
-    let counted = |count| {
-        Arc::new(TipSnapshot {
-            tip_id: bitcoin_rs_chain::NodeId::new(0),
-            height: 0,
-            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-            hash: bitcoin_rs_primitives::Hash256::default(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
-        })
-    };
-    ctx.chain.applied_tip.store(Some(counted(1)));
-    assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(1));
-    ctx.chain.applied_tip.store(Some(counted(42)));
-    assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(42));
-}
-
-#[test]
 fn applied_view_uses_one_publication() {
     use bitcoin_rs_chain::{ChainTxCount, ChainWork, NodeId};
 

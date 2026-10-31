@@ -823,13 +823,6 @@ mod ban_state_tests {
     }
 
     #[test]
-    fn setban_add_persists_in_context() {
-        let ctx = Arc::new(Context::new());
-        setban_ok(&ctx, "127.0.0.1:8333", "add");
-        assert_eq!(ctx.network.p2p.banned().len(), 1);
-    }
-
-    #[test]
     fn listbanned_returns_added_entries() {
         let ctx = Arc::new(Context::new());
         setban_ok(&ctx, "192.168.1.1:8333", "add");

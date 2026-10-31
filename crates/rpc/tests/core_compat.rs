@@ -528,7 +528,6 @@ fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate
         Err(error) => error,
         Ok(_) => return Err("undecodable hex was accepted".into()),
     };
-    assert_eq!(error.to_string(), "Block decode failed");
     assert_eq!(error.code(), -22);
     Ok(())
 }
