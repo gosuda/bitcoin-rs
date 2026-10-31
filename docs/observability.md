@@ -28,9 +28,9 @@ migration.
 
 Metrics MUST NOT carry per-event payloads, block/tx/peer identity, or any
 other high-cardinality label value. The only label values allowed are
-enumerations: backend names, durability modes, closed reason taxonomies
+enumerations: backend names, durability modes, and closed reason taxonomies
 (see `node.sync.stall_episodes_cleared{reason}` in `crates/p2p/src/download_window.rs`
-for the pattern), and the enum capability states of `node.capability.txindex_readiness`, and
+for the pattern). They also include the enum capability states of `node.capability.txindex_readiness`, and
 the closed family labels of `index.family_planned_write_bytes{family}` where
 `family` in `{tx_lookup, script_history, script_live, headers, filters}`.
 No speculative instrumentation: a signal earns its place by an operator
@@ -41,9 +41,9 @@ Prometheus series as global labels.
 
 RPC connection isolation (API-34/WF-02) exposes `rpc.connections.active`
 (gauge, admitted live workers), `rpc.connections.rejected_total` (counter,
-connection-budget refusals), and `rpc.http.request_seconds` (histogram,
-complete request head through body read, authentication and response write,
-including subsequent failures; excludes idle/head acquisition). The closed `surface`
+connection-budget refusals), and `rpc.http.request_seconds` (histogram).
+The histogram covers the complete request head through body read,
+authentication and response write, including subsequent failures; it excludes idle/head acquisition. The closed `surface`
 label is `shared`, `management`, or `public`; the histogram's closed `route`
 label is `json_rpc`, `rest`, `esplora_public`, `esplora_backend`, or `not_found`.
 `route` records classification before the listener's route policy is checked;
@@ -70,14 +70,14 @@ retained residency without changing any admission rule:
 The three byte signals are attribution, not measurement of the process. They
 exclude allocator rounding, the inline `Block` value, and the stager's map and
 queue bookkeeping, so they are not an RSS or `VmHWM` figure and need not equal
-one. They cover only bodies the stager owns: a body drained for apply, or
+one. They cover only bodies the stager owns. A body drained for apply, or
 pulled from the channel into a stage batch, is unattributed until it is
-staged or restored, so `staged_retained_bytes = 0` in the middle of an apply
+staged or restored. `staged_retained_bytes = 0` in the middle of an apply
 does not mean no block memory is held. A block is measured once, when the
-stager takes ownership of its allocation (arrival, or restore after a partial
-apply, which re-measures the restored allocation because the restored copy
-need not have the drained original's capacities), and released at the
-transition that releases its serialized bytes: drain, branch retirement,
+stager takes ownership of its allocation. This occurs on arrival, or restore
+after a partial apply (which re-measures the restored allocation because the
+restored copy need not have the drained original's capacities). It is released
+at the transition that releases its serialized bytes: drain, branch retirement,
 count-budget eviction, discard, expiry, or replacement. The retained high-water
 mark advances on arrival and on restore; an arrival's mark is taken before the
 count-budget eviction it causes. `node.sync.staged_blocks_high_water` and
@@ -85,26 +85,27 @@ count-budget eviction it causes. `node.sync.staged_blocks_high_water` and
 Nothing admits, evicts, or retries on these signals. They are backlog/capacity
 gauges (OBS-01) published with the other staged gauges from one scheduler-lock
 hold by the sync drain pass that saw arrivals, expiry, applies, or failures.
-That pass runs after it has emptied the receiver, so
+That pass runs after it has emptied the receiver.
 `inbound_block_queue_depth` is a post-drain residual, normally near zero, not
-a peak, and it is not refreshed on passes that emit nothing.
+a peak. It is not refreshed on passes that emit nothing.
 
 Staging policy decision (retained): production keeps the fixed 256-block /
-512 MiB wire budget. An isolated count-horizon experiment (candidate
-`f24b7ded0`, committed after the matrix so source bytes match the gated binary)
-ran 48 synthetic regtest trials (4 cells x 4 policies x 3 rounds, 320 blocks
-applied each; raw samples in
-`.outline/evidence/native-gate-20261026T183745Z-1096270/gate.log`) and was
-evaluated and rejected under the fixed Step 25 gate (>=10% peak-RSS reduction,
+512 MiB wire budget. An isolated count-horizon experiment ran 48 synthetic
+regtest trials (4 cells x 4 policies x 3 rounds, 320 blocks applied each).
+Candidate `f24b7ded0` was committed after the matrix so source bytes match
+the gated binary (raw samples in
+`.outline/evidence/native-gate-20261026T183745Z-1096270/gate.log`). The gate
+evaluated it under the fixed Step 25 criteria (>=10% peak-RSS reduction,
 throughput >=98%, strictly lower retained high-water, no
-retry/starvation/stall regression): no horizon met the RSS gate (binding
-medians ~1.00-1.01x fixed vs required <=0.90), and the modern-large 8-peer
-15 s and 30 s horizons each added a stall-episode start (median 1 vs fixed 0;
-disconnects stayed 0, which does not cancel the episode regression). Five
-early-multi rows were not valid binding comparisons (all 60 s first refusals
-arrived after the corpus was fully requested; 30 s rounds 1-2 had no refusal).
-Synthetic regtest only (early/small and modern/large-OP_RETURN corpora, 3 runs
-per arm); no mainnet, p99, or whole-node claim.
+retry/starvation/stall regression) and rejected it. No horizon met the RSS
+gate (binding medians ~1.00-1.01x fixed vs required <=0.90). The
+modern-large 8-peer 15 s and 30 s horizons each added a stall-episode start
+(median 1 vs fixed 0; disconnects stayed 0, which does not cancel the episode
+regression). Five early-multi rows were not valid binding comparisons (all
+60 s first refusals arrived after the corpus was fully requested; 30 s
+rounds 1-2 had no refusal). Synthetic regtest only (early/small and
+modern/large-OP_RETURN corpora, 3 runs per arm); no mainnet, p99, or
+whole-node claim.
 
 The call-site audit table below is a snapshot of its audited base. It has no
 row for `index.family_planned_write_bytes`. This clause describes it.
@@ -137,16 +138,16 @@ it is not a count of bytes written.
 ### `OBS-02`: `tracing::` is diagnostics, not an API
 
 Free-form development and debugging detail belongs in `tracing::` events and
-spans: per-event stage decompositions, timings a developer attaches to one
-investigation, and anything whose fields or verbosity will change with the
-code. `tracing::` content is explicitly not a stable surface: field names,
+spans. This includes per-event stage decompositions, timings a developer
+attaches to one investigation, and anything whose fields or verbosity will
+change with the code. `tracing::` content is explicitly not a stable surface: field names,
 event names, and levels may change without notice. Operator runbooks
 (`docs/operations/runtime-stall.md`) do not depend on log field shapes.
 
 ### `OBS-03`: USDT probes carry the detailed payloads
 
-Core-compatible per-event payloads — block hashes, txids, raw message bytes,
-per-event durations — belong in the USDT probes of `bitcoin_rs_consensus::trace`
+Core-compatible per-event payloads (block hashes, txids, raw message bytes,
+per-event durations) belong in the USDT probes of `bitcoin_rs_consensus::trace`
 (see [`tracing.md`](tracing.md), issues #1121/#1194). Probe payloads are the
 layer that must not pollute metrics cardinality. If a detailed per-event datum
 is worth keeping in production but is not operator-facing, it is a probe
@@ -157,12 +158,11 @@ argument, not a metric label. This slice adds no new probes.
 The measured product-stage histograms that
 [`contracts/hot-path-attribution.md`](contracts/hot-path-attribution.md)
 consumes (HPA-04: "Existing `metrics::histogram!` names in the ledger are
-diagnostic hooks") are grandfathered into the metrics API even though they are
-per-event decompositions. Their inventory is exactly the `histogram = ` keys of
-[`benchmarks/hot-path-ledger.toml`](benchmarks/hot-path-ledger.toml); a hook
+diagnostic hooks") are grandfathered into the metrics API. They are per-event
+decompositions. Their inventory is exactly the `histogram = ` keys of
+[`benchmarks/hot-path-ledger.toml`](benchmarks/hot-path-ledger.toml). A hook
 outside that file must be renamed into `tracing::`, and a new hook must first
 become a ledger path row. The named hooks are:
-
 | Ledger hook | Ledger path |
 | --- | --- |
 | `node.window.verify_seconds` | `apply.prove_window` |
