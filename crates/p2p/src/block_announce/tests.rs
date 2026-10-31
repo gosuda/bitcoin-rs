@@ -472,9 +472,8 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
     let shutdown = bitcoin_rs_chain::LatchWriter::new();
-    let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
-            .expect("the announce worker spawns");
+    let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
+        .expect("the announce worker spawns");
     let _stop = WorkerStop {
         shutdown,
         queue: Some(queue),
@@ -994,9 +993,8 @@ fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
     let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     let shutdown = bitcoin_rs_chain::LatchWriter::new();
-    let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
-            .expect("the announce worker spawns");
+    let worker = spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
+        .expect("the announce worker spawns");
     let _stop = WorkerStop {
         shutdown,
         queue: Some(queue),

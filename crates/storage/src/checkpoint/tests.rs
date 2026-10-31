@@ -4,11 +4,11 @@ use super::load::read_current;
 use super::*;
 use bitcoin_rs_primitives::hex::hex_encode;
 
+use crate::test_support::{TestError, TestResult};
 use cap_std::ambient_authority;
 use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::tempdir;
-use crate::test_support::{TestError, TestResult};
 
 fn publish_fixture(
     data_dir: &cap_std::fs::Dir,
@@ -133,8 +133,7 @@ fn open_root(path: &std::path::Path) -> Result<cap_std::fs::Dir, std::io::Error>
 }
 
 #[test]
-fn publication_replaces_current_and_cleans_previous_generation()
--> TestResult {
+fn publication_replaces_current_and_cleans_previous_generation() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     assert_eq!(publish_fixture(&data, None)?, 1);
@@ -153,8 +152,7 @@ fn publication_replaces_current_and_cleans_previous_generation()
 }
 
 #[test]
-fn publication_failpoints_preserve_the_previous_current() -> TestResult
-{
+fn publication_failpoints_preserve_the_previous_current() -> TestResult {
     let failpoints = [
         CheckpointFailpoint::HeadersWrite,
         CheckpointFailpoint::HeadersSync,
@@ -225,8 +223,7 @@ fn publication_failpoints_preserve_the_previous_current() -> TestResult
 }
 
 #[test]
-fn historical_publication_retains_head_generation_until_explicit_retirement()
--> TestResult {
+fn historical_publication_retains_head_generation_until_explicit_retirement() -> TestResult {
     for failpoint in [
         None,
         Some(CheckpointFailpoint::CurrentRename),
@@ -297,8 +294,7 @@ fn historical_publication_retains_head_generation_until_explicit_retirement()
 }
 
 #[test]
-fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces()
--> TestResult {
+fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     clear_checkpoint_generations_at(&data, HISTORICAL_CHECKPOINT_ROOT)?;
@@ -330,8 +326,7 @@ fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces(
 }
 
 #[test]
-fn direct_and_current_selection_share_publication_digest_validation()
--> TestResult {
+fn direct_and_current_selection_share_publication_digest_validation() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     let reference = publish_fixture_at(&data, CHECKPOINT_ROOT, CheckpointRetention::Replace, None)?;
@@ -375,8 +370,8 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
     let data = open_root(dir.path())?;
     publish_fixture(&data, None)?;
     let root_path = dir.path().join(CHECKPOINT_ROOT);
-    let root =
-        CheckpointRoot::open_existing(&data, CHECKPOINT_ROOT)?.ok_or(TestError::Missing("missing checkpoint root"))?;
+    let root = CheckpointRoot::open_existing(&data, CHECKPOINT_ROOT)?
+        .ok_or(TestError::Missing("missing checkpoint root"))?;
     let current_path = root_path.join(CURRENT_FILE);
     let original_current = fs::read(&current_path)?;
     for mutation in 0..4 {
@@ -445,13 +440,12 @@ fn current_and_manifest_validation_reject_tampering() -> TestResult {
 }
 
 #[test]
-fn artifact_and_coinstats_validation_preserves_protocol_bounds()
--> TestResult {
+fn artifact_and_coinstats_validation_preserves_protocol_bounds() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     publish_fixture(&data, None)?;
-    let root =
-        CheckpointRoot::open_existing(&data, CHECKPOINT_ROOT)?.ok_or(TestError::Missing("missing checkpoint root"))?;
+    let root = CheckpointRoot::open_existing(&data, CHECKPOINT_ROOT)?
+        .ok_or(TestError::Missing("missing checkpoint root"))?;
     let current = read_current(&root)?.ok_or(TestError::Missing("missing CURRENT"))?;
     let generation = root.open_dir(&current.directory)?;
     assert!(matches!(
@@ -613,8 +607,7 @@ fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
     target_os = "redox"
 ))]
 #[test]
-fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames()
--> TestResult {
+fn rename_noreplace_refuses_escape_but_keeps_same_dir_renames() -> TestResult {
     use std::io::Write as _;
 
     let dir = tempdir()?;
@@ -740,7 +733,11 @@ fn open_file_reads_regular_file() -> TestResult {
 
     let missing = match super::fs::open_file(&cap_dir, "missing.dat") {
         Err(error) => error,
-        Ok(_) => return Err(TestError::UnexpectedSuccess("opening a missing checkpoint entry must fail")),
+        Ok(_) => {
+            return Err(TestError::UnexpectedSuccess(
+                "opening a missing checkpoint entry must fail",
+            ));
+        }
     };
     assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     Ok(())
@@ -755,7 +752,11 @@ fn open_file_refuses_directory_entry() -> TestResult {
 
     let error = match super::fs::open_file(&cap_dir, "gen-1") {
         Err(error) => error,
-        Ok(_) => return Err(TestError::UnexpectedSuccess("opening a directory as a checkpoint entry must fail")),
+        Ok(_) => {
+            return Err(TestError::UnexpectedSuccess(
+                "opening a directory as a checkpoint entry must fail",
+            ));
+        }
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     Ok(())
@@ -815,8 +816,7 @@ fn open_file_refuses_fifo_without_blocking() -> TestResult {
     target_os = "redox"
 ))]
 #[test]
-fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files()
--> TestResult {
+fn rename_noreplace_refuses_an_existing_destination_and_keeps_both_files() -> TestResult {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     fs::write(dir.path().join("staged"), b"new")?;

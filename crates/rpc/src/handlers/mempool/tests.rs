@@ -285,7 +285,9 @@ fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), crate::test
 
     let result = getmempooldescendants(&ctx, &json!([parent_txid.to_string()]))?;
     let Some(array) = result.as_array() else {
-        return Err(crate::test_error::TestError::Missing("expected descendants array"));
+        return Err(crate::test_error::TestError::Missing(
+            "expected descendants array",
+        ));
     };
 
     assert_eq!(array.len(), 1);
@@ -322,7 +324,9 @@ fn getmempoolancestors_walks_real_ancestor_graph() -> Result<(), crate::test_err
 
     let result = getmempoolancestors(&ctx, &json!([child_txid.to_string()]))?;
     let Some(array) = result.as_array() else {
-        return Err(crate::test_error::TestError::Missing("expected ancestors array"));
+        return Err(crate::test_error::TestError::Missing(
+            "expected ancestors array",
+        ));
     };
 
     assert_eq!(array.len(), 1);

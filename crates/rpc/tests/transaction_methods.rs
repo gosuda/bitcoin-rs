@@ -111,8 +111,7 @@ fn sendrawtransaction_rejects_missing_inputs() {
 }
 
 #[test]
-fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), TestError>
-{
+fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x43, 10_000);
@@ -131,8 +130,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), TestErro
 }
 
 #[test]
-fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
--> Result<(), TestError> {
+fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x44, 10_000);
@@ -180,8 +178,7 @@ fn funded_standard_tx(
 }
 
 #[test]
-fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape()
--> Result<(), TestError> {
+fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape() -> Result<(), TestError> {
     let (ctx, tx, raw) = funded_standard_tx(0x50, 10_000, 9_000)?;
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -196,8 +193,7 @@ fn sendrawtransaction_admits_the_lnd_wallet_broadcast_shape()
 }
 
 #[test]
-fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
--> Result<(), TestError> {
+fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling() -> Result<(), TestError> {
     let (ctx, tx, raw) = funded_standard_tx(0x51, 100_000_000, 1_000_000)?;
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -216,8 +212,7 @@ fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
 }
 
 #[test]
-fn sendrawtransaction_fee_argument_keeps_core_amount_semantics()
--> Result<(), TestError> {
+fn sendrawtransaction_fee_argument_keeps_core_amount_semantics() -> Result<(), TestError> {
     for (index, fee) in [json!(null), json!(0.1), json!("0.1"), json!(0)]
         .into_iter()
         .enumerate()
@@ -300,8 +295,7 @@ fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), TestError> {
 }
 
 #[test]
-fn testmempoolaccept_reports_reject_for_already_in_mempool()
--> Result<(), TestError> {
+fn testmempoolaccept_reports_reject_for_already_in_mempool() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x45, 10_000);
@@ -564,8 +558,7 @@ fn decoderawtransaction_refuses_hex_beyond_the_consensus_size_limit_before_decod
 }
 
 #[test]
-fn decoderawtransaction_inspects_a_consensus_legal_non_standard_tx()
--> Result<(), TestError> {
+fn decoderawtransaction_inspects_a_consensus_legal_non_standard_tx() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;

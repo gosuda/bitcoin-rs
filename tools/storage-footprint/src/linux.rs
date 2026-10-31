@@ -416,7 +416,7 @@ mod tests {
         Ok(())
     }
 
-// FP-01
+    // FP-01
     #[test]
     fn sparse_file_and_hard_link_are_not_double_counted() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -468,7 +468,7 @@ mod tests {
         Ok(())
     }
 
-// FP-01, FP-02
+    // FP-01, FP-02
     #[test]
     fn namespace_totals_match_and_measurement_leaves_files_unchanged() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -503,7 +503,7 @@ mod tests {
         Ok(())
     }
 
-// FP-02
+    // FP-02
     #[test]
     fn refuses_symlinks_and_special_entries() -> io::Result<()> {
         use std::os::unix::net::UnixListener;

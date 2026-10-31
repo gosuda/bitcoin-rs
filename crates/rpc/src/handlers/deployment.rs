@@ -159,7 +159,8 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn native_deployments_share_the_pinned_schema_without_inventing_versionbits() -> Result<(), crate::test_error::TestError> {
+    fn native_deployments_share_the_pinned_schema_without_inventing_versionbits()
+    -> Result<(), crate::test_error::TestError> {
         let mut context = Context::new();
         context.chain.chain_network = Network::Regtest;
         let context = Arc::new(context);

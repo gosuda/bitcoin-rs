@@ -12,8 +12,7 @@ fn writer_refuses_a_best_tip_that_is_not_active() -> TestResult {
 }
 
 #[test]
-fn writer_refuses_an_applied_tip_off_the_active_best_ancestry()
--> TestResult {
+fn writer_refuses_an_applied_tip_off_the_active_best_ancestry() -> TestResult {
     let (mut tree, best_tip_id, _) = chain_with_applied_height(3, 1)?;
     let genesis_hash = tree.node(NodeId::new(0))?.hash;
     let mut fork = mined_regtest_header(BlockHash(genesis_hash), 1)?;
@@ -64,7 +63,9 @@ fn immutable_generation_resumes_best_ahead_of_applied() -> TestResult {
     ));
     let loaded = load_checkpoint(dir.path(), config())?;
     let CheckpointLoad::Complete(restored) = loaded else {
-        return Err(TestError::UnexpectedSuccess("checkpoint did not restore complete chainstate"));
+        return Err(TestError::UnexpectedSuccess(
+            "checkpoint did not restore complete chainstate",
+        ));
     };
     assert_eq!(restored.tree.tip().map(|tip| tip.height), Some(3));
     assert_eq!(restored.applied_tip.height, 1);

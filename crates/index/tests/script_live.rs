@@ -549,8 +549,7 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), TestError> {
 }
 
 #[test]
-fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), TestError>
-{
+fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
     let empty = MapScripts::default();
     chain.connect(vec![coinbase(0)], &empty)?;
@@ -815,8 +814,7 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), TestError> {
 }
 
 #[test]
-fn seed_stream_fenced_write_failure_does_not_publish_watermark()
--> Result<(), TestError> {
+fn seed_stream_fenced_write_failure_does_not_publish_watermark() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
     store.fail_next_fenced_write.store(true, Ordering::SeqCst);

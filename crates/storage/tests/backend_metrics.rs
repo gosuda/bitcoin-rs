@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::support::TestResult;
 use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget_with_txindex};
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
     SharedString, Unit,
 };
-use crate::support::TestResult;
 
 fn txindex_share() -> u64 {
     let share = split_cache_budget_with_txindex(MIN_DBCACHE_BYTES)[1].bytes;
@@ -242,8 +242,7 @@ fn redb_configures_the_budgeted_share_verbatim() -> TestResult {
 
 #[test]
 #[cfg(feature = "redb")]
-fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
--> TestResult {
+fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim() -> TestResult {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
     let share = txindex_share();

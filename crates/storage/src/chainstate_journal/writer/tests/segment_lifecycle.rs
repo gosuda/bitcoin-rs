@@ -230,7 +230,9 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     writer.freeze()?;
     assert_eq!(writer.state(), WriterState::Frozen);
     let Err(error) = writer.append(&sample_record(2)) else {
-        return Err(TestError::UnexpectedSuccess("frozen writer accepted an append"));
+        return Err(TestError::UnexpectedSuccess(
+            "frozen writer accepted an append",
+        ));
     };
     assert!(matches!(error, JournalWriterError::NotOpen { .. }));
     writer.compact_to_checkpoint(CheckpointBase {

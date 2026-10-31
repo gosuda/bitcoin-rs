@@ -1,7 +1,6 @@
 use super::*;
-use bitcoin_rs_chain::NodeStatus;
 use crate::test_fixtures::{TestError, TestResult};
-
+use bitcoin_rs_chain::NodeStatus;
 
 struct Branched {
     tree: BlockTree,
@@ -180,7 +179,9 @@ fn valid_side_branches_survive_restart_in_learn_order() -> TestResult {
         if fixture.invalid.contains(&hash) {
             continue;
         }
-        let node = tree.node_by_hash(hash).ok_or(TestError::Missing("retained node missing"))?;
+        let node = tree
+            .node_by_hash(hash)
+            .ok_or(TestError::Missing("retained node missing"))?;
         let restored_parent = node
             .parent
             .map(|parent| tree.node(parent).map(|parent| parent.hash))

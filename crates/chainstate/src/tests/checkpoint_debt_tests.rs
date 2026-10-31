@@ -21,8 +21,7 @@ fn checkpoint_dirs(root: &std::path::Path) -> TestResult<BTreeSet<String>> {
 }
 
 #[test]
-fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
--> TestResult {
+fn checkpoint_refuses_inflight_disconnect_and_preserves_state() -> TestResult {
     let dir = tempfile::tempdir()?;
     let network = Network::Regtest;
     let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));

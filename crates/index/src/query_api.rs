@@ -42,22 +42,15 @@ pub enum TxUnavailableCause {
     LivePrefixScanTruncated,
     BodyReadBudgetExhausted,
     BodyBudgetExceeded,
-    PrunedPrefixUnproven {
-        family: &'static str,
-        floor: u32,
-    },
-    HistoryUnproven {
-        floor: u32,
-    },
+    PrunedPrefixUnproven { family: &'static str, floor: u32 },
+    HistoryUnproven { floor: u32 },
     CapabilityDisabled(IndexCapability),
     WorkerFailed(CompactString),
     WorkerStopped,
     CompactFilterFailed(CompactString),
     ScriptLiveUnavailable(CompactString),
     MissingAuthority(&'static str),
-    BlockBodyMissing {
-        height: u32,
-    },
+    BlockBodyMissing { height: u32 },
     FilterDataMissing,
     Other(CompactString),
 }

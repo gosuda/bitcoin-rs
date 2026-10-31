@@ -37,19 +37,18 @@ fn publish_tip(ctx: &Context, time: u32) -> TestResult {
         Some(id) => BlockHash::from(tree.node(id)?.hash),
         None => BlockHash::default(),
     };
-    let id = tree
-        .insert_node(
-            parent,
-            Header {
-                version: 1,
-                prev_blockhash: previous_hash,
-                merkle_root: Hash256::default(),
-                time,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: time,
-            },
-            NodeStatus::Active,
-        )?;
+    let id = tree.insert_node(
+        parent,
+        Header {
+            version: 1,
+            prev_blockhash: previous_hash,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: time,
+        },
+        NodeStatus::Active,
+    )?;
     let node = tree.node(id)?;
     ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
         tip_id: id,

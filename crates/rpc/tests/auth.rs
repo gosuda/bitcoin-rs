@@ -6,11 +6,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
+use crate::support::TestError;
 use bitcoin_rs_rpc::auth::constant_time_eq;
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, RpcSurface};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
-use crate::support::TestError;
 
 type TestResult<T = ()> = Result<T, TestError>;
 
@@ -456,10 +456,7 @@ fn pool_management_requires_authentication_and_management_surface() -> TestResul
     Ok(())
 }
 
-fn spawn_on_surface(
-    auth: Auth,
-    surface: RpcSurface,
-) -> TestResult<std::net::SocketAddr> {
+fn spawn_on_surface(auth: Auth, surface: RpcSurface) -> TestResult<std::net::SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let ctx = Arc::new(Context::new());
@@ -483,10 +480,7 @@ fn spawn(auth: Auth) -> TestResult<std::net::SocketAddr> {
     spawn_with_rest(auth, false)
 }
 
-fn spawn_with_rest(
-    auth: Auth,
-    rest_enabled: bool,
-) -> TestResult<std::net::SocketAddr> {
+fn spawn_with_rest(auth: Auth, rest_enabled: bool) -> TestResult<std::net::SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let ctx = Arc::new(Context::new());
@@ -506,11 +500,7 @@ fn spawn_with_rest(
     Ok(address)
 }
 
-fn request_get(
-    address: std::net::SocketAddr,
-    path: &str,
-    connection: &str,
-) -> TestResult<String> {
+fn request_get(address: std::net::SocketAddr, path: &str, connection: &str) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,
@@ -541,10 +531,7 @@ fn request_post(
     stream.read_to_string(&mut response)?;
     Ok(response)
 }
-fn request_options(
-    address: std::net::SocketAddr,
-    path: &str,
-) -> TestResult<String> {
+fn request_options(address: std::net::SocketAddr, path: &str) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,
@@ -578,11 +565,7 @@ fn read_response(reader: &mut BufReader<TcpStream>) -> TestResult<String> {
     Ok(format!("{header_text}{}", String::from_utf8(body)?))
 }
 
-fn request(
-    address: std::net::SocketAddr,
-    credentials: &str,
-    body: &str,
-) -> TestResult<String> {
+fn request(address: std::net::SocketAddr, credentials: &str, body: &str) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,

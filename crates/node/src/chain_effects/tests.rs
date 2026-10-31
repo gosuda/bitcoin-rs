@@ -584,11 +584,6 @@ fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), Tes
         BlockValidationResult::Accepted,
         "submitblock must not invite retry after authoritative commit"
     );
-    assert!(
-        state
-            .chainstate()
-            .shutdown_reader()
-            .is_triggered()
-    );
+    assert!(state.chainstate().shutdown_reader().is_triggered());
     Ok(())
 }

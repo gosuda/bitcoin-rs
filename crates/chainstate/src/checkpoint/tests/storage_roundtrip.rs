@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> TestResult
-{
+fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> TestResult {
     const OUTPUT_COUNT: u32 = 440;
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
@@ -32,7 +31,9 @@ fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> TestResult
         Some(&applied_tip),
     )?;
     let CheckpointLoad::Complete(restored) = load_checkpoint(dir.path(), config())? else {
-        return Err(TestError::UnexpectedSuccess("multi-output checkpoint did not restore"));
+        return Err(TestError::UnexpectedSuccess(
+            "multi-output checkpoint did not restore",
+        ));
     };
 
     assert_eq!(restored.utxo.len(), usize::try_from(OUTPUT_COUNT)?);
@@ -46,8 +47,7 @@ fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> TestResult
 }
 
 #[test]
-fn scanned_trailer_restores_independently_scanned_stats() -> TestResult
-{
+fn scanned_trailer_restores_independently_scanned_stats() -> TestResult {
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;

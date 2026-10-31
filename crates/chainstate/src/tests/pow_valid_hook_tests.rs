@@ -44,8 +44,7 @@ fn pow_valid_hook_fires_once_for_tip_child_commit() -> TestResult {
 }
 
 #[test]
-fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult
-{
+fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
     handles
@@ -53,11 +52,19 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult
         .map_err(|_| TestError::HookAlreadyInstalled("hook installs once"))?;
     let genesis_tip = seed_genesis(&handles)?;
     for height in 1..=3 {
-        let tip = handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?;
+        let tip = handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?;
         let block = mined_child(tip.hash.into(), height)?;
         handles.apply_block(&BlockPayload::from_local(block))?;
     }
-    assert_eq!(handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?.height, 3);
+    assert_eq!(
+        handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .height,
+        3
+    );
     calls.lock().expect("hook calls").clear();
 
     let stale = mined_child(genesis_tip.hash.into(), 1)?;
@@ -67,12 +74,17 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult
         "a stale-parent block never announces early"
     );
     assert_eq!(
-        handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?.height,
+        handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .height,
         3,
         "a stale fork never moves the published tip"
     );
 
-    let tip = handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?;
+    let tip = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?;
     let mut falling = mined_child(tip.hash.into(), 4)?;
     let coinbase = falling
         .txs
@@ -90,8 +102,10 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult
     );
     falling.header.merkle_root =
         merkle_root(&falling.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
-    mine_block_to_declared_target(&mut falling)
-        .map_err(|source| TestError::Regrind { what: "overspend", source })?;
+    mine_block_to_declared_target(&mut falling).map_err(|source| TestError::Regrind {
+        what: "overspend",
+        source,
+    })?;
     let failed: Result<_, ApplyError> =
         handles.apply_block(&BlockPayload::from_local(falling.clone()));
     assert!(
@@ -111,7 +125,10 @@ fn pow_valid_hook_skips_stale_parent_and_failed_connects() -> TestResult
     );
     assert_eq!(fired[0].0, Hash256::from(falling.block_hash()));
     assert_eq!(
-        handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?.height,
+        handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .height,
         3,
         "a failed connect leaves the published tip unchanged"
     );
@@ -126,9 +143,14 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
         .set_pow_valid_block(recording_hook(&calls))
         .map_err(|_| TestError::HookAlreadyInstalled("hook installs once"))?;
     seed_genesis(&handles)?;
-    let tip = handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?;
+    let tip = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?;
     let mut non_final = mined_child(tip.hash.into(), 1)?;
-    let coinbase = non_final.txs.first_mut().ok_or(TestError::Missing("coinbase"))?;
+    let coinbase = non_final
+        .txs
+        .first_mut()
+        .ok_or(TestError::Missing("coinbase"))?;
     coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
     coinbase
         .inputs
@@ -137,8 +159,10 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
         .sequence = bitcoin_rs_primitives::Sequence::from_consensus(0);
     non_final.header.merkle_root =
         merkle_root(&non_final.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
-    mine_block_to_declared_target(&mut non_final)
-        .map_err(|source| TestError::Regrind { what: "non-final", source })?;
+    mine_block_to_declared_target(&mut non_final).map_err(|source| TestError::Regrind {
+        what: "non-final",
+        source,
+    })?;
     let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(non_final));
     assert!(
         matches!(
@@ -157,8 +181,7 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
 }
 
 #[test]
-fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
--> TestResult {
+fn pow_valid_hook_skips_bip34_violating_commit_intent_block() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
     handles
@@ -170,7 +193,13 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
         handles.apply_block(&BlockPayload::from_local(block.clone()))?;
         tip_hash = Hash256::from(block.block_hash());
     }
-    assert_eq!(handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?.height, 499);
+    assert_eq!(
+        handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?
+            .height,
+        499
+    );
     calls.lock().expect("hook calls").clear();
     let mut violating = mined_child(tip_hash.into(), 500)?;
     violating
@@ -183,8 +212,10 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
         .script_sig = vec![0x51, 0x51].into();
     violating.header.merkle_root =
         merkle_root(&violating.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
-    mine_block_to_declared_target(&mut violating)
-        .map_err(|source| TestError::Regrind { what: "violating", source })?;
+    mine_block_to_declared_target(&mut violating).map_err(|source| TestError::Regrind {
+        what: "violating",
+        source,
+    })?;
     let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(violating));
     assert!(
         matches!(
@@ -203,8 +234,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block()
 }
 
 #[test]
-fn hook_installation_after_a_clone_is_visible_through_both_handles()
--> TestResult {
+fn hook_installation_after_a_clone_is_visible_through_both_handles() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let shadow = handles.clone();
     let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
@@ -216,7 +246,9 @@ fn hook_installation_after_a_clone_is_visible_through_both_handles()
         "the original must see the clone's install and refuse a second one"
     );
     seed_genesis(&handles)?;
-    let tip = handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?;
+    let tip = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?;
     let child = mined_child(tip.hash.into(), 1)?;
     handles.apply_block(&BlockPayload::from_local(child.clone()))?;
     let fired = calls.lock().expect("hook calls").clone();
@@ -243,9 +275,12 @@ fn pow_valid_hook_skips_legacy_sigop_violating_block() -> TestResult {
     let mut block = mined_child(genesis_tip.hash.into(), 1)?;
     block.txs[0].outputs[0].script_pubkey =
         vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001].into();
-    block.header.merkle_root = merkle_root(&block.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
-    mine_block_to_declared_target(&mut block)
-        .map_err(|source| TestError::Regrind { what: "legacy sigop", source })?;
+    block.header.merkle_root =
+        merkle_root(&block.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
+    mine_block_to_declared_target(&mut block).map_err(|source| TestError::Regrind {
+        what: "legacy sigop",
+        source,
+    })?;
     let failed: Result<_, ApplyError> = handles.apply_block(&BlockPayload::from_local(block));
     assert!(
         matches!(
@@ -270,9 +305,14 @@ fn pow_valid_hook_skips_legacy_sigop_violating_block() -> TestResult {
 fn proposal_intent_rejects_non_final_coinbase_parity() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     seed_genesis(&handles)?;
-    let tip = handles.applied_tip_snapshot().ok_or(TestError::Missing("tip"))?;
+    let tip = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("tip"))?;
     let mut non_final = mined_child(tip.hash.into(), 1)?;
-    let coinbase = non_final.txs.first_mut().ok_or(TestError::Missing("coinbase"))?;
+    let coinbase = non_final
+        .txs
+        .first_mut()
+        .ok_or(TestError::Missing("coinbase"))?;
     coinbase.lock_time = bitcoin_rs_primitives::LockTime::from_consensus(2);
     coinbase
         .inputs
@@ -281,8 +321,10 @@ fn proposal_intent_rejects_non_final_coinbase_parity() -> TestResult {
         .sequence = bitcoin_rs_primitives::Sequence::from_consensus(0);
     non_final.header.merkle_root =
         merkle_root(&non_final.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
-    mine_block_to_declared_target(&mut non_final)
-        .map_err(|source| TestError::Regrind { what: "non-final", source })?;
+    mine_block_to_declared_target(&mut non_final).map_err(|source| TestError::Regrind {
+        what: "non-final",
+        source,
+    })?;
     let payload = BlockPayload::from_local(non_final);
     let failed = handles.validate_block(&payload);
     assert!(

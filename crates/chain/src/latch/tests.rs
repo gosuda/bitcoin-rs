@@ -166,4 +166,3 @@ fn types_implement_send_and_sync() {
     assert_send_sync::<LatchReader>();
     assert_send_sync::<HookGuard>();
 }
-

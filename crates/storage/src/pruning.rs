@@ -290,9 +290,7 @@ pub enum PruneError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("storage row length {size} does not fit in u64")]
-    RowSizeOverflow {
-        size: usize,
-    },
+    RowSizeOverflow { size: usize },
 }
 
 pub(crate) fn row_len_u64(value: &[u8]) -> Result<u64, PruneError> {

@@ -50,14 +50,8 @@ macro_rules! identifier_newtype {
     };
 }
 
-identifier_newtype!(
-    Txid
-);
+identifier_newtype!(Txid);
 
-identifier_newtype!(
-    Wtxid
-);
+identifier_newtype!(Wtxid);
 
-identifier_newtype!(
-    BlockHash
-);
+identifier_newtype!(BlockHash);

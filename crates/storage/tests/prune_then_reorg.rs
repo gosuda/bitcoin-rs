@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
+use crate::support::TestResult;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
@@ -20,7 +21,6 @@ use bitcoin_rs_storage::{
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tempfile::tempdir;
-use crate::support::TestResult;
 
 /// Prune everything below the requested height; `retention_depth` still
 /// floors at the 288-block reorg margin.
@@ -95,8 +95,7 @@ fn write_body_rows(
 
 // ARCH-08, SYNC-07
 #[test]
-fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> TestResult
-{
+fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -134,8 +133,7 @@ fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> TestResult
 }
 
 #[test]
-fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
--> TestResult {
+fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -207,8 +205,7 @@ fn prune_to_height_respects_an_active_retention_lease() -> TestResult {
 }
 
 #[test]
-fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
--> TestResult {
+fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim() -> TestResult {
     let store = MemoryStore::default();
     let data_dir = tempdir()?;
     let old_rows = {
@@ -269,8 +266,7 @@ fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
 }
 
 #[test]
-fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
--> TestResult {
+fn target_pruning_deletes_old_indexes_in_the_current_flat_file() -> TestResult {
     let store = MemoryStore::default();
     let data_dir = tempdir()?;
     let hash = fake_hash(1);
@@ -379,8 +375,7 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> TestResult {
 }
 
 #[test]
-fn history_request_between_planning_and_commit_is_refused() -> TestResult
-{
+fn history_request_between_planning_and_commit_is_refused() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -448,8 +443,7 @@ fn history_request_between_planning_and_commit_is_refused() -> TestResult
 /// a restart reconstructs exactly that boundary, and the restarted authority
 /// refuses a lease over rows the previous process deleted.
 #[test]
-fn executed_frontier_survives_restart_and_refuses_deleted_heights()
--> TestResult {
+fn executed_frontier_survives_restart_and_refuses_deleted_heights() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -485,8 +479,7 @@ fn executed_frontier_survives_restart_and_refuses_deleted_heights()
 }
 
 #[test]
-fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
--> TestResult {
+fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -603,8 +596,7 @@ fn missing_executed_frontier_after_prune_fails_closed() -> TestResult {
 }
 
 #[test]
-fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> TestResult
-{
+fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> TestResult {
     for key in [
         EXECUTED_FRONTIER_KEY,
         b"node:pruneheight",
@@ -621,8 +613,7 @@ fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> TestResult
 }
 
 #[test]
-fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
--> TestResult {
+fn ambiguous_durability_promotes_the_line_the_batch_already_persisted() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -655,8 +646,7 @@ fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
 }
 
 #[test]
-fn ambiguous_durability_releases_the_claim_when_nothing_applied()
--> TestResult {
+fn ambiguous_durability_releases_the_claim_when_nothing_applied() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -681,8 +671,7 @@ fn ambiguous_durability_releases_the_claim_when_nothing_applied()
 }
 
 #[test]
-fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
--> TestResult {
+fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -718,8 +707,7 @@ fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
 }
 
 #[test]
-fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
--> TestResult {
+fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -748,8 +736,7 @@ fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
 }
 
 #[test]
-fn optional_consumer_budget_exhaustion_unblocks_pruning() -> TestResult
-{
+fn optional_consumer_budget_exhaustion_unblocks_pruning() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,

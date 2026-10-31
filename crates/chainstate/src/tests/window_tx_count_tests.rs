@@ -12,8 +12,7 @@ use crate::test_fixtures::{
 };
 
 #[test]
-fn a_grouped_window_publishes_each_blocks_own_prefix_count()
--> TestResult {
+fn a_grouped_window_publishes_each_blocks_own_prefix_count() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
@@ -77,10 +76,9 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
         "the cell names the last published tip"
     );
 
-    let head = handles
-        .durable_head
-        .load()?
-        .ok_or(TestError::Missing("the group's one batch wrote the durable head"))?;
+    let head = handles.durable_head.load()?.ok_or(TestError::Missing(
+        "the group's one batch wrote the durable head",
+    ))?;
     assert_eq!(head.height, 3);
     assert_eq!(head.tip, outcomes[2].hash);
     assert_eq!(
@@ -97,8 +95,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
 }
 
 #[test]
-fn a_grouped_window_stages_only_its_newest_block_before_the_sync()
--> TestResult {
+fn a_grouped_window_stages_only_its_newest_block_before_the_sync() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
@@ -191,7 +188,9 @@ fn corrupted_window_bytes_fail_payload_construction() -> TestResult {
         "trailing bytes must fail construction, before any count is consulted"
     );
 
-    let applied = handles.applied_tip_snapshot().ok_or(TestError::Missing("seeded tip"))?;
+    let applied = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("seeded tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(genesis.block_hash()),
@@ -224,7 +223,9 @@ fn witness_only_mutation_fails_payload_construction() -> TestResult {
         "a witness count the stream cannot back must fail construction"
     );
 
-    let applied = handles.applied_tip_snapshot().ok_or(TestError::Missing("seeded tip"))?;
+    let applied = handles
+        .applied_tip_snapshot()
+        .ok_or(TestError::Missing("seeded tip"))?;
     assert_eq!(
         applied.hash,
         Hash256::from(genesis.block_hash()),

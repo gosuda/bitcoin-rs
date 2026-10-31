@@ -413,10 +413,7 @@ impl std::fmt::Debug for P2pService {
 
 impl P2pService {
     #[must_use]
-    pub fn new(
-        config: P2pServiceConfig,
-        shutdown: bitcoin_rs_chain::LatchReader,
-    ) -> Self {
+    pub fn new(config: P2pServiceConfig, shutdown: bitcoin_rs_chain::LatchReader) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) =
             crossbeam_channel::bounded(INBOUND_HEADER_QUEUE_LIMIT);
@@ -1353,7 +1350,10 @@ fn dial_is_admissible(dial: &OutboundDial, shared: &crate::listener::ConnectionS
             .automatic_snapshot(SystemTime::now())
             .allows(dial.addr.address())
     };
-    shared.activity.is_active() && !shared.session_cancel.is_triggered() && services_allowed && allowed
+    shared.activity.is_active()
+        && !shared.session_cancel.is_triggered()
+        && services_allowed
+        && allowed
 }
 
 fn dial_is_already_active(

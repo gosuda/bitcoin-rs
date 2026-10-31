@@ -496,7 +496,9 @@ mod tests {
         } else {
             None
         };
-        worker.join().map_err(|_| TestError::WorkerPanicked("cleanup worker panicked"))?;
+        worker
+            .join()
+            .map_err(|_| TestError::WorkerPanicked("cleanup worker panicked"))?;
         drop(rescue);
         assert!(
             !observed.map_err(|_| TestError::Blocked("cleanup blocked on substituted FIFO"))??,

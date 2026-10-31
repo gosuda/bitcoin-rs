@@ -38,7 +38,8 @@ fn prepare<S: KvStore>(
 
 // IDX-04
 #[test]
-fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Result<(), TestError> {
+fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Result<(), TestError>
+{
     let store = Arc::new(common::MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

@@ -923,7 +923,6 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-
     pub fn admit_headers(
         &self,
         headers: &[Header],

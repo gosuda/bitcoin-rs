@@ -102,12 +102,18 @@ fn chaininfo_projection_rejects_unknown_fields() -> Result<(), crate::support::T
     let mut response = handler.dispatch("getblockchaininfo", &json!([]))?;
     response
         .as_object_mut()
-        .ok_or(crate::support::TestError::Missing("getblockchaininfo must return an object"))?
+        .ok_or(crate::support::TestError::Missing(
+            "getblockchaininfo must return an object",
+        ))?
         .insert("unexpected", json!(true));
     let body = sonic_rs::to_string(&response)?;
     let error = match support::compare::typed_getblockchain_info(body.as_bytes()) {
         Err(error) => error,
-        Ok(_) => return Err(crate::support::TestError::Missing("the unknown chaininfo field was accepted")),
+        Ok(_) => {
+            return Err(crate::support::TestError::Missing(
+                "the unknown chaininfo field was accepted",
+            ));
+        }
     };
     assert!(
         error.to_string().contains("unexpected"),
@@ -445,7 +451,8 @@ fn primitive_responses_stay_primitives() -> Result<(), crate::support::TestError
 }
 
 #[test]
-fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate::support::TestError> {
+fn submitblock_truncates_trailing_bytes_to_consumed_prefix() -> Result<(), crate::support::TestError>
+{
     #[derive(Default)]
     struct RecordingSubmit {
         submitted: std::sync::Mutex<Option<Vec<u8>>>,

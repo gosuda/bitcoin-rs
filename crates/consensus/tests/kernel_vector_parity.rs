@@ -246,17 +246,13 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, TestErr
             continue;
         }
 
-        let tx_hex = arr[1]
-            .as_str()
-            .ok_or(TestError::Row {
-                row: index,
-                fault: RowFault::NotText("tx hex"),
-            })?;
-        let tx_bytes = hex_to_bytes(tx_hex)?;
-        let tx: Tx = deserialize(&tx_bytes).map_err(|source| TestError::RowDecode {
+        let tx_hex = arr[1].as_str().ok_or(TestError::Row {
             row: index,
-            source,
+            fault: RowFault::NotText("tx hex"),
         })?;
+        let tx_bytes = hex_to_bytes(tx_hex)?;
+        let tx: Tx =
+            deserialize(&tx_bytes).map_err(|source| TestError::RowDecode { row: index, source })?;
 
         let flags = match expected {
             Verdict::Accept => tx_valid_flags(flags_str),
@@ -418,8 +414,7 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         .iter()
         .find(|row| !is_policy_only_tx(row))
         .ok_or("no runnable invalid rows found")?;
-    let actual_invalid =
-        kernel_verdict(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags)?;
+    let actual_invalid = kernel_verdict(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags)?;
     assert_eq!(
         actual_invalid,
         Verdict::Reject,

@@ -1,6 +1,6 @@
 use super::*;
-use crate::test_support::TestError;
 use crate::chainstate_journal::CheckpointBase;
+use crate::test_support::TestError;
 
 // JW-MARK-1
 #[test]

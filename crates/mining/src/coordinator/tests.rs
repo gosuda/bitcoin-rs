@@ -437,7 +437,12 @@ fn service_with_chain(
     pool: Arc<StaticPool>,
     chain: Arc<dyn ChainContextSource>,
 ) -> MiningService {
-    service_with_source(tip, pool, chain, bitcoin_rs_chain::LatchReader::fixture_never())
+    service_with_source(
+        tip,
+        pool,
+        chain,
+        bitcoin_rs_chain::LatchReader::fixture_never(),
+    )
 }
 
 fn service_with_source(

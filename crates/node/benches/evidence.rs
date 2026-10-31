@@ -269,7 +269,7 @@ mod tests {
         kept.join("\n")
     }
 
-// HPA-12
+    // HPA-12
     #[test]
     fn evidence_without_an_identity_is_refused() {
         for field in [
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(level.check(), Ok(()));
     }
 
-// HPA-04, HPA-12
+    // HPA-04, HPA-12
     #[test]
     fn nested_and_concurrent_intervals_are_not_addends() {
         let outer = sample(0, 100);
@@ -370,7 +370,7 @@ mod tests {
         );
     }
 
-// HPA-12
+    // HPA-12
     #[test]
     fn repeated_samples_and_empty_cells_survive_a_round_trip() {
         let mut ledger = Ledger::parse(LEDGER_TOML).expect("checked-in ledger");
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(reparsed.cells.len(), ledger.cells.len());
     }
 
-// HPA-13
+    // HPA-13
     #[test]
     fn quantiles_are_exact_order_statistics_with_a_support_floor() {
         assert_eq!(Quantiles::of(&[]), None, "an empty set is not a zero");

@@ -600,7 +600,8 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn invalid_tail_drain_polls_cancellation_per_bounded_chunk() -> Result<(), crate::portable::TestError> {
+    fn invalid_tail_drain_polls_cancellation_per_bounded_chunk()
+    -> Result<(), crate::portable::TestError> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("tail.dat");
         let interval = usize::try_from(CANCEL_POLL_RECORDS)?;

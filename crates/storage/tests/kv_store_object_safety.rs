@@ -1,7 +1,7 @@
 #![cfg(feature = "fjall")]
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use crate::support::TestResult;
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 #[test]
 fn kv_store_dispatches_through_a_trait_object() -> TestResult {
