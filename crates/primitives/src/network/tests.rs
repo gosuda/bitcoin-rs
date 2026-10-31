@@ -141,7 +141,7 @@ fn softfork_activations_match_core_chainparams() {
         (
             "Taproot",
             Network::is_taproot_active,
-            [709_632, 2_017_256, 0, 0, 0],
+            [709_632, 2_011_968, 0, 0, 0],
         ),
     ];
     for (rule, is_active, heights) in activations {
@@ -152,6 +152,18 @@ fn softfork_activations_match_core_chainparams() {
             assert!(is_active(network, activation), "{network:?}: {rule}");
         }
     }
+}
+#[test]
+fn taproot_activation_height_matches_core_oracle() {
+    assert_eq!(Network::Mainnet.taproot_activation_height(), 709_632);
+    assert_eq!(Network::Testnet3.taproot_activation_height(), 2_011_968);
+    assert_eq!(Network::Testnet4.taproot_activation_height(), 0);
+    assert_eq!(Network::Signet.taproot_activation_height(), 0);
+    assert_eq!(Network::Regtest.taproot_activation_height(), 0);
+
+    assert!(!Network::Testnet3.is_taproot_active(2_011_967));
+    assert!(Network::Testnet3.is_taproot_active(2_011_968));
+    assert!(Network::Testnet3.is_taproot_active(2_017_256));
 }
 #[test]
 fn every_network_carries_chain_tx_data() {

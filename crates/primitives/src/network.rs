@@ -195,7 +195,7 @@ impl Network {
     pub const fn taproot_activation_height(self) -> u32 {
         match self {
             Self::Mainnet => 709_632,
-            Self::Testnet3 => 2_017_256,
+            Self::Testnet3 => 2_011_968,
             Self::Testnet4 | Self::Signet | Self::Regtest => 0,
         }
     }
