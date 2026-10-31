@@ -671,15 +671,14 @@ pub(super) fn history(
     let chain = match records
         .into_iter()
         .map(|record| {
-            let confirmation = match confirmations.get(&record.height) {
-                Some(confirmation) => *confirmation,
-                None => {
-                    let confirmation = projection
-                        .confirmation_at_height(record.height)
-                        .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
-                    confirmations.insert(record.height, confirmation);
-                    confirmation
-                }
+            let confirmation = if let Some(confirmation) = confirmations.get(&record.height) {
+                *confirmation
+            } else {
+                let confirmation = projection
+                    .confirmation_at_height(record.height)
+                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                confirmations.insert(record.height, confirmation);
+                confirmation
             };
             let transaction = projection.confirmed_transaction(&record.txid)?;
             Ok((transaction, Some(confirmation)))

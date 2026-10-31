@@ -562,15 +562,14 @@ impl<'a> Projection<'a> {
         let mut outputs = confirmed
             .into_iter()
             .map(|record| {
-                let status = match confirmations.get(&record.height) {
-                    Some(confirmation) => TransactionStatus::from(*confirmation),
-                    None => {
-                        let confirmation = self
-                            .confirmation_at_height(record.height)
-                            .ok_or_else(|| service_unavailable("funding block unavailable"))?;
-                        confirmations.insert(record.height, confirmation);
-                        TransactionStatus::from(confirmation)
-                    }
+                let status = if let Some(confirmation) = confirmations.get(&record.height) {
+                    TransactionStatus::from(*confirmation)
+                } else {
+                    let confirmation = self
+                        .confirmation_at_height(record.height)
+                        .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                    confirmations.insert(record.height, confirmation);
+                    TransactionStatus::from(confirmation)
                 };
                 Ok(UtxoValue {
                     txid: record.txid.to_string(),

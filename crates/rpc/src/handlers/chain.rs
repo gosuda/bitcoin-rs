@@ -958,11 +958,15 @@ pub(crate) fn verifychain(
     typed_to_sonic(&v31::VerifyChain(verified))
 }
 
-pub(crate) fn gettxoutsetinfo(
-    ctx: &Arc<Context>,
-    params: &Value,
-    cancellation: &bitcoin_rs_chain::LatchReader,
-) -> Result<Value, RpcError> {
+struct TxOutSetScan {
+    stats: bitcoin_rs_utxo::stats::CoinStats,
+    txouts: usize,
+    transactions: usize,
+    set_hash: Option<(&'static str, String)>,
+    disk_size: u64,
+}
+
+fn parse_txoutsetinfo_params(params: &Value) -> Result<&str, RpcError> {
     let array = if params.is_null() {
         None
     } else {
@@ -990,64 +994,84 @@ pub(crate) fn gettxoutsetinfo(
             "Querying specific block heights requires coinstatsindex".to_owned(),
         ));
     }
-    let want_muhash = hash_type == "muhash";
-    let _scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
-        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
-            RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
-        }
-        error => RpcError::Internal(error.to_string()),
-    })?;
-    let interrupted = || RpcError::Misc("gettxoutsetinfo interrupted".to_owned());
-    let scan = |view: &AppliedView| {
-        if cancellation.is_triggered() {
-            return Err(interrupted());
-        }
-        ctx.chain.utxo.with_stable_view(|stable| {
-            let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
+    Ok(hash_type)
+}
+
+fn compute_txoutset_hash(
+    stable: &bitcoin_rs_utxo::UtxoSetView<'_>,
+    stats: &bitcoin_rs_utxo::stats::CoinStats,
+    hash_type: &str,
+) -> Result<Option<(&'static str, String)>, RpcError> {
+    match hash_type {
+        "hash_serialized_3" => {
+            let hash = stable
+                .hash_serialized_3()
                 .map_err(|err| RpcError::Internal(err.to_string()))?;
-            let set_hash = match hash_type {
-                "hash_serialized_3" => Some((
-                    "hash_serialized_3",
-                    stable
-                        .hash_serialized_3()
-                        .map_err(|err| RpcError::Internal(err.to_string()))?
-                        .to_string_be(),
-                )),
-                "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-                "none" => None,
-                _ => {
-                    return Err(RpcError::InvalidParams(
-                        "hash_type must be one of: hash_serialized_3, muhash, none",
-                    ));
-                }
-            };
-            Ok::<_, RpcError>((
-                stats,
-                stable.len(),
-                stable.record_count(),
-                set_hash,
-                u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX),
-            ))
+            Ok(Some(("hash_serialized_3", hash.to_string_be())))
+        }
+        "muhash" => Ok(Some((
+            "muhash",
+            stats.muhash.finalize_hash().to_string_be(),
+        ))),
+        "none" => Ok(None),
+        _ => Err(RpcError::InvalidParams(
+            "hash_type must be one of: hash_serialized_3, muhash, none",
+        )),
+    }
+}
+
+fn scan_txoutset_view(
+    ctx: &Context,
+    view: &AppliedView,
+    hash_type: &str,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<TxOutSetScan, RpcError> {
+    if cancellation.is_triggered() {
+        return Err(RpcError::Misc("gettxoutsetinfo interrupted".to_owned()));
+    }
+    let want_muhash = hash_type == "muhash";
+    ctx.chain.utxo.with_stable_view(|stable| {
+        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
+        let set_hash = compute_txoutset_hash(stable, &stats, hash_type)?;
+        let disk_size = u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+        Ok(TxOutSetScan {
+            stats,
+            txouts: stable.len(),
+            transactions: stable.record_count(),
+            set_hash,
+            disk_size,
         })
-    };
-    let mut contested = 0usize;
-    let (view, (stats, txouts, transactions, set_hash, disk_size)) = loop {
+    })
+}
+
+fn execute_txoutset_scan(
+    ctx: &Context,
+    hash_type: &str,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<(AppliedView, TxOutSetScan), RpcError> {
+    for _ in 0..4 {
         let view = ctx.chain.applied_view();
-        let scanned = scan(&view)?;
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, cancellation)?;
         if ctx.chain.applied_view().tip() == view.tip() {
-            break (view, scanned);
+            return Ok((view, scanned));
         }
-        contested += 1;
-        if contested == 4 {
-            break ctx.chain.with_stable_chainstate(|| {
-                let view = ctx.chain.applied_view();
-                scan(&view).map(|scanned| (view, scanned))
-            })?;
-        }
-    };
+    }
+    ctx.chain.with_stable_chainstate(|| {
+        let view = ctx.chain.applied_view();
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, cancellation)?;
+        Ok((view, scanned))
+    })
+}
+
+fn format_txoutsetinfo_response(
+    ctx: &Context,
+    view: &AppliedView,
+    scan: TxOutSetScan,
+) -> Result<Value, RpcError> {
     let applied_height = view.height();
     let best_block = view.hash(ctx.chain.chain_network);
-    let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
+    let (hash_serialized_3, muhash) = scan.set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
             (Some(hash), None)
         } else {
@@ -1057,16 +1081,32 @@ pub(crate) fn gettxoutsetinfo(
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
         height: i64::from(applied_height),
         best_block: best_block.to_string_be(),
-        transactions: Some(i64_saturated(transactions)),
-        tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
-        bogo_size: i64_saturated(stats.bogo_size),
+        transactions: Some(i64_saturated(scan.transactions)),
+        tx_outs: i64_saturated(u64::try_from(scan.txouts).unwrap_or(u64::MAX)),
+        bogo_size: i64_saturated(scan.stats.bogo_size),
         hash_serialized_3,
-        disk_size: Some(i64_saturated(disk_size)),
-        total_amount: sat_to_btc(stats.total_amount),
+        disk_size: Some(i64_saturated(scan.disk_size)),
+        total_amount: sat_to_btc(scan.stats.total_amount),
         muhash,
         total_unspendable_amount: None,
         block_info: None,
     })
+}
+
+pub(crate) fn gettxoutsetinfo(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
+    let hash_type = parse_txoutsetinfo_params(params)?;
+    let _scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
+        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+            RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
+        }
+        error => RpcError::Internal(error.to_string()),
+    })?;
+    let (view, scan) = execute_txoutset_scan(ctx, hash_type, cancellation)?;
+    format_txoutsetinfo_response(ctx, &view, scan)
 }
 
 pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
