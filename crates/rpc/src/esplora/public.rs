@@ -209,7 +209,7 @@ fn tx_status(ctx: &Context, id: &str) -> Response {
 fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
-        |(_record, bytes, txid)| {
+        |(_record, bytes, txid, _render)| {
             let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
             else {
                 return internal_error("stored block body is corrupt");
@@ -228,7 +228,7 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
 fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
-        |(record, bytes, txid)| {
+        |(record, bytes, txid, _render)| {
             let Ok(block) = deserialize::<Block>(&bytes) else {
                 return internal_error("stored block body is corrupt");
             };
@@ -249,7 +249,15 @@ fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
 fn confirmed_block(
     ctx: &Context,
     id: &str,
-) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Vec<u8>, Txid), Response> {
+) -> Result<
+    (
+        bitcoin_rs_index::block_log::BlockRecord,
+        Vec<u8>,
+        Txid,
+        crate::context::BlockRenderPermit,
+    ),
+    Response,
+> {
     let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
         return Err(not_found());
     };
@@ -258,11 +266,14 @@ fn confirmed_block(
         .chain
         .block_by_height(status.height)
         .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+    let render = ctx
+        .try_acquire_block_render()
+        .ok_or_else(|| service_unavailable("too many concurrent full-block reads; retry"))?;
     let bytes = ctx
         .chain
         .block_body_bytes(&record)
         .ok_or_else(|| service_unavailable("confirming block body unavailable"))?;
-    Ok((record, bytes, txid))
+    Ok((record, bytes, txid, render))
 }
 
 fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
@@ -378,6 +389,9 @@ fn block(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     projection.block_value(&record).map_or_else(|r| r, json_ok)
 }
 fn block_header(ctx: &Context, h: &str) -> Response {
@@ -417,6 +431,9 @@ fn block_raw(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
         return service_unavailable("block body unavailable");
     };
@@ -428,7 +445,15 @@ fn block_raw(ctx: &Context, text_hash: &str) -> Response {
     }
 }
 pub(super) fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (record, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -473,7 +498,15 @@ pub(super) fn block_transaction_values(
     )
 }
 fn block_txids(ctx: &Context, h: &str) -> Response {
-    let (_, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -489,7 +522,15 @@ fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
     let Ok(index) = index.parse::<usize>() else {
         return bad_request("transaction index must be an unsigned integer");
     };
-    let (_, block) = match Projection::new(ctx).required_block(h) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(h) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (_, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -503,6 +544,9 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     if ctx.chain.block_by_height_in_view(&view, start).is_none() {
         return not_found();
     }
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
     let mut values = Vec::with_capacity(10);
     let projection = Projection::new(ctx);
     for height in (0..=start).rev().take(10) {

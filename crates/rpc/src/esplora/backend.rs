@@ -12,7 +12,7 @@ use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
-use crate::rest::{bad_request, json_ok};
+use crate::rest::{bad_request, json_ok, service_unavailable};
 use sonic_rs::json as sonic_json;
 
 const TRANSACTION_BATCH_SIZE: usize = 25;
@@ -42,7 +42,15 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Respons
 }
 
 fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(hash) {
+    let projection = Projection::new(ctx);
+    let record = match projection.required_block_record(hash) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let Some(_render) = ctx.try_acquire_block_render() else {
+        return service_unavailable("too many concurrent full-block reads; retry");
+    };
+    let (record, block) = match projection.block_from_record(record) {
         Ok(value) => value,
         Err(response) => return response,
     };

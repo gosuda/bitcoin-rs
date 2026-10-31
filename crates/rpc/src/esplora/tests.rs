@@ -3269,3 +3269,59 @@ fn esplora_script_overlay_and_activity_match_the_seeded_pool() -> Result<(), Tes
     );
     Ok(())
 }
+
+#[test]
+fn exhausted_block_render_budget_refuses_esplora_block_reads() -> Result<(), TestError> {
+    let (handler, tx, block, _address) = contract_fixture()?;
+    let block_hash = block.block_hash().to_string();
+    let txid = tx.txid().to_string();
+    let ctx = handler.context();
+    let _first = ctx.try_acquire_block_render().expect("first permit");
+    let _second = ctx.try_acquire_block_render().expect("second permit");
+    assert!(ctx.try_acquire_block_render().is_none());
+
+    let refused_paths = [
+        format!("/block/{block_hash}"),
+        format!("/block/{block_hash}/raw"),
+        format!("/block/{block_hash}/txs"),
+        format!("/block/{block_hash}/txs/0"),
+        format!("/block/{block_hash}/txids"),
+        format!("/block/{block_hash}/txid/0"),
+        "/blocks".to_owned(),
+        "/blocks/0".to_owned(),
+        format!("/tx/{txid}/merkleblock-proof"),
+        format!("/tx/{txid}/merkle-proof"),
+    ];
+    for path in &refused_paths {
+        let response = route(&handler, path, "");
+        assert_eq!(response.status, 503, "{path}");
+        assert_eq!(
+            response.body, b"too many concurrent full-block reads; retry",
+            "{path}"
+        );
+    }
+
+    let internal_path = format!("/internal/block/{block_hash}/txs");
+    let backend_response = backend_route(&handler, &internal_path, "");
+    assert_eq!(backend_response.status, 503, "{internal_path}");
+    assert_eq!(
+        backend_response.body, b"too many concurrent full-block reads; retry",
+        "{internal_path}"
+    );
+
+    let permitted_paths = [
+        format!("/block/{block_hash}/header"),
+        format!("/block/{block_hash}/status"),
+        "/blocks/tip/height".to_owned(),
+        "/blocks/tip/hash".to_owned(),
+        "/block-height/0".to_owned(),
+        format!("/tx/{txid}"),
+        format!("/tx/{txid}/status"),
+    ];
+    for path in &permitted_paths {
+        let response = route(&handler, path, "");
+        assert_eq!(response.status, 200, "{path}");
+    }
+
+    Ok(())
+}

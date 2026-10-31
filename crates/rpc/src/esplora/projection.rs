@@ -408,11 +408,10 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn required_block(
+    pub(super) fn block_from_record(
         &self,
-        text_hash: &str,
+        record: bitcoin_rs_index::block_log::BlockRecord,
     ) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Block), Response> {
-        let record = self.required_block_record(text_hash)?;
         let bytes = self
             .ctx
             .chain
@@ -434,6 +433,15 @@ impl<'a> Projection<'a> {
             internal_error("stored block transaction or witness commitment mismatch")
         })?;
         Ok((record, block))
+    }
+
+    #[cfg(test)]
+    pub(super) fn required_block(
+        &self,
+        text_hash: &str,
+    ) -> Result<(bitcoin_rs_index::block_log::BlockRecord, Block), Response> {
+        let record = self.required_block_record(text_hash)?;
+        self.block_from_record(record)
     }
 
     pub(super) fn required_block_record(
