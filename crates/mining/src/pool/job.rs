@@ -151,16 +151,16 @@ impl SessionTable {
         }
     }
 
-    fn open(&mut self) -> Result<Session, JobError> {
+    fn open(&mut self) -> Result<Session, SessionOpenError> {
         if self.live.len() >= self.capacity {
-            return Err(JobError::SessionCapacity {
+            return Err(SessionOpenError::Capacity {
                 capacity: self.capacity,
             });
         }
         let following = self
             .next_id
             .checked_add(1)
-            .ok_or(JobError::SessionIdExhausted)?;
+            .ok_or(SessionOpenError::IdsExhausted)?;
         let slot = if let Some(slot) = self.free.pop_front() {
             slot
         } else {
@@ -225,14 +225,18 @@ pub enum JobError {
     CoinbaseSplit,
     #[error("job ids are exhausted")]
     JobIdExhausted,
-    #[error("session ids are exhausted")]
-    SessionIdExhausted,
-    #[error("all {capacity} session slots are in use")]
-    SessionCapacity { capacity: usize },
     #[error("share target and pool difficulty must be nonzero")]
     ZeroTarget,
     #[error("pool difficulty is not a plain decimal of at most 19 digits")]
     InvalidDifficulty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SessionOpenError {
+    #[error("all {capacity} session slots are in use")]
+    Capacity { capacity: usize },
+    #[error("session ids are exhausted")]
+    IdsExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1039,7 +1043,7 @@ impl JobBook {
         &self.config
     }
 
-    pub fn open_session(&mut self) -> Result<Session, JobError> {
+    pub fn open_session(&mut self) -> Result<Session, SessionOpenError> {
         self.sessions.open()
     }
 

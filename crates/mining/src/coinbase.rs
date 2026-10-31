@@ -72,10 +72,7 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
 }
 
 #[must_use]
-pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool {
-    if !segwit_active {
-        return false;
-    }
+pub fn needs_witness_reserved_value(block: &Block) -> bool {
     let Some(coinbase) = block.txs.first() else {
         return false;
     };
@@ -88,8 +85,8 @@ pub fn needs_witness_reserved_value(block: &Block, segwit_active: bool) -> bool 
     input.witness.is_empty()
 }
 
-pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
-    if !needs_witness_reserved_value(block, segwit_active) {
+pub fn update_uncommitted_block_structures(block: &mut Block) {
+    if !needs_witness_reserved_value(block) {
         return;
     }
     block.txs[0].inputs[0].witness.push(&WITNESS_RESERVED_VALUE);
@@ -159,8 +156,8 @@ mod uncommitted_witness_tests {
     #[test]
     fn predicate_matches_fill_branch_including_empty_shapes() {
         let mut fillable = commitment_block(Vec::new(), true);
-        assert!(needs_witness_reserved_value(&fillable, true));
-        update_uncommitted_block_structures(&mut fillable, true);
+        assert!(needs_witness_reserved_value(&fillable));
+        update_uncommitted_block_structures(&mut fillable);
         assert_eq!(
             fillable.txs[0].inputs[0].witness,
             Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
@@ -168,14 +165,14 @@ mod uncommitted_witness_tests {
 
         let mut no_txs = commitment_block(Vec::new(), true);
         no_txs.txs.clear();
-        assert!(!needs_witness_reserved_value(&no_txs, true));
-        update_uncommitted_block_structures(&mut no_txs, true);
+        assert!(!needs_witness_reserved_value(&no_txs));
+        update_uncommitted_block_structures(&mut no_txs);
         assert_eq!(no_txs.txs, Vec::<bitcoin_rs_primitives::Tx>::new());
 
         let mut no_inputs = commitment_block(Vec::new(), true);
         no_inputs.txs[0].inputs.clear();
-        assert!(!needs_witness_reserved_value(&no_inputs, true));
-        update_uncommitted_block_structures(&mut no_inputs, true);
+        assert!(!needs_witness_reserved_value(&no_inputs));
+        update_uncommitted_block_structures(&mut no_inputs);
         assert_eq!(
             no_inputs.txs[0].inputs,
             Vec::<bitcoin_rs_primitives::TxIn>::new()
@@ -194,7 +191,9 @@ mod uncommitted_witness_tests {
             (custom.clone(), false, true, custom),
         ] {
             let mut block = commitment_block(witness, with_commitment);
-            update_uncommitted_block_structures(&mut block, segwit_active);
+            if segwit_active {
+                update_uncommitted_block_structures(&mut block);
+            }
             assert_eq!(
                 block.txs[0].inputs[0].witness,
                 Witness::from_stack(want.clone()),

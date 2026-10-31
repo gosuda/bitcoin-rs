@@ -691,11 +691,10 @@ pub fn payout_output_weight_wu(script_len: usize) -> u64 {
         9u64
     };
     let len = u64::try_from(script_len).unwrap_or(u64::MAX);
-    let serialized = prefix
-        .checked_add(len)
-        .and_then(|sum| sum.checked_add(8))
-        .unwrap_or(u64::MAX);
-    serialized.checked_mul(4).unwrap_or(u64::MAX)
+    prefix
+        .saturating_add(len)
+        .saturating_add(8)
+        .saturating_mul(4)
 }
 
 fn check_outputs(outputs: &[PayoutOutput]) -> Result<u64, LedgerError> {

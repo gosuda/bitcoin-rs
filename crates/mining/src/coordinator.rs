@@ -435,7 +435,7 @@ impl MiningService {
             {
                 state.parked_long_poll_waiters += 1;
             }
-            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+            let _timed_out = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
             #[cfg(any(test, feature = "test-seam"))]
             {
                 state.parked_long_poll_waiters -= 1;
@@ -718,19 +718,11 @@ impl MiningService {
         Ok(Some(ready.candidate))
     }
 
-    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
-        let cache_key = CandidateKey::ordinary(key);
-        {
-            let state = self.state.lock();
-            if let Some(cached) = state.cache_get(&cache_key) {
-                return Ok(cached);
-            }
-        }
-        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
-            return Ok(candidate);
-        }
-        let mut state = self.state.lock();
-
+    fn await_flight(
+        &self,
+        key: GenerationKey,
+        state: &mut parking_lot::MutexGuard<'_, CoordinatorState>,
+    ) -> Result<Option<Arc<Candidate>>, MiningControlError> {
         loop {
             if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
@@ -744,9 +736,27 @@ impl MiningService {
                 break;
             }
             if let Some(result) = flight.result.clone() {
-                return result;
+                return result.map(Some);
             }
-            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+            let _timed_out = self.wake.wait_for(state, LONG_POLL_SLICE);
+        }
+        Ok(None)
+    }
+
+    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let cache_key = CandidateKey::ordinary(key);
+        {
+            let state = self.state.lock();
+            if let Some(cached) = state.cache_get(&cache_key) {
+                return Ok(cached);
+            }
+        }
+        if let Some(candidate) = self.prepared_candidate_for_key(key)? {
+            return Ok(candidate);
+        }
+        let mut state = self.state.lock();
+        if let Some(candidate) = self.await_flight(key, &mut state)? {
+            return Ok(candidate);
         }
         if let Some(cached) = state.cache_get(&cache_key) {
             return Ok(cached);
@@ -863,7 +873,7 @@ impl MiningService {
             if now >= until {
                 return Err(assembly_busy());
             }
-            let _ = self.wake.wait_for(&mut state, until - now);
+            let _timed_out = self.wake.wait_for(&mut state, until - now);
         };
         let _slot = BudgetedSlot {
             service: self,
@@ -1363,82 +1373,90 @@ pub fn snapshot_for_selection(
     match selection {
         GenerateSelection::Mempool => Ok(full),
         GenerateSelection::Ordered(items) => {
-            let flags = if segwit_active {
-                VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
-            } else {
-                VerifyFlags::P2SH
-            };
-            let prevouts: HashMap<_, _> =
-                prevouts.iter().map(|(key, value)| (*key, value)).collect();
-            let mut selected_positions = HashMap::with_capacity(items.len());
-            let mut by_txid = HashMap::with_capacity(full.entries.len());
-            for (index, entry) in full.entries.iter().enumerate() {
-                let position = u32::try_from(index).unwrap_or(u32::MAX);
-                by_txid.insert(entry.txid, position);
-            }
-            let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
-            let mut old_to_new = HashMap::with_capacity(items.len());
-            for item in items {
-                match item {
-                    GenerateTx::Mempool(txid) => {
-                        let Some(&old) = by_txid.get(txid) else {
-                            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                                "transaction not in mempool",
-                            )));
-                        };
-                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
-                        old_to_new.insert(old, new_index);
-                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
-                        selected.push(full.entries[old_usize].clone());
-                    }
-                    GenerateTx::ResolvedMempool(entry) => {
-                        let mut entry = entry.clone();
-                        entry.ancestors.clear();
-                        selected.push(entry);
-                    }
-                    GenerateTx::Raw(tx) => {
-                        let resolved = tx
-                            .inputs
-                            .iter()
-                            .filter_map(|input| {
-                                let outpoint = input.previous_output;
-                                let earlier_output = selected_positions
-                                    .get(&outpoint.txid)
-                                    .and_then(|&index: &usize| selected.get(index))
-                                    .and_then(|entry| {
-                                        usize::try_from(outpoint.vout)
-                                            .ok()
-                                            .and_then(|vout| entry.tx.outputs.get(vout))
-                                    });
-                                earlier_output
-                                    .or_else(|| prevouts.get(&outpoint).copied())
-                                    .map(|output| (outpoint, output.clone()))
-                            })
-                            .collect::<Vec<_>>();
-                        selected.push(snapshot_entry_from_raw(tx, &resolved, flags));
-                    }
-                }
-                if let Some(entry) = selected.last() {
-                    selected_positions.insert(entry.txid, selected.len() - 1);
-                }
-            }
-            for entry in &mut selected {
-                entry.ancestors.retain_mut(|ancestor| {
-                    if let Some(&new_index) = old_to_new.get(ancestor) {
-                        *ancestor = new_index;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            Ok(MempoolMiningSnapshot {
-                sequence: full.sequence,
-                fee_delta_sequence: full.fee_delta_sequence,
-                entries: selected,
-            })
+            ordered_snapshot(&full, items, prevouts, segwit_active)
         }
     }
+}
+
+fn ordered_snapshot(
+    full: &MempoolMiningSnapshot,
+    items: &[GenerateTx],
+    prevouts: &[(OutPoint, TxOut)],
+    segwit_active: bool,
+) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    let flags = if segwit_active {
+        VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
+    } else {
+        VerifyFlags::P2SH
+    };
+    let prevouts: HashMap<_, _> = prevouts.iter().map(|(key, value)| (*key, value)).collect();
+    let mut selected_positions = HashMap::with_capacity(items.len());
+    let mut by_txid = HashMap::with_capacity(full.entries.len());
+    for (index, entry) in full.entries.iter().enumerate() {
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        by_txid.insert(entry.txid, position);
+    }
+    let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
+    let mut old_to_new = HashMap::with_capacity(items.len());
+    for item in items {
+        match item {
+            GenerateTx::Mempool(txid) => {
+                let Some(&old) = by_txid.get(txid) else {
+                    return Err(MiningControlError::InvalidRequest(CompactString::from(
+                        "transaction not in mempool",
+                    )));
+                };
+                let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                old_to_new.insert(old, new_index);
+                let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                selected.push(full.entries[old_usize].clone());
+            }
+            GenerateTx::ResolvedMempool(entry) => {
+                let mut entry = entry.clone();
+                entry.ancestors.clear();
+                selected.push(entry);
+            }
+            GenerateTx::Raw(tx) => {
+                let resolved = tx
+                    .inputs
+                    .iter()
+                    .filter_map(|input| {
+                        let outpoint = input.previous_output;
+                        let earlier_output = selected_positions
+                            .get(&outpoint.txid)
+                            .and_then(|&index: &usize| selected.get(index))
+                            .and_then(|entry| {
+                                usize::try_from(outpoint.vout)
+                                    .ok()
+                                    .and_then(|vout| entry.tx.outputs.get(vout))
+                            });
+                        earlier_output
+                            .or_else(|| prevouts.get(&outpoint).copied())
+                            .map(|output| (outpoint, output.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                selected.push(snapshot_entry_from_raw(tx, &resolved, flags));
+            }
+        }
+        if let Some(entry) = selected.last() {
+            selected_positions.insert(entry.txid, selected.len() - 1);
+        }
+    }
+    for entry in &mut selected {
+        entry.ancestors.retain_mut(|ancestor| {
+            if let Some(&new_index) = old_to_new.get(ancestor) {
+                *ancestor = new_index;
+                true
+            } else {
+                false
+            }
+        });
+    }
+    Ok(MempoolMiningSnapshot {
+        sequence: full.sequence,
+        fee_delta_sequence: full.fee_delta_sequence,
+        entries: selected,
+    })
 }
 
 fn snapshot_entry_from_raw(

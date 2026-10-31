@@ -1,7 +1,8 @@
 use super::{
     AcceptedShare, BlockReceipt, BlockStatus, ExtranonceLayout, FoundBlock, Installed, Job,
-    JobBook, JobBookConfig, JobError, JobId, Session as BookSession, SessionId, ShareClass,
-    ShareError, ShareOutcome, ShareSubmission, ShareTarget, StaleReason, fetch_template,
+    JobBook, JobBookConfig, JobError, JobId, Session as BookSession, SessionId, SessionOpenError,
+    ShareClass, ShareError, ShareOutcome, ShareSubmission, ShareTarget, StaleReason,
+    fetch_template,
 };
 use crate::{Candidate, CoinbaseBudget, MiningControl, MiningControlError};
 use bitcoin_rs_primitives::{BlockHash, Hash256, TxOut};
@@ -121,13 +122,16 @@ impl Completion {
             rejected: AtomicBool::new(false),
         }
     }
-
     fn record(&self) {
-        let _ = self
-            .remaining
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            });
+        let recorded =
+            self.remaining
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                });
+        debug_assert!(
+            recorded.is_ok(),
+            "completion recorded more times than it has items"
+        );
     }
 
     fn record_rejected(&self) {
@@ -428,7 +432,7 @@ impl PoolCore {
         Ok(installed)
     }
 
-    pub(super) fn open_lease(self: &Arc<Self>) -> Result<Lease, JobError> {
+    pub(super) fn open_lease(self: &Arc<Self>) -> Result<Lease, SessionOpenError> {
         let session = locked(&self.book).open_session()?;
         Ok(Lease {
             pool: Arc::clone(self),
@@ -629,98 +633,112 @@ impl PoolCore {
         };
 
         match outcome {
-            ShareOutcome::Share(accepted) => {
-                let hash = accepted.hash;
-                let completion = Arc::new(Completion::new(1));
-                let item = Pending::Share {
-                    worker: worker.clone(),
-                    share: *accepted,
-                    completion: Arc::clone(&completion),
-                };
-                match self.deliver_inline(&item) {
-                    Ok(RecordOutcome::Recorded) => completion.record(),
-                    Ok(RecordOutcome::AlreadyRecorded | RecordOutcome::Rejected) => {
-                        return Err(SubmitFailure::Duplicate);
-                    }
-                    Err(LedgerUnavailable) => {
-                        if !reservation.commit_reserved(item) {
-                            return Err(SubmitFailure::OutboxFull);
-                        }
-                    }
-                }
-                Ok(Credited {
-                    hash,
-                    class: ShareClass::Share,
-                    completion,
-                    block: None,
-                })
+            ShareOutcome::Share(accepted) => self.credit_share(worker, accepted, &mut reservation),
+            ShareOutcome::Block(found) => self.credit_block(worker, found, &mut reservation),
+        }
+    }
+
+    fn credit_share(
+        &self,
+        worker: &WorkerIdentity,
+        accepted: Box<AcceptedShare>,
+        reservation: &mut OutboxReservation<'_>,
+    ) -> Result<Credited, SubmitFailure> {
+        let hash = accepted.hash;
+        let completion = Arc::new(Completion::new(1));
+        let item = Pending::Share {
+            worker: worker.clone(),
+            share: *accepted,
+            completion: Arc::clone(&completion),
+        };
+        match self.deliver_inline(&item) {
+            Ok(RecordOutcome::Recorded) => completion.record(),
+            Ok(RecordOutcome::AlreadyRecorded | RecordOutcome::Rejected) => {
+                return Err(SubmitFailure::Duplicate);
             }
-            ShareOutcome::Block(found) => {
-                let submission = self.submit_block_to_node(&found);
-                let block_outcome = match &submission {
-                    Ok(receipt) => match receipt.status() {
-                        BlockStatus::Applied => BlockOutcome::Applied,
-                        BlockStatus::Rejected => BlockOutcome::Rejected,
-                        BlockStatus::Undetermined => BlockOutcome::Undetermined,
-                    },
-                    Err(_) => BlockOutcome::NodeError,
-                };
-                let hash = found.share.hash;
-                let job = found.share.job;
-                let stale_parent = submission.as_ref().is_ok_and(BlockReceipt::is_stale_parent);
-                let completion = Arc::new(Completion::new(2));
-                let share_item = Pending::Share {
-                    worker: worker.clone(),
-                    share: found.share.clone(),
-                    completion: Arc::clone(&completion),
-                };
-                let block_item = Pending::BlockRecord {
-                    worker: worker.clone(),
-                    block: found,
-                    submission,
-                    completion: Arc::clone(&completion),
-                };
-
-                let mut share_settled = false;
-                match self.deliver_inline(&share_item) {
-                    Ok(RecordOutcome::Recorded) => completion.record(),
-                    Ok(RecordOutcome::AlreadyRecorded | RecordOutcome::Rejected) => {
-                        completion.record();
-                        share_settled = true;
-                    }
-                    Err(LedgerUnavailable) => {
-                        if !reservation.commit_reserved(share_item) {
-                            return Err(SubmitFailure::OutboxFull);
-                        }
-                    }
+            Err(LedgerUnavailable) => {
+                if !reservation.commit_reserved(item) {
+                    return Err(SubmitFailure::OutboxFull);
                 }
-
-                if self.deliver_inline(&block_item).is_err() {
-                    if !reservation.commit_reserved(block_item) {
-                        return Err(SubmitFailure::OutboxFull);
-                    }
-                } else {
-                    completion.record();
-                }
-
-                if stale_parent {
-                    return Err(SubmitFailure::Share(ShareError::Stale {
-                        job,
-                        reason: StaleReason::Invalidated,
-                    }));
-                }
-
-                if share_settled {
-                    return Err(SubmitFailure::Duplicate);
-                }
-
-                Ok(Credited {
-                    hash,
-                    class: ShareClass::Block,
-                    completion,
-                    block: Some(block_outcome),
-                })
             }
         }
+        Ok(Credited {
+            hash,
+            class: ShareClass::Share,
+            completion,
+            block: None,
+        })
+    }
+
+    fn credit_block(
+        &self,
+        worker: &WorkerIdentity,
+        found: Box<FoundBlock>,
+        reservation: &mut OutboxReservation<'_>,
+    ) -> Result<Credited, SubmitFailure> {
+        let submission = self.submit_block_to_node(&found);
+        let block_outcome = match &submission {
+            Ok(receipt) => match receipt.status() {
+                BlockStatus::Applied => BlockOutcome::Applied,
+                BlockStatus::Rejected => BlockOutcome::Rejected,
+                BlockStatus::Undetermined => BlockOutcome::Undetermined,
+            },
+            Err(_) => BlockOutcome::NodeError,
+        };
+        let hash = found.share.hash;
+        let job = found.share.job;
+        let stale_parent = submission.as_ref().is_ok_and(BlockReceipt::is_stale_parent);
+        let completion = Arc::new(Completion::new(2));
+        let share_item = Pending::Share {
+            worker: worker.clone(),
+            share: found.share.clone(),
+            completion: Arc::clone(&completion),
+        };
+        let block_item = Pending::BlockRecord {
+            worker: worker.clone(),
+            block: found,
+            submission,
+            completion: Arc::clone(&completion),
+        };
+
+        let mut share_settled = false;
+        match self.deliver_inline(&share_item) {
+            Ok(RecordOutcome::Recorded) => completion.record(),
+            Ok(RecordOutcome::AlreadyRecorded | RecordOutcome::Rejected) => {
+                completion.record();
+                share_settled = true;
+            }
+            Err(LedgerUnavailable) => {
+                if !reservation.commit_reserved(share_item) {
+                    return Err(SubmitFailure::OutboxFull);
+                }
+            }
+        }
+
+        if self.deliver_inline(&block_item).is_err() {
+            if !reservation.commit_reserved(block_item) {
+                return Err(SubmitFailure::OutboxFull);
+            }
+        } else {
+            completion.record();
+        }
+
+        if stale_parent {
+            return Err(SubmitFailure::Share(ShareError::Stale {
+                job,
+                reason: StaleReason::Invalidated,
+            }));
+        }
+
+        if share_settled {
+            return Err(SubmitFailure::Duplicate);
+        }
+
+        Ok(Credited {
+            hash,
+            class: ShareClass::Block,
+            completion,
+            block: Some(block_outcome),
+        })
     }
 }

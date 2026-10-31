@@ -471,7 +471,7 @@ impl<V: Value> Table<'_, u64, V> {
         )?;
         let complete = scan.complete;
         let mut rows: Vec<GuardPair<u64, V>> = Vec::new();
-        for (full_key, value) in scan.rows.into_iter() {
+        for (full_key, value) in scan.rows {
             if !full_key.starts_with(&self.prefix) {
                 break;
             }

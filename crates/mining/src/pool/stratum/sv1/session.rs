@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use crate::pool::core::{Completion, Credited, Lease, ShareRequest, SubmitFailure};
 use crate::pool::{
-    BlockOutcome, JobId, PoolCore, SessionId, ShareClass, ShareError, ShareTarget, StaleReason,
-    WorkerIdentity,
+    BlockOutcome, JobId, PoolCore, SessionId, SessionOpenError, ShareClass, ShareError,
+    ShareTarget, StaleReason, WorkerIdentity,
 };
 use bitcoin_rs_primitives::BlockHash;
 
@@ -161,7 +161,11 @@ impl ServerConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let day = Duration::new(86_400, 0);
+        self.validate_connection_limits()?;
+        self.validate_timeouts()
+    }
+
+    fn validate_connection_limits(&self) -> Result<(), ConfigError> {
         require(
             self.max_connections > 0,
             "max_connections",
@@ -191,7 +195,11 @@ impl ServerConfig {
             !self.accept_poll.is_zero(),
             "accept_poll",
             "must be nonzero",
-        )?;
+        )
+    }
+
+    fn validate_timeouts(&self) -> Result<(), ConfigError> {
+        let day = Duration::new(86_400, 0);
         require(
             !self.handshake_timeout.is_zero() && self.handshake_timeout <= day,
             "handshake_timeout",
@@ -585,13 +593,16 @@ impl SessionState {
             );
             return Verdict::Violation;
         }
-        let Some(lease) = self.shared.pool.open_lease().ok() else {
-            emit_reply(
-                request,
-                out,
-                &encode_error(&request.id, &errors::POOL_AT_CAPACITY),
-            );
-            return Verdict::Fatal(SessionEnd::PoolRefused);
+        let lease = match self.shared.pool.open_lease() {
+            Ok(lease) => lease,
+            Err(SessionOpenError::Capacity { .. } | SessionOpenError::IdsExhausted) => {
+                emit_reply(
+                    request,
+                    out,
+                    &encode_error(&request.id, &errors::POOL_AT_CAPACITY),
+                );
+                return Verdict::Fatal(SessionEnd::PoolRefused);
+            }
         };
         let extranonce1 = encode_hex(lease.session.extranonce_prefix());
         let extranonce2_size = self.shared.pool.layout().rolled_len();
@@ -864,7 +875,7 @@ impl SessionState {
         }
     }
 
-    fn emit_deferred_rejected(&self, response: &DeferredResponse, out: &mut Vec<u8>) {
+    fn emit_deferred_rejected(response: &DeferredResponse, out: &mut Vec<u8>) {
         if response.has_id {
             emit_line(
                 out,
@@ -883,7 +894,7 @@ impl SessionState {
             return Some(response);
         }
         if response.completion.is_rejected() {
-            self.emit_deferred_rejected(&response, out);
+            Self::emit_deferred_rejected(&response, out);
             return None;
         }
         let session = session?;
@@ -941,54 +952,53 @@ fn flush(stream: &mut TcpStream, out: &mut Vec<u8>) -> Result<(), SessionEnd> {
     })
 }
 
-fn run_connection(
-    mut stream: TcpStream,
-    peer: SocketAddr,
-    ordinal: u64,
-    shared: &Arc<Shared>,
-) -> SessionEnd {
-    let config = &shared.config;
-    let _ = stream.set_nodelay(true);
-    if let Err(error) = stream
-        .set_nonblocking(false)
+fn configure_stream(stream: &TcpStream, config: &ServerConfig) -> Result<(), SessionEnd> {
+    stream
+        .set_nodelay(true)
+        .and_then(|()| stream.set_nonblocking(false))
         .and_then(|()| stream.set_read_timeout(Some(config.poll_interval)))
         .and_then(|()| stream.set_write_timeout(Some(config.write_timeout)))
-    {
-        return SessionEnd::Io(error.kind());
-    }
-    shared.emit(&ServerEvent::Accepted { peer });
+        .map_err(|error| SessionEnd::Io(error.kind()))
+}
 
-    let mut session = SessionState::new(Arc::clone(shared), ordinal, peer);
-    let mut framer = LineBuffer::new(config.max_frame_bytes);
-    let mut out: Vec<u8> = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 4096];
-    let started = Instant::now();
-    let mut last_activity = started;
-    let mut last_poll = started;
-    let mut partial_since: Option<Instant> = None;
+struct Inbound {
+    framer: LineBuffer,
+    chunk: [u8; 4096],
+}
 
-    let end = 'run: loop {
-        if shared.cancel.load(Ordering::Acquire) {
-            break SessionEnd::Cancelled;
+impl Inbound {
+    fn new(max_frame_bytes: usize) -> Self {
+        Self {
+            framer: LineBuffer::new(max_frame_bytes),
+            chunk: [0_u8; 4096],
         }
+    }
+
+    fn read(
+        &mut self,
+        stream: &mut TcpStream,
+        session: &mut SessionState,
+        out: &mut Vec<u8>,
+        last_activity: &mut Instant,
+    ) -> Result<bool, SessionEnd> {
         let mut completed_frame = false;
-        match stream.read(&mut chunk) {
-            Ok(0) => break SessionEnd::ClientClosed,
+        match stream.read(&mut self.chunk) {
+            Ok(0) => return Err(SessionEnd::ClientClosed),
             Ok(count) => {
-                if framer.push(&chunk[..count]).is_err() {
-                    break SessionEnd::FrameTooLong;
+                if self.framer.push(&self.chunk[..count]).is_err() {
+                    return Err(SessionEnd::FrameTooLong);
                 }
                 loop {
-                    match framer.next_frame() {
+                    match self.framer.next_frame() {
                         Ok(Some(frame)) => {
                             completed_frame = true;
-                            last_activity = Instant::now();
-                            if let Flow::Close(end) = session.handle_frame(&frame, &mut out) {
-                                break 'run end;
+                            *last_activity = Instant::now();
+                            if let Flow::Close(end) = session.handle_frame(&frame, out) {
+                                return Err(end);
                             }
                         }
                         Ok(None) => break,
-                        Err(_) => break 'run SessionEnd::FrameTooLong,
+                        Err(_) => return Err(SessionEnd::FrameTooLong),
                     }
                 }
             }
@@ -996,14 +1006,47 @@ fn run_connection(
                 io::ErrorKind::WouldBlock
                 | io::ErrorKind::TimedOut
                 | io::ErrorKind::Interrupted => {}
-                kind => break SessionEnd::Io(kind),
+                kind => return Err(SessionEnd::Io(kind)),
             },
         }
+        Ok(completed_frame)
+    }
+}
+
+fn run_connection(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    ordinal: u64,
+    shared: &Arc<Shared>,
+) -> SessionEnd {
+    let config = &shared.config;
+    if let Err(end) = configure_stream(&stream, config) {
+        return end;
+    }
+    shared.emit(&ServerEvent::Accepted { peer });
+
+    let mut session = SessionState::new(Arc::clone(shared), ordinal, peer);
+    let mut inbound = Inbound::new(config.max_frame_bytes);
+    let mut out: Vec<u8> = Vec::with_capacity(1024);
+    let started = Instant::now();
+    let mut last_activity = started;
+    let mut last_poll = started;
+    let mut partial_since: Option<Instant> = None;
+
+    let end = loop {
+        if shared.cancel.load(Ordering::Acquire) {
+            break SessionEnd::Cancelled;
+        }
+        let completed_frame =
+            match inbound.read(&mut stream, &mut session, &mut out, &mut last_activity) {
+                Ok(completed) => completed,
+                Err(end) => break end,
+            };
         let now = Instant::now();
         if completed_frame {
             partial_since = None;
         }
-        if framer.has_partial() {
+        if inbound.framer.has_partial() {
             partial_since.get_or_insert(now);
         } else {
             partial_since = None;
@@ -1032,8 +1075,8 @@ fn run_connection(
             }
         }
     };
-    let _ = flush(&mut stream, &mut out);
-    let _ = stream.shutdown(Shutdown::Both);
+    let _peer_gone = flush(&mut stream, &mut out);
+    let _peer_gone = stream.shutdown(Shutdown::Both);
     end
 }
 
@@ -1051,7 +1094,7 @@ pub struct Server {
 }
 
 fn refuse(shared: &Shared, stream: &TcpStream, peer: SocketAddr, reason: RefusalReason) {
-    let _ = stream.shutdown(Shutdown::Both);
+    let _peer_gone = stream.shutdown(Shutdown::Both);
     shared.emit(&ServerEvent::Refused { peer, reason });
 }
 

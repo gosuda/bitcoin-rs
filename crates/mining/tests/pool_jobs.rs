@@ -12,8 +12,8 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::pool::{
     BIP320_VERSION_MASK, BlockStatus, Extranonce, ExtranonceLayout, Job, JobBook, JobBookConfig,
-    JobError, JobId, Session, SessionId, ShareClass, ShareError, ShareOutcome, ShareSubmission,
-    ShareTarget, ShareWork, StaleReason, fetch_template,
+    JobError, JobId, Session, SessionId, SessionOpenError, ShareClass, ShareError, ShareOutcome,
+    ShareSubmission, ShareTarget, ShareWork, StaleReason, fetch_template,
 };
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
@@ -883,7 +883,7 @@ fn sessions_get_unique_bounded_prefixes_and_reuse_oldest_freed_first() -> TestRe
     assert_eq!(third.extranonce_prefix(), &[2]);
     assert_eq!(
         book.open_session().err(),
-        Some(JobError::SessionCapacity { capacity: 3 })
+        Some(SessionOpenError::Capacity { capacity: 3 })
     );
     assert!(book.close_session(second.id()));
     assert!(!book.close_session(second.id()));
