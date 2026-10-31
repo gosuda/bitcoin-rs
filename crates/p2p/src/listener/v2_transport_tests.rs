@@ -86,7 +86,11 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(20)
 }
 
-type Listening = (PeerEndpoint, Arc<AtomicBool>, std::thread::JoinHandle<()>);
+type Listening = (
+    PeerEndpoint,
+    bitcoin_rs_chain::LatchWriter,
+    std::thread::JoinHandle<()>,
+);
 
 fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
     let listener = bind_listener(
@@ -95,10 +99,10 @@ fn listen(shared: ConnectionShared) -> Result<Listening, TestError> {
             .unwrap_or_else(|| panic!("expected IP fixture")),
     )?;
     let addr = listener.local_addr()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let reader = shutdown.reader();
     let handle = std::thread::spawn(move || {
-        let _ = serve(listener, flag, shared);
+        let _ = serve(listener, reader, shared);
     });
     Ok((addr.into(), shutdown, handle))
 }
@@ -215,7 +219,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
                 Ok(())
             })();
             table.cancel_all();
-            shutdown.store(true, Ordering::Relaxed);
+            shutdown.trigger();
             handle.join().map_err(|_| "listener panicked")?;
             result?;
         }
@@ -235,7 +239,7 @@ fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
     assert!(matches!(negotiated.protocol, TransportProtocol::V2 { .. }));
     handshake_and_ping(addr, stream, negotiated)?;
 
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
     Ok(())
 }
@@ -247,7 +251,7 @@ fn a_v2_listener_still_serves_a_v1_peer() -> TestResult {
 
     handshake_and_ping(addr, connect(addr)?, Negotiated::v1(MAGIC))?;
 
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
     Ok(())
 }
@@ -318,7 +322,7 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
 
     dialer_table.cancel_all();
     let _ = dial.join().map_err(|_| "dialer panicked")?;
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
 
     let (outbound, inbound) = published.ok_or("the v2 connection never published both ends")?;
@@ -356,7 +360,7 @@ fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
 
     dialer_table.cancel_all();
     let _ = dial.join().map_err(|_| "dialer panicked")?;
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     handle.join().map_err(|_| "listener panicked")?;
 
     let dialed = dialed.ok_or("the v1 retry never completed its handshake")?;

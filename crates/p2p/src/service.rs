@@ -27,6 +27,10 @@ const DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
 
+const OUTBOUND_TICK: Duration = Duration::from_secs(1);
+
+const INACTIVE_TICK: Duration = Duration::from_millis(100);
+
 const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
 #[expect(
@@ -161,8 +165,9 @@ pub enum P2pControlError {
 }
 
 struct Workers {
-    shutdown: Arc<AtomicBool>,
-    session_cancel: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
+    overlay_shutdown: Arc<AtomicBool>,
+    session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
     bootstrap: Option<JoinHandle<()>>,
@@ -173,8 +178,9 @@ struct Workers {
 impl Default for Workers {
     fn default() -> Self {
         Self {
-            shutdown: Arc::new(AtomicBool::new(false)),
-            session_cancel: Arc::new(AtomicBool::new(false)),
+            shutdown: bitcoin_rs_chain::LatchWriter::new(),
+            overlay_shutdown: Arc::new(AtomicBool::new(false)),
+            session_cancel: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
             listeners: Vec::new(),
             outbound: None,
             bootstrap: None,
@@ -185,9 +191,14 @@ impl Default for Workers {
 }
 
 impl Workers {
-    fn new(shutdown: Arc<AtomicBool>, session_cancel: Arc<AtomicBool>) -> Self {
+    fn new(
+        shutdown: bitcoin_rs_chain::LatchWriter,
+        overlay_shutdown: Arc<AtomicBool>,
+        session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
+    ) -> Self {
         Self {
             shutdown,
+            overlay_shutdown,
             session_cancel,
             listeners: Vec::new(),
             outbound: None,
@@ -198,8 +209,9 @@ impl Workers {
     }
 
     fn cancel(&self, peer_table: &crate::PeerTable, addresses: &Mutex<Vec<crate::PeerEndpoint>>) {
-        self.session_cancel.store(true, Ordering::Release);
-        self.shutdown.store(true, Ordering::Release);
+        self.session_cancel.trigger();
+        self.shutdown.trigger();
+        self.overlay_shutdown.store(true, Ordering::Release);
         peer_table.cancel_all();
         if let Some(session) = &self.sam_session {
             session.close();
@@ -385,7 +397,7 @@ pub struct P2pService {
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
-    session_cancel: Mutex<Arc<AtomicBool>>,
+    session_cancel: Mutex<Arc<bitcoin_rs_chain::LatchWriter>>,
     shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
     overlay_addresses: Arc<Mutex<Vec<crate::PeerEndpoint>>>,
 }
@@ -432,7 +444,7 @@ impl P2pService {
             worker_shutdown: Mutex::new(Arc::new(AtomicBool::new(false))),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
-            session_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            session_cancel: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
             banned,
             added_nodes: Arc::new(RwLock::new(Vec::new())),
             fixed_destinations: Arc::new(RwLock::new(Vec::new())),
@@ -484,12 +496,16 @@ impl P2pService {
             return Err(P2pServiceError::AlreadyStarted);
         }
 
-        let epoch_shutdown = Arc::new(AtomicBool::new(false));
-        let session_cancel = Arc::new(AtomicBool::new(false));
+        let overlay_shutdown = Arc::new(AtomicBool::new(false));
+        let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
         *self.session_cancel.lock() = Arc::clone(&session_cancel);
-        *self.worker_shutdown.lock() = Arc::clone(&epoch_shutdown);
+        *self.worker_shutdown.lock() = Arc::clone(&overlay_shutdown);
 
-        let mut workers = Workers::new(Arc::clone(&epoch_shutdown), Arc::clone(&session_cancel));
+        let mut workers = Workers::new(
+            bitcoin_rs_chain::LatchWriter::new(),
+            overlay_shutdown,
+            session_cancel,
+        );
 
         match self.start_workers(&mut workers, chain_query, sync_wake_tx, peer_ready, extras) {
             Ok(()) => {
@@ -532,7 +548,7 @@ impl P2pService {
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
                 &self.network_active,
             ))),
-            Arc::clone(&workers.session_cancel),
+            workers.session_cancel.reader(),
             Some(Arc::clone(peer_ready)),
             self.config.magic,
             self.inbound_headers_tx.clone(),
@@ -550,12 +566,12 @@ impl P2pService {
         );
         shared = shared.with_shared_outbound(&self.shared_outbound);
 
-        let worker_shutdown = self.worker_shutdown.lock().clone();
+        let overlay_shutdown = Arc::clone(&workers.overlay_shutdown);
         workers
             .listeners
-            .extend(self.overlay.start(&shared, &worker_shutdown)?);
+            .extend(self.overlay.start(&shared, &overlay_shutdown)?);
         for (listener_addr, listener) in bound_listeners {
-            let shutdown = Arc::clone(&workers.shutdown);
+            let shutdown = workers.shutdown.reader();
             let shared = shared.clone();
             let handle = thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
@@ -565,13 +581,13 @@ impl P2pService {
 
         let routes = crate::RouteTable::from_routes(&shared.dial_routes);
         let dial_allowance = shared.block_sync.clone();
-        let outbound = self.spawn_outbound_worker(shared, &workers.shutdown)?;
+        let outbound = self.spawn_outbound_worker(shared, &workers.shutdown.reader())?;
         workers.outbound = Some(outbound);
 
         let bootstrap = self.spawn_bootstrap_worker(
             dial_allowance,
             chain_query.cloned(),
-            &workers.shutdown,
+            &workers.shutdown.reader(),
             routes,
         )?;
         workers.bootstrap = bootstrap;
@@ -586,14 +602,14 @@ impl P2pService {
     fn spawn_outbound_worker(
         &self,
         shared: crate::listener::ConnectionShared,
-        shutdown: &Arc<AtomicBool>,
+        shutdown: &bitcoin_rs_chain::LatchReader,
     ) -> Result<JoinHandle<()>, io::Error> {
         let address_book = Arc::clone(&self.address_book);
         let manual_nodes = Arc::clone(&self.added_nodes);
         let fixed_destinations = Arc::clone(&self.fixed_destinations);
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
-        let shutdown = Arc::clone(shutdown);
+        let shutdown = shutdown.clone();
         let process_shutdown = self.shutdown.clone();
         let full_relay_slots = self.config.outbound_full_relay_slots;
         let block_relay_slots = self.config.outbound_block_relay_slots;
@@ -609,8 +625,8 @@ impl P2pService {
                 let mut pinned = pinned::PinnedPeers::default();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 let mut next_feeler = Instant::now() + feeler_delay(bitcoin::secp256k1::rand::thread_rng().next_u64());
-                while !shutdown.load(Ordering::Acquire)
-                    && !shared.session_cancel.load()
+                while !shutdown.is_triggered()
+                    && !shared.session_cancel.is_triggered()
                     && !process_shutdown.is_triggered()
                 {
                     let now = Instant::now();
@@ -627,7 +643,12 @@ impl P2pService {
                         );
                     }
                     if !shared.activity.is_active() {
-                        thread::sleep(Duration::from_millis(100));
+                        crossbeam_channel::select! {
+                            recv(shutdown.closed()) -> _ => break,
+                            recv(shared.session_cancel.closed()) -> _ => break,
+                            recv(process_shutdown.closed()) -> _ => break,
+                            recv(crossbeam_channel::after(INACTIVE_TICK)) -> _ => {}
+                        }
                         continue;
                     }
                     let extra_dial = shared
@@ -672,15 +693,21 @@ impl P2pService {
                             if !active.contains_key(&endpoint) { pinned.finished(endpoint, now); }
                         }
                     }
-                    let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
-                    let Ok(dial) = received else {
-                        if matches!(
-                            received,
-                            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
-                        ) {
-                            break;
+                    let next_dial = {
+                        let receiver = outbound_rx.lock();
+                        let receiver = &*receiver;
+                        crossbeam_channel::select! {
+                            recv(receiver) -> res => res.ok(),
+                            recv(crossbeam_channel::after(OUTBOUND_TICK)) -> _ => {
+                                continue;
+                            }
+                            recv(shutdown.closed()) -> _ => break,
+                            recv(shared.session_cancel.closed()) -> _ => break,
+                            recv(process_shutdown.closed()) -> _ => break,
                         }
-                        continue;
+                    };
+                    let Some(dial) = next_dial else {
+                        break;
                     };
                     if !dial.manual
                         && !dial_has_capacity(&dial, &active, active_limit, block_relay_slots, extra_dial)
@@ -719,11 +746,11 @@ impl P2pService {
         &self,
         block_sync: Option<Arc<crate::sync::BlockSync>>,
         chain_query: Option<Arc<dyn crate::ChainQuery>>,
-        shutdown: &Arc<AtomicBool>,
+        shutdown: &bitcoin_rs_chain::LatchReader,
         routes: crate::RouteTable,
     ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
-            let shutdown = Arc::clone(shutdown);
+            let shutdown = shutdown.clone();
             let network_active = Arc::clone(&self.network_active);
             let destinations = Arc::clone(&self.fixed_destinations);
             let endpoints = self.config.fixed_peers.clone();
@@ -741,7 +768,7 @@ impl P2pService {
                 })
                 .map(Some);
         }
-        let shutdown = Arc::clone(shutdown);
+        let shutdown = shutdown.clone();
         let network_active = Arc::clone(&self.network_active);
         let peer_table = Arc::clone(&self.peer_table);
         let outbound_tx = self.outbound_tx.clone();
@@ -780,7 +807,7 @@ impl P2pService {
             workers.cancel(&self.peer_table, &self.overlay_addresses);
         }
         self.worker_shutdown.lock().store(true, Ordering::Release);
-        self.session_cancel.lock().store(true, Ordering::Release);
+        self.session_cancel.lock().trigger();
         self.overlay_addresses.lock().clear();
         if !demonstrated.is_empty() {
             self.address_book
@@ -1165,16 +1192,14 @@ fn is_manual_endpoint(manual: &[PeerEndpoint], addr: PeerEndpoint) -> bool {
         .any(|pin| crate::addrman::canonical(*pin) == addr)
 }
 
-fn wait_for_shutdown(shutdown: &AtomicBool, delay: Duration) -> bool {
-    let deadline = Instant::now() + delay;
-    while !shutdown.load(Ordering::Acquire) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return false;
-        }
-        thread::sleep(remaining.min(Duration::from_millis(100)));
+fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, delay: Duration) -> bool {
+    if shutdown.is_triggered() {
+        return true;
     }
-    true
+    crossbeam_channel::select! {
+        recv(shutdown.closed()) -> _ => true,
+        recv(crossbeam_channel::after(delay)) -> _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1235,13 +1260,13 @@ fn bootstrap_fixed_peer_endpoints<R, I>(
 
 #[expect(clippy::needless_pass_by_value)]
 fn run_fixed_peer_resolution(
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     network_active: Arc<AtomicBool>,
     destinations: Arc<RwLock<Vec<PeerEndpoint>>>,
     endpoints: Vec<String>,
     overlay: Arc<crate::overlay::OverlayTransport>,
 ) {
-    while !shutdown.load(Ordering::Acquire) {
+    while !shutdown.is_triggered() {
         if !network_active.load(Ordering::Acquire) {
             if wait_for_shutdown(&shutdown, Duration::from_millis(100)) {
                 break;
@@ -1251,7 +1276,7 @@ fn run_fixed_peer_resolution(
         let mut resolved = Vec::new();
         for endpoint in &endpoints {
             match overlay.resolve(endpoint, &|| {
-                shutdown.load(Ordering::Acquire) || !network_active.load(Ordering::Acquire)
+                shutdown.is_triggered() || !network_active.load(Ordering::Acquire)
             }) {
                 Ok(addresses) => resolved.extend(addresses),
                 Err(error) => tracing::warn!(endpoint, %error, "fixed peer resolution failed"),
@@ -1578,7 +1603,7 @@ fn has_automatic_outbound_capacity(
 }
 
 struct AddressMaintenance {
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
     outbound_tx: Sender<OutboundDial>,
@@ -1652,9 +1677,7 @@ fn queue_restart_anchors(
     active: &mut Vec<PeerEndpoint>,
     now: u64,
 ) -> usize {
-    if maintenance.shutdown.load(Ordering::Acquire)
-        || !maintenance.network_active.load(Ordering::Acquire)
-    {
+    if maintenance.shutdown.is_triggered() || !maintenance.network_active.load(Ordering::Acquire) {
         return 0;
     }
     let sessions = maintenance.peer_table.sessions();
@@ -1750,7 +1773,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
     let mut anchors = VecDeque::new();
     let mut anchors_taken = false;
     let mut anchor_attempt = None;
-    while !maintenance.shutdown.load(Ordering::Acquire) {
+    while !maintenance.shutdown.is_triggered() {
         let tick_time = SystemTime::now();
         let now = tick_time
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -1761,7 +1784,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
                 anchors = maintenance.address_book.take_restart_anchors(now).into();
                 anchors_taken = true;
             }
-            if maintenance.shutdown.load(Ordering::Acquire)
+            if maintenance.shutdown.is_triggered()
                 || !maintenance.network_active.load(Ordering::Acquire)
             {
                 continue;
@@ -1776,7 +1799,7 @@ fn run_address_maintenance(maintenance: &AddressMaintenance) {
             let policy = maintenance.banned.automatic_snapshot(tick_time);
             {
                 let manual = maintenance.manual_nodes.read();
-                if maintenance.shutdown.load(Ordering::Acquire)
+                if maintenance.shutdown.is_triggered()
                     || !maintenance.network_active.load(Ordering::Acquire)
                 {
                     continue;
@@ -1911,7 +1934,7 @@ fn queue_address_candidates(
     let depth = crate::listener::approximate_best_block_depth(maintenance.chain_query.as_deref());
     let manual = maintenance.manual_nodes.read();
     for _ in 0..needed {
-        if maintenance.shutdown.load(Ordering::Acquire)
+        if maintenance.shutdown.is_triggered()
             || !maintenance.network_active.load(Ordering::Acquire)
         {
             break;

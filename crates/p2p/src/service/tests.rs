@@ -635,8 +635,15 @@ fn parked_overflow_releases_the_address_for_another_selection() {
         Some(address)
     );
 }
-fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundDial>) {
+fn maintenance_fixture(
+    target: usize,
+) -> (
+    AddressMaintenance,
+    Receiver<OutboundDial>,
+    bitcoin_rs_chain::LatchWriter,
+) {
     let (tx, rx) = crossbeam_channel::bounded(16);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
     for n in 1..100 {
         let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
@@ -651,7 +658,7 @@ fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundD
         AddressMaintenance {
             block_slots: 2,
             manual_nodes: Arc::new(RwLock::new(Vec::new())),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown.reader(),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
             outbound_tx: tx,
@@ -665,6 +672,7 @@ fn maintenance_fixture(target: usize) -> (AddressMaintenance, Receiver<OutboundD
             routes: crate::RouteTable::default(),
         },
         rx,
+        shutdown,
     )
 }
 
@@ -939,7 +947,7 @@ fn automatic_policy_and_manual_bans_are_distinct() {
 
 #[test]
 fn all_automatic_selection_classes_exclude_discouraged_addresses() {
-    let (maintenance, queue) = maintenance_fixture(4);
+    let (maintenance, queue, _shutdown) = maintenance_fixture(4);
     let now = crate::addrman::now();
     for n in 1..100 {
         let addr = PeerEndpoint::from(([8, n, 1, 1], 8333));
@@ -997,7 +1005,7 @@ fn all_automatic_selection_classes_exclude_discouraged_addresses() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
             &maintenance.network_active,
         ))),
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&maintenance.shutdown)),
+        maintenance.shutdown.clone(),
         None,
         Magic::BITCOIN,
         headers,
@@ -1024,7 +1032,7 @@ fn all_automatic_selection_classes_exclude_discouraged_addresses() {
 
 #[test]
 fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
-    let (mut maintenance, rx) = maintenance_fixture(3);
+    let (mut maintenance, rx, _shutdown) = maintenance_fixture(3);
     let tick = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
     queue_address_candidates(&maintenance, 10_000, tick, 0);
     assert_eq!(rx.len(), 3);
@@ -1077,7 +1085,7 @@ fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
 
 #[test]
 fn selection_uses_one_ban_snapshot_at_the_tick_time() {
-    let (maintenance, rx) = maintenance_fixture(1);
+    let (maintenance, rx, _shutdown) = maintenance_fixture(1);
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(10_001);
     maintenance.banned.inner.write().push(crate::BannedSubnet {
         subnet: "8.0.0.0/8".parse().expect("subnet"),
@@ -1329,7 +1337,7 @@ fn anchor_dials_prefer_block_slots_without_displacing_manual_roles() {
 
 #[test]
 fn anchor_queue_preserves_diversity_and_releases_a_saturated_attempt() {
-    let (mut maintenance, _) = maintenance_fixture(2);
+    let (mut maintenance, _, _shutdown) = maintenance_fixture(2);
     let (sender, receiver) = crossbeam_channel::bounded(1);
     maintenance.outbound_tx = sender;
     let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
@@ -1399,7 +1407,7 @@ fn anchor_queue_preserves_diversity_and_releases_a_saturated_attempt() {
 #[test]
 fn a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot() {
     for registered in [false, true] {
-        let (maintenance, receiver) = maintenance_fixture(1);
+        let (maintenance, receiver, _shutdown) = maintenance_fixture(1);
         let book = &maintenance.address_book;
         let probe = book
             .select(&[], &[], 10_000, u64::MAX, |_| true)
@@ -1446,7 +1454,7 @@ fn a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot() {
 }
 #[test]
 fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_configuration() {
-    let (maintenance, queue) = maintenance_fixture(4);
+    let (maintenance, queue, _shutdown) = maintenance_fixture(4);
     let now = crate::addrman::now();
     for n in 1..100 {
         maintenance.address_book.learn_dns(
@@ -1538,7 +1546,7 @@ fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_confi
 }
 #[test]
 fn onlynet_prefilter_selects_no_forbidden_network_dial() {
-    let (mut maintenance, queue) = maintenance_fixture(4);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(4);
     maintenance.routes.onlynet = vec![crate::NetworkLabel::Onion];
     let now = 10_000;
     queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
@@ -1595,7 +1603,7 @@ fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> cr
 #[test]
 fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
     for target in [1, 2] {
-        let (mut maintenance, queue) = maintenance_fixture(target);
+        let (mut maintenance, queue, _shutdown) = maintenance_fixture(target);
         maintenance.block_slots = 1;
         let book = crate::addrman::AddressBook::open(None, [1; 4], false, None);
         maintenance.address_book = Arc::clone(&book);
@@ -1848,7 +1856,7 @@ fn rejected_duplicates_preserve_active_feeler_and_dispatched_anchor_claims_until
 
 #[test]
 fn rejected_anchor_returns_original_metadata_and_releases_its_asmap_group() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let map = directory.path().join("asmap.raw");
     std::fs::write(
@@ -1900,7 +1908,7 @@ fn rejected_anchor_returns_original_metadata_and_releases_its_asmap_group() {
 
 #[test]
 fn inactive_boot_preserves_anchors_and_shutdown_returns_queued_undispatched_payload() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");
     let path = directory.path().join("peers-01010101.dat");
@@ -1927,7 +1935,7 @@ fn inactive_boot_preserves_anchors_and_shutdown_returns_queued_undispatched_payl
     assert_eq!(queued.addr, address);
     assert_eq!(queued.purpose, DialPurpose::Anchor);
     assert!(book.is_pending(address));
-    maintenance.shutdown.store(true, Ordering::Release);
+    shutdown.trigger();
     worker.join().expect("maintenance shutdown");
     assert!(!book.is_pending(address));
     assert!(
@@ -2003,7 +2011,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
         let book = crate::addrman::AddressBook::open(None, [1; 4], true, None);
         book.learn_dns("seed", &[address.into()], now);
         book.succeeded(address.into(), if tip_changes { 1032 } else { 9 }, now);
-        let (mut maintenance, queue) = maintenance_fixture(1);
+        let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
         maintenance.address_book = Arc::clone(&book);
         maintenance.chain_query = Some(Arc::clone(&query));
         queue_address_candidates(&maintenance, now, SystemTime::now(), 0);
@@ -2085,7 +2093,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
 
 #[test]
 fn ordinary_selection_skips_known_incomplete_peer_and_anchor_return_preserves_age() {
-    let (mut maintenance, queue) = maintenance_fixture(1);
+    let (mut maintenance, queue, _shutdown) = maintenance_fixture(1);
     let directory = tempfile::tempdir().expect("directory");
     let book = crate::addrman::AddressBook::open(
         Some(directory.path().join("peers.dat")),
@@ -2160,7 +2168,7 @@ fn disable_during_outbound_tip_query_refuses_registration_before_handshake() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
             &service.network_active,
         ))),
-        Arc::clone(&service.session_cancel.lock()),
+        service.session_cancel.lock().reader(),
         Some(Arc::new(move |_| {
             ready_count.fetch_add(1, Ordering::Relaxed);
         })),
@@ -2224,27 +2232,32 @@ fn workers_teardown_cleans_resources_and_cancels_sessions() {
         [127, 0, 0, 1],
         8333,
     )))]);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let session_cancel = Arc::new(AtomicBool::new(false));
-    let mut workers = Workers::new(Arc::clone(&shutdown), Arc::clone(&session_cancel));
+    let overlay_shutdown = Arc::new(AtomicBool::new(false));
+    let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let mut workers = Workers::new(
+        bitcoin_rs_chain::LatchWriter::new(),
+        Arc::clone(&overlay_shutdown),
+        Arc::clone(&session_cancel),
+    );
+    let shutdown = workers.shutdown.reader();
 
-    let thread_shutdown = Arc::clone(&shutdown);
+    let thread_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        while !thread_shutdown.load(Ordering::Acquire) {
-            thread::sleep(Duration::from_millis(10));
-        }
+        let _ = thread_shutdown.closed().recv();
         Ok(())
     });
     workers.listeners.push(handle);
 
-    assert!(!shutdown.load(Ordering::Acquire));
-    assert!(!session_cancel.load(Ordering::Acquire));
+    assert!(!shutdown.is_triggered());
+    assert!(!session_cancel.reader().is_triggered());
+    assert!(!overlay_shutdown.load(Ordering::Acquire));
     assert!(!addresses.lock().is_empty());
 
     workers.teardown(&peer_table, &addresses);
 
-    assert!(shutdown.load(Ordering::Acquire));
-    assert!(session_cancel.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
+    assert!(session_cancel.reader().is_triggered());
+    assert!(overlay_shutdown.load(Ordering::Acquire));
     assert!(addresses.lock().is_empty());
     assert!(workers.listeners.is_empty());
 }

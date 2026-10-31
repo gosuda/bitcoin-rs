@@ -2,7 +2,9 @@ use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::hashes::Hash as _;
@@ -26,7 +28,7 @@ fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
 
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
@@ -592,45 +594,68 @@ pub enum ListenerError {
 pub fn bind_listener(addr: std::net::SocketAddr) -> Result<TcpListener, ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|source| ListenerError::Bind { addr, source })?;
     Ok(listener)
 }
 
 #[expect(clippy::needless_pass_by_value)]
 pub fn serve(
     listener: TcpListener,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     shared: ConnectionShared,
 ) -> Result<(), ListenerError> {
+    let shutdown = shutdown.into();
     let addr = listener.local_addr()?;
     accept_connections(addr, &listener, &shutdown, &shared);
     Ok(())
 }
 
+fn loopback_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    match addr {
+        std::net::SocketAddr::V4(v4) if v4.ip().is_unspecified() => std::net::SocketAddr::V4(
+            std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, v4.port()),
+        ),
+        std::net::SocketAddr::V6(v6) if v6.ip().is_unspecified() => std::net::SocketAddr::V6(
+            std::net::SocketAddrV6::new(std::net::Ipv6Addr::LOCALHOST, v6.port(), 0, 0),
+        ),
+        other => other,
+    }
+}
+
 fn accept_connections(
     addr: std::net::SocketAddr,
     listener: &TcpListener,
-    shutdown: &AtomicBool,
+    shutdown: &bitcoin_rs_chain::LatchReader,
     shared: &ConnectionShared,
 ) {
-    let mut accept_backoff = POLL_INTERVAL;
-    while !shutdown.load(Ordering::Relaxed) && !shared.is_session_cancelled() {
+    let mut accept_backoff = ACCEPT_BACKOFF_INITIAL;
+    while !shutdown.is_triggered() && !shared.is_session_cancelled() {
         #[cfg(test)]
         if ACCEPT_ERROR_INJECT.swap(false, Ordering::Relaxed) {
             tracing::warn!(addr = %addr, "test-injected accept error; backing off");
-            std::thread::sleep(POLL_INTERVAL);
+            let _ = shutdown.closed().recv_timeout(ACCEPT_BACKOFF_INITIAL);
             continue;
         }
-        match listener.accept() {
+        let connect_addr = loopback_addr(addr);
+        let guard_shutdown = shutdown.on_cancel(move || {
+            let _ = std::net::TcpStream::connect(connect_addr);
+        });
+        let guard_session = shared.session_cancel.on_cancel(move || {
+            let _ = std::net::TcpStream::connect(connect_addr);
+        });
+        let accepted = listener.accept();
+        drop(guard_shutdown);
+        drop(guard_session);
+        if shutdown.is_triggered() || shared.is_session_cancelled() {
+            if let Ok((stream, _)) = accepted {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+            break;
+        }
+        match accepted {
             Ok((stream, peer_addr)) => {
                 let peer_addr = PeerEndpoint::from(peer_addr);
-                accept_backoff = POLL_INTERVAL;
+                accept_backoff = ACCEPT_BACKOFF_INITIAL;
                 admit_inbound(stream, peer_addr, shared);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(POLL_INTERVAL);
             }
             Err(error) => {
                 tracing::warn!(
@@ -639,7 +664,7 @@ fn accept_connections(
                     backoff_ms = accept_backoff.as_millis(),
                     "p2p accept error; backing off and continuing",
                 );
-                std::thread::sleep(accept_backoff);
+                let _ = shutdown.closed().recv_timeout(accept_backoff);
                 accept_backoff = std::cmp::min(accept_backoff * 2, ACCEPT_BACKOFF_MAX);
             }
         }
@@ -3106,7 +3131,7 @@ mod resilient_accept_tests {
     use bitcoin_rs_primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::{ACCEPT_ERROR_INJECT, bind_listener, serve, test_shared};
@@ -3121,21 +3146,21 @@ mod resilient_accept_tests {
         .expect("bind listener");
         let addr = listener.local_addr().expect("local_addr");
 
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
 
         ACCEPT_ERROR_INJECT.store(true, Ordering::Relaxed);
 
-        let thread_shutdown = Arc::clone(&shutdown);
+        let thread_shutdown = shutdown.reader();
         let handle = std::thread::spawn(move || serve(listener, thread_shutdown, shared));
 
         std::thread::sleep(Duration::from_millis(300));
 
         let _client = TcpStream::connect(addr).expect("listener should still accept");
 
-        shutdown.store(true, Ordering::Relaxed);
+        shutdown.trigger();
         let result = handle.join().expect("listener thread panicked");
         assert!(
             result.is_ok(),
@@ -3151,7 +3176,6 @@ mod inbound_admission_tests {
     use std::io::Read;
     use std::net::{Ipv4Addr, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use super::{bind_listener, serve, test_shared};
@@ -3171,8 +3195,8 @@ mod inbound_admission_tests {
         let mut shared = test_shared(Arc::clone(&peer_table), headers_tx, blocks_tx);
         shared.max_inbound = 1;
 
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let serve_shutdown = Arc::clone(&shutdown);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let serve_shutdown = shutdown.reader();
         let handle = std::thread::spawn(move || serve(listener, serve_shutdown, shared));
 
         let _first = TcpStream::connect(addr)?;
@@ -3195,7 +3219,7 @@ mod inbound_admission_tests {
             "the refused socket registered no lease"
         );
 
-        shutdown.store(true, Ordering::Relaxed);
+        shutdown.trigger();
         handle.join().expect("listener thread panicked")?;
         Ok(())
     }

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1276,8 +1276,8 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Te
     )?;
     let addr = listener.local_addr()?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let listener_shutdown = Arc::clone(&shutdown);
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let listener_shutdown = shutdown.reader();
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
     let shared = ConnectionShared::new(
@@ -1286,7 +1286,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Te
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchWriter::new().reader(),
         None,
         magic,
         headers_tx,
@@ -1301,13 +1301,13 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Te
     let client = match connect_with_retry(addr.into()) {
         Ok(client) => client,
         Err(error) => {
-            shutdown.store(true, Ordering::Relaxed);
+            shutdown.trigger();
             let _ = handle.join();
             return Err(error);
         }
     };
     let outcome = drive_handshake_as_core(client, magic, network);
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     let listener_result = handle.join().map_err(|_| "listener thread panicked")?;
     listener_result?;
     outcome

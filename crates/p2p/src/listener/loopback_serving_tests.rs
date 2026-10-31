@@ -2,7 +2,6 @@ use bitcoin_rs_primitives::PeerEndpoint;
 use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -189,7 +188,7 @@ struct Node {
     addr: PeerEndpoint,
     table: Arc<PeerTable>,
     aggregate: Arc<SharedOutboundBudget>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     listener: Option<JoinHandle<Result<(), ListenerError>>>,
 }
 
@@ -209,9 +208,9 @@ impl Node {
                 .unwrap_or_else(|| panic!("expected IP fixture")),
         )?;
         let addr = listener.local_addr()?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&shutdown);
-        let thread = std::thread::spawn(move || serve(listener, flag, shared));
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let reader = shutdown.reader();
+        let thread = std::thread::spawn(move || serve(listener, reader, shared));
         Ok(Self {
             addr: addr.into(),
             table,
@@ -222,7 +221,7 @@ impl Node {
     }
 
     fn request_stop(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.trigger();
         self.table.cancel_all();
     }
 
