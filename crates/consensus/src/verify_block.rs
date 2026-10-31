@@ -1,5 +1,3 @@
-//! Block rule checks over shared parse-once facts.
-
 use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
@@ -455,7 +453,6 @@ fn witness_commitment_hash_matches(
     &double_sha256(&buffer).to_le_bytes()[..] == commitment
 }
 
-/// Bitcoin merkle root over raw 32-byte leaves.
 #[must_use]
 pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
     if leaves.is_empty() {

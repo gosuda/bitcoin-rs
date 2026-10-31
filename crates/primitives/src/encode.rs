@@ -1,5 +1,3 @@
-//! Consensus encoding, hashing, and byte presentation for native protocol types.
-
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -69,7 +67,6 @@ pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
     bytes
 }
 
-/// Decodes a complete value from `bytes`, rejecting any trailing bytes.
 pub fn deserialize<T: ConsensusDecode>(bytes: &[u8]) -> Result<T, DecodeError> {
     let mut reader = bytes;
     let value = T::consensus_decode(&mut reader)?;

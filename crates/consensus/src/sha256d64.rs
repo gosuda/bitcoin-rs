@@ -1,5 +1,3 @@
-//! Eight-way `SHA256d` for fixed 64-byte Merkle parent inputs.
-
 pub(crate) const LANES: usize = 8;
 
 pub(crate) struct Avx2Sha256d64(());

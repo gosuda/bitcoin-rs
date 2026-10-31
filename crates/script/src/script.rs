@@ -1,5 +1,3 @@
-//! Native script parsing, classification, and building helpers.
-
 pub mod opcode {
 
     macro_rules! opcodes {
@@ -288,8 +286,6 @@ pub fn is_p2a(script: &[u8]) -> bool {
     script == [opcode::OP_PUSHNUM_1, 0x02, 0x4e, 0x73]
 }
 
-/// Returns the witness version and program of a segwit output script, or
-/// `None` when the script is not a well-formed witness program.
 #[must_use]
 pub fn witness_program(script: &[u8]) -> Option<(u8, &[u8])> {
     if script.len() < 4 || script.len() > 42 {
@@ -452,8 +448,6 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
     Some(declared)
 }
 
-/// Returns the smallest non-dust value in satoshis for an output paying
-/// `script` under `dust_relay_fee_sat_per_kvb`.
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     if script.len() > 10_000 {

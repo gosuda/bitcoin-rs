@@ -1,5 +1,3 @@
-//! Bitcoin Core-compatible USDT probes declared in `probes.d`.
-
 #![allow(
     clippy::items_after_statements,
     clippy::as_conversions,

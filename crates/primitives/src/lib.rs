@@ -45,7 +45,6 @@ pub use units::{
 };
 pub use version::{PKG_VERSION, USER_AGENT, client_version};
 
-/// Wall-clock seconds since the Unix epoch, `0` when the clock predates it.
 #[must_use]
 pub fn unix_time_secs() -> u64 {
     std::time::SystemTime::now()

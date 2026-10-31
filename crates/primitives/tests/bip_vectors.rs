@@ -1,5 +1,3 @@
-//! Authoritative BIP sighash vectors: the pinned expectations in
-//! `tests/vectors/` decide, not this crate's own re-derivations.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use std::path::PathBuf;

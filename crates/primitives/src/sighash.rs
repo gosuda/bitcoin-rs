@@ -1,5 +1,3 @@
-//! Native signature-hash computation: legacy, BIP143 (segwit v0), and BIP341/342 (taproot).
-
 use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};

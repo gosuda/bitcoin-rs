@@ -141,12 +141,10 @@ impl UtxoSetView<'_> {
         report
     }
 
-    /// Computes Bitcoin Core's `hash_serialized_3` commitment for this stable view.
     pub fn hash_serialized_3(&self) -> Result<Hash256, UtxoError> {
         crate::snapshot::hash_serialized_3_stable(self)
     }
 
-    /// Computes the snapshot commitment while rejecting impossible coin heights.
     pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
         crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
     }

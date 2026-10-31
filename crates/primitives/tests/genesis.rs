@@ -1,5 +1,3 @@
-//! Native genesis blocks hash to the published per-network genesis identifiers
-
 use bitcoin_rs_primitives::{Network, consensus_bytes};
 
 #[test]

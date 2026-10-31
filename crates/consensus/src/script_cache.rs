@@ -1,5 +1,3 @@
-//! Bounded script-execution cache for natively verified transactions.
-
 use std::collections::{HashMap, VecDeque};
 
 use bitcoin_rs_primitives::Wtxid;

@@ -2,8 +2,6 @@ use ruint::Uint;
 
 use crate::Hash256;
 
-/// A dated observation of the chain's cumulative transaction count, plus the
-/// rate transactions have arrived since — Bitcoin Core's `ChainTxData`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChainTxData {
     pub time: u64,

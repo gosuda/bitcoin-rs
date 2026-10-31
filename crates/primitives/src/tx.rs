@@ -1,5 +1,3 @@
-//! Native transaction types and txid/wtxid computation.
-
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -30,7 +28,6 @@ pub struct Tx {
 }
 
 impl Tx {
-    /// Returns true for exactly one input spending the null outpoint.
     #[must_use]
     pub fn is_coinbase(&self) -> bool {
         self.inputs.len() == 1 && self.inputs[0].previous_output.is_null()
@@ -41,7 +38,6 @@ impl Tx {
         self.inputs.iter().any(|input| !input.witness.is_empty())
     }
 
-    /// Computes the transaction id: double-SHA256 of the non-witness serialization.
     #[must_use]
     pub fn txid(&self) -> Txid {
         let mut engine: Sha256 = Sha256::new();
@@ -50,7 +46,6 @@ impl Tx {
         Txid(finalize_double_sha256(engine))
     }
 
-    /// Computes the witness transaction id: double-SHA256 of the full serialization.
     #[must_use]
     pub fn wtxid(&self) -> Wtxid {
         let mut engine = Sha256::new();
@@ -91,8 +86,6 @@ impl Tx {
         Self::vsize_from_weight(self.weight())
     }
 
-    /// Returns the heap bytes allocated for this transaction's inputs, outputs,
-    /// scripts, and witness stacks, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self

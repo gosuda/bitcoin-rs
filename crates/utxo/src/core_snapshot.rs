@@ -1,5 +1,3 @@
-//! Bitcoin Core portable snapshot v2 input.
-
 use std::io::{self, Read, Write};
 
 use bitcoin_rs_primitives::{AssumeUtxoData, Hash256, Network, varint};
@@ -21,7 +19,6 @@ const MAX_COMPACT_SIZE: u64 = 0x0200_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotMetadata {
-    /// Supported portable format version (2).
     pub version: u16,
     pub network_magic: [u8; 4],
     pub base_block_hash: Hash256,
@@ -77,9 +74,6 @@ pub enum StateVerifyError {
 }
 
 impl VerifiedSnapshotState {
-    /// # Errors
-    /// Returns the storage/height error of the commitment traversal, or
-    /// [`StateVerifyError::CommitmentMismatch`]; the set is dropped either way.
     pub fn verify(set: UtxoSet, anchor: &AssumeUtxoData) -> Result<Self, StateVerifyError> {
         let (actual, stats) = set.with_stable_view(|view| {
             let actual = view.hash_serialized_3_at_height(anchor.height)?;
@@ -187,7 +181,6 @@ pub enum SnapshotError {
     DeclaredCoinCountMismatch { declared: u64, actual: u64 },
     #[error("snapshot operation interrupted")]
     Interrupted,
-    /// Core emits exactly one group per txid in bytewise order.
     #[error("snapshot transaction groups are duplicated or out of Core byte order")]
     TransactionOrder,
     #[error("snapshot repeats output index {vout}")]
@@ -210,7 +203,6 @@ pub enum SnapshotError {
     CommitmentMismatch { expected: Hash256, actual: Hash256 },
 }
 
-/// Reads only the fixed 51-byte Core v2 header.
 pub fn read_metadata(reader: &mut impl Read) -> Result<SnapshotMetadata, SnapshotError> {
     Decoder::new(reader, HEADER_BYTES).metadata()
 }
@@ -234,11 +226,6 @@ pub fn read_and_verify(
     })
 }
 
-/// Folds statistics while authenticated staged records move into the UTXO table.
-///
-/// Activation therefore needs neither a second commitment pass nor a statistics
-/// scan over the table. Statistics are never computed for a file whose
-/// commitment did not match.
 pub fn read_verified(
     reader: &mut impl Read,
     network: Network,

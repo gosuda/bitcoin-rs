@@ -1,5 +1,3 @@
-//! Consensus validation surfaces for bitcoin-rs.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.

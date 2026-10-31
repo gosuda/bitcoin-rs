@@ -1,6 +1,3 @@
-//! The opcode evaluator: a bounded stack machine mirroring Bitcoin Core's
-//! `EvalScript`.
-
 use std::borrow::Cow;
 
 use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};

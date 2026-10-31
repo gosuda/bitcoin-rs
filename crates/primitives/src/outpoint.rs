@@ -35,9 +35,6 @@ impl OutPoint {
         Self { txid, vout }
     }
 
-    /// Bitcoin's null / coinbase prevout: an all-zero txid with `vout == u32::MAX`.
-    /// `OutPoint::default()` is the derived all-zero layout (`vout == 0`) and
-    /// is not null.
     #[must_use]
     pub fn null() -> Self {
         Self::new(Txid::default(), u32::MAX)

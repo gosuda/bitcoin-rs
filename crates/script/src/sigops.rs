@@ -1,5 +1,3 @@
-//! Native sigop counting over scripts, transactions, and blocks.
-
 use bitcoin_rs_primitives::{Tx, Witness};
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};

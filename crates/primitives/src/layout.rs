@@ -1,5 +1,3 @@
-//! Checked borrowed wire layout for blocks and transactions.
-
 use sha2::{Digest, Sha256};
 
 use crate::{

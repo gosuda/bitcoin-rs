@@ -1,5 +1,3 @@
-//! Block parse backends and runtime-selected script preparation.
-
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 

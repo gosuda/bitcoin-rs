@@ -1,5 +1,3 @@
-//! Scenario tests for the checked borrowed wire layout (`layout` module).
-
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
