@@ -143,6 +143,11 @@ pub trait TxInventory: Send + Sync {
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
+    /// Commits a `transaction_sent` mark when the response reached the
+    /// peer: the initial broadcast completed and must not be rolled back
+    /// by another peer's later failure.
+    fn transaction_send_committed(&self, _wtxid: Wtxid) {}
+
     /// Reverts `transaction_sent` when the response never reached the peer,
     /// so a failed send does not falsely complete initial broadcast.
     fn transaction_send_failed(&self, _wtxid: Wtxid) {}
@@ -156,6 +161,10 @@ pub trait TxInventory: Send + Sync {
 impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
     fn transaction_sent(&self, wtxid: Wtxid) {
         self.mark_broadcast(wtxid);
+    }
+
+    fn transaction_send_committed(&self, wtxid: Wtxid) {
+        self.commit_broadcast(wtxid);
     }
 
     fn transaction_send_failed(&self, wtxid: Wtxid) {
@@ -509,6 +518,9 @@ impl<'a> BroadcastMarks<'a> {
     }
 
     fn commit(mut self) {
+        for wtxid in &self.wtxids {
+            self.inventory.transaction_send_committed(*wtxid);
+        }
         self.wtxids.clear();
     }
 }

@@ -34,7 +34,17 @@ pub struct MempoolEntry {
     pub descendant_fee_delta: i128,
     /// Mempool acceptance time in wall-clock seconds since the Unix epoch.
     pub time: u64,
+    /// Effective flag: the transaction is awaiting its initial broadcast
+    /// (`broadcast_pending` set, no send committed, no serve in flight).
     pub unbroadcast: bool,
+    /// Admission intent: the transaction still needs an initial broadcast.
+    /// Kept across serve marks so a failed send can restore it.
+    pub broadcast_pending: bool,
+    /// Latched when a served response commits; no later failure may
+    /// re-flag the transaction as unbroadcast.
+    pub broadcast_done: bool,
+    /// Serve attempts currently holding a pre-send mark.
+    pub broadcast_marks: u32,
     /// Chain height at acceptance.
     pub height: u32,
     /// BIP141 sigop cost, counted against the resolved prevouts.
@@ -79,6 +89,9 @@ impl MempoolEntry {
             descendant_fee_delta: 0,
             time,
             unbroadcast: false,
+            broadcast_pending: false,
+            broadcast_done: false,
+            broadcast_marks: 0,
             height,
         }
     }

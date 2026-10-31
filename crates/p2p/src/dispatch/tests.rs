@@ -1040,6 +1040,10 @@ impl TxInventory for FakeTxInventory {
         self.marks.lock().push("sent");
     }
 
+    fn transaction_send_committed(&self, _wtxid: Wtxid) {
+        self.marks.lock().push("committed");
+    }
+
     fn transaction_send_failed(&self, _wtxid: Wtxid) {
         self.marks.lock().push("reverted");
     }
