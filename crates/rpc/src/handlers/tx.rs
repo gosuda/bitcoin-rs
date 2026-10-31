@@ -832,7 +832,7 @@ pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
     check_hex_len(raw, MAX_BROADCAST_HEX_CHARS, BROADCAST_HEX_LIMIT_ERROR)
 }
 
-fn check_inspect_hex_len(raw: &str) -> Result<(), &'static str> {
+pub(crate) fn check_consensus_hex_len(raw: &str) -> Result<(), &'static str> {
     check_hex_len(raw, MAX_INSPECT_HEX_CHARS, CONSENSUS_HEX_LIMIT_ERROR)
 }
 
@@ -842,7 +842,7 @@ fn decode_broadcast_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
 }
 
 fn decode_inspection_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
-    check_inspect_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
+    check_consensus_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
     decode_tx(raw, message)
 }
 
