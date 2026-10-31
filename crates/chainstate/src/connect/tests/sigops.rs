@@ -78,14 +78,25 @@ fn legacy_block_with_coinbase_sigop(
     Ok(block)
 }
 
-fn legacy_block_body(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
-    let mut block = mined_child(parent, 101)?;
-    // Each input executes 200 non-push opcodes, within the script limit,
-    // but legacy counting charges 100 * 20 * 4 = 8,000 per transaction.
-    let script: Vec<u8> = (0..100)
+fn legacy_sigop_heavy_script() -> Vec<u8> {
+    (0..100)
         .flat_map(|_| [OP_0, OP_0, OP_0, OP_CHECKMULTISIG, OP_DROP])
         .chain([OP_PUSHNUM_1])
-        .collect();
+        .collect()
+}
+
+fn dead_branch_multisig_script() -> Vec<u8> {
+    [
+        vec![OP_0, OP_IF],
+        vec![OP_CHECKMULTISIG; 100],
+        vec![OP_ENDIF, OP_PUSHNUM_1],
+    ]
+    .concat()
+}
+
+fn legacy_block_body(parent: BlockHash, funding: &Tx, transactions: u32) -> TestResult<Block> {
+    let mut block = mined_child(parent, 101)?;
+    let script = legacy_sigop_heavy_script();
     for vout in 0..transactions {
         block.txs.push(spend(vec![input(
             OutPoint::new(funding.txid(), vout),
@@ -257,13 +268,7 @@ fn coinbase_only_blocks_obey_the_sigop_budget() -> TestResult {
 
 #[test]
 fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
-    // Dead-branch multisig opcodes count toward sigops without needing keys.
-    let script: Vec<u8> = [
-        vec![OP_0, OP_IF],
-        vec![OP_CHECKMULTISIG; 100],
-        vec![OP_ENDIF, OP_PUSHNUM_1],
-    ]
-    .concat();
+    let script = dead_branch_multisig_script();
     for witness in [false, true] {
         for extra in [false, true] {
             let (mut chain, funding, parent) = funded_chain()?;

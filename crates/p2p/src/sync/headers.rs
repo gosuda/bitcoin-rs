@@ -409,30 +409,30 @@ impl BlockSync {
     }
 
     pub(super) fn retire_timed_out_header_syncs(&self, now: Instant) {
-        let below_floor = self.below_header_work_floor();
-        let expired: Vec<_> = {
-            let mut scheduler = self.scheduler.lock();
-            let expired: Vec<_> = scheduler
-                .headers_sync
-                .iter()
-                .filter_map(|(source, owned)| {
-                    let request = owned.request?;
-                    (request.state == HeaderRequestState::AwaitingResponse
-                        && (below_floor || owned.presync.is_some())
-                        && now.saturating_duration_since(request.requested_at) >= request.timeout())
-                    .then_some(*source)
-                })
-                .collect();
-            // Receipt and timeout settle under the same request-state lock.
-            for source in &expired {
-                scheduler.clear_headers_sync_for(*source);
-            }
-            expired
-        };
-        for source in expired {
+        for source in self.clear_timed_out_header_syncs(now) {
             self.peer_table.disconnect_source(source);
             tracing::debug!(peer_addr = ?source.endpoint, "block sync: header sync request timed out");
         }
+    }
+
+    fn clear_timed_out_header_syncs(&self, now: Instant) -> Vec<PeerSource> {
+        let below_floor = self.below_header_work_floor();
+        let mut scheduler = self.scheduler.lock();
+        let expired: Vec<_> = scheduler
+            .headers_sync
+            .iter()
+            .filter_map(|(source, owned)| {
+                let request = owned.request?;
+                (request.state == HeaderRequestState::AwaitingResponse
+                    && (below_floor || owned.presync.is_some())
+                    && now.saturating_duration_since(request.requested_at) >= request.timeout())
+                .then_some(*source)
+            })
+            .collect();
+        for source in &expired {
+            scheduler.clear_headers_sync_for(*source);
+        }
+        expired
     }
 
     fn below_header_work_floor(&self) -> bool {
