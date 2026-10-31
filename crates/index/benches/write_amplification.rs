@@ -1,6 +1,5 @@
-#![expect(clippy::expect_used, reason = "benchmark harness assertions")]
-
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+#[expect(clippy::expect_used, reason = "benchmark harness assertions")]
 mod bench_runner {
     use std::path::Path;
     use std::sync::Arc;
