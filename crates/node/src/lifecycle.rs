@@ -173,16 +173,15 @@ fn bind_rpc(
     )
 }
 
-fn bind_rpc_with_pool(
+fn rpc_context_handles(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
     pool: bitcoin_rs_rpc::context::PoolHandles,
-) -> Result<RpcBindings, RunError> {
+) -> ContextHandles {
     let config = state.config();
-    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let chainstate = state.chainstate();
-    let context = Context::from_handles(ContextHandles {
+    ContextHandles {
         silent_payments: config.rpc.silent_payments,
         compressed_transactions: config.rpc.compressed_transactions,
         chain: ChainHandles {
@@ -225,8 +224,19 @@ fn bind_rpc_with_pool(
         pool,
         zmq_publisher: state.zmq_publisher(),
         debug_log_path: Some(state.data_dir().join("debug.log")),
-    })
-    .with_esplora_derived_index(state.esplora_derived_index_query());
+    }
+}
+fn bind_rpc_with_pool(
+    state: &NodeState,
+    mining_control: &Arc<dyn MiningControl>,
+    block_body_source: Arc<dyn BlockBodySource>,
+    pool: bitcoin_rs_rpc::context::PoolHandles,
+) -> Result<RpcBindings, RunError> {
+    let config = state.config();
+    let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
+    let handles = rpc_context_handles(state, mining_control, block_body_source, pool);
+    let context = Context::from_handles(handles)
+        .with_esplora_derived_index(state.esplora_derived_index_query());
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
@@ -619,20 +629,7 @@ pub(crate) fn start_node(
         panic!("state recorded above");
     };
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
-    guard.services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
-        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
-    } else {
-        None
-    };
-    guard.services.readiness_sampler = if guard.services.metrics.is_some() {
-        Some(crate::metrics::spawn_readiness_sampler(
-            state.derived_index_status(),
-            state.shutdown_reader(),
-        )?)
-    } else {
-        None
-    };
+    init_metrics_services(state, &mut guard.services)?;
 
     let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
         (rx, None)
@@ -764,21 +761,7 @@ pub(crate) fn start_node(
     let pool_handles = bitcoin_rs_rpc::context::PoolHandles::default();
     let RpcBindings { context, listeners } =
         bind_rpc_with_pool(state, &mining_control, block_body_source, pool_handles)?;
-    for (rpc_server, surface) in listeners {
-        let rpc_local_addr = rpc_server.local_addr()?;
-        tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
-        let rpc_shutdown = state.shutdown_reader();
-        let worker = std::thread::Builder::new()
-            .name("bitcoin-rs-rpc".into())
-            .spawn(move || {
-                let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
-                if !rpc_shutdown.is_triggered() {
-                    tracing::error!(?surface, error = ?result.as_ref().err(), "rpc listener exited before shutdown");
-                }
-                result
-            })?;
-        guard.services.rpc_threads.push(worker);
-    }
+    start_rpc_listeners(state, listeners, &mut guard.services)?;
     #[cfg(feature = "pool")]
     if let Some(pool) = guard.services.pool.as_mut() {
         pool.start()?;
@@ -807,6 +790,46 @@ pub(crate) fn start_node(
             })?,
     );
     Ok(guard.finish(context))
+}
+fn init_metrics_services(state: &NodeState, services: &mut NodeServices) -> Result<(), RunError> {
+    services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
+        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
+        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
+    } else {
+        None
+    };
+    services.readiness_sampler = if services.metrics.is_some() {
+        Some(crate::metrics::spawn_readiness_sampler(
+            state.derived_index_status(),
+            state.shutdown_reader(),
+        )?)
+    } else {
+        None
+    };
+    Ok(())
+}
+
+fn start_rpc_listeners(
+    state: &NodeState,
+    listeners: Vec<(RpcServer, RpcSurface)>,
+    services: &mut NodeServices,
+) -> Result<(), RunError> {
+    for (rpc_server, surface) in listeners {
+        let rpc_local_addr = rpc_server.local_addr()?;
+        tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
+        let rpc_shutdown = state.shutdown_reader();
+        let worker = std::thread::Builder::new()
+            .name("bitcoin-rs-rpc".into())
+            .spawn(move || {
+                let result = rpc_server.serve_surface_with_shutdown(rpc_shutdown.clone(), surface);
+                if !rpc_shutdown.is_triggered() {
+                    tracing::error!(?surface, error = ?result.as_ref().err(), "rpc listener exited before shutdown");
+                }
+                result
+            })?;
+        services.rpc_threads.push(worker);
+    }
+    Ok(())
 }
 
 fn final_payout_script(config: &NodeConfig) -> Vec<u8> {
