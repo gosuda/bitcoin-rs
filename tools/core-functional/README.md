@@ -28,7 +28,7 @@ fail honestly rather than be silently accommodated.
 
 ```sh
 # 1. Extract the pinned Core suite (idempotent; wipes and re-extracts)
-tools/core-functional/fetch-core-tests.sh            # --core-repo --tag --dest
+tools/core-functional/fetch-core-tests.sh --core-repo ~/git/bitcoin   # or: export BITCOIN_CORE_REPO=~/git/bitcoin
 
 # 2. Point at a built node binary
 cargo build --release --bin bitcoin-rs               # owned by other phases
@@ -37,7 +37,7 @@ export BITCOIN_RS_BIN=$PWD/target/release/bitcoin-rs
 # 3. Run
 tools/core-functional/run.sh                         # all clean candidates
 tools/core-functional/run.sh rpc_getchaintips feature_help
-tools/core-functional/run.sh --jobs 8 --timeout 600 --results-dir /tmp/opencode/results
+tools/core-functional/run.sh --jobs 8 --timeout 600 --results-dir target/core-functional/results/quick
 tools/core-functional/run.sh --list                  # list candidate tests
 ```
 
@@ -53,8 +53,8 @@ per-test `tmp/` datadirs retained for debugging.
 | `fetch-core-tests.sh` | `git archive`s `test/functional`, `contrib/linearize`, `share/rpcauth` from a verified tag in a local Core checkout, writes a `PROVENANCE` stamp, symlinks `<dest>/bin/bitcoind` -> `bin/bitcoind-wrapper`. Refuses to run if the tag does not resolve. |
 | `bin/bitcoind-wrapper` | Python adapter exec'd by the framework. Translates Core-style argv to bitcoin-rs flags, derives a supported-only `bitcoin-rs-derived.conf` from the framework's `bitcoin.conf`, and creates the RPC cookie file where the framework reads it (`<datadir>/<chain>/.cookie`), pointing the node at it via `--rpc-cookie`. Unmappable flags/conf keys are dropped and appended as JSON lines to `<datadir>/wrapper-dropped-flags.log`. Silent on stdout/stderr in success paths. Reads `BITCOIN_RS_BIN` (required) and `BITCOIN_RS_EXTRA_ARGS` (optional, appended verbatim). |
 | `config.ini` | Template framework config; `run.sh` renders `@CORE_TESTS_DIR@` into the results dir. `ENABLE_BITCOIND=true`, every other component `false` so wallet/cli/zmq-dependent tests take the framework's own skip paths. |
-| `shim/sitecustomize.py` | PYTHONPATH startup hook that monkeypatches `test_framework.wallet.MiniWallet.generate` to mine via the implemented `generatetoaddress` RPC instead of the unimplemented `generatetodescriptor` (ADDRESS_OP_TRUE mode only; other modes keep upstream behavior and fail loudly). No Core code is copied; the patch preserves the upstream post-conditions (rescan_utxos, return shape, kwargs forwarding). |
-| `run.sh` + `bin/runner.py` | Runner: per-test `python3 <test>.py --configfile <rendered config.ini> --tmpdir <results>/tmp/<test> --cachedir <results>/cache` with the shim on `PYTHONPATH`, cwd `= <dest>/test/functional`. Classifies 0=PASS, 77=SKIP, else=FAIL (timeout tracked separately). Fails fast (exit 2, before running anything) when `BITCOIN_RS_BIN` is unset/missing. |
+| `shim/sitecustomize.py` | PYTHONPATH startup hook; four patches, each an explicitly recorded bitcoin-rs deviation with a disable env var (the file header owns the full detail): (1) MiniWallet `generate` mines via the implemented `generatetoaddress` instead of the unimplemented `generatetodescriptor` (ADDRESS_OP_TRUE mode only; other modes keep upstream behavior and fail loudly); (2) rewrites exactly the empty-params object and `generatetoaddress`'s named-object form into positional arrays client-side; (3) no-ops the two framework-plumbing RPCs the node still lacks (`syncwithvalidationinterfacequeue`, `setmocktime`); (4) strips exactly the `stop(wait=0)` teardown form (non-zero waits still fail honestly). No Core code is copied; patches preserve upstream post-conditions where they apply. |
+| `run.sh` + `bin/runner.py` | Runner: per-test `python3 <test>.py --configfile <rendered config.ini> --tmpdir <results>/tmp/<test> --cachedir <results>/cache` with the shim on `PYTHONPATH`, cwd `= <dest>/test/functional`. Before the parallel pool starts, runs the extracted tree's `create_cache.py` once, serially, against the shared cachedir (Core's own `test_runner.py` pattern) so parallel jobs never race to build the cache; the framework skips mining when the cache node dir already exists, so pre-seeded caches are reused. Each test runs as its own process group; a timeout kills the whole group so node processes a timed-out test spawned cannot linger and hold ports. Classifies 0=PASS, 77=SKIP, else=FAIL (timeout tracked separately). Fails fast (exit 2, before running anything) when `BITCOIN_RS_BIN` is unset/missing. |
 | `tests/clean-candidates.txt` | The 46 tests selected by static RPC-dependency analysis at derivation time: an upper bound on candidates, not pass claims. |
 
 ## Wrapper translation table
@@ -129,7 +129,9 @@ and failure log tails) is the single evidence owner for any future
 "bitcoin-rs passes Core functional test X" statement; the candidate list is
 explicitly an upper bound from static analysis, and every behavioral gap the
 adapter papered over is recorded in per-datadir `wrapper-dropped-flags.log`
-rather than hidden. The lane is tooling only: no `crates/`, `bin/`, `docs/`,
-`scripts/`, or `e2e/` code is touched, consensus and persistence behavior are
-unchanged, and node synchronization is affected only in the sense that a node
-process is exercised - no sync, validation, or commit path code is modified.
+rather than hidden. The lane is tooling only: it adds no `crates/`, `bin/`,
+`scripts/`, or `e2e/` code (its only non-`tools/` changes are the
+documentation that indexes and contracts it), consensus and persistence
+behavior are unchanged, and node synchronization is affected only in the
+sense that a node process is exercised - no sync, validation, or commit
+path code is modified.

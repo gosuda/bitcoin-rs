@@ -7,6 +7,18 @@ codes (0 PASS, 77 SKIP, anything else FAIL - timeout gets its own marker),
 and writes report.json (machine) + report.md (human) into the results dir.
 The reports are the evidence owner for any compatibility claim made from this
 lane; see tools/core-functional/README.md.
+
+Cache handling copies Bitcoin Core's own test_runner.py: before the parallel
+pool starts, create_cache.py (a num_nodes=0 framework run whose
+_initialize_chain mines the 199-block regtest chain into --cachedir) is run
+once, serially, so parallel jobs never race to build the shared cache on the
+same node0 datadir and ports. The framework itself skips mining when the
+cache node dir already exists, so a pre-seeded cache is reused as-is.
+
+Each test runs as its own process-group leader and a timeout kills the whole
+group: a timed-out framework process leaves its node processes running
+(SIGTERM to the python parent never runs its cleanup), and those orphans hold
+RPC/p2p ports for the rest of the parallel run.
 """
 
 import argparse
@@ -16,6 +28,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -73,15 +86,26 @@ def run_one(test, args, env):
     if tmpdir.exists():
         shutil.rmtree(tmpdir)  # framework requires a nonexistent --tmpdir
     command = [
-        "timeout", str(args.timeout), sys.executable, str(script),
+        sys.executable, str(script),
         f"--configfile={pathlib.Path(args.config).resolve()}",
         f"--tmpdir={tmpdir}",
         f"--cachedir={results_dir / 'cache'}",
     ]
     started = time.monotonic()
-    proc = subprocess.run(command, cwd=test_dir, env=env, capture_output=True, text=True)
+    proc = subprocess.Popen(
+        command, cwd=test_dir, env=env, start_new_session=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    timed_out = False
+    try:
+        stdout, stderr = proc.communicate(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the group: test + its nodes
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate()
     duration = time.monotonic() - started
-    timed_out = proc.returncode == 124
     return {
         "name": test,
         "status": classify(proc.returncode, timed_out),
@@ -89,9 +113,48 @@ def run_one(test, args, env):
         "timeout": timed_out,
         "duration_secs": round(duration, 1),
         "log_tail": log_tail(tmpdir / "test_framework.log") if proc.returncode != 0 else None,
-        "stdout_tail": tail_text(proc.stdout),
-        "stderr_tail": tail_text(proc.stderr),
+        "stdout_tail": tail_text(stdout),
+        "stderr_tail": tail_text(stderr),
     }
+
+
+def prime_cache(args, env):
+    """Build the shared chain cache once, serially, before the pool starts.
+
+    Core's test_runner.py runs create_cache.py the same way before its
+    parallel job handlers: without it, several non-clean-chain tests can
+    simultaneously observe the missing <results>/cache/node0 and race to
+    build it on the same cache datadir and ports, or copy a half-built
+    cache. Runs only when tests actually run in parallel (Core's own
+    condition); the framework skips mining when the cache node dir already
+    exists, so pre-seeded caches are reused, not rebuilt. Returns 0 on
+    success or the failing exit code (the run then aborts, as Core's
+    runner re-raises)."""
+    test_dir = pathlib.Path(args.dest).resolve() / "test" / "functional"
+    results_dir = pathlib.Path(args.results_dir).resolve()
+    scratch = results_dir / "cache-create"
+    if scratch.exists():
+        shutil.rmtree(scratch)  # framework requires a nonexistent --tmpdir
+    command = [
+        sys.executable, str(test_dir / "create_cache.py"),
+        f"--configfile={pathlib.Path(args.config).resolve()}",
+        f"--tmpdir={scratch}",
+        f"--cachedir={results_dir / 'cache'}",
+    ]
+    print("priming shared chain cache (create_cache.py, serial)", flush=True)
+    started = time.monotonic()
+    proc = subprocess.run(command, cwd=test_dir, env=env,
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(f"runner: create_cache.py failed (exit {proc.returncode});"
+                         " aborting before the parallel run\n")
+        if tail_text(proc.stdout):
+            sys.stderr.write(tail_text(proc.stdout) + "\n")
+        if tail_text(proc.stderr):
+            sys.stderr.write(tail_text(proc.stderr) + "\n")
+        return proc.returncode or 1
+    print(f"cache ready in {time.monotonic() - started:.1f}s", flush=True)
+    return 0
 
 
 def main():
@@ -111,6 +174,11 @@ def main():
     print(f"node binary : {env.get('BITCOIN_RS_BIN', '<unset>')}")
     print(f"wrapper     : {env.get('BITCOIND', '<unset>')}")
     print(f"tests={len(args.tests)} jobs={args.jobs} timeout={args.timeout}s", flush=True)
+
+    if len(args.tests) > 1 and args.jobs > 1:
+        code = prime_cache(args, env)
+        if code:
+            return code
 
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
