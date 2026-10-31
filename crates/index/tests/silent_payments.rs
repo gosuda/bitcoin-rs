@@ -1,5 +1,6 @@
 #![cfg(feature = "silent-payments")]
 
+use crate::support::error::TestError;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin_hashes::{Hash as _, hash160};
 use bitcoin_rs_index::silent_payments::{
@@ -12,7 +13,6 @@ use bitcoin_rs_utxo::{
     contract::{BlockSpends, BlockSpendsError, HistoryUnavailable},
 };
 use serde::Deserialize;
-use crate::support::error::TestError;
 
 type Result<T = ()> = std::result::Result<T, TestError>;
 
@@ -245,7 +245,7 @@ fn taproot_annex_and_script_path_nums_are_handled_without_mutation() -> Result {
         .ok_or("taproot vector")?;
     let (mut tx, scripts) = vector_tx(case)?;
     let initial = derive(&tx, &scripts)?.ok_or("eligible")?;
-    tx.inputs[0].witness.push(vec![0x50, 0x99]);
+    tx.inputs[0].witness.push(&[0x50, 0x99]);
     assert_eq!(derive(&tx, &scripts)?.ok_or("annex")?.tweak, initial.tweak);
     let before = tx.clone();
     derive(&tx, &scripts)?;

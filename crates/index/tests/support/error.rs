@@ -23,6 +23,12 @@ pub(crate) enum TestError {
     #[cfg(feature = "silent-payments")]
     #[error(transparent)]
     Tweak(#[from] bitcoin_rs_index::silent_payments::TweakError),
+    #[error(transparent)]
+    ConsensusEncode(#[from] bitcoin::consensus::encode::Error),
+    #[error(transparent)]
+    Hash(#[from] bitcoin_rs_primitives::HashError),
+    #[error("{0}")]
+    Message(String),
     #[error("missing {0}")]
     Missing(&'static str),
 }
@@ -30,5 +36,11 @@ pub(crate) enum TestError {
 impl From<&'static str> for TestError {
     fn from(s: &'static str) -> Self {
         Self::Missing(s)
+    }
+}
+
+impl From<String> for TestError {
+    fn from(s: String) -> Self {
+        Self::Message(s)
     }
 }
