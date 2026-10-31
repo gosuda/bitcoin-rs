@@ -1,3 +1,5 @@
+#![expect(clippy::expect_used, reason = "benchmark harness assertions")]
+
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 mod bench_runner {
     use std::path::Path;
@@ -187,11 +189,11 @@ mod bench_runner {
     }
 
     fn print_report(report: &RunReport) {
-        let amplification_permille = if report.logical_bytes == 0 {
-            0
-        } else {
-            report.write_bytes.saturating_mul(1_000) / report.logical_bytes
-        };
+        let amplification_permille = report
+            .write_bytes
+            .saturating_mul(1_000)
+            .checked_div(report.logical_bytes)
+            .unwrap_or(0);
         println!(
             "family={} backend={} blocks={} write_bytes={} logical_bytes={} amplification_permille={} \
          build_ms={} snapshot_open_us={} footprint_bytes={} query_p50_us={} query_p95_us={} \
@@ -213,6 +215,77 @@ mod bench_runner {
         );
     }
 
+    fn query_samples<S>(
+        store: &Arc<S>,
+        family: Family,
+        scripthash_prefix: ScriptHash,
+    ) -> Result<Vec<Duration>, BenchError>
+    where
+        S: KvStore + Send + Sync + 'static,
+    {
+        let reader = Indexer::new(Arc::clone(store));
+        let snapshot = reader.snapshot()?;
+        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
+        for _ in 0..QUERY_SAMPLES {
+            let started = Instant::now();
+            let rows = match family {
+                Family::ScriptHistory => snapshot
+                    .funding_rows(scripthash_prefix, SCAN_LIMIT)?
+                    .rows
+                    .len(),
+                Family::ScriptLive => snapshot
+                    .live_rows(scripthash_prefix, SCAN_LIMIT)?
+                    .rows
+                    .len(),
+                Family::TxLookup => {
+                    let txid = bitcoin_rs_primitives::Txid(
+                        bitcoin_rs_primitives::Hash256::from_le_bytes(&[0; 32]),
+                    );
+                    snapshot.transaction_rows(&txid, SCAN_LIMIT)?.rows.len()
+                }
+            };
+            std::hint::black_box(rows);
+            samples.push(started.elapsed());
+        }
+        Ok(samples)
+    }
+
+    fn rollback_chain<S>(
+        store: &Arc<S>,
+        capabilities: IndexCapabilities,
+        watermarks: &[IndexWatermark],
+        bodies: &[Vec<u8>],
+        spent: &FixedSpentScripts,
+    ) -> Result<Duration, BenchError>
+    where
+        S: KvStore + Send + Sync + 'static,
+    {
+        let reorg_started = Instant::now();
+        let mut writer = IndexWriter::open(Arc::clone(store), 1)?;
+        for depth in 0..REORG_DEPTH {
+            let height = CHAIN_BLOCKS - 1 - depth;
+            let (fence, _) = writer.fenced_watermarks()?;
+            let prev = if height == 0 {
+                None
+            } else {
+                let prev_idx = usize::try_from(height - 1)?;
+                Some(watermarks[prev_idx])
+            };
+            let depth_idx = usize::try_from(depth)?;
+            let body = &bodies[bodies.len() - 1 - depth_idx];
+            writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
+                fence,
+                capabilities,
+                prev,
+                body,
+                ConsumerCursorUpdate::Keep,
+                spent,
+            )?;
+        }
+        let reorg = reorg_started.elapsed();
+        Ok(reorg)
+    }
+
     fn measure<S>(
         family: Family,
         backend: &'static str,
@@ -230,8 +303,10 @@ mod bench_runner {
         let mut writer = IndexWriter::open(Arc::clone(store), 1)?;
         let footprint_baseline = directory_bytes(dir);
 
-        let mut watermarks: Vec<IndexWatermark> = Vec::with_capacity(CHAIN_BLOCKS as usize);
-        let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(REORG_DEPTH as usize);
+        let chain_blocks = usize::try_from(CHAIN_BLOCKS)?;
+        let reorg_depth = usize::try_from(REORG_DEPTH)?;
+        let mut watermarks: Vec<IndexWatermark> = Vec::with_capacity(chain_blocks);
+        let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(reorg_depth);
         let mut previous = Hash256::from_le_bytes(&[0; 32]);
         let mut logical_bytes = 0_u64;
         let write_before = write_bytes_now();
@@ -255,7 +330,7 @@ mod bench_runner {
             }
             let watermark = writer.commit_forward(batch)?;
             bodies.push(body);
-            if bodies.len() > REORG_DEPTH as usize {
+            if bodies.len() > reorg_depth {
                 bodies.remove(0);
             }
             watermarks.push(watermark);
@@ -267,55 +342,11 @@ mod bench_runner {
 
         let snapshot_started = Instant::now();
         let reader = Indexer::new(Arc::clone(store));
-        let snapshot = reader.snapshot()?;
+        let _snapshot = reader.snapshot()?;
         let snapshot_open = snapshot_started.elapsed();
 
-        let mut samples = Vec::with_capacity(QUERY_SAMPLES);
-        for _ in 0..QUERY_SAMPLES {
-            let started = Instant::now();
-            let rows = match family {
-                Family::ScriptHistory => snapshot
-                    .funding_rows(scripthash_prefix, SCAN_LIMIT)?
-                    .rows
-                    .len(),
-                Family::ScriptLive => snapshot
-                    .live_rows(scripthash_prefix, SCAN_LIMIT)?
-                    .rows
-                    .len(),
-                Family::TxLookup => {
-                    let txid = bitcoin_rs_primitives::Txid(
-                        bitcoin_rs_primitives::Hash256::from_le_bytes(&[0; 32]),
-                    );
-                    snapshot.transaction_rows(&txid, SCAN_LIMIT)?.rows.len()
-                }
-            };
-            std::hint::black_box(rows);
-            samples.push(started.elapsed());
-        }
-        drop(snapshot);
-
-        let reorg_started = Instant::now();
-        let mut writer = IndexWriter::open(Arc::clone(store), 1)?;
-        for depth in 0..REORG_DEPTH {
-            let height = CHAIN_BLOCKS - 1 - depth;
-            let (fence, _) = writer.fenced_watermarks()?;
-            let prev = if height == 0 {
-                None
-            } else {
-                Some(watermarks[height as usize - 1])
-            };
-            let body = &bodies[bodies.len() - 1 - depth as usize];
-            writer.commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                body,
-                ConsumerCursorUpdate::Keep,
-                &spent,
-            )?;
-        }
-        let reorg = reorg_started.elapsed();
-        drop(writer);
+        let mut samples = query_samples(store, family, scripthash_prefix)?;
+        let reorg = rollback_chain(store, capabilities, &watermarks, &bodies, &spent)?;
 
         Ok(RunReport {
             family,
