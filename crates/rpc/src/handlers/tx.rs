@@ -820,7 +820,7 @@ pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
     check_hex_len(raw, MAX_BROADCAST_HEX_CHARS, BROADCAST_HEX_LIMIT_ERROR)
 }
 
-fn check_inspect_hex_len(raw: &str) -> Result<(), &'static str> {
+pub(crate) fn check_inspect_hex_len(raw: &str) -> Result<(), &'static str> {
     check_hex_len(raw, MAX_INSPECT_HEX_CHARS, CONSENSUS_HEX_LIMIT_ERROR)
 }
 
