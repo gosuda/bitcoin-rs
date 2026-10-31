@@ -788,7 +788,7 @@ fn holding_maximum_share_leaves_room_for_second_connection() -> TestResult {
 
 // P2P-02
 #[test]
-fn aggregate_never_exceeds_cap_with_concurrent_reservers() {
+fn aggregate_never_exceeds_cap_with_concurrent_reservers() -> TestResult {
     let aggregate = Arc::new(SharedOutboundBudget::new());
     let cap = aggregate.max_bytes();
     let threads = 8;
@@ -829,7 +829,9 @@ fn aggregate_never_exceeds_cap_with_concurrent_reservers() {
         .collect();
 
     for handle in handles {
-        handle.join().expect("reserver thread joined cleanly");
+        handle
+            .join()
+            .map_err(|_| "reserver thread joined cleanly")?;
     }
 
     assert_eq!(
@@ -837,11 +839,12 @@ fn aggregate_never_exceeds_cap_with_concurrent_reservers() {
         0,
         "independent oracle: releasing all credits must return aggregate used bytes to 0"
     );
+    Ok(())
 }
 
 // P2P-02
 #[test]
-fn releasing_credits_returns_used_to_zero() {
+fn releasing_credits_returns_used_to_zero() -> TestResult {
     let aggregate = Arc::new(SharedOutboundBudget::new());
     let (tx, _rx) = crate::test_support::message_channel();
     let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
@@ -849,7 +852,7 @@ fn releasing_credits_returns_used_to_zero() {
 
     let credit = budget
         .try_charge(1_000_000)
-        .expect("independent oracle: fresh budget admits reservation");
+        .map_err(|_| "independent oracle: fresh budget admits reservation")?;
     assert_eq!(
         aggregate.pending(),
         1_000_000,
@@ -861,4 +864,5 @@ fn releasing_credits_returns_used_to_zero() {
         0,
         "independent oracle: dropping credit returns aggregate pending bytes to 0"
     );
+    Ok(())
 }
