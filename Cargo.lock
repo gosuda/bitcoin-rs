@@ -334,6 +334,7 @@ dependencies = [
  "bytes",
  "cap-fs-ext",
  "cap-std",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "metrics",
  "parking_lot",

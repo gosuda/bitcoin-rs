@@ -48,6 +48,7 @@ bitcoin-rs-chain.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
 cap-fs-ext.workspace = true
+crossbeam-channel.workspace = true
 cap-std.workspace = true
 hashbrown.workspace = true
 metrics.workspace = true

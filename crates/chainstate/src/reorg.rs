@@ -944,7 +944,6 @@ mod tests {
     use bitcoin_rs_utxo::UtxoSet;
 
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
 
     struct NoopObserver;
 
@@ -959,7 +958,7 @@ mod tests {
     #[test]
     fn fatal_pretransition_settlement_closes_admission() {
         let handles = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
-        let shutdown = handles.shutdown_handle();
+        let shutdown = handles.shutdown_reader();
         let mut observer = NoopObserver;
         let mut settle = |_: &mut NoopObserver, _: core::result::Result<(), ReorgError>| {
             Err(ReorgError::TransitionSettlement {
@@ -974,7 +973,7 @@ mod tests {
             result,
             Err(ReorgError::TransitionSettlement { .. })
         ));
-        assert!(shutdown.load(Ordering::Acquire));
+        assert!(shutdown.is_triggered());
         assert!(matches!(
             handles.begin_transition(),
             Err(ApplyError::Shutdown)

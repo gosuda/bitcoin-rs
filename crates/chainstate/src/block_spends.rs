@@ -1,7 +1,5 @@
 //! Read-only, receipt-checked access to the existing retained undo owner.
 
-use std::sync::atomic::Ordering;
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_primitives::{Block, Hash256, deserialize};
 use bitcoin_rs_storage::{DurableHead, pruning::HistoryLease};
@@ -70,7 +68,7 @@ impl Chainstate {
         if self.is_closed_for_recovery() {
             return Err(BlockSpendsError::Closed);
         }
-        if self.shutdown.load(Ordering::Acquire) {
+        if self.shutdown.reader().is_triggered() {
             return Err(HistoryUnavailable::Shutdown.into());
         }
         let applied = self.applied_tip.load_full();

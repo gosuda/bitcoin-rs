@@ -635,9 +635,7 @@ fn a_historical_role_keeps_its_whole_window() -> Result {
 #[test]
 fn shutdown_during_the_walk_skips_instead_of_failing() -> Result {
     let f = fixture(4)?;
-    f.chain
-        .shutdown
-        .store(true, core::sync::atomic::Ordering::SeqCst);
+    f.chain.request_shutdown();
     assert_eq!(
         f.outcome(CheckLevel::CheckUndo, None)?,
         VerifyOutcome::SkippedNoBlockData { height: 4 }

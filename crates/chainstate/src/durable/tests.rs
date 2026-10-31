@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
@@ -496,7 +495,7 @@ fn committed_gap_replay_failure_fails_closed() -> TestResult {
         panic!("a gap body that fails apply must fail the replay");
     };
     assert!(
-        handles.shutdown_handle().load(Ordering::Acquire),
+        handles.shutdown_reader().is_triggered(),
         "a failed replay must fail closed, got: {error}"
     );
     assert!(

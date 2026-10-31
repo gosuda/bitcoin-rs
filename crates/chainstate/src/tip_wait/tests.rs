@@ -2,7 +2,8 @@ use super::*;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at;
 use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
-use std::sync::{atomic::AtomicBool, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 
 fn owner() -> Chainstate {
     let owner = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));

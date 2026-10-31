@@ -213,12 +213,12 @@ fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
 #[test]
 fn close_requests_shutdown() {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    let shutdown = handles.shutdown_handle();
-    assert!(!shutdown.load(Ordering::Acquire));
+    let shutdown = handles.shutdown_reader();
+    assert!(!shutdown.is_triggered());
 
     let _closed = handles.close();
 
-    assert!(shutdown.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn direct_transition_fatal_error_closes_admission() -> TestResult {
     let durable = Arc::new(InMemoryDurableHeadStore::new());
     durable.commit(None, &incompatible, &CommitRecords::default())?;
     handles.durable_head = durable;
-    let shutdown = handles.shutdown_handle();
+    let shutdown = handles.shutdown_reader();
 
     let transition = handles.begin_transition()?;
     let outcome = transition.connect(&BlockPayload::from_local(child));
@@ -248,7 +248,7 @@ fn direct_transition_fatal_error_closes_admission() -> TestResult {
         outcome,
         Err(ApplyError::DurableHeadLineage { .. })
     ));
-    assert!(shutdown.load(Ordering::Acquire));
+    assert!(shutdown.is_triggered());
     drop(transition);
     assert!(matches!(
         handles.begin_transition(),

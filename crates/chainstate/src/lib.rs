@@ -5,8 +5,8 @@ use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TransitionDomain;
 use bitcoin_rs_chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
-    TransitionAuthority, TransitionAuthorityGuard,
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, LatchReader, LatchWriter, TipReader,
+    TipSnapshot, TransitionAuthority, TransitionAuthorityGuard,
 };
 use bitcoin_rs_consensus::ScriptExecutionCache;
 use bitcoin_rs_consensus::UtxoView;
@@ -122,20 +122,20 @@ fn tx_count_delta_for(block: &Block) -> u64 {
 const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
 pub(crate) struct ApplyAdmission {
-    closed: Arc<AtomicBool>,
+    closed: LatchWriter,
     barrier: RwLock<()>,
 }
 
 impl ApplyAdmission {
     pub(crate) fn new() -> Self {
         Self {
-            closed: Arc::new(AtomicBool::new(false)),
+            closed: LatchWriter::new(),
             barrier: RwLock::new(()),
         }
     }
 
     fn ensure_open(&self) -> Result<(), ApplyError> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.reader().is_triggered() {
             return Err(ApplyError::Shutdown);
         }
         Ok(())
@@ -152,7 +152,7 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close(&self) -> RwLockWriteGuard<'_, ()> {
-        self.closed.store(true, Ordering::Release);
+        self.closed.trigger();
         self.barrier.write()
     }
 
@@ -161,7 +161,15 @@ impl ApplyAdmission {
     }
 
     pub(crate) fn close_permanently(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.closed.trigger();
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.reader().is_triggered()
+    }
+
+    pub(crate) fn closed_reader(&self) -> LatchReader {
+        self.closed.reader()
     }
 }
 
@@ -397,7 +405,9 @@ pub struct Chainstate {
     /// before the tip publishes (`RCV-02`).
     pub(crate) durable_head: Arc<dyn DurableHeadStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
-    pub(crate) shutdown: Arc<AtomicBool>,
+    pub(crate) shutdown: Arc<LatchWriter>,
+    #[cfg(any(test, feature = "test-seam"))]
+    pub(crate) legacy_shutdown: Arc<AtomicBool>,
     pub(crate) tip_notification: Arc<tip_wait::TipNotification>,
     pub(crate) chain_transition: TransitionAuthority,
     pub(crate) assume_valid_height: u32,
@@ -536,7 +546,6 @@ impl Chainstate {
             TipReader::new(Arc::clone(&applied_tip)),
             BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
-        let shutdown = Arc::new(AtomicBool::new(false));
         Self {
             network: parts.network,
             chain_tip,
@@ -549,7 +558,9 @@ impl Chainstate {
             undo_store: parts.undo_store,
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown,
+            shutdown: Arc::new(LatchWriter::new()),
+            #[cfg(any(test, feature = "test-seam"))]
+            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: parts.chain_transition,
             assume_valid_height: parts.assume_valid_height,
@@ -736,7 +747,9 @@ impl Chainstate {
             undo_store: undo,
             durable_head: historical_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(LatchWriter::new()),
+            #[cfg(any(test, feature = "test-seam"))]
+            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
@@ -763,12 +776,14 @@ impl Chainstate {
 
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
+        self.shutdown.reader()
     }
 
     pub fn request_shutdown(&self) {
         let _gate = self.tip_notification.gate.lock();
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
+        #[cfg(any(test, feature = "test-seam"))]
+        self.legacy_shutdown.store(true, Ordering::Release);
         self.tip_notification.changed.notify_all();
     }
 
@@ -779,12 +794,12 @@ impl Chainstate {
 
     #[must_use]
     pub fn is_closed_for_recovery(&self) -> bool {
-        self.admission.closed.load(Ordering::Acquire)
+        self.admission.is_closed()
     }
 
     #[must_use]
     pub fn closed_for_recovery_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.admission.closed))
+        self.admission.closed_reader()
     }
 
     #[must_use]
@@ -922,7 +937,7 @@ impl Chainstate {
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
+        Arc::clone(&self.legacy_shutdown)
     }
 
     pub fn admit_headers(
@@ -1069,7 +1084,9 @@ impl Chainstate {
             undo_store: Arc::new(InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(LatchWriter::new()),
+            #[cfg(any(test, feature = "test-seam"))]
+            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: TransitionDomain::new().authority(),
             assume_valid_height: 0,

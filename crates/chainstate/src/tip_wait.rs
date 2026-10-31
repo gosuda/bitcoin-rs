@@ -1,7 +1,6 @@
 //! Parking and settled response capture for the authoritative applied tip.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{ActiveTipWait, LatchReader, TipSnapshot, TipWaitCondition};
@@ -23,7 +22,7 @@ impl ActiveTipWait for Chainstate {
         cancellation: &LatchReader,
     ) -> Option<Arc<TipSnapshot>> {
         let stopped = || {
-            self.shutdown.load(Ordering::Acquire)
+            self.shutdown.reader().is_triggered()
                 || cancellation.is_triggered()
                 || deadline.is_some_and(|end| Instant::now() >= end)
         };

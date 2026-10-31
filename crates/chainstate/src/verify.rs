@@ -2,7 +2,6 @@
 
 use core::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::{
     BlockTreeReader, ChainError, LatchReader, NodeId, softfork_state, validate_pow,
@@ -273,7 +272,7 @@ impl Walk<'_> {
         if self.chainstate.is_closed_for_recovery() {
             return Err(Stop::Failed(VerifyError::ClosedForRecovery));
         }
-        if self.chainstate.shutdown.load(Ordering::Acquire) {
+        if self.chainstate.shutdown.reader().is_triggered() {
             return Err(Stop::Skipped { height });
         }
         if self.lease.floor().is_none() {

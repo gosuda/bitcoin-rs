@@ -44,3 +44,53 @@ fn is_closed_for_recovery_tracks_the_fatal_close() {
         "the same closure still refuses every later transition"
     );
 }
+
+#[test]
+fn shutdown_reader_unblocks_select_on_request_shutdown() {
+    let chainstate = crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    );
+    let reader = chainstate.shutdown_reader();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let thread = std::thread::spawn(move || {
+        crossbeam_channel::select! {
+            recv(reader.closed()) -> _ => {
+                let _ = tx.send(true);
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    chainstate.request_shutdown();
+    let unblocked = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        unblocked.is_ok(),
+        "select did not unblock on request_shutdown"
+    );
+    let _ = thread.join();
+}
+
+#[test]
+fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
+    let chainstate = crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    );
+    let reader = chainstate.closed_for_recovery_reader();
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let thread = std::thread::spawn(move || {
+        crossbeam_channel::select! {
+            recv(reader.closed()) -> _ => {
+                let _ = tx.send(true);
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    chainstate.fail_closed_for_recovery();
+    let unblocked = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        unblocked.is_ok(),
+        "select did not unblock on fail_closed_for_recovery"
+    );
+    let _ = thread.join();
+}
