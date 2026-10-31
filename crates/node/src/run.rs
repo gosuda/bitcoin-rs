@@ -1,6 +1,5 @@
 use std::io::IsTerminal as _;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
@@ -274,8 +273,8 @@ fn build_filter_directive(level: &str) -> String {
 }
 
 fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader) {
-    while !shutdown.is_triggered() {
-        std::thread::sleep(Duration::from_millis(100));
+    if !shutdown.is_triggered() {
+        let _ = shutdown.closed().recv();
     }
 }
 
@@ -290,6 +289,7 @@ pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn explicit_directive_is_respected_as_is() {
@@ -322,5 +322,24 @@ mod tests {
                 panic!("bare level {level:?} with per-target caps must parse: {error}")
             });
         }
+    }
+
+    #[test]
+    fn wait_for_shutdown_wakes_promptly_on_trigger() {
+        let writer = bitcoin_rs_chain::LatchWriter::new();
+        let reader = writer.reader();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let handle = std::thread::spawn(move || {
+            wait_for_shutdown(&reader);
+            let _ = tx.send(());
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        writer.trigger();
+        let res = rx.recv_timeout(Duration::from_millis(25));
+        assert!(
+            res.is_ok(),
+            "wait_for_shutdown did not wake promptly: timed out waiting for trigger"
+        );
+        assert!(handle.join().is_ok(), "thread panicked");
     }
 }

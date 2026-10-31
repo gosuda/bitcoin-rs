@@ -49,6 +49,11 @@ impl EventLoop {
                     metrics::gauge!("node.shutdown.requested").set(1.0);
                     break;
                 }
+                recv(shutdown.closed()) -> _ => {
+                    request_shutdown();
+                    metrics::gauge!("node.shutdown.requested").set(1.0);
+                    break;
+                }
                 recv(self.sync_tick) -> ticked => {
                     if ticked.is_ok() {
                         sync_ticks += 1;

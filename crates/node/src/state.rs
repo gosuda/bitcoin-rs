@@ -92,10 +92,12 @@ pub struct NodeState {
     recovery_reporter: Arc<storage::RecoveryReporter>,
     pub(crate) snapshots: Arc<crate::snapshot::SnapshotControl>,
     block_announce_rx: Mutex<Option<bitcoin_rs_p2p::BlockAnnounceReceiver>>,
+    shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
 }
 
 impl Drop for NodeState {
     fn drop(&mut self) {
+        self.shutdown.trigger();
         let _admission = self.chainstate.close();
         self.storage.retention().shutdown();
     }
@@ -243,10 +245,16 @@ impl NodeState {
 
     #[must_use]
     pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
-        self.chainstate.shutdown_reader()
+        self.shutdown.reader()
+    }
+
+    #[must_use]
+    pub fn shutdown_writer(&self) -> Arc<bitcoin_rs_chain::LatchWriter> {
+        Arc::clone(&self.shutdown)
     }
 
     pub fn request_shutdown(&self) {
+        self.shutdown.trigger();
         self.chainstate.request_shutdown();
     }
 

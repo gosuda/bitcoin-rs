@@ -725,6 +725,7 @@ impl NodeState {
             recovery_reporter,
             snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
+            shutdown: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
         })
     }
 }

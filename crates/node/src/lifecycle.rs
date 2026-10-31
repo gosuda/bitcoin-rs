@@ -637,8 +637,12 @@ pub(crate) fn start_node(
         let (tx, rx) = bounded(1);
         if install_signals {
             let chainstate_for_signal = state.chainstate();
+            let state_shutdown = state.shutdown_writer();
             guard.services.signal_handler = Some(crate::signal::ShutdownHandler::install(
-                move || chainstate_for_signal.request_shutdown(),
+                move || {
+                    state_shutdown.trigger();
+                    chainstate_for_signal.request_shutdown();
+                },
                 tx.clone(),
             )?);
         }
@@ -782,11 +786,15 @@ pub(crate) fn start_node(
     guard.services.maintenance_worker = Some(state.start_chainstate_maintenance()?);
     let loop_shutdown = state.shutdown_reader();
     let loop_chainstate = state.chainstate();
+    let state_shutdown = state.shutdown_writer();
     guard.services.event_loop = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-event-loop".into())
             .spawn(move || {
-                loop_handle.spin(&loop_shutdown, move || loop_chainstate.request_shutdown());
+                loop_handle.spin(&loop_shutdown, move || {
+                    state_shutdown.trigger();
+                    loop_chainstate.request_shutdown();
+                });
             })?,
     );
     Ok(guard.finish(context))
