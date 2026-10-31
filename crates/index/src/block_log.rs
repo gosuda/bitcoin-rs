@@ -279,3 +279,41 @@ impl BlockRecord {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_primitives::{BlockHash, Hash256};
+
+    fn hash(v: u8) -> BlockHash {
+        BlockHash::from(Hash256::from_le_bytes(&[v; 32]))
+    }
+
+    #[test]
+    fn block_log_cumulative_tx_count_and_duplicate_height() {
+        let mut log = BlockLog::new();
+        log.push(BlockRecord {
+            hash: hash(1),
+            height: 0,
+            body_size: 100,
+            header: None,
+            tx_count: 5,
+            time: 1000,
+        });
+        log.push(BlockRecord {
+            hash: hash(2),
+            height: 1,
+            body_size: 200,
+            header: None,
+            tx_count: 3,
+            time: 1001,
+        });
+        assert_eq!(cumulative_tx_count_through(&log, 1), Some(8));
+
+        let records = vec![
+            BlockRecord::synthetic(1, hash(1)),
+            BlockRecord::synthetic(1, hash(2)),
+        ];
+        assert_eq!(record_at_height(&records, 1).map(|r| r.hash), Some(hash(1)));
+    }
+}

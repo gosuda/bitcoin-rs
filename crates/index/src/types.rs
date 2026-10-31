@@ -479,4 +479,13 @@ mod tests {
             Some(row)
         );
     }
+
+    #[test]
+    fn tx_position_orders_by_offset_before_length() {
+        let first = super::TxPosition::new(81, 10);
+        let second = super::TxPosition::new(256, 20);
+        let third = super::TxPosition::new(256, 30);
+        assert!(first < second);
+        assert!(second < third);
+    }
 }
