@@ -63,22 +63,7 @@ const PAYOUT: &[u8] = &[0x51];
 const ALL_ONES: [u8; 32] = [0xff; 32];
 const WHOLE: usize = 1 << 20;
 
-#[derive(Debug)]
-struct TestError(String);
-
-impl std::fmt::Display for TestError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for TestError {}
-
-impl From<String> for TestError {
-    fn from(error: String) -> Self {
-        Self(error)
-    }
-}
+use crate::support::TestError;
 
 type TestResult<T = ()> = Result<T, TestError>;
 
@@ -352,18 +337,14 @@ fn handshake(
     pinned: [u8; 32],
     chunk: usize,
 ) -> Result<Client, TestError> {
-    let initiator = Handshake::initiator(
-        Initiator::from_raw_k(pinned).map_err(|e| format!("authority key: {e:?}"))?,
-    );
-    let (act1, initiator) = initiator.step_0().map_err(|e| format!("step 0: {e:?}"))?;
+    let initiator = Handshake::initiator(Initiator::from_raw_k(pinned)?);
+    let (act1, initiator) = initiator.step_0()?;
     let mut encoder = NoiseEncoder::new();
     let wire = encoder.encode_handshake(act1);
     let wire: &[u8] = wire.as_ref();
     assert_eq!(wire.len(), ELLSWIFT_ENCODING_SIZE);
     for piece in wire.chunks(chunk) {
-        server
-            .feed(piece, book)
-            .map_err(|e| format!("server feed: {e:?}"))?;
+        server.feed(piece, book)?;
     }
     let reply = server.take_transmit();
     assert_eq!(reply.len(), INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE);
@@ -375,10 +356,7 @@ fn handshake(
         let len = window.len();
         window.copy_from_slice(&reply[offset..offset + len]);
         offset += len;
-        match decoder
-            .next_handshake_frame::<InitiatorSent>()
-            .map_err(|e| format!("decode handshake: {e:?}"))?
-        {
+        match decoder.next_handshake_frame::<InitiatorSent>()? {
             Decoded::Frame(frame) => break frame,
             Decoded::Incomplete(_) => {}
         }
@@ -386,10 +364,8 @@ fn handshake(
     let act2: [u8; INITIATOR_EXPECTED_HANDSHAKE_MESSAGE_SIZE] = act2
         .payload()
         .try_into()
-        .map_err(|_| "act 2 length".to_owned())?;
-    let transport = initiator
-        .step_2(act2)
-        .map_err(|e| format!("step 2: {e:?}"))?;
+        .map_err(|_| TestError::Missing("act 2 length"))?;
+    let transport = initiator.step_2(act2)?;
     let (enc, dec) = transport.split();
     Ok(Client {
         enc,
@@ -763,10 +739,8 @@ fn standard_with_job() -> Standard {
 #[test]
 fn noise_handshake_authenticates_the_pool_to_a_pinned_miner() -> TestResult {
     let authority = fresh_authority();
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
-    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)
-        .map_err(|error| format!("config: {error:?}"))?;
+    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
+    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)?;
     handshake(&mut conn, &mut book, *authority.public(), WHOLE)?;
     Ok(())
 }
@@ -775,10 +749,8 @@ fn noise_handshake_authenticates_the_pool_to_a_pinned_miner() -> TestResult {
 fn a_miner_pinning_another_authority_rejects_the_server_certificate() -> TestResult {
     let authority = fresh_authority();
     let impostor = fresh_authority();
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
-    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)
-        .map_err(|error| format!("config: {error:?}"))?;
+    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
+    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)?;
     let outcome = handshake(&mut conn, &mut book, *impostor.public(), WHOLE);
     assert!(
         outcome.is_err(),
@@ -792,8 +764,7 @@ fn a_mismatched_authority_key_pair_is_refused_at_accept() -> TestResult {
     let authority = fresh_authority();
     let other = fresh_authority();
     let mismatched = AuthorityKeypair::from_bytes(*authority.public(), Zeroizing::new([0x42; 32]));
-    let book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .map_err(|error| format!("book: {error:?}"))?;
+    let book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
     assert!(
         Connection::accept(&mismatched, Duration::from_secs(60), server_config(), &book).is_err()
     );
@@ -804,9 +775,7 @@ fn a_mismatched_authority_key_pair_is_refused_at_accept() -> TestResult {
 #[test]
 fn byte_at_a_time_delivery_is_decoded_like_whole_reads() -> TestResult {
     let mut wire = Wire::with(1, server_config(), BIP320_VERSION_MASK);
-    wire.book
-        .install(candidate(100, 0xab, 2), Vec::new())
-        .map_err(|error| format!("install: {error:?}"))?;
+    wire.book.install(candidate(100, 0xab, 2), Vec::new())?;
     wire.setup_mining(0);
     let mut frames = wire.open_standard(1, "carol", ALL_ONES);
     assert_eq!(
@@ -831,8 +800,7 @@ fn a_flipped_ciphertext_bit_fails_the_mac_and_kills_the_connection() -> TestResu
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("mallory")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("mallory")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
@@ -862,8 +830,7 @@ fn a_flipped_header_bit_also_fails_authentication() -> TestResult {
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("mallory")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("mallory")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
@@ -886,15 +853,12 @@ fn a_replayed_ciphertext_does_not_authenticate_under_the_next_nonce() -> TestRes
         false,
         OpenStandardMiningChannel {
             request_id: 1,
-            user_identity: Str0255::try_from("replay")
-                .map_err(|error| format!("short: {error:?}"))?,
+            user_identity: Str0255::try_from("replay")?,
             nominal_hash_rate: 1.0,
             max_target: U256::from(&ALL_ONES),
         },
     );
-    wire.conn
-        .feed(&bytes, &mut wire.book)
-        .map_err(|error| format!("first delivery: {error:?}"))?;
+    wire.conn.feed(&bytes, &mut wire.book)?;
     assert_eq!(wire.conn.session().channel_count(), 1);
     let replay = wire.conn.feed(&bytes, &mut wire.book);
     assert!(matches!(
@@ -918,17 +882,12 @@ fn an_oversize_declaration_is_refused_before_it_is_buffered() -> TestResult {
         min_version: 2,
         max_version: 2,
         flags: 0,
-        endpoint_host: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
+        endpoint_host: Str0255::try_from(long.as_str())?,
         endpoint_port: 1,
-        vendor: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        hardware_version: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        firmware: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
-        device_id: Str0255::try_from(long.as_str())
-            .map_err(|error| format!("100 bytes: {error:?}"))?,
+        vendor: Str0255::try_from(long.as_str())?,
+        hardware_version: Str0255::try_from(long.as_str())?,
+        firmware: Str0255::try_from(long.as_str())?,
+        device_id: Str0255::try_from(long.as_str())?,
     };
     let outcome = wire.try_exchange(MESSAGE_TYPE_SETUP_CONNECTION, false, oversize);
     assert!(
@@ -1429,36 +1388,21 @@ fn accepted_share_is_held_until_the_ledger_confirms_then_acknowledged() {
 #[test]
 fn target_difficulty_converts_share_targets_to_integer_difficulty_without_raw_hash_scaling()
 -> TestResult {
-    fn target<E: std::fmt::Debug>(
-        result: Result<ShareTarget, E>,
-        context: &str,
-    ) -> TestResult<ShareTarget> {
-        result.map_err(|error| TestError(format!("{context}: {error:?}")))
-    }
+    assert_eq!(target_difficulty(ShareTarget::from_pool_difficulty(1)?), 1);
     assert_eq!(
-        target_difficulty(target(ShareTarget::from_pool_difficulty(1), "diff 1")?),
-        1
-    );
-    assert_eq!(
-        target_difficulty(target(ShareTarget::from_pool_difficulty(42), "diff 42")?),
+        target_difficulty(ShareTarget::from_pool_difficulty(42)?),
         42
     );
     assert_eq!(
-        target_difficulty(target(
-            ShareTarget::from_pool_difficulty(16_384),
-            "diff 16384"
-        )?),
+        target_difficulty(ShareTarget::from_pool_difficulty(16_384)?),
         16_384
     );
     assert_eq!(
-        target_difficulty(target(
-            ShareTarget::from_pool_difficulty(1_000_000),
-            "diff 1M"
-        )?),
+        target_difficulty(ShareTarget::from_pool_difficulty(1_000_000)?),
         1_000_000
     );
     assert_eq!(
-        target_difficulty(target(ShareTarget::from_le_bytes(ALL_ONES), "all ones")?),
+        target_difficulty(ShareTarget::from_le_bytes(ALL_ONES)?),
         1,
         "sub-1 target difficulty floors at 1 unit of acknowledged work"
     );
@@ -2718,7 +2662,7 @@ fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
         .iter()
         .map(|frame| (frame.msg_type, frame.payload.clone()))
         .collect();
-    assert_eq!(announced.len(), 3, "second announce frames: {:?}", detail);
+    assert_eq!(announced.len(), 3, "second announce frames: {detail:?}");
     let mut received: Vec<Received> = announced
         .into_iter()
         .map(|frame| Received {

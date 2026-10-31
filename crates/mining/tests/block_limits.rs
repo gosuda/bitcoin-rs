@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry};
@@ -13,7 +13,7 @@ use bitcoin_rs_primitives::{
 };
 use common::zero_fee_pool;
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), TestError>;
 
 #[test]
 fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult {
@@ -216,7 +216,7 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     Ok(())
 }
 
-fn build_pool(count: usize, witness: &Witness) -> Result<Mempool, Box<dyn Error>> {
+fn build_pool(count: usize, witness: &Witness) -> Result<Mempool, TestError> {
     let mut pool = zero_fee_pool();
     for label in 1..=count {
         let tx = make_tx(u16::try_from(label)?, None, witness);
@@ -225,7 +225,7 @@ fn build_pool(count: usize, witness: &Witness) -> Result<Mempool, Box<dyn Error>
     Ok(pool)
 }
 
-fn insert_measured(pool: &mut Mempool, tx: Tx, fee: u64) -> Result<Txid, Box<dyn Error>> {
+fn insert_measured(pool: &mut Mempool, tx: Tx, fee: u64) -> Result<Txid, TestError> {
     let txid = tx.txid();
     let vsize = u32::try_from(tx.vsize())?;
     pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, fee, 0, 0, 0))?;

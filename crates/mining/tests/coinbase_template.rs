@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 use std::sync::Arc;
 
 use bitcoin::Wtxid as OracleWtxid;
@@ -28,7 +28,7 @@ fn context(height: u32, segwit_active: bool) -> CandidateContext {
     }
 }
 
-fn used_empty_pool() -> Result<Mempool, Box<dyn Error>> {
+fn used_empty_pool() -> Result<Mempool, TestError> {
     let mut pool = zero_fee_pool();
     let first = witnessed_tx(1, 1_000, None);
     let first_txid = first.txid();
@@ -53,7 +53,7 @@ fn used_empty_pool() -> Result<Mempool, Box<dyn Error>> {
 }
 
 #[test]
-fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error>> {
+fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), TestError> {
     let context = context(800_000, true);
     let pool = used_empty_pool()?;
     let candidate = assemble_candidate(&context, &pool, PAYOUT)?;
@@ -93,7 +93,7 @@ fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn small_heights_use_bip34_opcodes_and_two_byte_script_sig() -> Result<(), Box<dyn Error>> {
+fn small_heights_use_bip34_opcodes_and_two_byte_script_sig() -> Result<(), TestError> {
     let pool = zero_fee_pool();
     for height in [1_u32, 16] {
         let candidate = assemble_candidate(&context(height, false), &pool, &[])?;
@@ -107,7 +107,7 @@ fn small_heights_use_bip34_opcodes_and_two_byte_script_sig() -> Result<(), Box<d
 }
 
 #[test]
-fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<(), Box<dyn Error>> {
+fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<(), TestError> {
     let parent = witnessed_tx(1, 50_000, None);
     let child = witnessed_tx(2, 40_000, Some(parent.txid()));
     let mut pool = zero_fee_pool();
@@ -191,7 +191,7 @@ fn fee_overflow_is_reported_instead_of_wrapping() {
 }
 
 #[test]
-fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), Box<dyn Error>> {
+fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let tx = witnessed_tx(1, 1_000, None);
     let txid = tx.txid();
@@ -265,7 +265,7 @@ impl bitcoin_rs_mempool::AdmissionChain for ReorgCoins {
     }
 }
 
-fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), Box<dyn Error>> {
+fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), TestError> {
     use bitcoin::hashes::{hash160, sha256};
 
     let redeem = vec![0x00, 0x63, 0xac, 0x68, 0x51];
@@ -338,11 +338,11 @@ fn reconsidered_sigop_fixture() -> Result<(Arc<MempoolGateway>, Tx, Tx), Box<dyn
 }
 
 #[test]
-fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
+fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), TestError> {
     let (gateway, parent, child) = reconsidered_sigop_fixture()?;
     let snapshot = gateway.read().mining_snapshot();
     assert_eq!(snapshot.entries.len(), 2);
-    let entry_sigop_cost = |txid: Txid| -> Result<u32, Box<dyn Error>> {
+    let entry_sigop_cost = |txid: Txid| -> Result<u32, TestError> {
         Ok(snapshot
             .entries
             .iter()

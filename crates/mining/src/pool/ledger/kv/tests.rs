@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_error::TestError;
 use bitcoin_rs_storage::{FjallStore, RedbStore};
 
 const SHARES: TableDefinition<'static, u64, &'static [u8]> =
@@ -6,7 +7,7 @@ const SHARES: TableDefinition<'static, u64, &'static [u8]> =
 const BALANCES: TableDefinition<'static, u64, &'static [u8]> =
     TableDefinition::new("pplns_balances_v1");
 
-fn exercise(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>> {
+fn exercise(store: &Arc<dyn KvStore>) -> Result<(), TestError> {
     let first = Database::new(Arc::clone(store));
     let second = Database::new(Arc::clone(store));
     let stale_read = first.begin_read()?;
@@ -57,19 +58,19 @@ fn exercise(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
-fn redb_snapshot_and_cross_handle_conditional_commit() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_snapshot_and_cross_handle_conditional_commit() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store: Arc<dyn KvStore> = Arc::new(RedbStore::open(dir.path().join("store.redb"))?);
     exercise(&store)
 }
 
 #[test]
-fn fjall_snapshot_and_cross_handle_conditional_commit() -> Result<(), Box<dyn std::error::Error>> {
+fn fjall_snapshot_and_cross_handle_conditional_commit() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store: Arc<dyn KvStore> = Arc::new(FjallStore::open(dir.path().join("store"))?);
     exercise(&store)
 }
-fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>> {
+fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), TestError> {
     let missing = || std::io::Error::other("missing tail row");
     let db = Database::new(Arc::clone(store));
     let setup = db.begin_write()?;
@@ -126,14 +127,14 @@ fn tail_cases(store: &Arc<dyn KvStore>) -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn redb_last_merges_overlay_tail() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_last_merges_overlay_tail() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store: Arc<dyn KvStore> = Arc::new(RedbStore::open(dir.path().join("store.redb"))?);
     tail_cases(&store)
 }
 
 #[test]
-fn fjall_last_merges_overlay_tail() -> Result<(), Box<dyn std::error::Error>> {
+fn fjall_last_merges_overlay_tail() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let store: Arc<dyn KvStore> = Arc::new(FjallStore::open(dir.path().join("store"))?);
     tail_cases(&store)

@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry};
@@ -30,16 +30,15 @@ fn lock_child(parent: Txid, vout: u32, version: u32, sequence: u32) -> Tx {
     }
 }
 
-fn insert_staged(pool: &mut Mempool, tx: Tx) -> Result<Txid, Box<dyn Error>> {
+fn insert_staged(pool: &mut Mempool, tx: Tx) -> Result<Txid, TestError> {
     let txid = tx.txid();
     let vsize = u32::try_from(tx.vsize())?;
-    pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 10_000, 0, 0, 0))
-        .map_err(|error| format!("fixture insert stages: {error:?}"))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 10_000, 0, 0, 0))?;
     Ok(txid)
 }
 
 #[test]
-fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> Result<(), Box<dyn Error>> {
+fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> Result<(), TestError> {
     let mut pool = zero_fee_pool();
     let parent = Tx {
         version: 2,

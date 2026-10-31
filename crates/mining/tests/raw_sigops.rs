@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_mining::{
@@ -13,7 +13,7 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::push_data;
 use common::{context, insert, oracle_transaction, p2pkh, zero_fee_pool};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), TestError>;
 
 struct RawCase {
     previous_script: Vec<u8>,
@@ -142,7 +142,7 @@ fn cases() -> Vec<RawCase> {
     ]
 }
 
-fn oracle_cost(tx: &Tx, prevout: &TxOut) -> Result<u32, Box<dyn Error>> {
+fn oracle_cost(tx: &Tx, prevout: &TxOut) -> Result<u32, TestError> {
     let oracle = oracle_transaction(tx)?;
     let prevout: bitcoin::TxOut = bitcoin::consensus::deserialize(&consensus_bytes(prevout))?;
     Ok(u32::try_from(

@@ -1,5 +1,5 @@
+use crate::support::TestError;
 use bitcoin_rs_consensus::{ValidationEngine, transaction_sigop_cost};
-use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,7 +21,7 @@ use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::support::fixtures as common;
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 fn context() -> CandidateContext {
     CandidateContext {

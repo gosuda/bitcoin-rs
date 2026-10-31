@@ -8,7 +8,9 @@ use super::*;
 use bitcoin_rs_mempool::{MempoolEntry, MempoolLimits};
 use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_error::TestError;
+
+type TestResult = Result<(), TestError>;
 
 const PAYOUT: &[u8] = &[0x51];
 
@@ -66,7 +68,7 @@ fn witnessed_tx(label: u8) -> Tx {
     }
 }
 
-fn pool_with_tx(sigop_cost: u32) -> Result<Mempool, Box<dyn std::error::Error>> {
+fn pool_with_tx(sigop_cost: u32) -> Result<Mempool, TestError> {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
@@ -185,7 +187,7 @@ fn projected_staged_parent_locks_evaluate_at_the_staged_height() -> TestResult {
     Ok(())
 }
 
-fn used(candidate: &Candidate) -> Result<(u64, u64, u64), Box<dyn std::error::Error>> {
+fn used(candidate: &Candidate) -> Result<(u64, u64, u64), TestError> {
     let block = candidate.into_unsolved_block()?;
     let sigops = u64::from(transaction_sigop_cost(
         &candidate.coinbase,
@@ -199,10 +201,7 @@ fn used(candidate: &Candidate) -> Result<(u64, u64, u64), Box<dyn std::error::Er
     Ok((block.weight(), u64::try_from(block.total_size())?, sigops))
 }
 
-fn growth_size(
-    candidate: &Candidate,
-    budget: CoinbaseBudget,
-) -> Result<u64, Box<dyn std::error::Error>> {
+fn growth_size(candidate: &Candidate, budget: CoinbaseBudget) -> Result<u64, TestError> {
     let script_sig = candidate.coinbase.inputs[0].script_sig.len();
     Ok(u64::from(budget.additional_size) + u64::try_from(100 - script_sig)?)
 }

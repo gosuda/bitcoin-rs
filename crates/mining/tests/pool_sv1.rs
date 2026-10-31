@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use crate::support::TestError;
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, FrameError, LineBuffer, Observer, RefusalReason, Server,
@@ -22,7 +23,7 @@ use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), TestError>;
 
 #[derive(Default)]
 struct TestLedger {

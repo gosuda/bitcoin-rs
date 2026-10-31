@@ -1,5 +1,5 @@
+use crate::support::TestError;
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bitcoin_rs_chain::compact_is_met_by;
@@ -29,7 +29,7 @@ use compact_str::CompactString;
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = Result<(), TestError>;
 
 const PAYOUT: &[u8] = &[0x51];
 static ROLLED: [u8; 4] = [7, 7, 7, 7];
@@ -120,7 +120,7 @@ impl AdmissionChain for Coins {
     }
 }
 
-fn admitted_gateway(count: u8) -> Result<MempoolGateway, Box<dyn Error>> {
+fn admitted_gateway(count: u8) -> Result<MempoolGateway, TestError> {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
@@ -150,21 +150,19 @@ fn admitted_gateway(count: u8) -> Result<MempoolGateway, Box<dyn Error>> {
             &coins,
         )?;
         if !matches!(outcome, SubmitOutcome::Committed(_)) {
-            return Err(
-                format!("fixture transaction {label} was not committed: {outcome:?}").into(),
-            );
+            return Err(TestError::Uncommitted { label });
         }
     }
     Ok(gateway)
 }
 
-fn assemble(context: &CandidateContext, txs: u8) -> Result<Candidate, Box<dyn Error>> {
+fn assemble(context: &CandidateContext, txs: u8) -> Result<Candidate, TestError> {
     let gateway = admitted_gateway(txs)?;
     let pool = gateway.read();
     Ok(assemble_candidate(context, &pool, PAYOUT)?)
 }
 
-fn build_candidate(height: u32, parent: u8, txs: u8) -> Result<Arc<Candidate>, Box<dyn Error>> {
+fn build_candidate(height: u32, parent: u8, txs: u8) -> Result<Arc<Candidate>, TestError> {
     let candidate = assemble(&context(height, parent), txs)?;
     assert_eq!(candidate.transactions.len(), usize::from(txs));
     assert!(
@@ -204,7 +202,7 @@ struct Fixture {
     candidate: Arc<Candidate>,
 }
 
-fn fixture(config: JobBookConfig, height: u32, txs: u8) -> Result<Fixture, Box<dyn Error>> {
+fn fixture(config: JobBookConfig, height: u32, txs: u8) -> Result<Fixture, TestError> {
     let candidate = build_candidate(height, 0xab, txs)?;
     let mut book = JobBook::new(config)?;
     let session = book.open_session()?;
@@ -233,7 +231,7 @@ fn nonces(
     job: &Job,
     want_block: bool,
     count: usize,
-) -> Result<Vec<u32>, Box<dyn Error>> {
+) -> Result<Vec<u32>, TestError> {
     let extranonce = Extranonce {
         session: session.extranonce_prefix(),
         rolled: &ROLLED,
@@ -252,7 +250,7 @@ fn nonces(
     Err("nonce space exhausted".into())
 }
 
-fn header_hash(session: &Session, job: &Job, nonce: u32) -> Result<Hash256, Box<dyn Error>> {
+fn header_hash(session: &Session, job: &Job, nonce: u32) -> Result<Hash256, TestError> {
     let extranonce = Extranonce {
         session: session.extranonce_prefix(),
         rolled: &ROLLED,

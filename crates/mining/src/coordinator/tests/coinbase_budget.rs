@@ -6,7 +6,7 @@ use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{Sequence, TxIn, Witness};
 use std::thread::JoinHandle;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 const HEAVY_SIGOPS: u32 = 72_155;
 

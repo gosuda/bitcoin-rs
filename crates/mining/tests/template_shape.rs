@@ -1,6 +1,6 @@
 use crate::support::fixtures as common;
 
-use std::error::Error;
+use crate::support::TestError;
 
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
@@ -17,7 +17,7 @@ fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> 
 
 #[test]
 #[expect(clippy::too_many_lines)]
-fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
+fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
@@ -130,7 +130,7 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
 }
 
 #[test]
-fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dyn Error>> {
+fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
     for label in 1_u8..=5 {
         insert(
@@ -167,7 +167,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
 }
 
 #[test]
-fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
+fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), TestError> {
     let context = CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
         version: 1,
@@ -189,7 +189,7 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
+fn assembly_copies_deployment_boundary_flags() -> Result<(), TestError> {
     let empty = zero_fee_pool();
     for (csv_active, segwit_active) in [(false, false), (true, false), (false, true), (true, true)]
     {
@@ -212,7 +212,7 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
+fn candidate_solves_an_unsolved_regtest_header() -> Result<(), TestError> {
     let context = CandidateContext {
         height: 1,
         version: 1,
@@ -236,7 +236,7 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
+fn ordered_assembly_keeps_snapshot_order() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
     insert(&mut mempool, tx(1, 10_000, None), 150, 1_000, 1, 100)?;
     insert(&mut mempool, tx(2, 10_000, None), 150, 1_000, 1, 100)?;

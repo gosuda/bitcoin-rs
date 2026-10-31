@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_error::TestError;
+
+type TestResult = Result<(), TestError>;
 
 mod coinbase_budget;
 mod fee_revision;

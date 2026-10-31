@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 pub(super) struct Sources {
     tree: BlockTree,
