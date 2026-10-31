@@ -759,6 +759,20 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
     );
 }
 #[test]
+fn fee_bucket_truncation_resists_lossy_cast_overflow() {
+    assert_eq!(truncate_fee_bucket(-50.0), 0);
+    assert_eq!(truncate_fee_bucket(0.0), 0);
+    assert_eq!(truncate_fee_bucket(0.999), 0);
+    assert_eq!(truncate_fee_bucket(1.0), 1);
+    assert_eq!(truncate_fee_bucket(50.0), 50);
+    assert_eq!(truncate_fee_bucket(60.5), 60);
+    assert_eq!(truncate_fee_bucket(1_405.121_842_403_216_3), 1405);
+    assert_eq!(truncate_fee_bucket(1_545.634_026_643_538_2), 1545);
+    assert_eq!(truncate_fee_bucket(10_000_000.0), 10_000_000);
+    assert_eq!(truncate_fee_bucket(f64::NAN), 0);
+    assert_eq!(truncate_fee_bucket(f64::INFINITY), 0);
+}
+#[test]
 fn remote_relay_optout_and_announced_inventory_suppress_only_that_connection() -> TestResult {
     let table = PeerTable::new();
     let gateway = gateway();

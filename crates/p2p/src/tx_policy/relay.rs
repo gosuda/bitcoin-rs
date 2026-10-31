@@ -75,12 +75,26 @@ fn exponential(mean_secs: u32, rng: &mut impl RngCore) -> Duration {
 /// followed by the configured min-relay floor.
 ///
 /// Fractional buckets are intentionally truncated to integer sat/kvB, as in Core.
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "positive Core fee buckets are at most ten million sat/kvB"
-)]
+pub(super) fn truncate_fee_bucket(val: f64) -> u64 {
+    if !val.is_finite() || val <= 0.0 {
+        return 0;
+    }
+    let bits = val.to_bits();
+    let raw_exp = (bits >> 52) & 0x7FF;
+    if raw_exp < 1023 {
+        return 0;
+    }
+    let exp = raw_exp - 1023;
+    let mantissa = (1_u64 << 52) | (bits & ((1_u64 << 52) - 1));
+    if exp <= 52 {
+        mantissa >> (52 - exp)
+    } else if exp < 64 {
+        mantissa << (exp - 52)
+    } else {
+        u64::MAX
+    }
+}
+
 fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
     if floor == 0 {
         return minimum;
@@ -98,7 +112,7 @@ fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
     } else {
         upper
     };
-    (rounded as u64).max(minimum)
+    truncate_fee_bucket(rounded).max(minimum)
 }
 
 impl RelayPeer {
