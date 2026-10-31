@@ -71,6 +71,30 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts() -> TestResult {
     assert!(!dir.path().join(CHECKPOINT_ROOT).join(CURRENT_FILE).exists());
     Ok(())
 }
+#[test]
+fn checkpoint_writer_refuses_height_mismatch() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (tree, _, applied) = chain_with_applied_height(0, 0)?;
+    let applied_tip = tip_snapshot(&tree, applied)?;
+    let data_dir = super::super::open_data_dir(dir.path())?;
+    let mut stats = CoinStats::new();
+    stats.finish_block(1, 0);
+    let result = super::super::write_checkpoint_from_dir(
+        &data_dir,
+        config(),
+        &RwLock::new(tree),
+        &UtxoSet::new(),
+        &CoinStatsListener::new(stats),
+        Some(&applied_tip),
+    );
+    let Err(_) = result else {
+        return Err(TestError::UnexpectedSuccess(
+            "stale CoinStats unexpectedly published",
+        ));
+    };
+    assert!(!dir.path().join(CHECKPOINT_ROOT).join(CURRENT_FILE).exists());
+    Ok(())
+}
 
 #[test]
 fn authenticated_header_semantics_require_resync() -> TestResult {
