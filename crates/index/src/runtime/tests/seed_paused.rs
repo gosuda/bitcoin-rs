@@ -570,6 +570,7 @@ impl SeedHarness {
             enabled,
             chain_events: Arc::new(TestChainCursor),
             reporter,
+            shutdown: bitcoin_rs_chain::LatchReader::fixture_never(),
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,

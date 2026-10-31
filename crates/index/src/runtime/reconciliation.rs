@@ -19,7 +19,6 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::pruning::HistoryLease;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant;
 fn forward_start(watermark: Option<IndexWatermark>) -> u32 {
     watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
@@ -72,9 +71,12 @@ impl Worker {
                             continue;
                         }
                     }
-                    match self.wake_rx.recv_timeout(Duration::from_secs(1)) {
-                        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    crossbeam_channel::select! {
+                        recv(self.shutdown.closed()) -> _ => break,
+                        recv(self.wake_rx) -> msg => match msg {
+                            Ok(()) => {}
+                            Err(_) => break,
+                        },
                     }
                 }
                 ReconcileAction::Buffered => {

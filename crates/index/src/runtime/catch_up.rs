@@ -346,25 +346,28 @@ impl Worker {
 
     pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {
         loop {
-            if self.runtime.should_stop() {
+            if self.shutdown.is_triggered() || self.runtime.should_stop() {
                 return None;
             }
-            match self.wake_rx.recv_timeout(self.quiet_period) {
-                Ok(()) => seen_revision = self.runtime.revision(),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            crossbeam_channel::select! {
+                recv(self.shutdown.closed()) -> _ => return None,
+                recv(self.wake_rx) -> msg => match msg {
+                    Ok(()) => seen_revision = self.runtime.revision(),
+                    Err(_) => return None,
+                },
+                recv(crossbeam_channel::after(self.quiet_period)) -> _ => {
                     let current = self.runtime.revision();
                     if current == seen_revision {
                         return Some(current);
                     }
                     seen_revision = current;
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
             }
         }
     }
 
     pub(super) fn wait_for_batch_deadline(&self, deadline: Instant) -> BatchWait {
-        if self.runtime.should_stop() {
+        if self.shutdown.is_triggered() || self.runtime.should_stop() {
             return BatchWait::Stopped;
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -373,14 +376,25 @@ impl Worker {
         if remaining.is_zero() {
             return BatchWait::Deadline;
         }
-        match self.wake_rx.recv_timeout(remaining) {
-            Ok(()) if self.runtime.should_stop() => BatchWait::Stopped,
-            Ok(()) => BatchWait::Woken,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) if self.runtime.should_stop() => {
-                BatchWait::Stopped
+        crossbeam_channel::select! {
+            recv(self.shutdown.closed()) -> _ => BatchWait::Stopped,
+            recv(self.wake_rx) -> msg => match msg {
+                Ok(()) => {
+                    if self.shutdown.is_triggered() || self.runtime.should_stop() {
+                        BatchWait::Stopped
+                    } else {
+                        BatchWait::Woken
+                    }
+                }
+                Err(_) => BatchWait::Stopped,
+            },
+            recv(crossbeam_channel::after(remaining)) -> _ => {
+                if self.shutdown.is_triggered() || self.runtime.should_stop() {
+                    BatchWait::Stopped
+                } else {
+                    BatchWait::Deadline
+                }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
         }
     }
 }

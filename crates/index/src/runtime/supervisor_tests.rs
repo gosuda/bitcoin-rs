@@ -8,7 +8,6 @@ use super::*;
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockTree;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
     DerivedIndexOpenSpec {
@@ -40,7 +39,7 @@ struct WorkerInputs {
     generation: Generation,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     wake_rx: Receiver<()>,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
 }
@@ -53,7 +52,7 @@ fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {
     let generation = Generation::new(epoch);
     let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let chain_events = Arc::new(TestChainCursor);
 
     WorkerInputs {
@@ -96,7 +95,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         None,
         Arc::clone(&inputs.chain_events),
         RecordedIndexAhead::new(),
-        Arc::clone(&inputs.shutdown),
+        inputs.shutdown.reader(),
         inputs.wake_rx,
     )
     .expect("spawn");
@@ -143,7 +142,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     drop(worker);
 
     inputs.runtime.request_shutdown();
-    inputs.shutdown.store(true, Ordering::Release);
+    inputs.shutdown.trigger();
     drop(open_tx);
 }
 
@@ -176,7 +175,7 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
         None,
         Arc::clone(&inputs.chain_events),
         RecordedIndexAhead::new(),
-        Arc::clone(&inputs.shutdown),
+        inputs.shutdown.reader(),
         inputs.wake_rx,
     )
     .expect("spawn");
@@ -189,7 +188,7 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
         "worker should still be blocked on open"
     );
 
-    inputs.shutdown.store(true, Ordering::Release);
+    inputs.shutdown.trigger();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !worker.is_finished() {
@@ -209,7 +208,7 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
 #[test]
 fn open_timeout_publishes_error_not_infinite_spin() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let mut spec = test_open_spec(dir.path(), 1);
     spec.open_store = Arc::new(move |_dir| {
         std::thread::sleep(Duration::from_secs(10));
@@ -219,11 +218,165 @@ fn open_timeout_publishes_error_not_infinite_spin() {
         &spec,
         &dir.path().join("txindex"),
         Duration::from_secs(1),
-        || shutdown.load(Ordering::Acquire),
+        &shutdown.reader(),
+        || false,
     );
 
     let Err(DerivedIndexWorkerError::OpenTimeout { secs }) = result else {
         panic!("expected OpenTimeout, got a different error variant");
     };
     assert_eq!(secs, 1);
+}
+
+#[test]
+fn caught_up_idle_worker_wakes_on_shutdown_latch_and_joins_promptly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let inputs = build_worker_inputs(dir.path(), 45);
+    let shutdown_writer = bitcoin_rs_chain::LatchWriter::new();
+    let mut worker = DerivedIndexWorker::spawn_with_open(
+        Arc::clone(&inputs.runtime),
+        inputs.spec,
+        Arc::clone(&inputs.lifecycle),
+        inputs.generation.clone(),
+        bitcoin_rs_chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
+        None,
+        bitcoin_rs_storage::pruning::HistoryAccess::new(
+            Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+            bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+        ),
+        None,
+        Arc::clone(&inputs.chain_events),
+        RecordedIndexAhead::new(),
+        shutdown_writer.reader(),
+        inputs.wake_rx,
+    )
+    .expect("spawn");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(**inputs.lifecycle.load(), DerivedIndexLifecycle::Serving(_)) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker must enter serving state"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    shutdown_writer.trigger();
+
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let join_thread = std::thread::spawn(move || {
+        let handle = worker.join_handle.take().expect("handle");
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok(),
+        "worker thread must join within deadline on latch trigger"
+    );
+    assert!(join_thread.join().is_ok());
+}
+
+#[test]
+fn revision_quiet_cancellation_wakes_and_joins_promptly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let inputs = build_worker_inputs(dir.path(), 46);
+    let shutdown_writer = bitcoin_rs_chain::LatchWriter::new();
+    let store = Arc::new(
+        bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), 8 * 1024 * 1024)
+            .expect("store"),
+    );
+    let open = open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, 46).expect("open");
+    let writer = open.writer;
+    let worker = Worker {
+        runtime: Arc::clone(&inputs.runtime),
+        writer,
+        applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
+        body_store: None,
+        history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+            Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+            bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+        ),
+        batch_limits: DEFAULT_BATCH_LIMITS,
+        enabled: IndexCapabilities::default(),
+        chain_events: Arc::new(TestChainCursor),
+        reporter: RecordedIndexAhead::new(),
+        shutdown: shutdown_writer.reader(),
+        wake_rx: inputs.wake_rx,
+        quiet_period: Duration::from_secs(30),
+        batch_delay: Duration::ZERO,
+        rollback_rebuild_cutover: 0,
+        seed_slot: None,
+        seed_bundle: parking_lot::Mutex::new(None),
+    };
+
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let join_thread = std::thread::spawn(move || {
+        let result = worker.wait_for_revision_quiet(0);
+        let _ = done_tx.send(result);
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    shutdown_writer.trigger();
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("must exit within 5 s deadline");
+    assert_eq!(result, None);
+    assert!(join_thread.join().is_ok());
+}
+
+#[test]
+fn batch_deadline_cancellation_wakes_and_joins_promptly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let inputs = build_worker_inputs(dir.path(), 47);
+    let shutdown_writer = bitcoin_rs_chain::LatchWriter::new();
+    let store = Arc::new(
+        bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), 8 * 1024 * 1024)
+            .expect("store"),
+    );
+    let open = open_derived_index_store_on_worker(store, DEFAULT_BATCH_LIMITS, 47).expect("open");
+    let writer = open.writer;
+    let worker = Worker {
+        runtime: Arc::clone(&inputs.runtime),
+        writer,
+        applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
+        block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
+        body_store: None,
+        history: bitcoin_rs_storage::pruning::HistoryAccess::new(
+            Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+            bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+        ),
+        batch_limits: DEFAULT_BATCH_LIMITS,
+        enabled: IndexCapabilities::default(),
+        chain_events: Arc::new(TestChainCursor),
+        reporter: RecordedIndexAhead::new(),
+        shutdown: shutdown_writer.reader(),
+        wake_rx: inputs.wake_rx,
+        quiet_period: Duration::from_secs(30),
+        batch_delay: Duration::ZERO,
+        rollback_rebuild_cutover: 0,
+        seed_slot: None,
+        seed_bundle: parking_lot::Mutex::new(None),
+    };
+
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let join_thread = std::thread::spawn(move || {
+        let result =
+            worker.wait_for_batch_deadline(std::time::Instant::now() + Duration::from_secs(30));
+        let _ = done_tx.send(result);
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    shutdown_writer.trigger();
+
+    let result = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("must exit within 5 s deadline");
+    assert_eq!(result, super::catch_up::BatchWait::Stopped);
+    assert!(join_thread.join().is_ok());
 }

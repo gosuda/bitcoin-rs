@@ -1,6 +1,8 @@
 use arc_swap::ArcSwap;
 
-use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, TipReader, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockBodySource, BlockTree, BlockTreeReader, LatchReader, LatchWriter, TipReader, TipSnapshot,
+};
 
 use crate::{
     IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWatermarks,
@@ -72,6 +74,7 @@ use query::{IndexProgress, map_historical_error};
 pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
+    cancel: LatchWriter,
     pub(super) failed: AtomicBool,
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
@@ -86,6 +89,7 @@ impl DerivedIndexRuntime {
         Self {
             revision: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
+            cancel: LatchWriter::new(),
             failed: AtomicBool::new(false),
             wake_tx,
             failure_message: RwLock::new(None),
@@ -156,7 +160,17 @@ impl DerivedIndexRuntime {
 
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.cancel();
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.trigger();
         let _receiver_gone = self.wake_tx.try_send(());
+    }
+
+    #[must_use]
+    pub(crate) fn cancel_reader(&self) -> LatchReader {
+        self.cancel.reader()
     }
 
     #[must_use]
@@ -399,10 +413,10 @@ pub struct DerivedIndexOpenSpec {
 
 pub struct DerivedIndexWorker {
     runtime: Arc<DerivedIndexRuntime>,
-    join_handle: Option<JoinHandle<()>>,
+    pub(crate) join_handle: Option<JoinHandle<()>>,
     pub generation: Generation,
     namespace_key: Option<PathBuf>,
-    open_abandoned: Arc<AtomicBool>,
+    open_abandoned: LatchReader,
 }
 
 pub struct OpenDerivedIndex {
@@ -523,6 +537,7 @@ struct Worker {
     enabled: IndexCapabilities,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
+    shutdown: LatchReader,
     wake_rx: Receiver<()>,
     quiet_period: Duration,
     batch_delay: Duration,

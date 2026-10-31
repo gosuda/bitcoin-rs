@@ -9,13 +9,11 @@ use super::startup::fail_worker;
 use super::startup::run_worker_with_open;
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
+use bitcoin_rs_chain::{BlockTreeReader, LatchWriter, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::HistoryAccess;
 use crossbeam_channel::Receiver;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::thread;
 
 impl DerivedIndexWorker {
@@ -40,8 +38,8 @@ impl DerivedIndexWorker {
             NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace).ok();
         let runtime_for_thread = Arc::clone(&runtime);
         let generation_for_thread = generation.clone();
-        let open_abandoned = Arc::new(AtomicBool::new(false));
-        let open_abandoned_for_thread = Arc::clone(&open_abandoned);
+        let open_abandoned = LatchWriter::new();
+        let open_abandoned_reader = open_abandoned.reader();
         let join_handle = thread::Builder::new()
             .name("bitcoin-rs-txindex".to_owned())
             .spawn(move || {
@@ -60,7 +58,7 @@ impl DerivedIndexWorker {
                         reporter,
                         &shutdown,
                         &wake_rx,
-                        &open_abandoned_for_thread,
+                        &open_abandoned,
                     );
                 }));
                 match result {
@@ -86,7 +84,7 @@ impl DerivedIndexWorker {
             join_handle: Some(join_handle),
             generation,
             namespace_key,
-            open_abandoned,
+            open_abandoned: open_abandoned_reader,
         })
     }
 
@@ -97,7 +95,7 @@ impl DerivedIndexWorker {
     }
 
     pub fn open_was_abandoned(&self) -> bool {
-        self.open_abandoned.load(Ordering::Acquire)
+        self.open_abandoned.is_triggered()
     }
 
     pub fn join(mut self) {

@@ -18,14 +18,12 @@ use crate::writer::TxIndexWriter;
 use crate::{IndexCapability, IndexError, IndexWriter};
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_chain::{BlockTreeReader, TipReader};
+use bitcoin_rs_chain::{BlockTreeReader, LatchReader, LatchWriter, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::pruning::HistoryAccess;
 use crossbeam_channel::Receiver;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -66,7 +64,7 @@ pub(super) fn run_worker_with_open(
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
     shutdown: &bitcoin_rs_chain::LatchReader,
     wake_rx: &Receiver<()>,
-    open_abandoned: &Arc<AtomicBool>,
+    open_abandoned: &bitcoin_rs_chain::LatchWriter,
 ) {
     let namespace_key =
         match NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace) {
@@ -93,6 +91,10 @@ pub(super) fn run_worker_with_open(
         spec.storage_backend.to_string(),
     );
 
+    let cancel_hook = shutdown.on_cancel({
+        let runtime = Arc::clone(runtime);
+        move || runtime.request_shutdown()
+    });
     let setup = WorkerSetup {
         runtime,
         spec: &spec,
@@ -102,8 +104,10 @@ pub(super) fn run_worker_with_open(
         block_tree: &block_tree,
         body_source,
         shutdown,
+        cancel: runtime.cancel_reader(),
     };
     let worker_result = open_and_run(&setup, body_store, history, chain_events, reporter, wake_rx);
+    drop(cancel_hook);
     heartbeat.stop_and_join();
 
     finish_worker(
@@ -122,12 +126,12 @@ fn finish_worker(
     generation: &Generation,
     namespace_key: &Path,
     result: Result<(), DerivedIndexWorkerError>,
-    open_abandoned: &AtomicBool,
+    open_abandoned: &bitcoin_rs_chain::LatchWriter,
 ) {
     let registry = &*NAMESPACE_REGISTRY;
     if let Err(error) = result {
         if error.abandoned_open() {
-            open_abandoned.store(true, Ordering::Release);
+            open_abandoned.trigger();
             registry.poison(namespace_key, generation.id());
         }
         tracing::error!(%error, "txindex worker open or run failed");
@@ -176,7 +180,8 @@ pub(super) struct WorkerSetup<'a> {
     applied_tip: &'a TipReader,
     block_tree: &'a BlockTreeReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
-    shutdown: &'a bitcoin_rs_chain::LatchReader,
+    shutdown: &'a LatchReader,
+    cancel: LatchReader,
 }
 
 impl WorkerSetup<'_> {
@@ -197,10 +202,13 @@ pub(super) fn open_and_run(
     std::fs::create_dir_all(&txindex_dir)
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let open: OpenDerivedIndex =
-        open_derived_index_with_timeout(setup.spec, &txindex_dir, TXINDEX_OPEN_TIMEOUT, || {
-            setup.is_interrupted()
-        })?;
+    let open: OpenDerivedIndex = open_derived_index_with_timeout(
+        setup.spec,
+        &txindex_dir,
+        TXINDEX_OPEN_TIMEOUT,
+        &setup.cancel,
+        || setup.is_interrupted(),
+    )?;
 
     if setup.is_interrupted() {
         return Ok(());
@@ -320,6 +328,7 @@ fn build_worker(
         batch_limits: open.batch_limits,
         enabled: setup.spec.enabled,
         rollback_rebuild_cutover: setup.spec.rollback_rebuild_cutover,
+        shutdown: setup.cancel.clone(),
         wake_rx: wake_rx.clone(),
         quiet_period: REVISION_QUIET_PERIOD,
         chain_events: Arc::clone(chain_events),
@@ -358,12 +367,13 @@ pub(super) fn open_derived_index_with_timeout(
     spec: &DerivedIndexOpenSpec,
     txindex_dir: &Path,
     open_timeout: Duration,
+    shutdown: &bitcoin_rs_chain::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
-    if should_stop() {
+    if shutdown.is_triggered() || should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
     }
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = crossbeam_channel::bounded(1);
     let open_store = Arc::clone(&spec.open_store);
     let dir = txindex_dir.to_path_buf();
     let _join = thread::Builder::new()
@@ -373,7 +383,7 @@ pub(super) fn open_derived_index_with_timeout(
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let result = wait_for_open_result(&rx, open_timeout, should_stop);
+    let result = wait_for_open_result(&rx, open_timeout, shutdown, should_stop);
     if matches!(&result, Err(DerivedIndexWorkerError::OpenTimeout { .. })) {
         tracing::error!(
             timeout_secs = open_timeout.as_secs(),
@@ -404,19 +414,19 @@ where
 }
 
 pub(super) struct Heartbeat {
-    stop: Arc<AtomicBool>,
+    stop: LatchWriter,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Heartbeat {
     pub(super) fn start(capability: &'static str, namespace: String, backend: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
+        let stop = LatchWriter::new();
+        let reader = stop.reader();
         let start = Instant::now();
         let handle = match thread::Builder::new()
             .name(format!("bitcoin-rs-{capability}-heartbeat"))
             .spawn(move || {
-                while !stop_clone.load(Ordering::Acquire) {
+                while !reader.is_triggered() {
                     let elapsed = start.elapsed();
                     tracing::info!(
                         capability,
@@ -425,11 +435,9 @@ impl Heartbeat {
                         elapsed_secs = elapsed.as_secs(),
                         "index store recovery in progress"
                     );
-                    for _ in 0..300 {
-                        if stop_clone.load(Ordering::Acquire) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(100));
+                    crossbeam_channel::select! {
+                        recv(reader.closed()) -> _ => return,
+                        recv(crossbeam_channel::after(Duration::from_secs(30))) -> _ => {}
                     }
                 }
             }) {
@@ -443,50 +451,49 @@ impl Heartbeat {
     }
 
     pub(super) fn stop_and_join(mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.stop.trigger();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
 }
 
-const OPEN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 pub(super) fn wait_for_open_result(
-    receiver: &std::sync::mpsc::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
+    receiver: &crossbeam_channel::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
     timeout: Duration,
+    shutdown: &bitcoin_rs_chain::LatchReader,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if should_stop() {
-            return Err(DerivedIndexWorkerError::OpenStopped);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(DerivedIndexWorkerError::OpenTimeout {
-                secs: timeout.as_secs(),
-            });
-        }
-        match receiver.recv_timeout(remaining.min(OPEN_POLL_INTERVAL)) {
-            Ok(result) => return result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(DerivedIndexWorkerError::Storage(
-                    bitcoin_rs_storage::StorageError::Backend(
-                        "txindex open thread exited without result".to_owned(),
-                    ),
-                ));
+    if shutdown.is_triggered() || should_stop() {
+        return Err(DerivedIndexWorkerError::OpenStopped);
+    }
+    if timeout.is_zero() {
+        return Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 });
+    }
+    crossbeam_channel::select! {
+        recv(shutdown.closed()) -> _ => Err(DerivedIndexWorkerError::OpenStopped),
+        recv(receiver) -> result => match result {
+            Ok(result) => result,
+            Err(_) => Err(DerivedIndexWorkerError::Storage(
+                bitcoin_rs_storage::StorageError::Backend(
+                    "txindex open thread exited without result".to_owned(),
+                ),
+            )),
+        },
+        recv(crossbeam_channel::after(timeout)) -> _ => {
+            if shutdown.is_triggered() || should_stop() {
+                Err(DerivedIndexWorkerError::OpenStopped)
+            } else {
+                Err(DerivedIndexWorkerError::OpenTimeout {
+                    secs: timeout.as_secs(),
+                })
             }
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::mpsc;
     #[test]
     fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
         for error in [
@@ -499,7 +506,7 @@ mod tests {
             let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
             let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
-            let open_abandoned = AtomicBool::new(false);
+            let open_abandoned = LatchWriter::new();
             finish_worker(
                 &runtime,
                 &lifecycle,
@@ -513,7 +520,7 @@ mod tests {
                 **lifecycle.load(),
                 DerivedIndexLifecycle::Failed(_)
             ));
-            assert!(open_abandoned.load(Ordering::Acquire));
+            assert!(open_abandoned.reader().is_triggered());
             assert!(NAMESPACE_REGISTRY.is_poisoned(&key));
             assert!(!NAMESPACE_REGISTRY.claim(key, 2));
         }
@@ -533,7 +540,7 @@ mod tests {
             let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
             let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
-            let open_abandoned = AtomicBool::new(false);
+            let open_abandoned = LatchWriter::new();
             finish_worker(
                 &runtime,
                 &lifecycle,
@@ -542,7 +549,7 @@ mod tests {
                 result,
                 &open_abandoned,
             );
-            assert!(!open_abandoned.load(Ordering::Acquire));
+            assert!(!open_abandoned.reader().is_triggered());
             assert!(!NAMESPACE_REGISTRY.is_poisoned(&key));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), 2));
             NAMESPACE_REGISTRY.release(&key, 2);
@@ -550,49 +557,55 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn pending_open_rechecks_shutdown_before_the_open_deadline() {
-        let (open_tx, open_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
+    fn pending_open_cancels_before_the_open_deadline() {
+        let (_open_tx, open_rx) = crossbeam_channel::bounded(1);
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        let shutdown_reader = shutdown.reader();
         let worker = std::thread::spawn(move || {
-            let checks = AtomicUsize::new(0);
-            let result = wait_for_open_result(&open_rx, Duration::from_secs(30), || {
-                checks.fetch_add(1, Ordering::Relaxed) > 0
-            });
+            let result =
+                wait_for_open_result(&open_rx, Duration::from_secs(30), &shutdown_reader, || {
+                    false
+                });
             let _receiver_gone = done_tx.send(result);
         });
-        let result = done_rx.recv_timeout(Duration::from_secs(2));
-        drop(open_tx);
+        std::thread::sleep(Duration::from_millis(20));
+        shutdown.trigger();
+        let Ok(result) = done_rx.recv_timeout(Duration::from_secs(5)) else {
+            panic!("must exit within 5 s deadline");
+        };
         assert!(worker.join().is_ok());
-        assert!(matches!(
-            result,
-            Ok(Err(DerivedIndexWorkerError::OpenStopped))
-        ));
+        assert!(matches!(result, Err(DerivedIndexWorkerError::OpenStopped)));
     }
 
     #[test]
     fn shutdown_wins_over_an_expired_open_deadline() {
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        shutdown.trigger();
         assert!(matches!(
-            wait_for_open_result(&rx, Duration::ZERO, || true),
+            wait_for_open_result(&rx, Duration::ZERO, &shutdown.reader(), || false),
             Err(DerivedIndexWorkerError::OpenStopped)
         ));
     }
 
     #[test]
     fn expired_open_deadline_is_typed() {
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
         assert!(matches!(
-            wait_for_open_result(&rx, Duration::ZERO, || false),
+            wait_for_open_result(&rx, Duration::ZERO, &shutdown.reader(), || false),
             Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 })
         ));
     }
 
     #[test]
     fn disconnected_open_thread_is_a_storage_failure() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
         drop(tx);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
         assert!(matches!(
-            wait_for_open_result(&rx, Duration::from_secs(1), || false),
+            wait_for_open_result(&rx, Duration::from_secs(1), &shutdown.reader(), || false),
             Err(DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Backend(reason)))
                 if reason == "txindex open thread exited without result"
         ));
@@ -600,15 +613,16 @@ mod tests {
 
     #[test]
     fn backend_error_is_preserved_without_becoming_abandonment() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
         assert!(
             tx.send(Err(DerivedIndexWorkerError::Storage(
                 bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
             )))
             .is_ok()
         );
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
         assert!(matches!(
-            wait_for_open_result(&rx, Duration::from_secs(1), || false),
+            wait_for_open_result(&rx, Duration::from_secs(1), &shutdown.reader(), || false),
             Err(DerivedIndexWorkerError::Storage(
                 bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
             ))
@@ -633,8 +647,15 @@ mod tests {
             bundle: crate::portable::IndexBundleDirective::None,
             seed_slot: None,
         };
-        let result =
-            open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
+        shutdown.trigger();
+        let result = open_derived_index_with_timeout(
+            &spec,
+            &path,
+            Duration::from_secs(30),
+            &shutdown.reader(),
+            || false,
+        );
         assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
         assert!(!path.exists());
         Ok(())
@@ -656,5 +677,18 @@ mod tests {
             matches!(fatal, IndexBundleError::Index(_)),
             "cleanup and writer failures must take the worker-failure path"
         );
+    }
+
+    #[test]
+    fn heartbeat_cancellation_wakes_and_joins_promptly() {
+        let heartbeat = Heartbeat::start("txindex", "test".to_owned(), "fjall".to_owned());
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let join_thread = std::thread::spawn(move || {
+            heartbeat.stop_and_join();
+            let _ = done_tx.send(());
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(5));
+        assert!(result.is_ok(), "heartbeat must exit within 5 s deadline");
+        assert!(join_thread.join().is_ok());
     }
 }
