@@ -396,6 +396,7 @@ mod tests {
     fn tor_accept_loop_exits_on_latch_trigger_while_pending_accept() {
         let control_listener = TcpListener::bind("127.0.0.1:0").expect("bind control");
         let control_addr = control_listener.local_addr().expect("control addr");
+        let (probe_tx, probe_rx) = crossbeam_channel::bounded(1);
         let fake_control = std::thread::spawn(move || {
             let (mut stream, _) = control_listener.accept().expect("accept control");
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
@@ -417,11 +418,14 @@ mod tests {
                     .as_bytes(),
                 )
                 .expect("write ADD_ONION reply");
+            line.clear();
             while let Ok(count) = reader.read_line(&mut line) {
                 if count == 0 {
                     break;
                 }
                 if line == "GETINFO version\r\n" {
+                    let _ = probe_tx.send(());
+                    std::thread::sleep(Duration::from_millis(500));
                     let _ = stream.write_all(b"250-version=0.4.8.10\r\n250 OK\r\n");
                 }
                 line.clear();
@@ -455,7 +459,9 @@ mod tests {
             transport.local_onion.read().is_some(),
             "tor service must become active"
         );
-
+        probe_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("tor worker must request the control heartbeat");
         let started = Instant::now();
         latch.trigger();
         joined_rx
