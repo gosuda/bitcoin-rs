@@ -16,4 +16,5 @@
 - Do not edit generated files. Run `cargo run --locked -p contract-index` to regenerate `docs/contracts/evidence-index.md` and the contract list in `docs/contracts/README.md`. Run `scripts/extract_lean.sh` to regenerate `docs/lean/Extracted/`.
 - Give each new test an expected value from a specification, an external vector, a reference implementation, or an invariant, never from the code under test. Make the test fail before the fix. Do not add snapshot, wording, or source-text tests.
 - Do not write source comments, except `// SAFETY:` comments, legal notices, contract tag lines, and rustdoc that states an invariant that no name, type, or test can carry.
+- Do not use `anyhow` or `Box<dyn Error>` for errors. Define a `thiserror` enum for each failure domain, in libraries, binaries, tests, and tools alike. Keep each variant's source with `#[from]` or `#[source]`.
 - Write contracts, policies, and other maintainer documents in ASD-STE100. Write operator guides in plain language.
