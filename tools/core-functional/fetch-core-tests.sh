@@ -3,10 +3,11 @@
 # Core checkout into the gitignored scratch area, plus a PROVENANCE stamp.
 #
 # Usage:
-#   tools/core-functional/fetch-core-tests.sh [--core-repo <path>] [--tag <tag>] [--dest <dir>]
+#   tools/core-functional/fetch-core-tests.sh --core-repo <path> [--tag <tag>] [--dest <dir>]
 #
-# Defaults: --core-repo /home/deploy/git/bitcoin, --tag v31.1,
-#           --dest <repo-root>/target/core-functional/core-v31.1
+# --core-repo is required unless BITCOIN_CORE_REPO is set (no host-local
+# default path). Defaults: --tag v31.1,
+#                           --dest <repo-root>/target/core-functional/core-v31.1
 #
 # Idempotent: the destination is wiped and re-extracted on every run.
 # Extracted from the tag: test/functional (the suite), contrib/linearize and
@@ -18,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-CORE_REPO="/home/deploy/git/bitcoin"
+CORE_REPO="${BITCOIN_CORE_REPO:-}"
 TAG="v31.1"
 DEST="${REPO_ROOT}/target/core-functional/core-v31.1"
 
@@ -37,6 +38,10 @@ done
 if ! command -v git >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
     echo "fetch-core-tests.sh: git and tar are required" >&2
     exit 1
+fi
+if [[ -z "${CORE_REPO}" ]]; then
+    echo "fetch-core-tests.sh: no Core checkout given (use --core-repo <path> or export BITCOIN_CORE_REPO)" >&2
+    exit 2
 fi
 if [[ ! -d "${CORE_REPO}/.git" ]]; then
     echo "fetch-core-tests.sh: ${CORE_REPO} is not a git checkout (use --core-repo)" >&2
