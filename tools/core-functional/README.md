@@ -17,7 +17,8 @@ The first full run against a built bitcoin-rs binary completed on 2026-10-30:
 gating, 37 failed - every failure triaged to a node-side gap, itemized below.
 A second measured run (same day, after node-side fixes for NG-1/NG-2/NG-15 and
 the accounting half of NG-5) reproduced 4/5/37 with one failure-point movement;
-see [Run 2](#run-2-post-ng-12515-fixes) below. A third measured run (same day,
+see [Run 2](#run-2-post-ng-1215-and-ng-5-accounting-half-fixes-ng-16-isolated)
+below. A third measured run (same day,
 after the ping-origination fix for NG-16) again reproduced 4/5/37 while all
 six pong-wait tests moved past `connect_nodes` into their bodies; see
 [Run 3](#run-3-post-ng-16-ping-origination) below. A fourth measured run (same
@@ -145,9 +146,12 @@ in the final run. Cause classes: `NG-n` = node gap numbered below.
 | rpc_validateaddress | FAIL | NG-10 | invalid-address result omits `error`/`error_locations` fields Core returns |
 | rpc_whitelist | FAIL | NG-11 | unauthorized RPC answered HTTP 403 where Core answers 401 (`rpcwhitelist*` flags also dropped) |
 
-### Run 2 (post NG-1/2/5/15 fixes)
+### Run 2 (post NG-1/2/15 and NG-5 accounting-half fixes; NG-16 isolated)
 
-Second measured run: **2026-10-30**, same branch, after node-side fixes landed:
+Second measured run: **2026-10-30**, same branch, with the NG-1/NG-2/NG-15
+fixes and NG-5's per-message accounting half in the tree; this run then
+isolated NG-5's residual blocker (no originated ping) and renumbered it
+**NG-16**:
 
 - bitcoin-rs commit: `8620686378348610882bdda47577a08efcecfe0e`
   (`cb9cf472c` getpeerinfo per-message byte accounting on top of run 1's
@@ -189,7 +193,8 @@ failure-point movement:
   `net_processing.cpp:5718`: `m_ping_start` initializes to the clock epoch, so
   `now > m_ping_start + PING_INTERVAL` is true on the first pass). That
   residual - previously indistinguishable from the accounting gap - is now
-  numbered **NG-16** below; NG-5 is closed.
+  numbered **NG-16** below; NG-16 subsumes NG-5's remaining scope, so the
+  ledger records NG-5 as accounting-half closed, not fully closed.
 - Every other FAIL is unchanged in cause class and failure origin (verified by
   exact predicate/exception/traceback-origin comparison against run 1's logs;
   differences are only ephemeral ports, timestamps, and results-dir paths).
@@ -459,7 +464,10 @@ collision at startup during the parallel run (`Address already in use`, an
 execution-environment collision under `--jobs 6`, not a node change) and
 whose isolated same-binary rerun reproduces run 4's exact NG-10 assertion
 (`assert_equal(res["error"], error_str)`; `results/run5-recheck-rpcvalidateaddress/`).
-One execution per candidate, same limits as runs 1-4.
+One execution per candidate, same limits as runs 1-4. Run 5's own statuses
+live in its report (`target/core-functional/results/run5/report.json`); a
+per-test table is not duplicated for this pre-rebase twin - run 5b below
+re-anchors the same 46 statuses on the landed stack and carries the table.
 
 ### Run 5b (post-rebase re-anchor)
 
@@ -493,9 +501,70 @@ runner-level timeout fired (the ~60s failures are the framework's own
 internal waits, as in runs 3-5). One execution per candidate, same limits as
 runs 1-5.
 
+Per-test statuses below are read from run 5b's measured report
+(`target/core-functional/results/run5b/report.json`); causes reuse run 4's
+triage (the summary above verified every failure reproduces run 4's exact
+failure point), with run 5b's own ephemeral ports where a cause cites them.
+
+| test | status | cause | delta vs run 4 | one-line cause |
+|------|--------|-------|----------------|----------------|
+| feature_discover | PASS | | = | |
+| mining_mainnet | PASS | | = | |
+| rpc_decodescript | PASS | | = | |
+| rpc_deprecated | PASS | | = | |
+| feature_uacomment | PASS | | = | NG-9 uacomment half closed: composition `(testnode0; foo)`, 256-byte cap, and unsafe-character startup errors all match Core |
+| p2p_block_sync | PASS | | = | NG-8 closed: fully silent console; body and exact-stderr teardown pass |
+| p2p_invalid_locator | PASS | | = | NG-8 closed: protocol legs already passed; teardown stderr now empty |
+| p2p_net_deadlock | PASS | | = | NG-8 closed: body already passed; teardown stderr now empty |
+| example_test | SKIP | framework | = | wallet not compiled (ENABLE_WALLET=false) |
+| feature_bind_port_discover | SKIP | framework | = | needs routable 1.1.1.1/2.2.2.2 on host interfaces |
+| feature_bind_port_externalip | SKIP | framework | = | needs routable 1.1.1.1 on a host interface |
+| interface_usdt_net | SKIP | framework | = | USDT tracepoints disabled in config.ini |
+| interface_usdt_validation | SKIP | framework | = | USDT tracepoints disabled in config.ini |
+| feature_bind_extra | FAIL | NG-12 | = | `-bind=IP:PORT=onion` dropped; node listens on conf port instead (`{0.0.0.0:12083}` vs expected `{127.0.0.1:12086}`) |
+| feature_blocksdir | FAIL | NG-7 | = | `blocks_path` `<datadir>/regtest/blocks` never created; `-blocksdir` dropped |
+| feature_chain_tiebreaks | FAIL | NG-6 | = | test reads `<datadir>/regtest/debug.log`: no debug log file at Core's path |
+| feature_dirsymlinks | FAIL | NG-7 | = | manipulates `<datadir>/regtest/blocks` as a symlink: no Core-format blocks dir |
+| feature_framework_startup_failures | FAIL | NG-14 | = | node starts successfully on conf/flags Core refuses at startup ("Should have failed earlier during startup") |
+| feature_help | FAIL | NG-14 | = | `-fakearg` leg: Core exits 1, wrapper drops the flag, node runs -> `wait(60)` expires |
+| feature_includeconf | FAIL | NG-9 | = | `-includeconf` dropped; subversion ends `(testnode0; main)` instead of `(testnode0; main; relative)` (the uacomment half now composes; the includeconf residual remains) |
+| feature_loadblock | FAIL | NG-7 | = | `setnetworkactive(state=False)` now binds (NG-17 closed) and `connect_nodes` passes; fails at `not(0 == 100)`: node1's `-loadblock=bootstrap.dat` is dropped |
+| feature_posix_fs_permissions | FAIL | NG-6 | = | datadir+wallets perm checks pass; fails on missing `<datadir>/regtest/debug.log` |
+| feature_presegwit_node_upgrade | FAIL | NG-13 | = | `softfork_active(node,"segwit")` true where the test expects false (deployment reporting) |
+| feature_proxy | FAIL | NG-12 | = | proxied peer never appears in `getpeerinfo` (fails before the pong wait) |
+| feature_reindex_init | FAIL | NG-7 | = | test corrupts Core-format `regtest/blocks/index` (absent); `-test=reindex_*` flag dropped |
+| feature_remove_pruned_files_on_startup | FAIL | NG-7 | = | expects Core-format `regtest/blocks/blk00000.dat` pruning layout |
+| feature_shutdown | FAIL | NG-4 | = | `stop(wait=1000)`: node refuses any stop argument (registry-documented deviation) with `-32602` |
+| feature_startupnotify | FAIL | NG-12 | = | `-startupnotify` dropped; notify file never created (single-node test, no `connect_nodes` involved) |
+| feature_versionbits_warning | FAIL | NG-12 | = | NG-18's stale-parent race did not fire this execution; the generate calls pass and it fails at the warning content: `WARN_UNKNOWN_RULES_ACTIVE` absent from `getmininginfo.warnings` |
+| interface_http | FAIL | NG-11 | = | RPC HTTP server closes the connection after the reply (no keep-alive); `conn.sock is not None` fails |
+| interface_rpc | FAIL | NG-6 | = | `getrpcinfo.logpath` = `<data-dir>/debug.log` (file never written) vs Core's `<datadir>/<chain>/debug.log` |
+| p2p_add_connections | FAIL | NG-12 | = | `add_outbound_p2p_connection` `wait_for_connect` times out (node never dials the configured outbound slot) |
+| p2p_compactblocks_blocksonly | FAIL | NG-12 | = | node sends 2 `sendcmpct` where 1 expected (compact-blocks announce count) |
+| p2p_compactblocks_hb | FAIL | NG-12 | = | `disconnect_nodes` now matches peers (NG-9 closed) and the stale-inbound wait passes; fails at BIP152 high-bandwidth selection: relaying through one inbound promotes all three inbounds (`[False, True, True, True]` vs `[False, True, False, False]`) |
+| p2p_getdata | FAIL | NG-12 | = | p2p `wait_until` (`blocks[best_block] == 1`) after getdata handshake probes |
+| p2p_message_capture | FAIL | NG-12 | = | `-capture` message capture unsupported; no `msgs_recv.dat` written (IndexError on empty capture list) |
+| p2p_nobloomfilter_messages | FAIL | NG-12 | = | p2p `wait_for_disconnect` after `msg_mempool` (bloom-filter negotiation expectations) |
+| p2p_v2_encrypted | FAIL | NG-12 | = | v2-transport handshake wait (`add_outbound_p2p_connection(supports_v2_p2p=False)` leg) |
+| rpc_bind | FAIL | NG-12 | = | rpc listen set lacks `::1` (IPv6) listener: `{127.0.0.1:18534}` vs `{127.0.0.1:18534, [::1]:18534}` |
+| rpc_deriveaddresses | FAIL | NG-10 | = | error text: `key with hardened derivation steps cannot be a DerivedDescriptorKey` vs Core `Cannot derive script without private keys` |
+| rpc_estimatefee | FAIL | NG-10 | = | error text: `invalid params: conf_target is required` vs Core's `estimatesmartfee ...` message |
+| rpc_getblockfilter | FAIL | NG-19 | = | the split/disconnect/reorg and `sync_blocks` now pass (NG-9 closed); the first `getblockfilter` on active-chain blocks that arrived via p2p sync answers `-1 Filter not found` (filter index has no filters for synced blocks) |
+| rpc_getchaintips | FAIL | NG-20 | = | `split_network` works (NG-9 closed); `join_network`'s `sync_all` times out after 60s - divergent chains are not exchanged after rejoin (the same split/mine/reconnect/sync pattern passed inside rpc_getblockfilter in this run; trigger unisolated, single execution) |
+| rpc_getdescriptorinfo | FAIL | NG-10 | = | error text: `invalid params: descriptor is required` vs expected substring `getdescriptorinfo` |
+| rpc_validateaddress | FAIL | NG-10 | = | invalid-address result omits `error`/`error_locations` fields Core returns (run 4's exact assertion reached directly, `check_invalid` -> `KeyError: 'error'`; run 5's host port collision did not recur) |
+| rpc_whitelist | FAIL | NG-11 | = | unauthorized RPC answered HTTP 403 where Core answers 401 (`rpcwhitelist*` flags also dropped) |
+
+
 ### Node gaps for the next phase
 
-Order below is by measured blast radius (tests blocked) as of the latest run
+Order below preserves introduction order - the run-1 triage order first,
+then NG-16..NG-20 appended as later runs isolated them - with one deliberate
+deviation from that rule: **NG-4 sits last** because it is a keep-or-lift
+decision on a documented deviation, not a fix-pending gap (it blocks 1 test,
+`feature_shutdown`, the same tier as NG-19/NG-20). The ledger is not sorted
+by the latest blast radius because those counts moved between runs; each
+entry states its own measured tests-blocked count as of the latest run
 (run 5b, which reproduced run 4's statuses and failure points on the rebased
 tree). Evidence: the per-test `tmp/<test>/test_framework.log` and per-datadir
 `wrapper-dropped-flags.log` under `target/core-functional/results/run4/`;
@@ -766,7 +835,6 @@ become the cookie file the adapter writes (see below), and
 (argv) translates to a repeatable `--uacomment=X` flag and a conf `uacomment=`
 line is carried verbatim (both accumulate; a conf line whose option was
 already set on the CLI is suppressed, per the CLI-outranks-conf rule). Everything else - including the
-framework's `server, keypool, discover, fixedseeds, listenonion, peertimeout,
 framework's `server, keypool, discover, fixedseeds, listenonion, peertimeout,
 shrinkdebugfile, natpmp, fallbackfee, rpcservertimeout, rpcdoccheck, rpcthreads,
 maxconnections, par, unsafesqlitesync, connect=0` and
