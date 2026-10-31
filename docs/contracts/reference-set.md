@@ -1,30 +1,107 @@
 # Reference set contract
 
-A readable projection of the `[reference]` record in `crates/rpc/core-compat.toml` and its typed validation in `e2e/src/reference_set.rs`. `ReferenceSet` is the parsed identity record used by the test and formal gates, not a separate registry or new public type. On conflict, the manifest governs values and the parser governs validation. A version label alone is never custody: a reference MUST carry source and binary identities.
+This page provides a readable projection of the `[reference]` record in `crates/rpc/core-compat.toml`.
+It projects the typed validation in `e2e/src/reference_set.rs`.
+`ReferenceSet` is the parsed identity record used by test and formal gates.
+It is not a separate registry or new public type.
+On conflict, the manifest governs values and the parser governs validation.
+A version label alone is never custody: a reference MUST carry source and binary identities.
 
 ## Clauses
 
 ### `REF-01`: Manifest values and parser validation govern
-The `[reference]` record is the machine-readable authority for reference identity values. `e2e/src/reference_set.rs` enforces required identities, complete source commits, digest formats, corpus presence, product versus kernel-tree separation, and audited fingerprints of each source-and-artifact tuple; the RPC corpus gate compiles the same module to validate capture provenance.
+
+- The `[reference]` record is the machine-readable authority for reference identity values.
+- `e2e/src/reference_set.rs` enforces required identities, complete source commits, digest formats, and corpus presence.
+- It enforces product versus kernel-tree separation.
+- It enforces audited fingerprints of each source-and-artifact tuple.
+- The RPC corpus gate compiles the same module to validate capture provenance.
+
 ### `REF-02`: Core 31.1 product reference
-The released Bitcoin Core 31.1 reference is the pinned product oracle under `[reference.release]`: `core_version = "31.1"`, `git_tag = "v31.1"`, `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`, canonical `target = "x86_64-linux-gnu"` (the fixture-capture platform, never inferred from host), `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256 b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind_sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`, `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`. Extra `[[reference.release.platforms]]` rows of the same shape (`arm64-apple-darwin`, `win64`) run the same release on other hosts. Captures keep their own `core_source_commit`, `core_binary_sha256`, version, regtest inputs, and allowed differences, compared by `crates/rpc/tests/support/fixture.rs`; changing the reference stales old captures (gate fails, never relabels), and the harness hashes the live executable. The parser fingerprints the full tuple (NUL-separated UTF-8 fields, `bitcoin-rs/reference-release/v2`, product fields then artifacts in order): a different well-formed commit or digest is a custody mismatch. No claim against a version string or source snapshot alone.
+
+- The released Bitcoin Core 31.1 reference is the pinned product oracle under `[reference.release]`.
+- Pinned release fields include:
+  - `core_version = "31.1"`
+  - `git_tag = "v31.1"`
+  - `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`
+  - Canonical `target = "x86_64-linux-gnu"` (the fixture-capture platform, never inferred from host)
+  - `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256 b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`
+  - `bitcoind_sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
+  - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
+- Extra `[[reference.release.platforms]]` rows of the same shape (`arm64-apple-darwin`, `win64`) run the same release on other hosts.
+- Captures keep their own `core_source_commit`, `core_binary_sha256`, version, regtest inputs, and allowed differences.
+- `crates/rpc/tests/support/fixture.rs` compares these fields.
+- Changing the reference stales old captures.
+- The gate fails and never relabels.
+- The harness hashes the live executable.
+- The parser fingerprints the full tuple using NUL-separated UTF-8 fields with domain `bitcoin-rs/reference-release/v2`.
+- The tuple orders product fields before artifact fields.
+- A different well-formed commit or digest is a custody mismatch.
+- The system permits no claim against a version string or source snapshot alone.
+
 ### `REF-03`: Core 31.99.0 kernel tree evidence
-The kernel oracle is a development tree identity, not a released product, carried by scalar `[reference]` keys: `core_version = "31.99.0"`, `kernel_crate = "bitcoinkernel"` at `0.3.2`, `kernel_sys_crate = "libbitcoinkernel-sys"` at `0.4.1`, `kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"`, `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`, `kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"`, `differential_harness = false`. The published crate's `.cargo_vcs_info.json` identifies the vendor revision; its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44) records the Core revision in `git-subtree-split`. The gate checks the package digest against `Cargo.lock`; source and package identities share one NUL-separated `bitcoin-rs/reference-kernel/v1` fingerprint and upgrade together. Build options stay with that crate's `build.rs` (static `RelWithDebInfo` kernel build with wallet, daemon, tests, and IPC disabled). This identity is differential evidence only: not a policy pin, not a release, never the `REF-02` product reference.
+
+- The kernel oracle is a development tree identity, not a released product.
+- Scalar keys under `[reference]` carry this identity:
+  - `core_version = "31.99.0"`
+  - `kernel_crate = "bitcoinkernel"` at `0.3.2`
+  - `kernel_sys_crate = "libbitcoinkernel-sys"` at `0.4.1`
+  - `kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"`
+  - `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`
+  - `kernel_sys_crate_sha256 = "345d18a1ce19a1becfcaaa066e3a60e9c7813ef5c23ea8c20704ca4ba1a46339"`
+  - `differential_harness = false`
+- The published crate `.cargo_vcs_info.json` identifies the vendor revision.
+- Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44) records the Core revision in `git-subtree-split`.
+- The gate checks the package digest against `Cargo.lock`.
+- Source and package identities share one NUL-separated `bitcoin-rs/reference-kernel/v1` fingerprint and upgrade together.
+- Build options stay with that crate `build.rs` (static `RelWithDebInfo` kernel build with wallet, daemon, tests, and IPC disabled).
+- This identity is differential evidence only.
+- It is not a policy pin.
+- It is not a release.
+- It is never the `REF-02` product reference.
+
 ### `REF-04`: Corpus identities
-Product corpora are defined in [`campaign-corpora.md`](campaign-corpora.md) and pinned as `[[reference.corpora]]` rows by `id`, `stop_height`, `stop_hash`: `C150` is mainnet blocks `0 .. 150,000` (stop hash `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`, `muhash 383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116`, first certified Core 31.1 `gettxoutsetinfo` at height 150,000); `Cmodern` is `0 .. 709,635` (stop hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, `txouts` 75,903,651, `total_amount_sat` 1,887,251,879,232,217, `muhash 71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`, first certified Core 31.1 `gettxoutsetinfo` response at 709,635). A cell MUST NOT close on a guessed or recalled UTXO total.
-`manifest_sha256` is optional until the archive exists (C150 exported 2026-09-07, Cmodern 2026-09-09); `corpus_custody()` reports a missing one as `Blocked { missing: "manifest_sha256" }`, never an invented digest. Each archive uses the Core-framed format with an export-time manifest digest; a length-prefixed diagnostic file is not a product corpus.
+
+- Product corpora are defined in [`campaign-corpora.md`](campaign-corpora.md).
+- Manifest rows under `[[reference.corpora]]` pin them by `id`, `stop_height`, and `stop_hash`.
+- `C150` covers mainnet blocks `0 .. 150,000` (stop hash `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`, `muhash 383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116`, first certified Core 31.1 `gettxoutsetinfo` at height 150,000).
+- `Cmodern` covers mainnet blocks `0 .. 709,635` (stop hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, `txouts` 75,903,651, `total_amount_sat` 1,887,251,879,232,217, `muhash 71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`, first certified Core 31.1 `gettxoutsetinfo` response at 709,635).
+- A cell MUST NOT close on a guessed or recalled UTXO total.
+- `manifest_sha256` is optional until the archive exists (C150 exported 2026-09-07, Cmodern 2026-09-09).
+- `corpus_custody()` reports a missing manifest digest as `Blocked { missing: "manifest_sha256" }`, never an invented digest.
+- Each archive uses the Core-framed format with an export-time manifest digest.
+- A length-prefixed diagnostic file is not a product corpus.
+
 ### `REF-06`: Formal tool identity
-Evidence tool pin only (no checker run claimed): `name = "apalache-mc"` at `version = "0.62.2"`, `archive_sha256 7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2`, `jar_sha256 079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8`, observed Java runtime `26.0.2.1`.
+
+- This clause defines the evidence tool pin only (no checker run claimed).
+- `name = "apalache-mc"` at `version = "0.62.2"`.
+- `archive_sha256 7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2`.
+- `jar_sha256 079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8`.
+- Observed Java runtime `26.0.2.1`.
+
 ### `REF-07`: Pinned mainnet stop and custody rule
-The default unpruned full-tip storage campaign uses a pinned mainnet stop `(height, block_hash)` recorded by the run; no floating stop. The benchmark campaign owns any 1 TB verdict, which applies only to that pinned default lane; the offline snapshot in [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it. Missing identities, malformed commits or digests, unbound custody tuples, and confused product identities fail with typed `ReferenceError`; the fixture gate rejects stale capture provenance and the harness rejects missing binaries or executable hashes differing from the reference. The 31.1 product reference and the 31.99.0 kernel tree are distinct: no product-parity claim against the kernel identity, and no manifest status upgrades to `supported` while `differential_harness = false`.
-- `REF-07a`: reply values compare after successful transport; differences are behavioral evidence, not transport success.
-- `REF-07b`: startup reports and reaps an early child exit, including success before readiness.
-- `REF-07c`: readiness and each reference request are deadline-bounded; expiry reports the deadline and reaps startup children.
-- `REF-07d`: malformed HTTP, JSON, or P2P envelopes are transport or protocol errors, not behavioral comparisons.
+
+- The default unpruned full-tip storage campaign uses a pinned mainnet stop `(height, block_hash)` recorded by the run.
+- It permits no floating stop.
+- The benchmark campaign owns any 1 TB verdict, which applies only to that pinned default lane.
+- The offline snapshot in [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it.
+- Missing identities, malformed commits or digests, unbound custody tuples, and confused product identities fail with typed `ReferenceError`.
+- The fixture gate rejects stale capture provenance.
+- The harness rejects missing binaries or executable hashes differing from the reference.
+- The 31.1 product reference and the 31.99.0 kernel tree are distinct.
+- The harness permits no product-parity claim against the kernel identity.
+- No manifest status upgrades to `supported` while `differential_harness = false`.
+- `REF-07a`: Reply values compare after successful transport; differences are behavioral evidence, not transport success.
+- `REF-07b`: Startup reports and reaps an early child exit, including success before readiness.
+- `REF-07c`: Readiness and each reference request are deadline-bounded; expiry reports the deadline and reaps startup children.
+- `REF-07d`: Malformed HTTP, JSON, or P2P envelopes are transport or protocol errors, not behavioral comparisons.
 
 ## Verification boundaries
 
-The shared e2e reference parser owns typed custody tests; RPC corpus fixtures own capture provenance. Binary process-harness and process-peer tests own startup, substituted binaries, deadlines, malformed transport, RPC/P2P comparisons, and transcript custody. Input validation does not establish a completed product campaign.
+The shared e2e reference parser owns typed custody tests; RPC corpus fixtures own capture provenance.
+Binary process-harness and process-peer tests own startup, substituted binaries, deadlines, malformed transport, RPC/P2P comparisons, and transcript custody.
+Input validation does not establish a completed product campaign.
 
 ## Vocabulary
 

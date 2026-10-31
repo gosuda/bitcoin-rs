@@ -2154,7 +2154,7 @@ class CampaignControllerTests(unittest.TestCase):
         return code, output, workspace
 
     def test_warm_campaign_agrees_across_all_backends(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         frozen: object | None = None
         for backend in sorted(module.BITCOIN_RS_BACKENDS):
             code, output, workspace = self._run(backend=backend, policy="warm")
@@ -2249,7 +2249,7 @@ class CampaignControllerTests(unittest.TestCase):
             module._parse_campaign_config(parsed)
 
     def test_command_must_include_config_placeholder(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         _root, config_path, _output = self._campaign_files()
         parsed, _ = module._load_json_path(
             config_path, module.MAX_INPUT_BYTES, "campaign config"
@@ -2264,7 +2264,7 @@ class CampaignControllerTests(unittest.TestCase):
             module._parse_campaign_config(parsed)
 
     def test_readiness_rejects_a_listener_the_child_does_not_own(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-02.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-02.
         decoy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         decoy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         decoy.bind(("127.0.0.1", 0))
@@ -2287,7 +2287,7 @@ class CampaignControllerTests(unittest.TestCase):
             decoy.close()
 
     def test_rpc_does_not_send_credentials_to_a_foreign_peer(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-02.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-02.
         spy = _FixtureServer("ok", _state_literal())
         thread = spy.start()
         child = subprocess.Popen(
@@ -2317,7 +2317,7 @@ class CampaignControllerTests(unittest.TestCase):
             thread.join(timeout=5)
 
     def test_pinned_config_copy_ignores_later_operator_path_writes(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         root = _make_root("muhash-config-copy-")
         source = root / "operator.json"
         source.write_bytes(b"pinned-config")
@@ -2350,7 +2350,7 @@ class CampaignControllerTests(unittest.TestCase):
         shutil.rmtree(root, ignore_errors=True)
 
     def test_binary_snapshot_execs_and_config_snapshot_does_not(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         root = _make_root("muhash-memfd-exec-")
         script = b"#!/usr/bin/env python3\nimport sys\nsys.stdout.write('ran')\n"
         binary = root / "node.py"
@@ -2391,7 +2391,7 @@ class CampaignControllerTests(unittest.TestCase):
         shutil.rmtree(root, ignore_errors=True)
 
     def test_snapshot_falls_back_when_exec_flags_are_einval(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         # memfd_create(2) returns EINVAL for unknown flag bits; Linux 6.3
         # introduced MFD_EXEC and MFD_NOEXEC_SEAL.
         root = _make_root("muhash-memfd-einval-")
@@ -2451,7 +2451,7 @@ class CampaignControllerTests(unittest.TestCase):
         shutil.rmtree(root, ignore_errors=True)
 
     def test_verified_config_inode_survives_workspace_path_replace(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         root = _make_root("muhash-config-inode-")
         path = root / "workspace-config"
         path.write_bytes(b"pinned-config")
@@ -2473,7 +2473,7 @@ class CampaignControllerTests(unittest.TestCase):
         shutil.rmtree(root, ignore_errors=True)
 
     def test_spawn_reads_verified_config_after_workspace_replace(self) -> None:
-        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        # Contract clause: docs/contracts/hot-path-attribution.md MRPC-03.
         root = _make_root("muhash-spawn-inode-")
         datadir = root / "data"
         datadir.mkdir()

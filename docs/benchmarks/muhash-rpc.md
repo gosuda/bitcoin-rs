@@ -253,7 +253,7 @@ exactly one of `fjall`, `rocksdb` or `redb`. It also binds the single cache
 policy, the corpus, and the pinned binaries and commands. `{binary}` is
 copied and re-hashed before every spawn. `{config}` is required, so the
 receipt's pinned config is the file the daemon received
-(`docs/contracts/muhash-rpc.md` `MRPC-03`). The controller copies that file
+(`docs/contracts/hot-path-attribution.md` `MRPC-03`). The controller copies that file
 into the workspace and opens the copy through the shared regular-file
 reader. It re-hashes the copy into a sealed memfd (`MFD_EXEC` for the
 binary, `MFD_NOEXEC_SEAL` for `{config}`), and passes `/proc/self/fd/<n>`

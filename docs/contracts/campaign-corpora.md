@@ -1,77 +1,76 @@
 # Campaign corpora contract
 
-The two immutable cumulative corpora every product-domain cell uses. This page
-owns the identities, archive format, validation posture, script census,
-chain-state oracle, and end-state evidence roles. Numeric pins live in
-[`tools/campaign-corpus/products.json`](../../tools/campaign-corpus/products.json).
-The exporter and classifier live in
-[`tools/campaign-corpus/corpus.py`](../../tools/campaign-corpus/corpus.py).
+Every product-domain cell uses two immutable cumulative corpora.
+This page owns the identities, archive format, validation posture, script census, chain-state oracle, and end-state evidence roles.
+Numeric pins live in [`tools/campaign-corpus/products.json`](../../tools/campaign-corpus/products.json).
+The exporter and classifier live in [`tools/campaign-corpus/corpus.py`](../../tools/campaign-corpus/corpus.py).
 
 Owners:
 - `tools/campaign-corpus/products.json`
 - `tools/campaign-corpus/corpus.py`
 
-Offline parity work that consumes these corpora is defined by issue #46 and
-implemented by the offline comparator (#34). This page does not own timing,
-reopen proofs, or backend selection.
+Issue #46 defines offline parity work that consumes these corpora.
+The offline comparator (#34) implements that work.
+This page does not own timing, reopen proofs, or backend selection.
 
 ## Clauses
 
 ### `CORP-00`: Writer lifecycle
 
-Campaign writers poison themselves after a failed append; truncation does not
-make absorbed, uncommitted bytes safe to reuse. A resumed tail must complete
-its verification gate before it is accepted, and each destination must have a
-distinct output path. Corpus-writer tests cite this clause.
+- Campaign writers poison themselves after a failed append.
+- Truncation does not make absorbed, uncommitted bytes safe to reuse.
+- A resumed tail MUST complete its verification gate before acceptance.
+- Each destination MUST have a distinct output path.
+- Corpus-writer tests cite this clause.
 
 ### `CORP-01`: Two product corpora
 
-Every product-domain cell uses exactly one of two mainnet cumulative archives:
+Every product-domain cell MUST use exactly one of two mainnet cumulative archives:
 
 | Corpus | Inclusive range | Stop hash | Blocks |
 | --- | --- | --- | ---: |
 | C150 | genesis .. 150,000 | `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b` | 150,001 |
 | Cmodern | genesis .. 709,635 | `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f` | 709,636 |
 
-Cmodern is the first height at which every required modern script class has
-executed, not Taproot activation (709,632). No other stop height may satisfy a
-product cell. A length-prefixed diagnostic file is not a product corpus.
+- Cmodern is the first height where every required modern script class has executed.
+- Cmodern is not Taproot activation (709,632).
+- No other stop height MAY satisfy a product cell.
+- A length-prefixed diagnostic file is not a product corpus.
 
 ### `CORP-02`: Core-framed archive and manifest
 
-- Encode each block as a Bitcoin Core block-file record: 4-byte mainnet magic
-  `f9beb4d9`, 4-byte little-endian payload length, then consensus block bytes.
-- Bind the archive with schema `bitcoin-rs-corpus-manifest` version 1: network,
-  magic, genesis hash, contiguous `0..stop` entries (height, header hash, byte
-  offset, payload length), archive size, archive SHA-256, and a canonical
-  `manifest_sha256`.
-- Distinct container formats are allowed only after converting into this
-  framing. `convert` turns a `[u32 le length][payload]` stream into the same
-  archive the REST exporter writes.
-- Archive bytes are not stored in git. A cell names the certified archive by
-  the manifest digest produced at export time.
+- Encode each block as a Bitcoin Core block-file record.
+- The record contains 4-byte mainnet magic `f9beb4d9`, 4-byte little-endian payload length, and consensus block bytes.
+- Bind the archive with schema `bitcoin-rs-corpus-manifest` version 1: network, magic, genesis hash, and contiguous `0..stop` entries.
+- Each entry records height, header hash, byte offset, and payload length.
+- The manifest includes archive size, archive SHA-256, and canonical `manifest_sha256`.
+- Distinct container formats are allowed only after converting into this framing.
+- `convert` turns a `[u32 le length][payload]` stream into the same archive that the REST exporter writes.
+- Git does not store archive bytes.
+- A cell names the certified archive by the manifest digest produced at export time.
 - Indexed representation (harness parity only, not a new product corpus):
-  schema `bitcoin-rs-corpus-index-v1` locates the same verified logical byte
-  stream inside Core `blkNNNNN.dat` sources with per-source fingerprints,
-  exact order, logical digest/size, and stop-hash binding. Producer
-  `build_index_from_scan`/`IndexWriter` builds it; `verify_index` runs once
-  before `iter_indexed_framed` is fully exhausted. The offline comparator
-  harness accepts dual packed/indexed inputs and requires byte parity with
-  the packed archive. Product identities (C150/Cmodern pins) are unchanged.
+  - Schema `bitcoin-rs-corpus-index-v1` locates the same verified logical byte stream inside Core `blkNNNNN.dat` sources.
+  - The schema includes per-source fingerprints, exact order, logical digest/size, and stop-hash binding.
+  - Producer `build_index_from_scan` and `IndexWriter` build the index.
+  - `verify_index` runs once before `iter_indexed_framed` is fully exhausted.
+  - The offline comparator harness accepts dual packed and indexed inputs.
+  - It requires byte parity with the packed archive.
+  - Product identities (C150/Cmodern pins) remain unchanged.
 
 ### `CORP-03`: Validation posture
 
-- Full script and consensus validation. `assume_valid_height` is `0`.
-- Height-correct consensus flags. No sampled or REST-live certification.
-- Fresh native stores per trial. The timed work and reopen gates are owned by
-  #46 / #34 / #36, not by this freeze.
-- Invalid and nonstandard-but-consensus-valid corpora are counted and
-  classified with a fixed skip reason and count for every section of the
-  consensus rule family.
+- Validation requires full script and consensus validation.
+- `assume_valid_height` is `0`.
+- Validation uses height-correct consensus flags.
+- Validation allows no sampled or REST-live certification.
+- Each trial uses fresh native stores.
+- The timed work and reopen gates are owned by #46 / #34 / #36, not by this freeze.
+- Test runs MUST count and classify invalid and nonstandard-but-consensus-valid corpora.
+- Each classification provides a fixed skip reason and count for every section of the consensus rule family.
 
 ### `CORP-04`: Script census
 
-Eleven special context counters must be present and classified:
+Eleven special context counters MUST be present and classified:
 
 `p2sh_redeem_spends`, `native_witness_v0_spends`,
 `p2sh_wrapped_witness_v0_spends`, `bare_multisig_checks`,
@@ -80,30 +79,29 @@ Eleven special context counters must be present and classified:
 `tapscript_spends`, `tapscript_schnorr_checks`,
 `tapscript_checksigadd_checks`.
 
-C150 (file-bound historical census): `context_count` =
-`ffi_verify_entries` = `op_checksig` = 2,868,199; `eval_script_entries` =
-5,736,398; `op_checksigverify`, `op_checkmultisig`,
-`op_checkmultisigverify`, `op_checksigadd`, `checkschnorr_entries`, and
-`schnorr_verify_calls` are 0; every special counter is 0. P2SH, witness v0,
-and Taproot are inactive in this range.
+C150 (file-bound historical census):
+- `context_count` = `ffi_verify_entries` = `op_checksig` = 2,868,199;
+- `eval_script_entries` = 5,736,398;
+- `op_checksigverify`, `op_checkmultisig`, `op_checkmultisigverify`, `op_checksigadd`, `checkschnorr_entries`, and `schnorr_verify_calls` are 0;
+- every special counter is 0.
+- P2SH, witness v0, and Taproot are inactive in this range.
 
-Cmodern: every special counter is ≥ 1. Schnorr accounting is
-`checkschnorr_entries >= schnorr_verify_calls` and
-`schnorr_verify_calls == schnorr_verify_ok + schnorr_verify_fail`. A nonzero
-Schnorr total without Tapscript and `OP_CHECKSIGADD` does not qualify.
+Cmodern:
+- Every special counter is >= 1.
+- Schnorr accounting is `checkschnorr_entries >= schnorr_verify_calls` and `schnorr_verify_calls == schnorr_verify_ok + schnorr_verify_fail`.
+- A nonzero Schnorr total without Tapscript and `OP_CHECKSIGADD` does not qualify.
 
 ### `CORP-05`: Chain-state oracle
 
-The cross-node commitment is the 32-byte `MuHash3072` digest from Bitcoin
-Core 31.1:
+The cross-node commitment is the 32-byte `MuHash3072` digest from Bitcoin Core 31.1:
 
 ```text
 gettxoutsetinfo "muhash" <stop_height> true
 ```
 
-`coinstatsindex` must be synchronized. `hash_serialized_3` is not the
-campaign oracle. Cells match height, `bestblock`, `txouts`, satoshi
-`total_amount`, and `muhash`.
+- `coinstatsindex` MUST be synchronized.
+- `hash_serialized_3` is not the campaign oracle.
+- Cells MUST match height, `bestblock`, `txouts`, satoshi `total_amount`, and `muhash`.
 
 C150 frozen state:
 
@@ -115,24 +113,24 @@ C150 frozen state:
 | total_amount | 749,989,998,999,999 sat |
 | muhash | `383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116` |
 
-Cmodern uses the same RPC at height 709,635. The numeric `txouts`,
-`total_amount`, and `muhash` are the first certified Core 31.1 response at
-that height. No Cmodern cell may close on a guessed or recalled UTXO total.
+- Cmodern uses the same RPC at height 709,635.
+- The numeric `txouts`, `total_amount`, and `muhash` are the first certified Core 31.1 response at that height.
+- No Cmodern cell MAY close on a guessed or recalled UTXO total.
 
 ### `CORP-06`: End-state evidence roles
 
-- G0 pins: the corpus identities, stop hashes, manifest digest binding, and
-  chain-state oracle values are reference-set truth. They are recorded in
-  [`reference-set.md`](reference-set.md).
-- G5 replay arms: every product cell uses a C150 or Cmodern replay as one arm
-  of the promotion gate. The full native validation path must match the
-  certified `muhash` and the invalid corpus must be counted and classified.
-- A corpus with a mismatched stop hash, an unsynchronized `coinstatsindex`, or
-  a guessed `muhash` is rejected as reference-set failure.
+- G0 pins: The corpus identities, stop hashes, manifest digest binding, and chain-state oracle values are reference-set truth.
+- They are recorded in [`reference-set.md`](reference-set.md).
+- G5 replay arms: Every product cell uses a C150 or Cmodern replay as one arm of the promotion gate.
+- The full native validation path MUST match the certified `muhash`.
+- The run MUST count and classify the invalid corpus.
+- A corpus with a mismatched stop hash, an unsynchronized `coinstatsindex`, or a guessed `muhash` is rejected as reference-set failure.
 
 ## Verification boundaries
 
-Corpus manifest and measured-campaign checks validate the recorded identities, bounds, and evidence schema. They do not establish that a corpus was acquired or that a product campaign completed; the custody and completion requirements above remain authoritative.
+Corpus manifest and measured-campaign checks validate the recorded identities, bounds, and evidence schema.
+They do not establish that a corpus was acquired or that a product campaign completed.
+The custody and completion requirements above remain authoritative.
 
 ## Vocabulary
 

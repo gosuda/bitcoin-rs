@@ -1988,7 +1988,7 @@ def _open_verified_snapshot(
 
     The child inherits this descriptor and opens ``/proc/self/fd/<n>``.
     Execution-policy flags and the older-kernel ``EINVAL`` fallback are
-    ``docs/contracts/muhash-rpc.md`` ``MRPC-03``. The caller closes the
+    ``docs/contracts/hot-path-attribution.md`` ``MRPC-03``. The caller closes the
     fd after ``Popen``.
     """
     raw = _read_regular_file(path, cap, field)

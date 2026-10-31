@@ -29,13 +29,29 @@ apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --inv=TypeOK --leng
 apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --temporal=ConditionalProgress --length=<K> --smt-encoding=funArrays --out-dir=target/apalache/<Owner>/<Machine>/temporal/k<K> docs/models/<Owner>/<Machine>.tla
 ```
 
-- Every lane starts at K = 128. Resource exhaustion (evidence return code 14) halves K until the lane completes or K reaches 1. The run records the last K attempted and its return codes.
-- `--check-only` verifies the tool and module identities. It does not evaluate a property.
+- Every lane starts at K = 128.
+- Resource exhaustion (evidence return code 14) halves K until the lane completes or K reaches 1.
+- The run records the last K attempted and its return codes.
+- `--check-only` verifies the tool and module identities.
+- It does not evaluate a property.
 - `target/apalache/summary.json` records the bound and both return codes of every lane.
-- Native return codes map to evidence codes as follows: success `0 -> 0`; parse `150 -> 12`; typecheck `120 -> 12`; counterexample `12 -> 13`; spec evaluation `75 -> 14`; system error `255 -> 14`; timeout or incomplete output `-> 14`; model identity mismatch `-> 15`; tool identity mismatch `-> 11`.
-- The solver run belongs to the operator-invoked `model-check-manual` workflow and to the `proofs` stage. Normal Cargo suites do not run the external checker.
+- Native return codes map to evidence codes:
+  - Success maps `0 -> 0`.
+  - Parse maps `150 -> 12`.
+  - Typecheck maps `120 -> 12`.
+  - A counterexample maps `12 -> 13`.
+  - Spec evaluation maps `75 -> 14`.
+  - System error maps `255 -> 14`.
+  - Timeout or incomplete output maps `-> 14`.
+  - A model identity mismatch maps `-> 15`.
+  - A tool identity mismatch maps `-> 11`.
+- The solver run belongs to the operator-invoked `model-check-manual` workflow and to the `proofs` stage.
+- Normal Cargo suites do not run the external checker.
 
-`env -C docs/lean lake build` builds every Lean module. `scripts/extract_lean.sh` runs Charon and Aeneas for the listed functions and writes `docs/lean/Extracted/`. With `--check` it writes to a temporary directory and fails when the output differs from `docs/lean/Extracted/`.
+`env -C docs/lean lake build` builds every Lean module.
+`scripts/extract_lean.sh` runs Charon and Aeneas for the listed functions and writes `docs/lean/Extracted/`.
+With `--check` it writes to a temporary directory and fails when the output differs from `docs/lean/Extracted/`.
+The chainstate admission model step implements the state machine verified in `docs/lean/ChainAdmission/Safety.lean`.
 
 ## Per-module Apalache table
 
