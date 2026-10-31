@@ -1,0 +1,52 @@
+# Derived 2026-10-30 by static RPC-dependency analysis of Bitcoin Core v31.1's
+# functional tests against the bitcoin-rs RPC registry (see /tmp/opencode/
+# classification.json -> clean_candidates.json at selection time): the tests
+# below reference no statically-detectable unimplemented RPC. This is an upper
+# bound on runnable candidates, not a claim that any of them pass; run.sh's
+# report.json/report.md is the evidence owner for actual outcomes.
+example_test.py
+feature_bind_extra.py
+feature_bind_port_discover.py
+feature_bind_port_externalip.py
+feature_blocksdir.py
+feature_chain_tiebreaks.py
+feature_dirsymlinks.py
+feature_discover.py
+feature_framework_startup_failures.py
+feature_help.py
+feature_includeconf.py
+feature_loadblock.py
+feature_posix_fs_permissions.py
+feature_presegwit_node_upgrade.py
+feature_proxy.py
+feature_reindex_init.py
+feature_remove_pruned_files_on_startup.py
+feature_shutdown.py
+feature_startupnotify.py
+feature_uacomment.py
+feature_versionbits_warning.py
+interface_http.py
+interface_rpc.py
+interface_usdt_net.py
+interface_usdt_validation.py
+mining_mainnet.py
+p2p_add_connections.py
+p2p_block_sync.py
+p2p_compactblocks_blocksonly.py
+p2p_compactblocks_hb.py
+p2p_getdata.py
+p2p_invalid_locator.py
+p2p_message_capture.py
+p2p_net_deadlock.py
+p2p_nobloomfilter_messages.py
+p2p_v2_encrypted.py
+rpc_bind.py
+rpc_decodescript.py
+rpc_deprecated.py
+rpc_deriveaddresses.py
+rpc_estimatefee.py
+rpc_getblockfilter.py
+rpc_getchaintips.py
+rpc_getdescriptorinfo.py
+rpc_validateaddress.py
+rpc_whitelist.py
