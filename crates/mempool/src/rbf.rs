@@ -623,4 +623,12 @@ mod tests {
         assert_eq!(trim_bump(-1_000, 12, 1_000), None);
         assert_eq!(trim_bump(-1_000, 1_000, 1_000), None);
     }
+
+    #[test]
+    fn required_fee_floors_at_one_satoshi_for_positive_rate_and_vsize() {
+        assert_eq!(super::required_fee(1, 1), Ok(1));
+        assert_eq!(super::required_fee(1_000, 250), Ok(250));
+        assert_eq!(super::required_fee(0, 100), Ok(0));
+        assert_eq!(super::required_fee(100, 0), Ok(0));
+    }
 }
