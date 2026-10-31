@@ -1,6 +1,5 @@
 use super::*;
 
-/// the typed-cause retag. A later edit that drifts wire text fails here.
 fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
     for (cause, expected) in cases {
         assert_eq!(cause.to_string(), expected, "{cause:?}");
@@ -128,7 +127,6 @@ fn carried_unavailable_causes_render_pinned_wire_text() {
     ]);
 }
 
-/// `Retry` and never new wire text. Engine-level proof (flag set with no
 #[test]
 fn script_live_unavailable_is_typed_passthrough_not_retry() {
     for reason in [
@@ -251,8 +249,6 @@ mod script_live_outage_engine_tests {
         Ok(deserialize::<Header>(&serialize(&block.header))?)
     }
 
-    /// Double-SHA256 of the transaction serialization: the exact txid the
-    /// committed rows are keyed by, without crossing crate boundaries.
     fn expected_txid(block: &Block) -> Txid {
         let bytes = serialize(&block.txdata[0]);
         let digest = Sha256::digest(Sha256::digest(bytes).as_slice());

@@ -1,5 +1,3 @@
-//! Coherent write fences and cooperative, versioned capability-reset recovery.
-
 use super::{
     capability::COMPACT_FILTERS_WATERMARK_KEY, capability::IndexCapabilities,
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
@@ -28,8 +26,6 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
 
-/// reconciliation consumer; data row keys begin with ASCII letters only and
-/// can never collide with the reserved `0x00` prefix.
 pub(super) const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
@@ -48,7 +44,6 @@ enum ResetState {
     Idle {
         version: u64,
     },
-    /// A reset obligation derived on top of `base_version`. `process_epoch`
     Claim {
         mask: u8,
         process_epoch: u64,
@@ -95,7 +90,6 @@ fn valid_reset_mask(mask: u8) -> bool {
     mask != 0 && IndexCapabilities::from_mask(mask).is_ok()
 }
 
-/// Decodes exactly `size_of::<u64>()` bytes as little-endian; any other
 fn decode_le_u64(bytes: &[u8]) -> Result<u64, IndexError> {
     let raw: [u8; size_of::<u64>()] = bytes
         .try_into()

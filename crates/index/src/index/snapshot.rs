@@ -1,5 +1,3 @@
-//! Point-in-time, bounded, typed index scans.
-
 use super::{
     capability::IndexCapability, capability::IndexWatermark, error::IndexError, reader::Indexer,
     write::IndexWriter,
@@ -13,7 +11,6 @@ use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum TxIndexFamily {
-    /// carrying packed `TxPosition` values.
     TxConfirmed,
 }
 
@@ -27,23 +24,19 @@ impl TxIndexFamily {
 
 #[derive(Debug)]
 pub struct TxIndexScanRow {
-    /// Parsed fixed-width prefix row.
     pub row: HashPrefixRow,
     pub value: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct TxIndexScan {
-    /// Parsed fixed-width prefix rows.
     pub rows: Vec<TxIndexScanRow>,
     pub encoded_bytes: usize,
     pub complete: bool,
 }
 
-/// One bounded page of a `TxIndex` family in ascending stored-key order.
 #[derive(Debug)]
 pub struct TxIndexPage {
-    /// Parsed rows of this page in ascending stored-key order.
     pub rows: Vec<TxIndexScanRow>,
     pub complete: bool,
 }
@@ -63,17 +56,12 @@ pub trait TxIndexSnapshot: Send + Sync {
         &self,
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError>;
-    /// Scans one bounded page of `family` in ascending stored-key order.
-    /// begins at the first key strictly above `start_after`. Backends seek
-    /// the snapshot to the cursor, so no family-sized copy is made on any
     fn scan_family_page(
         &self,
         family: TxIndexFamily,
         start_after: Option<&[u8]>,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexPage, IndexError>;
-    /// Loads one capability's coverage floor: the first height its committed
-    /// rows cover. `0` means complete coverage from genesis.
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
         let _ = capability;
         Ok(0)
@@ -83,13 +71,11 @@ pub trait TxIndexSnapshot: Send + Sync {
         txid: &Txid,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
-    /// Scans one script's history rows, newest height first.
     fn funding_rows(
         &self,
         scripthash: ScriptHash,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
-    /// Scans history rows at or below `start_height`, newest height first.
     fn funding_rows_from(
         &self,
         scripthash: ScriptHash,
@@ -123,7 +109,6 @@ impl StoreTxIndexSnapshot<'_> {
         decode_scan(scan)
     }
 
-    /// Scans script-history rows, decoding the newest-first height suffix.
     fn scan_history_from(
         &self,
         prefix: &[u8],

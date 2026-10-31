@@ -1,5 +1,3 @@
-//! Chain identity capture and exact-identity transaction reads for bundles.
-
 use super::artifact::CANCEL_POLL_RECORDS;
 use super::{IndexBundleError, Withheld};
 use crate::types::TxPosition;
@@ -13,10 +11,8 @@ use std::collections::{HashMap, VecDeque};
 
 pub(super) struct ChainBase {
     pub(super) height: u32,
-    /// Base block hash, little-endian bytes.
     pub(super) hash: [u8; 32],
     pub(super) chainwork: ChainWork,
-    /// Genesis block hash, little-endian bytes.
     pub(super) genesis: [u8; 32],
     pub(super) validated: bool,
     anchor_count: u64,
@@ -182,7 +178,6 @@ impl ChainBase {
         tree.read().node(id).ok().map(|node| node.hash)
     }
 
-    /// 80-byte header at `height` on the captured ancestry.
     pub(super) fn header_at(&self, tree: &BlockTreeReader, height: u32) -> Option<[u8; 80]> {
         let id = *self.nodes.get(usize::try_from(height).ok()?)?;
         tree.read().node(id).ok().map(|node| node.header.to_bytes())

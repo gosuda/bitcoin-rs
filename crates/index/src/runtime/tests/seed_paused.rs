@@ -1,5 +1,3 @@
-//! Paused-write, poison, lease, and demand proofs for the immutable snapshot
-
 use super::super::*;
 
 use bitcoin::hashes::Hash as _;
@@ -649,8 +647,6 @@ fn commit_lookup_block(writer: &Arc<dyn TxIndexWriter>, height: u32, hash: [u8; 
         .expect("commit lookup block");
 }
 
-/// block adds its coinbase and spend outputs and spends the previous
-/// coinbase. All fixture scripts are `[0x51]`.
 fn expected_chain_live(
     fixture: &SeedFixture,
     through: u32,

@@ -1,4 +1,3 @@
-//! Shared test support: a backend-free `KvStore` over `BTreeMap`.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -26,8 +25,6 @@ impl MemoryStore {
         self.cfs.read()[cf.index()].len()
     }
 
-    /// Fails the next fenced write before it applies, modelling a durability
-    /// boundary that published neither rows nor a watermark.
     pub(crate) fn arm_fenced_write_failure(&self) {
         self.fail_next_fenced_write.store(true, Ordering::SeqCst);
     }
@@ -212,8 +209,6 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
-/// little-endian key order, not watermark contiguity, use this instead of
-/// [`bitcoin_rs_index::IndexWriter::commit_block`].
 pub(crate) fn put_funding_row(
     store: &MemoryStore,
     scripthash: ScriptHash,

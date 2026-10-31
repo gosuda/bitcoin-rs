@@ -1,5 +1,3 @@
-//! Derived-index reconciliation state and policy over supplied authoritative chain facts.
-
 use bitcoin_rs_primitives::Hash256;
 
 use crate::{IndexCapabilities, IndexCapability};

@@ -1,4 +1,3 @@
-//! Atomic filter publication, selective reset, rollback and backend persistence.
 use crate::support::{common, error::TestError};
 
 use bitcoin::{Block, consensus::serialize, hashes::Hash as _};

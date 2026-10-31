@@ -1,11 +1,3 @@
-//! Portable, versioned index bundles: export and restore of the `TxLookup` family.
-//!
-//! A bundle holds `txlookup-v1.dat` and, published last, `manifest.json`.
-//!
-//! Restore validates the whole bundle before mutating anything. Only `TxLookup`
-//! bundles: `ScriptHistory` is refused as unqualified; `ScriptLive` is reseeded from
-//! the UTXO set.
-
 mod artifact;
 mod chain;
 mod export;
@@ -67,7 +59,6 @@ pub enum IndexBundleError {
         name: &'static str,
         reason: &'static str,
     },
-    /// A record violates framing, bounds, or ascending order.
     #[error("artifact {name} record {record} invalid: {reason}")]
     ArtifactFraming {
         name: &'static str,
@@ -86,7 +77,6 @@ pub enum IndexBundleError {
     ExportTooLarge { limit_positions: usize },
     #[error("bundle omits transactions at height {height}: expected {expected}, found {actual}")]
     Incomplete {
-        /// First height where the bundle's count differs from the chain.
         height: u32,
         expected: u64,
         actual: u64,
@@ -235,8 +225,6 @@ mod tests {
 
     type TestResult = Result<(), TestError>;
 
-    /// An incomplete bundle names the first height whose count differs, so an
-    /// omitted record cannot silently receive the complete watermark.
     #[test]
     fn incomplete_reports_first_missing_height() {
         let error = IndexBundleError::Incomplete {

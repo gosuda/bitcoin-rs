@@ -1,5 +1,3 @@
-//! Script history, spending, and live-view reads under the shared snapshot gate.
-
 use super::{
     DerivedIndexQueryEngine, OutPoint, QueryBudget, ReadPrefix, ScriptHash, ScriptHistoryPage,
     ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
@@ -7,11 +5,8 @@ use super::{
 };
 use crate::types::ScriptHistoryOccurrence;
 
-/// Height rows requested by one history page scan. One height row can hold
-/// every occurrence of the block, so a page never reads far past its limit.
 const PAGE_SCAN_ROWS: usize = 32;
 
-/// Byte cap of one history page scan.
 const PAGE_SCAN_BYTES: usize = 1 << 20;
 
 fn storage_error(error: impl core::fmt::Display) -> TxQueryError {
@@ -272,10 +267,6 @@ impl DerivedIndexQueryEngine {
         Ok(history)
     }
 
-    /// Resolves `txid` to the exclusive page cursor of its newest occurrence.
-    ///
-    /// The transaction index gives the candidate heights; one bounded seek per
-    /// height confirms the occurrence under this exact script.
     pub(super) fn history_cursor_for(
         snapshot: &dyn TxIndexSnapshot,
         prefix: &ReadPrefix,
@@ -320,11 +311,6 @@ impl DerivedIndexQueryEngine {
         Self::none_below_floor(prefix.floor, "script history")
     }
 
-    /// One bounded newest-first page strictly after `cursor`.
-    ///
-    /// `cursor` is an API-09 transaction id, resolved to the newest occurrence
-    /// of this script. An unknown cursor reports `cursor_found = false` and
-    /// returns the first page, so API-09 restarts instead of skipping records.
     pub(super) fn confirmed_history_page_for(
         snapshot: &dyn TxIndexSnapshot,
         prefix: &ReadPrefix,
@@ -475,7 +461,6 @@ mod tests {
     use bitcoin_rs_storage::PrefixScanLimit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// One script's occurrence rows, newest height first.
     struct HistorySnapshot {
         script: ScriptHash,
         rows: Vec<(u32, Vec<ScriptHistoryOccurrence>)>,
@@ -626,8 +611,6 @@ mod tests {
         }
     }
 
-    /// Position every fixture occurrence shares, so a `(height, offset)` cursor
-    /// is expressible without a second lookup.
     const CURSOR_OFFSET: u32 = 10;
 
     fn occurrence(scripthash: ScriptHash, txid: u8, offset: u32) -> ScriptHistoryOccurrence {

@@ -1,5 +1,3 @@
-//! Canonical row accounting, grouping, and ordered live-view mutations.
-
 use super::error::IndexError;
 use crate::types::{HashPrefixRow, ScriptHistoryOccurrence};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily};
@@ -121,7 +119,6 @@ fn distinct_history_row_count(rows: &[PositionedHistory]) -> usize {
     rows.chunk_by(|left, right| left.row == right.row).count()
 }
 
-/// [`crate::types::TxPositionValue`].
 fn for_each_row_group<F>(rows: &[PositionedRow], mut emit: F)
 where
     F: FnMut(HashPrefixRow, &[crate::types::TxPosition]),

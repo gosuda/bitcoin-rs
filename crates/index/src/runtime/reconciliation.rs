@@ -1,5 +1,3 @@
-//! Index reconciliation state machine and supplied chain-position decisions.
-
 use super::CursorCommit;
 use super::DerivedIndexWorkerError;
 use super::ForwardLeg;
@@ -23,7 +21,6 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-/// First height a capability whose durable watermark is `watermark` still
 fn forward_start(watermark: Option<IndexWatermark>) -> u32 {
     watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
 }

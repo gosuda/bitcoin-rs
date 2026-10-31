@@ -1,12 +1,8 @@
-//! Derived-index query contract: typed errors, progress info, and the
-//! object-safe read traits the RPC surface and node composition consume.
-
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::{IndexCapability, ScriptHash};
 
-/// Optional BIP157/158 queries shared by RPC and P2P adapters.
 pub trait CompactFilterQuery: Send + Sync {
     fn block_filter(
         &self,
@@ -57,7 +53,6 @@ pub enum TxUnavailableCause {
     WorkerFailed(CompactString),
     WorkerStopped,
     CompactFilterFailed(CompactString),
-    /// Carries the stored worker reason verbatim; no new wire text beyond that reason.
     ScriptLiveUnavailable(CompactString),
     MissingAuthority(&'static str),
     BlockBodyMissing {
@@ -124,7 +119,6 @@ pub enum HistoricalQueryError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoricalUnavailableCause {
-    /// lifecycle, and pruned-prefix refusals keep their identical variant.
     Shared(TxUnavailableCause),
     NoCoveredPrefix {
         capability: IndexCapability,
@@ -186,16 +180,11 @@ pub struct ScriptHistoryRecord {
     pub height: u32,
 }
 
-/// Largest page the index returns, independent of the caller's request.
 pub const SCRIPT_HISTORY_PAGE_MAX: usize = 100;
 
-/// One bounded newest-first confirmed-history page.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScriptHistoryPage {
-    /// At most the caller-requested number of records, newest first.
     pub records: Vec<ScriptHistoryRecord>,
-    /// Whether the supplied cursor named an exact occurrence of this script.
-    /// A false value preserves API-09 by returning the first page.
     pub cursor_found: bool,
 }
 
@@ -231,11 +220,6 @@ pub trait ScriptIndexQuery: Send + Sync {
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         Ok(self.history_snapshot(script_hash)?.history)
     }
-    /// Returns one bounded newest-first page strictly after `cursor`.
-    ///
-    /// `cursor` is an API-09 transaction id. The default implementation orders
-    /// complete history by `(height, txid)` descending and skips the cursor's
-    /// first occurrence, so a page never repeats the cursor itself.
     fn confirmed_history_page(
         &self,
         script_hash: ScriptHash,

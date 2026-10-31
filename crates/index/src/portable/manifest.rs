@@ -1,5 +1,3 @@
-//! Versioned bundle manifest: schema, canonical encoding, and field validation.
-
 use super::{IndexBundleError, artifact::HEADER_LEN};
 use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_primitives::Network;
@@ -70,7 +68,6 @@ pub(super) struct ManifestIndex {
     pub(super) capabilities: Vec<ManifestCoverage>,
 }
 
-/// One artifact file: identity, exact length, and record count.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManifestArtifact {
@@ -96,11 +93,9 @@ pub(super) struct IndexBundleManifestV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BundleIdentity {
     pub(super) network: Network,
-    /// Genesis block hash, little-endian bytes.
     pub(super) genesis: [u8; 32],
     pub(super) format_version: u32,
     pub(super) base_height: u32,
-    /// Base block hash, little-endian bytes.
     pub(super) base_hash: [u8; 32],
     pub(super) chainwork: ChainWork,
     pub(super) chain_tx_count: u64,
@@ -265,7 +260,6 @@ impl IndexBundleManifestV1 {
     }
 }
 
-/// Encodes little-endian hash bytes in the conventional big-endian spelling.
 pub(super) fn encode_hash_be(le: &[u8; 32]) -> String {
     let mut be = *le;
     be.reverse();
@@ -283,7 +277,6 @@ fn invalid_hex32(field: &str) -> IndexBundleError {
     IndexBundleError::Manifest(format!("{field} is not 64 lowercase hex digits"))
 }
 
-/// Parses a big-endian hash spelling into little-endian bytes.
 fn parse_hash_be(text: &str, field: &str) -> Result<[u8; 32], IndexBundleError> {
     let mut bytes = parse_hex32(text, field)?;
     bytes.reverse();

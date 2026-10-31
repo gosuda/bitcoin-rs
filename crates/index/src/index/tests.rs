@@ -15,7 +15,6 @@ use crate::{ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
-/// Answers every spent outpoint, so history rows prepare without a UTXO set.
 struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
@@ -94,7 +93,6 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), crate::portable::TestE
     Ok(())
 }
 
-/// Proves that inverted heights make ascending key byte order newest first.
 #[test]
 fn iter_funding_rows_height_order_is_newest_first() -> Result<(), crate::portable::TestError> {
     let script = vec![0x51, 0x01];
@@ -167,8 +165,6 @@ fn iter_spending_rows_returns_indexed_rows() -> Result<(), crate::portable::Test
     Ok(())
 }
 
-/// A block whose rows populate all four column families: a coinbase plus a
-/// spend, so funding and spending rows both exist alongside txid and header
 fn rollback_fixture_block() -> Block {
     let funded = tx(OutPoint::null(), vec![0x51]);
     let spender = tx(OutPoint::new(funded.txid(), 0), vec![0x52]);

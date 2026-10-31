@@ -1,5 +1,3 @@
-//! Fenced row/cursor commits and retained forward-batch settlement.
-
 use super::CursorCommit;
 use super::DerivedIndexWorkerError;
 use super::PendingForward;

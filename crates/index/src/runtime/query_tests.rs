@@ -237,7 +237,6 @@ struct FixtureConfig {
     scans: Vec<ScanResponse>,
     watermark: Option<IndexWatermark>,
     extra_blocks: Vec<Block>,
-    /// `(outpoint, txout, coinbase, height)`. Empty leaves the engine
     utxo_adds: Vec<(OutPoint, TxOut, bool, u32)>,
 }
 
@@ -1079,10 +1078,6 @@ fn child_block(parent: &Block, txs: Vec<Tx>) -> Result<Block, std::io::Error> {
     Ok(block)
 }
 
-/// Three-height chain paying one script: the genesis coinbase at height 0, two outputs
-/// at height 1 in descending txid block order, one output at height 2.
-///
-/// Returns the genesis block, the two children, and the paid
 fn paying_chain() -> Result<(Block, Vec<Block>, ScriptHash), std::io::Error> {
     let genesis = Network::Regtest.genesis_block();
     let script = genesis.txs[0].outputs[0].script_pubkey.clone();

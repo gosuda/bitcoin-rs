@@ -1,5 +1,3 @@
-//! The sole concrete owner of durable index mutations.
-
 use super::{
     block::NoSpentScripts, block::SpentCoinScripts, block::pending_rows_for_block_with_header,
     capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
@@ -24,8 +22,6 @@ impl<S: KvStore> IndexWriter<S> {
         &self.indexer
     }
 
-    /// Format 5 changed every row family (big-endian heights, 43-byte live
-    /// the store for rebuild. No in-place upgrade path exists.
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
         match indexer
@@ -185,7 +181,6 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
-    /// `TxLookup` watermark and coverage floor are written only in the final
     pub(crate) fn import_tx_lookup_stream<F>(
         &self,
         mut produce: F,
@@ -220,7 +215,6 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
-    /// reseeds from an immutable artifact or retained history, so anchoring it would
     pub(crate) fn anchor_watermark(
         &self,
         capabilities: IndexCapabilities,
@@ -504,9 +498,7 @@ pub(crate) enum PortableImportRow<'a> {
     /// The 80-byte header identity of an active-chain block at or below the
     /// bundle base, so ordinary rollback can unseat the base later.
     Header(&'a [u8; crate::types::HEADER_ROW_SIZE]),
-    /// One `TxConfirmed` row and its packed `TxPosition` value.
     TxLookup {
-        /// Stored key: txid prefix and big-endian height.
         row: crate::types::HashPrefixRow,
         value: &'a [u8],
     },

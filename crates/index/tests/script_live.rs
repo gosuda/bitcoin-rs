@@ -1,5 +1,3 @@
-//! `ScriptLive` behavior over the prepared/commit path (`IDX-01`, `IDX-07`, #225).
-
 use crate::support::{TestError, common};
 
 #[cfg(any(feature = "redb", feature = "fjall"))]
@@ -492,8 +490,6 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), TestError> {
     Ok(())
 }
 
-/// A BIP30-style outpoint overwrite removes the old script row on connect and
-/// restores it from the undo anchor on disconnect.
 #[test]
 fn live_rows_restore_a_replaced_outpoint() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
@@ -663,7 +659,6 @@ fn unresolvable_spends_fail_closed() -> Result<(), TestError> {
     Ok(())
 }
 
-/// The live predicate is UTXO admission: `OP_RETURN` and oversized scripts never
 #[test]
 fn live_predicate_matches_utxo_admission_not_history() -> Result<(), TestError> {
     let mut chain = Chain::new()?;
@@ -706,7 +701,6 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), TestError> 
     Ok(())
 }
 
-/// Answers every spent outpoint for history-only commits in this suite.
 struct NoSpend;
 
 static NO_SPEND_SCRIPT: [u8; 2] = [0x51, 0x01];

@@ -1,6 +1,3 @@
-//! Export: stream the `TxLookup` family of one coherent snapshot into a
-//! hashed artifact, then publish the manifest last.
-
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, IO_BUFFER_BYTES, hash_file,
     write_record,
@@ -38,7 +35,6 @@ fn export_page_limit() -> PrefixScanLimit {
     }
 }
 
-/// Streams every `TxConfirmed` row of one snapshot in stored-key order
 #[expect(
     clippy::type_complexity,
     reason = "the page emitter signature is the streaming interface; an alias would hide the output contract"
@@ -105,7 +101,6 @@ impl Publication {
         }
     }
 
-    /// takes ownership of its removal.
     fn create_new(&mut self, path: &Path) -> Result<File, IndexBundleError> {
         let file = create_new_file(path)?;
         self.created.push(path.to_path_buf());
@@ -349,15 +344,11 @@ struct RowExporter<'a> {
 /// Sort key of one staged row entry: `height` big-endian then `sequence`
 /// big-endian, so byte order is numeric order.
 const STAGED_SORT_KEY_LEN: usize = 4 + 8;
-/// Sort key of one resolved entry: `sequence` big-endian.
 const RESOLVED_SORT_KEY_LEN: usize = 8;
-/// Staged payload of one row: the fixed-width stored key, the value length,
-/// then the value.
 const STAGED_KEY_LEN: usize = HASH_PREFIX_ROW_SIZE;
 const SORT_RUN_BYTES: usize = 4 << 20;
 const SORT_MERGE_FAN_IN: usize = 32;
 
-/// Writes one framed record: sort key, value length, then value.
 fn write_framed(out: &mut impl Write, key: &[u8], payload: &[u8]) -> io::Result<()> {
     let payload_len = u64::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "payload length exceeds u64"))?;
@@ -528,7 +519,6 @@ fn merge_runs(
     Ok(())
 }
 
-/// Staged payload of one stored row: the fixed-width stored key, the value
 fn encode_staged(key: &[u8; STAGED_KEY_LEN], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(STAGED_KEY_LEN + 8 + value.len());
     payload.extend_from_slice(key);
@@ -550,8 +540,6 @@ fn decode_staged(payload: &[u8]) -> Option<([u8; STAGED_KEY_LEN], &[u8])> {
     Some((key, value))
 }
 
-/// `txid || position` pair per entry, with positions in [`TxPosition`]'s
-/// little-endian 6-byte layout.
 fn encode_resolved(height: u32, located: &[([u8; 32], TxPosition)]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(8 + located.len() * (32 + 6));
     payload.extend_from_slice(&height.to_le_bytes());
@@ -590,8 +578,6 @@ fn decode_resolved(payload: &[u8]) -> Option<(u32, ResolvedPairs)> {
 }
 
 impl RowExporter<'_> {
-    /// Streams every row once, in stored-key order, and returns
-    /// `(records, payload bytes)`.
     fn stream(
         &mut self,
         base: IndexWatermark,
@@ -624,7 +610,6 @@ impl RowExporter<'_> {
         Ok(total)
     }
 
-    /// Streams every stored row once, in stored-key order, into an anonymous
     fn enumerate(
         &self,
         base: IndexWatermark,
@@ -762,7 +747,6 @@ impl RowExporter<'_> {
         Ok(resolved)
     }
 
-    /// order, returning `(records, payload bytes)`.
     fn emit(
         &mut self,
         resolved: &mut File,

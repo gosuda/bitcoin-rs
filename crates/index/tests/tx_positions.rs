@@ -1,4 +1,3 @@
-//! Tests for the persisted transaction-position row values.
 #![allow(clippy::expect_used)]
 
 use crate::support::common;
@@ -19,8 +18,6 @@ use proptest::prelude::*;
 
 use common::MemoryStore;
 
-/// Answers every spent outpoint, so the v6 history rows prepare without a
-/// real UTXO set.
 struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
