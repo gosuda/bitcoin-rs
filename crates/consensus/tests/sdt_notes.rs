@@ -2,6 +2,10 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+#[path = "support/error.rs"]
+mod error;
+use error::TestError;
+
 #[derive(Debug)]
 struct ProbeDef {
     provider: String,
@@ -282,7 +286,7 @@ fn instantiate_probes() {
 }
 
 #[test]
-fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Error>> {
+fn embedded_sdt_notes_match_core_layout() -> Result<(), TestError> {
     #[cfg(feature = "usdt")]
     instantiate_probes();
     let path = match std::env::var_os("SDT_ELF") {
@@ -295,7 +299,10 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
         let notes = match parse_sdt_notes(&bytes) {
             SdtParse::NotElf => Vec::new(),
             SdtParse::Malformed(reason) => {
-                return Err(format!("{}: {reason}", path.display()).into());
+                return Err(TestError::MalformedNote {
+                    path: path.display().to_string(),
+                    reason,
+                });
             }
             SdtParse::Notes(_, notes) => notes,
         };
@@ -316,7 +323,10 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
             return Ok(());
         }
         SdtParse::Malformed(reason) => {
-            return Err(format!("{}: {reason}", path.display()).into());
+            return Err(TestError::MalformedNote {
+                path: path.display().to_string(),
+                reason,
+            });
         }
         SdtParse::Notes(machine, notes) => (machine, notes),
     };
@@ -324,7 +334,7 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
         let note = notes
             .iter()
             .find(|note| note.provider == def.provider && note.name == def.name)
-            .ok_or_else(|| format!("missing SDT note {}:{}", def.provider, def.name))?;
+            .ok_or(TestError::Missing("missing SDT note"))?;
         if let Some(expected) = expected_layout(def, machine) {
             assert_eq!(
                 note.args, expected,

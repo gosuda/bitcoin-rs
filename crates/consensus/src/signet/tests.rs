@@ -11,7 +11,9 @@ use super::{
 use crate::ConsensusError;
 use crate::verify_block::witness_commitment_index;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_error::TestError;
+
+type TestResult = Result<(), TestError>;
 
 const CORE_SIGNET_BLOCKS: [&str; 10] = [
     "00000020f61eee3b63a380a477a063af32b2bbc97c9ff9f01f2c4225e973988108000000f575c83235984e7dc4afc1f30944c170462e84437ab6f2d52e16878a79e4678bd1914d5fae77031eccf4070001010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff025151feffffff0200f2052a010000001600149243f727dd5343293eb83174324019ec16c2630f0000000000000000776a24aa21a9ede2f61c3f71d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf94c4fecc7daa2490047304402205e423a8754336ca99dbe16509b877ef1bf98d008836c725005b3c787c41ebe46022047246e4467ad7cc7f1ad98662afcaf14c115e0095a227c7b05c5182591c23e7e01000120000000000000000000000000000000000000000000000000000000000000000000000000",
@@ -33,7 +35,7 @@ fn hex_bytes(hex: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
         .collect()
 }
 
-fn core_blocks() -> Result<Vec<Block>, Box<dyn std::error::Error>> {
+fn core_blocks() -> Result<Vec<Block>, TestError> {
     let mut blocks = Vec::with_capacity(CORE_SIGNET_BLOCKS.len());
     for hex in CORE_SIGNET_BLOCKS {
         blocks.push(deserialize::<Block>(&hex_bytes(hex)?)?);
@@ -41,14 +43,14 @@ fn core_blocks() -> Result<Vec<Block>, Box<dyn std::error::Error>> {
     Ok(blocks)
 }
 
-fn default_challenge() -> Result<&'static [u8], Box<dyn std::error::Error>> {
+fn default_challenge() -> Result<&'static [u8], TestError> {
     let challenge = Network::Signet
         .signet_challenge()
         .ok_or("signet defines a challenge")?;
     Ok(challenge)
 }
 
-fn commitment_output(block: &Block) -> Result<(usize, Vec<u8>), Box<dyn std::error::Error>> {
+fn commitment_output(block: &Block) -> Result<(usize, Vec<u8>), TestError> {
     let coinbase = block.txs.first().ok_or("block has a coinbase")?;
     let index = witness_commitment_index(coinbase).ok_or("coinbase has a witness commitment")?;
     Ok((index, coinbase.outputs[index].script_pubkey.to_vec()))

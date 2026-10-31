@@ -7,6 +7,7 @@ mod kernel_vector_parity;
 mod overhaul_parse_parity;
 mod overhaul_prepared_inputs;
 mod shared_sighash;
+mod support;
 mod validation_engine;
 mod vectors;
 mod witness_commitment_rules;

@@ -19,6 +19,8 @@ pub mod script_cache;
 mod sha256d64;
 pub mod signet;
 mod sigops;
+#[cfg(test)]
+pub(crate) mod test_error;
 pub mod trace;
 pub mod verify_block;
 pub mod verify_tx;

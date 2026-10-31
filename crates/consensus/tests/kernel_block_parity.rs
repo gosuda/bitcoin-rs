@@ -1,6 +1,5 @@
 #![cfg(feature = "kernel")]
 
-use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use bitcoin::hex::FromHex;
@@ -12,7 +11,9 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
 
-type TestResult = Result<(), Box<dyn Error>>;
+use crate::support::error::TestError;
+
+type TestResult = Result<(), TestError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -299,10 +300,9 @@ fn vectors_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/scripts")
 }
 
-fn load_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
+fn load_fixtures() -> Result<Vec<Fixture>, TestError> {
     let dir = vectors_dir();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|error| format!("fixture corpus dir {}: {error}", dir.display()))?;
+    let entries = std::fs::read_dir(&dir)?;
     let mut paths: Vec<PathBuf> = entries
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<_, _>>()?;
@@ -312,47 +312,38 @@ fn load_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
     let mut fixtures = Vec::with_capacity(paths.len());
     for path in &paths {
         let text = std::fs::read_to_string(path)?;
-        let file: FixtureFile =
-            sonic_rs::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+        let file: FixtureFile = sonic_rs::from_str(&text)?;
         fixtures.push(validate_fixture(file, path)?);
     }
     Ok(fixtures)
 }
 
-fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn Error>> {
-    let tx: Tx = deserialize(&decode_hex(&file.tx_hex)?)
-        .map_err(|error| format!("{}: tx hex does not decode: {error}", path.display()))?;
+fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, TestError> {
+    let tx: Tx = deserialize(&decode_hex(&file.tx_hex)?)?;
     let computed_txid = tx.txid().to_string();
     if computed_txid != file.txid {
-        return Err(format!(
-            "{}: txid mismatch: manifest says {} but tx hex hashes to {computed_txid}",
-            path.display(),
-            file.txid
-        )
-        .into());
+        return Err(TestError::TxidMismatch {
+            path: path.display().to_string(),
+            expected: file.txid,
+            actual: computed_txid,
+        });
     }
     let computed_wtxid = tx.wtxid().to_string();
     if computed_wtxid != file.wtxid {
-        return Err(format!(
-            "{}: wtxid mismatch: manifest says {} but tx hex hashes to {computed_wtxid} \
-             (witness bytes are not what was frozen)",
-            path.display(),
-            file.wtxid
-        )
-        .into());
+        return Err(TestError::WtxidMismatch {
+            path: path.display().to_string(),
+            expected: file.wtxid,
+            actual: computed_wtxid,
+        });
     }
     if file.prevouts.len() != tx.inputs.len() {
-        return Err(format!(
-            "{}: {} prevouts for {} inputs; every input needs its prevout \
-             (the kernel taproot path requires all of them)",
-            path.display(),
-            file.prevouts.len(),
-            tx.inputs.len()
-        )
-        .into());
+        return Err(TestError::PrevoutMismatch {
+            path: path.display().to_string(),
+            prevouts: file.prevouts.len(),
+            inputs: tx.inputs.len(),
+        });
     }
-    let flags = VerifyFlags::from_core_names(&file.flags)
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let flags = VerifyFlags::from_core_names(&file.flags)?;
     let prevouts = file
         .prevouts
         .iter()
@@ -362,7 +353,7 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
                 script_pubkey: decode_hex(&prevout.script_hex)?.into(),
             })
         })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+        .collect::<Result<Vec<_>, TestError>>()?;
     Ok(Fixture {
         name: file.name,
         class: file.class,
@@ -374,17 +365,13 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
     })
 }
 
-fn decode_hex(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+fn decode_hex(hex: &str) -> Result<Vec<u8>, TestError> {
     Ok(Vec::from_hex(hex)?)
 }
 
-fn require_non_empty(fixtures: &[Fixture]) -> Result<(), Box<dyn Error>> {
+fn require_non_empty(fixtures: &[Fixture]) -> Result<(), TestError> {
     if fixtures.is_empty() {
-        return Err(format!(
-            "kernel parity fixture corpus is empty; commit fixtures under {}",
-            vectors_dir().display()
-        )
-        .into());
+        return Err(TestError::VacuousVectors("kernel parity fixture corpus"));
     }
     Ok(())
 }
@@ -480,8 +467,11 @@ fn differential_is_non_vacuous() -> TestResult {
 
     let kernel = kernel_result(&script_path.tx, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&script_path.tx, &script_path.prevouts, script_path.flags);
-    let pristine_kernel_verdict = Verdict::of_kernel(&kernel)
-        .map_err(|err| format!("pristine taproot script-path kernel execution error: {err}"))?;
+    let pristine_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| {
+        TestError::Oracle {
+            fault: OracleFault::PristineKernel,
+        }
+    })?;
     assert_eq!(
         pristine_kernel_verdict,
         Verdict::Accept,
@@ -498,8 +488,11 @@ fn differential_is_non_vacuous() -> TestResult {
         .ok_or("TamperWitness must apply to a taproot script-path spend")?;
     let kernel = kernel_result(&tampered, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&tampered, &script_path.prevouts, script_path.flags);
-    let tampered_kernel_verdict = Verdict::of_kernel(&kernel)
-        .map_err(|err| format!("tampered taproot script-path kernel execution error: {err}"))?;
+    let tampered_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| {
+        TestError::Oracle {
+            fault: OracleFault::TamperedKernel,
+        }
+    })?;
     assert_eq!(
         tampered_kernel_verdict,
         Verdict::Reject,

@@ -1,6 +1,5 @@
 #![cfg(feature = "kernel")]
 
-use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -10,7 +9,9 @@ use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, consensus_bytes, deserial
 use bitcoin_rs_script::{VerifyFlags, push_int};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
-type TestResult = Result<(), Box<dyn Error>>;
+use crate::support::error::{RowFault, RowFlagNames, TestError, TokenText};
+
+type TestResult = Result<(), TestError>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -36,18 +37,17 @@ fn kernel_verdict(
     }
 }
 
-fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
+fn parse_core_asm(asm: &str) -> Result<Vec<u8>, TestError> {
     let mut script = Vec::new();
     for token in asm.split_whitespace() {
         if let Some(hex) = token.strip_prefix("0x") {
-            let bytes =
-                hex_to_bytes(hex).map_err(|e| format!("invalid hex in token {token}: {e}"))?;
-            script.extend_from_slice(&bytes);
+            script.extend_from_slice(&hex_to_bytes(hex)?);
         } else if let Ok(n) = token.parse::<i64>() {
             script.extend_from_slice(&push_int(n));
         } else {
-            let byte =
-                resolve_opcode(token).ok_or_else(|| format!("unknown opcode token: {token}"))?;
+            let byte = resolve_opcode(token).ok_or_else(|| TestError::UnknownOpcode {
+                token: TokenText(token.to_owned()),
+            })?;
             script.push(byte);
         }
     }
@@ -168,8 +168,8 @@ fn resolve_opcode(name: &str) -> Option<u8> {
     })
 }
 
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    Vec::from_hex(hex).map_err(|error| error.to_string())
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, TestError> {
+    Ok(Vec::from_hex(hex)?)
 }
 
 struct VectorRow {
@@ -206,33 +206,31 @@ const FULL_FLAGS: VerifyFlags = VerifyFlags::STANDARD
     .union(VerifyFlags::CONST_SCRIPTCODE)
     .union(VerifyFlags::MINIMALIF);
 
-fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
-    let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
+fn tx_valid_flags(names: &str) -> Result<VerifyFlags, TestError> {
+    let parsed = VerifyFlags::from_core_names(names)?;
     let effective = VerifyFlags::from_bits_retain(FULL_FLAGS.bits() & !parsed.bits());
     if effective != effective.filled() {
-        return Err(format!(
-            "bad test flags (not a filled combination): {names}"
-        ));
+        return Err(TestError::UnfilledFlags {
+            names: RowFlagNames("full flag set"),
+        });
     }
     Ok(effective)
 }
 
-fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, String> {
-    let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
+fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, TestError> {
+    let parsed = VerifyFlags::from_core_names(names)?;
     if parsed != parsed.filled() {
-        return Err(format!(
-            "bad test flags (not a filled combination): {names}"
-        ));
+        return Err(TestError::UnfilledFlags {
+            names: RowFlagNames("test flags"),
+        });
     }
     Ok(parsed)
 }
 
-fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn Error>> {
+fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, TestError> {
     let path = Path::new("tests/vectors").join(name);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{} should be readable: {e}", path.display()))?;
-    let root: Vec<Value> = sonic_rs::from_str(&text)
-        .map_err(|e| format!("{} should parse as JSON array: {e}", path.display()))?;
+    let text = std::fs::read_to_string(&path)?;
+    let root: Vec<Value> = sonic_rs::from_str(&text)?;
 
     let mut rows = Vec::new();
     for (index, row) in root.iter().enumerate() {
@@ -250,50 +248,66 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
 
         let tx_hex = arr[1]
             .as_str()
-            .ok_or_else(|| format!("row {index}: tx hex should be string"))?;
-        let tx_bytes = hex_to_bytes(tx_hex).map_err(|e| format!("row {index}: bad tx hex: {e}"))?;
-        let tx: Tx = deserialize(&tx_bytes)
-            .map_err(|e| format!("row {index}: tx should deserialize: {e}"))?;
+            .ok_or(TestError::Row {
+                row: index,
+                fault: RowFault::NotText("tx hex"),
+            })?;
+        let tx_bytes = hex_to_bytes(tx_hex)?;
+        let tx: Tx = deserialize(&tx_bytes).map_err(|source| TestError::RowDecode {
+            row: index,
+            source,
+        })?;
 
         let flags = match expected {
             Verdict::Accept => tx_valid_flags(flags_str),
             Verdict::Reject => tx_invalid_flags(flags_str),
         }
-        .map_err(|e| format!("row {index}: bad flags: {e}"))?;
+        .map_err(|_| TestError::Row {
+            row: index,
+            fault: RowFault::NotText("flags"),
+        })?;
 
-        let prevout_specs = arr[0]
-            .as_array()
-            .ok_or_else(|| format!("row {index}: prevout specs should be array"))?;
+        let prevout_specs = arr[0].as_array().ok_or(TestError::Row {
+            row: index,
+            fault: RowFault::NotArray("prevout specs"),
+        })?;
         let mut available_prevouts = Vec::with_capacity(prevout_specs.len());
         for spec in prevout_specs {
-            let spec = spec
-                .as_array()
-                .ok_or_else(|| format!("row {index}: bad prevout spec"))?;
-            let hash_hex = spec[0]
-                .as_str()
-                .ok_or_else(|| format!("row {index}: bad prevout hash"))?;
-            let vout_signed = spec[1]
-                .as_i64()
-                .ok_or_else(|| format!("row {index}: bad prevout vout"))?;
+            let spec = spec.as_array().ok_or(TestError::Row {
+                row: index,
+                fault: RowFault::NotArray("prevout spec"),
+            })?;
+            let hash_hex = spec[0].as_str().ok_or(TestError::Row {
+                row: index,
+                fault: RowFault::NotText("prevout hash"),
+            })?;
+            let vout_signed = spec[1].as_i64().ok_or(TestError::Row {
+                row: index,
+                fault: RowFault::NotInteger("prevout vout"),
+            })?;
             let vout = if vout_signed == -1 {
                 u32::MAX
             } else {
-                u32::try_from(vout_signed)
-                    .map_err(|_| format!("row {index}: prevout vout does not fit in u32"))?
+                u32::try_from(vout_signed).map_err(|_| TestError::Row {
+                    row: index,
+                    fault: RowFault::OutOfRange("prevout vout"),
+                })?
             };
-            let script_asm = spec[2]
-                .as_str()
-                .ok_or_else(|| format!("row {index}: bad prevout script"))?;
+            let script_asm = spec[2].as_str().ok_or(TestError::Row {
+                row: index,
+                fault: RowFault::NotText("prevout script"),
+            })?;
             let amount = spec
                 .get(3)
                 .and_then(sonic_rs::JsonValueTrait::as_u64)
                 .unwrap_or(0);
 
-            let script_pubkey = parse_core_asm(script_asm)
-                .map_err(|e| format!("row {index}: bad prevout script asm: {e}"))?;
+            let script_pubkey = parse_core_asm(script_asm)?;
 
-            let txid = Txid::from_str(hash_hex)
-                .map_err(|e| format!("row {index}: bad prevout txid: {e}"))?;
+            let txid = Txid::from_str(hash_hex).map_err(|_| TestError::Row {
+                row: index,
+                fault: RowFault::NotText("prevout txid"),
+            })?;
             let outpoint = OutPoint::new(txid, vout);
 
             available_prevouts.push((
@@ -311,11 +325,10 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
                 .iter()
                 .find(|(op, _)| *op == input.previous_output)
             else {
-                return Err(format!(
-                    "row {index}: missing prevout for input {:?}",
-                    input.previous_output
-                )
-                .into());
+                return Err(TestError::RowMissingPrevout {
+                    row: index,
+                    outpoint: input.previous_output,
+                });
             };
             prevouts.push((input.previous_output, spent.clone()));
         }
@@ -371,9 +384,9 @@ fn kernel_verdict_matches_mandatory_core_catalogs() -> TestResult {
     Ok(())
 }
 
-fn require_non_empty(rows: &[VectorRow], name: &str) -> Result<(), Box<dyn Error>> {
+fn require_non_empty(rows: &[VectorRow], name: &'static str) -> Result<(), TestError> {
     if rows.is_empty() {
-        return Err(format!("{name}: zero vectors loaded — gate is vacuous").into());
+        return Err(TestError::VacuousVectors(name));
     }
     Ok(())
 }
@@ -383,8 +396,7 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
     let valid_rows = load_vectors("tx_valid.json", Verdict::Accept)?;
     require_non_empty(&valid_rows, "tx_valid.json")?;
     let valid_row = &valid_rows[0];
-    let actual_valid = kernel_verdict(&valid_row.tx, &valid_row.prevouts, valid_row.flags)
-        .map_err(|err| format!("oracle infrastructure error on valid tx: {err}"))?;
+    let actual_valid = kernel_verdict(&valid_row.tx, &valid_row.prevouts, valid_row.flags)?;
     assert_eq!(
         actual_valid,
         Verdict::Accept,
@@ -393,8 +405,7 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
 
     let mut tampered_tx = valid_row.tx.clone();
     tampered_tx.inputs[0].script_sig = bitcoin_rs_primitives::Script::from_bytes(vec![0x00]);
-    let tampered_verdict = kernel_verdict(&tampered_tx, &valid_row.prevouts, valid_row.flags)
-        .map_err(|err| format!("oracle infrastructure error on tampered tx: {err}"))?;
+    let tampered_verdict = kernel_verdict(&tampered_tx, &valid_row.prevouts, valid_row.flags)?;
     assert_eq!(
         tampered_verdict,
         Verdict::Reject,
@@ -407,8 +418,8 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         .iter()
         .find(|row| !is_policy_only_tx(row))
         .ok_or("no runnable invalid rows found")?;
-    let actual_invalid = kernel_verdict(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags)
-        .map_err(|err| format!("oracle infrastructure error on invalid tx: {err}"))?;
+    let actual_invalid =
+        kernel_verdict(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags)?;
     assert_eq!(
         actual_invalid,
         Verdict::Reject,
@@ -440,25 +451,19 @@ fn kernel_infrastructure_error_fails_closed() -> TestResult {
     );
 
     let tx_bytes = consensus_bytes(&row.tx);
-    let kernel_tx =
-        bitcoinkernel::Transaction::new(&tx_bytes).map_err(|e| format!("kernel_tx new: {e}"))?;
+    let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)?;
     let kernel_prevouts = row
         .prevouts
         .iter()
         .map(|(_, prevout)| {
-            let script = bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey)
-                .map_err(|e| format!("script new: {e}"))?;
-            let amount =
-                i64::try_from(prevout.value.to_sat()).map_err(|e| format!("amount: {e}"))?;
+            let script = bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey)?;
+            let amount = i64::try_from(prevout.value.to_sat())?;
             Ok(bitcoinkernel::TxOut::new(&script, amount))
         })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    let precomputed = bitcoinkernel::PrecomputedTransactionData::new(&kernel_tx, &kernel_prevouts)
-        .map_err(|e| format!("precomputed new: {e}"))?;
-    let script = bitcoinkernel::ScriptPubkey::new(&row.prevouts[0].1.script_pubkey)
-        .map_err(|e| format!("script new: {e}"))?;
-    let amount =
-        i64::try_from(row.prevouts[0].1.value.to_sat()).map_err(|e| format!("amount: {e}"))?;
+        .collect::<Result<Vec<_>, TestError>>()?;
+    let precomputed = bitcoinkernel::PrecomputedTransactionData::new(&kernel_tx, &kernel_prevouts)?;
+    let script = bitcoinkernel::ScriptPubkey::new(&row.prevouts[0].1.script_pubkey)?;
+    let amount = i64::try_from(row.prevouts[0].1.value.to_sat())?;
     let kernel_verify_err = bitcoinkernel::verify(
         &script,
         Some(amount),
