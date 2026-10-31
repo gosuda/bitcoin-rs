@@ -24,7 +24,8 @@ pub struct WorkerIdentity {
     pub worker: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("ledger unavailable")]
 pub struct LedgerUnavailable;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -2535,71 +2535,87 @@ fn full_event_queue_fails_before_share_validation_without_orphan_ticket() {
     );
 }
 
-#[test]
-fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
-    use bitcoin_rs_mining::pool::stratum::sv2::{Frame, ProtocolSession};
-    fn setup_frame(msg_type: u8, channel_msg: bool, payload: Vec<u8>) -> Frame {
-        Frame {
-            extension_type: 0,
-            msg_type,
-            channel_msg,
-            payload,
-        }
-    }
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
-        .unwrap_or_else(|error| panic!("book: {error:?}"));
+use bitcoin_rs_mining::pool::stratum::sv2::{Frame, ProtocolSession};
+
+fn open_test_session(book: &mut JobBook) -> ProtocolSession {
     let mut cfg = server_config();
     cfg.limits.max_outbound_frames = 3;
     let mut session =
-        ProtocolSession::new(cfg, &book).unwrap_or_else(|error| panic!("session: {error:?}"));
+        ProtocolSession::new(cfg, book).unwrap_or_else(|error| panic!("session: {error:?}"));
     let setup = SetupConnection {
         protocol: Protocol::MiningProtocol,
         min_version: 2,
         max_version: 2,
         flags: FLAG_REQUIRES_STANDARD_JOBS,
-        endpoint_host: Str0255::try_from("pool.invalid").unwrap(),
+        endpoint_host: Str0255::try_from("pool.invalid")
+            .unwrap_or_else(|error| panic!("short: {error:?}")),
         endpoint_port: 3333,
-        vendor: Str0255::try_from("test-miner").unwrap(),
-        hardware_version: Str0255::try_from("sim-1").unwrap(),
-        firmware: Str0255::try_from("fw-0").unwrap(),
-        device_id: Str0255::try_from("").unwrap(),
+        vendor: Str0255::try_from("test-miner").unwrap_or_else(|error| panic!("short: {error:?}")),
+        hardware_version: Str0255::try_from("sim-1")
+            .unwrap_or_else(|error| panic!("short: {error:?}")),
+        firmware: Str0255::try_from("fw-0").unwrap_or_else(|error| panic!("short: {error:?}")),
+        device_id: Str0255::try_from("").unwrap_or_else(|error| panic!("empty: {error:?}")),
     };
     let payload = binary_sv2::to_bytes(setup).unwrap_or_else(|error| panic!("encode: {error:?}"));
     session
         .handle(
-            &mut book,
-            setup_frame(MESSAGE_TYPE_SETUP_CONNECTION, false, payload),
+            book,
+            Frame {
+                extension_type: 0,
+                msg_type: MESSAGE_TYPE_SETUP_CONNECTION,
+                channel_msg: false,
+                payload,
+            },
         )
         .unwrap_or_else(|error| panic!("setup: {error:?}"));
     assert!(session.is_open());
     session.take_frames();
-    let open = |session: &mut ProtocolSession, book: &mut JobBook, id: u32, user: &str| {
-        let msg = OpenStandardMiningChannel {
-            request_id: id,
-            user_identity: Str0255::try_from(user).unwrap(),
-            nominal_hash_rate: 1.0e12,
-            max_target: U256::from(&ALL_ONES),
-        };
-        let payload = binary_sv2::to_bytes(msg).unwrap();
-        session
-            .handle(
-                book,
-                setup_frame(MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL, false, payload),
-            )
-            .unwrap_or_else(|error| panic!("open: {error:?}"));
-        let mut out = session.take_frames();
-        let mut received: Vec<Received> = out
-            .drain(..)
-            .map(|frame| Received {
-                msg_type: frame.msg_type,
-                channel_msg: frame.channel_msg,
-                payload: frame.payload,
-            })
-            .collect();
-        read_open_standard(&mut received)
+    session
+}
+
+fn open_test_standard_channel(
+    session: &mut ProtocolSession,
+    book: &mut JobBook,
+    id: u32,
+    user: &str,
+) -> Opened {
+    let msg = OpenStandardMiningChannel {
+        request_id: id,
+        user_identity: Str0255::try_from(user).unwrap_or_else(|error| panic!("short: {error:?}")),
+        nominal_hash_rate: 1.0e12,
+        max_target: U256::from(&ALL_ONES),
     };
-    let opened_a = open(&mut session, &mut book, 7, "alice.rig1");
-    let opened_b = open(&mut session, &mut book, 8, "bob.rig1");
+    let payload = binary_sv2::to_bytes(msg).unwrap_or_else(|error| panic!("encode: {error:?}"));
+    session
+        .handle(
+            book,
+            Frame {
+                extension_type: 0,
+                msg_type: MESSAGE_TYPE_OPEN_STANDARD_MINING_CHANNEL,
+                channel_msg: false,
+                payload,
+            },
+        )
+        .unwrap_or_else(|error| panic!("open: {error:?}"));
+    let mut received: Vec<Received> = session
+        .take_frames()
+        .into_iter()
+        .map(|frame| Received {
+            msg_type: frame.msg_type,
+            channel_msg: frame.channel_msg,
+            payload: frame.payload,
+        })
+        .collect();
+    read_open_standard(&mut received)
+}
+
+#[test]
+fn active_refresh_upgrades_a_channel_that_missed_its_parent_to_future() {
+    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))
+        .unwrap_or_else(|error| panic!("book: {error:?}"));
+    let mut session = open_test_session(&mut book);
+    let opened_a = open_test_standard_channel(&mut session, &mut book, 7, "alice.rig1");
+    let opened_b = open_test_standard_channel(&mut session, &mut book, 8, "bob.rig1");
     let first = book
         .install(candidate(100, 0xab, 2), Vec::new())
         .unwrap_or_else(|error| panic!("install: {error:?}"));

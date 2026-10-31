@@ -1,11 +1,10 @@
-
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_mining::pool::ledger::*;
-use std::sync::Arc;
 use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, RedbStore};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 trait FixtureValue<T> {
@@ -26,7 +25,6 @@ impl<T> FixtureValue<T> for Option<T> {
         self.unwrap_or_else(|| panic!("{context}"))
     }
 }
-
 
 fn hash(tag: u8) -> Hash32 {
     [tag; 32]
@@ -65,7 +63,14 @@ fn share(job: u64, account: u64, nonce: u32, work: u128) -> ShareCredit {
     share_vnt(job, account, nonce, 1, 1_700_000_000, work)
 }
 
-fn share_vnt(job: u64, account: u64, nonce: u32, version: i32, ntime: u32, work: u128) -> ShareCredit {
+fn share_vnt(
+    job: u64,
+    account: u64,
+    nonce: u32,
+    version: i32,
+    ntime: u32,
+    work: u128,
+) -> ShareCredit {
     let mut seed = Vec::new();
     seed.extend_from_slice(&job.to_be_bytes());
     seed.extend_from_slice(&account.to_be_bytes());
@@ -135,7 +140,6 @@ fn miner_amounts(list: &[(u64, u64)]) -> Vec<(MinerId, u64)> {
         .collect()
 }
 
-
 #[derive(Default)]
 struct ChainState {
     tip: u32,
@@ -155,9 +159,12 @@ struct FakeChain {
 impl FakeChain {
     fn set_tip(&self, tip: u32) {
         let mut state = self.state.borrow_mut();
-        let displaced: Vec<Hash32> = state.blocks.iter()
+        let displaced: Vec<Hash32> = state
+            .blocks
+            .iter()
             .filter(|(height, _)| **height > tip && **height <= state.tip)
-            .map(|(_, hash)| *hash).collect();
+            .map(|(_, hash)| *hash)
+            .collect();
         state.displaced.extend(displaced);
         state.tip = tip;
     }
@@ -206,13 +213,23 @@ impl ChainView for FakeChain {
         Ok(self.state.borrow().tip)
     }
 
-    fn block_location(&self, block_hash: &Hash32, height: u32) -> Result<BlockLocation, ChainViewError> {
+    fn block_location(
+        &self,
+        block_hash: &Hash32,
+        height: u32,
+    ) -> Result<BlockLocation, ChainViewError> {
         self.check()?;
         let state = self.state.borrow();
-        if let Some((&observed, _)) = state.blocks.iter().find(|(h, hash)| **h <= state.tip && *hash == block_hash) {
+        if let Some((&observed, _)) = state
+            .blocks
+            .iter()
+            .find(|(h, hash)| **h <= state.tip && *hash == block_hash)
+        {
             return Ok(BlockLocation::Canonical { height: observed });
         }
-        if state.displaced.contains(block_hash) || (state.blocks.contains_key(&height) && height <= state.tip) {
+        if state.displaced.contains(block_hash)
+            || (state.blocks.contains_key(&height) && height <= state.tip)
+        {
             return Ok(BlockLocation::Side);
         }
         Ok(BlockLocation::Unknown)
@@ -242,7 +259,6 @@ impl ChainView for FakeChain {
         Ok(self.state.borrow().spends.get(outpoint).copied())
     }
 }
-
 
 fn varint(value: u64) -> Vec<u8> {
     match value {
@@ -364,7 +380,6 @@ impl ExternalSigner for TestSigner {
     }
 }
 
-
 struct Fund {
     _dir: TempDir,
     path: PathBuf,
@@ -470,17 +485,25 @@ fn confirm_tx(fund: &Fund, txid: Hash32, block_tag: u8, height: u32, tip: u32) {
     fund.chain.set_tip(tip);
 }
 
-
 // POOL-07
 #[test]
 fn equal_height_fork_reverses_matured_credits() {
     let fund = funded(0, 1_000_001);
     fund.chain.set_block(100, hash(0xF0));
     fund.chain.set_tip(102);
-    let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("reconcile equal-height fork");
+    let report = fund
+        .ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("reconcile equal-height fork");
     assert_eq!(report.transitions.len(), 1);
     assert_eq!(report.transitions[0].to, RoundState::Orphaned);
-    assert_eq!(fund.ledger.balance(MinerId(1)).fixture("balance").available_sat, 0);
+    assert_eq!(
+        fund.ledger
+            .balance(MinerId(1))
+            .fixture("balance")
+            .available_sat,
+        0
+    );
     fund.ledger.check_invariants().fixture("conservation");
 }
 
@@ -489,10 +512,19 @@ fn lower_height_fork_reverses_matured_credits() {
     let fund = funded(0, 1_000_001);
     fund.chain.set_block(100, hash(0xF1));
     fund.chain.set_tip(99);
-    let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("reconcile shorter fork");
+    let report = fund
+        .ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("reconcile shorter fork");
     assert_eq!(report.transitions.len(), 1);
     assert_eq!(report.transitions[0].to, RoundState::Orphaned);
-    assert_eq!(fund.ledger.balance(MinerId(1)).fixture("balance").available_sat, 0);
+    assert_eq!(
+        fund.ledger
+            .balance(MinerId(1))
+            .fixture("balance")
+            .available_sat,
+        0
+    );
     fund.ledger.check_invariants().fixture("conservation");
 }
 
@@ -502,8 +534,12 @@ fn independent_ledger_handles_share_the_revision_and_restart_state() {
     let store = backend(ledger_path(&dir));
     let first = Ledger::create(Arc::clone(&store), config(100, 0)).fixture("create");
     let second = Ledger::open(Arc::clone(&store), config(100, 0)).fixture("second handle");
-    first.record_share(&share(1, 1, 1, 10)).fixture("first write");
-    second.record_share(&share(1, 2, 1, 20)).fixture("second write");
+    first
+        .record_share(&share(1, 1, 1, 10))
+        .fixture("first write");
+    second
+        .record_share(&share(1, 2, 1, 20))
+        .fixture("second write");
     assert_eq!(first.share_count().fixture("count"), 2);
     assert_eq!(second.share_count().fixture("count"), 2);
     first.check_invariants().fixture("first invariants");
@@ -727,7 +763,6 @@ fn share_work_converts_exactly_from_le_bytes() {
     ));
 }
 
-
 #[test]
 fn legacy_and_segwit_serializations_share_one_txid() {
     let inputs = [outpoint(1, 3)];
@@ -798,7 +833,6 @@ fn parser_rejects_malformed_encodings() {
         Err(TxParseError::NoOutputs)
     );
 }
-
 
 #[test]
 fn payout_request_and_receipt_round_trip_and_reject_corruption() {
@@ -890,7 +924,6 @@ fn payout_request_encode_rejects_invalid_change_scripts_before_emitting_bytes() 
     ));
 }
 
-
 #[test]
 fn create_refuses_existing_paths_and_open_demands_the_same_config() {
     let dir = tempfile::tempdir().fixture("tempdir");
@@ -928,8 +961,19 @@ fn open_refuses_a_foreign_store_without_writing_to_it() {
         Ledger::open(Arc::clone(&store), config(100, 0)).err(),
         Some(LedgerError::NotALedger)
     ));
-    assert_eq!(store.get(ColumnFamily::PoolLedger, b"foreign-owner").fixture("read"), Some(b"untouched".to_vec()));
-    assert!(store.iter_prefix(ColumnFamily::PoolLedger, b"pool-ledger/v1/").fixture("scan").next().is_none());
+    assert_eq!(
+        store
+            .get(ColumnFamily::PoolLedger, b"foreign-owner")
+            .fixture("read"),
+        Some(b"untouched".to_vec())
+    );
+    assert!(
+        store
+            .iter_prefix(ColumnFamily::PoolLedger, b"pool-ledger/v1/")
+            .fixture("scan")
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -963,7 +1007,6 @@ fn config_validation_rejects_every_unsafe_value() {
         Some(LedgerError::InvalidConfig(_))
     ));
 }
-
 
 fn plain_ledger(window: u128) -> (TempDir, Ledger) {
     let dir = tempfile::tempdir().fixture("tempdir");
@@ -1040,7 +1083,7 @@ fn maximum_length_extranonce_shares_stay_readable() {
         ledger.record_share(&longest).fixture("replay"),
         ShareReceipt::Duplicate { seq: 0 }
     );
-    let mut same_identity = longest.clone();
+    let mut same_identity = longest;
     same_identity.header_hash = hash(0xEE);
     assert!(matches!(
         ledger.record_share(&same_identity).err(),
@@ -1209,7 +1252,9 @@ fn retiring_a_job_bounds_the_index_and_refuses_late_shares() {
     let (_dir, ledger) = plain_ledger(100);
     let old = share(7, 1, 1, 10);
     ledger.record_share(&old).fixture("credit");
-    ledger.record_share(&share(8, 2, 1, 10)).fixture("other job");
+    ledger
+        .record_share(&share(8, 2, 1, 10))
+        .fixture("other job");
     assert_eq!(ledger.retire_job(7).fixture("retire"), 1);
     assert_eq!(ledger.retire_job(7).fixture("again"), 0);
     assert_eq!(
@@ -1234,18 +1279,18 @@ fn retiring_a_job_bounds_the_index_and_refuses_late_shares() {
 #[test]
 fn version_and_ntime_rolls_are_distinct_shares_not_conflicts() {
     let (_dir, ledger) = plain_ledger(100);
-    let base = share_vnt(1, 1, 7, 0x20000000, 1_700_000_000, 10);
+    let base = share_vnt(1, 1, 7, 0x2000_0000, 1_700_000_000, 10);
     assert_eq!(
         ledger.record_share(&base).fixture("base"),
         ShareReceipt::Credited { seq: 0 }
     );
-    let rolled_version = share_vnt(1, 1, 7, 0x20000001, 1_700_000_000, 10);
+    let rolled_version = share_vnt(1, 1, 7, 0x2000_0001, 1_700_000_000, 10);
     assert_ne!(rolled_version.header_hash, base.header_hash);
     assert_eq!(
         ledger.record_share(&rolled_version).fixture("version roll"),
         ShareReceipt::Credited { seq: 1 }
     );
-    let rolled_time = share_vnt(1, 1, 7, 0x20000000, 1_700_000_001, 10);
+    let rolled_time = share_vnt(1, 1, 7, 0x2000_0000, 1_700_000_001, 10);
     assert_ne!(rolled_time.header_hash, base.header_hash);
     assert_eq!(
         ledger.record_share(&rolled_time).fixture("ntime roll"),
@@ -1268,7 +1313,7 @@ fn a_retired_header_hash_is_never_credited_again() {
         ledger.record_share(&old).err(),
         Some(LedgerError::JobRetired(7))
     ));
-    let mut cross_job = old.clone();
+    let mut cross_job = old;
     cross_job.job = 8;
     assert!(matches!(
         ledger.record_share(&cross_job).err(),
@@ -1282,9 +1327,7 @@ fn a_retired_header_hash_is_never_credited_again() {
 fn permanent_share_conflicts_are_classified_for_rejection() {
     assert!(LedgerError::JobRetired(7).is_permanent_share_conflict());
     assert!(LedgerError::ShareConflict { seq: 0 }.is_permanent_share_conflict());
-    assert!(
-        LedgerError::ShareIdentityConflict { seq: 0 }.is_permanent_share_conflict()
-    );
+    assert!(LedgerError::ShareIdentityConflict { seq: 0 }.is_permanent_share_conflict());
     assert!(LedgerError::BlockConflict.is_permanent_share_conflict());
     assert!(!LedgerError::Conflict.is_permanent_share_conflict());
     assert!(!LedgerError::WindowPruned.is_permanent_share_conflict());
@@ -1307,7 +1350,7 @@ fn config_encode_validates_change_scripts_before_encoding() {
         empty.encode().err(),
         Some(LedgerError::InvalidConfig(_))
     ));
-    let mut unspendable = ok.clone();
+    let mut unspendable = ok;
     unspendable.change_scripts = vec![vec![0x6a, 0x01]];
     assert!(matches!(
         unspendable.encode().err(),
@@ -1315,11 +1358,13 @@ fn config_encode_validates_change_scripts_before_encoding() {
     ));
 }
 
-
 #[test]
 fn a_found_block_is_recorded_once_and_pays_nothing_until_the_chain_shows_it() {
     let fund = staged(0, 1_000_001);
-    let again = fund.ledger.record_found_block(&fund.block).fixture("replay");
+    let again = fund
+        .ledger
+        .record_found_block(&fund.block)
+        .fixture("replay");
     assert!(!again.newly_recorded);
     assert_eq!(again.round.state, RoundState::Pending);
     assert_eq!(
@@ -1395,11 +1440,13 @@ fn rounds_mature_only_after_the_configured_confirmations_on_the_active_chain() {
     );
 
     fund.chain.set_tip(101);
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_rounds(&fund.chain)
             .fixture("tip 101")
-            .transitions
-            , Vec::new());
+            .transitions,
+        Vec::new()
+    );
     assert_eq!(
         fund.ledger.balance(MinerId(1)).fixture("balance"),
         Balance::default()
@@ -1471,7 +1518,9 @@ fn reconciliation_is_idempotent_and_writes_no_audit_noise() {
 fn a_reorg_before_maturity_orphans_the_round_with_nothing_to_reverse_and_can_revive() {
     let fund = staged(0, 1_000_001);
     fund.chain.set_tip(100);
-    fund.ledger.reconcile_rounds(&fund.chain).fixture("immature");
+    fund.ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("immature");
     fund.chain.set_block(100, hash(0xDD));
     fund.chain.set_tip(101);
     let report = fund
@@ -1532,7 +1581,10 @@ fn a_reorg_after_maturity_reverses_the_credits_and_re_credits_when_the_block_ret
         .fixture("invariants after reversal");
 
     fund.chain.set_block(100, fund.block.share.header_hash);
-    let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("returned");
+    let report = fund
+        .ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("returned");
     assert_eq!(report.transitions[0].to, RoundState::Matured);
     assert_eq!(report.transitions[0].credited_sat, 1_000_001);
     assert_eq!(
@@ -1559,7 +1611,10 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
         RoundState::Matured
     );
     fund.chain.set_tip(101);
-    let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("shorter tip");
+    let report = fund
+        .ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("shorter tip");
     assert_eq!(report.transitions.len(), 1);
     let transition = report.transitions[0];
     assert_eq!(
@@ -1582,7 +1637,10 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
         .fixture("invariants after demotion");
 
     fund.chain.set_tip(102);
-    let report = fund.ledger.reconcile_rounds(&fund.chain).fixture("deeper tip");
+    let report = fund
+        .ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("deeper tip");
     assert_eq!(report.transitions.len(), 1);
     assert_eq!(report.transitions[0].from, RoundState::Immature);
     assert_eq!(report.transitions[0].to, RoundState::Matured);
@@ -1594,7 +1652,9 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
             .available_sat,
         500_001
     );
-    fund.ledger.check_invariants().fixture("invariants after re-mature");
+    fund.ledger
+        .check_invariants()
+        .fixture("invariants after re-mature");
 }
 
 // POOL-07
@@ -1624,7 +1684,9 @@ fn reversing_credits_that_were_already_reserved_creates_an_explicit_deficit() {
         .fixture("deficit keeps the equation balanced");
 
     fund.chain.set_block(100, fund.block.share.header_hash);
-    fund.ledger.reconcile_rounds(&fund.chain).fixture("returned");
+    fund.ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("returned");
     let balance = fund.ledger.balance(MinerId(1)).fixture("balance");
     assert_eq!(
         (
@@ -1677,13 +1739,19 @@ fn unseen_rounds_stop_being_monitored_after_the_watch_depth() {
     assert_eq!(report.transitions.len(), 1);
     assert_eq!(report.transitions[0].to, RoundState::Orphaned);
     fund.chain.set_block(100, fund.block.share.header_hash);
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_rounds(&fund.chain)
             .fixture("no longer watched")
-            .transitions
-            , Vec::new());
+            .transitions,
+        Vec::new()
+    );
     assert_eq!(
-        fund.ledger.round(1).fixture("round").fixture("exists").state,
+        fund.ledger
+            .round(1)
+            .fixture("round")
+            .fixture("exists")
+            .state,
         RoundState::Orphaned
     );
 }
@@ -1718,7 +1786,11 @@ fn a_claim_the_chain_contradicts_is_surfaced_and_never_applied() {
         "claimed total differs from the observed total"
     );
     assert_eq!(
-        fund.ledger.round(1).fixture("round").fixture("exists").state,
+        fund.ledger
+            .round(1)
+            .fixture("round")
+            .fixture("exists")
+            .state,
         RoundState::Pending
     );
     assert_eq!(
@@ -1784,17 +1856,26 @@ fn an_unavailable_observer_changes_nothing() {
         audit_before
     );
     assert_eq!(
-        fund.ledger.round(1).fixture("round").fixture("exists").state,
+        fund.ledger
+            .round(1)
+            .fixture("round")
+            .fixture("exists")
+            .state,
         RoundState::Pending
     );
     fund.chain.bring_up();
-    fund.ledger.reconcile_rounds(&fund.chain).fixture("recovers");
+    fund.ledger
+        .reconcile_rounds(&fund.chain)
+        .fixture("recovers");
     assert_eq!(
-        fund.ledger.round(1).fixture("round").fixture("exists").state,
+        fund.ledger
+            .round(1)
+            .fixture("round")
+            .fixture("exists")
+            .state,
         RoundState::Matured
     );
 }
-
 
 #[test]
 fn payout_scripts_are_validated_and_batches_skip_accounts_without_one() {
@@ -1815,7 +1896,10 @@ fn payout_scripts_are_validated_and_batches_skip_accounts_without_one() {
             .err(),
         Some(LedgerError::InvalidInput(_))
     ));
-    assert_eq!(fund.ledger.payout_script(MinerId(9)).fixture("script"), None);
+    assert_eq!(
+        fund.ledger.payout_script(MinerId(9)).fixture("script"),
+        None
+    );
     assert_eq!(
         fund.ledger.payout_script(MinerId(1)).fixture("script"),
         Some(account_script(1))
@@ -1996,16 +2080,19 @@ fn a_payout_walks_prepared_signed_broadcast_confirmed_with_exact_accounting() {
             .fixture("replay"),
         broadcast
     );
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_payouts(&fund.chain)
-            .fixture("mempool only")
-            , Vec::new());
+            .fixture("mempool only"),
+        Vec::new()
+    );
 
     confirm_tx(&fund, tx.txid, 0xB1, 102, 102);
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_payouts(&fund.chain)
-            .fixture("one confirmation")
-            , Vec::new(),
+            .fixture("one confirmation"),
+        Vec::new(),
         "payout_confirmations is 2"
     );
     assert_eq!(
@@ -2086,19 +2173,25 @@ fn assert_invalid_receipts(
     let tx = build_tx(input, &short_amount, Witness::Items);
     assert!(matches!(
         fund.ledger.record_signed(&receipt(batch, &tx)).err(),
-        Some(LedgerError::Receipt(ReceiptError::MissingOutput { index: 0 }))
+        Some(LedgerError::Receipt(ReceiptError::MissingOutput {
+            index: 0
+        }))
     ));
     let tx = build_tx(input, &paid[..2], Witness::Items);
     assert!(matches!(
         fund.ledger.record_signed(&receipt(batch, &tx)).err(),
-        Some(LedgerError::Receipt(ReceiptError::MissingOutput { index: 2 }))
+        Some(LedgerError::Receipt(ReceiptError::MissingOutput {
+            index: 2
+        }))
     ));
     let mut stray = paid.to_vec();
     stray.push((10_000, script(0x77)));
     let tx = build_tx(input, &stray, Witness::Items);
     assert!(matches!(
         fund.ledger.record_signed(&receipt(batch, &tx)).err(),
-        Some(LedgerError::Receipt(ReceiptError::UnexpectedOutput { index: 3 }))
+        Some(LedgerError::Receipt(ReceiptError::UnexpectedOutput {
+            index: 3
+        }))
     ));
     let mut two_change = paid.to_vec();
     two_change.push((10_000, change_script()));
@@ -2219,7 +2312,9 @@ fn replacements_must_conflict_with_every_earlier_signed_transaction() {
         .record_broadcast(&batch.id, &replacement.txid, &fund.chain)
         .fixture("broadcast replacement");
     confirm_tx(&fund, replacement.txid, 0xB2, 102, 103);
-    fund.ledger.reconcile_payouts(&fund.chain).fixture("confirm");
+    fund.ledger
+        .reconcile_payouts(&fund.chain)
+        .fixture("confirm");
     let confirmed = fund
         .ledger
         .batch(&batch.id)
@@ -2242,7 +2337,9 @@ fn a_reorged_out_confirmation_reverts_the_payout_and_a_new_block_reconfirms_it()
         .record_signed(&receipt(&batch, &tx))
         .fixture("signed");
     confirm_tx(&fund, tx.txid, 0xB1, 102, 103);
-    fund.ledger.reconcile_payouts(&fund.chain).fixture("confirm");
+    fund.ledger
+        .reconcile_payouts(&fund.chain)
+        .fixture("confirm");
     assert_eq!(
         fund.ledger.balance(MinerId(1)).fixture("balance").paid_sat,
         500_001
@@ -2339,10 +2436,11 @@ fn a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent
         },
     );
     fund.chain.set_tip(105);
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_payouts(&fund.chain)
-            .fixture("one dead")
-            , Vec::new(),
+            .fixture("one dead"),
+        Vec::new(),
         "only the first transaction lost an input"
     );
     fund.chain.set_spend(
@@ -2354,10 +2452,11 @@ fn a_batch_fails_only_when_every_signed_transaction_is_conclusively_double_spent
         },
     );
     fund.chain.set_tip(104);
-    assert_eq!(fund.ledger
+    assert_eq!(
+        fund.ledger
             .reconcile_payouts(&fund.chain)
-            .fixture("too shallow")
-            , Vec::new(),
+            .fixture("too shallow"),
+        Vec::new(),
         "depth 1 is below abandon_confirmations"
     );
     fund.chain.set_tip(105);
@@ -2445,7 +2544,11 @@ fn a_mid_reconcile_chain_transition_defers_a_permanent_fail() {
             .fixture("deferred"),
         Vec::new()
     );
-    let still = fund.ledger.batch(&batch.id).fixture("batch").fixture("exists");
+    let still = fund
+        .ledger
+        .batch(&batch.id)
+        .fixture("batch")
+        .fixture("exists");
     assert_eq!(still.state, BatchState::ExternallySigned);
     let transitions = fund
         .ledger
@@ -2543,7 +2646,6 @@ fn the_external_signer_seam_signs_the_canonical_request_and_failures_change_noth
     fund.ledger.check_invariants().fixture("invariants");
 }
 
-
 #[test]
 fn state_survives_a_restart_byte_for_byte() {
     let fund = funded(250, 1_000_001);
@@ -2559,7 +2661,11 @@ fn state_survives_a_restart_byte_for_byte() {
     let round = fund.ledger.round(1).fixture("round");
     let window = fund.ledger.current_window().fixture("window");
     let path = fund.path.clone();
-    let Fund { ledger, _dir: retained_dir, .. } = fund;
+    let Fund {
+        ledger,
+        _dir: retained_dir,
+        ..
+    } = fund;
     drop(ledger);
 
     let reopened = open(&path, config(100, 250)).fixture("reopen");
@@ -2610,7 +2716,10 @@ fn prepare_after_interrupted_operations() -> (Fund, PayoutBatch) {
         Some(LedgerError::Injected(_))
     ));
     assert_eq!(ledger.share_count().fixture("count"), 0);
-    assert_eq!(ledger.share_by_hash(&one.header_hash).fixture("lookup"), None);
+    assert_eq!(
+        ledger.share_by_hash(&one.header_hash).fixture("lookup"),
+        None
+    );
     assert_eq!(
         ledger.record_share(&one).fixture("retry"),
         ShareReceipt::Credited { seq: 0 }
@@ -2791,10 +2900,10 @@ fn a_commit_whose_reply_was_lost_is_durable_and_the_replay_changes_nothing() {
             .state,
         BatchState::Confirmed
     );
-    assert_eq!(fund.ledger
-            .reconcile_payouts(&fund.chain)
-            .fixture("replay")
-            , Vec::new());
+    assert_eq!(
+        fund.ledger.reconcile_payouts(&fund.chain).fixture("replay"),
+        Vec::new()
+    );
     assert_eq!(
         fund.ledger.balance(MinerId(1)).fixture("balance").paid_sat,
         500_001,
@@ -2845,11 +2954,7 @@ mod process_death {
         let exe = std::env::current_exe().fixture("test binary path");
         Command::new(exe)
             .arg(format!("{BACKEND}::process_death::crash_child_entry"))
-            .args([
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-            ])
+            .args(["--exact", "--nocapture", "--test-threads=1"])
             .env("POOL_CRASH_DIR", dir)
             .env("POOL_CRASH_MODE", mode)
             .stdout(Stdio::null())
@@ -2878,8 +2983,7 @@ mod process_death {
             return;
         };
         let mode = std::env::var("POOL_CRASH_MODE").unwrap_or_default();
-        let ledger =
-            open(PathBuf::from(dir).join("pool.redb"), config(100, 0)).fixture("open");
+        let ledger = open(PathBuf::from(dir).join("pool.redb"), config(100, 0)).fixture("open");
         let abort = |op: &'static str, point: FailPoint| FailPlan {
             op,
             point,
@@ -2990,7 +3094,9 @@ mod process_death {
                 .fixture("prepare")
                 .fixture("batch");
             let tx = pay_tx(&batch, &[outpoint(0xA1, 0)], Some(1_000));
-            ledger.record_signed(&receipt(&batch, &tx)).fixture("signed");
+            ledger
+                .record_signed(&receipt(&batch, &tx))
+                .fixture("signed");
             tx.txid
         };
         let status = run_child(dir.path(), "reconcile_after_commit");
@@ -3007,14 +3113,16 @@ mod process_death {
             "the confirmation commit was durable"
         );
         let chain = crash_chain(txid);
-        assert_eq!(ledger.reconcile_payouts(&chain).fixture("replay"), Vec::new());
+        assert_eq!(
+            ledger.reconcile_payouts(&chain).fixture("replay"),
+            Vec::new()
+        );
         let balance = ledger.balance(MinerId(1)).fixture("balance");
         assert_eq!((balance.reserved_sat, balance.paid_sat), (0, 500_001));
         let invariants = ledger.check_invariants().fixture("invariants");
         assert_eq!(invariants.paid_sat, 1_000_001);
     }
 }
-
 
 #[test]
 fn the_audit_chain_is_deterministic_and_detects_tampering() {
@@ -3068,14 +3176,21 @@ fn the_audit_chain_is_deterministic_and_detects_tampering() {
     );
 
     let path = first.path.clone();
-    let Fund { ledger, _dir: retained_dir, .. } = first;
+    let Fund {
+        ledger,
+        _dir: retained_dir,
+        ..
+    } = first;
     drop(ledger);
     {
         let db = backend(&path);
         let mut key = b"pool-ledger/v1/".to_vec();
         key.push(18);
         key.extend_from_slice(&1u64.to_be_bytes());
-        let mut bytes = db.get(ColumnFamily::PoolLedger, &key).fixture("get").fixture("record 1");
+        let mut bytes = db
+            .get(ColumnFamily::PoolLedger, &key)
+            .fixture("get")
+            .fixture("record 1");
         bytes[9] ^= 0xff;
         let mut batch = db.new_batch();
         batch.put(ColumnFamily::PoolLedger, &key, &bytes);
@@ -3098,7 +3213,9 @@ fn the_audit_chain_is_deterministic_and_detects_tampering() {
 fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
     let fund = staged(0, 1_000_001);
     let second = found(share(1, 4, 1, 20), 101, 1_000_001);
-    fund.ledger.record_found_block(&second).fixture("second block");
+    fund.ledger
+        .record_found_block(&second)
+        .fixture("second block");
     fund.chain.set_block(101, second.share.header_hash);
     fund.chain
         .set_coinbase(second.share.header_hash, coinbase_for(&second, 1_000_001));
@@ -3142,7 +3259,7 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
         .ledger
         .reconcile_payouts_checked_limit(&fund.chain, &|| false, 0, None)
         .fixture("payouts limit 0");
-    assert!(none.is_empty());
+    assert_eq!(none, []);
     assert!(more_none, "limit 0 must report more observable batches");
     let (_, more_one, _) = fund
         .ledger
@@ -3160,8 +3277,12 @@ fn bounded_reconcile_units_are_bounded_and_generation_guarded() {
         .ledger
         .reconcile_payouts_checked_limit(&fund.chain, &|| true, 10, None)
         .fixture("payouts aborted");
-    assert!(held.is_empty());
-    let still = fund.ledger.batch(&batch.id).fixture("batch").fixture("exists");
+    assert_eq!(held, []);
+    let still = fund
+        .ledger
+        .batch(&batch.id)
+        .fixture("batch")
+        .fixture("exists");
     assert_eq!(still.state, BatchState::Broadcast);
 }
 
@@ -3171,7 +3292,9 @@ fn bounded_pages_advance_via_cursor_without_rescanning_head() {
     let mut hashes = vec![fund.block.share.header_hash];
     for tag in [7u8, 8, 9, 10] {
         let block = found(share(1, 4, u32::from(tag), 20), 101, 1_000_001);
-        fund.ledger.record_found_block(&block).fixture("extra block");
+        fund.ledger
+            .record_found_block(&block)
+            .fixture("extra block");
         fund.chain.set_block(101, block.share.header_hash);
         hashes.push(block.share.header_hash);
     }
@@ -3219,7 +3342,6 @@ fn bounded_pages_advance_via_cursor_without_rescanning_head() {
         vec![ids[1], ids[3], ids[4]],
         "raw cursors must be [1,3,4] for five rows at limit 2"
     );
-
 }
 
 #[test]
@@ -3235,7 +3357,9 @@ fn payout_lifecycle_events_are_audited_in_order() {
         .record_broadcast(&batch.id, &tx.txid, &fund.chain)
         .fixture("broadcast");
     confirm_tx(&fund, tx.txid, 0xB1, 102, 103);
-    fund.ledger.reconcile_payouts(&fund.chain).fixture("confirm");
+    fund.ledger
+        .reconcile_payouts(&fund.chain)
+        .fixture("confirm");
     let kinds: Vec<AuditKind> = fund
         .ledger
         .audit_records(0, 1_000)
@@ -3287,19 +3411,33 @@ fn confirmed_payout_with_shallow_depth_reverts_and_restores_reservation() {
         .record_broadcast(&batch.id, &tx.txid, &fund.chain)
         .fixture("broadcast");
     confirm_tx(&fund, tx.txid, 0xB1, 102, 103);
-    let confirmed = fund.ledger.reconcile_payouts(&fund.chain).fixture("confirm");
+    let confirmed = fund
+        .ledger
+        .reconcile_payouts(&fund.chain)
+        .fixture("confirm");
     assert_eq!(confirmed.len(), 1);
     assert_eq!(confirmed[0].to, BatchState::Confirmed);
-    let after_confirm = fund.ledger.batch(&batch.id).fixture("batch").fixture("exists");
+    let after_confirm = fund
+        .ledger
+        .batch(&batch.id)
+        .fixture("batch")
+        .fixture("exists");
     assert_eq!(after_confirm.state, BatchState::Confirmed);
     assert!(after_confirm.confirmation.is_some());
 
     fund.chain.set_tip(102);
-    let reverted = fund.ledger.reconcile_payouts(&fund.chain).fixture("shallow");
+    let reverted = fund
+        .ledger
+        .reconcile_payouts(&fund.chain)
+        .fixture("shallow");
     assert_eq!(reverted.len(), 1, "shallow Confirmed must transition");
     assert_eq!(reverted[0].from, BatchState::Confirmed);
     assert_eq!(reverted[0].to, BatchState::Broadcast);
-    let after_revert = fund.ledger.batch(&batch.id).fixture("batch").fixture("exists");
+    let after_revert = fund
+        .ledger
+        .batch(&batch.id)
+        .fixture("batch")
+        .fixture("exists");
     assert_eq!(after_revert.state, BatchState::Broadcast);
     assert!(after_revert.confirmation.is_none());
     for output in &after_revert.outputs {
@@ -3330,10 +3468,7 @@ impl ChainView for TxOnlyChain<'_> {
     ) -> Result<BlockLocation, ChainViewError> {
         self.inner.block_location(block_hash, claimed_height)
     }
-    fn coinbase_of(
-        &self,
-        block_hash: &Hash32,
-    ) -> Result<Option<ObservedCoinbase>, ChainViewError> {
+    fn coinbase_of(&self, block_hash: &Hash32) -> Result<Option<ObservedCoinbase>, ChainViewError> {
         self.inner.coinbase_of(block_hash)
     }
     fn tx_status(&self, txid: &Hash32) -> Result<TxStatus, ChainViewError> {
@@ -3398,26 +3533,8 @@ fn confirmed_replacement_confirms_without_spend_index() {
     fund.ledger.check_invariants().fixture("invariants");
 }
 
-#[test]
-fn prepare_caps_outputs_by_serialized_weight_before_count() {
-    assert_eq!(
-        payout_output_weight_wu(34),
-        172,
-        "a P2TR/P2WSH output weighs 43 bytes * 4"
-    );
-    assert!(
-        2_500u64.saturating_mul(172) > MAX_PAYOUT_OUTPUT_WEIGHT_WU,
-        "the count cap alone would exceed the output weight budget"
-    );
-    let dir = tempfile::tempdir().fixture("tempdir");
-    let path = ledger_path(&dir);
-    let mut cfg = config(1_000_000, 0);
-    cfg.payout_confirmations = 2;
-    cfg.abandon_confirmations = 2;
-    cfg.reorg_watch_depth = 10;
-    let ledger = create(&path, cfg).fixture("create");
-    const ACCOUNTS: u64 = 2_400;
-    for account in 1..=ACCOUNTS {
+fn record_test_shares_for_accounts(ledger: &Ledger, accounts: u64) {
+    for account in 1..=accounts {
         let mut seed = Vec::new();
         seed.extend_from_slice(&1u64.to_be_bytes());
         seed.extend_from_slice(&account.to_be_bytes());
@@ -3434,6 +3551,41 @@ fn prepare_caps_outputs_by_serialized_weight_before_count() {
         };
         ledger.record_share(&credit).fixture("share");
     }
+}
+
+fn set_test_scripts_for_accounts(ledger: &Ledger, accounts: u64) {
+    for account in 1..=accounts {
+        let mut script = vec![0x51u8, 0x20];
+        let mut key = [0u8; 32];
+        key[..8].copy_from_slice(&account.to_le_bytes());
+        script.extend_from_slice(&key);
+        assert_eq!(script.len(), 34);
+        ledger
+            .set_payout_script(MinerId(account), &script)
+            .fixture("script");
+    }
+}
+
+#[test]
+fn prepare_caps_outputs_by_serialized_weight_before_count() {
+    const ACCOUNTS: u64 = 2_400;
+    assert_eq!(
+        payout_output_weight_wu(34),
+        172,
+        "a P2TR/P2WSH output weighs 43 bytes * 4"
+    );
+    assert!(
+        2_500u64.saturating_mul(172) > MAX_PAYOUT_OUTPUT_WEIGHT_WU,
+        "the count cap alone would exceed the output weight budget"
+    );
+    let dir = tempfile::tempdir().fixture("tempdir");
+    let path = ledger_path(&dir);
+    let mut cfg = config(1_000_000, 0);
+    cfg.payout_confirmations = 2;
+    cfg.abandon_confirmations = 2;
+    cfg.reorg_watch_depth = 10;
+    let ledger = create(&path, cfg).fixture("create");
+    record_test_shares_for_accounts(&ledger, ACCOUNTS);
     let solving = ShareCredit {
         header_hash: sha256(b"solve"),
         job: 1,
@@ -3464,16 +3616,7 @@ fn prepare_caps_outputs_by_serialized_weight_before_count() {
         },
     );
     chain.set_tip(99);
-    for account in 1..=ACCOUNTS {
-        let mut script = vec![0x51u8, 0x20];
-        let mut key = [0u8; 32];
-        key[..8].copy_from_slice(&account.to_le_bytes());
-        script.extend_from_slice(&key);
-        assert_eq!(script.len(), 34);
-        ledger
-            .set_payout_script(MinerId(account), &script)
-            .fixture("script");
-    }
+    set_test_scripts_for_accounts(&ledger, ACCOUNTS);
     chain.set_tip(102);
     ledger.reconcile_rounds(&chain).fixture("mature");
     let batch = ledger
@@ -3497,8 +3640,7 @@ fn prepare_caps_outputs_by_serialized_weight_before_count() {
     );
     assert!(
         weight <= MAX_PAYOUT_OUTPUT_WEIGHT_WU,
-        "reserved outputs must leave funding headroom: {weight} > {}",
-        MAX_PAYOUT_OUTPUT_WEIGHT_WU
+        "reserved outputs must leave funding headroom: {weight} > {MAX_PAYOUT_OUTPUT_WEIGHT_WU}"
     );
     assert!(
         weight.saturating_add(payout_output_weight_wu(34)) > MAX_PAYOUT_OUTPUT_WEIGHT_WU,

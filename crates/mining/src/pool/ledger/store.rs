@@ -298,7 +298,14 @@ impl Ledger {
         }
     }
 
-    #[cfg_attr(not(feature = "test-seam"), allow(unused_variables))]
+    #[cfg_attr(
+        not(feature = "test-seam"),
+        expect(
+            clippy::unused_self,
+            unused_variables,
+            reason = "fault injection seam uses self and op when test-seam is enabled"
+        )
+    )]
     fn commit(&self, txn: WriteTransaction<'_>, op: &'static str) -> Result<(), LedgerError> {
         #[cfg(feature = "test-seam")]
         self.inject(op, FailPoint::BeforeCommit)?;
