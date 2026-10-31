@@ -1,3 +1,4 @@
+\* IDX-06
 ---------------------------- MODULE Projection ----------------------------
 (***************************************************************************)
 (* Projection sub-machine of the projection and mining model.              *)

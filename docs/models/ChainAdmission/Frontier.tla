@@ -1,3 +1,4 @@
+\* RCV-02, SYNC-05
 ---------------------------- MODULE Frontier ----------------------------
 (***************************************************************************)
 (* Admission-frontier sub-machine of the coordinated chain-transition     *)
