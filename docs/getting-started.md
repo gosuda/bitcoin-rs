@@ -348,7 +348,7 @@ Direct `bitcoin-rs-consensus` library callers have no config file, environment, 
 - To use bitcoinkernel, do both: build with `--features kernel` and set `validation_engine = "kernel"` (TOML), `BITCOIN_RS_VALIDATION_ENGINE=kernel` (env), or `--validation-engine kernel` (CLI).
 - Setting `kernel` without the feature fails at startup with the unsupported-build error above.
 - Bare `bitcoin-rs` runs native. The shipped Docker image compiles kernel support (`--features fjall,kernel`) and selects `kernel` at the **config-file** layer (`/etc/bitcoin-rs/default.toml`). Bare `docker run` therefore keeps today's kernel behavior. `BITCOIN_RS_VALIDATION_ENGINE=native` or a config file mounted over that one still overrides it without touching CMD. A CLI override (`--validation-engine`) replaces CMD wholesale under docker semantics, where `docker run IMAGE args` runs `bitcoin-rs args`. Going that route means repeating the whole argument list (`--config --data-dir --p2p-listen` included).
-- `--validation-mode` / `validation_mode` (Full/AssumeValid) is the separate script-skip policy and is unchanged.
+- `--validation-mode fast` was removed. The supported modes are `full` and `assume-valid` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML). Starting in `full` mode forces a cold rebuild from block files if the stored chain has a durable attestation weaker than `Full`. This cold rebuild validates every script and requires an unpruned datadir. If your datadir was pruned, restart with `--validation-mode assume-valid` or resync.
 
 ## More
 
