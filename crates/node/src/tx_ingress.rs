@@ -165,7 +165,7 @@ impl TxIngressConsumer {
         );
         self.peer_table
             .transaction_response_completed(inbound.source, txid, wtxid);
-        if self.dispatch_outcome(txid, wtxid, source, outcome, true) {
+        if self.dispatch_inbound_outcome(txid, wtxid, source, outcome) {
             self.peer_table.note_useful_transaction(inbound.source);
         }
         self.peer_table
@@ -185,18 +185,70 @@ impl TxIngressConsumer {
             .iter()
             .any(|retry| matches!(retry.result, Ok(SubmitOutcome::Committed(_))));
         for retry in retries {
-            self.dispatch_outcome(retry.txid, retry.wtxid, retry.source, retry.result, false);
+            self.dispatch_retry_outcome(retry.txid, retry.wtxid, retry.source, retry.result);
         }
         made_progress
     }
 
-    fn dispatch_outcome(
+    fn dispatch_inbound_outcome(
         &self,
         txid: Txid,
         wtxid: Wtxid,
         source: PeerToken,
         outcome: Result<SubmitOutcome, SubmitError>,
-        allow_package_request: bool,
+    ) -> bool {
+        match outcome {
+            Ok(SubmitOutcome::Held { missing_parents }) => {
+                let package_requested = self.peer_table.package_relay_versions(source)
+                    & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
+                    != 0
+                    && bitcoin_rs_p2p::inv::request_package_info(
+                        &self.peer_table,
+                        source,
+                        wtxid,
+                        &missing_parents,
+                    );
+                if !package_requested && !self.peer_table.has_live_package_solicitation(wtxid) {
+                    bitcoin_rs_p2p::request_missing_parents(
+                        &self.peer_table,
+                        source,
+                        &missing_parents,
+                    );
+                }
+                false
+            }
+            other => self.dispatch_common_outcome(txid, wtxid, source, other),
+        }
+    }
+
+    fn dispatch_retry_outcome(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        source: PeerToken,
+        outcome: Result<SubmitOutcome, SubmitError>,
+    ) -> bool {
+        match outcome {
+            Ok(SubmitOutcome::Held { missing_parents }) => {
+                if !self.peer_table.has_live_package_solicitation(wtxid) {
+                    bitcoin_rs_p2p::request_missing_parents(
+                        &self.peer_table,
+                        source,
+                        &missing_parents,
+                    );
+                }
+                false
+            }
+            other => self.dispatch_common_outcome(txid, wtxid, source, other),
+        }
+    }
+
+    fn dispatch_common_outcome(
+        &self,
+        txid: Txid,
+        wtxid: Wtxid,
+        source: PeerToken,
+        outcome: Result<SubmitOutcome, SubmitError>,
     ) -> bool {
         match outcome {
             Ok(SubmitOutcome::Committed(result)) => {
@@ -216,31 +268,11 @@ impl TxIngressConsumer {
                 }
                 true
             }
-            Ok(SubmitOutcome::Held { missing_parents }) => {
-                let package_requested = allow_package_request
-                    && self.peer_table.package_relay_versions(source)
-                        & bitcoin_rs_p2p::packages::PKG_RELAY_ANC
-                        != 0
-                    && bitcoin_rs_p2p::inv::request_package_info(
-                        &self.peer_table,
-                        source,
-                        wtxid,
-                        &missing_parents,
-                    );
-                if !package_requested && !self.peer_table.has_live_package_solicitation(wtxid) {
-                    bitcoin_rs_p2p::request_missing_parents(
-                        &self.peer_table,
-                        source,
-                        &missing_parents,
-                    );
-                }
-                false
-            }
+            Ok(SubmitOutcome::Held { .. } | SubmitOutcome::AlreadyKnown) => false,
             Ok(SubmitOutcome::AlreadyConfirmed) => {
                 self.peer_table.forget_known_transaction(txid, wtxid);
                 false
             }
-            Ok(SubmitOutcome::AlreadyKnown) => false,
             Err(error) => {
                 tracing::debug!(%txid, ?error, "peer transaction not admitted");
                 false
