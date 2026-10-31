@@ -1134,7 +1134,7 @@ impl PeerTable {
                 .copied()
                 .collect();
             for source in gone {
-                let _ = policy.disconnected(source, now);
+                let _disconnected_keys = policy.disconnected(source, now);
             }
             policy.known_batch()
         };

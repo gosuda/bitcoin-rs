@@ -203,7 +203,8 @@ pub struct PackagePlan {
 impl PackagePlan {
     #[must_use]
     pub fn wtxids(&self) -> &[Wtxid] {
-        self.wtxids.get(..self.count).unwrap_or(&[])
+        let count = self.count.min(self.wtxids.len());
+        &self.wtxids[..count]
     }
 
     #[must_use]

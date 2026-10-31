@@ -156,7 +156,8 @@ pub(super) fn read(path: &Path, kind: Kind) -> io::Result<Option<String>> {
     }
     let mut text = String::new();
     file.take(LIMIT + 1).read_to_string(&mut text)?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > LIMIT {
+    let len = u64::try_from(text.len()).map_err(|_| invalid("overlay identity file too large"))?;
+    if len > LIMIT {
         return Err(invalid("overlay identity file too large"));
     }
     let stored: Stored =
@@ -212,7 +213,8 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
         checksum: Sha256::digest(text.as_bytes()).into(),
     })
     .map_err(|_| invalid("overlay identity serialization failed"))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LIMIT {
+    let len = u64::try_from(bytes.len()).map_err(|_| invalid("overlay identity file too large"))?;
+    if len > LIMIT {
         return Err(invalid("overlay identity file too large"));
     }
     let parent = path
@@ -252,6 +254,12 @@ pub(super) fn create(path: &Path, text: &str, kind: Kind) -> io::Result<()> {
             &bitcoin_rs_storage::checkpoint::fs::open_data_dir(parent)?,
         )
     })();
-    let _ = fs::remove_file(temporary);
-    result
+    let cleanup = fs::remove_file(&temporary);
+    match result {
+        Ok(()) => cleanup,
+        Err(error) => {
+            drop(cleanup);
+            Err(error)
+        }
+    }
 }

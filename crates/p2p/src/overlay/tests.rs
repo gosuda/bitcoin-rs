@@ -250,6 +250,23 @@ fn application_identity_is_create_once_and_corruption_is_explicit() {
     assert!(identity::read(&path, identity::Kind::Tor).is_err());
     assert_eq!(std::fs::read_to_string(path).expect("preserved"), "damaged");
 }
+#[test]
+fn application_identity_create_cleans_temporary_file() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().expect("directory");
+    let path = dir.path().join("onion.key");
+    let key = format!(
+        "ED25519-V3:{}",
+        base64::engine::general_purpose::STANDARD.encode([7; 64])
+    );
+    identity::create(&path, &key, identity::Kind::Tor).expect("create identity");
+    let entries = std::fs::read_dir(dir.path())
+        .expect("read_dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], "onion.key");
+}
 
 #[cfg(unix)]
 #[test]

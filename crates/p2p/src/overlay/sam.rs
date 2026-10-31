@@ -174,6 +174,64 @@ impl OverlayTransport {
             alive: Some(alive),
         })
     }
+    fn establish_sam_session<'a>(
+        &self,
+        address: SocketAddr,
+        key: &mut Option<String>,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> io::Result<(Setup<'a>, String, Arc<AtomicBool>)> {
+        use bitcoin::secp256k1::rand::RngCore as _;
+        let mut control = Setup::new(address, cancelled)?;
+        hello(&mut control)?;
+        if self.config.i2p_accept && key.is_none() {
+            control.write(b"DEST GENERATE SIGNATURE_TYPE=7\n")?;
+            let line = control.line()?;
+            if !line.starts_with("DEST REPLY ") {
+                return Err(invalid("SAM destination generation refused"));
+            }
+            let private =
+                field(&line, "PRIV").ok_or_else(|| invalid("SAM destination lacks private key"))?;
+            *key = Some(private.to_owned());
+        }
+        if let Some(private) = key.as_deref() {
+            identity::create(
+                &self.config.identity_dir.join("i2p.key"),
+                private,
+                identity::Kind::I2p,
+            )?;
+        }
+        let id = format!(
+            "bitcoin-rs-{:016x}",
+            bitcoin::secp256k1::rand::thread_rng().next_u64()
+        );
+        control.deadline = Instant::now() + Duration::from_secs(120);
+        control.write(
+            format!(
+                "SESSION CREATE STYLE=STREAM ID={id} DESTINATION={} TO_PORT={}\n",
+                key.as_deref().unwrap_or("TRANSIENT"),
+                self.config.port
+            )
+            .as_bytes(),
+        )?;
+        status(&mut control, "SESSION STATUS ")?;
+        control.deadline = Instant::now() + SETUP_TIMEOUT;
+        control.write(b"NAMING LOOKUP NAME=ME\n")?;
+        let reply = status(&mut control, "NAMING REPLY ")?;
+        let local = PeerEndpoint::new(
+            destination(
+                field(&reply, "VALUE").ok_or_else(|| invalid("SAM local destination missing"))?,
+            )?,
+            self.config.port,
+        );
+        let alive = Arc::new(AtomicBool::new(true));
+        *self.sam.write() = Some(Session {
+            id: id.clone(),
+            alive: Arc::clone(&alive),
+            local_address: local,
+        });
+        Ok((control, id, alive))
+    }
+
     pub(super) fn run_sam(
         &self,
         address: SocketAddr,
@@ -181,62 +239,13 @@ impl OverlayTransport {
         shared: &crate::listener::ConnectionShared,
         shutdown: &AtomicBool,
     ) {
-        use bitcoin::secp256k1::rand::RngCore as _;
         let cancelled = || shutdown.load(Ordering::Acquire) || shared.is_session_cancelled();
         let mut backoff = Duration::from_secs(1);
         while !cancelled() {
             let result = (|| -> io::Result<()> {
-                let mut control = Setup::new(address, &cancelled)?;
-                hello(&mut control)?;
-                if self.config.i2p_accept && key.is_none() {
-                    control.write(b"DEST GENERATE SIGNATURE_TYPE=7\n")?;
-                    let line = control.line()?;
-                    if !line.starts_with("DEST REPLY ") {
-                        return Err(invalid("SAM destination generation refused"));
-                    }
-                    let private = field(&line, "PRIV")
-                        .ok_or_else(|| invalid("SAM destination lacks private key"))?;
-                    key = Some(private.to_owned());
-                }
-                if let Some(private) = &key {
-                    identity::create(
-                        &self.config.identity_dir.join("i2p.key"),
-                        private,
-                        identity::Kind::I2p,
-                    )?;
-                }
-                let id = format!(
-                    "bitcoin-rs-{:016x}",
-                    bitcoin::secp256k1::rand::thread_rng().next_u64()
-                );
-                control.deadline = Instant::now() + Duration::from_secs(120);
-                control.write(
-                    format!(
-                        "SESSION CREATE STYLE=STREAM ID={id} DESTINATION={} TO_PORT={}\n",
-                        key.as_deref().unwrap_or("TRANSIENT"),
-                        self.config.port
-                    )
-                    .as_bytes(),
-                )?;
-                status(&mut control, "SESSION STATUS ")?;
-                control.deadline = Instant::now() + SETUP_TIMEOUT;
-                control.write(b"NAMING LOOKUP NAME=ME\n")?;
-                let reply = status(&mut control, "NAMING REPLY ")?;
-                let local = PeerEndpoint::new(
-                    destination(
-                        field(&reply, "VALUE")
-                            .ok_or_else(|| invalid("SAM local destination missing"))?,
-                    )?,
-                    self.config.port,
-                );
-                let alive = Arc::new(AtomicBool::new(true));
-                *self.sam.write() = Some(Session {
-                    id: id.clone(),
-                    alive: Arc::clone(&alive),
-                    local_address: local,
-                });
+                let (mut control, id, alive) =
+                    self.establish_sam_session(address, &mut key, &cancelled)?;
                 let healthy_since = Instant::now();
-
                 std::thread::scope(|scope| {
                     let accept = self
                         .config
@@ -263,7 +272,9 @@ impl OverlayTransport {
                     })();
                     alive.store(false, Ordering::Release);
                     if let Some(accept) = accept {
-                        let _ = accept.join();
+                        if accept.join().is_err() && monitored.is_ok() {
+                            return Err(invalid("SAM accept worker failed"));
+                        }
                     }
                     monitored
                 })

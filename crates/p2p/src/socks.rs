@@ -193,7 +193,7 @@ pub(crate) fn socks_connect(
     let connect_timeout = remaining_timeout(deadline).map_err(DialFailure::Transport)?;
     let mut stream =
         TcpStream::connect_timeout(&proxy, connect_timeout).map_err(DialFailure::Transport)?;
-    let _ = stream.set_nodelay(true);
+    stream.set_nodelay(true).map_err(DialFailure::Transport)?;
 
     if isolate {
         authenticate_isolated(&mut stream, deadline)?;
