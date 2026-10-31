@@ -403,8 +403,6 @@ pub struct Chainstate {
     pub(crate) durable_head: Arc<dyn DurableHeadStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) shutdown: Arc<LatchWriter>,
-    #[cfg(any(test, feature = "test-seam"))]
-    pub(crate) legacy_shutdown: Arc<AtomicBool>,
     pub(crate) tip_notification: Arc<tip_wait::TipNotification>,
     pub(crate) chain_transition: TransitionAuthority,
     pub(crate) assume_valid_height: u32,
@@ -556,8 +554,6 @@ impl Chainstate {
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
-            #[cfg(any(test, feature = "test-seam"))]
-            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: parts.chain_transition,
             assume_valid_height: parts.assume_valid_height,
@@ -745,8 +741,6 @@ impl Chainstate {
             durable_head: historical_head,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
-            #[cfg(any(test, feature = "test-seam"))]
-            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
@@ -779,8 +773,6 @@ impl Chainstate {
     pub fn request_shutdown(&self) {
         let _gate = self.tip_notification.gate.lock();
         self.shutdown.trigger();
-        #[cfg(any(test, feature = "test-seam"))]
-        self.legacy_shutdown.store(true, Ordering::Release);
         self.tip_notification.changed.notify_all();
     }
 
@@ -931,11 +923,6 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.legacy_shutdown)
-    }
 
     pub fn admit_headers(
         &self,
@@ -1082,8 +1069,6 @@ impl Chainstate {
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(LatchWriter::new()),
-            #[cfg(any(test, feature = "test-seam"))]
-            legacy_shutdown: Arc::new(AtomicBool::new(false)),
             tip_notification: Arc::default(),
             chain_transition: TransitionDomain::new().authority(),
             assume_valid_height: 0,

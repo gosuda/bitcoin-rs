@@ -32,7 +32,7 @@ fn relay_feature_switches_default_off_and_reach_connections_independently() {
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -83,7 +83,7 @@ fn start_fails_when_listener_cannot_bind() {
             listen_addrs: vec![addr],
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let error = service
         .start(
@@ -108,11 +108,11 @@ fn start_fails_when_listener_cannot_bind() {
 fn independent_services_own_independent_aggregate_budgets() {
     let first = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let second = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let a = first.shared_outbound_budget();
     let b = second.shared_outbound_budget();
@@ -128,7 +128,7 @@ fn independent_services_own_independent_aggregate_budgets() {
 fn start_and_join_succeed_without_listeners() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     service
         .start(
@@ -149,7 +149,7 @@ fn overlay_workers_are_retained_for_join_and_rollback() {
     config.overlay.onion_proxy = Some(SocketAddr::from(([127, 0, 0, 1], 19051)));
     config.overlay.tor_control = Some(SocketAddr::from(([127, 0, 0, 1], 19052)));
     config.overlay.identity_dir = dir.path().to_path_buf();
-    let service = P2pService::new(config, Arc::new(AtomicBool::new(false)));
+    let service = P2pService::new(config, bitcoin_rs_chain::LatchReader::fixture_never());
     service
         .start(
             None,
@@ -552,7 +552,7 @@ fn add_node_enqueues_and_respects_queue_capacity() {
             outbound_queue_limit: 1,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let addr1: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
     let addr2: PeerEndpoint = "127.0.0.2:8333".parse().expect("addr");
@@ -580,7 +580,7 @@ fn add_node_enqueues_and_respects_queue_capacity() {
 fn add_node_inactive_skips_queueing() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     service.set_network_active(false);
     let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
@@ -593,7 +593,7 @@ fn add_node_inactive_skips_queueing() {
 fn add_node_rejects_banned_address() {
     let service = P2pService::new(
         P2pServiceConfig::default(),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let subnet: crate::IpSubnet = "127.0.0.0/24".parse().expect("subnet");
     service.set_ban(crate::BannedSubnet {
@@ -913,7 +913,7 @@ fn automatic_policy_and_manual_bans_are_distinct() {
             noban_subnets: vec![protected],
             ..Default::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let reader = service.banned_reader();
     reader.discourage(ip);
@@ -1108,7 +1108,7 @@ fn shutdown_releases_parked_automatic_claims_before_restart() {
             dns_seeds_enabled: false,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let address = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
@@ -1175,7 +1175,7 @@ fn manual_dial_cannot_release_an_automatic_claim_and_reaper_releases_only_its_ow
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -1495,7 +1495,7 @@ fn mapped_manual_pins_exclude_all_automatic_dial_classes_without_rewriting_confi
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(false),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         Magic::REGTEST,
         headers,
@@ -1730,7 +1730,7 @@ fn shutdown_captures_anchors_before_cancelling_workers() {
             allow_local_addresses: true,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 8333));
     let now = crate::addrman::now();
@@ -1784,7 +1784,7 @@ fn rejected_duplicates_preserve_active_feeler_and_dispatched_anchor_claims_until
             Arc::new(crate::NetworkActivity::from_shared(Arc::new(
                 AtomicBool::new(false),
             ))),
-            Arc::new(AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
             None,
             Magic::REGTEST,
             crossbeam_channel::bounded(1).0,
@@ -2028,7 +2028,7 @@ fn ordinary_queue_rechecks_services_and_tip_before_dispatch_and_tcp() {
             Arc::new(crate::NetworkActivity::from_shared(Arc::new(
                 AtomicBool::new(true),
             ))),
-            Arc::new(AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
             None,
             Magic::REGTEST,
             crossbeam_channel::bounded(1).0,
@@ -2136,7 +2136,7 @@ fn disable_during_outbound_tip_query_refuses_registration_before_handshake() {
             magic: Magic::REGTEST,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
     let server = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = server.local_addr().expect("address");

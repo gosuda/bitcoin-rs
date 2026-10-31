@@ -22,8 +22,8 @@ use bitcoin::{
     script::Builder,
 };
 use bitcoin_rs_chain::{
-    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, NodeStatus,
-    TipReader, TipSnapshot,
+    BlockBodyReadError, BlockBodySource, BlockTree, BlockTreeReader, ChainTxCount, LatchWriter,
+    NodeStatus, TipReader, TipSnapshot,
 };
 use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
@@ -257,7 +257,7 @@ struct BodyLoadCounter {
 struct SourceBodies {
     bodies: Arc<BodyMap>,
     hidden: HashSet<u32>,
-    trip: Option<Arc<AtomicBool>>,
+    trip: Option<Arc<LatchWriter>>,
     witness: Option<(PathBuf, Arc<AtomicBool>)>,
     loads: Option<Arc<BodyLoadCounter>>,
 }
@@ -270,7 +270,7 @@ impl SourceBodies {
             }
         }
         if let Some(trip) = &self.trip {
-            trip.store(true, Ordering::Release);
+            trip.trigger();
         }
         if self.hidden.contains(&height) {
             return None;
@@ -512,7 +512,7 @@ impl Node {
         let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         let adapter = DerivedIndexQueryAdapter::new(Arc::clone(&lifecycle));
         let probe = Arc::new(Probe::default());
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(LatchWriter::new());
         let crash = start.crash_after_bulk_import;
         let spec = DerivedIndexOpenSpec {
             data_dir: data_dir.to_path_buf(),
@@ -576,7 +576,7 @@ impl Node {
             body_source,
             chain_events,
             index_ahead,
-            shutdown,
+            shutdown.reader(),
             wake_rx,
         )
         .expect("spawn txindex worker");

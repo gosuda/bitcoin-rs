@@ -265,9 +265,8 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
     gateway: Weak<MempoolGateway>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {

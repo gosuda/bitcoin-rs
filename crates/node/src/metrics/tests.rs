@@ -1,7 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -80,7 +79,7 @@ fn scrape(addr: SocketAddr) -> (u16, String) {
 #[test]
 fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
     let occupied = TcpListener::bind(unused_ephemeral())
         .unwrap_or_else(|error| panic!("occupy port: {error}"));
     let addr = occupied
@@ -88,7 +87,7 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
         .unwrap_or_else(|error| panic!("occupied local addr: {error}"));
     let installed_before = PROMETHEUS_HANDLE.lock().is_some();
 
-    let first = start_metrics(Some(addr), Arc::clone(&shutdown), &identity());
+    let first = start_metrics(Some(addr), shutdown.clone(), &identity());
     assert!(first.is_err(), "occupied bind must fail");
     assert_eq!(
         PROMETHEUS_HANDLE.lock().is_some(),
@@ -115,7 +114,7 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
 #[test]
 fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
     let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     metrics::counter!("node_metrics_scrape_probe").increment(1);
@@ -170,8 +169,8 @@ fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
 #[test]
 fn two_sequential_servers_in_one_process_both_serve() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let mut first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let mut first = MetricsServer::bind(unused_ephemeral(), shutdown.clone(), &identity())
         .unwrap_or_else(|error| panic!("first: {error}"));
     metrics::counter!("node_metrics_sequential_probe").increment(1);
     let (status, body) = scrape(first.local_addr());
@@ -283,8 +282,8 @@ fn assert_one_active(samples: &[RenderedSample], expected: &str) {
 #[test]
 fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let mut server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
 
     publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Ready));

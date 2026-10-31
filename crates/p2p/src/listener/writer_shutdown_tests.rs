@@ -175,8 +175,9 @@ fn send_block_forwards_the_blocks_header() -> Result<(), TestError> {
 fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
-    let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
-    let session_cancel = shared.session_cancel.clone();
+    let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+    let session_cancel = bitcoin_rs_chain::LatchWriter::new();
+    shared.session_cancel = session_cancel.reader();
     let addr = PeerEndpoint::from((Ipv4Addr::LOCALHOST, 18_448));
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = crate::PeerLease::new(tx);
@@ -198,7 +199,7 @@ fn send_block_unblocks_when_session_is_cancelled() -> Result<(), TestError> {
         !blocked.is_finished(),
         "full inbound block channel must block until cancel"
     );
-    session_cancel.store(true);
+    session_cancel.trigger();
     blocked
         .join()
         .map_err(|_| std::io::Error::other("send_block thread panicked"))?;

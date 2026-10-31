@@ -277,7 +277,6 @@ fn long_poll_wakes_on_mempool_sequence_change() -> Result<()> {
 #[test]
 fn shutdown_ends_long_poll_without_wake() -> Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
-    let shutdown = state.chainstate().shutdown_handle();
     let mining = Arc::new(MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -292,7 +291,7 @@ fn shutdown_ends_long_poll_without_wake() -> Result<()> {
     let waiter =
         thread::spawn(move || mining_wait.get_block_template(template_request(Some(long_poll_id))));
     thread::sleep(Duration::from_millis(50));
-    shutdown.store(true, Ordering::Release);
+    state.chainstate().request_shutdown();
     let outcome = waiter
         .join()
         .unwrap_or_else(|_| panic!("shutdown waiter panicked"));
@@ -707,9 +706,11 @@ fn long_poll_legacy_id_parses_as_fee_zero_and_malformed_ids_are_rejected() -> Re
     for rejected_id in rejected {
         let call_id = CompactString::from(rejected_id.as_str());
         let call_mining = Arc::clone(&mining);
-        let outcome = PendingPoll::spawn(state.chainstate().shutdown_handle(), move || {
-            call_mining.get_block_template(template_request(Some(call_id)))
-        })
+        let chainstate = state.chainstate();
+        let outcome = PendingPoll::spawn(
+            move || chainstate.request_shutdown(),
+            move || call_mining.get_block_template(template_request(Some(call_id))),
+        )
         .collect(PROMPT)?;
         match outcome {
             Err(MiningControlError::InvalidRequest(message)) => assert!(

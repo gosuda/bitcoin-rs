@@ -540,7 +540,7 @@ struct Harness {
     magic: Magic,
     gateway: Arc<MempoolGateway>,
     mining: Arc<FakeMiningControl>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     stop: Arc<AtomicBool>,
     source: LoopbackPeer,
     bystander: LoopbackPeer,
@@ -563,7 +563,7 @@ impl Harness {
         let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         let mining = FakeMiningControl::unavailable("not implemented");
         let mining_control: Arc<dyn MiningControl> = mining.clone();
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown = bitcoin_rs_chain::LatchWriter::new();
 
         let wiring = PeerWiring {
             magic,
@@ -607,13 +607,13 @@ impl Harness {
             PeerRelaySink::new(harness.state.peer_table()),
             relay_rx,
             Arc::downgrade(&harness.gateway),
-            Arc::clone(&harness.shutdown),
+            harness.shutdown.reader(),
         )?);
         harness.ingress = Some(spawn_tx_ingress_consumer(
             &harness.state,
             Arc::clone(&harness.gateway),
             mining_control,
-            Arc::clone(&harness.shutdown),
+            harness.shutdown.reader(),
             ingress_rx,
             relay,
         )?);
@@ -646,7 +646,7 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.trigger();
         let source_ok = self.source.close();
         let bystander_ok = self.bystander.close();
         let ingress_ok = self
@@ -673,7 +673,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> Result<()>
     assert!(relay.announce(pending.txid(), pending.wtxid(), None, u64::MAX));
     let mining = Arc::new(RecordingMining::default());
     let mining_control: Arc<dyn MiningControl> = Arc::<RecordingMining>::clone(&mining);
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let (ingress_tx, ingress_rx) = crossbeam_channel::bounded(1);
     let tx = spending_tx(parent_txid(0xDD), 40_000);
     let txid = tx.txid();
@@ -684,7 +684,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> Result<()>
         &state,
         Arc::clone(&gateway),
         mining_control,
-        Arc::clone(&shutdown),
+        shutdown.reader(),
         ingress_rx,
         relay.clone(),
     )?;
@@ -697,7 +697,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> Result<()>
                 gateway.read().contains_txid(&txid) && mining.publish_count() >= 1
             })
         });
-    shutdown.store(true, Ordering::Relaxed);
+    shutdown.trigger();
     let joined = ingress.join();
     observed?;
     joined.map_err(|_| TestError::message("transaction ingress worker panicked"))?;

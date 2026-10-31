@@ -716,7 +716,8 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
     let ctx = Arc::new(Context::new());
     for cause in ["abort", "shutdown", "deadline"] {
         let permit = ctx.chain.utxo.reserve_scan()?;
-        let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
+        let cancellation_writer = bitcoin_rs_chain::LatchWriter::new();
+        let cancellation = cancellation_writer.reader();
         let descriptor = scan_descriptor(
             &format!("wpkh({SCAN_XPUB}/<0;1>/*)"),
             Some((0, 9)),
@@ -732,7 +733,7 @@ fn scan_expansion_observes_abort_shutdown_and_deadline() -> TestResult {
                         )));
                     }
                     if cause == "shutdown" {
-                        cancellation.store(true);
+                        cancellation_writer.trigger();
                     } else {
                         ctx.chain.utxo.abort_scan();
                     }

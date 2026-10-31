@@ -415,7 +415,7 @@ impl P2pService {
     #[must_use]
     pub fn new(
         config: P2pServiceConfig,
-        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        shutdown: bitcoin_rs_chain::LatchReader,
     ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) =
@@ -440,7 +440,7 @@ impl P2pService {
             overlay,
             config,
             address_book,
-            shutdown: shutdown.into(),
+            shutdown,
             worker_shutdown: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
@@ -1144,7 +1144,7 @@ fn spawn_feeler(
 ) {
     if active.values().any(|entry| entry.feeler)
         || !shared.activity.is_active()
-        || shared.session_cancel.load()
+        || shared.session_cancel.is_triggered()
     {
         return;
     }
@@ -1353,7 +1353,7 @@ fn dial_is_admissible(dial: &OutboundDial, shared: &crate::listener::ConnectionS
             .automatic_snapshot(SystemTime::now())
             .allows(dial.addr.address())
     };
-    shared.activity.is_active() && !shared.session_cancel.load() && services_allowed && allowed
+    shared.activity.is_active() && !shared.session_cancel.is_triggered() && services_allowed && allowed
 }
 
 fn dial_is_already_active(

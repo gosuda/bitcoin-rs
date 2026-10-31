@@ -1,4 +1,3 @@
-use std::sync::atomic::Ordering;
 use std::thread;
 
 use bitcoin_rs_node::test_support::TestError;
@@ -715,7 +714,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> Result<()> {
         state.mempool_gateway().stable_generation().is_some(),
         "a clean block rejection must settle the chain generation"
     );
-    assert!(!state.chainstate().shutdown_handle().load(Ordering::Acquire));
+    assert!(!state.chainstate().shutdown_reader().is_triggered());
     Ok(())
 }
 

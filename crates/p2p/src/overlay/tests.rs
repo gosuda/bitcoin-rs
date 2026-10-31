@@ -10,7 +10,7 @@ fn shared(owner: &Arc<OverlayTransport>) -> crate::listener::ConnectionShared {
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         bitcoin::p2p::Magic::REGTEST,
         crossbeam_channel::unbounded().0,

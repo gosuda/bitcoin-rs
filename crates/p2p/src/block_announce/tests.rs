@@ -429,14 +429,14 @@ fn rotation_saturated_restores_full_selection_in_place_and_retries() {
 }
 
 struct WorkerStop {
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchWriter,
     queue: Option<BlockAnnounceQueue>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for WorkerStop {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown.trigger();
         self.queue.take();
         if let Some(handle) = self.handle.take() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -471,12 +471,12 @@ fn worker_timeout_retries_saturated_announcement_without_new_wake() {
     let hold = crate::test_support::hog(&aggregate, 512);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
     assert!(queue.wake(), "the wake enqueued the tip");
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, Arc::clone(&shutdown))
+        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
             .expect("the announce worker spawns");
     let _stop = WorkerStop {
-        shutdown: Arc::clone(&shutdown),
+        shutdown,
         queue: Some(queue),
         handle: Some(worker),
     };
@@ -993,9 +993,9 @@ fn worker_retries_tip_with_no_ready_peers_until_connection_arrives() {
     assert_eq!(announcer.process_tip_retry(), Vec::new());
     let (_lease, rx) = setup_peer(&table, &announcer, test_addr(1014), false);
     let (queue, worker_rx) = BlockAnnounceQueue::new();
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
     let worker =
-        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, Arc::clone(&shutdown))
+        spawn_block_announce_worker(Arc::clone(&announcer), worker_rx, shutdown.reader())
             .expect("the announce worker spawns");
     let _stop = WorkerStop {
         shutdown,

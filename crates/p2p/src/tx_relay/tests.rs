@@ -3,7 +3,6 @@ use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
 
 #[derive(Clone)]
 struct FakePeer {
@@ -372,8 +371,8 @@ fn relay_worker_announces_only_live_transactions() {
         1,
     );
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), Arc::clone(&shutdown))
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown)
         .expect("relay worker spawns");
     drop(queue);
     worker.join().expect("relay worker exits");
@@ -398,8 +397,8 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
         )
         .expect("observer slot");
     let sink = FakeSink::new(Vec::new());
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), Arc::clone(&shutdown))
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), shutdown.reader())
         .expect("relay worker spawns");
 
     drop(queue);
@@ -411,7 +410,7 @@ fn relay_worker_exits_when_queue_closes_with_observer_attached() {
     let queue_close = joined_rx.recv_timeout(std::time::Duration::from_secs(1));
     let exited_on_queue_close = matches!(&queue_close, Ok(true));
     if !exited_on_queue_close {
-        shutdown.store(true, Ordering::Relaxed);
+        shutdown.trigger();
         let stopped = joined_rx.recv_timeout(std::time::Duration::from_secs(1));
         assert!(
             matches!(&stopped, Ok(true)),

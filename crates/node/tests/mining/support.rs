@@ -1,8 +1,5 @@
 use std::fmt::Write as _;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -742,11 +739,14 @@ pub(crate) fn gbt_view(handler: &Handler, long_poll_id: Option<&str>) -> Result<
 pub(crate) struct PendingPoll<T> {
     done: Receiver<T>,
     thread: Option<JoinHandle<()>>,
-    release: Arc<AtomicBool>,
+    release: Box<dyn Fn() + Send>,
 }
 
 impl<T> PendingPoll<T> {
-    pub(crate) fn spawn(release: Arc<AtomicBool>, call: impl FnOnce() -> T + Send + 'static) -> Self
+    pub(crate) fn spawn(
+        release: impl Fn() + Send + 'static,
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> Self
     where
         T: Send + 'static,
     {
@@ -757,7 +757,7 @@ impl<T> PendingPoll<T> {
         Self {
             done,
             thread: Some(thread),
-            release,
+            release: Box::new(release),
         }
     }
 
@@ -785,7 +785,7 @@ impl<T> Drop for PendingPoll<T> {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        self.release.store(true, Ordering::Release);
+        (self.release)();
         let _ = thread.join();
     }
 }
@@ -905,8 +905,10 @@ impl PriorityFixture {
     pub(crate) fn poll(&self, id: &str) -> Poll {
         let handler = Arc::clone(&self.wired.handler);
         let id = id.to_owned();
-        PendingPoll::spawn(self.state.chainstate().shutdown_handle(), move || {
-            gbt_view(&handler, Some(&id))
-        })
+        let chainstate = self.state.chainstate();
+        PendingPoll::spawn(
+            move || chainstate.request_shutdown(),
+            move || gbt_view(&handler, Some(&id)),
+        )
     }
 }

@@ -1,10 +1,10 @@
 use super::*;
 use crate::template::{SelectedBody, select_template_body, select_template_body_after};
-use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus};
+use bitcoin_rs_chain::{BlockTree, ChainTxCount, LatchReader, NodeStatus};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_primitives::{Block, Sequence, TxIn, Txid, Witness};
 use compact_str::CompactString;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
 
@@ -145,7 +145,7 @@ pub(super) fn service_over(pool: Mempool) -> TestResult<(Arc<Sources>, Arc<Minin
         source.clone(),
         source.clone(),
         vec![0x51],
-        Arc::new(AtomicBool::new(false)),
+        LatchReader::fixture_never(),
     ));
     Ok((source, service))
 }

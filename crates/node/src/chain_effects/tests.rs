@@ -587,8 +587,8 @@ fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), Tes
     assert!(
         state
             .chainstate()
-            .shutdown_handle()
-            .load(std::sync::atomic::Ordering::Acquire)
+            .shutdown_reader()
+            .is_triggered()
     );
     Ok(())
 }

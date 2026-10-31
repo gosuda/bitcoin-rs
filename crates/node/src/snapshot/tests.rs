@@ -381,7 +381,11 @@ fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> Result<
     std::fs::create_dir(&out)?;
     let output = out.join("interrupted.dat");
 
-    let cancelled = LatchReader::new(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    let cancelled = {
+        let trigger = bitcoin_rs_chain::LatchWriter::new();
+        trigger.trigger();
+        trigger.reader()
+    };
     assert!(matches!(
         state.snapshots.export(&output, &cancelled),
         Err(SnapshotExportError::Interrupted)

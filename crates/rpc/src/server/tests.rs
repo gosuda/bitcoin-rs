@@ -310,9 +310,11 @@ fn shutdown_before_serving_does_not_admit_a_queued_connection() -> io::Result<()
     let server = accept_test_server()?;
     let handler = Arc::clone(&server.handler);
     let _queued = TcpStream::connect(server.local_addr()?)?;
-    let shutdown = Arc::new(AtomicBool::new(true));
+    let shutdown_writer = bitcoin_rs_chain::LatchWriter::new();
+    shutdown_writer.trigger();
+    let shutdown = shutdown_writer.reader();
     let mut attempts = 0;
-    server.serve_accept_loop(&shutdown.into(), RpcSurface::Shared, |listener| {
+    server.serve_accept_loop(&shutdown, RpcSurface::Shared, |listener| {
         attempts += 1;
         listener.accept()
     })?;

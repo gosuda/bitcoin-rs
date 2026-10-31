@@ -247,7 +247,7 @@ pub(crate) fn start(
     core: Arc<PoolCore>,
     ledger: Arc<LedgerHost>,
     control: Arc<dyn MiningControl>,
-    cancel: impl Into<bitcoin_rs_chain::LatchReader>,
+    cancel: bitcoin_rs_chain::LatchReader,
     limiter: Arc<ConnectionLimiter>,
 ) -> Result<Sv2Service, RunError> {
     let bind = config.sv2_bind.ok_or(RunError::PoolSv2BindMissing)?;
@@ -264,8 +264,7 @@ pub(crate) fn start(
         .local_addr()
         .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
     let connect_addr = loopback_connect_addr(local_addr);
-    let parent_cancel = cancel.into();
-    let service_cancel = parent_cancel.child();
+    let service_cancel = cancel.child();
     let thread_cancel = service_cancel.reader();
     let cancel_hook = thread_cancel.on_cancel(move || {
         let _ = TcpStream::connect(connect_addr);

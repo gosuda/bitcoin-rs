@@ -341,13 +341,16 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), Te
 
 #[test]
 fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), TestError> {
-    let ctx = Arc::new(Context::new());
+    let mut ctx = Context::new();
+    let closed = bitcoin_rs_chain::LatchWriter::new();
+    ctx.chain.closed_for_recovery = closed.reader();
+    let ctx = Arc::new(ctx);
     let handler = Handler::new(Arc::clone(&ctx));
     let open = handler.dispatch("getblockchaininfo", &json!([]))?;
     assert_eq!(open["is_closed_for_recovery"], json!(false));
-    ctx.chain.closed_for_recovery.store(true);
-    let closed = handler.dispatch("getblockchaininfo", &json!([]))?;
-    assert_eq!(closed["is_closed_for_recovery"], json!(true));
+    closed.trigger();
+    let closed_info = handler.dispatch("getblockchaininfo", &json!([]))?;
+    assert_eq!(closed_info["is_closed_for_recovery"], json!(true));
     Ok(())
 }
 

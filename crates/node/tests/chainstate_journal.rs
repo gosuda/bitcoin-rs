@@ -8,10 +8,7 @@ use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_primitives::{BlockHash, Hash256};
 
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 fn stable_utxo_hash(
     view: &bitcoin_rs_utxo::UtxoSetView<'_>,
@@ -235,10 +232,7 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(child))?;
     let worker = state.start_chainstate_maintenance()?;
     std::thread::sleep(Duration::from_secs(3));
-    state
-        .chainstate()
-        .shutdown_handle()
-        .store(true, Ordering::Release);
+    state.chainstate().request_shutdown();
     worker
         .join()
         .map_err(|_| std::io::Error::other("chainstate maintenance worker panicked"))?;
@@ -295,10 +289,7 @@ fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    state
-        .chainstate()
-        .shutdown_handle()
-        .store(true, Ordering::Release);
+    state.chainstate().request_shutdown();
     worker
         .join()
         .map_err(|_| std::io::Error::other("chainstate maintenance worker panicked"))?;

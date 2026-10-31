@@ -9,8 +9,6 @@ use super::{Handler, live_registry, optional_bool, parse_txid, required_str, req
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::manifest::{self, SurfaceKind};
-#[cfg(feature = "zmq")]
-use crate::registry::REGISTRY;
 
 const POLICY_ABSENCES: &[&str] = &[
     "clearmempool",

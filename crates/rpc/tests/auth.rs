@@ -1,7 +1,6 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::sync::atomic::AtomicBool;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -473,7 +472,7 @@ fn spawn_on_surface(
         idle_timeout: Duration::from_secs(2),
         rest_enabled: false,
     };
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
     thread::spawn(move || {
         let _ignored = server.serve_surface_with_shutdown(shutdown, surface);
     });
@@ -500,7 +499,7 @@ fn spawn_with_rest(
         idle_timeout: Duration::from_secs(2),
         rest_enabled,
     };
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchReader::fixture_never();
     thread::spawn(move || {
         let _ignored = server.serve_with_shutdown(shutdown);
     });

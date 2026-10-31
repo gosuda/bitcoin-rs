@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bitcoin_rs_chain::regtest_fixture::{
     merkle_root, mine_header_to_declared_target, mined_regtest_child_at,
 };
-use bitcoin_rs_chain::{LatchReader, TipSnapshot, validate_pow};
+use bitcoin_rs_chain::{LatchReader, LatchWriter, TipSnapshot, validate_pow};
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::{
     Block, BlockPayload, Hash256, Network, Script, Witness, consensus_bytes, deserialize,
@@ -647,8 +647,11 @@ fn shutdown_during_the_walk_skips_instead_of_failing() -> Result {
 #[test]
 fn a_request_cancelled_before_admission_never_reads_or_pins() -> Result {
     let f = fixture(4)?;
-    let flag = Arc::new(core::sync::atomic::AtomicBool::new(true));
-    let cancellation = LatchReader::new(Arc::clone(&flag));
+    let cancellation = {
+        let trigger = LatchWriter::new();
+        trigger.trigger();
+        trigger.reader()
+    };
     let error = verify_recent_blocks(
         &f.chain,
         cancellable_request(CheckLevel::CheckUndo, None, &cancellation),
@@ -668,11 +671,10 @@ fn a_request_cancelled_before_admission_never_reads_or_pins() -> Result {
 #[test]
 fn a_request_cancelled_during_the_walk_interrupts_without_success() -> Result {
     let f = fixture(4)?;
-    let flag = Arc::new(core::sync::atomic::AtomicBool::new(false));
-    let cancellation = LatchReader::new(Arc::clone(&flag));
-    let trigger = Arc::clone(&flag);
+    let trigger = LatchWriter::new();
+    let cancellation = trigger.reader();
     *f.bodies.before_read.lock() = Some(Box::new(move || {
-        trigger.store(true, core::sync::atomic::Ordering::SeqCst);
+        trigger.trigger();
     }));
     let error = verify_recent_blocks(
         &f.chain,
@@ -782,11 +784,10 @@ fn rows_a_prune_pass_took_while_the_pin_was_withdrawn_are_not_damage() -> Result
 #[test]
 fn a_request_cancelled_on_the_final_read_interrupts_before_success() -> Result {
     let f = fixture(4)?;
-    let flag = Arc::new(core::sync::atomic::AtomicBool::new(false));
-    let cancellation = LatchReader::new(Arc::clone(&flag));
-    let trigger = Arc::clone(&flag);
+    let trigger = LatchWriter::new();
+    let cancellation = trigger.reader();
     *f.bodies.before_read.lock() = Some(Box::new(move || {
-        trigger.store(true, core::sync::atomic::Ordering::SeqCst);
+        trigger.trigger();
     }));
     let error = verify_recent_blocks(
         &f.chain,

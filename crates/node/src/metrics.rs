@@ -387,9 +387,8 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> Result<JoinHandle<()>, RunError> {
-    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
         .spawn(move || {

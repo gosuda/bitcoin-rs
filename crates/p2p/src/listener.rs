@@ -129,7 +129,7 @@ impl ConnectionShared {
         peer_table: Arc<crate::PeerTable>,
         banned: impl Into<crate::BannedReader>,
         activity: Arc<crate::NetworkActivity>,
-        session_cancel: impl Into<bitcoin_rs_chain::LatchReader>,
+        session_cancel: bitcoin_rs_chain::LatchReader,
         peer_ready: PeerReadyHandle,
         magic: Magic,
         headers_tx: Sender<crate::InboundHeaders>,
@@ -144,7 +144,7 @@ impl ConnectionShared {
             address_book: None,
             feeler: false,
             activity,
-            session_cancel: session_cancel.into(),
+            session_cancel,
             peer_ready,
             magic,
             headers_tx,
@@ -337,7 +337,7 @@ impl ConnectionShared {
     }
 
     pub(crate) fn is_session_cancelled(&self) -> bool {
-        self.session_cancel.load()
+        self.session_cancel.is_triggered()
     }
 
     /// Retain the whole response under backpressure. Never wait while holding
@@ -3551,7 +3551,11 @@ mod address_tests {
             let book = crate::addrman::AddressBook::open(None, shared.magic.to_bytes(), true, None);
             book.learn_dns("seed", &[target.into()], now - 31 * 86400);
             shared.address_book = Some(Arc::clone(&book));
-            shared.session_cancel.store(cancelled);
+            if cancelled {
+                let session_cancel = bitcoin_rs_chain::LatchWriter::new();
+                session_cancel.trigger();
+                shared.session_cancel = session_cancel.reader();
+            }
             assert!(
                 run_outbound_connection(
                     target.into(),

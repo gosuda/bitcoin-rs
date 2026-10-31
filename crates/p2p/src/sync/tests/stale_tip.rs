@@ -1,6 +1,5 @@
 use std::io;
 use std::net::TcpListener;
-use std::sync::atomic::AtomicBool;
 use std::thread;
 
 use super::super::stale_tips::{MAX_ADVERTISED_STALETIPS, StaleTipRetainer};
@@ -60,7 +59,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
             outbound_block_relay_slots: 1,
             ..P2pServiceConfig::default()
         },
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
     );
     let ready: Arc<dyn Fn(PeerSource) + Send + Sync> = Arc::new(|_| {});
     service

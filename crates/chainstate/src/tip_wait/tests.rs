@@ -2,7 +2,7 @@ use super::*;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at;
 use bitcoin_rs_primitives::{BlockPayload, Hash256, Network};
 use bitcoin_rs_utxo::UtxoSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use bitcoin_rs_chain::LatchWriter;
 use std::sync::mpsc;
 
 fn owner() -> Chainstate {
@@ -15,7 +15,7 @@ fn owner() -> Chainstate {
 fn spawn_wait(
     owner: &Chainstate,
     condition: TipWaitCondition,
-    stop: Arc<AtomicBool>,
+    stop: LatchReader,
 ) -> (
     mpsc::Receiver<Option<Arc<TipSnapshot>>>,
     std::thread::JoinHandle<()>,
@@ -26,7 +26,7 @@ fn spawn_wait(
         tx.send(owner.wait_for_tip(
             condition,
             Some(Instant::now() + Duration::from_secs(2)),
-            &stop.into(),
+            &stop,
         ))
         .expect("result receiver");
     });
@@ -41,7 +41,7 @@ fn registration_races_never_lose_durable_publication() {
         let (rx, task) = spawn_wait(
             &owner,
             TipWaitCondition::Changed(Some(genesis.hash)),
-            Arc::new(AtomicBool::new(false)),
+            LatchReader::fixture_never(),
         );
         let child = mined_regtest_child_at(Network::Regtest.genesis_block().block_hash(), 1)
             .expect("child");
@@ -60,9 +60,9 @@ fn registration_races_never_lose_durable_publication() {
 fn all_owner_shutdown_paths_and_external_cancellation_wake_observers() {
     for mode in 0..4 {
         let owner = owner();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = LatchWriter::new();
         let genesis = owner.applied_tip.load_full().expect("genesis");
-        let (rx, task) = spawn_wait(&owner, TipWaitCondition::Height(1), Arc::clone(&stop));
+        let (rx, task) = spawn_wait(&owner, TipWaitCondition::Height(1), stop.reader());
         match mode {
             0 => owner.request_shutdown(),
             1 => owner.fail_closed_for_recovery(),
@@ -70,7 +70,7 @@ fn all_owner_shutdown_paths_and_external_cancellation_wake_observers() {
                 drop(owner.close());
             }
             _ => {
-                stop.store(true, Ordering::Release);
+                stop.trigger();
                 owner.wake_waiters();
             }
         }
@@ -89,10 +89,10 @@ fn all_owner_shutdown_paths_and_external_cancellation_wake_observers() {
 fn external_cancellation_does_not_wait_for_a_busy_transition() {
     let owner = owner();
     let transition = owner.chain_transition.lock();
-    let stop = Arc::new(AtomicBool::new(false));
-    let (rx, task) = spawn_wait(&owner, TipWaitCondition::Height(0), Arc::clone(&stop));
+    let stop = LatchWriter::new();
+    let (rx, task) = spawn_wait(&owner, TipWaitCondition::Height(0), stop.reader());
     assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
-    stop.store(true, Ordering::Release);
+    stop.trigger();
     owner.wake_waiters();
     assert!(
         rx.recv_timeout(Duration::from_secs(1))
@@ -113,7 +113,7 @@ fn grouped_publication_returns_settled_tip_and_transient_round_trip_keeps_waitin
     let (rx, task) = spawn_wait(
         &owner,
         TipWaitCondition::Height(1),
-        Arc::new(AtomicBool::new(false)),
+        LatchReader::fixture_never(),
     );
     {
         let transition = owner.begin_transition().expect("transition");
@@ -135,7 +135,7 @@ fn grouped_publication_returns_settled_tip_and_transient_round_trip_keeps_waitin
     let (rx, task) = spawn_wait(
         &owner,
         TipWaitCondition::Hash(genesis.hash),
-        Arc::new(AtomicBool::new(false)),
+        LatchReader::fixture_never(),
     );
     {
         let transition = owner.begin_transition().expect("transition");
@@ -167,7 +167,7 @@ fn headers_spurious_wakes_and_other_chainstates_do_not_change_active_tip() {
     let (rx, task) = spawn_wait(
         &owner,
         TipWaitCondition::Changed(Some(genesis.hash)),
-        Arc::new(AtomicBool::new(false)),
+        LatchReader::fixture_never(),
     );
     let deadline = Instant::now() + Duration::from_secs(2);
     while owner.tip_notification.changed.notify_all() == 0 {
@@ -260,7 +260,9 @@ fn timeout_and_cancellation_return_a_durable_reorg_prefix_without_waiting_for_co
         .expect("published prefix");
     assert_eq!(tip.height, 0);
     assert!(start.elapsed() < Duration::from_secs(1));
-    let stopped = LatchReader::new(Arc::new(AtomicBool::new(true)));
+    let stopped_writer = LatchWriter::new();
+    stopped_writer.trigger();
+    let stopped = stopped_writer.reader();
     assert_eq!(
         owner
             .wait_for_tip(TipWaitCondition::Height(2), None, &stopped)
@@ -337,7 +339,7 @@ fn omitted_current_tip_captures_after_an_in_flight_transition() {
     let (rx, task) = spawn_wait(
         &owner,
         TipWaitCondition::Changed(None),
-        Arc::new(AtomicBool::new(false)),
+        LatchReader::fixture_never(),
     );
     assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
     let second_payload = BlockPayload::from_local(second);

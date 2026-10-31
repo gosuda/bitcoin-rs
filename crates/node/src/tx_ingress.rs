@@ -18,11 +18,10 @@ pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     tx_rx: Receiver<bitcoin_rs_p2p::InboundBody>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let shutdown = shutdown.into();
     let chainstate = state.chainstate();
     let consumer = TxIngressConsumer {
         utxo: chainstate.utxo_reader(),
@@ -44,7 +43,7 @@ fn run_consumer_loop(
     shutdown: &bitcoin_rs_chain::LatchReader,
     tx_rx: &Receiver<bitcoin_rs_p2p::InboundBody>,
 ) {
-    while !shutdown.load() {
+    while !shutdown.is_triggered() {
         let made_progress = consumer.process_retries();
         if made_progress {
             match tx_rx.try_recv() {

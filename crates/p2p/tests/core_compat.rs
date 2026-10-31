@@ -895,7 +895,7 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Te
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,
@@ -1356,7 +1356,7 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
         Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
             true,
         )))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::fixture_never(),
         None,
         magic,
         headers_tx,

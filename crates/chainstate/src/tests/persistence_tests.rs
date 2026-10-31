@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -101,8 +100,8 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let next_hash = Hash256::from(next.block_hash());
 
     let observer = handles.clone();
-    let stop = Arc::new(AtomicBool::new(false));
-    let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::clone(&stop));
+    let stop = bitcoin_rs_chain::LatchWriter::new();
+    let cancellation = stop.reader();
     let (answer_tx, answer_rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
         answer_tx.send(observer.wait_for_tip(
@@ -119,7 +118,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let outcome = handles.apply_block(&BlockPayload::from_local(next));
     let pending = answer_rx.recv_timeout(Duration::from_millis(30));
     let remained_pending = matches!(pending, Err(mpsc::RecvTimeoutError::Timeout));
-    stop.store(true, Ordering::Release);
+    stop.trigger();
     handles.wake_waiters();
     let observed = match pending {
         Ok(answer) => answer,

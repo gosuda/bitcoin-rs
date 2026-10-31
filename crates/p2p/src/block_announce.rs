@@ -753,9 +753,8 @@ impl BlockAnnouncer {
 pub fn spawn_block_announce_worker(
     announcer: Arc<BlockAnnouncer>,
     rx: BlockAnnounceReceiver,
-    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> Result<std::thread::JoinHandle<()>, std::io::Error> {
-    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-block-announce".into())
         .spawn(move || {

@@ -55,14 +55,12 @@ fn trigger_is_idempotent_and_clones_observe_true() {
     let reader2 = reader1.clone();
     assert!(!reader1.is_triggered());
     assert!(!reader2.is_triggered());
-    assert!(!reader1.load());
     writer.trigger();
     writer.trigger();
     let reader3 = reader1.clone();
     assert!(reader1.is_triggered());
     assert!(reader2.is_triggered());
     assert!(reader3.is_triggered());
-    assert!(reader1.load());
 }
 
 #[test]
@@ -156,12 +154,7 @@ fn abandoned_child_deregisters_and_does_not_block_parent() {
 }
 
 #[test]
-fn flag_reader_compatibility_and_fixture_never() {
-    let flag = Arc::new(AtomicBool::new(false));
-    let reader = LatchReader::new(Arc::clone(&flag));
-    assert!(!reader.is_triggered());
-    flag.store(true, Ordering::Release);
-    assert!(reader.is_triggered());
+fn fixture_never_remains_untriggered() {
     let never = LatchReader::fixture_never();
     assert!(!never.is_triggered());
 }
@@ -174,15 +167,3 @@ fn types_implement_send_and_sync() {
     assert_send_sync::<HookGuard>();
 }
 
-#[test]
-fn token_store_preserves_one_way_latch() {
-    let writer = LatchWriter::new();
-    let reader = writer.reader();
-    assert!(!reader.is_triggered());
-    reader.store(false);
-    assert!(!reader.is_triggered());
-    reader.store(true);
-    assert!(reader.is_triggered());
-    reader.store(false);
-    assert!(reader.is_triggered());
-}

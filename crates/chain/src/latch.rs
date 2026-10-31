@@ -1,14 +1,12 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 #[cfg(test)]
 mod tests;
-
-static NEVER_RX: LazyLock<Receiver<()>> = LazyLock::new(crossbeam_channel::never);
 
 type Hook = Box<dyn FnOnce() + Send + 'static>;
 
@@ -128,7 +126,7 @@ impl LatchWriter {
     #[must_use]
     pub fn reader(&self) -> LatchReader {
         LatchReader {
-            inner: LatchReaderInner::Token(Arc::clone(&self.shared)),
+            shared: Arc::clone(&self.shared),
         }
     }
 
@@ -143,12 +141,6 @@ impl LatchWriter {
     }
 }
 
-#[derive(Clone)]
-enum LatchReaderInner {
-    Flag(Arc<AtomicBool>),
-    Token(Arc<Shared>),
-}
-
 /// Cancellation token reader representing the observation side of a one-way latch.
 ///
 /// Invariants:
@@ -159,7 +151,7 @@ enum LatchReaderInner {
 ///   the hook never runs.
 #[derive(Clone)]
 pub struct LatchReader {
-    inner: LatchReaderInner,
+    shared: Arc<Shared>,
 }
 
 impl fmt::Debug for LatchReader {
@@ -170,102 +162,47 @@ impl fmt::Debug for LatchReader {
     }
 }
 
-impl From<Arc<AtomicBool>> for LatchReader {
-    fn from(inner: Arc<AtomicBool>) -> Self {
-        Self::new(inner)
-    }
-}
-
 impl LatchReader {
     #[must_use]
-    pub const fn new(inner: Arc<AtomicBool>) -> Self {
-        Self {
-            inner: LatchReaderInner::Flag(inner),
-        }
-    }
-
-    #[must_use]
-    pub fn load(&self) -> bool {
-        match &self.inner {
-            LatchReaderInner::Flag(flag) => flag.load(Ordering::Acquire),
-            LatchReaderInner::Token(shared) => shared.triggered.load(Ordering::Acquire),
-        }
-    }
-
-    #[must_use]
     pub fn is_triggered(&self) -> bool {
-        self.load()
+        self.shared.triggered.load(Ordering::Acquire)
     }
 
     /// Returns a receiver that disconnects when the latch triggers.
-    ///
-    /// Flag-backed readers return a channel that never delivers messages
-    /// and never disconnects, so flag-backed readers cannot wake a select!.
     #[must_use]
     pub fn closed(&self) -> &Receiver<()> {
-        match &self.inner {
-            LatchReaderInner::Flag(_) => &NEVER_RX,
-            LatchReaderInner::Token(shared) => &shared.wake_rx,
-        }
+        &self.shared.wake_rx
     }
 
     pub fn on_cancel(&self, hook: impl FnOnce() + Send + 'static) -> HookGuard {
-        match &self.inner {
-            LatchReaderInner::Flag(flag) => {
-                if flag.load(Ordering::Acquire) {
-                    hook();
-                }
-                HookGuard::inert()
-            }
-            LatchReaderInner::Token(shared) => register_hook(shared, Box::new(hook)),
-        }
+        register_hook(&self.shared, Box::new(hook))
     }
 
     #[must_use]
     pub fn child(&self) -> LatchWriter {
-        match &self.inner {
-            LatchReaderInner::Flag(_) => LatchWriter::new(),
-            LatchReaderInner::Token(shared) => {
-                let child_writer = LatchWriter::new();
-                let weak_child = Arc::downgrade(&child_writer.shared);
-                let guard = register_hook(
-                    shared,
-                    Box::new(move || {
-                        if let Some(child) = weak_child.upgrade() {
-                            child.trigger();
-                        }
-                    }),
-                );
-                *child_writer.shared.parent_guard.lock() = Some(guard);
-                child_writer
-            }
-        }
+        let child_writer = LatchWriter::new();
+        let weak_child = Arc::downgrade(&child_writer.shared);
+        let guard = register_hook(
+            &self.shared,
+            Box::new(move || {
+                if let Some(child) = weak_child.upgrade() {
+                    child.trigger();
+                }
+            }),
+        );
+        *child_writer.shared.parent_guard.lock() = Some(guard);
+        child_writer
     }
 
     #[must_use]
     pub fn fixture_never() -> Self {
-        Self::new(Arc::new(AtomicBool::new(false)))
-    }
-
-    #[cfg(any(test, feature = "test-seam"))]
-    pub fn store(&self, value: bool) {
-        match &self.inner {
-            LatchReaderInner::Flag(flag) => flag.store(value, Ordering::Release),
-            LatchReaderInner::Token(shared) => {
-                if value {
-                    shared.trigger();
-                }
-            }
-        }
+        LatchWriter::new().reader()
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn hook_count(&self) -> usize {
-        match &self.inner {
-            LatchReaderInner::Flag(_) => 0,
-            LatchReaderInner::Token(shared) => shared.hook_count(),
-        }
+        self.shared.hook_count()
     }
 }
 

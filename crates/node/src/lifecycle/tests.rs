@@ -217,7 +217,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Re
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let cancellation = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    let cancellation = bitcoin_rs_chain::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 2, 100] {
             assert!(
@@ -255,7 +255,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Resul
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    let live = bitcoin_rs_chain::LatchReader::fixture_never();
     for check_level in 0..=4 {
         for nblocks in [0, 1, 6] {
             assert!(
@@ -284,12 +284,16 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestEr
         sync: state.sync(),
         snapshots: Arc::clone(&state.snapshots),
     };
-    let live = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false)));
+    let live = bitcoin_rs_chain::LatchReader::fixture_never();
     assert!(
         matches!(control.verify_chain(3, 6, &live), Ok(true)),
         "an open chain must verify"
     );
-    let fired = bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(true)));
+    let fired = {
+        let trigger = bitcoin_rs_chain::LatchWriter::new();
+        trigger.trigger();
+        trigger.reader()
+    };
     assert!(
         matches!(
             control.verify_chain(3, 6, &fired),
@@ -570,11 +574,11 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> Result<(), TestE
     let config = isolated_config(&temp.path().join("startup-rollback"));
     let state = NodeState::open(config.clone(), None)?;
     let (current, previous) = seed_checkpoint(&state)?;
-    let shutdown_flag = state.chainstate().shutdown_handle();
+    let shutdown = state.chainstate().shutdown_reader();
     let exited = Arc::new(AtomicBool::new(false));
     let worker_exited = Arc::clone(&exited);
     let worker = std::thread::spawn(move || {
-        while !shutdown_flag.load(Ordering::Acquire) {
+        while !shutdown.is_triggered() {
             std::thread::yield_now();
         }
         worker_exited.store(true, Ordering::Release);
@@ -1097,9 +1101,9 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> Result<(), Te
     let addr = server.local_addr()?;
 
     gate.arm();
-    let stop_flag = state.chainstate().shutdown_handle();
+    let chainstate = state.chainstate();
     let mut witness = ServedWitness::new(
-        move || stop_flag.store(true, Ordering::Release),
+        move || chainstate.request_shutdown(),
         Some(Arc::clone(&gate)),
     );
     witness.serve(server, state.shutdown_reader())?;

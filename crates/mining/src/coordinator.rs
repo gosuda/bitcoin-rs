@@ -242,10 +242,9 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
-        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+        shutdown: bitcoin_rs_chain::LatchReader,
     ) -> Self {
         let seed = mempool.current_revisions().0;
-        let shutdown = shutdown.into();
         let wake = Arc::new(Condvar::new());
         let wake_hook = Arc::clone(&wake);
         let wake_guard = shutdown.on_cancel(move || {
