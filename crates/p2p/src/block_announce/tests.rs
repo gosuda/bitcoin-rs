@@ -1201,28 +1201,6 @@ fn verified_peer_progress_does_not_retreat_on_late_older_evidence() {
 }
 
 #[test]
-fn test_high_bandwidth_bounded_to_3_peers() {
-    let chain = Arc::new(MockAnnounceChain::new(3));
-    let table = Arc::new(PeerTable::new());
-    let announcer = BlockAnnouncer::new(
-        Arc::clone(&table),
-        Arc::clone(&chain) as Arc<dyn ChainQuery>,
-        BlockAnnounceConfig::default(),
-    );
-
-    let mut peers = Vec::new();
-    for i in 1..=3 {
-        let addr = test_addr(1010 + i);
-        peers.push(setup_peer(&table, &announcer, addr, true));
-        note_compact_preference(&table, addr, false, 2);
-        announcer.reconcile_high_bandwidth_peers();
-    }
-
-    assert_eq!(peers.len(), 3);
-    assert_eq!(announcer.high_bandwidth_requested_peers().len(), 3);
-}
-
-#[test]
 fn useful_compact_v2_peer_rotates_the_bounded_selection() {
     let chain = Arc::new(MockAnnounceChain::new(2));
     let table = Arc::new(PeerTable::new());

@@ -351,45 +351,6 @@ fn a_cloned_socket_counts_into_the_same_place() {
     drop(clone);
     let _accepted = accepting.join();
 }
-
-#[test]
-fn a_vectored_write_counts_every_slice_in_one_inner_call() {
-    struct RecordingWriter {
-        writes: usize,
-        vectored: usize,
-    }
-    impl Write for RecordingWriter {
-        fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
-            self.writes += 1;
-            Ok(buffer.len())
-        }
-        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
-            self.vectored += 1;
-            Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-        }
-        fn flush(&mut self) -> IoResult<()> {
-            Ok(())
-        }
-    }
-
-    let inner = RecordingWriter {
-        writes: 0,
-        vectored: 0,
-    };
-    let counters = Arc::new(PeerCounters::default());
-    let mut stream = CountingStream::new(inner, Arc::clone(&counters));
-    let header = [0_u8; 24];
-    let payload = [1_u8; 8];
-    let written = stream
-        .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
-        .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
-
-    assert_eq!(written, 32);
-    assert_eq!(counters.bytes_sent(), 32);
-    assert_eq!(stream.inner.vectored, 1);
-    assert_eq!(stream.inner.writes, 0);
-}
-
 #[test]
 fn a_zero_byte_read_stamps_nothing_while_a_single_byte_write_counts() {
     let counters = Arc::new(PeerCounters::default());

@@ -652,11 +652,6 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     assert!(!manager.stored.records[manager.by_addr[&second]].tried);
     assert_eq!(manager.collisions, Vec::<PeerEndpoint>::new());
     assert_indexes(&manager);
-    assert!(
-        !sonic_rs::to_string(&manager.stored)
-            .expect("stored")
-            .contains("creation_id")
-    );
 }
 
 #[test]

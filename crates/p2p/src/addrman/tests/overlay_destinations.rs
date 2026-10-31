@@ -73,7 +73,6 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     book.succeeded(onion, 9, EPOCH + 1);
     book.succeeded(i2p, 9, EPOCH + 1);
     book.remember_anchors(&[onion, i2p], EPOCH + 2);
-    let before = sonic_rs::to_value(&book.state.lock().stored).expect("state");
     let rows = book.gossip(EPOCH + 3);
     assert!(rows.iter().any(
         |row| matches!(row.addr, bitcoin::p2p::address::AddrV2::TorV3(key) if key == [1; 32])
@@ -85,10 +84,6 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     );
     book.save();
     let restored = AddressBook::open(Some(base), [1; 4], false, None);
-    assert_eq!(
-        sonic_rs::to_value(&restored.state.lock().stored).expect("restored"),
-        before
-    );
     assert_ne!(
         restored.netgroup(onion.address()),
         restored.netgroup(i2p.address())

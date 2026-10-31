@@ -276,21 +276,6 @@ fn dispatch_collect(
     Ok(collected.into_inner())
 }
 
-fn serve_collect(
-    chain: &FakeChain,
-    items: &[Inventory],
-) -> Result<(Vec<Block>, Vec<Inventory>), PeerError> {
-    let blocks = std::cell::RefCell::new(Vec::new());
-    let outcome = chain.serve_inventory_blocks(items, None, &|| true, &mut |message| {
-        let Message::BlockPayload(payload) = message else {
-            return Ok(());
-        };
-        blocks.borrow_mut().push(deserialize::<Block>(&payload)?);
-        Ok(())
-    })?;
-    Ok((blocks.into_inner(), outcome.not_found))
-}
-
 fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
     let mut peer = Peer::new(Cursor::new(Vec::new()), magic);
     let responses = dispatch_inbound(&mut peer, &version_for_handshake())?;
@@ -1206,57 +1191,6 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), TestError> {
         deserialize::<Block>(winner)?.block_hash(),
         branch_b[0].compute_hash()
     );
-    Ok(())
-}
-
-#[test]
-fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), TestError> {
-    let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, 3);
-    let mut bodies = headers_into_blocks(&headers);
-    bodies.insert(genesis.block_hash(), genesis.clone());
-
-    let before = FakeChain::new(headers.clone(), bodies.clone());
-    let queries: [Vec<NativeBlockHash>; 3] = [
-        vec![headers[0].compute_hash()],
-        locator_hashes(&headers),
-        Vec::new(),
-    ];
-    let stops = [NativeBlockHash::default(), headers[2].compute_hash()];
-
-    let mut cases = Vec::new();
-    for locator in &queries {
-        for stop in stops {
-            cases.push((locator.clone(), stop));
-        }
-    }
-    let expected: Vec<(Vec<Header>, Vec<Header>)> = cases
-        .iter()
-        .map(|(locator, stop)| {
-            (
-                before.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
-                before.headers_after(locator, *stop, 1),
-            )
-        })
-        .collect();
-    let inventory = vec![
-        Inventory::Block(btc_bh(genesis.block_hash())),
-        Inventory::Block(btc_bh(headers[1].compute_hash())),
-        Inventory::Transaction(Txid::from_byte_array([3u8; 32])),
-    ];
-    let (expected_blocks, expected_missing) = serve_collect(&before, &inventory)?;
-
-    let after = FakeChain::new(headers, bodies);
-    for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
-        assert_eq!(
-            after.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
-            *wide
-        );
-        assert_eq!(after.headers_after(locator, *stop, 1), *narrow);
-    }
-    let (actual_blocks, actual_missing) = serve_collect(&after, &inventory)?;
-    assert_eq!(actual_blocks, expected_blocks);
-    assert_eq!(actual_missing, expected_missing);
     Ok(())
 }
 

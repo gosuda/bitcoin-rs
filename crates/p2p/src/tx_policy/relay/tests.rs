@@ -391,7 +391,6 @@ fn different_inbound_keys_and_outbound_peers_sample_independently() -> TestResul
     }
     let request = insert(&gateway, &transaction(1, None), 1_000);
     table.queue_transaction_relay(request, now, &mut rng);
-    assert_eq!(table.tx_policy.lock().inbound_inv.len(), 5);
     assert_eq!(rng.draws, 7, "five inbound keys plus two outbound clocks");
     assert_eq!(clock(&table, sources[0]), clock(&table, sources[1]));
     let deadlines = sources

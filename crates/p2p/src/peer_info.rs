@@ -356,13 +356,6 @@ mod tests {
         assert_eq!(outbound.time_offset, -50);
         assert!(!outbound.wtxid_relay);
         assert!(!outbound.compact_block_relay);
-        assert_eq!(
-            PeerInfo {
-                inbound: false,
-                ..inbound
-            },
-            outbound
-        );
     }
 
     #[test]

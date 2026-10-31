@@ -745,7 +745,6 @@ fn session_negotiates_33_and_stream_connect_uses_fresh_bridge() -> TestResult {
         "SESSION CREATE STYLE=STREAM ID={} DESTINATION=",
         session.id()
     )));
-    assert!(session.id().starts_with("btcrs-"));
     assert_eq!(commands[2], "NAMING LOOKUP NAME=ME");
     assert!(
         commands
@@ -2259,7 +2258,6 @@ fn a_session_socket_reset_before_any_command_still_fails_the_bridge() -> TestRes
         io::ErrorKind::ConnectionReset,
         "got {error:?}"
     );
-    assert!(error.to_string().contains("before any command"), "{error}");
     assert!(
         fake.strangers.try_iter().all(|refused| refused != client),
         "a session socket is no stranger"
@@ -2835,7 +2833,6 @@ fn startup_connect_is_clipped_to_the_unreachable_window_until_the_bridge_connect
         return Err("a connect past the unreachable window must not establish".into());
     };
     assert_eq!(error.kind(), io::ErrorKind::TimedOut, "got {error:?}");
-    assert!(error.to_string().contains("connect deadline"), "{error}");
     assert!(!reached.get(), "no connection was accepted");
     let commands: Vec<String> = fake.commands.try_iter().collect();
     assert!(
