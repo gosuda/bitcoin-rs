@@ -32,7 +32,7 @@ fn cf_value(cf: ColumnFamily, label: impl AsRef<[u8]>) -> Vec<u8> {
     }
 }
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError> {
     insert_rows(&store)?;

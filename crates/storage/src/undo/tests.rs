@@ -1,5 +1,6 @@
 use super::*;
 use proptest::prelude::*;
+use crate::test_support::{TestError, TestResult};
 
 fn test_hash(byte: u8) -> Hash256 {
     Hash256::from_le_bytes(&[byte; 32])
@@ -7,7 +8,7 @@ fn test_hash(byte: u8) -> Hash256 {
 
 #[cfg(feature = "redb")]
 #[test]
-fn a_deferred_undo_record_is_readable_before_any_flush() -> Result<(), Box<dyn std::error::Error>> {
+fn a_deferred_undo_record_is_readable_before_any_flush() -> TestResult {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(crate::RedbStore::open(dir.path())?);
     let undo_store = KvUndoStore::new(Arc::clone(&store));
@@ -17,7 +18,7 @@ fn a_deferred_undo_record_is_readable_before_any_flush() -> Result<(), Box<dyn s
 
     let loaded = undo_store
         .load_undo(4_242, hash)?
-        .ok_or("undo record must be readable in-process before any flush")?;
+        .ok_or(TestError::Missing("undo record must be readable in-process before any flush"))?;
     assert_eq!(
         loaded, b"undo-record",
         "the deferred write must return exactly what was written"
@@ -28,7 +29,7 @@ fn a_deferred_undo_record_is_readable_before_any_flush() -> Result<(), Box<dyn s
 #[cfg(feature = "fjall")]
 #[test]
 fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let block_hash = Hash256::from_le_bytes(&[0xa7; 32]);
 
@@ -40,7 +41,7 @@ fn an_armed_disconnect_marker_survives_closing_and_reopening_the_store()
     let reopened = Arc::new(crate::FjallStore::open(dir.path())?);
     let marker = KvUndoStore::new(Arc::clone(&reopened))
         .load_disconnect_marker()?
-        .ok_or("armed marker did not survive the reopen")?;
+        .ok_or(TestError::Missing("armed marker did not survive the reopen"))?;
     assert_eq!(marker.hash, block_hash, "hash must round-trip");
     assert_eq!(marker.height, 140_003, "height must round-trip");
     assert_eq!(
@@ -154,7 +155,7 @@ proptest! {
 // RCV-15
 #[cfg(feature = "fjall")]
 #[test]
-fn a_corrupt_marker_row_fails_closed_and_stays_on_disk() -> Result<(), Box<dyn std::error::Error>> {
+fn a_corrupt_marker_row_fails_closed_and_stays_on_disk() -> TestResult {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(crate::FjallStore::open(dir.path())?);
     store.put(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY, b"short")?;
@@ -273,7 +274,7 @@ fn a_repeated_rollback_completion_for_the_same_block_succeeds() -> Result<(), St
 // RCV-15
 #[cfg(feature = "fjall")]
 #[test]
-fn disarming_an_absent_marker_is_a_no_op() -> Result<(), Box<dyn std::error::Error>> {
+fn disarming_an_absent_marker_is_a_no_op() -> TestResult {
     let dir = tempfile::tempdir()?;
     let undo = KvUndoStore::new(Arc::new(crate::FjallStore::open(dir.path())?));
 
@@ -290,7 +291,7 @@ fn disarming_an_absent_marker_is_a_no_op() -> Result<(), Box<dyn std::error::Err
 // EVT-05
 #[cfg(feature = "fjall")]
 #[test]
-fn a_backend_marker_cannot_be_completed_for_another_block() -> Result<(), Box<dyn std::error::Error>>
+fn a_backend_marker_cannot_be_completed_for_another_block() -> TestResult
 {
     let dir = tempfile::tempdir()?;
     let undo = KvUndoStore::new(Arc::new(crate::FjallStore::open(dir.path())?));
@@ -423,7 +424,7 @@ impl KvStore for ArmOnMarkerRead {
 #[cfg(feature = "fjall")]
 #[test]
 fn a_disconnect_armed_while_the_marker_is_disarmed_survives()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let dir = tempfile::tempdir()?;
     let inner = Arc::new(crate::FjallStore::open(dir.path())?);
     let gated = Arc::new(ArmOnMarkerRead::new(Arc::clone(&inner)));

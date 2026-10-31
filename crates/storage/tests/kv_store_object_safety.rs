@@ -1,9 +1,10 @@
 #![cfg(feature = "fjall")]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
+use crate::support::TestResult;
 
 #[test]
-fn kv_store_dispatches_through_a_trait_object() -> Result<(), Box<dyn std::error::Error>> {
+fn kv_store_dispatches_through_a_trait_object() -> TestResult {
     let dir = tempfile::tempdir()?;
     let store: Box<dyn KvStore> = Box::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
 

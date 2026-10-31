@@ -1,5 +1,6 @@
 use super::*;
 use crate::chainstate_journal::CheckpointBase;
+use crate::test_support::{TestError, TestResult};
 use std::io::Write;
 
 #[test]
@@ -220,7 +221,7 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     writer.freeze()?;
     assert_eq!(writer.state(), WriterState::Frozen);
     let Err(error) = writer.append(&sample_record(2)) else {
-        return Err("frozen writer accepted an append".into());
+        return Err(TestError::UnexpectedSuccess("frozen writer accepted an append"));
     };
     assert!(matches!(error, JournalWriterError::NotOpen { .. }));
     writer.compact_to_checkpoint(CheckpointBase {

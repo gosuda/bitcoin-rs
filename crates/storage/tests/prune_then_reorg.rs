@@ -20,6 +20,7 @@ use bitcoin_rs_storage::{
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tempfile::tempdir;
+use crate::support::TestResult;
 
 /// Prune everything below the requested height; `retention_depth` still
 /// floors at the 288-block reorg margin.
@@ -29,7 +30,7 @@ const AGGRESSIVE: PrunePolicy = PrunePolicy {
 };
 
 fn memory_store_with_block_files()
--> Result<(Arc<MemoryStore>, tempfile::TempDir, FlatFileBlockStore), Box<dyn std::error::Error>> {
+-> TestResult<(Arc<MemoryStore>, tempfile::TempDir, FlatFileBlockStore)> {
     let data_dir = tempdir()?;
     let block_files = FlatFileBlockStore::open(data_dir.path())?;
     Ok((Arc::new(MemoryStore::default()), data_dir, block_files))
@@ -62,7 +63,7 @@ fn write_body_rows(
     store: &MemoryStore,
     block_files: &FlatFileBlockStore,
     rows: &[(u32, &[u8])],
-) -> Result<Vec<StoredRow>, Box<dyn std::error::Error>> {
+) -> TestResult<Vec<StoredRow>> {
     let mut appended = Vec::with_capacity(rows.len());
     let mut batch = store.new_batch();
     for &(height, payload) in rows {
@@ -93,7 +94,7 @@ fn write_body_rows(
 }
 
 #[test]
-fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> Result<(), Box<dyn std::error::Error>>
+fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> TestResult
 {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
@@ -133,7 +134,7 @@ fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> Result<(), Box<dy
 
 #[test]
 fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -164,7 +165,7 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
 }
 
 #[test]
-fn prune_to_height_respects_an_active_retention_lease() -> Result<(), Box<dyn std::error::Error>> {
+fn prune_to_height_respects_an_active_retention_lease() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -205,7 +206,7 @@ fn prune_to_height_respects_an_active_retention_lease() -> Result<(), Box<dyn st
 
 #[test]
 fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let store = MemoryStore::default();
     let data_dir = tempdir()?;
     let old_rows = {
@@ -267,7 +268,7 @@ fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
 
 #[test]
 fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let store = MemoryStore::default();
     let data_dir = tempdir()?;
     let hash = fake_hash(1);
@@ -308,7 +309,7 @@ fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
 }
 
 #[test]
-fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std::error::Error>> {
+fn retention_lease_stops_the_prune_line_at_its_floor() -> TestResult {
     let store = MemoryStore::default();
     let data_dir = tempdir()?;
     let old_hash = fake_hash(1);
@@ -376,7 +377,7 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dyn std::error::Error>>
+fn history_request_between_planning_and_commit_is_refused() -> TestResult
 {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
@@ -446,7 +447,7 @@ fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dy
 /// refuses a lease over rows the previous process deleted.
 #[test]
 fn executed_frontier_survives_restart_and_refuses_deleted_heights()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -483,7 +484,7 @@ fn executed_frontier_survives_restart_and_refuses_deleted_heights()
 
 #[test]
 fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -533,7 +534,7 @@ fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
 }
 
 #[test]
-fn unpruned_store_has_no_executed_frontier() -> Result<(), Box<dyn std::error::Error>> {
+fn unpruned_store_has_no_executed_frontier() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     assert_eq!(
         ExecutedFrontier::reconstruct(&*store)?,
@@ -560,7 +561,7 @@ fn unpruned_store_has_no_executed_frontier() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn missing_executed_frontier_after_prune_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn missing_executed_frontier_after_prune_fails_closed() -> TestResult {
     for survivors in [false, true] {
         let (store, _data_dir, block_files) = memory_store_with_block_files()?;
         write_body_rows(&store, &block_files, &[(10, b"body"), (11, b"body")])?;
@@ -600,7 +601,7 @@ fn missing_executed_frontier_after_prune_fails_closed() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> Result<(), Box<dyn std::error::Error>>
+fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> TestResult
 {
     for key in [
         EXECUTED_FRONTIER_KEY,
@@ -619,7 +620,7 @@ fn corrupt_prune_metadata_never_becomes_an_empty_frontier() -> Result<(), Box<dy
 
 #[test]
 fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -653,7 +654,7 @@ fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
 
 #[test]
 fn ambiguous_durability_releases_the_claim_when_nothing_applied()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -679,7 +680,7 @@ fn ambiguous_durability_releases_the_claim_when_nothing_applied()
 
 #[test]
 fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -716,7 +717,7 @@ fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
 
 #[test]
 fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
--> Result<(), Box<dyn std::error::Error>> {
+-> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(
         &store,
@@ -745,7 +746,7 @@ fn ambiguous_durability_does_not_confuse_a_retry_with_its_earlier_pass()
 }
 
 #[test]
-fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn std::error::Error>>
+fn optional_consumer_budget_exhaustion_unblocks_pruning() -> TestResult
 {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;
     write_body_rows(

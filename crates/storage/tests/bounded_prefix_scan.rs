@@ -2,7 +2,7 @@
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScan, PrefixScanLimit, StorageError};
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 fn seed_rows<S: KvStore>(store: &S) -> Result<(), StorageError> {
     let mut batch = store.new_batch();

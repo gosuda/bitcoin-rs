@@ -8,7 +8,7 @@ use bitcoin_rs_storage::{
 };
 use redb::ReadableDatabase;
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 const MAX_SCAN: PrefixScanLimit = PrefixScanLimit {
     max_rows: 10_000,

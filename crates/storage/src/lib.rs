@@ -128,3 +128,5 @@ mod rocksdb_impl;
 
 pub mod chainstate_journal;
 pub mod checkpoint;
+#[cfg(test)]
+pub(crate) mod test_support;

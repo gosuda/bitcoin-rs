@@ -2,7 +2,7 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{BoundedReadError, ColumnFamily, KvStore, KvUndoStore, UndoStore};
 use std::sync::Arc;
 
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+use crate::support::TestResult as Result;
 
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 fn check_store(store: impl KvStore) -> Result {

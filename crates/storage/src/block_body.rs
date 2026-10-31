@@ -579,10 +579,11 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
 mod body_position_prefetch_tests {
     use super::*;
     use crate::BoundedReadError;
+    use crate::test_support::{TestError, TestResult};
 
     #[test]
     fn verification_distinguishes_corrupt_frames_from_missing_bodies()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -643,7 +644,7 @@ mod body_position_prefetch_tests {
 
     #[test]
     fn prefetched_positions_stream_bodies_in_exact_request_order()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -679,7 +680,7 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
-    fn persisting_same_block_body_twice_appends_once() -> Result<(), Box<dyn std::error::Error>> {
+    fn persisting_same_block_body_twice_appends_once() -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -703,7 +704,7 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
-    fn malformed_body_row_is_incompatible_not_missing() -> Result<(), Box<dyn std::error::Error>> {
+    fn malformed_body_row_is_incompatible_not_missing() -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -715,13 +716,13 @@ mod body_position_prefetch_tests {
         batch.put(crate::pruning::BLOCK_DATA_CF, &key, b"legacy-inline-body");
         index.write(batch)?;
         let Err(error) = store.load_block_body(7, hash) else {
-            return Err("malformed body row must fail closed".into());
+            return Err(TestError::UnexpectedSuccess("malformed body row must fail closed"));
         };
         assert!(matches!(error, StorageError::IncompatibleData(_)));
 
         let mut reader = store.reader()?;
         let Err(error) = reader.load_block_body(7, hash) else {
-            return Err("malformed body row must fail closed in the direct reader".into());
+            return Err(TestError::UnexpectedSuccess("malformed body row must fail closed in the direct reader"));
         };
         assert!(matches!(error, StorageError::IncompatibleData(_)));
         Ok(())
@@ -729,7 +730,7 @@ mod body_position_prefetch_tests {
 
     #[test]
     fn missing_prefetched_body_row_is_missing_not_incompatible()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -744,7 +745,7 @@ mod body_position_prefetch_tests {
 
     #[test]
     fn malformed_prefetched_body_row_is_incompatible_not_missing()
-    -> Result<(), Box<dyn std::error::Error>> {
+    -> TestResult {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
         let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
@@ -757,7 +758,7 @@ mod body_position_prefetch_tests {
 
         let mut reader = store.reader()?;
         let Err(error) = reader.prefetch_positions(&[(7, hash)]) else {
-            return Err("malformed prefetched body row must fail closed".into());
+            return Err(TestError::UnexpectedSuccess("malformed prefetched body row must fail closed"));
         };
         assert!(matches!(error, StorageError::IncompatibleData(_)));
         Ok(())

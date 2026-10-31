@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::TestError;
 use crate::chainstate_journal::CheckpointBase;
 
 #[test]
@@ -100,7 +101,7 @@ fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
     writer.append(&sample_record(1))?;
     writer.last_boundary = Instant::now()
         .checked_sub(Duration::from_secs(2))
-        .ok_or("test instant underflow")?;
+        .ok_or(TestError::Missing("test instant underflow"))?;
     writer.prepare_for_apply()?;
     assert_eq!(writer.head().height, 1);
     Ok(())
