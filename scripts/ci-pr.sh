@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|deep|all|proofs}" >&2
+  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|deep|all|proofs}" >&2
   exit 2
 }
 
@@ -393,6 +393,10 @@ case "$1" in
       check
     ;;
 
+  contracts)
+    cargo run --locked -p contract-index -- --check
+    ;;
+
   proofs)
     proofs_stage
     ;;
@@ -410,6 +414,7 @@ case "$1" in
     "$0" fmt || failures=$((failures + 1))
     "$0" deep || failures=$((failures + 1))
     "$0" deny || failures=$((failures + 1))
+    "$0" contracts || failures=$((failures + 1))
     finish
     ;;
 
