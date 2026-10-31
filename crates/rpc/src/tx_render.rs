@@ -18,7 +18,6 @@ pub(crate) struct TransactionChainContext {
     pub in_active_chain: Option<bool>,
 }
 
-/// Exact eight-decimal BTC spelling used by Core JSON amount fields.
 #[must_use]
 pub(crate) fn btc_amount_json(satoshis: u64) -> Value {
     btc_amount_parts(false, satoshis)

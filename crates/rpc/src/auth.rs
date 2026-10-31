@@ -5,8 +5,6 @@ use std::path::Path;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-/// RPC authentication policy: one expected `(user, password)` pair hashed at
-/// construction, regardless of how the password was sourced.
 #[derive(Debug)]
 pub struct Auth {
     user: String,

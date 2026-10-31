@@ -1,58 +1,39 @@
 use thiserror::Error;
 
-/// JSON-RPC 2.0 and Bitcoin Core-compatible RPC errors.
 #[derive(Debug, Error)]
 pub enum RpcError {
     #[error("parse error: {0}")]
     Parse(String),
-    /// The payload is rendered verbatim: Core's `JSONRPCError` message text
-    /// has no prefix (`src/rpc/request.cpp`), and the pinned client
-    /// comparison checks the exact string.
     #[error("{0}")]
     InvalidRequest(&'static str),
-    /// Bitcoin Core answers `RPC_PARSE_ERROR` (-32700) with its own message
-    /// for this case (`src/httprpc.cpp`: "Top-level object parse error").
-    /// The payload is rendered verbatim.
     #[error("{0}")]
     TopLevelParse(&'static str),
     #[error("method not found: {0}")]
     MethodNotFound(String),
     #[error("invalid params: {0}")]
     InvalidParams(&'static str),
-    /// Bitcoin Core's `RPC_TYPE_ERROR` (-3). Display is the Core message text
-    /// with no wrapper prefix.
     #[error("{0}")]
     InvalidType(String),
     #[error("not found: {0}")]
     NotFound(&'static str),
     #[error("{0}")]
     MethodDisabled(&'static str),
-    /// Bitcoin Core's `RPC_INVALID_PARAMETER` (-8). Distinct from
-    /// [`RpcError::InvalidParams`], which is the JSON-RPC shape error.
     #[error("{0}")]
     InvalidParameter(String),
-    /// Bitcoin Core's `RPC_INVALID_ADDRESS_OR_KEY` (-5).
     #[error("{0}")]
     InvalidAddressOrKey(String),
     #[error("{0}")]
     TxRejected(String),
-    /// Bitcoin Core's `RPC_VERIFY_ERROR` (-25), which it uses for submissions
-    /// stopped by a caller-configured guard rather than by consensus or policy.
     #[error("{0}")]
     TxVerifyError(String),
-    /// Bitcoin Core `RPC_DESERIALIZATION_ERROR` (-22).
     #[error("{0}")]
     Deserialization(String),
-    /// Bitcoin Core `RPC_CLIENT_NOT_CONNECTED` (-9).
     #[error("{0}")]
     ClientNotConnected(String),
-    /// Bitcoin Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD` (-10).
     #[error("{0}")]
     ClientInInitialDownload(String),
-    /// Bitcoin Core `RPC_MISC_ERROR` (-1), including unavailable optional indexes.
     #[error("{0}")]
     Misc(String),
-    /// Bitcoin Core internal failure whose wire message has no local prefix.
     #[error("{0}")]
     CoreInternal(String),
     #[error("internal error: {0}")]

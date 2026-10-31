@@ -1,10 +1,6 @@
-//! Machine-readable compatibility manifest for every external surface this
-//! node exposes, declared against Bitcoin Core 31.x.
-
 use std::format;
 use std::string::String;
 
-/// Transport kind of a manifest row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Rpc,
@@ -32,7 +28,6 @@ impl SurfaceKind {
     }
 }
 
-/// Compatibility status of one surface against the pinned Bitcoin Core reference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Status {
     Supported,
@@ -40,7 +35,6 @@ pub enum Status {
     ImplementedUnverified,
     Extension,
     Disabled,
-    /// Not exposed: JSON-RPC answers `-32601`, REST answers 404.
     Unimplemented,
 }
 
@@ -76,23 +70,16 @@ impl Status {
     }
 }
 
-/// The compatibility manifest source, embedded so it cannot drift.
 pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 #[derive(Clone, Copy, Debug)]
 pub struct Entry {
-    /// JSON-RPC method name, REST route prefix (`/rest/...`), or ZMQ topic.
     pub name: &'static str,
     pub kind: SurfaceKind,
     pub status: Status,
-    /// Cargo feature that must be active; empty for always-compiled rows.
     pub feature: &'static str,
     pub core_version: &'static str,
-    /// Deviation/extension rationale, citing the source file when the surface
-    /// differs from Core.
     pub notes: &'static str,
-    /// bitcoin-rs version whose surface the row describes; `pending` marks
-    /// not-yet-landed rows.
     pub since: &'static str,
 }
 
@@ -105,7 +92,6 @@ impl Entry {
     }
 }
 
-/// Core contract version every row is declared against.
 pub(crate) const CORE_VERSION: &str = "31.x";
 
 pub(crate) const NO_WALLET: &str =

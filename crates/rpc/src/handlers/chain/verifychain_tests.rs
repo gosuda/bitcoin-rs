@@ -1,4 +1,3 @@
-//! `verifychain` parameter boundaries and pre-delegation outcomes.
 #![expect(clippy::unwrap_used)]
 
 use alloc::sync::Arc;

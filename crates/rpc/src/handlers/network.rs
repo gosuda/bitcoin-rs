@@ -46,11 +46,6 @@ fn epoch_seconds(time: SystemTime) -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-/// Resolves the finite expiry requested by `setban`.
-///
-/// SETBAN-EXPIRY-01: zero relative bantime uses `DEFAULT_BAN_TIME_SECS`; absolute
-/// bantime is measured from `UNIX_EPOCH`. An unrepresentable expiry returns
-/// `RpcError::InvalidParameter` (-8) before any ban-list mutation.
 fn ban_until_absolute(now: SystemTime, bantime: u64) -> Result<SystemTime, RpcError> {
     if bantime < epoch_seconds(now) {
         return Err(RpcError::InvalidParameter(
@@ -187,10 +182,8 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     })
 }
 
-/// Samples below which Core does not compute an offset at all.
 const MIN_TIME_OFFSET_SAMPLES: usize = 5;
 
-/// The node's clock offset, as the median of what its outbound peers claim.
 fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
     let mut offsets: Vec<i64> = peers
         .iter()
@@ -204,8 +197,6 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
     offsets.get(offsets.len() / 2).copied().unwrap_or(0)
 }
 
-/// Renders every handshake-complete connection, including anonymous inbound
-/// overlay sessions.
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let sessions = ctx.network.peer_table.sessions();
@@ -230,10 +221,6 @@ struct Bip152Flags {
     bip152_hb_from: bool,
 }
 
-/// One `getpeerinfo` row: `corepc_types::v31::PeerInfo` field for field, with the same
-/// keys, except that `id` is the connection's full `u64` identity rather than a `u32`.
-///
-/// Unset optional fields are dropped by
 #[derive(serde::Serialize)]
 struct PeerInfoWire {
     id: u64,
@@ -538,7 +525,6 @@ fn control_error_to_rpc_error(error: bitcoin_rs_p2p::P2pControlError) -> RpcErro
     }
 }
 
-/// `disconnectnode ( "address" nodeid )`
 pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let bound = super::bind_named_params(params, &["address", "nodeid"])?;
     let array = params_array(&bound)?;
@@ -615,12 +601,6 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     })
 }
 
-/// `getnodeaddresses [count]` — returns known peer addresses.
-///
-/// The address source is the live peer registry plus persisted `addnode add` entries,
-/// deduplicated by socket address.  `count` defaults to 1; `0` returns every known
-/// address.  Each entry follows Core's shape: `{ time, services, address, port, network
-/// }`.
 pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let count = optional_u64(params, 0, 1)?;
 

@@ -1,6 +1,3 @@
-//! RAII harness: a real regtest `NodeState`, the real authenticated
-//! `RpcServer` on loopback, and the replay client that exercises them.
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

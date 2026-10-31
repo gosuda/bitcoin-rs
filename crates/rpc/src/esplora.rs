@@ -1,4 +1,3 @@
-//! Esplora HTTP projections over confirmed indexes and the live mempool.
 #![expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
@@ -26,8 +25,6 @@ pub enum Surface {
     Backend,
 }
 
-/// `path` is the rest after `/api` or `/esplora`. The listener demux owns
-/// prefix matching; this function only dispatches inside a directory.
 #[must_use]
 pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
     let ctx = handler.context();
@@ -55,7 +52,6 @@ fn dispatch_get(
     public::get(ctx, path)
 }
 
-/// `path` is the rest after `/api` or `/esplora`. Unknown paths 404.
 #[must_use]
 pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
     if surface == Surface::Backend {
@@ -72,9 +68,6 @@ pub(crate) fn route_post(handler: &Handler, surface: Surface, path: &str, body: 
     public::post(handler, path, body)
 }
 
-/// `/api/v1` is not an alias: that prefix is Mempool's own API on the
-/// explorer port, so `/api/v1/block-height/{h}` is `/v1/block-height/{h}`
-/// here and 404s.
 #[must_use]
 pub fn namespace(path: &str) -> Option<(Surface, &str)> {
     strip_dir(path, "/api")

@@ -1,12 +1,9 @@
-//! Structural comparator for the Core parity gate.
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use super::fixture::{
     BodyCheck, BodyForm, Checks, Fixture, HeaderCheck, HeaderClass, HttpTuple, Relation,
 };
 
-/// Deserializes any JSON value for a field that sits inside an internally
-/// tagged enum.
 pub(crate) fn json_value<'de, D>(deserializer: D) -> Result<Value, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -201,8 +198,6 @@ impl EnvelopeCheck {
     }
 }
 
-/// Compares one replayed live tuple against its fixture under the fixture's
-/// declared relation.
 pub(crate) fn compare(
     fixture: &Fixture,
     live: &HttpTuple,
@@ -333,9 +328,6 @@ fn value_diff_paths(core: &Value, current: &Value, prefix: &str, paths: &mut Vec
     }
 }
 
-/// A known gap may only diverge from Core at its declared paths and nowhere
-/// else: the complete structural diff must equal the declared set, which
-/// also proves the gap is real rather than vacuous.
 fn assert_divergence_exactly_at(fixture: &Fixture, current: &HttpTuple) -> Result<(), Mismatch> {
     let mut observed = structural_diff_paths(&fixture.core, current);
     observed.sort();

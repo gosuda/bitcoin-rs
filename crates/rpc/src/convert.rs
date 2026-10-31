@@ -1,5 +1,3 @@
-//! Native <-> rust-bitcoin conversions and typed wire serialization.
-
 use alloc::string::{String, ToString};
 
 use bitcoin::Address;
@@ -14,8 +12,6 @@ use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 use crate::error::RpcError;
 use crate::tx_render;
 
-/// Maps a native network onto the rust-bitcoin network for the sanctioned
-/// address seams (`Address` parsing requires it).
 #[must_use]
 pub(crate) const fn bitcoin_network(network: Network) -> bitcoin::Network {
     match network {
@@ -27,7 +23,6 @@ pub(crate) const fn bitcoin_network(network: Network) -> bitcoin::Network {
     }
 }
 
-/// Core RPC chain spelling, distinct from checkpoint and evidence identities.
 #[must_use]
 pub(crate) const fn chain_name(network: Network) -> &'static str {
     match network {
@@ -85,9 +80,6 @@ pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
     bitcoin_rs_primitives::i64_to_f64(clamped) / 100_000_000.0
 }
 
-/// Expands a compact `nBits` into its 64-character lowercase target hex, the
-/// spelling Core uses for `target` fields: the `SetCompact` magnitude rendered
-/// MSB-first by `arith_uint256::GetHex`.
 #[must_use]
 pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
     let bits = bits.to_consensus();
@@ -110,14 +102,11 @@ pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
     target.to_lower_hex_string()
 }
 
-/// Script disassembly (`asm`) via the sanctioned rust-bitcoin seam.
 #[must_use]
 pub(crate) fn script_asm(script: &[u8]) -> String {
     bitcoin::Script::from_bytes(script).to_asm_string()
 }
 
-/// The internal script-shape classification shared by the Core RPC/REST
-/// renderer and the Esplora renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScriptShape {
     Empty,
@@ -167,7 +156,6 @@ pub(crate) fn classify(script: &[u8]) -> ScriptShape {
     ScriptShape::Nonstandard
 }
 
-/// Names one script shape in the Core `scriptPubKey.type` vocabulary.
 #[must_use]
 pub(crate) const fn core_type_name(shape: ScriptShape) -> &'static str {
     match shape {
@@ -185,8 +173,6 @@ pub(crate) const fn core_type_name(shape: ScriptShape) -> &'static str {
     }
 }
 
-/// Renders the Core address string for a script, or `None` when the script
-/// has no standard address form (via the sanctioned rust-bitcoin seam).
 #[must_use]
 pub(crate) fn script_address(script: &[u8], network: Network) -> Option<String> {
     Address::from_script(
@@ -201,7 +187,6 @@ pub(crate) fn typed_to_sonic<T: serde::Serialize>(typed: &T) -> Result<Value, Rp
     sonic_rs::to_value(typed).map_err(RpcError::from)
 }
 
-/// Serializes one typed Core wire value, omitting keys whose value is `null`.
 pub(crate) fn typed_to_sonic_omitting_nulls<T: serde::Serialize>(
     typed: &T,
 ) -> Result<Value, RpcError> {

@@ -1,5 +1,3 @@
-//! Core active-tip waits: parameter projection only, no mining dependency.
-
 use alloc::sync::Arc;
 use std::borrow::Cow;
 use std::time::{Duration, Instant};

@@ -215,9 +215,6 @@ fn the_legacy_allowhighfees_false_keeps_the_default_fee_ceiling()
     Ok(())
 }
 
-/// Omitted, null, numeric and numeric-string ceilings keep Core's `maxfeerate`
-/// meaning, and everything that is neither an amount nor the legacy boolean
-/// is still refused before any admission.
 #[test]
 fn sendrawtransaction_fee_argument_keeps_core_amount_semantics()
 -> Result<(), TestError> {

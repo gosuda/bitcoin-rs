@@ -1,6 +1,3 @@
-//! The default of 24 hours is independently specified by Bitcoin Core v31.1
-//! `src/rpc/net.cpp::setban` and `src/banman.h::DEFAULT_MISBEHAVING_BANTIME`.
-
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

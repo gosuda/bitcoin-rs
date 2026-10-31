@@ -1,6 +1,3 @@
-//! BIP337 compressed-transaction codec (`compressrawtransaction` /
-//! `decompressrawtransaction`).
-
 use bitcoin::hashes::{Hash as _, hash160};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId, Signature};
 use bitcoin::secp256k1::{Message, Secp256k1};
@@ -23,7 +20,6 @@ pub(crate) const MAX_RESOLVER_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_CUMULATIVE_BODY_LOADS: usize = MAX_RETAINED_BODIES * 2;
 pub(crate) const MAX_CUMULATIVE_BODY_BYTES: usize = MAX_RETAINED_BODY_BYTES * 2;
 
-/// Cancellation is polled once per this many codec inputs.
 const CANCELLATION_POLL_INPUTS: usize = 256;
 
 type FlatLookup = Option<Result<Option<u32>, LookupError>>;
@@ -88,11 +84,6 @@ pub(crate) trait PrevoutResolver {
     fn cancelled(&self) -> bool;
 }
 
-/// Codec failure.
-///
-/// Each variant maps to exactly one [`RpcError`]: structural malformation is `-22`,
-/// oversize input or output is `-8`, budget exhaustion and cancellation are retryable
-/// `-1`, a proved-absent prevout during decompress is `-5`.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CodecError {
     #[error("compressed transaction is truncated")]
@@ -597,7 +588,6 @@ struct CompressedSig {
     sig: [u8; 64],
     pubkey_hash: Option<[u8; 20]>,
     hash_type: Option<u8>,
-    /// Standard hash type: `0x01` ECDSA, `0x00` (absent byte) taproot.
     standard: bool,
 }
 
@@ -613,9 +603,6 @@ fn ecdsa_compressed(sig_item: &[u8]) -> Option<CompressedSig> {
     })
 }
 
-/// Extracts the compressed form of `input`'s signature when the prevout
-/// kind is in the closed compressible set and the authorization has the
-/// exact expected shape; `None` selects the uncompressed envelope.
 fn compress_p2tr_signature(input: &TxIn) -> Option<CompressedSig> {
     if !input.script_sig.is_empty() || input.witness.len() != 1 {
         return None;
@@ -800,9 +787,6 @@ struct Plan {
     sequence: u32,
 }
 
-/// Compresses `tx`. Missing contextual facts degrade a single input to
-/// its raw outpoint with one `UTXO(i): <reason>` warning; retained
-/// budget exhaustion and cancellation are errors, never downgrades.
 #[allow(
     clippy::too_many_lines,
     reason = "one sequential encoding pass over the transaction fields"

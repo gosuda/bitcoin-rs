@@ -317,8 +317,6 @@ fn withheld_body_request(
     Ok((response, started.elapsed()))
 }
 
-/// An unauthenticated JSON-RPC request whose 16 MiB body is withheld gets
-/// Core's full 401 tuple within 2 s, and the connection is then closed.
 #[test]
 fn unauthorized_request_is_answered_before_its_body_is_read() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
@@ -341,8 +339,6 @@ fn unauthorized_request_is_answered_before_its_body_is_read() -> TestResult {
     Ok(())
 }
 
-/// A request that fails HTTP framing is a 400 before authentication is
-/// consulted; framing keeps its old precedence.
 #[test]
 fn framing_errors_precede_authentication() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;

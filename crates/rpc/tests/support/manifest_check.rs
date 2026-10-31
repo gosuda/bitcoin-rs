@@ -1,5 +1,3 @@
-//! Authority check against the const `MANIFEST`.
-
 use bitcoin_rs_rpc::manifest::{Entry, SurfaceKind};
 
 use super::fixture::Fixture;

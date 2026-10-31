@@ -1,5 +1,3 @@
-//! Mempool-backend electrs extensions: `/internal/*` and `/block-template`.
-
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 

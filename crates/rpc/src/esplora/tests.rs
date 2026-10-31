@@ -1200,8 +1200,6 @@ impl MempoolObserver for BroadcastObserver {
     }
 }
 
-/// API-10: both directories identify Esplora at the existing publication
-/// boundary; successful retries publish no second acceptance.
 // API-10
 #[test]
 fn broadcast_preserves_esplora_origin_and_idempotence() {
@@ -1231,8 +1229,6 @@ fn broadcast_preserves_esplora_origin_and_idempotence() {
     }
 }
 
-/// The HTTP rejection dialect and lack of publication are observable
-/// contracts, including malformed input and a missing UTXO.
 // API-10
 #[test]
 fn broadcast_rejections_are_400_without_mutation() {
@@ -1271,8 +1267,6 @@ fn broadcast_rejections_are_400_without_mutation() {
     }
 }
 
-/// The broadcast predecode gate refuses oversized hex before any decode,
-/// with no admission side effects (#1741).
 #[test]
 fn broadcast_refuses_hex_beyond_the_standard_size_limit_before_decode() {
     for path in ["/api/tx", "/esplora/tx"] {
@@ -1294,8 +1288,6 @@ fn broadcast_refuses_hex_beyond_the_standard_size_limit_before_decode() {
     }
 }
 
-/// The 0.1 BTC/kvB HTTP cap is fixed. RPC's zero override still opts
-/// out only for that RPC call, and the observer receives its RPC origin.
 #[test]
 fn broadcast_fee_ceiling_is_independent_of_rpc_overrides() {
     use sonic_rs::JsonValueTrait as _;
@@ -1339,8 +1331,6 @@ fn broadcast_fee_ceiling_is_independent_of_rpc_overrides() {
     }
 }
 
-/// Independent rust-bitcoin decoding supplies the wire vsize; this
-/// fixture has no sigops, so that is also its policy vsize.
 #[test]
 fn broadcast_fee_ceiling_accepts_equality_and_refuses_one_sat_above() {
     for above in [0, 1] {

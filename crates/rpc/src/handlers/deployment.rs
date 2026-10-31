@@ -39,8 +39,6 @@ pub(crate) fn getdeploymentinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     at_hash(ctx, hash)
 }
 
-/// One projection shared by RPC and REST; named headers need no block body.
-/// The caller selects its hash from one applied publication or an explicit query.
 pub(crate) fn at_hash(ctx: &Context, hash: Hash256) -> Result<Value, RpcError> {
     let network = ctx.chain.chain_network;
     let tree = ctx.chain.block_tree.read();

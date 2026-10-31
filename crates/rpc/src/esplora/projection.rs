@@ -1,5 +1,3 @@
-//! Consistent chain, transaction, and script-activity projections for Esplora.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
@@ -171,7 +169,6 @@ impl<'a> Projection<'a> {
             .ok_or_else(|| service_unavailable("confirming transaction unavailable"))
     }
 
-    /// Resolves confirmation only against the current applied chain.
     pub(super) fn confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
         if self
             .ctx
@@ -490,11 +487,6 @@ impl<'a> Projection<'a> {
         })
     }
 
-    /// One bounded newest-first confirmed-history page after `cursor`.
-    ///
-    /// Each call reads one index snapshot; anything that moves during the read
-    /// answers `Retry`, so a page never mixes two tips. An unknown, stale or
-    /// reorged cursor restarts at the first page, as API-09 requires.
     pub(super) fn confirmed_history_page(
         &self,
         script_hash: ScriptHash,
@@ -703,7 +695,6 @@ impl<'a> Projection<'a> {
     }
 }
 
-/// Names one script shape in the Esplora `scriptpubkey_type` dialect.
 const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
     match shape {
         convert::ScriptShape::Empty => "empty",

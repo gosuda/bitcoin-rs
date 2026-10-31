@@ -621,7 +621,6 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
     }
 }
 
-/// Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
 // MRPC-01
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() {

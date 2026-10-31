@@ -6,8 +6,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::context::Context;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 
-/// Exercises HTTP demux and framing, including refusal before a declared
-/// oversized body is uploaded. No Content-Length-sized allocation is needed.
 fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut client = TcpStream::connect(listener.local_addr()?)?;
@@ -31,8 +29,6 @@ fn rest_wire_request(request: &[u8], enabled: bool) -> std::io::Result<Vec<u8>> 
     Ok(response)
 }
 
-/// A peer continuously writes a byte before the idle timeout expires.
-/// Request-line, header, and body parsing must still expire promptly.
 fn assert_dripped_request_expires(prefix: &[u8]) -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut client = TcpStream::connect(listener.local_addr()?)?;
@@ -91,8 +87,6 @@ fn slow_drip_request_line_headers_and_body_expire() -> io::Result<()> {
     Ok(())
 }
 
-/// Waiting for the next keep-alive request runs under the idle deadline;
-/// the shorter head budget starts only when the request begins.
 #[test]
 fn keep_alive_wait_is_not_bounded_by_the_head_budget() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -118,8 +112,6 @@ fn keep_alive_wait_is_not_bounded_by_the_head_budget() -> io::Result<()> {
     Ok(())
 }
 
-/// One source filling the blocking quota still has a connection left in
-/// its own share for an ordinary call such as status or abort.
 #[test]
 fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
     for max_connections in [1, 2, 4, 5, 128] {
@@ -136,9 +128,6 @@ fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
     }
 }
 
-/// A materializing inspection decode reserves the blocking budget before
-/// it decodes, so an exhausted budget refuses without allocating the
-/// transaction (#1741).
 #[test]
 fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
     let handler = Handler::new(Arc::new(Context::new()));
@@ -406,8 +395,6 @@ fn wf_02_classify_splits_rest_esplora_and_json_rpc() {
     assert_eq!(classify("GET", "/blocks/tip/height"), HttpRoute::NotFound);
 }
 
-/// WF-02: a body-carrying POST without Content-Length is a framing
-/// error, not an empty JSON-RPC request.
 #[test]
 fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
     let auth = Arc::new(Auth::basic("alice", "secret"));
@@ -449,8 +436,6 @@ fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Runs `read_request` over a loopback socket fed `request` in writes of
-/// at most `chunk` bytes, after which the client closes its write half.
 fn read_fed_request(
     request: Vec<u8>,
     chunk: usize,
@@ -490,8 +475,6 @@ fn body_arriving_across_reads_is_received_whole() -> io::Result<()> {
     Ok(())
 }
 
-/// A body declared at the size cap but cut short is a framing error, as
-/// before.
 #[test]
 fn declared_but_unsent_body_is_a_framing_error() -> io::Result<()> {
     let request = format!(
@@ -507,7 +490,6 @@ fn declared_but_unsent_body_is_a_framing_error() -> io::Result<()> {
     Ok(())
 }
 
-/// The body buffer tracks the bytes that arrived, not the declared length.
 #[test]
 fn declared_but_unsent_body_allocates_only_received_bytes() {
     let mut body = Vec::new();
@@ -528,9 +510,6 @@ fn declared_but_unsent_body_allocates_only_received_bytes() {
     );
 }
 
-/// A body received in full keeps a buffer no larger than its declared
-/// length, including at the size cap and at lengths that are not powers
-/// of two.
 #[test]
 fn full_body_capacity_stays_within_the_declared_length() -> io::Result<()> {
     for content_length in [MAX_BODY_BYTES, 9_000_000] {
@@ -552,8 +531,6 @@ fn full_body_capacity_stays_within_the_declared_length() -> io::Result<()> {
     Ok(())
 }
 
-/// The request-head budget must be enforced while bytes arrive, even if
-/// the peer never sends a newline or closes its write half.
 #[test]
 fn oversized_unterminated_head_is_rejected_before_newline() -> std::io::Result<()> {
     for prefix in [
@@ -1223,8 +1200,6 @@ fn json_rpc_batch_excludes_notifications() {
     assert!(rows[1].get("error").is_some());
 }
 
-/// Reads one request the way `serve_connection` does, minus the
-/// authentication gate between the two phases.
 fn read_whole_request(
     reader: &mut BufReader<RequestDeadlineStream>,
     head_timeout: Duration,
@@ -1236,24 +1211,13 @@ fn read_whole_request(
     }
 }
 
-/// What one loopback client saw while `serve_connection` handled its request.
 struct Exchange {
-    /// Bytes received until the server's FIN or a read failure.
     response: String,
-    /// Whether the server closed its write side. A read timeout means it
-    /// neither answered nor closed.
     eof: bool,
-    /// Time from the first write until the read ended.
     elapsed: Duration,
-    /// The connection handler's own verdict, taken after the client hangs up.
     served: io::Result<()>,
 }
 
-/// Serves one loopback connection with `serve_connection`, writes `request` and nothing
-/// more, and reports what the client saw.
-///
-/// The client keeps its side open until the response ends, as a client still uploading
-/// would.
 fn exchange(request: &[u8]) -> io::Result<Exchange> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut client = TcpStream::connect(listener.local_addr()?)?;
@@ -1295,12 +1259,9 @@ fn exchange(request: &[u8]) -> io::Result<Exchange> {
     })
 }
 
-/// `Authorization` tokens for `alice:secret` and `alice:bad`.
 const GOOD_TOKEN: &str = "YWxpY2U6c2VjcmV0";
 const BAD_TOKEN: &str = "YWxpY2U6YmFk";
 
-/// Core's 401 for JSON-RPC: the challenge, its default error type, an empty
-/// body, a close, and no `Date`.
 const CORE_UNAUTHORIZED: &str = "HTTP/1.1 401 Unauthorized\r\n\
     WWW-Authenticate: Basic realm=\"jsonrpc\"\r\n\
     Content-Type: text/html; charset=ISO-8859-1\r\n\
@@ -1317,10 +1278,6 @@ fn json_rpc_head(token: Option<&str>, content_length: usize) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A JSON-RPC request without valid credentials is answered from its head: the client
-/// withholds all 16 MiB it declared and still gets Core's exact 401 and a FIN.
-///
-/// A wrong password waits out Core's brute-force delay first.
 #[test]
 fn unauthorized_json_rpc_is_answered_from_the_head_with_core_s_tuple() -> io::Result<()> {
     for (token, delayed) in [(None, false), (Some(BAD_TOKEN), true)] {
@@ -1339,8 +1296,6 @@ fn unauthorized_json_rpc_is_answered_from_the_head_with_core_s_tuple() -> io::Re
     Ok(())
 }
 
-/// Bytes pipelined behind an unauthorized request are discarded, never
-/// served: the one response is the 401.
 #[test]
 fn unauthorized_request_never_serves_pipelined_bytes() -> io::Result<()> {
     let mut request = json_rpc_head(None, 2);
@@ -1351,10 +1306,6 @@ fn unauthorized_request_never_serves_pipelined_bytes() -> io::Result<()> {
     Ok(())
 }
 
-/// A 401 witnesses `authenticate_json_rpc_head` on a real loopback pair:
-/// the one declared byte is prebuffered before the call, the client stays
-/// open through the drain, and the call consumes the buffer without the
-/// one-second budget hold before the client sees the 401 and EOF.
 #[test]
 fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -1399,12 +1350,6 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
     Ok(())
 }
 
-/// Runs the unauthorized path on the server side of one loopback pair and returns the
-/// client's view of the response plus the next `take` bytes the server reads once the
-/// handler returns.
-///
-/// The server thread starts first and reads while the client writes, so neither side
-/// waits on a buffer the other has not drained.
 fn serve_unauthorized(request: &[u8], take: usize) -> io::Result<(String, Vec<u8>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -1439,8 +1384,6 @@ fn serve_unauthorized(request: &[u8], take: usize) -> io::Result<(String, Vec<u8
     Ok((response, next))
 }
 
-/// The drain consumes exactly the declared body, even at the cap, so the
-/// bytes pipelined behind it are still on the stream for the next read.
 #[test]
 fn unauthorized_drain_consumes_exactly_the_declared_body() -> io::Result<()> {
     let mut request = json_rpc_head(None, MAX_DRAIN_BYTES);
@@ -1452,9 +1395,6 @@ fn unauthorized_drain_consumes_exactly_the_declared_body() -> io::Result<()> {
     Ok(())
 }
 
-/// A declared body above the cap is drained only up to the cap: the peer
-/// still gets the 401 and a clean close, and the bytes past the cap stay
-/// unread on the stream.
 #[test]
 fn unauthorized_drain_stops_at_the_cap_for_an_oversized_body() -> io::Result<()> {
     const TAIL: usize = 4 * 1_024;
@@ -1467,8 +1407,6 @@ fn unauthorized_drain_stops_at_the_cap_for_an_oversized_body() -> io::Result<()>
     Ok(())
 }
 
-/// A head that fails HTTP framing is a 400 whether or not the client sent
-/// credentials: authentication runs only on a well-framed head.
 #[test]
 fn head_framing_errors_keep_their_400_without_credentials() -> io::Result<()> {
     let oversize = json_rpc_head(None, MAX_BODY_BYTES + 1);
@@ -1498,8 +1436,6 @@ fn head_framing_errors_keep_their_400_without_credentials() -> io::Result<()> {
     Ok(())
 }
 
-/// Valid credentials pass the gate and the body is then read: a body cut
-/// short is the framing error it always was, not a 401 and not a hang.
 #[test]
 fn authorized_request_proceeds_to_body_framing() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -1539,8 +1475,6 @@ fn accept_test_server() -> io::Result<RpcServer> {
     )
 }
 
-/// Arrival phases start after a real `WouldBlock`, so the former 100-ms sleep
-/// cannot hide behind a connection queued before the accept thread started.
 #[test]
 fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
     let server = accept_test_server()?;

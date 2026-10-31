@@ -1,5 +1,3 @@
-//! HTTP response mapping for the Esplora surfaces.
-
 use bitcoin_rs_mempool::SubmitError;
 
 use crate::context::TxQueryError;
@@ -19,8 +17,6 @@ pub(super) fn query_error(e: TxQueryError) -> Response {
     }
 }
 
-/// API-10: transaction refusals are 400; an exhausted stale-state retry
-/// budget remains an unavailable response with the existing body text.
 pub(super) fn admission_error(error: SubmitError) -> Response {
     match error {
         SubmitError::Policy(reason) => {
