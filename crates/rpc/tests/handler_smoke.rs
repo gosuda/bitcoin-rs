@@ -22,10 +22,10 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use crate::mining_fixture;
+use crate::support::TestError;
 
 #[test]
-fn required_handlers_report_the_fixture_chain_mempool_and_network_facts()
--> Result<(), Box<dyn std::error::Error>> {
+fn required_handlers_report_the_fixture_chain_mempool_and_network_facts() -> Result<(), TestError> {
     let fixture = Fixture::new()?;
     let handler = Handler::new(Arc::clone(&fixture.ctx));
 
@@ -47,7 +47,7 @@ fn required_handlers_report_the_fixture_chain_mempool_and_network_facts()
 type Expectation = (&'static str, sonic_rs::Value, sonic_rs::Value);
 
 #[test]
-fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), Box<dyn std::error::Error>> {
+fn compact_filter_rpc_exposes_only_enabled_ready_data() -> Result<(), TestError> {
     use bitcoin_rs_index::{BasicFilter, CompactFilterQuery, DerivedIndexInfo, TxQueryError};
     struct Filters(AtomicBool);
     impl CompactFilterQuery for Filters {
@@ -234,7 +234,7 @@ fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
 
 fn network_and_wallet_expectations(
     fixture: &Fixture,
-) -> Result<Vec<Expectation>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Expectation>, TestError> {
     let psbt = build_valid_base64_psbt(&fixture.tx)?;
 
     Ok(vec![
@@ -307,8 +307,7 @@ fn assert_contains(method: &str, path: &str, actual: &sonic_rs::Value, expected:
 
 #[cfg(feature = "zmq")]
 #[test]
-fn getzmqnotifications_dispatches_compiled_notifications() -> Result<(), Box<dyn std::error::Error>>
-{
+fn getzmqnotifications_dispatches_compiled_notifications() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getzmqnotifications", &json!([]))?;
@@ -330,8 +329,7 @@ fn getzmqnotifications_is_absent_without_zmq() {
     assert_eq!(err.code(), RpcError::METHOD_NOT_FOUND);
 }
 #[test]
-fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context()
--> Result<(), Box<dyn std::error::Error>> {
+fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let response = handler.dispatch("getblockhash", &json!([0]))?;
@@ -344,8 +342,7 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context()
 }
 
 #[test]
-fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), Box<dyn std::error::Error>>
-{
+fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let open = handler.dispatch("getblockchaininfo", &json!([]))?;
@@ -481,7 +478,7 @@ fn verifychain_maps_control_interruptions_to_core_errors() {
 }
 
 #[test]
-fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let tip = TipSnapshot {
         tip_id: NodeId::new(0),
@@ -506,7 +503,7 @@ fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
@@ -537,7 +534,7 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("gettxoutsetinfo", &json!(["muhash"]))?;
@@ -553,8 +550,7 @@ fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dyn std::error::Error>>
-{
+fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("gettxoutsetinfo", &json!(["muhash", null, false]))?;
@@ -570,7 +566,7 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dy
 }
 
 #[test]
-fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     for hash_type in ["muhash", "none", "hash_serialized_3"] {
@@ -587,7 +583,7 @@ fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn getindexinfo_returns_available_indexes() -> Result<(), Box<dyn std::error::Error>> {
+fn getindexinfo_returns_available_indexes() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("getindexinfo", &json!([]))?;
@@ -596,8 +592,7 @@ fn getindexinfo_returns_available_indexes() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dyn std::error::Error>>
-{
+fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), TestError> {
     let mut ctx = Context::new();
     ctx.indexes.derived_index = Some(Arc::new(FakeTxIndex {
         transactions: HashMap::new(),
@@ -624,7 +619,7 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dy
 }
 
 #[test]
-fn getindexinfo_named_request_returns_only_that_index() -> Result<(), Box<dyn std::error::Error>> {
+fn getindexinfo_named_request_returns_only_that_index() -> Result<(), TestError> {
     struct UnavailableFilters;
     impl bitcoin_rs_index::CompactFilterQuery for UnavailableFilters {
         fn block_filter(
@@ -691,7 +686,7 @@ fn getblockstats_errors_without_indexer() {
 }
 
 #[test]
-fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), TestError> {
     let mut values = HashMap::new();
     values.insert(outpoint(21), 10_000);
     values.insert(outpoint(22), 20_000);
@@ -739,7 +734,7 @@ fn getblockstats_errors_when_any_prevout_missing() {
 }
 
 #[test]
-fn empty_context_is_in_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
+fn empty_context_is_in_initial_block_download() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("getblockchaininfo", &json!([]))?;
@@ -753,8 +748,7 @@ fn empty_context_is_in_initial_block_download() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn std::error::Error>>
-{
+fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let headers_tip = TipSnapshot {
         tip_id: NodeId::new(0),
@@ -786,7 +780,7 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 }
 
 #[test]
-fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
+fn network_peer_methods_read_shared_peer_table() -> Result<(), TestError> {
     let peer_table = Arc::new(PeerTable::new());
     let info = PeerInfo {
         wtxid_relay: false,
@@ -1022,7 +1016,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self, TestError> {
         let mut ctx = Context::new().with_mining_control(FakeMiningControl::with_template(
             mining_fixture::canned_template(Vec::new(), Vec::new()),
             mining_fixture::canned_info(),
@@ -1110,7 +1104,7 @@ fn outpoint(label: u8) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
 }
 
-fn build_valid_base64_psbt(tx: &Tx) -> Result<String, Box<dyn std::error::Error>> {
+fn build_valid_base64_psbt(tx: &Tx) -> Result<String, TestError> {
     let bytes = consensus_bytes(tx);
     let btc_tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&bytes)?;
     let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(btc_tx)?;

@@ -103,7 +103,7 @@ fn applied_view_uses_one_publication() {
 }
 
 #[test]
-fn applied_view_does_not_wait_for_transition() -> Result<(), Box<dyn std::error::Error>> {
+fn applied_view_does_not_wait_for_transition() -> Result<(), crate::test_error::TestError> {
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -620,8 +620,7 @@ fn height_for_hash_returns_none_when_tree_empty() {
     assert!(ctx.chain.height_for_hash(unknown).is_none());
 }
 #[test]
-fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dyn std::error::Error>>
-{
+fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -650,7 +649,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
         let child_hash = tree.node(child_id)?.hash;
         let applied_tip = tree
             .tip()
-            .ok_or_else(|| std::io::Error::other("missing child tip"))?;
+            .ok_or("missing child tip")?;
         ctx.chain
             .applied_tip
             .store(Some(Arc::new((*applied_tip).clone())));
@@ -664,7 +663,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
     let found = ctx
         .chain
         .block_by_height(1)
-        .ok_or_else(|| std::io::Error::other("tree child missing at height 1"))?;
+        .ok_or("tree child missing at height 1")?;
     assert_eq!(
         found.hash,
         BlockHash::from(child_hash),
@@ -675,8 +674,7 @@ fn block_by_height_prefers_tree_identity_over_stale_cache() -> Result<(), Box<dy
 }
 
 #[test]
-fn height_lookups_follow_applied_tip_when_header_fork_leads()
--> Result<(), Box<dyn std::error::Error>> {
+fn height_lookups_follow_applied_tip_when_header_fork_leads() -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Header;
 
@@ -703,7 +701,7 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads()
         let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
         let applied_tip = tree
             .tip()
-            .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+            .ok_or("missing applied tip")?;
         assert_eq!(applied_tip.tip_id, applied_id);
 
         let fork = Header {

@@ -16,6 +16,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use super::projection::Projection;
+use crate::test_error::TestError;
 use super::public::{
     CHAIN_PAGE, address_transaction_summary, block_txs, fee_rate_sat_per_vbyte, history, outspend,
     summary,
@@ -421,7 +422,7 @@ impl crate::context::ScriptIndexQuery for MonitoredScriptIndex {
     }
 }
 
-fn contract_fixture() -> Result<(Handler, Tx, Block, String), Box<dyn std::error::Error>> {
+fn contract_fixture() -> Result<(Handler, Tx, Block, String), TestError> {
     let target = {
         let mut script = Vec::with_capacity(22);
         script.push(0x00);
@@ -517,8 +518,7 @@ fn fee_estimate_conversion_preserves_the_exact_relay_floor() {
 
 #[test]
 #[expect(clippy::too_many_lines)]
-fn bitcoin_esplora_surface_matches_documented_routes_and_content_types()
--> Result<(), Box<dyn std::error::Error>> {
+fn bitcoin_esplora_surface_matches_documented_routes_and_content_types() -> Result<(), TestError> {
     let (handler, transaction, block, address) = contract_fixture()?;
     let txid = transaction.txid().to_string();
     let block_hash = block.block_hash().to_string();
@@ -645,8 +645,7 @@ fn bitcoin_esplora_surface_matches_documented_routes_and_content_types()
 
 #[test]
 #[expect(clippy::too_many_lines)]
-fn bitcoin_esplora_representations_match_the_documented_schemas()
--> Result<(), Box<dyn std::error::Error>> {
+fn bitcoin_esplora_representations_match_the_documented_schemas() -> Result<(), TestError> {
     fn keys(value: &Value) -> std::collections::BTreeSet<&str> {
         value
             .as_object()
@@ -810,7 +809,7 @@ fn bitcoin_esplora_errors_distinguish_bad_missing_and_unavailable() {
 }
 
 #[test]
-fn esplora_lives_only_under_the_api_prefix() -> Result<(), Box<dyn std::error::Error>> {
+fn esplora_lives_only_under_the_api_prefix() -> Result<(), TestError> {
     let (handler, _, _, _) = contract_fixture()?;
     let genesis = route(&handler, "/block-height/0", "");
     assert_eq!(genesis.status, 200);
@@ -849,7 +848,7 @@ fn esplora_lives_only_under_the_api_prefix() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn api_is_the_public_electrs_directory() -> Result<(), Box<dyn std::error::Error>> {
+fn api_is_the_public_electrs_directory() -> Result<(), TestError> {
     let (handler, _, _, _) = contract_fixture()?;
     assert_eq!(
         route(&handler, "/internal/mempool/txs", "").status,
@@ -883,7 +882,7 @@ fn api_is_the_public_electrs_directory() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn esplora_is_the_mempool_backend_superset() -> Result<(), Box<dyn std::error::Error>> {
+fn esplora_is_the_mempool_backend_superset() -> Result<(), TestError> {
     let (handler, _, _, _) = contract_fixture()?;
     assert_eq!(
         backend_route(&handler, "/internal/mempool/txs", "").status,
@@ -950,8 +949,7 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
 
 #[test]
 #[expect(clippy::too_many_lines)]
-fn block_status_and_block_list_never_straddle_two_applied_branches()
--> Result<(), Box<dyn std::error::Error>> {
+fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(), TestError> {
     use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::Header;
 
@@ -1159,8 +1157,7 @@ fn internal_mempool_routes_return_live_transactions() {
 }
 
 #[test]
-fn mempool_backend_extension_surface_uses_the_same_projections()
--> Result<(), Box<dyn std::error::Error>> {
+fn mempool_backend_extension_surface_uses_the_same_projections() -> Result<(), TestError> {
     let (handler, transaction, block, address) = contract_fixture()?;
     let txid = transaction.txid().to_string();
     let ids = sonic_rs::to_vec(&vec![txid.clone()])?;
@@ -1384,8 +1381,7 @@ fn broadcast_transaction_is_immediately_visible_as_unconfirmed() {
 }
 
 #[test]
-fn history_cursors_follow_api_09_on_both_esplora_surfaces() -> Result<(), Box<dyn std::error::Error>>
-{
+fn history_cursors_follow_api_09_on_both_esplora_surfaces() -> Result<(), TestError> {
     let (handler, transaction, _, address) = contract_fixture()?;
     let txid = transaction.txid().to_string();
     let script_hash = ScriptHash::new(&transaction.outputs[0].script_pubkey)
@@ -2838,8 +2834,7 @@ fn parent_query_errors_and_republication_never_yield_a_cached_success() {
 }
 
 #[test]
-fn stale_block_transactions_do_not_inherit_active_chain_status()
--> Result<(), Box<dyn std::error::Error>> {
+fn stale_block_transactions_do_not_inherit_active_chain_status() -> Result<(), TestError> {
     let transaction = transaction(
         Some(OutPoint::null()),
         TxOut {
@@ -3180,8 +3175,7 @@ fn descending_recent(seeds: &[Seed]) -> Vec<usize> {
 }
 
 #[test]
-fn esplora_mempool_summary_recent_and_txids_match_the_seeded_pool()
--> Result<(), Box<dyn std::error::Error>> {
+fn esplora_mempool_summary_recent_and_txids_match_the_seeded_pool() -> Result<(), TestError> {
     let fixture = parity_fixture();
     let mut bins = std::collections::BTreeMap::new();
     for seed in &fixture.seeds {
@@ -3241,8 +3235,7 @@ fn esplora_mempool_summary_recent_and_txids_match_the_seeded_pool()
 }
 
 #[test]
-fn esplora_script_overlay_and_activity_match_the_seeded_pool()
--> Result<(), Box<dyn std::error::Error>> {
+fn esplora_script_overlay_and_activity_match_the_seeded_pool() -> Result<(), TestError> {
     let fixture = parity_fixture();
     let unconfirmed = json!({ "confirmed": false });
     let utxos: Value = sonic_rs::from_slice(&routed_bytes(

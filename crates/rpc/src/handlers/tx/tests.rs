@@ -51,7 +51,7 @@ fn fixture_genesis() -> Block {
 
 #[test]
 fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
     let coinbase = genesis
@@ -86,7 +86,7 @@ fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
 
 #[test]
 fn getrawtransaction_checks_mempool_before_failing_txindex()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     struct FailingQuery;
 
     impl DerivedIndexQuery for FailingQuery {
@@ -697,8 +697,9 @@ fn gettxoutproof_without_blockhash_refuses_before_reading_any_block_body() {
     let txid = coinbase.txid();
     let mut ctx = Context::new();
     let source = Arc::new(CountingBodySource::default());
-    ctx.chain.block_body_source =
-        Some(Arc::clone(&source) as Arc<dyn bitcoin_rs_chain::BlockBodySource>);
+    let body_source: Arc<dyn bitcoin_rs_chain::BlockBodySource> =
+        Arc::<CountingBodySource>::clone(&source);
+    ctx.chain.block_body_source = Some(body_source);
     ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
     ctx.chain.add_block(BlockRecord::from_block(1, &genesis));
     let ctx = Arc::new(ctx);

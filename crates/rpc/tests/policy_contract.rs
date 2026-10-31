@@ -36,7 +36,6 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 use bitcoin::hex::DisplayHex;
-use std::error::Error;
 
 fn p2wpkh_script() -> Vec<u8> {
     [vec![0x00, 0x14], vec![0x11; 20]].concat()
@@ -121,7 +120,7 @@ fn reject_message(error: &RpcError) -> String {
 
 #[test]
 fn sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let prevout = fund_utxo(&ctx, 0x50, 10_000);
     let tx = tx(prevout, 9_999, 0xffff_ffff);
@@ -181,7 +180,7 @@ fn set_relay_floor(ctx: &Context, sat_per_kvb: u64) {
 
 #[test]
 fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let plain = Arc::new(Context::new());
     let ordinary = funded_fee_tx(&plain, 0x80, 1_230);
     let handler = Handler::new(Arc::clone(&plain));
@@ -282,7 +281,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
 }
 
 #[test]
-fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
+fn rpc_outlets_enforce_the_configured_floor() -> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     ctx.mempool
         .gateway
@@ -362,7 +361,7 @@ fn staged_outpoint(label: u8) -> OutPoint {
 
 /// `(mempoolminfee, minrelaytxfee)` as `getmempoolinfo` quotes them, in
 /// BTC/kvB.
-fn quoted_floors(handler: &Handler) -> Result<(f64, f64), Box<dyn Error>> {
+fn quoted_floors(handler: &Handler) -> Result<(f64, f64), crate::support::TestError> {
     let info = handler.dispatch("getmempoolinfo", &json!([]))?;
     let floor = info
         .get("mempoolminfee")
@@ -385,7 +384,7 @@ fn quotes_sat_per_kvb(quoted: f64, sat_per_kvb: u32) -> bool {
 fn preview_verdict(
     handler: &Handler,
     transaction: &Tx,
-) -> Result<(bool, Option<String>), Box<dyn Error>> {
+) -> Result<(bool, Option<String>), crate::support::TestError> {
     let result = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(transaction)]]))?;
     let rows = result.as_array().ok_or("expected an array of results")?;
     let row = rows.first().ok_or("expected one row")?;
@@ -401,7 +400,8 @@ fn preview_verdict(
 }
 
 #[test]
-fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(), Box<dyn Error>> {
+fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let unit =
         bitcoin_rs_mempool::entry_memory_usage(&tx(staged_outpoint(0x86), 1_000, 0xffff_ffff));
@@ -487,7 +487,7 @@ fn rpc_outlets_enforce_the_floor_a_capacity_eviction_left_behind() -> Result<(),
 
 #[test]
 fn package_preview_leaves_other_rows_unfinished_after_a_precheck_failure()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let good = tx(fund_utxo(&ctx, 0x51, 10_000), 9_000, 0xffff_ffff);
     let below_min = tx(fund_utxo(&ctx, 0x52, 10_000), 9_999, 0xffff_ffff);
@@ -517,7 +517,8 @@ fn package_preview_leaves_other_rows_unfinished_after_a_precheck_failure()
 }
 
 #[test]
-fn sendrawtransaction_rejects_oversized_and_nonstandard_txs() -> Result<(), Box<dyn Error>> {
+fn sendrawtransaction_rejects_oversized_and_nonstandard_txs()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
 
@@ -562,7 +563,7 @@ fn insert_original(
     sequence: u32,
     vsize: u32,
     fee: u64,
-) -> Result<Tx, Box<dyn Error>> {
+) -> Result<Tx, crate::support::TestError> {
     let original = tx(fund_utxo(ctx, label, 100_000), 92_000, sequence);
     ctx.mempool
         .gateway
@@ -574,7 +575,7 @@ fn insert_original(
 
 #[test]
 fn sendrawtransaction_applies_an_rbf_replacement_and_sweeps_the_conflicts()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x60, 0xffff_fffd, 4_000, 8_000)?;
     let replacement = tx(confirmed_outpoint(0x60), 90_000, 0xffff_ffff);
@@ -625,7 +626,8 @@ impl MempoolObserver for RecordingGatewayObserver {
 }
 
 #[test]
-fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dyn Error>> {
+fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), crate::support::TestError>
+{
     let observer = Arc::new(RecordingGatewayObserver::default());
     let ctx = Arc::new(Context::new_with_mempool_observer(observer.clone()));
     let plain = tx(fund_utxo(&ctx, 0x51, 100_000), 90_000, 0xffff_ffff);
@@ -686,7 +688,7 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
 }
 
 #[test]
-fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error>> {
+fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x98, 0xffff_fffd, 4_000, 8_000)?;
     let mut unrelated = tx(fund_utxo(&ctx, 0x99, 10_000), 9_000, 0xffff_ffff);
@@ -725,7 +727,7 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
 
 #[test]
 fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x9a, 0xffff_fffd, 4_000, 8_000)?;
     let replacement = tx(confirmed_outpoint(0x9a), 96_000, 0xffff_ffff);
@@ -769,7 +771,8 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
 }
 
 #[test]
-fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box<dyn Error>> {
+fn sendrawtransaction_rejects_a_crossing_replacement_diagram()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let original = tx(fund_utxo(&ctx, 0x9b, 200_000), 192_000, 0xffff_fffd);
     ctx.mempool
@@ -839,7 +842,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
     expected_reason_fragment: &str,
     expected_rbf_error: RbfError,
     mempool: &Arc<MempoolGateway>,
-) -> Result<sonic_rs::Value, Box<dyn Error>> {
+) -> Result<sonic_rs::Value, crate::support::TestError> {
     let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([tx_hex]))
@@ -891,7 +894,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
 }
 
 #[test]
-fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), Box<dyn Error>> {
+fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0xa1, 0xffff_ffff, 4_000, 8_000)?;
     let replacement = tx(confirmed_outpoint(0xa1), 90_000, 0xffff_ffff);
@@ -926,7 +929,7 @@ fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let _original = insert_original(&ctx, 0xa4, 0xffff_fffd, 4_000, 8_000)?;
     let replacement = tx(confirmed_outpoint(0xa4), 92_000, 0xffff_ffff);
@@ -944,7 +947,8 @@ fn bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs()
 }
 
 #[test]
-fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<(), Box<dyn Error>> {
+fn replacement_counts_conflicting_clusters_instead_of_descendants()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     {
         let mut pool = ctx.mempool.gateway.pool().write();
@@ -979,7 +983,7 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
     Ok(())
 }
 
-fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
+fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, crate::support::TestError> {
     let mut pool = ctx.mempool.gateway.pool().write();
     let mut txs = Vec::new();
     let mut previous = OutPoint {
@@ -1022,7 +1026,8 @@ fn tx_multi_child(funded: &OutPoint, tip: &Tx) -> Tx {
 }
 
 #[test]
-fn both_rpcs_allow_more_than_25_ancestors_within_cluster_limits() -> Result<(), Box<dyn Error>> {
+fn both_rpcs_allow_more_than_25_ancestors_within_cluster_limits()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let chain = chain_pool(&ctx)?;
     let tip = chain.last().ok_or("empty chain")?;
@@ -1037,7 +1042,7 @@ fn both_rpcs_allow_more_than_25_ancestors_within_cluster_limits() -> Result<(), 
 
 #[test]
 fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let root = {
         let mut pool = ctx.mempool.gateway.pool().write();
@@ -1105,7 +1110,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
 
 #[test]
 fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let root = {
         let mut pool = ctx.mempool.gateway.pool().write();
@@ -1160,7 +1165,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
 
 #[test]
 fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_cluster()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let (root, original) = {
         let mut pool = ctx.mempool.gateway.pool().write();
@@ -1264,7 +1269,7 @@ fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
 
 #[test]
 fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressure()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let root = |label: u8| OutPoint {
         txid: Txid(Hash256::from_le_bytes(&[label; 32])),
@@ -1349,7 +1354,8 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
 }
 
 #[test]
-fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), Box<dyn Error>> {
+fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let good = tx(fund_utxo(&ctx, 0x70, 10_000), 9_000, 0xffff_ffff);
     let below_min = tx(fund_utxo(&ctx, 0x71, 10_000), 9_999, 0xffff_ffff);
@@ -1380,7 +1386,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), 
 }
 
 #[test]
-fn decode_failures_reject_with_deserialization_error() -> Result<(), Box<dyn Error>> {
+fn decode_failures_reject_with_deserialization_error() -> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let error = handler
@@ -1436,7 +1442,7 @@ impl ChainControl for NodeInvalidator {
     }
 }
 
-fn open_regtest_state() -> Result<(NodeState, tempfile::TempDir), Box<dyn Error>> {
+fn open_regtest_state() -> Result<(NodeState, tempfile::TempDir), crate::support::TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -1486,7 +1492,7 @@ fn reorg_mine_and_apply(
     prev: Hash256,
     height: u32,
     txs: Vec<Tx>,
-) -> Result<Block, Box<dyn Error>> {
+) -> Result<Block, crate::support::TestError> {
     let mut block = Block {
         header: bitcoin_rs_primitives::Header {
             version: 0x2000_0000,
@@ -1510,10 +1516,10 @@ fn reorg_mine_and_apply(
     Ok(block)
 }
 
-fn applied_tip_pair(state: &NodeState) -> Result<(Hash256, u32), Box<dyn Error>> {
+fn applied_tip_pair(state: &NodeState) -> Result<(Hash256, u32), crate::support::TestError> {
     let applied = state.chainstate().applied_tip_reader();
     let Some(tip) = applied.load_full() else {
-        return Err("applied tip must exist".into());
+        return Err(crate::support::TestError::Missing("applied tip must exist"));
     };
     Ok((tip.hash, tip.height))
 }
@@ -1564,7 +1570,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
 
 #[test]
 fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_the_coinbase()
--> Result<(), Box<dyn Error>> {
+-> Result<(), crate::support::TestError> {
     let (state, _dir) = open_regtest_state()?;
     let genesis = Network::Regtest.genesis_block();
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))?;
@@ -1672,8 +1678,8 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
 }
 
 #[test]
-fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity() -> Result<(), Box<dyn Error>>
-{
+fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let coinbase = fund_coinbase_utxo(&ctx, 0x70, 10_000, 20);
     let spend = tx(coinbase, 9_000, 0xffff_ffff);
@@ -1727,7 +1733,8 @@ fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity() -> Resul
 }
 
 #[test]
-fn bip68_locked_tx_admits_while_csv_is_inactive_on_the_rpc_surface() -> Result<(), Box<dyn Error>> {
+fn bip68_locked_tx_admits_while_csv_is_inactive_on_the_rpc_surface()
+-> Result<(), crate::support::TestError> {
     let ctx = Arc::new(Context::new());
     let prevout = fund_utxo(&ctx, 0x72, 10_000);
     let locked = tx(prevout, 9_000, 5);

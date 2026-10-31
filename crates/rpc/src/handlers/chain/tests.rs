@@ -234,7 +234,7 @@ fn unknown_hashes_are_not_found_on_every_block_response_form() {
 
 #[test]
 fn getblock_populates_real_header_fields_from_stored_record()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let genesis = fixture_genesis();
     let record = BlockRecord::from_block(0, &genesis);
     let mut ctx = Context::new();
@@ -302,7 +302,7 @@ fn getblock_populates_real_header_fields_from_stored_record()
 }
 
 #[test]
-fn getblock_reads_metadata_only_record_from_body_source() -> Result<(), Box<dyn std::error::Error>>
+fn getblock_reads_metadata_only_record_from_body_source() -> Result<(), crate::test_error::TestError>
 {
     struct SingleBlockSource {
         height: u32,
@@ -721,7 +721,7 @@ struct Fork {
     fork_header: Header,
 }
 
-fn forked_ctx() -> Result<Fork, Box<dyn std::error::Error>> {
+fn forked_ctx() -> Result<Fork, crate::test_error::TestError> {
     use bitcoin_rs_chain::NodeStatus;
 
     let ctx = Context::new();
@@ -775,7 +775,7 @@ fn forked_ctx() -> Result<Fork, Box<dyn std::error::Error>> {
 
 #[test]
 fn confirmations_count_applied_depth_and_answer_minus_one_off_the_chain()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         applied: applied_hash,
@@ -805,7 +805,7 @@ fn confirmations_count_applied_depth_and_answer_minus_one_off_the_chain()
 
 #[test]
 fn verbose_block_facts_never_straddle_two_applied_publications()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use bitcoin_rs_chain::NodeStatus;
@@ -911,7 +911,7 @@ fn verbose_block_facts_never_straddle_two_applied_publications()
 }
 
 #[test]
-fn getblockheader_answers_a_header_only_tree_node() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockheader_answers_a_header_only_tree_node() -> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         fork,
@@ -953,7 +953,7 @@ fn getblockheader_answers_a_header_only_tree_node() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn getblockstats_rejects_a_stale_block_hash() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockstats_rejects_a_stale_block_hash() -> Result<(), crate::test_error::TestError> {
     let Fork {
         ctx,
         fork: fork_hash,
@@ -1004,7 +1004,7 @@ fn record_for(header: Header, with_body: bool) -> BlockRecord {
 
 fn assert_reorged_block_reports_negative_confirmations(
     with_body: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::test_error::TestError> {
     let Fork {
         mut ctx,
         applied: applied_hash,
@@ -1041,13 +1041,13 @@ fn assert_reorged_block_reports_negative_confirmations(
 
     let handler = crate::Handler::new(Arc::clone(&ctx));
     let confirmations_of =
-        |method: &str, hash: Hash256| -> Result<i64, Box<dyn std::error::Error>> {
+        |method: &str, hash: Hash256| -> Result<i64, crate::test_error::TestError> {
             let value = handler.dispatch(method, &json!([hash.to_string_be(), true]))?;
             value
                 .get("confirmations")
                 .and_then(JsonValueTrait::as_i64)
                 .ok_or_else(|| {
-                    Box::<dyn std::error::Error>::from(format!(
+                    crate::test_error::TestError::from(format!(
                         "confirmations missing or not an integer: {value:?}"
                     ))
                 })
@@ -1079,7 +1079,7 @@ fn assert_reorged_block_reports_negative_confirmations(
 
 #[test]
 fn reorged_block_reports_negative_confirmations_stored_or_pruned()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     for with_body in [true, false] {
         assert_reorged_block_reports_negative_confirmations(with_body)?;
     }
@@ -1479,7 +1479,7 @@ fn block_log_running_sums_saturate_instead_of_wrapping() {
 
 #[test]
 fn getchaintxstats_two_block_window_uses_one_folded_window()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let tip = {
         let mut tree = ctx.chain.block_tree.write();
@@ -1551,7 +1551,7 @@ fn getchaintxstats_two_block_window_uses_one_folded_window()
 
 #[test]
 fn getchaintxstats_rejects_nblocks_equal_to_selected_height()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let tip = {
         let mut tree = ctx.chain.block_tree.write();

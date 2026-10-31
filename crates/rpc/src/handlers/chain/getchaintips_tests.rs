@@ -28,7 +28,7 @@ fn getchaintips_returns_empty_on_fresh_context() {
 }
 
 #[test]
-fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), Box<dyn std::error::Error>> {
+fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let genesis = synthetic_header(BlockHash::default(), 1_000_000);
     let hash = genesis.compute_hash().0;
@@ -102,7 +102,7 @@ fn getchaintips_serves_snapshot_tip_without_a_tree_row() {
 }
 
 #[test]
-fn getchaintips_emits_two_tips_when_chain_is_forked() -> Result<(), Box<dyn std::error::Error>> {
+fn getchaintips_emits_two_tips_when_chain_is_forked() -> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let (active_tip_id, active_chainwork, active_hash) = {
         let mut tree = ctx.chain.block_tree.write();
@@ -150,7 +150,7 @@ fn getchaintips_emits_two_tips_when_chain_is_forked() -> Result<(), Box<dyn std:
 }
 #[test]
 fn getchaintips_emits_branchlen_one_for_non_active_sibling_of_active_tip()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
 
     let sibling_height = {
@@ -206,7 +206,7 @@ fn ctx_with_headers_ahead(
         bitcoin_rs_chain::NodeId,
         bitcoin_rs_chain::NodeId,
     ),
-    Box<dyn std::error::Error>,
+    crate::test_error::TestError,
 > {
     let ctx = Arc::new(Context::new());
     let mut previous = BlockHash::default();
@@ -262,7 +262,7 @@ fn field<'a>(tip: &'a sonic_rs::Value, key: &str) -> &'a str {
 
 #[test]
 fn the_applied_tip_is_reported_even_when_headers_run_ahead()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
 
     let tips = tips_of(&ctx);
@@ -289,8 +289,8 @@ fn the_applied_tip_is_reported_even_when_headers_run_ahead()
 }
 
 #[test]
-fn a_header_tip_ahead_of_the_applied_tip_is_headers_only() -> Result<(), Box<dyn std::error::Error>>
-{
+fn a_header_tip_ahead_of_the_applied_tip_is_headers_only()
+-> Result<(), crate::test_error::TestError> {
     let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
 
     let tips = tips_of(&ctx);
@@ -311,7 +311,7 @@ fn a_header_tip_ahead_of_the_applied_tip_is_headers_only() -> Result<(), Box<dyn
 }
 
 #[test]
-fn the_active_tip_has_no_branch_length() -> Result<(), Box<dyn std::error::Error>> {
+fn the_active_tip_has_no_branch_length() -> Result<(), crate::test_error::TestError> {
     let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
     let tips = tips_of(&ctx);
     let Some(active) = tips.iter().find(|tip| field(tip, "status") == "active") else {
@@ -326,7 +326,7 @@ fn the_active_tip_has_no_branch_length() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn a_branch_left_behind_by_a_reorg_is_reported_as_headers_only()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let (abandoned_height, new_tip) = {
         let mut tree = ctx.chain.block_tree.write();
@@ -384,7 +384,7 @@ fn a_branch_left_behind_by_a_reorg_is_reported_as_headers_only()
 }
 
 #[test]
-fn an_invalidated_applied_tip_is_not_reported_as_active() -> Result<(), Box<dyn std::error::Error>>
+fn an_invalidated_applied_tip_is_not_reported_as_active() -> Result<(), crate::test_error::TestError>
 {
     let ctx = Arc::new(Context::new());
     let tip = {
@@ -448,7 +448,7 @@ fn an_invalidated_applied_tip_is_not_reported_as_active() -> Result<(), Box<dyn 
 /// Core orders by height descending. A fork longer than the active chain is what an
 /// operator is looking for, and sorting the active tip to the front would bury it.
 #[test]
-fn tips_are_ordered_by_height_descending() -> Result<(), Box<dyn std::error::Error>> {
+fn tips_are_ordered_by_height_descending() -> Result<(), crate::test_error::TestError> {
     let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
 
     let heights: Vec<u64> = tips_of(&ctx)
@@ -466,7 +466,7 @@ fn tips_are_ordered_by_height_descending() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn getchaintips_marks_unapplied_best_header_as_headers_only()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let (genesis_id, genesis_chainwork, genesis_hash) = {
         let mut tree = ctx.chain.block_tree.write();

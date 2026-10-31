@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(feature = "zmq")]
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 #[test]
 fn zmq_topic_names_match_the_compatibility_manifest() {

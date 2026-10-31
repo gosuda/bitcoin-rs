@@ -4,7 +4,7 @@ use std::thread;
 #[cfg(feature = "zmq")]
 use std::time::{Duration, Instant};
 #[cfg(feature = "zmq")]
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 #[cfg(feature = "zmq")]
 fn endpoint(endpoint: impl Into<String>, topics: Vec<ZmqTopic>, hwm: u32) -> ZmqEndpointConfig {

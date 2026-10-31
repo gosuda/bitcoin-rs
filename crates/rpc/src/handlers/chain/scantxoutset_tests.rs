@@ -10,7 +10,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
 use super::*;
 
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 fn test_txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];

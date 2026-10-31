@@ -222,7 +222,7 @@ fn register_peer(ctx: &Context, addr: SocketAddr) -> bitcoin_rs_p2p::PeerLease {
 }
 
 #[test]
-fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), Box<dyn std::error::Error>> {
+fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), crate::test_error::TestError> {
     use std::collections::BTreeSet;
 
     let ctx = Context::new();
@@ -265,13 +265,13 @@ fn getpeerinfo_rows_match_the_pinned_v31_row() -> Result<(), Box<dyn std::error:
 
 fn fields_but_id(
     row: &Value,
-) -> Result<std::collections::BTreeMap<&str, &Value>, Box<dyn std::error::Error>> {
+) -> Result<std::collections::BTreeMap<&str, &Value>, crate::test_error::TestError> {
     let object = row.as_object().ok_or("rows are objects")?;
     Ok(object.iter().filter(|(key, _)| *key != "id").collect())
 }
 
 #[test]
-fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), Box<dyn std::error::Error>> {
+fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let _lease = register_peer(&ctx, "127.0.0.1:9102".parse()?);
     let sessions = ctx.network.peer_table.sessions();
@@ -321,8 +321,7 @@ fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let lease = register_peer(&ctx, "127.0.0.1:9103".parse()?);
     let ctx = Arc::new(ctx);
@@ -338,8 +337,7 @@ fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
 }
 
 #[test]
-fn getpeerinfo_ids_are_connection_identities_not_positions()
--> Result<(), Box<dyn std::error::Error>> {
+fn getpeerinfo_ids_are_connection_identities_not_positions() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr_a: SocketAddr = "127.0.0.1:9001".parse()?;
     let addr_b: SocketAddr = "127.0.0.1:9002".parse()?;
@@ -387,8 +385,7 @@ fn getpeerinfo_ids_are_connection_identities_not_positions()
 }
 
 #[test]
-fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8333".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -420,8 +417,7 @@ fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
 }
 
 #[test]
-fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session() -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_p2p::{PeerInfo, PeerLease};
     use crossbeam_channel::unbounded;
 
@@ -481,8 +477,7 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
 }
 
 #[test]
-fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8350".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -518,8 +513,7 @@ fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement()
 }
 
 #[test]
-fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8360".parse()?;
     let lease = register_peer(&ctx, addr);
@@ -541,7 +535,7 @@ fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
 }
 
 #[test]
-fn disconnectnode_address_only_still_selects_by_address() -> Result<(), Box<dyn std::error::Error>>
+fn disconnectnode_address_only_still_selects_by_address() -> Result<(), crate::test_error::TestError>
 {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8340".parse()?;
@@ -561,8 +555,7 @@ fn disconnectnode_address_only_still_selects_by_address() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn disconnectnode_address_only_ignores_a_session_still_handshaking()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_address_only_ignores_a_session_still_handshaking() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8370".parse()?;
     let pending = register_pending_peer(&ctx, addr);
@@ -591,8 +584,7 @@ fn disconnectnode_address_only_ignores_a_session_still_handshaking()
 }
 
 #[test]
-fn disconnectnode_identity_forms_ignore_a_session_still_handshaking()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnectnode_identity_forms_ignore_a_session_still_handshaking() -> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8371".parse()?;
     let pending = register_pending_peer(&ctx, addr);

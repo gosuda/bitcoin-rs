@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_e2e::rpc::Connection;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
 use sonic_rs::{Value, json};
+use crate::support::TestError;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 fn call(connection: &mut Connection, method: &str, params: Value) -> TestResult<Value> {
     let mut request = json!({"jsonrpc":"2.0", "id":1,"method":method});
@@ -20,13 +21,12 @@ fn call(connection: &mut Connection, method: &str, params: Value) -> TestResult<
     )?)
 }
 
-fn reserved(context: &Context) -> TestResult {
+fn reserved(context: &Context) {
     let deadline = Instant::now() + Duration::from_secs(3);
     while context.chain.utxo.scan_progress().is_none() {
         assert!(Instant::now() < deadline, "scan never reserved");
         std::thread::sleep(Duration::from_millis(1));
     }
-    Ok(())
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn check_scan_cancellation(stop: bool) -> TestResult {
             )
         });
         let operation = (|| -> TestResult<()> {
-            reserved(&context)?;
+            reserved(&context);
             assert_eq!(
                 call(&mut control, "scantxoutset", json!(["status"]))?["result"]["progress"],
                 json!(0)

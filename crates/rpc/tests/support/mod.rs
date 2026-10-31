@@ -7,6 +7,8 @@ pub(crate) mod harness;
 pub(crate) mod http;
 pub(crate) mod limits;
 pub(crate) mod manifest_check;
+pub(crate) mod error;
+pub(crate) use error::TestError;
 
 use std::fmt;
 

@@ -11,9 +11,12 @@ use bitcoin_rs_rpc::auth::constant_time_eq;
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, RpcSurface};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+use crate::support::TestError;
+
+type TestResult<T = ()> = Result<T, TestError>;
 
 #[test]
-fn basic_auth_accepts_and_rejects_requests() -> Result<(), Box<dyn std::error::Error>> {
+fn basic_auth_accepts_and_rejects_requests() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
 
@@ -45,7 +48,7 @@ fn basic_auth_accepts_and_rejects_requests() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn json_rpc_2_error_is_http_200_without_result() -> Result<(), Box<dyn std::error::Error>> {
+fn json_rpc_2_error_is_http_200_without_result() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"{"jsonrpc":"2.0","method":"missing","params":[],"id":7}"#;
     let response = request(address, "YWxpY2U6c2VjcmV0", body)?;
@@ -60,7 +63,7 @@ fn json_rpc_2_error_is_http_200_without_result() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::error::Error>> {
+fn legacy_error_has_core_envelope_and_http_error() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"{"method":"missing","params":[],"id":7}"#;
     let response = request(address, "YWxpY2U6c2VjcmV0", body)?;
@@ -79,7 +82,7 @@ fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn json_rpc_2_notification_returns_http_204() -> Result<(), Box<dyn std::error::Error>> {
+fn json_rpc_2_notification_returns_http_204() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[]}"#;
     let response = request(address, "YWxpY2U6c2VjcmV0", body)?;
@@ -90,8 +93,7 @@ fn json_rpc_2_notification_returns_http_204() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn json_rpc_2_batch_returns_an_array_and_excludes_notifications()
--> Result<(), Box<dyn std::error::Error>> {
+fn json_rpc_2_batch_returns_an_array_and_excludes_notifications() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"[
         {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1},
@@ -111,7 +113,7 @@ fn json_rpc_2_batch_returns_an_array_and_excludes_notifications()
 }
 
 #[test]
-fn notification_only_batch_returns_http_204() -> Result<(), Box<dyn std::error::Error>> {
+fn notification_only_batch_returns_http_204() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let body = r#"[
         {"jsonrpc":"2.0","method":"getblockcount","params":[]},
@@ -125,8 +127,7 @@ fn notification_only_batch_returns_http_204() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn malformed_json_uses_core_legacy_parse_error_envelope() -> Result<(), Box<dyn std::error::Error>>
-{
+fn malformed_json_uses_core_legacy_parse_error_envelope() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let response = request(address, "YWxpY2U6c2VjcmV0", "{")?;
     let payload = response.split_once("\r\n\r\n").ok_or("missing body")?.1;
@@ -155,7 +156,7 @@ fn malformed_json_uses_core_legacy_parse_error_envelope() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn rest_enabled_does_not_require_authentication() -> Result<(), Box<dyn std::error::Error>> {
+fn rest_enabled_does_not_require_authentication() -> TestResult {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let response = request_get(address, "/rest/chaininfo.json", "close")?;
     assert!(response.starts_with("HTTP/1.1 200 OK"));
@@ -167,8 +168,7 @@ fn rest_enabled_does_not_require_authentication() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn rest_disabled_returns_not_found_without_authentication() -> Result<(), Box<dyn std::error::Error>>
-{
+fn rest_disabled_returns_not_found_without_authentication() -> TestResult {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), false)?;
     let response = request_get(address, "/rest/chaininfo.json", "close")?;
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
@@ -176,8 +176,7 @@ fn rest_disabled_returns_not_found_without_authentication() -> Result<(), Box<dy
 }
 
 #[test]
-fn post_json_rpc_still_requires_and_accepts_authentication()
--> Result<(), Box<dyn std::error::Error>> {
+fn post_json_rpc_still_requires_and_accepts_authentication() -> TestResult {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let body = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":1}"#;
     let rejected = request_post(address, body, None, "close")?;
@@ -189,8 +188,7 @@ fn post_json_rpc_still_requires_and_accepts_authentication()
 }
 
 #[test]
-fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn std::error::Error>>
-{
+fn non_rest_get_returns_not_found_without_authentication() -> TestResult {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let response = request_get(address, "/", "close")?;
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
@@ -198,8 +196,7 @@ fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn
 }
 
 #[test]
-fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
--> Result<(), Box<dyn std::error::Error>> {
+fn public_esplora_success_and_error_responses_allow_cross_origin_reads() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     for path in ["/api/blocks/tip/height", "/api/not-an-esplora-route"] {
         let response = request_get(address, path, "close")?;
@@ -210,8 +207,7 @@ fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
 }
 
 #[test]
-fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
--> Result<(), Box<dyn std::error::Error>> {
+fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     for path in ["/", "/rest/chaininfo.json", "/esplora/internal/mempool/txs"] {
         let response = request_get(address, path, "close")?;
@@ -224,8 +220,7 @@ fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
 }
 
 #[test]
-fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dyn std::error::Error>>
-{
+fn public_esplora_options_returns_cors_preflight_response() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let response = request_options(address, "/api/blocks/tip/height")?;
 
@@ -240,8 +235,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
 }
 
 #[test]
-fn options_never_falls_through_to_json_rpc_or_non_public_surfaces()
--> Result<(), Box<dyn std::error::Error>> {
+fn options_never_falls_through_to_json_rpc_or_non_public_surfaces() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     for path in ["/", "/rest/chaininfo.json", "/esplora/internal/mempool/txs"] {
         let response = request_options(address, path)?;
@@ -262,7 +256,7 @@ fn options_never_falls_through_to_json_rpc_or_non_public_surfaces()
 }
 
 #[test]
-fn rest_keep_alive_serves_two_requests() -> Result<(), Box<dyn std::error::Error>> {
+fn rest_keep_alive_serves_two_requests() -> TestResult {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let mut stream = TcpStream::connect(address)?;
     write!(
@@ -279,7 +273,7 @@ fn rest_keep_alive_serves_two_requests() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn cookie_auth_accepts_file_backed_secret() -> Result<(), Box<dyn std::error::Error>> {
+fn cookie_auth_accepts_file_backed_secret() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(".cookie");
     std::fs::write(&path, "__cookie__:cookie\n")?;
@@ -305,7 +299,7 @@ fn constant_time_compare_checks_length_and_content() {
 fn withheld_body_request(
     address: std::net::SocketAddr,
     credentials: Option<&str>,
-) -> Result<(String, Duration), Box<dyn std::error::Error>> {
+) -> TestResult<(String, Duration)> {
     let mut stream = TcpStream::connect(address)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let authorization = credentials
@@ -326,8 +320,7 @@ fn withheld_body_request(
 /// An unauthenticated JSON-RPC request whose 16 MiB body is withheld gets
 /// Core's full 401 tuple within 2 s, and the connection is then closed.
 #[test]
-fn unauthorized_request_is_answered_before_its_body_is_read()
--> Result<(), Box<dyn std::error::Error>> {
+fn unauthorized_request_is_answered_before_its_body_is_read() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     for credentials in [None, Some("YWxpY2U6YmFk")] {
         let (response, elapsed) = withheld_body_request(address, credentials)?;
@@ -351,7 +344,7 @@ fn unauthorized_request_is_answered_before_its_body_is_read()
 /// A request that fails HTTP framing is a 400 before authentication is
 /// consulted; framing keeps its old precedence.
 #[test]
-fn framing_errors_precede_authentication() -> Result<(), Box<dyn std::error::Error>> {
+fn framing_errors_precede_authentication() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     for head in [
         "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -372,8 +365,7 @@ fn framing_errors_precede_authentication() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn authorized_request_with_a_truncated_body_is_a_framing_error()
--> Result<(), Box<dyn std::error::Error>> {
+fn authorized_request_with_a_truncated_body_is_a_framing_error() -> TestResult {
     let address = spawn(Auth::basic("alice", "secret"))?;
     let mut stream = TcpStream::connect(address)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -393,8 +385,7 @@ fn authorized_request_with_a_truncated_body_is_a_framing_error()
 }
 
 #[test]
-fn pool_management_requires_authentication_and_management_surface()
--> Result<(), Box<dyn std::error::Error>> {
+fn pool_management_requires_authentication_and_management_surface() -> TestResult {
     let body = r#"{"jsonrpc":"2.0","method":"getpoolinfo","params":[],"id":1}"#;
 
     let row = bitcoin_rs_rpc::manifest::MANIFEST
@@ -473,7 +464,7 @@ fn pool_management_requires_authentication_and_management_surface()
 fn spawn_on_surface(
     auth: Auth,
     surface: RpcSurface,
-) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+) -> TestResult<std::net::SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let ctx = Arc::new(Context::new());
@@ -493,14 +484,14 @@ fn spawn_on_surface(
     Ok(address)
 }
 
-fn spawn(auth: Auth) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+fn spawn(auth: Auth) -> TestResult<std::net::SocketAddr> {
     spawn_with_rest(auth, false)
 }
 
 fn spawn_with_rest(
     auth: Auth,
     rest_enabled: bool,
-) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+) -> TestResult<std::net::SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
     let ctx = Arc::new(Context::new());
@@ -524,7 +515,7 @@ fn request_get(
     address: std::net::SocketAddr,
     path: &str,
     connection: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,
@@ -540,7 +531,7 @@ fn request_post(
     body: &str,
     authorization: Option<&str>,
     connection: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     let authorization = authorization.map_or(String::new(), |value| {
         format!("Authorization: Basic {value}\r\n")
@@ -558,7 +549,7 @@ fn request_post(
 fn request_options(
     address: std::net::SocketAddr,
     path: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,
@@ -570,7 +561,7 @@ fn request_options(
     stream.read_to_string(&mut response)?;
     Ok(response)
 }
-fn read_response(reader: &mut BufReader<TcpStream>) -> Result<String, Box<dyn std::error::Error>> {
+fn read_response(reader: &mut BufReader<TcpStream>) -> TestResult<String> {
     let mut headers = Vec::new();
     reader.read_until(b'\n', &mut headers)?;
     loop {
@@ -596,7 +587,7 @@ fn request(
     address: std::net::SocketAddr,
     credentials: &str,
     body: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> TestResult<String> {
     let mut stream = TcpStream::connect(address)?;
     write!(
         stream,

@@ -886,6 +886,7 @@ fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&Va
 mod tests {
     use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
+    use super::super::TestError;
     use super::{load_corpus_from, reference_set};
 
     const FIXTURE_NAME: &str = "01_getblockchaininfo_v2_positional.json";
@@ -896,15 +897,12 @@ mod tests {
         sonic_rs::from_str(CAPTURED_FIXTURE)
     }
 
-    fn assert_reference_rejected(
-        fixture: &Value,
-        reason: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn assert_reference_rejected(fixture: &Value, reason: &str) -> Result<(), TestError> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), sonic_rs::to_vec(fixture)?)?;
         let Err(error) = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)
         else {
-            return Err("invalid Core reference was accepted".into());
+            return Err(TestError::Missing("invalid Core reference was accepted"));
         };
         let message = error.to_string();
         assert!(message.contains(FIXTURE_NAME), "{message}");
@@ -913,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn copied_fixture_preserves_core_reference() -> Result<(), Box<dyn std::error::Error>> {
+    fn copied_fixture_preserves_core_reference() -> Result<(), TestError> {
         let dir = tempfile::tempdir()?;
         let fixture = captured_fixture()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), sonic_rs::to_vec(&fixture)?)?;
@@ -923,12 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn corpus_rejects_missing_core_reference_fields() -> Result<(), Box<dyn std::error::Error>> {
+    fn corpus_rejects_missing_core_reference_fields() -> Result<(), TestError> {
         for field in ["core_version", "core_source_commit", "core_binary_sha256"] {
             let mut fixture = captured_fixture()?;
             fixture["provenance"]
                 .as_object_mut()
-                .ok_or("captured provenance must be an object")?
+                .ok_or(TestError::Missing("captured provenance must be an object"))?
                 .remove(&field);
             assert_reference_rejected(&fixture, &format!("missing field `{field}`"))?;
         }
@@ -936,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_rejects_non_pinned_core_version() -> Result<(), Box<dyn std::error::Error>> {
+    fn corpus_rejects_non_pinned_core_version() -> Result<(), TestError> {
         for version in ["31.0.0", "31.99.0", ""] {
             let mut fixture = captured_fixture()?;
             fixture["provenance"]["core_version"] = Value::from(version);
@@ -946,11 +944,13 @@ mod tests {
     }
 
     #[test]
-    fn corpus_rejects_mismatched_or_empty_core_digest() -> Result<(), Box<dyn std::error::Error>> {
+    fn corpus_rejects_mismatched_or_empty_core_digest() -> Result<(), TestError> {
         let original = captured_fixture()?;
         let digest = original["provenance"]["core_binary_sha256"]
             .as_str()
-            .ok_or("captured binary digest must be a string")?;
+            .ok_or(TestError::Missing(
+                "captured binary digest must be a string",
+            ))?;
         let mut changed = digest.to_owned();
         changed.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
         for digest in [changed.as_str(), ""] {
@@ -962,8 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_401_tuple_checks_volatile_presence_on_the_live_reply_only()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn exact_401_tuple_checks_volatile_presence_on_the_live_reply_only() -> Result<(), TestError> {
         use super::super::compare::{LiveChain, compare};
         use super::{BodyForm, Fixture, HttpTuple};
 
@@ -1021,8 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_rejects_stale_fixture_after_reference_changes()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn corpus_rejects_stale_fixture_after_reference_changes() -> Result<(), TestError> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), CAPTURED_FIXTURE)?;
         let reference = reference_set::load_reference_set(bitcoin_rs_rpc::manifest::MANIFEST_TOML)?;

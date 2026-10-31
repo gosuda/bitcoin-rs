@@ -88,7 +88,7 @@ fn decode_result_as_chaininfo(envelope: &Value) -> Result<(), support::Failure> 
 }
 
 #[test]
-fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error::Error>> {
+fn differential_loopback_authenticated_chain() -> Result<(), support::TestError> {
     let corpus = fixture::load_corpus()?;
     let (node, server) = stand_up()?;
     let live: LiveChain = node.live_chain()?;
@@ -154,7 +154,7 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error::Error>> {
+fn keepalive_two_framed_responses_without_eof() -> Result<(), support::TestError> {
     let (_node, server) = stand_up()?;
 
     let mut connection = Connection::connect(server.address())?;
@@ -200,7 +200,7 @@ fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error
 fn replay_during_chain_transition(
     server: &ServerHarness,
     body: &str,
-) -> Result<RawResponse, Box<dyn std::error::Error>> {
+) -> Result<RawResponse, support::TestError> {
     use std::net::SocketAddr;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -248,7 +248,7 @@ fn replay_during_chain_transition(
     }
 }
 
-fn seeded_chain_tx_count(node: &NodeHarness) -> Result<u64, Box<dyn std::error::Error>> {
+fn seeded_chain_tx_count(node: &NodeHarness) -> Result<u64, support::TestError> {
     let applied = node
         .state
         .chainstate()
@@ -267,7 +267,7 @@ fn decoded_success(
     response: &RawResponse,
     method: &str,
     id: i64,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<Value, support::TestError> {
     if response.status != 200 {
         return Err(support::fail(format!(
             "{method} answered HTTP {} while the barrier was held",
@@ -292,7 +292,7 @@ fn decoded_success(
 }
 
 #[test]
-fn getblockchaininfo_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+fn getblockchaininfo_returns_during_chain_transition() -> Result<(), support::TestError> {
     let (node, server) = stand_up()?;
     let live = node.live_chain()?;
 
@@ -316,7 +316,7 @@ fn getblockchaininfo_returns_during_chain_transition() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+fn getchaintxstats_returns_during_chain_transition() -> Result<(), support::TestError> {
     let (node, server) = stand_up()?;
     let seeded_count = seeded_chain_tx_count(&node)?;
 
@@ -345,7 +345,7 @@ fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn corpus_bounds_and_provenance_hold() -> Result<(), Box<dyn std::error::Error>> {
+fn corpus_bounds_and_provenance_hold() -> Result<(), support::TestError> {
     let corpus = fixture::load_corpus()?;
 
     let dir = fixture::corpus_dir();

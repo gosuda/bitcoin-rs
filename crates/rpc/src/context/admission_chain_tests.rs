@@ -5,7 +5,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::*;
 
-type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type TestResult<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 fn spendable_script() -> Vec<u8> {
     let mut script = vec![0x00, 0x20];
@@ -49,8 +49,7 @@ fn publish_tip(ctx: &Context, time: u32) -> TestResult {
                 nonce: time,
             },
             NodeStatus::Active,
-        )
-        .map_err(|error| format!("insert tip node: {error}"))?;
+        )?;
     let node = tree.node(id)?;
     ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
         tip_id: id,
@@ -196,8 +195,7 @@ fn admission_chain_uses_current_handles_and_one_applied_tip() -> TestResult {
         &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::default(),
-    )
-    .map_err(|error| format!("fund input: {error}"))?;
+    )?;
     publish_tip(&ctx, 100)?;
     publish_tip(&ctx, 200)?;
     let snapshot = ctx

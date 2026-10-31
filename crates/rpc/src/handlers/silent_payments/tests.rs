@@ -3,7 +3,7 @@ use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::{Block, Network};
 use bitcoin_rs_utxo::contract::{BlockSpends, BlockUndoSource, HistoryUnavailable};
 
-type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T = ()> = std::result::Result<T, crate::test_error::TestError>;
 
 struct Source<F>(F);
 impl<F> BlockUndoSource for Source<F>

@@ -271,7 +271,7 @@ fn getrawmempool_verbose_with_sequence_is_rejected() {
 }
 
 #[test]
-fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), Box<dyn std::error::Error>> {
+fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let parent = tx(1, Vec::new());
     let parent_txid = parent.txid();
@@ -285,7 +285,7 @@ fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), Box<dyn std
 
     let result = getmempooldescendants(&ctx, &json!([parent_txid.to_string()]))?;
     let Some(array) = result.as_array() else {
-        return Err("expected descendants array".into());
+        return Err(crate::test_error::TestError::Missing("expected descendants array"));
     };
 
     assert_eq!(array.len(), 1);
@@ -307,7 +307,7 @@ fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn getmempoolancestors_walks_real_ancestor_graph() -> Result<(), Box<dyn std::error::Error>> {
+fn getmempoolancestors_walks_real_ancestor_graph() -> Result<(), crate::test_error::TestError> {
     let ctx = Arc::new(Context::new());
     let parent = tx(3, Vec::new());
     let parent_txid = parent.txid();
@@ -322,7 +322,7 @@ fn getmempoolancestors_walks_real_ancestor_graph() -> Result<(), Box<dyn std::er
 
     let result = getmempoolancestors(&ctx, &json!([child_txid.to_string()]))?;
     let Some(array) = result.as_array() else {
-        return Err("expected ancestors array".into());
+        return Err(crate::test_error::TestError::Missing("expected ancestors array"));
     };
 
     assert_eq!(array.len(), 1);
