@@ -26,6 +26,10 @@ enum DeliveryCredit {
     Delivery(Option<u32>),
 }
 
+type StagedDelivery = (Hash256, Option<PeerSource>, StagedBlock);
+type RejectDeliveryItem = (Hash256, Option<PeerSource>);
+type ResolvedStagedDelivery = (Hash256, Option<PeerSource>, StagedBlock, Vec<Option<u32>>);
+
 const MAX_UNRESOLVED_STAGED_BODIES: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -293,12 +297,49 @@ impl BlockSync {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn buffer_received_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,
         next_expected_hash: Option<Hash256>,
     ) -> usize {
+        self.prune_blocks_behind_applied_tip(blocks);
+        let admission_plan = self.plan_block_admissions(blocks);
+        let binding_results = self.check_body_bindings(blocks, &admission_plan);
+        let now = Instant::now();
+        let (mut staged_blocks, reject_deliveries) = self.stage_inbound_blocks(
+            blocks,
+            admission_plan,
+            binding_results,
+            next_expected_hash,
+            now,
+        );
+
+        for (_, source, _) in &mut staged_blocks {
+            *source = source.filter(|source| self.peer_table.is_current(*source));
+        }
+
+        let staged_blocks = self.resolve_staged_dropped_heights(staged_blocks);
+        let mut retry_count = 0_u64;
+        let staged_count = staged_blocks.len() + reject_deliveries.len();
+        let mut delivery_credits: SmallVec<[(Hash256, PeerSource, DeliveryCredit); 8]> =
+            SmallVec::new();
+
+        self.apply_staged_delivery_credits(
+            staged_blocks,
+            &mut delivery_credits,
+            now,
+            &mut retry_count,
+        );
+        self.deliver_peer_credits(&delivery_credits, now);
+        self.process_reject_deliveries(reject_deliveries, now, &mut retry_count);
+
+        if retry_count > 0 {
+            metrics::counter!("node.sync.retry_count").increment(retry_count);
+        }
+        staged_count
+    }
+
+    fn prune_blocks_behind_applied_tip(&self, blocks: &mut Vec<InboundBlock>) {
         if let Some(applied_tip) = self.chain.applied_tip() {
             let tree = self.chain.block_tree();
             let indexed_tip = Self::indexed_applied_ancestry_tip(&tree, &applied_tip);
@@ -316,56 +357,62 @@ impl BlockSync {
                     })
             });
         }
+    }
 
-        let admission_plan: Vec<BodyAdmission> = {
-            let chain_tip = self.chain.chain_tip();
-            let applied_tip = self.chain.applied_tip();
-            let minimum_chain_work = self.chain.network().minimum_chain_work();
-            let tree = self.chain.block_tree();
-            let scheduler = self.scheduler.lock();
-            let offered = blocks.len();
-            let mut admission_plan = Vec::with_capacity(offered);
-            blocks.retain(|inbound| {
-                let hash = Hash256::from(inbound.payload().block().block_hash());
-                if scheduler.stager.contains(&hash) {
-                    admission_plan.push(BodyAdmission::Staged);
-                    return true;
-                }
-                let requested = scheduler.window.contains_pending(&hash);
-                if !requested
-                    && !unrequested_body_admissible(
-                        &tree,
-                        hash,
-                        chain_tip.as_deref(),
-                        applied_tip.as_deref(),
-                        minimum_chain_work,
-                    )
-                {
-                    return false;
-                }
-                let header_unknown = tree.lookup(hash).is_none();
-                admission_plan.push(if requested {
-                    BodyAdmission::Requested
-                } else {
-                    BodyAdmission::Unrequested {
-                        gate_pending: header_unknown,
-                    }
-                });
-                true
-            });
-            let discarded = offered.saturating_sub(blocks.len());
-            if discarded > 0 {
-                tracing::debug!(
-                    discarded,
-                    "block sync: discarded unrequested bodies Core would not process"
-                );
+    fn plan_block_admissions(&self, blocks: &mut Vec<InboundBlock>) -> Vec<BodyAdmission> {
+        let chain_tip = self.chain.chain_tip();
+        let applied_tip = self.chain.applied_tip();
+        let minimum_chain_work = self.chain.network().minimum_chain_work();
+        let tree = self.chain.block_tree();
+        let scheduler = self.scheduler.lock();
+        let offered = blocks.len();
+        let mut admission_plan = Vec::with_capacity(offered);
+        blocks.retain(|inbound| {
+            let hash = Hash256::from(inbound.payload().block().block_hash());
+            if scheduler.stager.contains(&hash) {
+                admission_plan.push(BodyAdmission::Staged);
+                return true;
             }
-            admission_plan
-        };
+            let requested = scheduler.window.contains_pending(&hash);
+            if !requested
+                && !unrequested_body_admissible(
+                    &tree,
+                    hash,
+                    chain_tip.as_deref(),
+                    applied_tip.as_deref(),
+                    minimum_chain_work,
+                )
+            {
+                return false;
+            }
+            let header_unknown = tree.lookup(hash).is_none();
+            admission_plan.push(if requested {
+                BodyAdmission::Requested
+            } else {
+                BodyAdmission::Unrequested {
+                    gate_pending: header_unknown,
+                }
+            });
+            true
+        });
+        let discarded = offered.saturating_sub(blocks.len());
+        if discarded > 0 {
+            tracing::debug!(
+                discarded,
+                "block sync: discarded unrequested bodies Core would not process"
+            );
+        }
+        admission_plan
+    }
 
-        let binding_results: Vec<Result<(), SyncChainError>> = blocks
+    fn check_body_bindings(
+        &self,
+        blocks: &[InboundBlock],
+        admission_plan: &[BodyAdmission],
+    ) -> Vec<Result<(), SyncChainError>> {
+        blocks
             .iter()
-            .zip(&admission_plan)
+            .zip(admission_plan)
             .map(|(inbound, admission)| {
                 if matches!(admission, BodyAdmission::Staged) {
                     Ok(())
@@ -373,13 +420,21 @@ impl BlockSync {
                     self.chain.check_body_binding(inbound.payload().block())
                 }
             })
-            .collect();
+            .collect()
+    }
 
+    fn stage_inbound_blocks(
+        &self,
+        blocks: &mut Vec<InboundBlock>,
+        admission_plan: Vec<BodyAdmission>,
+        binding_results: Vec<Result<(), SyncChainError>>,
+        next_expected_hash: Option<Hash256>,
+        now: Instant,
+    ) -> (Vec<StagedDelivery>, Vec<RejectDeliveryItem>) {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         let mut reject_deliveries = Vec::new();
         let mut refused_at_budget = 0_usize;
         let mut refused_at_quota = 0_usize;
-        let now = Instant::now();
         {
             let mut scheduler = self.scheduler.lock();
             let stager = &mut scheduler.stager;
@@ -452,68 +507,78 @@ impl BlockSync {
                 "block sync: refused unresolved bodies at the gate-pending quota"
             );
         }
+        (staged_blocks, reject_deliveries)
+    }
 
-        for (_, source, _) in &mut staged_blocks {
-            *source = source.filter(|source| self.peer_table.is_current(*source));
-        }
+    fn resolve_staged_dropped_heights(
+        &self,
+        staged_blocks: Vec<StagedDelivery>,
+    ) -> Vec<ResolvedStagedDelivery> {
+        let tree = self.chain.block_tree();
+        staged_blocks
+            .into_iter()
+            .map(|(hash, source_peer, staged)| {
+                let dropped_heights = match &staged {
+                    StagedBlock::Memory { dropped, .. } => dropped
+                        .iter()
+                        .map(|entry| {
+                            tree.lookup(*entry)
+                                .and_then(|node_id| tree.node(node_id).ok())
+                                .map(|node| node.height)
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (hash, source_peer, staged, dropped_heights)
+            })
+            .collect()
+    }
 
-        let staged_blocks: Vec<_> = {
-            let tree = self.chain.block_tree();
-            staged_blocks
-                .into_iter()
-                .map(|(hash, source_peer, staged)| {
-                    let dropped_heights = match &staged {
-                        StagedBlock::Memory { dropped, .. } => dropped
-                            .iter()
-                            .map(|entry| {
-                                tree.lookup(*entry)
-                                    .and_then(|node_id| tree.node(node_id).ok())
-                                    .map(|node| node.height)
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    (hash, source_peer, staged, dropped_heights)
-                })
-                .collect()
-        };
-        let mut retry_count = 0_u64;
-        let staged_count = staged_blocks.len() + reject_deliveries.len();
-        let mut delivery_credits: SmallVec<[(Hash256, PeerSource, DeliveryCredit); 8]> =
-            SmallVec::new();
-        {
-            let mut scheduler = self.scheduler.lock();
-            let window = &mut scheduler.window;
-            for (hash, source_peer, staged, dropped_heights) in staged_blocks {
-                match staged {
-                    StagedBlock::AlreadyStaged => {
-                        metrics::counter!("node.sync.duplicate_deliveries").increment(1);
-                        if let Some(source_peer) = source_peer {
-                            delivery_credits.push((hash, source_peer, DeliveryCredit::Duplicate));
-                        }
+    fn apply_staged_delivery_credits(
+        &self,
+        staged_blocks: Vec<ResolvedStagedDelivery>,
+        delivery_credits: &mut SmallVec<[(Hash256, PeerSource, DeliveryCredit); 8]>,
+        now: Instant,
+        retry_count: &mut u64,
+    ) {
+        let mut scheduler = self.scheduler.lock();
+        let window = &mut scheduler.window;
+        for (hash, source_peer, staged, dropped_heights) in staged_blocks {
+            match staged {
+                StagedBlock::AlreadyStaged => {
+                    metrics::counter!("node.sync.duplicate_deliveries").increment(1);
+                    if let Some(source_peer) = source_peer {
+                        delivery_credits.push((hash, source_peer, DeliveryCredit::Duplicate));
                     }
-                    StagedBlock::Memory { bytes, dropped } => {
-                        let pending_height = window.mark_received_from(hash, bytes, None, now);
-                        if let Some(source_peer) = source_peer {
-                            delivery_credits.push((
-                                hash,
-                                source_peer,
-                                DeliveryCredit::Delivery(pending_height),
-                            ));
-                        }
-                        for (dropped_hash, height) in dropped.into_iter().zip(dropped_heights) {
-                            window.requeue_for_retry(&dropped_hash, height, now);
-                            retry_count = retry_count.saturating_add(1);
-                        }
+                }
+                StagedBlock::Memory { bytes, dropped } => {
+                    let pending_height = window.mark_received_from(hash, bytes, None, now);
+                    if let Some(source_peer) = source_peer {
+                        delivery_credits.push((
+                            hash,
+                            source_peer,
+                            DeliveryCredit::Delivery(pending_height),
+                        ));
                     }
-                    StagedBlock::DroppedForRetry { hash } => {
-                        window.requeue_for_retry(&hash, None, now);
-                        retry_count = retry_count.saturating_add(1);
-                        tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
+                    for (dropped_hash, height) in dropped.into_iter().zip(dropped_heights) {
+                        window.requeue_for_retry(&dropped_hash, height, now);
+                        *retry_count = retry_count.saturating_add(1);
                     }
+                }
+                StagedBlock::DroppedForRetry { hash } => {
+                    window.requeue_for_retry(&hash, None, now);
+                    *retry_count = retry_count.saturating_add(1);
+                    tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                 }
             }
         }
+    }
+
+    fn deliver_peer_credits(
+        &self,
+        delivery_credits: &SmallVec<[(Hash256, PeerSource, DeliveryCredit); 8]>,
+        now: Instant,
+    ) {
         let mut credit_idx = 0;
         while credit_idx < delivery_credits.len() {
             let source_peer = delivery_credits[credit_idx].1;
@@ -546,6 +611,14 @@ impl BlockSync {
                 }
             });
         }
+    }
+
+    fn process_reject_deliveries(
+        &self,
+        reject_deliveries: Vec<(Hash256, Option<PeerSource>)>,
+        now: Instant,
+        retry_count: &mut u64,
+    ) {
         for (hash, source) in reject_deliveries {
             let mut rejected = RejectDelivery::DiscardedUnsolicited;
             let current = source.is_some_and(|source| {
@@ -564,7 +637,7 @@ impl BlockSync {
                     .reject_delivery(hash, None, now);
             }
             if rejected == RejectDelivery::ReleasedPending {
-                retry_count = retry_count.saturating_add(1);
+                *retry_count = retry_count.saturating_add(1);
                 if let Some(source) = source {
                     if self.peer_table.disconnect_source(source) {
                         self.scheduler
@@ -576,10 +649,6 @@ impl BlockSync {
                 }
             }
         }
-        if retry_count > 0 {
-            metrics::counter!("node.sync.retry_count").increment(retry_count);
-        }
-        staged_count
     }
 }
 

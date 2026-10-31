@@ -73,7 +73,6 @@ impl BlockSync {
         });
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
@@ -137,74 +136,102 @@ impl BlockSync {
                     self.record_demoted_tip(demoted);
                 }
             }
-            match admission {
-                HeaderAdmission::Accepted {
+            self.handle_header_admission(
+                admission,
+                source,
+                wire_response,
+                batch_len,
+                &mut direct_fetch,
+                &mut credit_refresh_needed,
+            );
+        }
+        self.post_headers_drain(credit_refresh_needed, direct_fetch, total_headers);
+    }
+
+    fn handle_header_admission(
+        &self,
+        admission: HeaderAdmission,
+        source: Option<PeerSource>,
+        wire_response: bool,
+        batch_len: usize,
+        direct_fetch: &mut Vec<(PeerSource, Hash256)>,
+        credit_refresh_needed: &mut bool,
+    ) {
+        match admission {
+            HeaderAdmission::Accepted {
+                accepted,
+                announced_tip,
+                active_height,
+                demoted_tip,
+            } => {
+                self.record_admitted_tips(demoted_tip, announced_tip, source);
+                if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
+                    self.peer_table
+                        .note_announced_tip(source, tip_hash, active_height);
+                    if wire_response && !self.owns_body_fetch(source, tip_hash) {
+                        direct_fetch.push((source, tip_hash));
+                    }
+                }
+                *credit_refresh_needed = true;
+                tracing::debug!(
                     accepted,
-                    announced_tip,
-                    active_height,
-                    demoted_tip,
-                } => {
-                    self.record_admitted_tips(demoted_tip, announced_tip, source);
-                    if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
-                        self.peer_table
-                            .note_announced_tip(source, tip_hash, active_height);
-                        if wire_response && !self.owns_body_fetch(source, tip_hash) {
-                            direct_fetch.push((source, tip_hash));
-                        }
+                    received = batch_len,
+                    "block sync: accepted inbound headers batch",
+                );
+            }
+            HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
+                let mut blamed_peer = None;
+                if let Some(source) = source {
+                    let disconnected = self.peer_table.disconnect_source(source);
+                    self.scheduler.lock().clear_headers_sync_for(source);
+                    if disconnected {
+                        self.scheduler
+                            .lock()
+                            .window
+                            .mark_peer_unresponsive(source, Instant::now());
+                        blamed_peer = Some(source.endpoint);
                     }
-                    credit_refresh_needed = true;
-                    tracing::debug!(
-                        accepted,
+                }
+                if let Some(peer_addr) = blamed_peer {
+                    tracing::warn!(
+                        peer_addr = ?peer_addr,
                         received = batch_len,
-                        "block sync: accepted inbound headers batch",
+                        %error,
+                        "block sync: peer served invalid headers; disconnecting",
                     );
-                }
-                HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
-                    let mut blamed_peer = None;
-                    if let Some(source) = source {
-                        let disconnected = self.peer_table.disconnect_source(source);
-                        self.scheduler.lock().clear_headers_sync_for(source);
-                        if disconnected {
-                            self.scheduler
-                                .lock()
-                                .window
-                                .mark_peer_unresponsive(source, Instant::now());
-                            blamed_peer = Some(source.endpoint);
-                        }
-                    }
-                    if let Some(peer_addr) = blamed_peer {
-                        tracing::warn!(
-                            peer_addr = ?peer_addr,
-                            received = batch_len,
-                            %error,
-                            "block sync: peer served invalid headers; disconnecting",
-                        );
-                    } else {
-                        tracing::warn!(
-                            received = batch_len,
-                            %error,
-                            "block sync: rejected source-less or stale headers batch",
-                        );
-                    }
-                }
-                HeaderAdmission::Rejected(error) => {
-                    if matches!(
-                        error,
-                        ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
-                    ) {
-                        self.request_headers_from(source);
-                    }
+                } else {
                     tracing::warn!(
                         received = batch_len,
                         %error,
-                        "block sync: rejected inbound headers batch",
+                        "block sync: rejected source-less or stale headers batch",
                     );
                 }
-                HeaderAdmission::Refused(error) => {
-                    self.request_ancestry_after_refusal(source, error.as_ref());
+            }
+            HeaderAdmission::Rejected(error) => {
+                if matches!(
+                    error,
+                    ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
+                ) {
+                    self.request_headers_from(source);
                 }
+                tracing::warn!(
+                    received = batch_len,
+                    %error,
+                    "block sync: rejected inbound headers batch",
+                );
+            }
+            HeaderAdmission::Refused(error) => {
+                self.request_ancestry_after_refusal(source, error.as_ref());
             }
         }
+    }
+
+    fn post_headers_drain(
+        &self,
+        credit_refresh_needed: bool,
+        direct_fetch: Vec<(PeerSource, Hash256)>,
+        total_headers: usize,
+    ) {
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
         }

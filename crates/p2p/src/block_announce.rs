@@ -232,9 +232,8 @@ impl BlockAnnouncer {
         }
     }
 
-    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
-        let eligible: Vec<_> = self
-            .peers
+    fn eligible_high_bandwidth_peers(&self) -> Vec<(PeerSource, u64)> {
+        self.peers
             .sessions()
             .into_iter()
             .filter_map(|session| {
@@ -246,11 +245,16 @@ impl BlockAnnouncer {
                     && announcement.compact_version == Some(COMPACT_BLOCK_VERSION))
                 .then_some((source, announcement.useful_block_sequence))
             })
-            .collect();
-        let selection_open = !self.config.blocksonly && !self.in_ibd();
-        let mut state = self.state.lock();
-        let mut sent = Vec::new();
+            .collect()
+    }
 
+    fn revoke_deselected_high_bandwidth_peers(
+        &self,
+        state: &mut AnnounceState,
+        eligible: &[(PeerSource, u64)],
+        selection_open: bool,
+        sent: &mut Vec<(Option<crate::PeerEndpoint>, Message)>,
+    ) {
         let selected = state.high_bandwidth_requested_peers.clone();
         for source in selected {
             if selection_open && eligible.iter().any(|(candidate, _)| *candidate == source) {
@@ -273,65 +277,87 @@ impl BlockAnnouncer {
                 sent.push((source.endpoint, message));
             }
         }
+    }
+
+    fn rebalance_high_bandwidth_by_sequence(
+        &self,
+        state: &mut AnnounceState,
+        eligible: &[(PeerSource, u64)],
+        sent: &mut Vec<(Option<crate::PeerEndpoint>, Message)>,
+    ) {
+        while let Some(&(candidate, candidate_sequence)) = eligible
+            .iter()
+            .filter(|(source, sequence)| {
+                *sequence > 0 && !state.high_bandwidth_requested_peers.contains(source)
+            })
+            .max_by_key(|(_, sequence)| *sequence)
+        {
+            let Some((demote_index, demoted_sequence)) = state
+                .high_bandwidth_requested_peers
+                .iter()
+                .enumerate()
+                .filter_map(|(index, source)| {
+                    eligible
+                        .iter()
+                        .find(|(candidate, _)| candidate == source)
+                        .map(|(_, sequence)| (index, *sequence))
+                })
+                .min_by_key(|(_, sequence)| *sequence)
+            else {
+                break;
+            };
+            if candidate_sequence <= demoted_sequence {
+                break;
+            }
+
+            let demoted = state.high_bandwidth_requested_peers.remove(demote_index);
+            self.peers.note_high_bandwidth_selected(demoted, false);
+            let demote = Message::SendCmpct(SendCmpct {
+                send_compact: false,
+                version: COMPACT_BLOCK_VERSION,
+            });
+            match self.peers.send(demoted, demote.clone()) {
+                Ok(()) => sent.push((demoted.endpoint, demote)),
+                Err(refusal) if refusal.is_saturated() => {
+                    state
+                        .high_bandwidth_requested_peers
+                        .insert(demote_index, demoted);
+                    self.peers.note_high_bandwidth_selected(demoted, true);
+                    break;
+                }
+                Err(_) => {}
+            }
+
+            let promote = Message::SendCmpct(SendCmpct {
+                send_compact: true,
+                version: COMPACT_BLOCK_VERSION,
+            });
+            if self.peers.send(candidate, promote.clone()).is_ok() {
+                state.high_bandwidth_requested_peers.push(candidate);
+                self.peers.note_high_bandwidth_selected(candidate, true);
+                sent.push((candidate.endpoint, promote));
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn reconcile_high_bandwidth_peers(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
+        let eligible = self.eligible_high_bandwidth_peers();
+        let selection_open = !self.config.blocksonly && !self.in_ibd();
+        let mut state = self.state.lock();
+        let mut sent = Vec::new();
+
+        self.revoke_deselected_high_bandwidth_peers(
+            &mut state,
+            &eligible,
+            selection_open,
+            &mut sent,
+        );
 
         if selection_open {
             self.fill_high_bandwidth_slots(&mut state, &eligible, &mut sent);
-
-            while let Some(&(candidate, candidate_sequence)) = eligible
-                .iter()
-                .filter(|(source, sequence)| {
-                    *sequence > 0 && !state.high_bandwidth_requested_peers.contains(source)
-                })
-                .max_by_key(|(_, sequence)| *sequence)
-            {
-                let Some((demote_index, demoted_sequence)) = state
-                    .high_bandwidth_requested_peers
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, source)| {
-                        eligible
-                            .iter()
-                            .find(|(candidate, _)| candidate == source)
-                            .map(|(_, sequence)| (index, *sequence))
-                    })
-                    .min_by_key(|(_, sequence)| *sequence)
-                else {
-                    break;
-                };
-                if candidate_sequence <= demoted_sequence {
-                    break;
-                }
-
-                let demoted = state.high_bandwidth_requested_peers.remove(demote_index);
-                self.peers.note_high_bandwidth_selected(demoted, false);
-                let demote = Message::SendCmpct(SendCmpct {
-                    send_compact: false,
-                    version: COMPACT_BLOCK_VERSION,
-                });
-                match self.peers.send(demoted, demote.clone()) {
-                    Ok(()) => sent.push((demoted.endpoint, demote)),
-                    Err(refusal) if refusal.is_saturated() => {
-                        state
-                            .high_bandwidth_requested_peers
-                            .insert(demote_index, demoted);
-                        self.peers.note_high_bandwidth_selected(demoted, true);
-                        break;
-                    }
-                    Err(_) => {}
-                }
-
-                let promote = Message::SendCmpct(SendCmpct {
-                    send_compact: true,
-                    version: COMPACT_BLOCK_VERSION,
-                });
-                if self.peers.send(candidate, promote.clone()).is_ok() {
-                    state.high_bandwidth_requested_peers.push(candidate);
-                    self.peers.note_high_bandwidth_selected(candidate, true);
-                    sent.push((candidate.endpoint, promote));
-                } else {
-                    break;
-                }
-            }
+            self.rebalance_high_bandwidth_by_sequence(&mut state, &eligible, &mut sent);
         }
         sent
     }
@@ -458,107 +484,122 @@ impl BlockAnnouncer {
         sent
     }
 
+    fn plan_headers_announcement(
+        &self,
+        source: PeerSource,
+        known_position: Option<(Hash256, u32)>,
+        tip: CommittedTip,
+        tip_hash: Hash256,
+    ) -> Option<PlannedAnnouncement> {
+        let (known_hash, known_height) = known_position?;
+        if known_height >= tip.height {
+            return None;
+        }
+        let distance = tip.height - known_height;
+        let max_announce = u32::try_from(MAX_BLOCKS_TO_ANNOUNCE).unwrap_or(u32::MAX);
+        if distance > max_announce {
+            return None;
+        }
+        let limit = usize::try_from(distance).unwrap_or(usize::MAX);
+        let headers =
+            self.chain_query
+                .headers_after(&[BlockHash::from(known_hash)], tip.hash, limit);
+        if !headers.is_empty() && headers.last().map(|h| h.compute_hash().into()) == Some(tip_hash)
+        {
+            Some(PlannedAnnouncement {
+                source,
+                message: Message::Headers(headers),
+                confirms_tip: true,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn plan_session_announcement(
+        &self,
+        session: &crate::PeerSession,
+        tip: CommittedTip,
+        tip_hash: Hash256,
+    ) -> Option<PlannedAnnouncement> {
+        let addr = session.endpoint;
+        let (source, peer_state, known_position) = self.peer_anchor(session);
+
+        if known_position.is_some_and(|(_, height)| height >= tip.height) {
+            let stale_relay = self
+                .peers
+                .announcement_state(source)
+                .and_then(|s| s.stale_tip_prefers_blocks)
+                .is_some();
+            if stale_relay {
+                let block_inv =
+                    Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
+                return Some(PlannedAnnouncement {
+                    source,
+                    message: Message::Inv(vec![block_inv]),
+                    confirms_tip: false,
+                });
+            }
+            return None;
+        }
+
+        if let Some(announcement) =
+            self.plan_compact_push(session, peer_state, known_position, tip.height, || {
+                self.chain_query
+                    .compact_block_for(tip.height, tip.hash, Some(COMPACT_BLOCK_VERSION))
+                    .filter(|msg| matches!(msg, Message::CmpctBlock(_)))
+            })
+        {
+            tracing::debug!(
+                peer = ?addr,
+                tip_height = tip.height,
+                mode = "compact",
+                "block announcement planned"
+            );
+            return Some(announcement);
+        }
+
+        let send_headers = session.info.as_ref().is_some_and(|i| i.send_headers);
+        if send_headers
+            && let Some(announcement) =
+                self.plan_headers_announcement(source, known_position, tip, tip_hash)
+        {
+            tracing::debug!(
+                peer = ?addr,
+                tip_height = tip.height,
+                mode = "headers",
+                "block announcement planned"
+            );
+            return Some(announcement);
+        }
+
+        let reason = Self::inv_fallback_reason(send_headers, known_position, tip.height);
+        let block_inv =
+            Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
+        tracing::debug!(
+            peer = ?addr,
+            tip_height = tip.height,
+            mode = "inv",
+            reason,
+            "block announcement planned"
+        );
+        Some(PlannedAnnouncement {
+            source,
+            message: Message::Inv(vec![block_inv]),
+            confirms_tip: false,
+        })
+    }
+
     fn planned_announcements(
         &self,
         tip: CommittedTip,
         live_sessions: &[crate::PeerSession],
     ) -> Vec<PlannedAnnouncement> {
         let tip_hash = Hash256::from(tip.hash);
-
-        let mut planned = Vec::new();
-
-        for session in live_sessions {
-            let addr = session.endpoint;
-            let (source, peer_state, known_position) = self.peer_anchor(session);
-
-            if known_position.is_some_and(|(_, height)| height >= tip.height) {
-                let stale_relay = self
-                    .peers
-                    .announcement_state(source)
-                    .and_then(|s| s.stale_tip_prefers_blocks)
-                    .is_some();
-                if stale_relay {
-                    let block_inv = Inventory::Block(bitcoin::BlockHash::from_byte_array(
-                        tip_hash.to_le_bytes(),
-                    ));
-                    planned.push(PlannedAnnouncement {
-                        source,
-                        message: Message::Inv(vec![block_inv]),
-                        confirms_tip: false,
-                    });
-                }
-                continue;
-            }
-
-            if let Some(announcement) =
-                self.plan_compact_push(session, peer_state, known_position, tip.height, || {
-                    self.chain_query
-                        .compact_block_for(tip.height, tip.hash, Some(COMPACT_BLOCK_VERSION))
-                        .filter(|msg| matches!(msg, Message::CmpctBlock(_)))
-                })
-            {
-                tracing::debug!(
-                    peer = ?addr,
-                    tip_height = tip.height,
-                    mode = "compact",
-                    "block announcement planned"
-                );
-                planned.push(announcement);
-                continue;
-            }
-
-            let send_headers = session.info.as_ref().is_some_and(|i| i.send_headers);
-            if send_headers {
-                if let Some((known_hash, known_height)) = known_position
-                    && known_height < tip.height
-                {
-                    let distance = tip.height - known_height;
-                    let max_announce = u32::try_from(MAX_BLOCKS_TO_ANNOUNCE).unwrap_or(u32::MAX);
-                    if distance <= max_announce {
-                        let limit = usize::try_from(distance).unwrap_or(usize::MAX);
-                        let headers = self.chain_query.headers_after(
-                            &[BlockHash::from(known_hash)],
-                            tip.hash,
-                            limit,
-                        );
-                        if !headers.is_empty()
-                            && headers.last().map(|h| h.compute_hash().into()) == Some(tip_hash)
-                        {
-                            planned.push(PlannedAnnouncement {
-                                source,
-                                message: Message::Headers(headers),
-                                confirms_tip: true,
-                            });
-                            tracing::debug!(
-                                peer = ?addr,
-                                tip_height = tip.height,
-                                mode = "headers",
-                                "block announcement planned"
-                            );
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            let reason = Self::inv_fallback_reason(send_headers, known_position, tip.height);
-            let block_inv =
-                Inventory::Block(bitcoin::BlockHash::from_byte_array(tip_hash.to_le_bytes()));
-            planned.push(PlannedAnnouncement {
-                source,
-                message: Message::Inv(vec![block_inv]),
-                confirms_tip: false,
-            });
-            tracing::debug!(
-                peer = ?addr,
-                tip_height = tip.height,
-                mode = "inv",
-                reason,
-                "block announcement planned"
-            );
-        }
-
-        planned
+        live_sessions
+            .iter()
+            .filter_map(|session| self.plan_session_announcement(session, tip, tip_hash))
+            .collect()
     }
 
     pub fn process_tip(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {

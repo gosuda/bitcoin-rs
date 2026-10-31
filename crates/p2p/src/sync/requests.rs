@@ -317,73 +317,89 @@ impl BlockSync {
         frontier: &ChainFrontier,
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
-        let (Some(chain_tip), Some(applied_tip), Some(required)) = (
-            frontier.chain_tip.as_ref(),
-            frontier.applied_tip.as_ref(),
-            frontier.next_required,
+        let Some(request) = self.plan_peer_getdata_request(
+            source,
+            allow_expired_retry_from_peer,
+            peer_best_height,
+            frontier,
+            now,
         ) else {
             return GetdataRequestOutcome::default();
         };
+        self.dispatch_getdata_request(source, &request, frontier, now)
+    }
 
-        let Some(info) = self.peer_table.info_of_source(source) else {
-            return GetdataRequestOutcome::default();
-        };
+    fn plan_peer_getdata_request(
+        &self,
+        source: PeerSource,
+        allow_expired_retry_from_peer: bool,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+        now: Instant,
+    ) -> Option<crate::download_window::PeerRequest> {
+        let chain_tip = frontier.chain_tip.as_ref()?;
+        let _applied_tip = frontier.applied_tip.as_ref()?;
+        let required = frontier.next_required?;
+
+        let info = self.peer_table.info_of_source(source)?;
         let policy = BlockDownloadPolicy {
             ibd: Arc::clone(&self.ibd),
             network: self.chain.network(),
             requested_height: required.height,
         };
         if !serves_requested_height(&info, &policy) {
-            return GetdataRequestOutcome::default();
+            return None;
         }
         let servable_floor = servable_floor(&info, &policy);
         let tree = self.chain.block_tree();
-        let request = {
-            let mut scheduler = self.scheduler.lock();
-            let SchedulerState {
-                window,
+        let mut scheduler = self.scheduler.lock();
+        let SchedulerState {
+            window,
+            stager,
+            body_unavailable,
+            ..
+        } = &mut *scheduler;
+        let is_refused = |hash| body_unavailable.refuses(source, hash, now);
+        let mut refusals = RefusalFilter::new(&is_refused);
+        if allow_expired_retry_from_peer {
+            window.next_peer_request_allowing_retry(
                 stager,
-                body_unavailable,
-                ..
-            } = &mut *scheduler;
-            let is_refused = |hash| body_unavailable.refuses(source, hash, now);
-            let mut refusals = RefusalFilter::new(&is_refused);
-            if allow_expired_retry_from_peer {
-                window.next_peer_request_allowing_retry(
-                    stager,
-                    source,
-                    chain_tip,
-                    required.height,
-                    peer_best_height,
-                    servable_floor,
-                    &tree,
-                    now,
-                    &mut refusals,
-                )
-            } else {
-                window.next_peer_request(
-                    stager,
-                    source,
-                    chain_tip,
-                    required.height,
-                    peer_best_height,
-                    servable_floor,
-                    &tree,
-                    now,
-                    &mut refusals,
-                )
-            }
-        };
-        drop(tree);
-        let Some(request) = request else {
-            return GetdataRequestOutcome::default();
-        };
-
-        let compact_fetch = self.compact_fetch_eligible(&request, frontier);
-        let inventory = if compact_fetch {
-            Self::build_compact_inventory(&request)
+                source,
+                chain_tip,
+                required.height,
+                peer_best_height,
+                servable_floor,
+                &tree,
+                now,
+                &mut refusals,
+            )
         } else {
-            Self::build_witness_inventory(&request)
+            window.next_peer_request(
+                stager,
+                source,
+                chain_tip,
+                required.height,
+                peer_best_height,
+                servable_floor,
+                &tree,
+                now,
+                &mut refusals,
+            )
+        }
+    }
+
+    fn dispatch_getdata_request(
+        &self,
+        source: PeerSource,
+        request: &crate::download_window::PeerRequest,
+        frontier: &ChainFrontier,
+        now: Instant,
+    ) -> GetdataRequestOutcome {
+        let compact_fetch = self.compact_fetch_eligible(request, frontier);
+        let inventory = if compact_fetch {
+            Self::build_compact_inventory(request)
+        } else {
+            Self::build_witness_inventory(request)
         };
         let count = inventory.len();
         let msg = Message::GetData(inventory);
@@ -392,7 +408,7 @@ impl BlockSync {
         let sent = self.peer_table.send_then(source, msg, || {
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
-            has_request_capacity = window.mark_requested(stager, &request, source, now);
+            has_request_capacity = window.mark_requested(stager, request, source, now);
         });
         if let Err(refusal) = sent {
             if refusal.is_saturated() {
@@ -420,8 +436,8 @@ impl BlockSync {
             peer_addr = ?source.endpoint,
             count,
             compact = compact_fetch,
-            applied_height = applied_tip.height,
-            chain_height = chain_tip.height,
+            applied_height = frontier.applied_tip.as_ref().map_or(0, |t| t.height),
+            chain_height = frontier.chain_tip.as_ref().map_or(0, |t| t.height),
             "block sync: sent getdata batch"
         );
         GetdataRequestOutcome {

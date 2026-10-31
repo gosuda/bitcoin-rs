@@ -4,7 +4,7 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::SchedulerState;
-use super::chain::WindowApplyDisposition;
+use super::chain::{WindowApplyDisposition, WindowCommitError};
 use bitcoin_rs_primitives::{BlockPayload, Hash256};
 use std::time::Instant;
 use std::vec::Vec;
@@ -19,6 +19,14 @@ pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize
     } else {
         base
     }
+}
+
+struct CommitWindowErrorOutcome {
+    stopped: usize,
+    failed_hash: Option<Hash256>,
+    failed_permanent: bool,
+    restore_from: usize,
+    failed_delivery: Option<(Option<crate::PeerSource>, Hash256)>,
 }
 
 impl BlockSync {
@@ -62,7 +70,6 @@ impl BlockSync {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn apply_buffered_blocks(
         &self,
         next_expected_hash: Option<Hash256>,
@@ -85,26 +92,10 @@ impl BlockSync {
             return (0, 0);
         };
         let started = Instant::now();
-        let (drained, expected_len) = self
-            .drain_cached_expected_blocks(staged_count)
-            .unwrap_or_else(|| {
-                let horizon = self.expected_apply_horizon(staged_count);
-                let cache = self.expected_block_hashes(horizon);
-                let expected_len = cache.as_ref().map_or(0, |c| c.hashes.len());
-                let mut scheduler = self.scheduler.lock();
-                let drained = match cache.as_ref() {
-                    Some(c) => scheduler.stager.drain_expected_prefix(&c.hashes),
-                    None => Vec::new(),
-                };
-                if let Some(c) = cache {
-                    scheduler.populate_expected_apply_cache(c);
-                }
-                (drained, expected_len)
-            });
+        let (mut drained, expected_len) = self.drain_blocks_for_apply(staged_count);
         let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
         let mut failed_hash = None;
         let mut failed_permanent = false;
-        let mut drained = drained;
         let mut chunk_start = 0_usize;
         while chunk_start < drained.len() {
             let chunk_end = chunk_start.saturating_add(
@@ -119,62 +110,110 @@ impl BlockSync {
                 .iter()
                 .map(super::super::block_stager::DrainedBlock::payload)
                 .collect();
-            let committed = match self.chain.commit_window(&payloads) {
-                Ok(applied) => applied,
-                Err(error) => {
-                    let stopped = error.applied.min(chunk.len());
-                    failed = failed.saturating_add(1);
-                    let blocker = chunk.get(stopped);
-                    let failed_delivery = blocker.map(|block| (block.source(), block.hash));
-                    if let Some(blocker) = blocker {
-                        failed_hash = Some(blocker.hash);
-                    }
-                    failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
-                    if error.disposition == WindowApplyDisposition::Fatal {
-                        self.note_fatal_settlement(stopped, &error.source);
-                    } else if let Some(blocker) = blocker {
-                        tracing::warn!(
-                            hash = %blocker.hash,
-                            error = %error.source,
-                            "block sync: failed to apply buffered block"
-                        );
-                    }
-                    for drained in chunk.iter().take(stopped) {
+            match self.chain.commit_window(&payloads) {
+                Ok(committed) => {
+                    for drained in chunk.iter().take(committed) {
                         applied_hashes.push(drained.hash);
                         if let Some(source) = drained.source() {
                             self.peer_table.note_useful_block(source);
                         }
                     }
-                    applied = applied.saturating_add(stopped);
-                    let restore_from =
-                        restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
-                    // All borrowed payloads/blocker references end above.
-                    // Transfer the uncommitted tail back without duplicating
-                    // its decoded witness tree while the source still lives.
+                    applied = applied.saturating_add(committed);
+                    chunk_start = chunk_end;
+                }
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    let outcome = self.handle_commit_window_error(
+                        &error,
+                        chunk,
+                        chunk_start,
+                        drained.len(),
+                        &mut applied_hashes,
+                    );
                     self.scheduler
                         .lock()
                         .stager
-                        .restore_many(drained.drain(restore_from..));
-                    if error.disposition == WindowApplyDisposition::Permanent {
+                        .restore_many(drained.drain(outcome.restore_from..));
+                    if outcome.failed_permanent {
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
-                        if let Some((source, hash)) = failed_delivery {
+                        if let Some((source, hash)) = outcome.failed_delivery {
                             self.punish_permanent_delivery_source(source, hash);
                         }
                     }
+                    applied = applied.saturating_add(outcome.stopped);
+                    failed_hash = outcome.failed_hash;
+                    failed_permanent = outcome.failed_permanent;
                     break;
                 }
-            };
-            for drained in chunk.iter().take(committed) {
-                applied_hashes.push(drained.hash);
-                if let Some(source) = drained.source() {
-                    self.peer_table.note_useful_block(source);
-                }
             }
-            applied = applied.saturating_add(committed);
-            chunk_start = chunk_end;
         }
+        self.finish_apply_buffered_blocks(&applied_hashes, failed_hash, failed_permanent, started);
+        (applied, failed)
+    }
+
+    fn drain_blocks_for_apply(&self, staged_count: usize) -> (Vec<DrainedBlock>, usize) {
+        self.drain_cached_expected_blocks(staged_count)
+            .unwrap_or_else(|| {
+                let horizon = self.expected_apply_horizon(staged_count);
+                let cache = self.expected_block_hashes(horizon);
+                let expected_len = cache.as_ref().map_or(0, |c| c.hashes.len());
+                let mut scheduler = self.scheduler.lock();
+                let drained = match cache.as_ref() {
+                    Some(c) => scheduler.stager.drain_expected_prefix(&c.hashes),
+                    None => Vec::new(),
+                };
+                if let Some(c) = cache {
+                    scheduler.populate_expected_apply_cache(c);
+                }
+                (drained, expected_len)
+            })
+    }
+    fn handle_commit_window_error(
+        &self,
+        error: &WindowCommitError,
+        chunk: &[DrainedBlock],
+        chunk_start: usize,
+        drained_len: usize,
+        applied_hashes: &mut ExpectedBlockHashes,
+    ) -> CommitWindowErrorOutcome {
+        let stopped = error.applied.min(chunk.len());
+        let blocker = chunk.get(stopped);
+        let failed_delivery = blocker.map(|block| (block.source(), block.hash));
+        let failed_hash = blocker.map(|b| b.hash);
+        let failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
+        if error.disposition == WindowApplyDisposition::Fatal {
+            self.note_fatal_settlement(stopped, &error.source);
+        } else if let Some(blocker) = blocker {
+            tracing::warn!(
+                hash = %blocker.hash,
+                error = %error.source,
+                "block sync: failed to apply buffered block"
+            );
+        }
+        for drained in chunk.iter().take(stopped) {
+            applied_hashes.push(drained.hash);
+            if let Some(source) = drained.source() {
+                self.peer_table.note_useful_block(source);
+            }
+        }
+        let restore_from = restore_split(chunk_start, stopped, chunk.len()).min(drained_len);
+        CommitWindowErrorOutcome {
+            stopped,
+            failed_hash,
+            failed_permanent,
+            restore_from,
+            failed_delivery,
+        }
+    }
+    fn finish_apply_buffered_blocks(
+        &self,
+        applied_hashes: &[Hash256],
+        failed_hash: Option<Hash256>,
+        failed_permanent: bool,
+        started: Instant,
+    ) {
         if !applied_hashes.is_empty() || failed_hash.is_some() {
             if let Some(hash) = failed_hash.filter(|_| !failed_permanent) {
                 let failed_height = {
@@ -187,11 +226,10 @@ impl BlockSync {
                     Instant::now(),
                 );
             }
-            self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
+            self.advance_expected_apply_cache(applied_hashes, failed_hash.is_some());
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")
                 .record(started.elapsed().as_secs_f64());
         }
-        (applied, failed)
     }
 
     /// Horizon for an apply-cache repopulation: the larger of `staged_count`

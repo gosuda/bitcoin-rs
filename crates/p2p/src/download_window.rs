@@ -1126,26 +1126,7 @@ impl DownloadWindow {
         let mut expired = self.expire_pending(now);
         expired.sort_by_key(|entry| entry.height);
 
-        let owned = self.pending_count_for(source);
-        let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
-        let block_capacity = self
-            .budget
-            .max_pending_blocks
-            .saturating_sub(self.pending.len())
-            .min(self.staged_count_headroom(stager, 0));
-        let mut byte_capacity = self
-            .budget
-            .max_pending_bytes
-            .saturating_sub(self.pending_bytes)
-            .min(self.staged_byte_headroom(stager));
-        let batch_limit = self
-            .budget
-            .getdata_batch_limit
-            .min(peer_capacity)
-            .min(block_capacity);
-        if batch_limit == 0 || byte_capacity < self.ewma_block_bytes {
-            return None;
-        }
+        let (batch_limit, mut byte_capacity) = self.compute_request_capacity(stager, source)?;
 
         let mut entries = self.expired_request_entries(
             stager,
@@ -1157,22 +1138,7 @@ impl DownloadWindow {
         );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
-        if request_start_height < self.next_request_height
-            && tree
-                .node_at_height_from(chain_tip.tip_id, request_start_height)
-                .and_then(|id| tree.node(id).ok())
-                .is_some_and(|node| {
-                    !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
-                })
-        {
-            let previous_height = self.next_request_height;
-            self.next_request_height = request_start_height;
-            tracing::debug!(
-                previous_height,
-                request_start_height,
-                "block sync: rewound unowned request frontier"
-            );
-        }
+        self.maybe_rewind_request_frontier(request_start_height, chain_tip, stager, tree);
         let height = request_start_height
             .max(self.next_request_height)
             .max(servable_floor);
@@ -1211,6 +1177,59 @@ impl DownloadWindow {
                 .max(self.next_request_height);
         }
         non_empty_request(source, entries, next_request_height)
+    }
+    fn compute_request_capacity(
+        &self,
+        stager: &BlockStager,
+        source: PeerSource,
+    ) -> Option<(usize, usize)> {
+        let owned = self.pending_count_for(source);
+        let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
+        let block_capacity = self
+            .budget
+            .max_pending_blocks
+            .saturating_sub(self.pending.len())
+            .min(self.staged_count_headroom(stager, 0));
+        let byte_capacity = self
+            .budget
+            .max_pending_bytes
+            .saturating_sub(self.pending_bytes)
+            .min(self.staged_byte_headroom(stager));
+        let batch_limit = self
+            .budget
+            .getdata_batch_limit
+            .min(peer_capacity)
+            .min(block_capacity);
+        if batch_limit == 0 || byte_capacity < self.ewma_block_bytes {
+            None
+        } else {
+            Some((batch_limit, byte_capacity))
+        }
+    }
+
+    fn maybe_rewind_request_frontier(
+        &mut self,
+        request_start_height: u32,
+        chain_tip: &TipSnapshot,
+        stager: &BlockStager,
+        tree: &BlockTree,
+    ) {
+        if request_start_height < self.next_request_height
+            && tree
+                .node_at_height_from(chain_tip.tip_id, request_start_height)
+                .and_then(|id| tree.node(id).ok())
+                .is_some_and(|node| {
+                    !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
+                })
+        {
+            let previous_height = self.next_request_height;
+            self.next_request_height = request_start_height;
+            tracing::debug!(
+                previous_height,
+                request_start_height,
+                "block sync: rewound unowned request frontier"
+            );
+        }
     }
 
     pub(crate) fn retarget_request_branch(
