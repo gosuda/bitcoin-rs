@@ -220,15 +220,14 @@ fn non_regular_epoch_lock_refuses_start() -> Result<(), TestError> {
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
 
-    let Err(error) = NodeState::open(config, None) else {
+    let Err(crate::NodeOpenError::DataDir(
+        bitcoin_rs_chainstate::events::DataDirError::LockNotRegularFile,
+    )) = NodeState::open(config, None)
+    else {
         return Err(TestError::message(
             "a non-regular epoch lock must refuse startup",
         ));
     };
-    assert!(
-        error.to_string().contains("not a regular file"),
-        "the refusal names the lock type: {error:#}"
-    );
     assert_eq!(
         std::fs::read_to_string(data_dir.join("process-epoch"))?,
         "7\n",

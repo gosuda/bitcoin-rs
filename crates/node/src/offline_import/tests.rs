@@ -492,5 +492,8 @@ fn manifest_read_refuses_oversized_input_without_buffering_it() {
     std::fs::write(&path, [b' '; 17]).expect("manifest");
     assert_eq!(read_bounded(&path, 17).expect("at bound").len(), 17);
     let error = read_bounded(&path, 16).expect_err("oversized manifest");
-    assert!(error.to_string().contains("byte bound"), "{error}");
+    assert!(
+        matches!(error, OfflineImportError::ManifestExceedsBound),
+        "{error:?}"
+    );
 }

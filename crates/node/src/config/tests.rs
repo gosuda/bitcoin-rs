@@ -2,7 +2,7 @@ use crate::test_support::TestError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use super::{Auth, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
+use super::{Auth, ConfigError, NetworkSelection, NodeConfig, ScriptIndexMode, ValidationEngine};
 use crate::options::{
     ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
     ValidationOverrides,
@@ -43,7 +43,10 @@ fn pool_requires_compiled_feature() {
         Ok(config) => {
             panic!("pool configuration must be refused without the pool build feature: {config:?}")
         }
-        Err(error) => assert!(error.to_string().contains("pool build feature"), "{error}"),
+        Err(error) => assert!(
+            matches!(error, ConfigError::PoolFeatureRequired),
+            "{error:?}"
+        ),
     }
 }
 
@@ -650,8 +653,8 @@ fn privacy_routes_with_default_dns_seeds_are_rejected() {
             panic!("a privacy route with default DNS seeds must fail validation");
         };
         assert!(
-            error.to_string().contains("--dns-seeds-enabled=false"),
-            "{error}"
+            matches!(error, ConfigError::PrivacyRequiresDnsOff),
+            "{error:?}"
         );
     }
 }
@@ -787,8 +790,8 @@ fn rpc_rejects_missing_or_public_credentials() {
         panic!("a non-loopback bind without credentials must fail validation");
     };
     assert!(
-        error.to_string().contains("non-loopback RPC bind"),
-        "{error}"
+        matches!(error, ConfigError::RpcNonLoopbackNeedsAuth),
+        "{error:?}"
     );
 
     let user_without_password = UserConfig {
@@ -801,10 +804,7 @@ fn rpc_rejects_missing_or_public_credentials() {
     let Err(error) = super::resolve(&[&user_without_password]) else {
         panic!("a user without a password must fail validation");
     };
-    assert!(
-        error.to_string().contains("nonempty username and password"),
-        "{error}"
-    );
+    assert!(matches!(error, ConfigError::RpcBasicAuthEmpty), "{error:?}");
 
     let legacy_password = UserConfig {
         rpc: RpcOverrides {
@@ -818,8 +818,8 @@ fn rpc_rejects_missing_or_public_credentials() {
         panic!("the legacy public password must fail validation");
     };
     assert!(
-        error.to_string().contains("publicly known legacy default"),
-        "{error}"
+        matches!(error, ConfigError::RpcPasswordDefault),
+        "{error:?}"
     );
 
     let explicit_password = UserConfig {
@@ -1114,8 +1114,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a non-mainnet magic override must fail validation");
     };
     assert!(
-        error.to_string().contains("require --network mainnet"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresMainnet),
+        "{error:?}"
     );
 
     let without_connect = UserConfig {
@@ -1130,8 +1130,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a magic override without a connect peer must fail validation");
     };
     assert!(
-        error.to_string().contains("at least one --connect peer"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresConnect),
+        "{error:?}"
     );
 
     let with_dns_seeds = UserConfig {
@@ -1146,10 +1146,8 @@ fn p2p_magic_override_is_cross_field_validated() {
         panic!("a magic override with dns seeds on must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("require --dns-seeds-enabled=false"),
-        "{error}"
+        matches!(error, ConfigError::MagicRequiresDnsOff),
+        "{error:?}"
     );
 
     let valid = UserConfig {
@@ -1178,10 +1176,8 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
         panic!("retention below rotation must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("max_journal_mib must be >= rotate_mib"),
-        "{error}"
+        matches!(error, ConfigError::JournalMaxJournalMib),
+        "{error:?}"
     );
 
     let inverted_lag = UserConfig {
@@ -1196,10 +1192,8 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
         panic!("a lag bound below the batch size must fail validation");
     };
     assert!(
-        error
-            .to_string()
-            .contains("max_lag_blocks must be >= blocks"),
-        "{error}"
+        matches!(error, ConfigError::JournalMaxLagBlocks),
+        "{error:?}"
     );
 
     let zero_period = UserConfig {
@@ -1212,10 +1206,7 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     let Err(error) = super::resolve(&[&zero_period]) else {
         panic!("a non-positive period must fail validation");
     };
-    assert!(
-        error.to_string().contains("seconds must be positive"),
-        "{error}"
-    );
+    assert!(matches!(error, ConfigError::JournalSeconds), "{error:?}");
 }
 
 #[test]

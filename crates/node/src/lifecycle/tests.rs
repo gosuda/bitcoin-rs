@@ -505,7 +505,10 @@ fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> Result<(
             "teardown with panicked metrics succeeded",
         ));
     };
-    assert!(error.to_string().contains("metrics scrape thread panicked"));
+    assert!(
+        matches!(error, RunError::MetricsScrapeThreadPanicked),
+        "{error:?}"
+    );
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
     assert!(bootstrap_drain_was_reached());
     assert_eq!(std::fs::read(&current)?, previous);

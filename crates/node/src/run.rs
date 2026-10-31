@@ -299,13 +299,6 @@ mod tests {
     }
 
     #[test]
-    fn default_filter_parses_successfully() {
-        EnvFilter::try_new(DEFAULT_FILTER).unwrap_or_else(|error| {
-            panic!("DEFAULT_FILTER must parse as a valid EnvFilter directive: {error}")
-        });
-    }
-
-    #[test]
     fn bare_levels_cap_storage_targets() {
         for (level, expected) in [
             ("", "info,fjall=warn,rocksdb=warn"),

@@ -64,7 +64,10 @@ fn public_listener_bind_validation_handles_wildcards_and_ephemeral_ports() -> Re
         let result = config.validate();
         assert_eq!(result.is_ok(), valid, "{management}, {public}: {result:?}");
         if let Err(error) = result {
-            assert!(error.to_string().contains("must not overlap"), "{error}");
+            assert!(
+                matches!(error, bitcoin_rs_node::ConfigError::RpcBindOverlap),
+                "{error:?}"
+            );
         }
     }
     let management = std::net::TcpListener::bind("0.0.0.0:0")?;
@@ -159,9 +162,10 @@ fn silent_payments_toml_overlay_preserves_explicit_disable() -> Result<()> {
     if cfg!(feature = "silent-payments") {
         assert!(result?.rpc.silent_payments);
     } else {
-        assert!(
-            result.is_err_and(|error| error.to_string().contains("silent-payments build feature"))
-        );
+        assert!(result.is_err_and(|error| matches!(
+            error,
+            bitcoin_rs_node::ConfigError::SilentPaymentsFeatureRequired
+        )));
     }
     Ok(())
 }
@@ -267,7 +271,10 @@ fn p2p_magic_override_requires_explicit_peer_and_disabled_seeds() {
         Ok(_) => panic!("magic overrides need a peer"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains("at least one --connect peer"));
+    assert!(
+        matches!(error, bitcoin_rs_node::ConfigError::MagicRequiresConnect),
+        "{error:?}"
+    );
 }
 
 #[test]
