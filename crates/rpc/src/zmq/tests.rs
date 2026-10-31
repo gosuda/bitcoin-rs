@@ -25,20 +25,17 @@ fn rejects_zero_zmq_hwm_before_socket_binding() {
     let Err(error) = validate_endpoint_configs(std::slice::from_ref(&config)) else {
         panic!("zero HWM must fail configuration validation");
     };
-    assert!(
-        error.to_string().contains("ZMQ HWM must be positive"),
-        "{error}"
-    );
+    assert!(matches!(error, ZmqConfigError::NonPositiveHwm));
 
     #[cfg(feature = "zmq")]
     {
         let Err(error) = SocketZmqPublisher::bind(&[config]) else {
             panic!("zero HWM must also fail socket binding");
         };
-        assert!(
-            error.to_string().contains("ZMQ HWM must be positive"),
-            "{error}"
-        );
+        assert!(matches!(
+            error,
+            ZmqBindError::Config(ZmqConfigError::NonPositiveHwm)
+        ));
     }
 }
 

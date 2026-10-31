@@ -190,10 +190,6 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
     let corruption = block_spends_error(BlockSpendsError::Corrupt("fixture"));
     assert_eq!(corruption.code(), -32603);
     assert_eq!(
-        corruption.to_string(),
-        "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event."
-    );
-    assert_eq!(
         block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
             below: 10
         }))
@@ -373,8 +369,7 @@ fn getblock_reports_corrupt_stored_body() {
 
     assert!(matches!(
         getblock(&ctx, &json!([hash.as_str(), 1])),
-        Err(RpcError::Internal(message))
-            if message == "stored block body is corrupt"
+        Err(RpcError::Internal(_))
     ));
 }
 

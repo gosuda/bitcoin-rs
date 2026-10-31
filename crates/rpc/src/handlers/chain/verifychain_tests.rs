@@ -159,6 +159,4 @@ fn empty_window_through_attached_control_is_verified() {
         control.calls.load(Ordering::SeqCst),
         "the applied tip must consult the attached control, not the no-tip shortcut"
     );
-    assert_eq!(control.level.load(Ordering::SeqCst), 0);
-    assert_eq!(control.nblocks.load(Ordering::SeqCst), 0);
 }

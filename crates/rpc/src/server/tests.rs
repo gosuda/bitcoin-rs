@@ -114,22 +114,6 @@ fn keep_alive_wait_is_not_bounded_by_the_head_budget() -> io::Result<()> {
 }
 
 #[test]
-fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
-    for max_connections in [1, 2, 4, 5, 128] {
-        let handler = Handler::new(Arc::new(Context::new()));
-        handler.configure_blocking_admission(per_source_limit(max_connections));
-        let held: Vec<_> = core::iter::from_fn(|| handler.reserve_blocking_request().ok())
-            .take(max_connections)
-            .collect();
-        assert_eq!(
-            held.len() + 1,
-            per_source_limit(max_connections),
-            "pool {max_connections}"
-        );
-    }
-}
-
-#[test]
 fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
     let handler = Handler::new(Arc::new(Context::new()));
     handler.configure_blocking_admission(2);

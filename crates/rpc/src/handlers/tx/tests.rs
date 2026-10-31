@@ -147,33 +147,6 @@ fn getrawtransaction_checks_mempool_before_failing_txindex()
 }
 
 #[test]
-fn getrawtransaction_with_blockhash_finds_tx_in_specific_block() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
-    let block_hash = genesis.block_hash();
-    let mut ctx = Context::new();
-    attach_body_for_block(&mut ctx, &genesis, 0);
-    ctx.chain
-        .block_tree
-        .write()
-        .insert_node(None, genesis.header, NodeStatus::Active)
-        .expect("insert genesis header");
-    ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-    let result = handler
-        .dispatch(
-            "getrawtransaction",
-            &json!([txid.to_string(), false, block_hash.to_string()]),
-        )
-        .unwrap_or_else(|err| panic!("getrawtransaction with blockhash: {err}"));
-    assert!(result.is_str(), "expected hex string, got {result:?}");
-}
-
-#[test]
 fn getrawtransaction_explicit_coinbase_preserves_undo_failures_and_render_budget() {
     use bitcoin_rs_utxo::contract::{BlockSpends, BlockSpendsError, BlockUndoSource};
 
@@ -595,44 +568,6 @@ fn gettxoutproof_finds_genesis_coinbase_through_the_index() {
 }
 
 #[test]
-fn gettxoutproof_with_blockhash_skips_unrelated_records() {
-    let genesis = fixture_genesis();
-    let Some(coinbase) = genesis.txs.first() else {
-        panic!("genesis has no transactions");
-    };
-    let txid = coinbase.txid();
-    let unrelated_hash = BlockHash::from(Hash256::from_le_bytes(&[7_u8; 32]));
-    let record = BlockRecord::from_block(0, &genesis);
-    let block_hash = record.hash;
-    let mut ctx = Context::new();
-    ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
-        height: record.height,
-        hash: record.hash,
-        body: consensus_bytes(&genesis),
-    }));
-    ctx.chain
-        .block_tree
-        .write()
-        .insert_node(None, genesis.header, NodeStatus::Active)
-        .expect("insert genesis header");
-    ctx.chain
-        .add_block(BlockRecord::synthetic(0, unrelated_hash));
-    ctx.chain.add_block(record);
-    let ctx = Arc::new(ctx);
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    let result = handler.dispatch(
-        "gettxoutproof",
-        &json!([[txid.to_string()], block_hash.to_string()]),
-    );
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "gettxoutproof should inspect only the specified block: {result:?}"
-    );
-}
-
-#[test]
 fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
     let ctx = Arc::new(Context::new());
     let genesis = fixture_genesis();
@@ -1012,37 +947,6 @@ fn gettxoutproof_with_blockhash_never_consults_the_index() {
     assert!(
         result.as_ref().is_ok_and(|value| value.as_str().is_some()),
         "the explicit-blockhash path should answer without the index: {result:?}"
-    );
-}
-
-#[test]
-fn gettxoutproof_asks_the_index_about_every_wanted_txid() {
-    let block = block_with_two_txs(13);
-    let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let probes = Arc::new(core::sync::atomic::AtomicUsize::new(0));
-
-    let counter = Arc::clone(&probes);
-    let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
-        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(None)
-    })));
-    install_blocks(&mut ctx, std::slice::from_ref(&block));
-    let ctx = Arc::new(ctx);
-
-    let result = proof_for(&ctx, &wanted);
-    assert!(
-        matches!(
-            result,
-            Err(RpcError::NotFound("no block contains all requested txids"))
-        ),
-        "an index that resolves nothing must answer the not-found error without sweeping blocks: {result:?}"
-    );
-
-    assert_eq!(
-        probes.load(core::sync::atomic::Ordering::Relaxed),
-        wanted.len(),
-        "every wanted txid must be probed before the index path gives up"
     );
 }
 

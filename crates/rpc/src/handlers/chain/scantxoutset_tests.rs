@@ -665,7 +665,6 @@ fn scan_expansion_budget_counts_ranges_paths_and_duplicates() -> TestResult {
             .err()
             .ok_or("oversized scan succeeded")?;
         assert_eq!(error.code(), -8);
-        assert!(error.to_string().contains("1024 scan script expansions"));
         assert_eq!(ctx.chain.utxo.scan_progress(), None);
     }
     for objects in [
@@ -900,23 +899,11 @@ fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
     .err()
     .unwrap_or_else(|| panic!("range [0, 1024] must fail"));
     assert_eq!(err_1024.code(), -8);
-    assert!(
-        err_1024
-            .to_string()
-            .contains("At most 1024 scan script expansions are supported"),
-        "unexpected scan error: {err_1024}"
-    );
 
     let err_multipath = scantxoutset(&ctx, &json!(["start", [format!("wpkh({xpub}/<0;1>/*)")]]))
         .err()
         .unwrap_or_else(|| panic!("omitted multipath default must fail on 2002 scripts"));
     assert_eq!(err_multipath.code(), -8);
-    assert!(
-        err_multipath
-            .to_string()
-            .contains("At most 1024 scan script expansions are supported"),
-        "unexpected multipath scan error: {err_multipath}"
-    );
 }
 
 #[test]

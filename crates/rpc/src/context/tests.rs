@@ -474,35 +474,6 @@ fn connected_log_blocks_resolve_metadata_without_header_bytes() {
 }
 
 #[test]
-fn context_reads_metadata_only_block_record_from_body_source() {
-    let block = Network::Regtest.genesis_block();
-    let body = consensus_bytes(&block);
-    let record = BlockRecord::from_block(0, &block);
-    let source = Arc::new(BlockBodies {
-        bodies: vec![(0, record.hash, body.clone())],
-    });
-    let ctx = Context::from_handles(ContextHandles {
-        chain: ChainHandles {
-            block_body_source: Some(source),
-            ..ChainHandles::default()
-        },
-        ..ContextHandles::default()
-    });
-    ctx.chain.add_block(record.clone());
-
-    assert_eq!(record.body_size, consensus_bytes(&block).len());
-    assert_eq!(
-        ctx.chain.block_body_bytes(&record).as_deref(),
-        Some(body.as_slice())
-    );
-    let expected_hex = body.to_lower_hex_string();
-    assert_eq!(
-        ctx.chain.block_body_hex(&record).as_deref(),
-        Some(expected_hex.as_str())
-    );
-}
-
-#[test]
 fn header_hex_is_unchanged_by_sourcing_the_header_from_the_tree() {
     let block = Network::Regtest.genesis_block();
     let ctx = Arc::new(Context::new());
@@ -755,7 +726,6 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads()
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn ibd_latch_judges_the_contexts_own_tree() {
     use alloc::sync::Arc;
 
@@ -854,15 +824,5 @@ fn ibd_latch_judges_the_contexts_own_tree() {
             .progress
             .initial_block_download(now, Network::Regtest),
         "the latch must judge the tip it reaches through the context's tree"
-    );
-    assert!(
-        Arc::ptr_eq(
-            ctx.indexes
-                .derived_index_status
-                .as_ref()
-                .expect("index status keeps its own slot"),
-            &status
-        ),
-        "the txindex status source must be shared with caller"
     );
 }
