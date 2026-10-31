@@ -12,7 +12,6 @@ pub mod portable;
 pub mod query_api;
 pub mod reconcile;
 pub mod runtime;
-/// Experimental, keyless BIP352 public scan material (no durable index or HTTP routes).
 #[cfg(feature = "silent-payments")]
 pub mod silent_payments;
 pub mod types;

@@ -1,5 +1,3 @@
-//! Big-endian key-order vs numeric-height-order contract tests.
-
 use crate::support::{TestError, common};
 
 use std::sync::Arc;

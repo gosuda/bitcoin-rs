@@ -1,5 +1,3 @@
-//! Recovery-contract tests for the txindex worker (`docs/contracts/recovery.md`).
-
 use crate::reconcile::{ReconcileLeg, ReconcilePhase};
 use arc_swap::ArcSwapOption;
 
@@ -833,8 +831,6 @@ fn run_loop_commits_a_retained_prefix_and_retries_an_absent_body_without_a_wake(
     run.join().expect("worker thread").expect("worker run");
 }
 
-/// record resets only `ScriptLive`, which reseeds at the tip while its
-/// siblings keep their rows and finish from bodies alone.
 #[test]
 fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     #[derive(Clone, Copy)]

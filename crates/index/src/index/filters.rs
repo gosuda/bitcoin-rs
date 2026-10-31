@@ -1,10 +1,7 @@
-//! BIP158 basic filters and their BIP157 commitments, owned by the derived index.
-
 use super::{IndexError, SpentCoinScripts};
 use bitcoin_rs_primitives::{encode, layout::ParsedBlock};
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot};
 
-/// Additive namespace in the index metadata table; no backend table, reset scans only this prefix.
 pub(super) const PREFIX: &[u8] = &[1, b'F'];
 
 pub(super) fn key(hash: &[u8; 32]) -> [u8; 34] {
@@ -14,14 +11,10 @@ pub(super) fn key(hash: &[u8; 32]) -> [u8; 34] {
     key
 }
 
-/// One serialized basic filter and its double-SHA256 commitments (wire byte order).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BasicFilter {
-    /// BIP158 `CompactSize` element count followed by Golomb-Rice coded deltas.
     pub filter: Vec<u8>,
-    /// Double SHA256 of `filter`.
     pub hash: [u8; 32],
-    /// Double SHA256 of `hash || previous_header`.
     pub header: [u8; 32],
 }
 
@@ -72,12 +65,6 @@ pub(super) fn read(
         .transpose()
 }
 
-/// Resolves inputs from earlier transactions in this block before consulting the
-/// authoritative undo source.
-///
-/// A missing external prevout fails closed. Empty and `OP_RETURN` outputs are excluded,
-/// but no UTXO admission rule applies: oversized scripts and genesis stay in the
-/// filter.
 pub(super) fn build(
     parsed: &ParsedBlock<'_>,
     height: u32,
@@ -143,7 +130,10 @@ pub(super) fn build(
 }
 
 #[cfg(test)]
-#[expect(clippy::expect_used, reason = "test fixture construction failures abort")]
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture construction failures abort"
+)]
 mod tests {
     use super::*;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};

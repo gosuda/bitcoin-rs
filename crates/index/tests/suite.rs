@@ -1,5 +1,3 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
 mod be_order;
 mod compact_filters;
 mod index_roundtrip;

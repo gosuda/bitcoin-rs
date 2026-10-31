@@ -1,5 +1,3 @@
-//! One snapshot gate for transaction, history, and live-view queries.
-
 use super::{
     Arc, AtPrefix, Block, BlockBodySource, BlockTree, DerivedIndexInfo, DerivedIndexQuery,
     DerivedIndexRuntime, Hash256, HistoricalQueryError, IndexCapabilities, IndexCapability,
@@ -60,10 +58,6 @@ impl QueryBudget {
         })
     }
 
-    /// Charges one page scan without refusing an incomplete page.
-    ///
-    /// Pagination continues from the last returned row, so a truncated scan is
-    /// progress, not an unprovable answer.
     pub(super) fn accept_page_scan(
         &mut self,
         scan: TxIndexScan,
@@ -176,7 +170,6 @@ pub(crate) struct CapabilityFloors {
 }
 
 impl CapabilityFloors {
-    /// floor. It reseeds from an immutable artifact or retained history, so it stores nothing.
     pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup = floor,
@@ -188,7 +181,6 @@ impl CapabilityFloors {
 
 pub(super) const HISTORICAL_ANCESTRY_BUDGET: usize = 256;
 
-/// above-anchor/below-floor skip, pruned-prefix refusals on positive floors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PrefixBound {
     ExactTip,

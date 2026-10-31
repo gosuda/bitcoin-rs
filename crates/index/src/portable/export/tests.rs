@@ -87,7 +87,6 @@ fn undurable_manifest_removal_keeps_the_artifact_it_names() -> TestResult {
     Ok(())
 }
 
-/// stored-key order with no overlap, gap, or repeat.
 #[test]
 fn paged_stream_preserves_row_order_across_small_pages() {
     let fake = PagedFake::new(25);

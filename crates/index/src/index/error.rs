@@ -1,5 +1,3 @@
-//! Typed failures shared by index reads, preparation, and durable writes.
-
 use super::capability::IndexWatermark;
 use bitcoin_rs_storage::StorageError;
 use thiserror::Error;
@@ -51,7 +49,6 @@ pub enum IndexError {
     MissingSpentScripts,
     #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
     MissingSpentCoin {
-        /// Spent transaction id (little-endian bytes).
         txid: [u8; 32],
         vout: u32,
         height: u32,
@@ -74,7 +71,6 @@ pub enum IndexError {
     StateRevisionOverflow,
     #[error("TxIndex state changed; discard derived state and re-derive")]
     StaleIndexState,
-    /// Shutdown was requested mid-stream; the caller keeps its bundle for retry.
     #[error("operation cancelled")]
     Cancelled,
 }

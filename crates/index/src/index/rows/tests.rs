@@ -62,12 +62,6 @@ fn positioned_histories() -> Vec<PositionedHistory> {
     ]
 }
 
-/// Byte contract (`docs/benchmarks/scriptindex-format.md` § Logical vs physical
-/// bytes): `tx_lookup` 42 = 24 prefix + 18 pos; `script_history` 279 = 24
-/// funding keys + 3 x 71-byte occurrences + 24 spending keys + 18-byte
-/// positions; headers 80; `script_live` 86; filters 101.
-///
-/// Family total equals `encoded_bytes`; physical put bytes match the family total.
 #[test]
 fn family_bytes_accounting() -> Result<(), IndexError> {
     let outpoint1 = OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0);

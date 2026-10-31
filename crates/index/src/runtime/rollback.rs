@@ -1,5 +1,3 @@
-//! Capability rollback, selective rebuilding, live seeding, and recovery evidence.
-
 use super::DerivedIndexWorkerError;
 use super::PendingForward;
 use super::ReconcileAction;
@@ -236,8 +234,6 @@ impl Worker {
             .map_err(DerivedIndexWorkerError::Index)
     }
 
-    /// Publishes the index-ahead rollback evidence for a watermark above the
-    /// applied tip. The marker is part of the rollback transition: a data dir
     pub(super) fn report_index_ahead(
         &self,
         capabilities: IndexCapabilities,
@@ -336,8 +332,6 @@ impl Worker {
         Ok(prev)
     }
 
-    /// INVARIANT: permanence comes from the grant. The worker never compares a
-    /// height against a copied prune frontier to decide it.
     pub(super) fn load_body(
         &self,
         height: u32,

@@ -1,5 +1,3 @@
-//! Worker lifecycle, supervisor shutdown, and open abandonment unit tests.
-
 #![expect(
     clippy::expect_used,
     reason = "test: supervisor tests use expect for clarity"

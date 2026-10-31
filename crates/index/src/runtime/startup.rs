@@ -1,5 +1,3 @@
-//! Supervised index backend opening, failure publication, and worker handoff.
-
 use super::DerivedIndexLifecycle;
 use super::DerivedIndexOpenSpec;
 use super::DerivedIndexQueryEngine;
@@ -32,7 +30,6 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// row family changed, so no in-place upgrade path exists. Cursorless legacy
 fn open_writer<S>(store: &Arc<S>, generation: u64) -> Result<IndexWriter<S>, IndexError>
 where
     S: bitcoin_rs_storage::KvStore,

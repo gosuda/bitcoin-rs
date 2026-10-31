@@ -1,4 +1,3 @@
-//! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
 use crate::support::{TestError, common};
 
 use common::MemoryStore;
@@ -33,8 +32,6 @@ use bitcoin_rs_storage::{
 
 const RESET_KEY: &[u8] = &[0x00, b'R'];
 
-/// Answers every spent outpoint, so test blocks prepared with `ScriptHistory`
-/// never rely on a real UTXO set.
 struct FixtureScripts;
 
 static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
@@ -126,7 +123,6 @@ fn is_idle_marker(bytes: &[u8]) -> bool {
     bytes.len() == idle_bytes(0).len() && bytes[0] == 0xFF
 }
 
-/// Decodes a little-endian `u64` from `bytes` at `offset`, returning `None`
 fn decode_u64_le(bytes: &[u8], offset: usize) -> Option<u64> {
     let mut arr = [0u8; 8];
     arr.copy_from_slice(bytes.get(offset..offset + 8)?);
@@ -412,9 +408,6 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
 
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> {
-    // Oracle: rust-bitcoin parses the same body independently of the index
-    // layout parser. Funding outputs (non-OP_RETURN) and non-coinbase inputs
-    // bound the occurrence counts the writer must produce.
     for height in [0_u32, 170, 481_824] {
         let store = std::sync::Arc::new(MemoryStore::default());
         let mut writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
@@ -436,15 +429,12 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> 
                 );
                 scripts.insert(output.script_pubkey.as_bytes().to_vec());
             }
-            // One occurrence per (script, transaction): repeated outputs that pay
-            // the same script merge.
             funding_scripts += scripts.len();
             spending_inputs += tx.inputs.len();
             if !tx.is_coinbase() {
                 spending_transactions += 1;
             }
         }
-        // The coinbase input is not a spend.
         spending_inputs = spending_inputs.saturating_sub(1);
         let funding_prefixes = u64::try_from(funding_prefixes.len())?;
 
@@ -486,7 +476,6 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), TestError> 
     Ok(())
 }
 
-/// Counts decoded occurrence flags across the Funding family.
 fn occurrence_flags(store: &MemoryStore) -> (usize, usize) {
     let mut funding = 0;
     let mut spending = 0;
@@ -2250,7 +2239,6 @@ fn populated_idle_tracking_store() -> Result<Arc<CallTrackingStore>, TestError> 
     Ok(store)
 }
 
-/// zero but stays byte-distinct from an encoded zero.
 fn stored_state_revision(
     store: &CallTrackingStore,
 ) -> Result<Option<u64>, TestError> {
@@ -2270,7 +2258,6 @@ fn stored_state_revision(
     }
 }
 
-/// one little-endian `u64`.
 fn assert_state_revision(
     store: &CallTrackingStore,
     expected: Option<u64>,
@@ -2582,7 +2569,6 @@ fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
     Ok(())
 }
 
-/// revision may wrap, and the store must be byte-identical afterwards.
 #[test]
 fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), TestError> {
     for version_overflow in [true, false] {

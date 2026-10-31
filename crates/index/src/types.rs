@@ -4,14 +4,11 @@ use sha2::{Digest as _, Sha256};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub(crate) const HASH_PREFIX_LEN: usize = 8;
-/// Number of bytes used for big-endian block heights in index rows.
-/// Big-endian makes lexicographic KV order match numeric height order within
 pub(crate) const HEIGHT_SIZE: usize = 4;
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 pub const HEADER_ROW_SIZE: usize = bitcoin_rs_primitives::Header::LEN;
 pub const U24_MAX: u32 = 0x00FF_FFFF;
 
-/// Encodes a block height so lexicographic byte order matches numeric order.
 #[must_use]
 pub(crate) const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
     height.to_be_bytes()
@@ -31,13 +28,11 @@ const fn decode_u24_le(bytes: [u8; 3]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
 }
 
-/// Encodes a script-history height so lexicographic order is newest first.
 #[must_use]
 pub(crate) const fn encode_history_height(height: u32) -> [u8; HEIGHT_SIZE] {
     (!height).to_be_bytes()
 }
 
-/// Decodes a newest-first script-history height.
 #[must_use]
 pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     !u32::from_be_bytes(bytes)
@@ -45,7 +40,6 @@ pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
 
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
-/// A stable electrs hash-prefix row: eight prefix bytes followed by a big-endian height.
 #[derive(
     Copy,
     Clone,
@@ -65,12 +59,10 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 #[repr(C)]
 pub struct HashPrefixRow {
     pub prefix: HashPrefix,
-    /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
 }
 
 impl HashPrefixRow {
-    /// Creates a row from its prefix and native-endian height.
     pub const fn new(prefix: HashPrefix, height: u32) -> Self {
         Self {
             prefix,
@@ -78,7 +70,6 @@ impl HashPrefixRow {
         }
     }
 
-    /// Returns the native-endian block height.
     pub const fn height(self) -> u32 {
         decode_height(self.height)
     }
@@ -193,11 +184,8 @@ impl TxidRow {
     }
 }
 
-/// Byte width of one live script-index row key: `scan-prefix || txid || vout_u24`.
 pub(crate) const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
-/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian) ||
-/// vout(3, little-endian u24)` -- and the value is empty. This is the full-outpoint
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptLiveRow {
@@ -232,10 +220,8 @@ impl ScriptLiveRow {
     }
 }
 
-/// Serialized byte length of one [`TxPosition`].
 pub const TX_POSITION_SIZE: usize = 6;
 
-/// Both fields are little-endian byte arrays rather than `u32` so the type has
 #[derive(
     Copy,
     Clone,
@@ -256,8 +242,6 @@ pub struct TxPosition {
     len: [u8; 3],
 }
 
-/// Deriving `Ord` would compare the little-endian byte arrays lexicographically,
-/// least-significant byte first — offset 256 would sort before offset 1. The
 impl Ord for TxPosition {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.offset()
@@ -273,7 +257,6 @@ impl PartialOrd for TxPosition {
 }
 
 impl TxPosition {
-    /// Creates a position from a native-endian offset and length.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
         assert!(
@@ -286,13 +269,11 @@ impl TxPosition {
         }
     }
 
-    /// Returns the native-endian byte offset within the serialized block.
     #[must_use]
     pub const fn offset(self) -> u32 {
         decode_u24_le(self.offset)
     }
 
-    /// Returns the native-endian serialized transaction length.
     #[must_use]
     pub const fn byte_len(self) -> u32 {
         decode_u24_le(self.len)
@@ -304,11 +285,8 @@ impl TxPosition {
     }
 }
 
-/// the query engine and the portable bundle framing apply [`positions_are_valid`],
-/// so a row the writer admits is never corrupt to an exporter.
 pub(crate) const MAX_POSITION_END_BYTES: usize = 4_000_000;
 
-/// query engine and bundle framing apply before trusting a stored row.
 pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
     let mut previous: Option<TxPosition> = None;
     for &position in positions {
@@ -329,8 +307,6 @@ pub(crate) fn positions_are_valid(positions: &[TxPosition]) -> bool {
     true
 }
 
-/// Layout: a packed `TxPosition[n]`, `n >= 1`. Writers emit a row only for
-/// a nonempty group of positioned transactions. An empty value is corrupt
 pub struct TxPositionValue;
 
 impl TxPositionValue {
@@ -339,7 +315,6 @@ impl TxPositionValue {
         positions.as_bytes().to_vec()
     }
 
-    /// rows before using the all-or-scan safety path for other invalid positions.
     #[must_use]
     pub fn decode(value: &[u8]) -> Option<&[TxPosition]> {
         if value.is_empty() {
@@ -362,31 +337,19 @@ fn spending_prefix(txid_bytes: &[u8], vout: u32) -> HashPrefix {
     value.to_be_bytes()
 }
 
-/// One exact transaction occurrence in a script-history height row.
-///
-/// Funding and spending references made by one transaction to one script merge
-/// into a single occurrence with both flag bits set. The full script identity
-/// is stored so a shared eight-byte scan prefix never serves another script.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScriptHistoryOccurrence {
-    /// Full 32-byte script identity the occurrence belongs to.
     pub scripthash: ScriptHash,
-    /// Transaction id in little-endian byte order.
     pub txid: [u8; 32],
-    /// Serialized position of the transaction in its block.
     pub position: TxPosition,
-    /// Any combination of [`Self::FUNDING`] and [`Self::SPENDING`].
     pub flags: u8,
 }
 
 impl ScriptHistoryOccurrence {
     pub const FUNDING: u8 = 0b01;
     pub const SPENDING: u8 = 0b10;
-    /// One encoded occurrence: `scripthash || txid || position || flags`.
-    /// Encoded width of one occurrence.
     pub const SIZE: usize = 32 + 32 + TX_POSITION_SIZE + 1;
 
-    /// Encodes a nonempty occurrence sequence.
     #[must_use]
     pub fn encode_all(entries: &[Self]) -> Vec<u8> {
         let mut out = Vec::with_capacity(entries.len().saturating_mul(Self::SIZE));
@@ -399,7 +362,6 @@ impl ScriptHistoryOccurrence {
         out
     }
 
-    /// Decodes one stored value, or `None` when it is empty or malformed.
     #[must_use]
     pub fn decode_all(value: &[u8]) -> Option<Vec<Self>> {
         let (chunks, remainder) = value.as_chunks::<{ Self::SIZE }>();

@@ -1,5 +1,3 @@
-//! Applied-block record log shared between the chain owner and index consumers.
-
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLockWriteGuard;
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -51,14 +49,11 @@ pub struct BlockRecord {
     pub hash: BlockHash,
     pub height: u32,
     pub body_size: usize,
-    /// Serialized block header bytes, when the record carries a header.
     pub header: Option<Box<[u8; bitcoin_rs_primitives::Header::LEN]>>,
     pub tx_count: usize,
     pub time: u32,
 }
 
-/// Boxing the header keeps the record at 64 bytes instead of 144;
-/// reverting it fails this compile-time gate.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<BlockRecord>() == 64,
@@ -73,7 +68,6 @@ const _: () = assert!(
 pub struct BlockLog {
     records: Vec<BlockRecord>,
     total_body_size: u64,
-    /// `cumulative_tx_count[i]` is the sum of `tx_count` over `records[..=i]`.
     cumulative_tx_count: Vec<u64>,
 }
 
@@ -196,7 +190,6 @@ pub fn cumulative_tx_count_through(log: &BlockLog, height: u32) -> Option<u64> {
     Some(log.tx_count_before(blocks.partition_point(|record| record.height <= height)))
 }
 
-/// Records must be sorted by non-decreasing height. Returns the first duplicate.
 #[must_use]
 pub fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
     if let Ok(index) = usize::try_from(height)
@@ -241,7 +234,6 @@ pub fn record_at_height_hash(
 }
 
 impl BlockRecord {
-    /// The record is metadata only: `body_size` is the native consensus-encoded length.
     #[must_use]
     pub fn from_block(height: u32, block: &Block) -> Self {
         let hash = block.block_hash();

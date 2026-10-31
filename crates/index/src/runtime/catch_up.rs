@@ -1,5 +1,3 @@
-//! Bounded body-reader sessions, parallel preparation, and ordered batch admission.
-
 use super::BlockIdentity;
 use super::ChunkAction;
 use super::DerivedIndexWorkerError;
@@ -282,8 +280,6 @@ impl Worker {
         Ok(durable)
     }
 
-    /// `ScriptLive` needs no anchor: it reseeds from an immutable artifact or
-    /// retained history, so the reset alone sends it through that path.
     fn rebuild_from_pruned(
         &self,
         capabilities: IndexCapabilities,

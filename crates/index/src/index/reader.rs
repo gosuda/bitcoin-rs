@@ -1,5 +1,3 @@
-//! Read-side store access and typed prefix-row decoding for confirmed index rows.
-
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
     capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError,
@@ -42,8 +40,6 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
-    /// Returns every row whose eight-byte script prefix matches, newest height
-    /// first: format 6 stores an inverted big-endian history height.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
@@ -84,7 +80,6 @@ impl<S: KvStore> Indexer<S> {
         Ok(outpoints)
     }
 
-    /// Spender rows keep chronological big-endian heights, so prefix-range scans arrive
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,

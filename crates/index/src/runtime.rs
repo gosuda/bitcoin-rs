@@ -1,5 +1,3 @@
-//! Asynchronous, durable, node-owned transaction index runtime.
-
 use arc_swap::ArcSwap;
 
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, TipReader, TipSnapshot};
@@ -254,7 +252,6 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
     }
 }
 
-/// These are query-side safety limits, not the writer batch limits.
 const QUERY_SCAN_ROW_LIMIT: usize = 1_000_000;
 
 const QUERY_SCAN_BYTE_LIMIT: usize = 64 << 20;
@@ -277,8 +274,6 @@ pub const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-/// selective reset + rebuild instead of a per-block rewind.
-/// Grounded in three measured runs of per-block forward-ingest versus rollback
 pub const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
@@ -397,7 +392,6 @@ pub struct DerivedIndexOpenSpec {
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     pub seed_slot: Option<SeedOfferCell>,
-    /// Test-only open specs may leave this unset; live queries then fail closed.
     pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
     pub bundle: crate::portable::IndexBundleDirective,
@@ -423,7 +417,6 @@ pub enum IndexAheadError {
     Evidence(#[from] bitcoin_rs_storage::recovery_evidence::EvidenceError),
 }
 
-/// Sink for index-ahead rollback evidence.
 pub trait IndexAheadSink: Send + Sync {
     fn report_index_ahead(
         &self,
@@ -529,12 +522,10 @@ struct Worker {
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
-    /// Sink for the index-ahead rollback evidence (`chain-rollback-event`
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
     wake_rx: Receiver<()>,
     quiet_period: Duration,
     batch_delay: Duration,
-    /// and rebuild instead of a per-block rewind. `u32::MAX` means rewind
     rollback_rebuild_cutover: u32,
     seed_slot: Option<SeedOfferCell>,
     seed_bundle: parking_lot::Mutex<Option<SeedBundle>>,
@@ -636,7 +627,6 @@ pub enum DerivedIndexWorkerError {
     UndoUnavailable { height: u32, hash: Hash256 },
     #[error("txindex worker: target chain node missing at height {height}")]
     MissingTargetChain { height: u32 },
-    /// The rollback evidence sink failed to publish the index-ahead event.
     #[error("txindex worker: rollback evidence marker not written: {0}")]
     RollbackEvidence(#[from] IndexAheadError),
 }

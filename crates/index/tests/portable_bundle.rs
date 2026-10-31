@@ -1,5 +1,3 @@
-//! Stage 2 portable `TxLookup` bundle lifecycle over real Fjall stores.
-
 #![cfg(feature = "fjall")]
 #![expect(
     clippy::expect_used,
@@ -64,7 +62,6 @@ struct ChainFixture {
 }
 
 impl ChainFixture {
-    /// `blocks` blocks above genesis, each holding a coinbase plus `extra`
     fn new(blocks: u32, extra: usize) -> Self {
         let mut tree = BlockTree::new();
         let mut bodies = BodyMap::new();
@@ -166,7 +163,6 @@ fn coinbase(height: u32) -> Transaction {
     }
 }
 
-/// A non-coinbase transaction whose id is unique per `(height, index)`.
 fn filler(height: u32, index: usize) -> Transaction {
     let index = u32::try_from(index).expect("filler index fits u32");
     let mut seed = [0x5a_u8; 32];

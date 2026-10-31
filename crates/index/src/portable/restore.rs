@@ -1,5 +1,3 @@
-//! Restore: one validating pass, then one fenced applying pass.
-
 use super::artifact::{
     ARTIFACT_VERSION, ArtifactHeader, CANCEL_POLL_RECORDS, HEADER_LEN, ReadFault, RecordReader,
     RowAssembler, TxLookupRecord, into_digest, open_hashed,
@@ -303,8 +301,6 @@ impl LocatorCheck<'_> {
     }
 }
 
-/// Reports the first height where the bundle's position count differs from
-/// the chain's transaction count, or `None` when the height is complete.
 fn incomplete_at(
     counts: &HashMap<u32, u64>,
     height: u32,
@@ -318,12 +314,6 @@ fn incomplete_at(
     })
 }
 
-/// Streams the whole artifact once: SHA-256, header, record framing, and, when `chain`
-/// is given, locator verification.
-///
-/// A framing or locator fault does not stop the hash: the rest of the file is drained
-/// so a digest mismatch, which outranks every other artifact fault, is reported first.
-/// Cancellation returns at once.
 fn validate_artifact(
     host: &BundleHost<'_>,
     path: &Path,
@@ -449,7 +439,6 @@ fn read_records<R: Read>(
     Ok(())
 }
 
-/// A framing or locator fault does not stop the hash: the caller drains even
 fn drain_remaining_for_hash(
     reader: &mut super::artifact::HashedFile,
     cancelled: &dyn Fn() -> bool,
@@ -610,8 +599,6 @@ mod tests {
     use crate::types::TxPosition;
     use std::cell::Cell;
 
-    /// fully so the digest comparison can outrank framing faults, while a
-    /// trip returns `Cancelled` at once with no digest comparison.
     #[test]
     fn invalid_tail_drain_polls_cancellation_per_bounded_chunk() -> Result<(), crate::portable::TestError> {
         let dir = tempfile::tempdir()?;
@@ -678,7 +665,6 @@ mod tests {
         );
     }
 
-    /// Omitted records are refused at the first height whose bundle count
     #[test]
     fn omitted_positions_report_first_missing_height() {
         let counts = HashMap::from([(0_u32, 2_u64), (1_u32, 1_u64)]);

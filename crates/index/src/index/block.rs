@@ -1,5 +1,3 @@
-//! Parse-once block preparation and authoritative spent-script anchoring.
-
 use super::{
     capability::{IndexCapabilities, IndexCapability},
     error::IndexError,
@@ -13,7 +11,6 @@ use crate::{
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode, layout::ParsedBlock};
 
 pub trait SpentCoinScripts {
-    /// `txid` is in little-endian byte order, as serialized in the input.
     fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]>;
 }
 
@@ -25,12 +22,8 @@ impl SpentCoinScripts for NoSpentScripts {
     }
 }
 
-/// `build_utxo_changes` — outputs with `is_op_return()` or a script longer
-/// than this never enter the UTXO set, so they must never enter the Live view
 pub use bitcoin_rs_script::MAX_SCRIPT_SIZE as MAX_LIVE_SCRIPT_SIZE;
 
-/// 80-byte prefix.
-/// INVARIANT: A rejected parse contributes no rows.
 pub(super) fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
@@ -247,7 +240,6 @@ fn process_outputs(
     }
 }
 
-/// anchor, otherwise preparation fails closed rather than leaving a stale live
 fn push_live_ops(
     rows: &mut PendingRows,
     created: Vec<([u8; 32], u32, Option<ScriptHash>)>,
@@ -299,7 +291,6 @@ fn push_live_ops(
     Ok(())
 }
 
-/// Whether a previous outpoint is the coinbase null outpoint: a zero
 fn is_null_prevout(prevout_txid: &[u8], vout: u32) -> bool {
     vout == u32::MAX && prevout_txid.iter().all(|byte| *byte == 0)
 }
@@ -309,8 +300,6 @@ pub(super) fn is_op_return_script(script: &[u8]) -> bool {
     matches!(script.first(), Some(0x6a))
 }
 
-/// INVARIANT: This predicate mirrors `build_utxo_changes`, which skips
-/// `is_op_return()` and scripts longer than `MAX_LIVE_SCRIPT_SIZE`. The
 fn live_admission(script: &[u8]) -> Option<ScriptHash> {
     let admitted = !is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE;
     admitted.then(|| ScriptHash::from_script_bytes(script))
