@@ -225,14 +225,8 @@ fn witness_stack_size(witness: &crate::Witness) -> usize {
     )
 }
 
-/// Serializes a transaction; `with_witness` controls the BIP144 marker/flag and witness
-/// sections (emitted only when some input carries witness data).
-pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
+pub(crate) fn encode_tx_base(tx: &Tx, sink: &mut impl Sink) {
     sink.write_all(&tx.version.to_le_bytes());
-    let has_witness = with_witness && tx.has_witness();
-    if has_witness {
-        sink.write_all(&[0x00, 0x01]);
-    }
     write_compact(sink, compact_len(tx.inputs.len()));
     for input in &tx.inputs {
         input.consensus_encode(sink);
@@ -241,13 +235,29 @@ pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
     for output in &tx.outputs {
         output.consensus_encode(sink);
     }
-    if has_witness {
-        for input in &tx.inputs {
-            write_compact(sink, compact_len(input.witness.len()));
-            for item in &input.witness {
-                write_compact(sink, compact_len(item.len()));
-                sink.write_all(item);
-            }
+    sink.write_all(&tx.lock_time.to_le_bytes());
+}
+
+pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink) {
+    if !tx.has_witness() {
+        encode_tx_base(tx, sink);
+        return;
+    }
+    sink.write_all(&tx.version.to_le_bytes());
+    sink.write_all(&[0x00, 0x01]);
+    write_compact(sink, compact_len(tx.inputs.len()));
+    for input in &tx.inputs {
+        input.consensus_encode(sink);
+    }
+    write_compact(sink, compact_len(tx.outputs.len()));
+    for output in &tx.outputs {
+        output.consensus_encode(sink);
+    }
+    for input in &tx.inputs {
+        write_compact(sink, compact_len(input.witness.len()));
+        for item in &input.witness {
+            write_compact(sink, compact_len(item.len()));
+            sink.write_all(item);
         }
     }
     sink.write_all(&tx.lock_time.to_le_bytes());
@@ -286,7 +296,7 @@ fn tx_witness_size(tx: &Tx) -> usize {
 
 impl ConsensusEncode for Tx {
     fn consensus_encode(&self, sink: &mut impl Sink) {
-        encode_tx(self, sink, true);
+        encode_tx(self, sink);
     }
 
     fn consensus_size(&self) -> usize {

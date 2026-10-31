@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
-    encode::{ConsensusEncode, Sha256Sink, encode_tx, finalize_double_sha256, tx_base_size},
+    encode::{ConsensusEncode, Sha256Sink, encode_tx_base, finalize_double_sha256, tx_base_size},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,7 +46,7 @@ impl Tx {
     pub fn txid(&self) -> Txid {
         let mut engine: Sha256 = Sha256::new();
         let mut writer = Sha256Sink(&mut engine);
-        encode_tx(self, &mut writer, false);
+        encode_tx_base(self, &mut writer);
         Txid(finalize_double_sha256(engine))
     }
 
