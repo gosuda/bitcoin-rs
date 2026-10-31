@@ -340,6 +340,7 @@ pub struct RpcConfig {
     pub public_bind: Option<SocketAddr>,
     pub max_connections: usize,
     pub public_max_connections: usize,
+    pub esplora_max_queries: usize,
     pub rest: bool,
     pub silent_payments: bool,
     pub compressed_transactions: bool,
@@ -470,6 +471,10 @@ impl NodeConfig {
                 public_bind: settings.rpc.public_bind,
                 max_connections: settings.rpc.max_connections.unwrap_or(128),
                 public_max_connections: settings.rpc.public_max_connections.unwrap_or(128),
+                esplora_max_queries: settings
+                    .rpc
+                    .esplora_max_queries
+                    .unwrap_or(bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()),
                 rest: settings.rpc.rest.unwrap_or(false),
                 silent_payments: settings.rpc.silent_payments.unwrap_or(false),
                 compressed_transactions: settings.rpc.compressed_transactions.unwrap_or(false),
@@ -561,6 +566,10 @@ impl NodeConfig {
         anyhow::ensure!(
             self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0,
             "RPC and public connection limits must be positive"
+        );
+        anyhow::ensure!(
+            self.rpc.esplora_max_queries > 0,
+            "Esplora query limit must be positive"
         );
         anyhow::ensure!(
             self.rpc.public_bind.is_none_or(|address| {

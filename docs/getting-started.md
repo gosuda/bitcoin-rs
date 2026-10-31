@@ -286,6 +286,20 @@ These options also resolve through TOML (`public_bind`, `rpc_max_connections`,
 the normal file < environment < CLI precedence. Both listeners use the same
 chain, mempool, indexes and broadcast gateway.
 
+`--esplora-max-queries` bounds concurrent address/scripthash summary, UTXO,
+and history projections across both Esplora namespaces and all listeners of
+one node (default 2, positive). It is independent of connection and blocking
+JSON-RPC quotas. Saturated queries immediately receive HTTP 503
+`expensive Esplora query limit reached`; there is no waiting queue. Tip and
+status routes remain outside this quota. Existing per-query script limits
+still apply, including HTTP 422 for `ScriptHashLimitExceeded`. Configure it
+with TOML `esplora_max_queries` or `BITCOIN_RS_ESPLORA_MAX_QUERIES` as well.
+The fixed-name metrics `rpc.esplora.expensive.active`,
+`rpc.esplora.expensive.rejected_total`, and
+`rpc.esplora.expensive.execution_seconds` report admitted work, overloads,
+and admitted execution latency (including failures), without address labels.
+This bounds optional work; it does not reserve CPU or storage bandwidth for sync.
+
 A Compose example runs the upstream mempool explorer against these endpoints: [btc-mempool-explorer](../tools/btc-mempool-explorer/README.md).
 
 ### REST

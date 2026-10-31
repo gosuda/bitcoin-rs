@@ -99,6 +99,70 @@ fn management_request() -> Vec<u8> {
 }
 
 #[test]
+fn expensive_query_saturation_preserves_shared_and_split_listener_service() -> io::Result<()> {
+    let context = Arc::new(
+        Context::new()
+            .with_esplora_query_limit(std::num::NonZeroUsize::new(1).expect("positive limit")),
+    );
+    let shared = RunningServer::start(&context, RpcSurface::Shared, 16)?;
+    let public = RunningServer::start(&context, RpcSurface::Public, 16)?;
+    let management = RunningServer::start(&context, RpcSurface::Management, 16)?;
+    let permit = context
+        .esplora_admission
+        .try_acquire()
+        .expect("first query");
+    for server in [&shared, &public] {
+        for prefix in ["/api", "/esplora"] {
+            for namespace in ["address", "scripthash"] {
+                for suffix in [
+                    "",
+                    "/utxo",
+                    "/txs",
+                    "/txs/summary",
+                    "/txs/mempool",
+                    "/txs/chain",
+                    "/txs/chain/cursor",
+                ] {
+                    let response = server.request(format!(
+                        "GET {prefix}/{namespace}/invalid{suffix} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    ).as_bytes())?;
+                    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+                    assert!(response.contains("expensive Esplora query limit reached"));
+                    assert_eq!(
+                        response.contains("Access-Control-Allow-Origin: *"),
+                        prefix == "/api"
+                    );
+                }
+            }
+        }
+        let response = server.request(
+            b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )?;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    }
+    for server in [&shared, &management] {
+        assert!(
+            server
+                .request(&management_request())?
+                .contains("\"result\":0")
+        );
+        // This is a separate quota, even on the shared listener.
+        let _blocking = server
+            .handler
+            .reserve_blocking_request()
+            .expect("management quota");
+    }
+    drop(permit);
+    for server in [&shared, &public] {
+        let response = server.request(
+            b"GET /api/address/invalid HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )?;
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    }
+    Ok(())
+}
+
+#[test]
 fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     let context = Arc::new(Context::new());
     let mut public = RunningServer::start(&context, RpcSurface::Public, 2)?;
