@@ -166,11 +166,6 @@ fn begin_publication_inner(
     })
 }
 
-/// Runs the write → flush → sync → rename → sync-root barrier sequence once.
-///
-/// Under `test`/`test-seam` each boundary is armed through `injected_io`
-/// immediately before the operation it names, so a failpoint run exercises
-/// this same sequence.
 pub fn commit_publication(
     stage: CheckpointStage,
     manifest: &CheckpointManifestV1,

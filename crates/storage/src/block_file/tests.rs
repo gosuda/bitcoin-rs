@@ -186,7 +186,6 @@ fn disk_usage_counts_only_block_files() -> Result<(), crate::StorageError> {
     Ok(())
 }
 
-/// A reopened store starts from the files it finds, not from zero.
 #[test]
 fn disk_usage_is_seeded_from_an_existing_directory() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;

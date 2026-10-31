@@ -9,13 +9,10 @@ use rust_rocksdb::{
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
-/// `RocksDB`'s block-cache capacity for unbudgeted opens.
 pub const ROCKSDB_DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const BLOOM_BITS_PER_KEY: f64 = 10.0;
 const WRITE_BUFFER_SIZE: usize = 128 << 20;
 
-/// One write's durability: its `storage.writes_total` label and whether it
-/// crosses the `Sync` boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WriteDurability {
     Default,
@@ -47,10 +44,6 @@ pub struct RocksDbStore {
 }
 
 impl RocksDbStore {
-    /// Keeps `guard` alive until this store's database handle is closed.
-    ///
-    /// Panics when a guard is already installed: replacing it would release the first
-    /// guard while the database handle it protects is still open.
     #[must_use]
     pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
         assert!(
@@ -67,7 +60,6 @@ impl RocksDbStore {
         Self::open_with_cache(path, ROCKSDB_DEFAULT_CACHE_BYTES)
     }
 
-    /// Opens or creates a `RocksDB` store with an explicit block-cache capacity.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             ROCKSDB_DEFAULT_CACHE_BYTES
@@ -116,7 +108,6 @@ impl RocksDbStore {
             .ok_or(StorageError::UnknownColumnFamily(cf))
     }
 
-    /// Translates a portable [`BufferedWriteBatch`] into a native `RocksDB` write batch.
     fn rocks_batch(&self, batch: BufferedWriteBatch) -> Result<RocksWriteBatch, StorageError> {
         let mut rocks_batch = RocksWriteBatch::default();
         let mut handles = [None; ColumnFamily::ALL.len()];
@@ -140,8 +131,6 @@ impl RocksDbStore {
         Ok(rocks_batch)
     }
 
-    /// Applies one batch as a single logical write with the given durability
-    /// label, so each write is counted exactly once.
     fn write_with_durability(
         &self,
         batch: BufferedWriteBatch,
@@ -311,7 +300,6 @@ impl KvStore for RocksDbStore {
     }
 }
 
-/// Records one backend-neutral write-path metric sample.
 fn count_write(durability: &'static str, encoded_bytes: usize) {
     metrics::counter!("storage.writes_total", "backend" => "rocksdb", "durability" => durability)
         .increment(1);

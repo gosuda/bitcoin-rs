@@ -16,7 +16,6 @@ const KEY_LEN: usize = 37;
 
 pub const BLOCK_DATA_CF: ColumnFamily = ColumnFamily::BlockBodies;
 
-/// Builds the canonical pruning key for a stored block body.
 #[must_use]
 pub fn block_body_key(height: u32, hash: Hash256) -> [u8; KEY_LEN] {
     let mut key = [0_u8; KEY_LEN];

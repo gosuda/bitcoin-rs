@@ -9,9 +9,6 @@ use crate::KvStore;
 use std::time::Instant;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// Recovery rules (plan §2.3): a torn tail beyond the head is ignored
-    /// (the active segment is truncated back to the head cursor); a missing
-    /// `head.json` with no segments is a fresh journal.
     pub fn open(
         dir: cap_std::fs::Dir,
         store: std::sync::Arc<S>,

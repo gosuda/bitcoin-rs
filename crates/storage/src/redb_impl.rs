@@ -35,10 +35,8 @@ const TXINDEX_SCRIPT_LIVE: FixedTable<SCRIPT_LIVE_KEY_LEN> =
     TableDefinition::new("txindex_v1_script_live");
 const TXINDEX_META: ByteTable = TableDefinition::new("txindex_v1_meta");
 
-/// redb's builder-default page-cache capacity for the transaction index.
 pub const REDB_TXINDEX_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// redb's builder-default page-cache capacity for unbudgeted opens.
 pub const REDB_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn write_with_durability(
@@ -165,10 +163,6 @@ pub struct RedbStore {
 }
 
 impl RedbStore {
-    /// Keeps `guard` alive until this store's database handle is closed.
-    ///
-    /// Panics when a guard is already installed: replacing it would release the first
-    /// guard while the database handle it protects is still open.
     #[must_use]
     pub fn guarded_by(self, guard: crate::StoreGuard) -> Self {
         assert!(
@@ -185,11 +179,6 @@ impl RedbStore {
         Self::open_with_cache(path, REDB_DEFAULT_CACHE_BYTES)
     }
 
-    /// Opens or creates a redb store with an explicit page-cache capacity.
-    ///
-    /// `cache_bytes` bounds redb's in-memory page cache and is configured exactly: a
-    /// budgeted share is never raised above its allocation. Zero selects the engine
-    /// default for unbudgeted opens.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             REDB_DEFAULT_CACHE_BYTES
@@ -381,8 +370,6 @@ impl RedbTxIndexStore {
         Self::open_with_cache(path, REDB_TXINDEX_DEFAULT_CACHE_BYTES)
     }
 
-    /// Opens or creates a transaction-index store with an explicit page-cache
-    /// capacity, configured exactly.
     fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let db_path = database_path(path.as_ref())?;
         let db = Database::builder()
@@ -579,12 +566,6 @@ impl KvStore for RedbTxIndexStore {
     }
 }
 
-/// The concrete store type is an implementation detail.
-///
-/// The store serves [`ColumnFamily::TxConfirmed`], [`ColumnFamily::Funding`],
-/// [`ColumnFamily::Spending`], [`ColumnFamily::BlockHeaders`],
-/// [`ColumnFamily::ScriptLive`], and [`ColumnFamily::UtxoMeta`]; every other family
-/// returns [`StorageError::InvalidOperation`].
 pub fn open_redb_tx_index_store(path: &Path) -> Result<impl KvStore, StorageError> {
     RedbTxIndexStore::open(path)
 }
@@ -809,8 +790,6 @@ impl KvSnapshot for RedbTxIndexSnapshot {
     }
 }
 
-/// Scans rows under `prefix` from the inclusive seek point `start`, clamped to
-/// the prefix. An empty `start` begins at the prefix itself.
 fn scan_prefix(
     read_txn: &redb::ReadTransaction,
     table_def: ByteTable,
@@ -878,7 +857,6 @@ fn scan_prefix(
     })
 }
 
-/// Returns the greatest row with the given prefix via one reverse cursor step.
 fn greatest_prefix(
     read_txn: &redb::ReadTransaction,
     table_def: ByteTable,
@@ -947,7 +925,6 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Rejects a `ScriptLive` write that is not a 43-byte key with an empty value.
 fn validate_script_live_put(key: &[u8], value: &[u8]) -> Result<(), StorageError> {
     fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ())?;
     if !value.is_empty() {
@@ -956,9 +933,6 @@ fn validate_script_live_put(key: &[u8], value: &[u8]) -> Result<(), StorageError
     Ok(())
 }
 
-/// Validates `ScriptLive` puts in a generic [`RedbStore`] batch before a
-/// transaction begins, matching the dedicated txindex store's reject-first
-/// contract.
 fn validate_redb_store_batch(batch: &BufferedWriteBatch) -> Result<(), StorageError> {
     batch.ops.iter().try_for_each(|op| match op {
         BatchOp::Put { cf, key, value } if *cf == ColumnFamily::ScriptLive => {
@@ -1004,11 +978,6 @@ fn fixed_prefix_bounds<const N: usize>(prefix: &[u8]) -> Result<([u8; N], [u8; N
     Ok((start, end))
 }
 
-/// Key range of the fixed-width keys that begin with `prefix` and sort at or after the
-/// seek point `start`, as a lower bound and an inclusive upper key.
-///
-/// `None` means no key of the prefix can sort at or after `start`. An empty `start`, or
-/// one before the prefix, begins at the prefix itself.
 fn fixed_prefix_window<const N: usize>(
     prefix: &[u8],
     start: &[u8],
@@ -1436,8 +1405,6 @@ fn validate_txindex_batch(batch: &BufferedWriteBatch) -> Result<(), StorageError
     })
 }
 
-/// Validates one txindex family/key pair; rejects unsupported families and
-/// fixed-width keys of the wrong length before any transaction begins.
 fn validate_txindex_key(cf: ColumnFamily, key: &[u8]) -> Result<(), StorageError> {
     match cf {
         ColumnFamily::TxConfirmed | ColumnFamily::Funding | ColumnFamily::Spending => {

@@ -1,14 +1,3 @@
-//! Durable chain head record and its atomic commit boundary.
-//!
-//! `RCV-02` orders every connect or disconnect as: reserve, append, sync, one atomic
-//! durable batch, publish.
-//!
-//! This module owns the record that batch commits: one versioned, CRC32C-framed row in
-//! the `UtxoMeta` family naming the committed chain tip, its strictly monotonic
-//! `commit_id`, the chain transaction count, and the committed body/undo extents
-//! (`INV-06`: the head never names a byte range that was not made durable before the
-//! batch).
-
 use bitcoin_rs_primitives::Hash256;
 
 use crate::chainstate_journal::crc32c;
@@ -21,10 +10,6 @@ pub const SCRIPT_ATTESTATION_KEY: &[u8] = b"node:script-attestation";
 
 const SCRIPT_ATTESTATION_ROW_LEN: usize = 9;
 
-/// How strongly the scripts of every block up to the durable head were executed.
-///
-/// The row binds to one head by its `commit_id`, so a binary that does not know the row
-/// cannot leave a stale stronger value behind: the next commit changes the `commit_id`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScriptAttestation {
     Unattested,
@@ -192,8 +177,6 @@ fn parse_payload(payload: &[u8]) -> Option<DurableHead> {
 pub struct CommitRecords<'a> {
     pub undo_rows: Vec<(u32, Hash256, &'a [u8])>,
     pub body_rows: Vec<(u32, Hash256, crate::block_file::BlockFilePosition)>,
-    /// Strength of the scripts this batch executed. `None` keeps the previous value, as a
-    /// replay of blocks that an earlier commit already attested does.
     pub attestation: Option<ScriptAttestation>,
 }
 
@@ -207,11 +190,8 @@ pub trait DurableHeadStore: Send + Sync + 'static {
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError>;
 
-    /// The attestation recorded for exactly this head; `Unattested` when the row is absent
-    /// or names another head.
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError>;
 
-    /// Raise the attestation of the current head after its scripts were executed again.
     fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError>;
 }
 
