@@ -32,7 +32,43 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
             peer.compact_blocks.record_remote_preference(send_cmpct);
             Ok(())
         }
-        _ => require_ready(peer.state),
+        Message::Addr(_)
+        | Message::Inv(_)
+        | Message::GetData(_)
+        | Message::NotFound(_)
+        | Message::GetBlocks(_)
+        | Message::GetHeaders(_)
+        | Message::MemPool
+        | Message::Tx(_)
+        | Message::Block(_)
+        | Message::BlockPayload(_)
+        | Message::Headers(_)
+        | Message::GetAddr
+        | Message::Ping(_)
+        | Message::Pong(_)
+        | Message::MerkleBlock(_)
+        | Message::FilterLoad(_)
+        | Message::FilterAdd(_)
+        | Message::FilterClear
+        | Message::GetCFilters(_)
+        | Message::CFilter(_)
+        | Message::GetCFHeaders(_)
+        | Message::CFHeaders(_)
+        | Message::GetCFCheckpt(_)
+        | Message::CFCheckpt(_)
+        | Message::CmpctBlock(_)
+        | Message::GetBlockTxn(_)
+        | Message::BlockTxn(_)
+        | Message::Alert(_)
+        | Message::Reject(_)
+        | Message::FeeFilter(_)
+        | Message::AddrV2(_)
+        | Message::AncPkgInfo(_)
+        | Message::GetPkgTxns(_)
+        | Message::PkgTxns(_)
+        | Message::PkgTxnsPayload(_)
+        | Message::StaleTip(_)
+        | Message::Unknown { .. } => require_ready(peer.state),
     }
 }
 
