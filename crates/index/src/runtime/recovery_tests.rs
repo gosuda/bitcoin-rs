@@ -1254,3 +1254,48 @@ fn cell_seed_artifact(
     );
     (artifact, dir)
 }
+#[test]
+fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() {
+    let f = ForkFixture::new(3);
+    f.persist_undo();
+    let h = Harness::with_enabled(&f, u32::MAX, IndexCapabilities::TX_LOOKUP);
+    let mut tip = (*f.tip(f.a[0])).clone();
+    tip.height = 0;
+    tip.hash = Hash256::from_le_bytes(&[0; 32]);
+    h.applied_tip.store(Some(Arc::new(tip)));
+    let expected = IndexWatermark {
+        height: 0,
+        hash: [0; 32],
+    };
+    h.writer
+        .anchor_watermark(IndexCapabilities::TX_LOOKUP, expected, 0)
+        .expect("anchor");
+
+    for malformed in [
+        &b""[..],
+        &b"\xff"[..],
+        &b"corrupt-cursor-bytes"[..],
+        &[0xaa; 51][..],
+        &[0xbb; 53][..],
+        &[0xcc; 1024][..],
+    ] {
+        let (fence, _) = h.writer.fenced_watermarks().expect("fence");
+        h.writer
+            .commit_consumer_cursor(fence, malformed)
+            .expect("commit malformed cursor");
+
+        let commit = h
+            .worker
+            .persist_chain_cursor()
+            .expect("persist must not panic on malformed cursor");
+        assert!(matches!(commit, CursorCommit::Settled));
+
+        let stored = h
+            .writer
+            .consumer_cursor()
+            .expect("read cursor")
+            .expect("cursor exists");
+        assert_eq!(stored.len(), crate::reconcile::CURSOR_BYTE_LEN);
+        assert_eq!(stored, h.worker.chain_events.cursor().to_bytes());
+    }
+}
