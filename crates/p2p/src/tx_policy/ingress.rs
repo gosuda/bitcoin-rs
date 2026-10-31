@@ -1,10 +1,3 @@
-//! Bounded ingress for BIP331 `pkgtxns` bodies, contained in the transaction policy
-//! owner.
-//!
-//! The charge is a lower bound of the heap a decoded package owns, taken at the exact
-//! capacities the decoder requests. It is not a physical heap ceiling: allocator
-//! rounding is outside it, and no process allocator is made to refuse.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 

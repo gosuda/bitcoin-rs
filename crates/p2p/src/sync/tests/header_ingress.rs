@@ -1,5 +1,3 @@
-//! Header drain budgets must leave time for block application and scheduling.
-
 use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
 use super::*;
 
@@ -22,7 +20,6 @@ fn header_backlog_yields_to_block_apply_and_request_scheduling() -> TestResult {
     let stale = current_source(&peers, old_peer);
     assert!(peers.disconnect_source(stale));
 
-    // Both empty wire responses and stale-source batches must cost a slot.
     for n in 0..2 * MAX_HEADER_BATCHES_PER_TICK {
         inbound_headers_tx.send(InboundHeaders {
             headers: Vec::new(),
@@ -53,7 +50,6 @@ fn header_backlog_yields_to_block_apply_and_request_scheduling() -> TestResult {
 #[test]
 fn header_work_budget_keeps_whole_batches_in_order() -> TestResult {
     let page = crate::wire::MAX_HEADERS_MESSAGE_COUNT;
-    // Exercise both the exact boundary and one final whole-page overshoot.
     for lengths in [vec![page, page, 1], vec![page - 1, page, page, 0]] {
         let mut tree = BlockTree::new();
         let genesis = genesis_header();

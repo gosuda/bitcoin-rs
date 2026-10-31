@@ -1,6 +1,3 @@
-//! Core's download-twice header presync state: the anti-memory-DoS gate that
-//! keeps an unverified, low-work header chain out of the block tree.
-
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
@@ -147,12 +144,6 @@ impl CompressedHeader {
     }
 }
 
-/// A FIFO of the one-bit commitments a PRESYNC pass leaves for the REDOWNLOAD check
-/// (`headerssync.h` keeps the same bits), packed 64 per word.
-///
-/// A mainnet pass can retain millions of commitments — see the honest-chain estimate in
-/// [`HeadersSyncState::new`] — so one byte apiece would make every open sync state a
-/// memory-amplification surface per connection.
 #[derive(Default)]
 struct CommitmentBits {
     words: VecDeque<u64>,
@@ -198,9 +189,6 @@ impl CommitmentBits {
     }
 }
 
-/// INVARIANT: no method on this type inserts into the block tree. Headers
-/// leave only through [`HeaderSyncResult::ready_headers`], and only the
-/// caller's committed-phase branch may admit them.
 pub struct HeadersSyncState {
     phase: HeadersSyncPhase,
     chain_start: HeaderAnchor,

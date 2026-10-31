@@ -1,4 +1,3 @@
-//! Create-once application keys. Existing files are never replaced or repaired implicitly.
 use super::invalid;
 use base64::{
     Engine as _, alphabet,

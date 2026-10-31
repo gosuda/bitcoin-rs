@@ -55,7 +55,6 @@ pub enum FilterServing {
     Pending(FilterRequest),
 }
 
-/// Header response for a BIP332 stale tip announcement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StaleTipHeaders {
     Headers(crate::staletip::StaleTipAnnouncement),
@@ -67,7 +66,6 @@ pub trait ChainQuery: Send + Sync {
         false
     }
 
-    /// Serves a bounded BIP157 request from persisted filters only.
     fn serve_compact_filters(
         &self,
         _request: &FilterRequest,
@@ -83,8 +81,6 @@ pub trait ChainQuery: Send + Sync {
         limit: usize,
     ) -> Vec<Header>;
 
-    /// [`Message::CmpctBlock`] built at the given BIP152 version — `None`
-    /// `MSG_BLOCK` strips witness data from the validated body (BIP144).
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
@@ -93,8 +89,6 @@ pub trait ChainQuery: Send + Sync {
         serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 
-    /// block. `compact_version` is the peer's servable BIP152 profile.
-    /// BIP152 (Core scores misbehavior).
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -110,7 +104,6 @@ pub trait ChainQuery: Send + Sync {
         None
     }
 
-    /// at the given BIP152 version.
     fn compact_block_for(
         &self,
         _height: u32,
@@ -124,7 +117,6 @@ pub trait ChainQuery: Send + Sync {
         None
     }
 
-    /// Returns the BIP332 stale-tip headers for `tip` given the peer's
     fn stale_tip_announcement(
         &self,
         tip: Hash256,
@@ -137,12 +129,10 @@ pub trait TxInventory: Send + Sync {
 
     fn get_tx(&self, txid: Txid) -> Option<Tx>;
 
-    /// node does not have it. Used to answer BIP339 `getdata` (`WTx`) items.
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
-    /// The BIP331 ancestor package of `wtxid` the node can serve: its
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
 
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
@@ -305,7 +295,6 @@ pub fn dispatch_inbound_full<S>(
     Ok(())
 }
 
-/// Answers the peer's `version` with our feature offers, the one BIP331
 fn reply_to_version<S>(
     peer: &mut Peer<S>,
     remote_version: u32,
@@ -366,7 +355,6 @@ fn receive_inv<S>(
     Ok(())
 }
 
-/// Applies one BIP331 package message once its sequence step passed.
 fn receive_package_message<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -403,7 +391,6 @@ fn receive_package_message<S>(
     Ok(())
 }
 
-/// Whether `item` is one of the two BIP331 inventory types.
 fn is_package_inventory(item: &Inventory) -> bool {
     matches!(
         item,
@@ -414,7 +401,6 @@ fn is_package_inventory(item: &Inventory) -> bool {
     )
 }
 
-/// The BIP331 `PKG_RELAY_*` bit `bit` must have been negotiated for the
 fn ensure_package_relay<S>(peer: &Peer<S>, bit: u64, error: &'static str) -> Result<(), PeerError> {
     if peer.package_relay_versions() & bit == 0 {
         return Err(PeerError::Misbehavior(error));
@@ -422,7 +408,6 @@ fn ensure_package_relay<S>(peer: &Peer<S>, bit: u64, error: &'static str) -> Res
     Ok(())
 }
 
-/// Rejects the `getdata` item types BIP331 forbids: `MSG_PKGTXNS` is a
 fn ensure_getdata_package_types_negotiated<S>(
     peer: &Peer<S>,
     items: &[Inventory],
@@ -585,7 +570,6 @@ fn serve_inbound_getdata<S>(
     Ok(())
 }
 
-/// requested by its inventory type (P2P-01 / BIP144). BIP339 `WTx` items are
 pub(crate) fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
@@ -694,7 +678,6 @@ fn serve_block_item(
     Ok(true)
 }
 
-/// `compact_version` is the peer's servable BIP152 profile (`None` leaves
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,

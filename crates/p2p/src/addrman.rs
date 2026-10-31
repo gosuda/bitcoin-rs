@@ -1,4 +1,3 @@
-//! P2P's single bounded `AddrMan` owner, following Core31.1 placement and selection.
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};

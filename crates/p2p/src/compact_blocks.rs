@@ -1,5 +1,3 @@
-//! BIP152 compact-block reconstruction.
-
 use crate::inv::{native_block_hash, wire_block_hash};
 
 use hashbrown::HashMap;
@@ -27,7 +25,6 @@ pub trait CompactBlockHints: Send + Sync {
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
 }
 
-/// What the listener must do after one receive-side BIP152 step.
 #[derive(Debug)]
 pub enum Outcome {
     Complete(Block),
@@ -60,7 +57,6 @@ impl Reconstruction {
         }
     }
 
-    /// `identity_version` is the BIP152 version the peer used to serialize
     pub fn receive_cmpctblock(
         &mut self,
         cmpct: &CmpctBlock,
@@ -276,7 +272,6 @@ fn fill_from_hints(
     Ok(())
 }
 
-/// Heap a reconstruction holds for one decoded transaction; the wire frame is not retained.
 fn retained_tx_bytes(tx: &Tx) -> usize {
     core::mem::size_of::<Tx>().saturating_add(tx.retained_heap_bytes())
 }

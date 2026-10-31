@@ -1,5 +1,3 @@
-//! Block download window, peer-assignment, stall, and scheduling policy.
-
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -21,7 +19,6 @@ pub struct SyncBudget {
     pub max_pending_bytes: usize,
     pub max_received_blocks: usize,
     pub max_received_bytes: usize,
-    /// Wire storage plus materialized block heap retained by the stager.
     pub max_retained_bytes: usize,
     pub max_peer_inflight: usize,
     pub fanout_peer_inflight: usize,

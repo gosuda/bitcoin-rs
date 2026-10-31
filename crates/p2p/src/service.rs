@@ -1,5 +1,3 @@
-//! Runtime owner for the Bitcoin P2P subsystem.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::VecDeque;
 use std::io;
@@ -47,8 +45,6 @@ fn feeler_delay(uniform: u64) -> Duration {
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
-/// At most 64 protocol-bounded batches (2,000 headers each) await sync.
-/// Full ingress backpressures the connection, rather than losing a response.
 const INBOUND_HEADER_QUEUE_LIMIT: usize = 64;
 
 const DEFAULT_MAX_PEER_CONNECTIONS: usize = 200;
@@ -71,13 +67,7 @@ pub struct P2pServiceConfig {
     pub max_peer_connections: usize,
     pub outbound_full_relay_slots: usize,
     pub local_services: ServiceFlags,
-    /// Whether connections try BIP324 v2 (see [`ConnectionShared::v2_transport`]).
     pub v2_transport: bool,
-    /// The opt-in relay capabilities connections offer: BIP331 ancestor package relay
-    /// and BIP332 stale-tip relay.
-    ///
-    /// Both are off by default; a peer relays packages or stale tips only after both
-    /// sides negotiate it.
     pub relay_offers: crate::RelayOffers,
     pub outbound_block_relay_slots: usize,
     pub outbound_queue_limit: usize,
@@ -112,17 +102,12 @@ impl Default for P2pServiceConfig {
 }
 
 impl P2pServiceConfig {
-    /// INVARIANT: manual peers do not consume these slots; the two slot
-    ///   counts are the only automatic outbound population knobs.
     #[must_use]
     fn total_outbound_active_limit(&self) -> usize {
         self.outbound_full_relay_slots
             .saturating_add(self.outbound_block_relay_slots)
     }
 
-    /// INVARIANT: this is the only inbound capacity derivation; at the result
-    ///   an inbound newcomer evicts an inbound connection or is refused
-    ///   (`PeerTable::try_register_inbound`).
     #[must_use]
     pub(crate) fn max_inbound(&self) -> usize {
         self.max_peer_connections
@@ -130,9 +115,6 @@ impl P2pServiceConfig {
             .saturating_sub(self.outbound_block_relay_slots)
     }
 
-    /// INVARIANT: this is the only place the service configuration reaches
-    ///   these `ConnectionShared` fields, and each switch maps to exactly its
-    ///   own field.
     fn apply_to(&self, shared: &mut crate::listener::ConnectionShared) {
         shared.max_inbound = self.max_inbound();
         shared.local_services = self.local_services;
@@ -250,11 +232,6 @@ impl Workers {
     }
 }
 
-/// INVARIANT: the origin travels with the request to the lease.
-///
-/// Core's `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
-/// extra-peer retirement (`net_processing.cpp`),
-/// and the queue is the only place that still knows which dials were asked for by name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutboundDial {
     pub addr: PeerEndpoint,
@@ -1286,13 +1263,6 @@ fn run_fixed_peer_resolution(
         }
     }
 }
-/// INVARIANT: an operator pin (`--connect`/`addnode`) asks for full relay because
-/// Core's `ConnectionType::MANUAL` peers relay transactions.
-///
-/// Feeding the pin through the slot chooser could hand it `BlockRelayOnly`, which
-/// advertises `relay = false` and ends the connection on the first transaction the
-/// operator's peer sends; the chooser only orders the dials the scheduler started
-/// itself.
 fn dial_outbound_role(
     dial: &OutboundDial,
     peer_table: &crate::PeerTable,
@@ -1464,7 +1434,6 @@ fn spawn_outbound_dial(
     handles.push((dial.addr, handle));
 }
 
-/// INVARIANT: only automatic connections count, once in their own class.
 fn next_outbound_role(
     peer_table: &crate::PeerTable,
     pending: &HashMap<PeerEndpoint, ActiveOutbound>,
@@ -1519,12 +1488,6 @@ fn next_outbound_role(
     }
 }
 
-/// INVARIANT: the extra connection exists to find a better chain, so it leaves as soon
-/// as the chain moves.
-///
-/// Core retires one per check (`EvictExtraOutboundPeers`,
-/// `net_processing.cpp`) and passes over a peer with blocks in flight or a
-/// peer below the minimum age.
 fn retire_extra_full_relay_connection(
     peer_table: &crate::PeerTable,
     sync: Option<&crate::sync::BlockSync>,
@@ -1552,9 +1515,6 @@ fn retire_extra_full_relay_connection(
     }
 }
 
-/// INVARIANT: the census and the victim set hold automatic connections only:
-///   a hand-pinned full-relay connection counts in neither, as Core's
-///   `IsFullOutboundConn()` excludes `ConnectionType::MANUAL`
 fn newest_excess_full_relay(
     peer_table: &crate::PeerTable,
     slots: usize,

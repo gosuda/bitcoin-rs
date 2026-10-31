@@ -1,4 +1,3 @@
-//! External Tor control service, with a dedicated unprivileged forwarding listener.
 use super::{
     AtomicBool, Duration, Instant, Ordering, OverlayTransport, POLL, PeerEndpoint, SETUP_TIMEOUT,
     Setup, SocketAddr, identity, invalid, io, pause,

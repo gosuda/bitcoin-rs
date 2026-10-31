@@ -1,19 +1,11 @@
-//! BIP324 packet sealing and opening.
-//! A packet is the encrypted 3-byte contents length, then one header byte and
-//! the contents sealed together under the packet cipher, then the tag.
-
 use super::cipher::{AuthFailed, FsChaCha20, FsChaCha20Poly1305, LENGTH_FIELD_LEN, TAG_LEN};
 
-/// Bytes of the header that precedes the contents inside the sealed body.
 pub(crate) const HEADER_LEN: usize = 1;
 
-/// Header bit marking a decoy packet the receiver discards.
 const IGNORE_BIT: u8 = 1 << 7;
 
-/// Largest contents length the 3-byte length field can express.
 const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 
-/// Bytes a packet adds to its contents: length field, header byte and tag.
 const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -40,9 +32,6 @@ impl SendCipher {
         }
     }
 
-    /// Seals one packet carrying `contents`. `aad` authenticates the garbage
-    /// sent before the first packet of a direction and is empty afterwards;
-    /// `ignore` marks a decoy.
     pub(crate) fn seal(
         &mut self,
         contents: &[u8],
@@ -89,9 +78,6 @@ impl RecvCipher {
         }
     }
 
-    /// Decrypts the next packet's length field: the contents length, which
-    /// sizes the sealed body (`HEADER_LEN + length + TAG_LEN` bytes) that
-    /// follows it.
     pub(crate) fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
         self.length.crypt(&mut field);
         usize::from(field[0]) | (usize::from(field[1]) << 8) | (usize::from(field[2]) << 16)

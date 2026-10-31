@@ -1,5 +1,3 @@
-//! Bounded delivery of pinned snapshot history beside the foreground window.
-
 use std::time::Instant;
 
 use bitcoin::hashes::Hash as _;
@@ -16,8 +14,6 @@ use crate::download_window::{
 };
 use crate::{BlockStager, InboundBlock, Message};
 
-/// Independent role, shared download policy. Unvalidated bodies stay transient;
-/// only the chainstate manager can publish their durable archive receipt.
 pub(super) struct HistoricalDownload {
     pub(super) window: DownloadWindow,
     pub(super) stager: BlockStager,

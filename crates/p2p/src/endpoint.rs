@@ -1,5 +1,3 @@
-//! P2P-owned endpoint parsing, formatting, BIP155 conversion, and dialing.
-
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -149,8 +147,6 @@ pub fn format_endpoint(endpoint: PeerEndpoint) -> String {
     endpoint.to_string()
 }
 
-/// Convert a BIP155 `addrv2` row to a typed endpoint.
-/// BIP155 ids 1/2 (IP) and 4/5 (`TorV3`/`I2P`) are accepted; `TorV2`,
 #[must_use]
 pub fn endpoint_from_addrv2(message: &AddrV2Message) -> Option<PeerEndpoint> {
     let port = message.port;
@@ -166,7 +162,6 @@ pub fn endpoint_from_addrv2(message: &AddrV2Message) -> Option<PeerEndpoint> {
     }
 }
 
-/// Convert a typed endpoint to a BIP155 `addrv2` row.
 #[must_use]
 pub fn endpoint_to_addrv2(
     endpoint: PeerEndpoint,
@@ -200,7 +195,6 @@ pub const fn addrv2_gossip_enabled(
     }
 }
 
-/// Canonical `AddrMan` netgroup for an endpoint host (not the BIP155 tag).
 #[must_use]
 pub fn overlay_netgroup(host: EndpointHost) -> Option<Vec<u8>> {
     match host {

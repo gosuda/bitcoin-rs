@@ -1,21 +1,12 @@
-//! BIP332 `staletip` message codec.
-//!
-//! Payload layout (BIP332, draft). No BIP324 short message ID is reserved for
-//! `staletip`: the command travels as its twelve-byte ASCII name on both
-//! transports.
-
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, varint};
 
 pub const STALETIP_COMMAND: &str = "staletip";
 
 pub const COMPRESSED_HEADER_LEN: usize = 48;
 
-/// (BIP332 `MAX_STALETIP_HEADERS`).
 pub const MAX_STALETIP_HEADERS: usize = 20;
-/// (BIP332 `STALETIP_RECENT_WINDOW`).
 pub const STALETIP_RECENT_WINDOW: u32 = 1000;
 
-/// (BIP332 `MAX_ADVERTISED_STALETIPS`).
 pub const MAX_ADVERTISED_STALETIPS: usize = 10;
 
 pub const MAX_PAYLOAD_LEN: usize =
@@ -121,9 +112,6 @@ pub enum StaleTipError {
 }
 
 impl StaleTipError {
-    /// BIP332 says a peer SHOULD NOT be punished solely because one
-    /// announcement exceeds local policy limits, so callers ignore such a
-    /// message; every other variant is a malformed payload.
     #[must_use]
     pub const fn is_policy_limit(&self) -> bool {
         matches!(self, Self::TooManyHeaders(_))

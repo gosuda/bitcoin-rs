@@ -490,8 +490,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
         "presync must request the continuation from the collected tip",
     );
 
-    // A queued response must not consume its request or advance the live
-    // presync cursor until the next tick actually admits that whole page.
     for _ in 0..super::super::headers::MAX_HEADER_BATCHES_PER_TICK {
         inbound_headers_tx.send(InboundHeaders {
             headers: Vec::new(),

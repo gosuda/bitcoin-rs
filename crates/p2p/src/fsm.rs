@@ -105,7 +105,6 @@ fn receive_version<S>(
     }
 }
 
-/// Record one BIP434 `feature` announcement.
 fn receive_feature<S>(
     peer: &mut Peer<S>,
     announcement: &FeatureAnnouncement,
@@ -123,9 +122,6 @@ fn receive_feature<S>(
     Ok(())
 }
 
-/// Record one BIP331 `sendpackages`.
-///   unknown bits and later messages are ignored, not punished. BIP331 has no
-///   protocol-version floor and no BIP434 mapping.
 fn receive_send_packages<S>(
     peer: &mut Peer<S>,
     send_packages: SendPackages,

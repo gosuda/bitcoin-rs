@@ -1,5 +1,3 @@
-//! BIP324 v2 transport.
-
 mod cipher;
 mod handshake;
 mod keys;
@@ -11,10 +9,8 @@ pub(crate) use handshake::{Established, Handshake, Step};
 pub(crate) use packet::SendCipher;
 pub(crate) use reader::{PacketReader, is_poll_timeout};
 
-/// A BIP324 transport failed. A poll-timeout [`TransportError::Io`] is
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TransportError {
-    /// No garbage terminator within the 4095 bytes of garbage BIP324 allows.
     #[error("BIP324 garbage terminator not found within the garbage limit")]
     TerminatorNotFound,
     #[error("peer sent a v1 version header for another network")]

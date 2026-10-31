@@ -1,4 +1,3 @@
-//! Fee-aware queued inventory, contained in the transaction policy owner.
 #[cfg(test)]
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::cmp::Reverse;
@@ -23,12 +22,6 @@ const MAX_KNOWN: usize = 5_000;
 const MAX_BATCH: usize = 1_000;
 const INVENTORY_TARGET: usize = 70;
 
-/// Core v31.1 net.cpp builds `m_network_key` from remote `GetNetClass` plus bound
-/// address bytes and port.
-///
-/// Socket scope/flow and the remote address/port are not part of this identity.
-/// Accepted I2P SAM streams use their ephemeral local bind endpoint, so their clocks
-/// are per stream; they do not share a destination-wide inbound clock.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct InboundClockKey {
     network: NetworkClass,
@@ -60,8 +53,6 @@ pub(super) struct RelayPeer {
     sent_ibd_filter: bool,
 }
 
-/// Core uses exponential clocks. A 30-second ceiling additionally bounds
-/// inventory latency; the random deadline is independent of admissions.
 fn next_inbound_inv(now: Instant, rng: &mut impl RngCore) -> Instant {
     now + exponential(5, rng).min(Duration::from_secs(30))
 }
@@ -75,10 +66,6 @@ fn exponential(mean_secs: u32, rng: &mut impl RngCore) -> Duration {
     Duration::from_secs_f64(-unit.ln() * f64::from(mean_secs)).max(Duration::from_millis(1))
 }
 
-/// Core v31.1 `FeeFilterRounder`: 1.1-spaced buckets, two-thirds rounded downward,
-/// followed by the configured min-relay floor.
-///
-/// Fractional buckets are intentionally truncated to integer sat/kvB, as in Core.
 pub(super) fn truncate_fee_bucket(val: f64) -> u64 {
     if !val.is_finite() || val <= 0.0 {
         return 0;
@@ -220,7 +207,6 @@ impl RelayPeer {
 }
 
 impl PeerTable {
-    /// The connection's currently received BIP133 threshold, in sat/kvB.
     #[must_use]
     pub fn transaction_fee_filter(&self, source: PeerSource) -> u64 {
         self.tx_policy

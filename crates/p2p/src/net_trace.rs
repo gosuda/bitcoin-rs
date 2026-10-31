@@ -1,5 +1,3 @@
-//! Bitcoin Core `net:*` tracepoint payload mapping.
-
 use crate::PeerRemote;
 
 use crate::peer_info::PeerRole;

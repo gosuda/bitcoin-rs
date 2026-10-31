@@ -1,6 +1,3 @@
-//! Live peer-session table: the single owner of connection leases and the
-//! handshake metadata published for them.
-
 use crate::{PeerEndpoint, PeerRemote};
 use std::hash::{BuildHasher, RandomState};
 
@@ -27,13 +24,7 @@ pub struct PeerSession {
     pub info: Option<PeerInfo>,
     pub(crate) demonstrated_tips: Vec<Hash256>,
     pub(crate) headers_horizon: Option<u32>,
-    /// compact-block push — Core's `getpeerinfo.bip152_hb_to`: we asked the
-    /// peer (via `sendcmpct(true)`) to announce new blocks to us as
-    /// unsolicited `cmpctblock` instead of `inv`.
     pub bip152_hb_to: bool,
-    /// push — Core's `getpeerinfo.bip152_hb_from`: the peer asked us (via
-    /// its `sendcmpct(true)`) to announce new blocks to it as unsolicited
-    /// `cmpctblock` instead of `inv`.
     pub bip152_hb_from: bool,
 }
 
@@ -43,13 +34,8 @@ pub(crate) struct PeerAnnouncementState {
     pub(crate) compact_high_bandwidth: Option<bool>,
     pub(crate) compact_version: Option<u64>,
     pub(crate) useful_block_sequence: u64,
-    /// high-bandwidth push (`bip152_hb_to`). Selection authority lives in
-    /// the worker; the table is the snapshot rpc reads, so promotions and
-    /// demotions are written through here.
     pub(crate) selected_high_bandwidth: bool,
-    /// Whether this peer negotiated BIP332 stale-tip relay, and its `prefers_blocks` flag.
     pub(crate) stale_tip_prefers_blocks: Option<bool>,
-    /// The BIP331 `PKG_RELAY_*` bits the connection owner negotiated; `0`
     pub(crate) package_relay: u64,
 }
 
@@ -199,8 +185,6 @@ impl PeerTable {
         Some(lease)
     }
 
-    /// INVARIANT: the count is always derived from the live entry set; no
-    ///   separate inbound counter exists.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn live_inbound_count(&self) -> usize {
@@ -214,9 +198,6 @@ impl PeerTable {
             .count()
     }
 
-    /// INVARIANT: the activity/count tests, eviction and reservation are one
-    ///   `PeerTable` write operation; every reserved lease is counted until
-    ///   its identity is removed.
     #[must_use]
     pub(crate) fn try_register_inbound(
         &self,
@@ -476,9 +457,6 @@ impl PeerTable {
         true
     }
 
-    /// Publishes the BIP331 `PKG_RELAY_*` bits the connection owner negotiated
-    /// INVARIANT: the `Peer` stays the one owner of the negotiation; this is
-    ///   a copy of its answer.
     pub(crate) fn note_package_relay(&self, source: PeerSource, versions: u64) -> bool {
         let mut entries = self.entries.write();
         let Some(entry) = entries
@@ -528,8 +506,6 @@ impl PeerTable {
         self.note_package_relay(source, versions)
     }
 
-    /// Records that the live connection negotiated BIP332 stale-tip relay
-    /// with the remote peer's `prefers_blocks` preference.
     pub(crate) fn note_stale_tip_relay(&self, source: PeerSource, prefers_blocks: bool) -> bool {
         let mut entries = self.entries.write();
         let Some(entry) = entries
@@ -618,7 +594,6 @@ impl PeerTable {
         true
     }
 
-    /// connection for high-bandwidth compact-block push (`bip152_hb_to`).
     pub(crate) fn note_high_bandwidth_selected(&self, source: PeerSource, selected: bool) {
         let mut entries = self.entries.write();
         if let Some(entry) = entries
@@ -661,7 +636,6 @@ impl PeerTable {
             })
     }
 
-    /// Records that the live connection at `source` negotiated BIP130 `sendheaders`.
     pub(crate) fn note_send_headers(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&PeerRemote::from(source)) {
@@ -706,8 +680,6 @@ impl PeerTable {
         self.remove_if(addr.into(), |current| current.connection_id() == id)
     }
 
-    /// INVARIANT: address sessions are not consulted for identity, so the
-    ///   endpoint-keyed replacement rule plays no part here.
     pub fn disconnect_ready_node_id(&self, node_id: u64) -> bool {
         let mut entries = self.entries.write();
         let Some(key) = entries
@@ -872,7 +844,6 @@ impl PeerTable {
         self.entries.read().is_empty()
     }
 
-    /// INVARIANT: every returned source passes `is_current` at snapshot time.
     #[must_use]
     pub fn live_sessions(&self) -> Vec<PeerSource> {
         live_sessions_of(&self.entries.read())
@@ -956,8 +927,6 @@ impl PeerTable {
         sessions
     }
 
-    /// INVARIANT: inbound, manual, and cancelled leases hold no automatic
-    ///   slot, so none can displace an automatic dial.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn outbound_role_counts(&self) -> (usize, usize) {
@@ -998,8 +967,6 @@ impl PeerTable {
         true
     }
 
-    /// Whether `source`'s connection published BIP144 witness relay: parent
-    /// requests to it carry the witness flag, others do not.
     pub(crate) fn transaction_witness(&self, source: PeerSource) -> bool {
         let entries = self.entries.read();
         let Some(entry) = entries.get(&PeerRemote::from(source)) else {
@@ -1041,7 +1008,6 @@ impl PeerTable {
         message: crate::Message,
         published: impl FnOnce(),
     ) -> Result<(), OutboundRefusal> {
-        // A receipt callback must not observe the send before request publication.
         let entries = self.entries.write();
         let Some(entry) = entries
             .get(&PeerRemote::from(source))
