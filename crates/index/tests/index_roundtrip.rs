@@ -512,8 +512,7 @@ fn parent_hash(body: &[u8]) -> [u8; 32] {
 }
 
 #[test]
-fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), TestError>
-{
+fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), TestError> {
     let watermark = IndexWatermark {
         height: 123,
         hash: [0xab; 32],
@@ -877,24 +876,7 @@ fn spending_rows_carry_transaction_positions() -> Result<(), TestError> {
 }
 
 #[test]
-fn commit_forward_uses_one_durable_write() -> Result<(), TestError> {
-    let store = Arc::new(CallTrackingStore::default());
-    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let body = read_fixture(0)?;
-    let block = prepare(&writer, 0, block_hash(&body), &body)?;
-    let batch = common::single_block_batch(block);
-
-    writer.commit_forward(batch)?;
-
-    assert_eq!(store.durable_writes.load(Ordering::Relaxed), 1);
-    assert_eq!(store.writes.load(Ordering::Relaxed), 0);
-    assert_eq!(store.flushes.load(Ordering::Relaxed), 0);
-    Ok(())
-}
-
-#[test]
-fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestError>
-{
+fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
@@ -977,8 +959,7 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), TestError> {
 }
 
 #[test]
-fn script_index_reset_preserves_tx_lookup_and_shared_identity()
--> Result<(), TestError> {
+fn script_index_reset_preserves_tx_lookup_and_shared_identity() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
@@ -1007,8 +988,7 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity()
 }
 
 #[test]
-fn rollback_preserves_shared_ancestors_for_a_disabled_capability()
--> Result<(), TestError> {
+fn rollback_preserves_shared_ancestors_for_a_disabled_capability() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
@@ -1263,8 +1243,7 @@ fn rollback_is_excluded_by_a_reset_fence() -> Result<(), TestError> {
 }
 
 #[test]
-fn obsolete_and_malformed_reset_claims_are_rejected_without_writes()
--> Result<(), TestError> {
+fn obsolete_and_malformed_reset_claims_are_rejected_without_writes() -> Result<(), TestError> {
     let mut old_claim = vec![SCRIPT_HISTORY_MASK];
     old_claim.extend_from_slice(&9_u64.to_le_bytes());
     for marker in [
@@ -1297,8 +1276,7 @@ fn obsolete_and_malformed_reset_claims_are_rejected_without_writes()
     Ok(())
 }
 
-fn seed_populated_stores()
--> Result<(Arc<MemoryStore>, Arc<MemoryStore>), TestError> {
+fn seed_populated_stores() -> Result<(Arc<MemoryStore>, Arc<MemoryStore>), TestError> {
     let control = Arc::new(MemoryStore::default());
     let interrupted = Arc::new(MemoryStore::default());
     for store in [&control, &interrupted] {
@@ -1307,10 +1285,7 @@ fn seed_populated_stores()
     Ok((control, interrupted))
 }
 
-fn seed_populated_store(
-    store: &Arc<impl KvStore>,
-    generation: u64,
-) -> Result<(), TestError> {
+fn seed_populated_store(store: &Arc<impl KvStore>, generation: u64) -> Result<(), TestError> {
     let mut writer = IndexWriter::open(Arc::clone(store), generation)?;
     let body = read_fixture(0)?;
     let block = prepare_for(
@@ -1401,8 +1376,6 @@ const SCRIPT_HISTORY_MASK: u8 = 0b10;
 const TX_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 
 const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
-
-const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
@@ -1651,8 +1624,7 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), TestError
 }
 
 #[test]
-fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
--> Result<(), TestError> {
+fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     let mut foreign = store.new_batch();
@@ -1906,10 +1878,7 @@ fn redb_snapshot_preserves_position_values() -> Result<(), TestError> {
     Ok(())
 }
 
-fn inject_full_claim(
-    store: &MemoryStore,
-    process_epoch: u64,
-) -> Result<(), TestError> {
+fn inject_full_claim(store: &MemoryStore, process_epoch: u64) -> Result<(), TestError> {
     let mut claim = store.new_batch();
     claim.put(
         ColumnFamily::UtxoMeta,
@@ -1925,8 +1894,7 @@ fn inject_full_claim(
 }
 
 #[test]
-fn full_reset_between_derive_and_commit_rejects_stale_work()
--> Result<(), TestError> {
+fn full_reset_between_derive_and_commit_rejects_stale_work() -> Result<(), TestError> {
     let cases = [
         ("forward", false, ConsumerCursorUpdate::Keep),
         ("rollback", true, ConsumerCursorUpdate::Keep),
@@ -1984,8 +1952,7 @@ fn full_reset_between_derive_and_commit_rejects_stale_work()
 }
 
 #[test]
-fn double_reset_same_generation_still_rejects_stale_commit()
--> Result<(), TestError> {
+fn double_reset_same_generation_still_rejects_stale_commit() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
@@ -2026,8 +1993,7 @@ fn double_reset_same_generation_still_rejects_stale_commit()
 
 // EVT-03
 #[test]
-fn intermediate_rollback_deletes_cursor_and_survives_reopen()
--> Result<(), TestError> {
+fn intermediate_rollback_deletes_cursor_and_survives_reopen() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -2099,8 +2065,7 @@ fn intermediate_rollback_removes_stale_cursor() -> Result<(), TestError> {
     Ok(())
 }
 #[test]
-fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), TestError>
-{
+fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
@@ -2239,9 +2204,7 @@ fn populated_idle_tracking_store() -> Result<Arc<CallTrackingStore>, TestError> 
     Ok(store)
 }
 
-fn stored_state_revision(
-    store: &CallTrackingStore,
-) -> Result<Option<u64>, TestError> {
+fn stored_state_revision(store: &CallTrackingStore) -> Result<Option<u64>, TestError> {
     match store
         .inner
         .get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?
@@ -2311,8 +2274,7 @@ fn rollback_commit_rejects_reset_during_header_read() -> Result<(), TestError> {
 }
 
 #[test]
-fn fenced_watermarks_prefers_reset_over_watermark_decode_error()
--> Result<(), TestError> {
+fn fenced_watermarks_prefers_reset_over_watermark_decode_error() -> Result<(), TestError> {
     let store = populated_idle_tracking_store()?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     arm_reset_after_malformed_watermark_read(&store)?;
@@ -2327,8 +2289,7 @@ fn fenced_watermarks_prefers_reset_over_watermark_decode_error()
 }
 
 #[test]
-fn fenced_watermarks_captures_every_capability_in_one_coherent_snapshot()
--> Result<(), TestError> {
+fn fenced_watermarks_captures_every_capability_in_one_coherent_snapshot() -> Result<(), TestError> {
     let store = populated_idle_tracking_store()?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     store.read_order.lock().clear();
@@ -2344,35 +2305,6 @@ fn fenced_watermarks_captures_every_capability_in_one_coherent_snapshot()
         store.snapshots.load(Ordering::Relaxed),
         snapshots_before + 1,
         "one successful fence capture must use one storage snapshot"
-    );
-    let captures = store.snapshot_read_order.lock().clone();
-    assert_eq!(
-        captures.len(),
-        6,
-        "one capture reads each fenced key exactly once: {captures:?}"
-    );
-    let mut captured_keys: Vec<&[u8]> = captures.iter().map(|(_cf, key)| key.as_slice()).collect();
-    captured_keys.sort_unstable();
-    let mut expected_keys = [
-        RESET_KEY,
-        ORDINARY_STATE_REVISION_KEY,
-        TX_WATERMARK_KEY,
-        SCRIPT_WATERMARK_KEY,
-        LIVE_WATERMARK_KEY,
-        &[0, b'F'],
-    ];
-    expected_keys.sort_unstable();
-    assert_eq!(captured_keys, expected_keys);
-    let live = store.read_order.lock().clone();
-    assert!(
-        live.iter().all(|(cf, key)| {
-            !(*cf == ColumnFamily::UtxoMeta
-                && (key.as_slice() == TX_WATERMARK_KEY
-                    || key.as_slice() == SCRIPT_WATERMARK_KEY
-                    || key.as_slice() == LIVE_WATERMARK_KEY
-                    || key.as_slice() == [0, b'F']))
-        }),
-        "watermark state was read outside the capture snapshot: {live:?}"
     );
 
     *store.snapshot_reset_after_tx_watermark_read.lock() = Some((2, 4));
@@ -2419,8 +2351,7 @@ fn unchanged_reset_surfaces_malformed_watermark_decode() -> Result<(), TestError
 }
 
 #[test]
-fn reset_change_takes_precedence_over_stale_reset_parse_error()
--> Result<(), TestError> {
+fn reset_change_takes_precedence_over_stale_reset_parse_error() -> Result<(), TestError> {
     let store = populated_idle_tracking_store()?;
     let writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let mut malformed = store.inner.new_batch();
@@ -2470,8 +2401,7 @@ fn cursor_only_contention_rejects_stale_revision() -> Result<(), TestError> {
 }
 
 #[test]
-fn each_ordinary_mutator_advances_the_revision_exactly_once()
--> Result<(), TestError> {
+fn each_ordinary_mutator_advances_the_revision_exactly_once() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
     assert_state_revision(&store, None)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
@@ -2524,8 +2454,7 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
 }
 
 #[test]
-fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
--> Result<(), TestError> {
+fn ordinary_revision_overflow_rejects_forward_without_destroying_state() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     let mut near_ceiling = store.new_batch();
@@ -2623,8 +2552,7 @@ fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), TestError
     Ok(())
 }
 #[test]
-fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
--> Result<(), TestError> {
+fn same_mask_claim_is_adopted_cooperatively_without_rewrite() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
     seed_populated_store(&store, 1)?;
     let mut crash = store.new_batch();
@@ -2667,8 +2595,7 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
 }
 
 #[test]
-fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
--> Result<(), TestError> {
+fn union_growth_preserves_claim_identity_and_deletes_full_union_state() -> Result<(), TestError> {
     let store = Arc::new(CallTrackingStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 7)?;

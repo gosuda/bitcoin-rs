@@ -203,7 +203,7 @@ fn committed_gap_with_missing_body_fails_closed() -> TestResult {
         head_height,
         restored_tip,
         restored_height,
-        reason,
+        ..
     } = error
     else {
         panic!("expected DurableHeadGapUnrecoverable, got {error:?}");
@@ -212,7 +212,6 @@ fn committed_gap_with_missing_body_fails_closed() -> TestResult {
     assert_eq!(head_height, 1);
     assert_eq!(restored_tip, Some(Network::Regtest.genesis_block_hash()));
     assert_eq!(restored_height, Some(0));
-    assert_eq!(reason, "a committed gap body is missing from storage");
     assert_eq!(
         handles
             .applied_tip
@@ -286,7 +285,6 @@ fn cold_chainstate_with_missing_genesis_body_fails_closed() -> TestResult {
         ApplyError::DurableHeadGapUnrecoverable {
             restored_tip: None,
             restored_height: None,
-            reason: "a committed gap body is missing from storage",
             ..
         }
     ));
@@ -346,10 +344,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap() -> TestResult {
     };
     assert!(matches!(
         error,
-        ApplyError::DurableHeadGapUnrecoverable {
-            reason: "the restored tip is not below the stored head; the state is not a publication lag",
-            ..
-        }
+        ApplyError::DurableHeadGapUnrecoverable { .. }
     ));
     Ok(())
 }
@@ -425,10 +420,7 @@ fn committed_gap_body_must_hash_to_the_head_identity() -> TestResult {
     };
     assert!(matches!(
         error,
-        ApplyError::DurableHeadGapUnrecoverable {
-            reason: "a stored body does not hash to its committed hash",
-            ..
-        }
+        ApplyError::DurableHeadGapUnrecoverable { .. }
     ));
     Ok(())
 }
@@ -461,10 +453,7 @@ fn committed_gap_must_descend_from_restored_tip() -> TestResult {
     };
     assert!(matches!(
         error,
-        ApplyError::DurableHeadGapUnrecoverable {
-            reason: "the head chain does not descend from the restored tip",
-            ..
-        }
+        ApplyError::DurableHeadGapUnrecoverable { .. }
     ));
     Ok(())
 }

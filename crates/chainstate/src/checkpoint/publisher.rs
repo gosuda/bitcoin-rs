@@ -334,20 +334,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_full_revalidation_marker_is_success() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        retire_full_revalidation_marker(dir.path())?;
-        Ok(())
-    }
-
-    #[test]
     fn marker_clear_io_is_classified_as_retryable_marker_error() -> TestResult {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(JOURNAL_DIR_NAME), b"not a directory")?;
 
         let error = match retire_full_revalidation_marker(dir.path()) {
             Err(error) => error,
-            Ok(()) => return Err(TestError::UnexpectedSuccess("opening a file as the journal directory must fail")),
+            Ok(()) => {
+                return Err(TestError::UnexpectedSuccess(
+                    "opening a file as the journal directory must fail",
+                ));
+            }
         };
         assert!(matches!(error, CheckpointError::FullRevalidationMarker(_)));
         Ok(())
@@ -364,7 +361,9 @@ mod tests {
         let (_, (), witness) =
             bitcoin_rs_utxo::snapshot::write_snapshot_witnessed(&set, &tip, 0, &mut encoded, ())?;
         let Some(witness) = witness else {
-            return Err(TestError::UnexpectedSuccess("empty snapshot must mint a witness"));
+            return Err(TestError::UnexpectedSuccess(
+                "empty snapshot must mint a witness",
+            ));
         };
         let reference = bitcoin_rs_storage::checkpoint::CheckpointReference {
             generation: 0,

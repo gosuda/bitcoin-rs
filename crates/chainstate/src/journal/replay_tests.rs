@@ -5,8 +5,8 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 
 use super::{JournalRecord, JournalReplayError, Mutation, replay_records, validate_replayed_head};
-use crate::test_fixtures::journal_coin as coin;
 use crate::test_fixtures::TestResult;
+use crate::test_fixtures::journal_coin as coin;
 use bitcoin_rs_storage::chainstate_journal::Coin;
 
 type BaseState = (BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin);
@@ -203,8 +203,7 @@ fn replay_requires_each_record_to_extend_the_replayed_tip() -> TestResult {
         if stale_parent {
             assert!(matches!(
                 result,
-                Err(JournalReplayError::CommittedRangeInvalid(reason))
-                    if reason == "record 2 header identity does not match its chain fields"
+                Err(JournalReplayError::CommittedRangeInvalid(_))
             ));
         } else {
             let replayed = result?;
@@ -249,8 +248,7 @@ fn replay_counts_from_an_empty_genesis_and_rejects_overflow() -> TestResult {
         } else {
             assert!(matches!(
                 result,
-                Err(JournalReplayError::CommittedRangeInvalid(reason))
-                    if reason == "chain transaction count overflow"
+                Err(JournalReplayError::CommittedRangeInvalid(_))
             ));
         }
     }

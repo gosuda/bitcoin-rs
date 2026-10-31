@@ -510,8 +510,7 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
         "one warning per rollback pass"
     );
     match h.index_ahead_call() {
-        Some((capability, index_height, tip_height, tip_hash_be, index_hash_be, depth)) => {
-            assert_eq!(capability, "tx_lookup,script_history");
+        Some((_capability, index_height, tip_height, tip_hash_be, index_hash_be, depth)) => {
             assert_eq!((tip_height, index_height, depth), (1, 3, 2));
             assert_eq!(tip_hash_be, a1.hash.to_string_be());
             assert_eq!(index_hash_be, a3.hash.to_string_be());

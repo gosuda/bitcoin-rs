@@ -378,10 +378,10 @@ fn incomplete_history_is_typed_even_for_empty_blocks() -> Result {
 fn materialization_limits_fail_explicitly() -> Result {
     let (mut tx, mut scripts, _) = sample()?;
     scripts[0] = vec![0x51; MAX_PREVOUT_BYTES + 1].into();
-    assert_eq!(
-        derive(&tx, &scripts).err().map(|err| err.to_string()),
-        Some(TweakError::ResourceLimit.to_string())
-    );
+    assert!(matches!(
+        derive(&tx, &scripts),
+        Err(TweakError::ResourceLimit)
+    ));
     let oversized_view = view(tx.clone(), &scripts);
     assert!(matches!(
         block_tweaks(&oversized_view, true),

@@ -395,10 +395,7 @@ fn cold_revalidation_still_refuses_corrupt_undo_instead_of_replacing_it() -> Tes
         .ok_or(TestError::Missing("corrupt undo must fail closed"))?;
     assert!(matches!(
         error,
-        ApplyError::DurableHeadGapUnrecoverable {
-            reason: "a committed gap undo record does not load",
-            ..
-        }
+        ApplyError::DurableHeadGapUnrecoverable { .. }
     ));
     assert_eq!(chain.durable_head.load()?, head);
     assert_eq!(

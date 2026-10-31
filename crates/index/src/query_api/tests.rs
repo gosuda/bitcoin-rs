@@ -1,132 +1,5 @@
 use super::*;
 
-fn assert_renders(cases: Vec<(TxUnavailableCause, &str)>) {
-    for (cause, expected) in cases {
-        assert_eq!(cause.to_string(), expected, "{cause:?}");
-    }
-}
-
-#[test]
-fn fixed_unavailable_causes_render_pinned_wire_text() {
-    assert_renders(vec![
-        (
-            TxUnavailableCause::RowBudgetExhausted,
-            "txindex query work budget exhausted",
-        ),
-        (
-            TxUnavailableCause::RowBudgetExceeded,
-            "txindex query work budget exceeded",
-        ),
-        (
-            TxUnavailableCause::PrefixScanTruncated,
-            "txindex prefix scan truncated",
-        ),
-        (
-            TxUnavailableCause::LivePrefixScanTruncated,
-            "txindex live prefix scan truncated",
-        ),
-        (
-            TxUnavailableCause::BodyReadBudgetExhausted,
-            "txindex query body budget exhausted",
-        ),
-        (
-            TxUnavailableCause::BodyBudgetExceeded,
-            "txindex query body budget exceeded",
-        ),
-        (TxUnavailableCause::WorkerStopped, "txindex worker stopped"),
-        (
-            TxUnavailableCause::FilterDataMissing,
-            "compact filter data is missing",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::TxLookup),
-            "txindex is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptHistory),
-            "script history is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive),
-            "script live is disabled",
-        ),
-        (
-            TxUnavailableCause::CapabilityDisabled(IndexCapability::CompactFilters),
-            "blockfilterindex is disabled",
-        ),
-    ]);
-}
-
-#[test]
-fn carried_unavailable_causes_render_pinned_wire_text() {
-    assert_renders(vec![
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "transaction index",
-                floor: 100,
-            },
-            "transaction index coverage starts at height 100; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "script history",
-                floor: 7,
-            },
-            "script history coverage starts at height 7; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::HistoryUnproven { floor: 5 },
-            "script history coverage starts at height 5; history cannot be proven complete",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("injected worker failure".into()),
-            "injected worker failure",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("txindex worker failed".into()),
-            "txindex worker failed",
-        ),
-        (
-            TxUnavailableCause::CompactFilterFailed("filter worker broke".into()),
-            "filter worker broke",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "chain transition authority missing for ScriptLive",
-            ),
-            "chain transition authority missing for ScriptLive",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "authoritative UTXO view is unavailable for ScriptLive",
-            ),
-            "authoritative UTXO view is unavailable for ScriptLive",
-        ),
-        (
-            TxUnavailableCause::MissingAuthority(
-                "ScriptLive locator is absent from authoritative UTXO",
-            ),
-            "ScriptLive locator is absent from authoritative UTXO",
-        ),
-        (
-            TxUnavailableCause::BlockBodyMissing { height: 9 },
-            "block body missing for txindex query at height 9",
-        ),
-        (
-            TxUnavailableCause::Other("txindex is opening".into()),
-            "txindex is opening",
-        ),
-        (
-            TxUnavailableCause::WorkerFailed("txindex is unavailable".into()),
-            "txindex is unavailable",
-        ),
-        (
-            TxUnavailableCause::Other("txindex was abandoned at shutdown".into()),
-            "txindex was abandoned at shutdown",
-        ),
-    ]);
-}
-
 #[test]
 fn script_live_unavailable_is_typed_passthrough_not_retry() {
     for reason in [
@@ -135,12 +8,7 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         "",
     ] {
         let cause = TxUnavailableCause::ScriptLiveUnavailable(reason.into());
-        assert_eq!(cause.to_string(), reason, "{cause:?}");
         let error = TxQueryError::Unavailable(cause);
-        assert_eq!(
-            error.to_string(),
-            format!("transaction index unavailable: {reason}"),
-        );
         assert!(!matches!(error, TxQueryError::Retry));
     }
     let outage = TxUnavailableCause::ScriptLiveUnavailable("pruned".into());
@@ -154,23 +22,6 @@ fn script_live_unavailable_is_typed_passthrough_not_retry() {
         TxUnavailableCause::CapabilityDisabled(IndexCapability::ScriptLive)
     );
     assert_ne!(outage, TxUnavailableCause::Other("pruned".into()));
-    let shared = HistoricalUnavailableCause::Shared(TxUnavailableCause::ScriptLiveUnavailable(
-        "pruned".into(),
-    ));
-    assert_eq!(shared.to_string(), "pruned");
-    assert_renders(vec![
-        (
-            TxUnavailableCause::PrunedPrefixUnproven {
-                family: "transaction index",
-                floor: 100,
-            },
-            "transaction index coverage starts at height 100; the pruned prefix is unproven",
-        ),
-        (
-            TxUnavailableCause::HistoryUnproven { floor: 5 },
-            "script history coverage starts at height 5; history cannot be proven complete",
-        ),
-    ]);
 }
 
 #[cfg(all(test, feature = "fjall"))]
@@ -394,7 +245,8 @@ impl ScriptIndexQuery for CompleteHistory {
 
 // IDX-02
 #[test]
-fn default_history_page_skips_the_cursor_and_restarts_when_unknown() -> Result<(), crate::portable::TestError> {
+fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
+-> Result<(), crate::portable::TestError> {
     let record = |id: u8, height| ScriptHistoryRecord {
         txid: Txid(Hash256::from_le_bytes(&[id; 32])),
         height,

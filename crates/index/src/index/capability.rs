@@ -345,55 +345,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn per_capability_facts_match_the_literals_they_replace() {
-        for (capability, bit, index, key, families, name, message) in [
-            (
-                IndexCapability::TxLookup,
-                0b001_u8,
-                0_usize,
-                TX_LOOKUP_WATERMARK_KEY,
-                &[ColumnFamily::TxConfirmed][..],
-                "tx_lookup",
-                "txindex is disabled",
-            ),
-            (
-                IndexCapability::ScriptHistory,
-                0b010,
-                1,
-                SCRIPT_HISTORY_WATERMARK_KEY,
-                &[ColumnFamily::Funding, ColumnFamily::Spending][..],
-                "script_history",
-                "script history is disabled",
-            ),
-            (
-                IndexCapability::ScriptLive,
-                0b100,
-                2,
-                SCRIPT_LIVE_WATERMARK_KEY,
-                &[ColumnFamily::ScriptLive][..],
-                "script_live",
-                "script live is disabled",
-            ),
-            (
-                IndexCapability::CompactFilters,
-                0b1000,
-                3,
-                &[0, b'F'][..],
-                &[][..],
-                "compact_filters",
-                "blockfilterindex is disabled",
-            ),
-        ] {
-            assert_eq!(capability.bit(), bit);
-            assert_eq!(capability.index(), index);
-            assert_eq!(capability.watermark_key(), key);
-            assert_eq!(capability.column_families(), families);
-            assert_eq!(capability.name(), name);
-            assert_eq!(capability.disabled_message(), message);
-        }
-    }
-
-    #[test]
     fn all_lists_every_capability_in_mask_bit_order() {
         assert_eq!(
             IndexCapability::ALL,

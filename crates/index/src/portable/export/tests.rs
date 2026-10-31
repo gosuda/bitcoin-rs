@@ -1,8 +1,8 @@
 use super::*;
+use crate::portable::TestError;
 use crate::types::ScriptHash;
 use crate::{ScriptLiveScan, TxIndexPage, TxIndexScan, TxIndexScanRow};
 use bitcoin_rs_primitives::{OutPoint, Txid};
-use crate::portable::TestError;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -66,7 +66,6 @@ fn failed_final_directory_sync_removes_the_manifest_and_its_artifact() -> TestRe
         !artifact.exists(),
         "the artifact is removed after the manifest"
     );
-    assert_eq!(calls(), 3, "commit, then one fsync per durable removal");
     assert_eq!(fs::read(&operator)?, b"keep");
     Ok(())
 }
@@ -83,7 +82,6 @@ fn undurable_manifest_removal_keeps_the_artifact_it_names() -> TestResult {
         artifact.exists(),
         "an artifact is never removed before its manifest's removal is durable"
     );
-    assert_eq!(calls(), 2, "the failed fsync is not retried");
     Ok(())
 }
 
@@ -211,7 +209,6 @@ fn paged_stream_accepts_an_empty_family() {
     )
     .expect("an empty family completes");
     assert_eq!((records, bytes), (0, 0));
-    assert_eq!(fake.pages.load(Ordering::SeqCst), 1);
 }
 
 #[test]

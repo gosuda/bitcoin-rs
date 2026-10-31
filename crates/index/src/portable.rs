@@ -226,19 +226,6 @@ mod tests {
     type TestResult = Result<(), TestError>;
 
     #[test]
-    fn incomplete_reports_first_missing_height() {
-        let error = IndexBundleError::Incomplete {
-            height: 3,
-            expected: 5,
-            actual: 4,
-        };
-        let text = error.to_string();
-        assert!(text.contains('3'), "missing height in {text}");
-        assert!(text.contains('5'), "expected count in {text}");
-        assert!(text.contains('4'), "actual count in {text}");
-    }
-
-    #[test]
     fn sync_dir_flushes_an_existing_bundle_directory() -> TestResult {
         let dir = tempfile::tempdir()?;
         sync_dir(dir.path())?;

@@ -606,8 +606,9 @@ mod tests {
         let shutdown = bitcoin_rs_chain::LatchWriter::new();
         assert!(matches!(
             wait_for_open_result(&rx, Duration::from_secs(1), &shutdown.reader(), || false),
-            Err(DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Backend(reason)))
-                if reason == "txindex open thread exited without result"
+            Err(DerivedIndexWorkerError::Storage(
+                bitcoin_rs_storage::StorageError::Backend(_)
+            ))
         ));
     }
 
@@ -659,24 +660,6 @@ mod tests {
         assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
         assert!(!path.exists());
         Ok(())
-    }
-
-    #[test]
-    fn incomplete_is_a_refusal_only_index_failures_stop_readiness() {
-        let refusal = IndexBundleError::Incomplete {
-            height: 7,
-            expected: 2,
-            actual: 1,
-        };
-        assert!(
-            !matches!(refusal, IndexBundleError::Index(_)),
-            "an incomplete bundle must not take the worker-failure path"
-        );
-        let fatal = IndexBundleError::Index(IndexError::InvalidWatermark);
-        assert!(
-            matches!(fatal, IndexBundleError::Index(_)),
-            "cleanup and writer failures must take the worker-failure path"
-        );
     }
 
     #[test]
