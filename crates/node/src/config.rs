@@ -313,6 +313,24 @@ impl PoolConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_binds()?;
+        self.validate_limits_and_payout()?;
+        #[cfg(feature = "pool")]
+        {
+            self.ledger_config().validate()?;
+            return match bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
+                &self.share_difficulty,
+            ) {
+                Ok(target) if target == self.share_target => Ok(()),
+                Ok(_) => Err(ConfigError::PoolShareTargetMismatch),
+                Err(difficulty_error) => Err(ConfigError::PoolShareDifficulty { difficulty_error }),
+            };
+        }
+        #[cfg(not(feature = "pool"))]
+        Ok(())
+    }
+
+    fn validate_binds(&self) -> Result<(), ConfigError> {
         if !cfg!(feature = "pool") {
             return Err(ConfigError::PoolFeatureRequired);
         }
@@ -346,6 +364,10 @@ impl PoolConfig {
         {
             return Err(ConfigError::Sv2AuthorityKeyEmpty);
         }
+        Ok(())
+    }
+
+    fn validate_limits_and_payout(&self) -> Result<(), ConfigError> {
         if !(self.max_connections > 0
             && self.max_connections_per_ip > 0
             && self.max_connections_per_ip <= self.max_connections)
@@ -387,20 +409,32 @@ impl PoolConfig {
         {
             return Err(ConfigError::PoolRewardScriptCanonical);
         }
-        #[cfg(feature = "pool")]
-        {
-            self.ledger_config().validate()?;
-            return match bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
-                &self.share_difficulty,
-            ) {
-                Ok(target) if target == self.share_target => Ok(()),
-                Ok(_) => Err(ConfigError::PoolShareTargetMismatch),
-                Err(difficulty_error) => Err(ConfigError::PoolShareDifficulty { difficulty_error }),
-            };
-        }
-        #[cfg(not(feature = "pool"))]
         Ok(())
     }
+}
+fn parse_reward_script_hex(reward: &str) -> Result<Vec<u8>, ConfigError> {
+    if reward.len() > 20_000 || !reward.len().is_multiple_of(2) {
+        return Err(ConfigError::PoolRewardScriptBoundedHex);
+    }
+    let (pairs, remainder) = reward.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(ConfigError::PoolRewardScriptEvenHex);
+    }
+    pairs
+        .iter()
+        .map(|pair| {
+            let digit = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            match (digit(pair[0]), digit(pair[1])) {
+                (Some(high), Some(low)) => Ok(high * 16 + low),
+                _ => Err(ConfigError::PoolRewardScriptHex),
+            }
+        })
+        .collect::<Result<Vec<u8>, ConfigError>>()
 }
 
 fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError> {
@@ -431,28 +465,7 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError
         .reward_script
         .as_deref()
         .ok_or(ConfigError::PoolRewardScriptMissing)?;
-    if reward.len() > 20_000 || !reward.len().is_multiple_of(2) {
-        return Err(ConfigError::PoolRewardScriptBoundedHex);
-    }
-    let (pairs, remainder) = reward.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err(ConfigError::PoolRewardScriptEvenHex);
-    }
-    let reward_script = pairs
-        .iter()
-        .map(|pair| {
-            let digit = |byte: u8| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                b'A'..=b'F' => Some(byte - b'A' + 10),
-                _ => None,
-            };
-            match (digit(pair[0]), digit(pair[1])) {
-                (Some(high), Some(low)) => Ok(high * 16 + low),
-                _ => Err(ConfigError::PoolRewardScriptHex),
-            }
-        })
-        .collect::<Result<Vec<u8>, ConfigError>>()?;
+    let reward_script = parse_reward_script_hex(reward)?;
     Ok(Some(PoolConfig {
         datadir: pool
             .datadir
@@ -573,10 +586,6 @@ impl NodeConfig {
         Self::materialize(&UserConfig::default(), NetworkSelection::from(network))
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One fold of every resolved field keeps precedence auditable in one place"
-    )]
     fn materialize(settings: &UserConfig, selection: NetworkSelection) -> Self {
         let profile = NetworkProfile::for_selection(selection);
         let mut chainstate_journal = ChainstateJournalConfig::default();
@@ -603,52 +612,8 @@ impl NodeConfig {
                 dbcache_mb: settings.storage.dbcache_mb.unwrap_or(DEFAULT_DBCACHE_MB),
                 prune_target_mb: settings.storage.prune_target_mb.unwrap_or(0),
             },
-            p2p: P2pConfig {
-                overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
-                    proxy: settings.p2p.proxy,
-                    onion_proxy: settings.p2p.onion_proxy,
-                    onlynet: settings.p2p.onlynet.clone().unwrap_or_default(),
-                    randomize_credentials: settings.p2p.proxy_randomize_credentials.unwrap_or(true),
-                    i2p_sam: settings.p2p.i2p_sam,
-                    i2p_accept: settings.p2p.i2p_accept.unwrap_or(false),
-                    tor_control: settings.p2p.tor_control,
-                    tor_cookie: settings.p2p.tor_cookie.clone(),
-                    identity_dir: PathBuf::from(format!(
-                        "overlay-{:08x}",
-                        u32::from_be_bytes(settings.p2p.magic.unwrap_or(profile.magic))
-                    )),
-                    port: settings
-                        .p2p
-                        .overlay_port
-                        .unwrap_or_else(|| selection.consensus_network().default_p2p_port()),
-                },
-                magic: settings.p2p.magic.unwrap_or(profile.magic),
-                listen: settings.p2p.listen.clone().unwrap_or(profile.listen),
-                dns_seeds_enabled: settings.p2p.dns_seeds.unwrap_or(profile.dns_seeds),
-                asmap: settings.p2p.asmap.clone(),
-                noban_subnets: settings.p2p.noban_subnets.clone().unwrap_or_default(),
-                connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
-                fast_sync: settings.p2p.fast_sync.unwrap_or(false),
-                v2_transport: settings.p2p.v2_transport.unwrap_or(true),
-                relay_offers: bitcoin_rs_p2p::RelayOffers {
-                    package_relay: settings.p2p.package_relay.unwrap_or(false),
-                    stale_tip_relay: settings.p2p.stale_tip_relay.unwrap_or(false),
-                    stale_tip_prefers_blocks: settings
-                        .p2p
-                        .stale_tip_prefers_blocks
-                        .unwrap_or(false),
-                },
-            },
-            rpc: RpcConfig {
-                bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
-                public_bind: settings.rpc.public_bind,
-                max_connections: settings.rpc.max_connections.unwrap_or(128),
-                public_max_connections: settings.rpc.public_max_connections.unwrap_or(128),
-                rest: settings.rpc.rest.unwrap_or(false),
-                silent_payments: settings.rpc.silent_payments.unwrap_or(false),
-                compressed_transactions: settings.rpc.compressed_transactions.unwrap_or(false),
-                auth: rpc_auth(settings),
-            },
+            p2p: materialize_p2p(&settings.p2p, &profile, selection.consensus_network()),
+            rpc: materialize_rpc(&settings.rpc, &profile, rpc_auth(settings)),
             indexes: IndexConfig {
                 txindex: settings.indexes.txindex.unwrap_or(false),
                 blockfilterindex: settings.indexes.blockfilterindex.unwrap_or(false),
@@ -864,6 +829,61 @@ impl NodeConfig {
             }
         }
         Ok(())
+    }
+}
+fn materialize_p2p(
+    settings: &crate::options::P2pOverrides,
+    profile: &NetworkProfile,
+    network: Network,
+) -> P2pConfig {
+    P2pConfig {
+        overlay: bitcoin_rs_p2p::overlay::OverlayConfig {
+            proxy: settings.proxy,
+            onion_proxy: settings.onion_proxy,
+            onlynet: settings.onlynet.clone().unwrap_or_default(),
+            randomize_credentials: settings.proxy_randomize_credentials.unwrap_or(true),
+            i2p_sam: settings.i2p_sam,
+            i2p_accept: settings.i2p_accept.unwrap_or(false),
+            tor_control: settings.tor_control,
+            tor_cookie: settings.tor_cookie.clone(),
+            identity_dir: PathBuf::from(format!(
+                "overlay-{:08x}",
+                u32::from_be_bytes(settings.magic.unwrap_or(profile.magic))
+            )),
+            port: settings
+                .overlay_port
+                .unwrap_or_else(|| network.default_p2p_port()),
+        },
+        magic: settings.magic.unwrap_or(profile.magic),
+        listen: settings.listen.clone().unwrap_or_else(|| profile.listen.clone()),
+        dns_seeds_enabled: settings.dns_seeds.unwrap_or(profile.dns_seeds),
+        asmap: settings.asmap.clone(),
+        noban_subnets: settings.noban_subnets.clone().unwrap_or_default(),
+        connect: settings.connect.clone().unwrap_or_else(|| profile.connect.clone()),
+        fast_sync: settings.fast_sync.unwrap_or(false),
+        v2_transport: settings.v2_transport.unwrap_or(true),
+        relay_offers: bitcoin_rs_p2p::RelayOffers {
+            package_relay: settings.package_relay.unwrap_or(false),
+            stale_tip_relay: settings.stale_tip_relay.unwrap_or(false),
+            stale_tip_prefers_blocks: settings.stale_tip_prefers_blocks.unwrap_or(false),
+        },
+    }
+}
+
+fn materialize_rpc(
+    settings: &crate::options::RpcOverrides,
+    profile: &NetworkProfile,
+    auth: Auth,
+) -> RpcConfig {
+    RpcConfig {
+        bind: settings.bind.unwrap_or(profile.rpc_bind),
+        public_bind: settings.public_bind,
+        max_connections: settings.max_connections.unwrap_or(128),
+        public_max_connections: settings.public_max_connections.unwrap_or(128),
+        rest: settings.rest.unwrap_or(false),
+        silent_payments: settings.silent_payments.unwrap_or(false),
+        compressed_transactions: settings.compressed_transactions.unwrap_or(false),
+        auth,
     }
 }
 
