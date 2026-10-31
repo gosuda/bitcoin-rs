@@ -382,7 +382,7 @@ fn peer_info_wire(
 }
 
 pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let _ = params_array(params)?;
+    params_array(params)?;
     let added = ctx.network.p2p.added_nodes();
     let entries = added
         .into_iter()

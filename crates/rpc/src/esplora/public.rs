@@ -213,7 +213,7 @@ fn tx_status(ctx: &Context, id: &str) -> Response {
 fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
     confirmed_block(ctx, id).map_or_else(
         |r| r,
-        |(record, bytes, txid)| {
+        |(_record, bytes, txid)| {
             let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
             else {
                 return internal_error("stored block body is corrupt");
@@ -221,7 +221,6 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
             let proof = MerkleBlock::from_block_with_predicate(&block, |candidate| {
                 candidate.as_byte_array() == txid.as_bytes()
             });
-            let _ = record;
             text_response(
                 "text/plain",
                 serialize(&proof).to_lower_hex_string().into_bytes(),

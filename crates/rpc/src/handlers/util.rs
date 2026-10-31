@@ -201,15 +201,15 @@ pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value
     };
     let feerate = crate::tx_render::btc_amount_json(rate.as_sat_per_kvb());
     let mut short = sonic_rs::Object::new();
-    let _ = short.insert("feerate", feerate.clone());
+    short.insert("feerate", feerate.clone());
     let mut medium = sonic_rs::Object::new();
-    let _ = medium.insert("feerate", feerate.clone());
+    medium.insert("feerate", feerate.clone());
     let mut long = sonic_rs::Object::new();
-    let _ = long.insert("feerate", feerate);
+    long.insert("feerate", feerate);
     let mut object = sonic_rs::Object::new();
-    let _ = object.insert("short", Value::from(short));
-    let _ = object.insert("medium", Value::from(medium));
-    let _ = object.insert("long", Value::from(long));
+    object.insert("short", Value::from(short));
+    object.insert("medium", Value::from(medium));
+    object.insert("long", Value::from(long));
     Ok(Value::from(object))
 }
 
@@ -1341,20 +1341,24 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
             .as_bytes()
             .iter()
             .position(|b| *b == needle)?;
-        let pos_u64 = u64::try_from(pos).ok()?;
-        let val = u32::try_from(pos_u64 & 31).ok()?;
+        #[expect(clippy::expect_used, reason = "index in BIP380 charset fits in u64")]
+        let pos_u64 = u64::try_from(pos).expect("index in BIP380 charset fits in u64");
+        #[expect(clippy::expect_used, reason = "5-bit masked position fits in u32")]
+        let val = u32::try_from(pos_u64 & 31).expect("5-bit masked position fits in u32");
         c = descriptor_polymod(c, val);
         cls = cls * 3 + (pos_u64 >> 5);
         clscount = clscount.saturating_add(1);
         if clscount == 3 {
-            let val = u32::try_from(cls).ok()?;
+            #[expect(clippy::expect_used, reason = "cls accumulator fits in u32")]
+            let val = u32::try_from(cls).expect("cls accumulator fits in u32");
             c = descriptor_polymod(c, val);
             cls = 0;
             clscount = 0;
         }
     }
     if clscount > 0 {
-        let val = u32::try_from(cls).ok()?;
+        #[expect(clippy::expect_used, reason = "cls accumulator fits in u32")]
+        let val = u32::try_from(cls).expect("cls accumulator fits in u32");
         c = descriptor_polymod(c, val);
     }
     for _ in 0..8_u32 {
@@ -1364,7 +1368,8 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
     let mut out = String::with_capacity(8);
     for i in 0..8_u32 {
         let shift = 5_u32 * (7 - i);
-        let idx = usize::try_from((c >> shift) & 31).ok()?;
+        #[expect(clippy::expect_used, reason = "5-bit checksum chunk fits in usize")]
+        let idx = usize::try_from((c >> shift) & 31).expect("5-bit checksum chunk fits in usize");
         out.push(char::from(BIP380_CHECKSUM_CHARSET[idx]));
     }
     Some(out)

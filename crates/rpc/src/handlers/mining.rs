@@ -296,13 +296,13 @@ pub(crate) fn getprioritisedtransactions(
     for entry in ctx.mempool.gateway.prioritised_transactions() {
         let txid = entry.txid.to_string();
         let mut row = sonic_rs::Object::new();
-        let _ = row.insert("fee_delta", json!(entry.fee_delta));
-        let _ = row.insert("in_mempool", json!(entry.in_mempool));
+        row.insert("fee_delta", json!(entry.fee_delta));
+        row.insert("in_mempool", json!(entry.in_mempool));
         if let Some(modified_fee) = entry.modified_fee {
             let sats = signed_sat_to_i64(modified_fee);
-            let _ = row.insert("modified_fee", json!(sats));
+            row.insert("modified_fee", json!(sats));
         }
-        let _ = object.insert(&txid, Value::from(row));
+        object.insert(&txid, Value::from(row));
     }
     Ok(Value::from(object))
 }

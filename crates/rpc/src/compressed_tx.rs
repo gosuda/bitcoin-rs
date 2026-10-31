@@ -480,12 +480,24 @@ enum PrevoutKind {
 
 fn prevout_kind(script: &[u8]) -> PrevoutKind {
     match output_shape(script) {
-        (OutputShape::P2pkh, payload) => {
-            PrevoutKind::P2pkh(payload.try_into().unwrap_or([0_u8; 20]))
+        (OutputShape::P2pkh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2pkh payload shape is 20 bytes")]
+            PrevoutKind::P2pkh(payload.try_into().expect("P2pkh payload shape is 20 bytes"))
         }
-        (OutputShape::P2sh, payload) => PrevoutKind::P2sh(payload.try_into().unwrap_or([0_u8; 20])),
-        (OutputShape::P2wpkh, payload) => {
-            PrevoutKind::P2wpkh(payload.try_into().unwrap_or([0_u8; 20]))
+        (OutputShape::P2sh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2sh payload shape is 20 bytes")]
+            PrevoutKind::P2sh(payload.try_into().expect("P2sh payload shape is 20 bytes"))
+        }
+        (OutputShape::P2wpkh, payload) =>
+        {
+            #[expect(clippy::expect_used, reason = "P2wpkh payload shape is 20 bytes")]
+            PrevoutKind::P2wpkh(
+                payload
+                    .try_into()
+                    .expect("P2wpkh payload shape is 20 bytes"),
+            )
         }
         (OutputShape::P2wsh, _) => PrevoutKind::P2wsh,
         (OutputShape::P2tr, _) => PrevoutKind::P2tr,
@@ -501,15 +513,18 @@ fn push_data(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 3);
     match data.len() {
         len if len < 76 => {
-            out.push(u8::try_from(len).unwrap_or(0));
+            #[expect(clippy::expect_used, reason = "len < 76 fits in u8")]
+            out.push(u8::try_from(len).expect("len < 76 fits in u8"));
         }
         len if len <= 0xff => {
             out.push(0x4c);
-            out.push(u8::try_from(len).unwrap_or(0));
+            #[expect(clippy::expect_used, reason = "len <= 0xff fits in u8")]
+            out.push(u8::try_from(len).expect("len <= 0xff fits in u8"));
         }
         len => {
             out.push(0x4d);
-            let len = u16::try_from(len).unwrap_or(u16::MAX);
+            #[expect(clippy::expect_used, reason = "push data length fits in u16")]
+            let len = u16::try_from(len).expect("push data length fits in u16");
             out.extend_from_slice(&len.to_le_bytes());
         }
     }
@@ -565,12 +580,15 @@ fn der_encode(sig64: &[u8; 64]) -> Vec<u8> {
     let s = integer(&sig64[32..]);
     let mut der = Vec::with_capacity(r.len() + s.len() + 6);
     der.push(0x30);
-    der.push(u8::try_from(r.len() + s.len() + 4).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER sequence length fits in u8")]
+    der.push(u8::try_from(r.len() + s.len() + 4).expect("DER sequence length fits in u8"));
     der.push(0x02);
-    der.push(u8::try_from(r.len()).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER integer r length fits in u8")]
+    der.push(u8::try_from(r.len()).expect("DER integer r length fits in u8"));
     der.extend_from_slice(&r);
     der.push(0x02);
-    der.push(u8::try_from(s.len()).unwrap_or(0));
+    #[expect(clippy::expect_used, reason = "DER integer s length fits in u8")]
+    der.push(u8::try_from(s.len()).expect("DER integer s length fits in u8"));
     der.extend_from_slice(&s);
     der
 }
@@ -604,16 +622,22 @@ fn compress_p2tr_signature(input: &TxIn) -> Option<CompressedSig> {
     }
     let item = input.witness.first()?;
     match item.len() {
-        64 => Some(CompressedSig {
-            sig: item.try_into().ok()?,
-            pubkey_hash: None,
-            hash_type: None,
-            standard: true,
-        }),
+        64 => {
+            #[expect(clippy::expect_used, reason = "item slice length is exactly 64")]
+            let sig = item.try_into().expect("item slice length is exactly 64");
+            Some(CompressedSig {
+                sig,
+                pubkey_hash: None,
+                hash_type: None,
+                standard: true,
+            })
+        }
         65 => {
             let (sig, hash_type) = item.split_at(64);
+            #[expect(clippy::expect_used, reason = "split_at(64) produces 64-byte slice")]
+            let sig = sig.try_into().expect("split_at(64) produces 64-byte slice");
             Some(CompressedSig {
-                sig: sig.try_into().ok()?,
+                sig,
                 pubkey_hash: None,
                 hash_type: Some(*hash_type.first()?),
                 standard: false,
@@ -675,7 +699,10 @@ fn compress_p2sh_signature(input: &TxIn, script_hash: &[u8; 20]) -> Option<Compr
     if pubkey.len() != 33 {
         return None;
     }
-    let redeem_hash: [u8; 20] = script_sig[3..23].try_into().ok()?;
+    #[expect(clippy::expect_used, reason = "slice 3..23 has length 20")]
+    let redeem_hash: [u8; 20] = script_sig[3..23]
+        .try_into()
+        .expect("slice 3..23 has length 20");
     if hash160_20(pubkey) != redeem_hash || hash160_20(&script_sig[1..]) != *script_hash {
         return None;
     }
