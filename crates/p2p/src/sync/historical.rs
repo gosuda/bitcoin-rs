@@ -176,13 +176,13 @@ impl BlockSync {
                     Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(hash.to_le_bytes()))
                 })
                 .collect();
-            let _ = self
-                .peer_table
-                .send_then(*source, Message::GetData(inventory), || {
-                    let mut historical = self.historical.lock();
-                    let HistoricalDownload { window, stager, .. } = &mut *historical;
-                    window.mark_requested(stager, &request, *source, now);
-                });
+            let _receiver_gone =
+                self.peer_table
+                    .send_then(*source, Message::GetData(inventory), || {
+                        let mut historical = self.historical.lock();
+                        let HistoricalDownload { window, stager, .. } = &mut *historical;
+                        window.mark_requested(stager, &request, *source, now);
+                    });
         }
     }
 
