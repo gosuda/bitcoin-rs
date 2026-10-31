@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::mutation::{AdmissionOrigin, RemovalReason};
 use crate::pool::ProjectionScope;
+#[cfg(any(test, feature = "test-seam"))]
 use crate::truc::SiblingEviction;
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
