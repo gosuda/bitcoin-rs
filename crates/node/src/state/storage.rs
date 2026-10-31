@@ -379,7 +379,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
         self.0
             .publish_index_ahead(
                 capability,

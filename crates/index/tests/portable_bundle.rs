@@ -31,7 +31,7 @@ use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
 use bitcoin_rs_index::reconcile::{ChainCursorSource, ConsumerCursor};
 use bitcoin_rs_index::runtime::{
     DEFAULT_BATCH_LIMITS, DerivedIndexLifecycle, DerivedIndexOpenSpec, DerivedIndexQueryAdapter,
-    DerivedIndexRuntime, DerivedIndexWorker, Generation, IndexAheadSink,
+    DerivedIndexRuntime, DerivedIndexWorker, Generation, IndexAheadError, IndexAheadSink,
     open_derived_index_store_on_worker,
 };
 use bitcoin_rs_index::{
@@ -247,7 +247,7 @@ impl IndexAheadSink for NoIndexAhead {
         _index_hash_be: &str,
         _depth: u32,
         _unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         Ok(())
     }
 }

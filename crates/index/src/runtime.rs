@@ -417,6 +417,12 @@ pub struct OpenDerivedIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum IndexAheadError {
+    #[error(transparent)]
+    Evidence(#[from] bitcoin_rs_storage::recovery_evidence::EvidenceError),
+}
+
 /// Sink for index-ahead rollback evidence.
 pub trait IndexAheadSink: Send + Sync {
     fn report_index_ahead(
@@ -428,7 +434,7 @@ pub trait IndexAheadSink: Send + Sync {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), IndexAheadError>;
 }
 
 pub(crate) struct UndoScripts {
@@ -499,7 +505,7 @@ impl IndexAheadSink for RecordedIndexAhead {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         self.calls.lock().push((
             capability.to_owned(),
             index_height,
@@ -632,7 +638,7 @@ pub enum DerivedIndexWorkerError {
     MissingTargetChain { height: u32 },
     /// The rollback evidence sink failed to publish the index-ahead event.
     #[error("txindex worker: rollback evidence marker not written: {0}")]
-    RollbackEvidence(#[source] Box<dyn std::error::Error + Send + Sync>),
+    RollbackEvidence(#[from] IndexAheadError),
 }
 
 impl DerivedIndexWorkerError {
