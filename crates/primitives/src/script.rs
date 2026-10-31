@@ -85,16 +85,17 @@ impl Witness {
     pub fn from_stack(stack: Vec<Vec<u8>>) -> Self {
         let total = stack.iter().map(Vec::len).sum();
         let mut witness = Self::with_capacity(stack.len(), total);
-        for item in &stack {
-            witness.push(item);
+        for item in stack {
+            witness.push(&item);
         }
         witness
     }
 
     pub fn push(&mut self, item: &[u8]) {
         self.bytes.extend_from_slice(item);
-        let end = u32::try_from(self.bytes.len())
-            .expect("a witness stays below the 4_000_000 byte consensus block maximum");
+        let end = u32::try_from(self.bytes.len()).unwrap_or_else(|_| {
+            unreachable!("a witness stays below the 4_000_000 byte consensus block maximum")
+        });
         self.ends.push(end);
     }
 

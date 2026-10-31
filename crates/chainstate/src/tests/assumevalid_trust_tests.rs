@@ -1,4 +1,4 @@
-//! AssumeValid script trust fails closed and follows pin ancestry (#1742).
+//! `AssumeValid` script trust fails closed and follows pin ancestry (#1742).
 
 use std::sync::Arc;
 
@@ -93,13 +93,12 @@ fn check_script_verdict(block: &Block, prevout: &TxOut) -> Result<(), ConsensusE
     )
 }
 
-fn assert_script_invalid(block: &Block, prevout: &TxOut) -> TestResult {
+fn assert_script_invalid(block: &Block, prevout: &TxOut) {
     let verdict = check_script_verdict(block, prevout);
     assert!(
         matches!(verdict, Err(ConsensusError::Script { .. })),
         "the fixture spend must be script-invalid, got {verdict:?}"
     );
-    Ok(())
 }
 
 fn assert_script_valid(block: &Block, prevout: &TxOut) -> TestResult {
@@ -109,7 +108,7 @@ fn assert_script_valid(block: &Block, prevout: &TxOut) -> TestResult {
 
 fn assert_rejected_unchanged(
     chain: &Chainstate,
-    result: Result<crate::ConnectOutcome, ApplyError>,
+    result: &Result<crate::ConnectOutcome, ApplyError>,
     funding: &OutPoint,
     tip_before: bitcoin_rs_primitives::Hash256,
 ) -> TestResult {
@@ -132,14 +131,14 @@ fn assert_rejected_unchanged(
 fn assume_valid_without_matching_pin_does_not_skip_scripts() -> TestResult {
     let (mut chain, funding, prevout, parent) = funded_chain()?;
     let invalid = spend_block(parent, funding, OP_RETURN)?;
-    assert_script_invalid(&invalid, &prevout)?;
+    assert_script_invalid(&invalid, &prevout);
     chain.validation_mode = ValidationMode::AssumeValid;
     chain.assume_valid_height = 101;
     chain.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(None));
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
     let failed = chain.apply_block(&BlockPayload::from_local(invalid));
-    assert_rejected_unchanged(&chain, failed, &funding, tip_before)?;
+    assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }
 
@@ -151,7 +150,7 @@ fn assume_valid_sibling_below_the_pin_runs_scripts() -> TestResult {
     let mut successor = mined_child(pin.block_hash(), 102)?;
     remine(&mut successor)?;
     let sibling = spend_block(parent, funding, OP_RETURN)?;
-    assert_script_invalid(&sibling, &prevout)?;
+    assert_script_invalid(&sibling, &prevout);
     chain.admit_headers(&[pin.header, successor.header, sibling.header])?;
     chain.validation_mode = ValidationMode::AssumeValid;
     chain.assume_valid_height = 101;
@@ -166,7 +165,7 @@ fn assume_valid_sibling_below_the_pin_runs_scripts() -> TestResult {
     );
     let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
     let failed = chain.apply_block(&BlockPayload::from_local(sibling));
-    assert_rejected_unchanged(&chain, failed, &funding, tip_before)?;
+    assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }
 
@@ -201,7 +200,7 @@ fn assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin() -> TestResult {
     let mut pin_successor = mined_child(pin.block_hash(), 102)?;
     remine(&mut pin_successor)?;
     let branch_block = spend_block(parent, funding, OP_RETURN)?;
-    assert_script_invalid(&branch_block, &prevout)?;
+    assert_script_invalid(&branch_block, &prevout);
     let mut branch_second = mined_child(branch_block.block_hash(), 102)?;
     remine(&mut branch_second)?;
     let mut branch_third = mined_child(branch_second.block_hash(), 103)?;
@@ -222,6 +221,6 @@ fn assume_valid_trust_is_revoked_when_a_reorg_drops_the_pin() -> TestResult {
     chain.assume_valid_gate.evaluate(&chain.block_tree.read());
     let tip_before = chain.applied_tip_snapshot().ok_or("tip")?.hash;
     let failed = chain.apply_block(&BlockPayload::from_local(branch_block));
-    assert_rejected_unchanged(&chain, failed, &funding, tip_before)?;
+    assert_rejected_unchanged(&chain, &failed, &funding, tip_before)?;
     Ok(())
 }

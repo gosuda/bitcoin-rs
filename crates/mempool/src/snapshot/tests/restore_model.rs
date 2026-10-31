@@ -1,11 +1,11 @@
 use super::*;
 
+const LINK_RECORDS: u64 = 8;
+
 #[expect(
     clippy::expect_used,
     reason = "all generated graph indices are bounded by four"
 )]
-const LINK_RECORDS: u64 = 8;
-
 fn graph(parents: &[Vec<usize>], fees: u32, nonfinal: u32, chain_state: u8) -> (Snapshot, Coins) {
     let mut rows: Vec<SavedTransaction> = Vec::new();
     let mut coins = Coins {

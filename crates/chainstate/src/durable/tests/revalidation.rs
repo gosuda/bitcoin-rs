@@ -1,4 +1,4 @@
-//! Cold recovery must not inherit script trust from AssumeValid commits (#1730).
+//! Cold recovery must not inherit script trust from `AssumeValid` commits (#1730).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -136,42 +136,39 @@ fn prepare_cold(
         enabled: false,
         ..crate::ChainstateJournalConfig::default()
     };
-    let dir = match checkpoint_dir {
-        Some(dir) => {
-            if marker {
-                // Prove selector validity: without the marker, this accepted checkpoint
-                // restores as ResumeSource::Checkpoint with applied_tip at height 100.
-                let baseline = prepare_initial_chainstate(
-                    dir.path(),
-                    Network::Regtest,
-                    journal_config,
-                    Some(&head),
-                )?;
-                assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
-                assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
+    let dir = if let Some(dir) = checkpoint_dir {
+        if marker {
+            // Prove selector validity: without the marker, this accepted checkpoint
+            // restores as ResumeSource::Checkpoint with applied_tip at height 100.
+            let baseline = prepare_initial_chainstate(
+                dir.path(),
+                Network::Regtest,
+                journal_config,
+                Some(&head),
+            )?;
+            assert_eq!(baseline.resume_source, ResumeSource::Checkpoint);
+            assert_eq!(baseline.applied_tip.as_ref().map(|t| t.height), Some(100));
 
-                let journal = dir.path().join(JOURNAL_DIR_NAME);
-                std::fs::create_dir_all(&journal)?;
-                std::fs::write(
-                    journal.join(FULL_REVALIDATION_MARKER),
-                    b"journal fork crossed below checkpoint base\n",
-                )?;
-            }
-            dir
+            let journal = dir.path().join(JOURNAL_DIR_NAME);
+            std::fs::create_dir_all(&journal)?;
+            std::fs::write(
+                journal.join(FULL_REVALIDATION_MARKER),
+                b"journal fork crossed below checkpoint base\n",
+            )?;
         }
-        None => {
-            let dir = tempfile::tempdir()?;
-            crate::events::initialize_data_dir(dir.path())?;
-            if marker {
-                let journal = dir.path().join(JOURNAL_DIR_NAME);
-                std::fs::create_dir_all(&journal)?;
-                std::fs::write(
-                    journal.join(FULL_REVALIDATION_MARKER),
-                    b"journal fork crossed below checkpoint base\n",
-                )?;
-            }
-            dir
+        dir
+    } else {
+        let dir = tempfile::tempdir()?;
+        crate::events::initialize_data_dir(dir.path())?;
+        if marker {
+            let journal = dir.path().join(JOURNAL_DIR_NAME);
+            std::fs::create_dir_all(&journal)?;
+            std::fs::write(
+                journal.join(FULL_REVALIDATION_MARKER),
+                b"journal fork crossed below checkpoint base\n",
+            )?;
         }
+        dir
     };
     let initial =
         prepare_initial_chainstate(dir.path(), Network::Regtest, journal_config, Some(&head))?;

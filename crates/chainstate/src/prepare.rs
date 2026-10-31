@@ -236,17 +236,18 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ScriptsRan {
     Executed,
     Skipped,
 }
 
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "profiling microsecond counts saturate below u64::MAX"
+)]
 pub(super) fn verify_block_transactions(
     handles: &Chainstate,
     view: &mut bitcoin_rs_consensus::BlockView<'_>,

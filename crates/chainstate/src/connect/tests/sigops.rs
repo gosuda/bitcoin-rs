@@ -98,7 +98,7 @@ fn check_budget(
     chain: &mut crate::Chainstate,
     block: Block,
     path: Path,
-    expected: Result<(), ConsensusError>,
+    expected: &Result<(), ConsensusError>,
 ) -> TestResult {
     let hash = block.block_hash().0;
     if matches!(path, Path::Window | Path::AssumeValid) {
@@ -153,7 +153,7 @@ fn check_budget(
                 error.source
             }),
     };
-    match &expected {
+    match expected {
         Ok(()) => {
             result?;
         }
@@ -212,7 +212,7 @@ fn aggregate_sigops_enforce_the_inclusive_budget_on_every_connect_path() -> Test
             } else {
                 Ok(())
             };
-            check_budget(&mut chain, block, path, expected)?;
+            check_budget(&mut chain, block, path, &expected)?;
         }
     }
     Ok(())
@@ -231,7 +231,7 @@ fn coinbase_only_blocks_obey_the_sigop_budget() -> TestResult {
         } else {
             Ok(())
         };
-        check_budget(&mut chain, block, Path::Direct, expected)?;
+        check_budget(&mut chain, block, Path::Direct, &expected)?;
     }
     Ok(())
 }
@@ -327,7 +327,7 @@ fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
             } else {
                 Ok(())
             };
-            check_budget(&mut chain, block, Path::Window, expected)?;
+            check_budget(&mut chain, block, Path::Window, &expected)?;
         }
     }
     Ok(())
@@ -345,7 +345,7 @@ fn empty_coinbase_outputs_rejected_on_every_connect_path() -> TestResult {
         let mut block = mined_child(parent, 101)?;
         block.txs[0].outputs.clear();
         remine(&mut block)?;
-        check_budget(&mut chain, block, path, Err(ConsensusError::EmptyOutputs))?;
+        check_budget(&mut chain, block, path, &Err(ConsensusError::EmptyOutputs))?;
     }
     Ok(())
 }

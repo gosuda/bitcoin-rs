@@ -379,7 +379,8 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
     }
 
     fn load_attestation(&self, head: &DurableHead) -> Result<ScriptAttestation, StorageError> {
-        Ok(match *self.attestation.read() {
+        let attestation = *self.attestation.read();
+        Ok(match attestation {
             Some((commit_id, level)) if commit_id == head.commit_id => level,
             _ => ScriptAttestation::Unattested,
         })
