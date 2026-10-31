@@ -67,7 +67,7 @@ The chain is layout-valid only. Custom input outpoints do not name real predeces
 
 ### Decision rule
 
-Keep Fjall as the index namespace default unless another backend writes at least 2 times fewer physical bytes, and its query p95 and build time are no more than 10 percent worse. Record the measured table and the decision below. When another backend wins, make it the default for new index namespaces; the format gate rebuilds any existing index.
+Keep Fjall as the index namespace default unless another backend writes at least 2 times fewer physical bytes. Its query p95 and build time must be no more than 10 percent worse. Record the measured table and the decision below. When another backend wins, make it the default for new index namespaces. The format gate rebuilds any existing index.
 
 ## Measured results
 
@@ -82,9 +82,9 @@ Run: 2026-10-31, one host, `RUSTC_WRAPPER= cargo bench -p bitcoin-rs-index --fea
 Limits of these numbers, read before using them:
 
 - `physical writes` is `unavailable`. The run reported 0 counted `write(2)` bytes, and the store directory showed a 0-byte delta from its post-open baseline. The bench did not trace which backend mechanism absorbed the writes, so it attributes neither of those observations to a cause and reports no amplification.
-- On-disk attribution is `unavailable` for the same observed reason: the directory did not grow past the baseline taken right after open, so per-family on-disk bytes cannot be separated on this backend with this method.
+- On-disk attribution is `unavailable` for the same observed reason: the directory did not grow past the baseline taken right after open. Per-family on-disk bytes cannot be separated on this backend with this method.
 - `query_p50_us` for `tx_lookup` is below one microsecond. The field is integer microseconds, so 0 means "under 1 us".
 - `script_live` row scans are slower than `script_history` row scans in this run. The measured call is the raw locator scan, so the bench does not attribute the difference to a cause.
 - `snapshot_open_us` replaces the earlier `reopen_ms` field. It measures creating a reader snapshot on the still-open store, not closing and reopening the backend. Every run reported under one millisecond.
 
-Decision: keep Fjall as the index namespace default. The decision rule needs physical bytes, and this host cannot measure them for Fjall. A backend swap needs a run that produces a non-zero physical-write count for each family; until then, no other backend has evidence against Fjall. Redb and RocksDB rows are absent because a full run per backend needs a clean bench build for each feature set; run them with the same command and `--features redb` or `--features rocksdb`.
+Decision: keep Fjall as the index namespace default. The decision rule needs physical bytes, and this host cannot measure them for Fjall. A backend swap needs a run that produces a non-zero physical-write count for each family. Until then, no other backend has evidence against Fjall. Redb and RocksDB rows are absent because a full run per backend needs a clean bench build for each feature set. Run them with the same command and `--features redb` or `--features rocksdb`.

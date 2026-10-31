@@ -69,11 +69,11 @@ Each cell lists rounds 1 / 2 / 3. The candidate holds the transition longer, bec
 
 ### Decision
 
-REJECT. The target gate needs control divided by candidate to reach 1.05, with the improvement larger than the control range. Control divided by candidate is between 0.43 and 0.96 over the six paired rounds, because candidate divided by control is between 1.045 and 2.343. The non-target gate fails too: the candidate raises the median wall time by 9.3% in `single_group` and 12.3% in `multi_group`, beyond the 3% limit, and raises p95 by more than 5% in `multi_group`. `window.rs` went back to its baseline, and the six regression tests stayed.
+REJECT. The target gate needs control divided by candidate to reach 1.05, with the improvement larger than the control range. Control divided by candidate is between 0.43 and 0.96 over the six paired rounds. Candidate divided by control is between 1.045 and 2.343. The non-target gate also fails. The candidate raises the median wall time by 9.3% in `single_group` and 12.3% in `multi_group`, beyond the 3% limit. It raises p95 by more than 5% in `multi_group`. `window.rs` went back to its baseline, and the six regression tests stayed.
 
 ### Why it lost on this corpus
 
 - The replay corpus holds coinbase-only blocks. A coinbase has no input script checks, so the verifier has nothing to run while the producer prepares the next block. The overlap has no work to hide.
 - The pipeline costs two thread wakeups per block: the producer hands off a unit, and the verifier returns a verdict. The baseline verifies the whole window in one call with no handoff.
-- Per-block verification also splits the batch. The baseline verifies all window checks in one parallel pass, so a window with fewer than 32 checks per block still saturates the verify pool; the candidate verifies each block separately and falls below the pool threshold.
+- Per-block verification also splits the batch. The baseline verifies all window checks in one parallel pass. A window with fewer than 32 checks per block still saturates the verify pool. The candidate verifies each block separately and falls below the pool threshold.
 - The corpus cannot measure the script-heavy case this mechanism targets. A future candidate needs a script-heavy replay corpus, a verification batch of several blocks, and a handoff that does not wake the producer per block. Until then, the mechanism stays unadopted.

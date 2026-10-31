@@ -262,8 +262,8 @@ fat one.
 #### Measured on the real chainstate, not the synthetic bench
 
 Everything above about size came from a synthetic fixture. The same 2.03 GiB
-`utxo-v4.dat` a real pruned sync produced at height 412,732 — 10,519,335 records
-and **38,145,360 outputs** — was then loaded by a v4 build and a v5 build.
+`utxo-v4.dat` a real pruned sync produced at height 412,732 (10,519,335 records
+and **38,145,360 outputs**) was then loaded by a v4 build and a v5 build.
 Same file, same machine, only the codec differs; both loads were measured
 with the now-retired `snapshot_memory` campaign helper.
 
@@ -283,8 +283,8 @@ route, and the RSS saving (11.49) is slightly *larger* than the payload saving
 (11.17), which is what an allocator returning whole size classes should do.
 
 **And it is consensus-neutral on real data.** Both builds produce the identical
-`hash_serialized_3` —
-`438e59e4c0400b89cd06a5bb3623234a299ba5cf600043fb298ab345c328edfb` — and a
+`hash_serialized_3`,
+`438e59e4c0400b89cd06a5bb3623234a299ba5cf600043fb298ab345c328edfb`, and a
 `MuHash` trailer whose SHA-256 matches the one the checkpoint manifest recorded
 when the v4 node wrote it. That is the golden-vector assertion from
 `crates/utxo/tests/snapshot_v4_golden.rs`, restated over 38 million real outputs
@@ -453,7 +453,7 @@ reasoning error is the instructive part: it priced a change against a component
 size that had never been measured.
 
 Extrapolating 110 bytes/output to the ~67M outputs live at height 645,804 gives
-**about 6.9 GiB** — roughly **half** of the observed 13.83 GiB. The UTXO set is
+**about 6.9 GiB**, roughly **half** of the observed 13.83 GiB. The UTXO set is
 not where the other ~7 GiB is. Candidates never yet measured: fjall/RocksDB
 memtables and block caches, CoinStats MuHash state, the `Vec<BlockRecord>` log,
 and the sync staging budgets.
@@ -471,7 +471,7 @@ Sizing the planned encoding work against the measured layout:
 Fifteen percent of a component that is itself about half of process RSS is
 **roughly 7% of the number the G14 budget is written against**. The arena work in
 Step 2.4 targets the 8-byte allocation header plus the fragmentation measured
-above — around 10% of UTXO RSS, or ~5% of process RSS — and it is the largest and
+above, around 10% of UTXO RSS, or ~5% of process RSS, and it is the largest and
 riskiest item in the plan.
 
 **Recommendation: do not start Step 2.2 or 2.4 on this evidence.** Neither is

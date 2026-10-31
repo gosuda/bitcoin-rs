@@ -93,14 +93,14 @@ or non-monotonic duration refuses the run.
   post-length bytes (proven by waiting for EOF under the same deadline)
   are all refused, and the absolute deadline is verified again after
   decoding.
-- All parsed JSON — trial input,
+- All parsed JSON (trial input,
   receipts, observations, aggregate manifests, RPC envelopes, and the
-  embedded raw response — is depth-limited and parsed with a
+  embedded raw response) is depth-limited and parsed with a
   duplicate-member-rejecting hook, so two members with the same name at any
   nesting level refuse the run instead of silently last-value-wins. The
   duplicate-member refusal is a fixed generic message that never echoes the
   member-name text, and decoder failures that would otherwise escape as a
-  traceback — recursion exhaustion and overlong integer tokens — are
+  traceback, including recursion exhaustion and overlong integer tokens, are
   translated into the same typed refusal.
 - Every `total_amount` is validated as a Bitcoin amount before it can reach
   canonical hashing: finite, nonnegative, at most 21,000,000 BTC, and at
@@ -190,7 +190,7 @@ or regrouped execution.
 No result file is created unless all of these hold:
 
 - every receipt file matches its pinned byte count and SHA-256 and the full
-  hash graph above recomputes — including the trial-input, request-body,
+  hash graph above recomputes, including the trial-input, request-body,
   and embedded-raw-response edges;
 
 `bogosize` and `disk_size` remain in every observation for diagnosis. They

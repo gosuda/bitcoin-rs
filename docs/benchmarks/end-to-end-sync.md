@@ -1,6 +1,6 @@
 # End-to-end synchronization lanes
 
-This document owns the two synchronization lanes of the target node: offline replay (blocks local, wall is validation plus durable commit) and live IBD over loopback peers (wall includes download scheduling under `P2pService`). Both lanes are product cells under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md): `replay.offline_full_validation` and `replay.live_ibd_loopback`. Historical live-network and bounded 0-150,000 results are retained below as candidate evidence; they describe superseded engines and are not end-state proof.
+This document owns the two synchronization lanes of the target node. Offline replay keeps blocks local, where wall is validation plus durable commit. Live IBD runs over loopback peers, where wall includes download scheduling under `P2pService`. Both lanes are product cells under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md): `replay.offline_full_validation` and `replay.live_ibd_loopback`. Historical live-network and bounded 0-150,000 results are retained below as candidate evidence. They describe superseded engines and are not end-state proof.
 
 ## Lanes
 
@@ -70,7 +70,7 @@ The two current-campaign 150,000-block files share the same recorded commit, hei
 
 These are observed differences only. They do not establish a regression, a causal treatment effect, or a population mean.
 
-The older `parverify` and `kernel` replays share the 0–150,000 range, REST source, full-validation posture, and stop hash, but use different commits and the `kernel`/`parverify` engine labels are inferred from filenames and run notes, not recorded Cargo features. They are useful historical results, not a controlled A/B. The 642,000-block replay uses an assume-valid posture and a local legacy fjall chainstate, so it is not comparable to either 150,000-block group.
+The older `parverify` and `kernel` replays share the 0–150,000 range, REST source, full-validation posture, and stop hash. They use different commits, and the `kernel`/`parverify` engine labels are inferred from filenames and run notes, not recorded Cargo features. They are useful historical results, not a controlled A/B. The 642,000-block replay uses an assume-valid posture and a local legacy fjall chainstate. It is not comparable to either 150,000-block group.
 
 ### Historical live-network results
 
@@ -95,7 +95,7 @@ The live runs were sequential single samples. Peer conditions and validation pos
 | `rs-curated-current-r1.log` | Partial | The run stopped on the v3 snapshot limit at a transaction with 440 live outputs. |
 | `fixed-fulltip-rss.csv` | 18,987–645,804 | RSS sampling ended before the target; peak was 14,503,188 KiB. There is no completed sync timing. |
 | `rs-full-tip-20260727.log` | 0–957,600 attempt | The run rejected the height-957,600 header because its nBits did not match the locally computed retarget. |
-| Bitcoin Core full-tip comparator | — | No completed, provenance-bound comparator artifact exists. |
+| Bitcoin Core full-tip comparator | (none) | No completed, provenance-bound comparator artifact exists. |
 
 Later code changed both failed bitcoin-rs paths, but no completed rerun is attached. This report does not infer results from those fixes.
 
