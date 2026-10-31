@@ -1932,3 +1932,31 @@ fn origin_peer_receives_inv_fallback_even_when_known_position_meets_tip() {
     let msg = rx.try_recv().expect("inv received");
     assert!(matches!(msg, Message::Inv(_)));
 }
+
+#[test]
+fn block_announce_worker_cancels_promptly_on_latch() {
+    let table = Arc::new(PeerTable::new());
+    let chain = Arc::new(MockAnnounceChain::new(5));
+    let announcer = Arc::new(BlockAnnouncer::new(
+        table,
+        chain as Arc<dyn ChainQuery>,
+        BlockAnnounceConfig::default(),
+    ));
+    let (_queue, worker_rx) = BlockAnnounceQueue::new();
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let worker =
+        spawn_block_announce_worker(announcer, worker_rx, latch.reader()).expect("worker spawns");
+    let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = join_tx.send(());
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    latch.trigger();
+    assert!(
+        join_rx
+            .recv_timeout(std::time::Duration::from_millis(40))
+            .is_ok(),
+        "block announce worker must join promptly upon latch trigger without waiting for poll timeout"
+    );
+}

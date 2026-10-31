@@ -67,6 +67,11 @@ impl BlockAnnounceQueue {
 }
 
 impl BlockAnnounceReceiver {
+    #[must_use]
+    pub fn receiver(&self) -> &Receiver<()> {
+        &self.receiver
+    }
+
     pub fn recv_timeout(
         &self,
         timeout: Duration,
@@ -754,18 +759,25 @@ pub fn spawn_block_announce_worker(
     std::thread::Builder::new()
         .name("bitcoin-rs-block-announce".into())
         .spawn(move || {
-            while !shutdown.load() {
-                match rx.recv_timeout(ANNOUNCE_POLL) {
-                    Ok(()) => {
-                        announcer.process_tip();
-                        announcer.process_stale_tips();
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            loop {
+                if shutdown.is_triggered() {
+                    break;
+                }
+                crossbeam_channel::select! {
+                    recv(rx.receiver()) -> res => match res {
+                        Ok(()) => {
+                            let _ = rx.try_recv();
+                            announcer.process_tip();
+                            announcer.process_stale_tips();
+                        }
+                        Err(_) => break,
+                    },
+                    recv(crossbeam_channel::after(ANNOUNCE_POLL)) -> _ => {
                         announcer.reconcile_high_bandwidth_peers();
                         announcer.process_tip_retry();
                         announcer.process_stale_tips();
                     }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    recv(shutdown.closed()) -> _ => break,
                 }
             }
         })
