@@ -96,22 +96,17 @@ pub(super) fn run_worker_with_open(
         spec.storage_backend.to_string(),
     );
 
-    let worker_result = open_and_run(
+    let setup = WorkerSetup {
         runtime,
-        &spec,
+        spec: &spec,
         lifecycle,
         generation,
-        &applied_tip,
-        &block_tree,
-        &body_store,
-        history,
-        &body_source,
-        chain_events,
-        reporter,
+        applied_tip: &applied_tip,
+        block_tree: &block_tree,
+        body_source: &body_source,
         shutdown,
-        wake_rx,
-    );
-
+    };
+    let worker_result = open_and_run(setup, &body_store, history, chain_events, reporter, wake_rx);
     heartbeat.stop_and_join();
 
     finish_worker(
@@ -176,118 +171,166 @@ pub(super) fn publish_lifecycle(
     });
 }
 
-#[expect(clippy::too_many_arguments, clippy::ref_option)]
+pub(super) struct WorkerSetup<'a> {
+    runtime: &'a Arc<DerivedIndexRuntime>,
+    spec: &'a DerivedIndexOpenSpec,
+    lifecycle: &'a Arc<ArcSwap<DerivedIndexLifecycle>>,
+    generation: &'a Generation,
+    applied_tip: &'a TipReader,
+    block_tree: &'a BlockTreeReader,
+    body_source: &'a Option<Arc<dyn BlockBodySource>>,
+    shutdown: &'a bitcoin_rs_chain::LatchReader,
+}
+
+impl WorkerSetup<'_> {
+    fn is_interrupted(&self) -> bool {
+        self.shutdown.is_triggered() || self.generation.is_revoked() || self.runtime.should_stop()
+    }
+}
+
 pub(super) fn open_and_run(
-    runtime: &Arc<DerivedIndexRuntime>,
-    spec: &DerivedIndexOpenSpec,
-    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
-    generation: &Generation,
-    applied_tip: &TipReader,
-    block_tree: &BlockTreeReader,
+    setup: WorkerSetup<'_>,
     body_store: &Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
-    body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-    shutdown: &bitcoin_rs_chain::LatchReader,
     wake_rx: &Receiver<()>,
 ) -> Result<(), DerivedIndexWorkerError> {
-    let txindex_dir = spec.data_dir.join(spec.namespace);
+    let txindex_dir = setup.spec.data_dir.join(setup.spec.namespace);
     std::fs::create_dir_all(&txindex_dir)
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
     let open: OpenDerivedIndex =
-        open_derived_index_with_timeout(spec, &txindex_dir, TXINDEX_OPEN_TIMEOUT, || {
-            shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop()
+        open_derived_index_with_timeout(setup.spec, &txindex_dir, TXINDEX_OPEN_TIMEOUT, || {
+            setup.is_interrupted()
         })?;
 
-    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
+    if setup.is_interrupted() {
         return Ok(());
     }
 
+    publish_serving_query_engine(&open, &setup);
+
+    if setup.is_interrupted() {
+        return Ok(());
+    }
+
+    execute_portable_bundle(&open, &setup)?;
+
+    if setup.is_interrupted() {
+        return Ok(());
+    }
+
+    let worker = build_worker(
+        open,
+        &setup,
+        body_store,
+        history,
+        chain_events,
+        reporter,
+        wake_rx,
+    );
+    worker.run()
+}
+
+fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>) {
     let query_engine = Arc::new(DerivedIndexQueryEngine::new(
-        Arc::clone(runtime),
+        Arc::clone(setup.runtime),
         Arc::clone(&open.reader),
-        block_tree.clone(),
-        applied_tip.clone(),
-        body_source.clone(),
+        setup.block_tree.clone(),
+        setup.applied_tip.clone(),
+        setup.body_source.clone(),
         QueryEngineLive {
-            utxo: spec.utxo.clone(),
-            chain_transition: spec.chain_transition.clone(),
-            enabled: spec.enabled,
+            utxo: setup.spec.utxo.clone(),
+            chain_transition: setup.spec.chain_transition.clone(),
+            enabled: setup.spec.enabled,
         },
     ));
-
     publish_lifecycle(
-        lifecycle,
-        generation,
+        setup.lifecycle,
+        setup.generation,
         DerivedIndexLifecycle::Serving(query_engine),
     );
+}
 
-    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
-        return Ok(());
-    }
-
-    if spec.enabled.contains(IndexCapability::TxLookup)
+fn execute_portable_bundle(
+    open: &OpenDerivedIndex,
+    setup: &WorkerSetup<'_>,
+) -> Result<(), DerivedIndexWorkerError> {
+    if setup.spec.enabled.contains(IndexCapability::TxLookup)
         && crate::portable::reset_interrupted_import(open.writer.as_ref(), open.reader.as_ref())
             .map_err(DerivedIndexWorkerError::Index)?
     {
         tracing::warn!("cleared rows left by an interrupted portable index import");
     }
-    let cancelled = || shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop();
+    let cancelled = || setup.is_interrupted();
     let host = BundleHost {
         writer: open.writer.as_ref(),
         reader: open.reader.as_ref(),
-        block_tree,
-        applied_tip,
-        body_source: body_source.as_deref(),
-        enabled: spec.enabled,
+        block_tree: setup.block_tree,
+        applied_tip: setup.applied_tip,
+        body_source: setup.body_source.as_deref(),
+        enabled: setup.spec.enabled,
         cancelled: &cancelled,
     };
-    match crate::portable::run(&host, &spec.bundle) {
-        Ok(None) => {}
-        Ok(Some(outcome)) => log_bundle_outcome(&outcome),
-        Err(IndexBundleError::Cancelled) => return Err(DerivedIndexWorkerError::Stopped),
-        Err(IndexBundleError::Index(error)) => return Err(DerivedIndexWorkerError::Index(error)),
+    match crate::portable::run(&host, &setup.spec.bundle) {
+        Ok(None) => Ok(()),
+        Ok(Some(outcome)) => {
+            log_bundle_outcome(&outcome);
+            Ok(())
+        }
+        Err(IndexBundleError::Cancelled) => Err(DerivedIndexWorkerError::Stopped),
+        Err(IndexBundleError::Index(error)) => Err(DerivedIndexWorkerError::Index(error)),
         Err(IndexBundleError::Incomplete {
             height,
             expected,
             actual,
-        }) => tracing::error!(
-            height,
-            expected,
-            actual,
-            "portable txindex bundle is incomplete; ordinary reconciliation proceeds"
-        ),
-        Err(error) => tracing::error!(
-            %error,
-            "portable txindex bundle request refused; ordinary reconciliation proceeds"
-        ),
+        }) => {
+            tracing::error!(
+                height,
+                expected,
+                actual,
+                "portable txindex bundle is incomplete; ordinary reconciliation proceeds"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "portable txindex bundle request refused; ordinary reconciliation proceeds"
+            );
+            Ok(())
+        }
     }
-    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
-        return Ok(());
-    }
+}
 
-    let worker = Worker {
-        runtime: Arc::clone(runtime),
+fn build_worker(
+    open: OpenDerivedIndex,
+    setup: &WorkerSetup<'_>,
+    body_store: &Option<Arc<dyn BlockBodyStore>>,
+    history: HistoryAccess,
+    chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
+    reporter: Arc<dyn crate::runtime::IndexAheadSink>,
+    wake_rx: &Receiver<()>,
+) -> Worker {
+    Worker {
+        runtime: Arc::clone(setup.runtime),
         writer: open.writer,
-        applied_tip: applied_tip.clone(),
-        block_tree: block_tree.clone(),
+        applied_tip: setup.applied_tip.clone(),
+        block_tree: setup.block_tree.clone(),
         body_store: body_store.clone(),
         history,
         batch_limits: open.batch_limits,
-        enabled: spec.enabled,
-        rollback_rebuild_cutover: spec.rollback_rebuild_cutover,
+        enabled: setup.spec.enabled,
+        rollback_rebuild_cutover: setup.spec.rollback_rebuild_cutover,
         wake_rx: wake_rx.clone(),
         quiet_period: REVISION_QUIET_PERIOD,
         chain_events: Arc::clone(chain_events),
         reporter,
         batch_delay: FORWARD_BATCH_DELAY,
-        seed_slot: spec.seed_slot.clone(),
+        seed_slot: setup.spec.seed_slot.clone(),
         seed_bundle: parking_lot::Mutex::new(None),
-    };
-
-    worker.run()
+    }
 }
 
 fn log_bundle_outcome(outcome: &BundleOutcome) {

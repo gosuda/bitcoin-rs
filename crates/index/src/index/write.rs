@@ -12,7 +12,7 @@ use super::{
     state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
+use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit};
 
 pub struct IndexWriter<S: KvStore> {
     pub(super) indexer: Indexer<S>,
@@ -197,77 +197,16 @@ impl<S: KvStore> IndexWriter<S> {
             &mut dyn FnMut(PortableImportRow<'_>) -> Result<(), IndexError>,
         ) -> Result<(), IndexError>,
     {
-        const IMPORT_BATCH_ROWS: usize = 65_536;
-        const IMPORT_BATCH_BYTES: usize = 8 << 20;
-        let refuse_populated = |fence: &IndexWriteFence| match fence.watermarks.tx_lookup {
-            Some(actual) => Err(IndexError::WatermarkMismatch {
-                expected: None,
-                actual: Some(actual),
-            }),
-            None => Ok(()),
-        };
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
-        refuse_populated(&existing)?;
+        refuse_tx_lookup_populated(&existing)?;
         self.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
-        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
-        refuse_populated(&fence)?;
-        let mut written = 0_usize;
-        let mut batch = self.indexer.store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            FORMAT_VERSION_KEY,
-            &FORMAT_VERSION_VALUE,
-        );
-        let mut in_batch = 0_usize;
-        let mut in_bytes = 0_usize;
-        let mut add = |row: PortableImportRow<'_>| -> Result<(), IndexError> {
-            match row {
-                PortableImportRow::Header(header) => {
-                    if self
-                        .indexer
-                        .store
-                        .get(ColumnFamily::BlockHeaders, header)?
-                        .is_some()
-                    {
-                        return Ok(());
-                    }
-                    batch.put(ColumnFamily::BlockHeaders, header, &[]);
-                    in_bytes = in_bytes.saturating_add(header.len());
-                }
-                PortableImportRow::TxLookup { row, value } => {
-                    batch.put(ColumnFamily::TxConfirmed, &row.to_db_row(), value);
-                    in_bytes = in_bytes
-                        .saturating_add(crate::HASH_PREFIX_ROW_SIZE)
-                        .saturating_add(value.len());
-                    written += 1;
-                }
-            }
-            in_batch += 1;
-            if in_batch >= IMPORT_BATCH_ROWS || in_bytes >= IMPORT_BATCH_BYTES {
-                let next = self.indexer.store.new_batch();
-                let old = std::mem::replace(&mut batch, next);
-                commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
-                fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
-                refuse_populated(&fence)?;
-                batch.put(
-                    ColumnFamily::UtxoMeta,
-                    FORMAT_VERSION_KEY,
-                    &FORMAT_VERSION_VALUE,
-                );
-                in_batch = 0;
-                in_bytes = 0;
-            }
-            Ok(())
-        };
-        produce(&mut add)?;
-        put_selected_watermarks(&mut batch, IndexCapabilities::TX_LOOKUP, Some(base));
-        crate::index::capability::put_selected_floors(
-            &mut batch,
-            IndexCapabilities::TX_LOOKUP,
-            floor,
-        );
-        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
-        Ok(written)
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        refuse_tx_lookup_populated(&fence)?;
+
+        let mut importer =
+            TxLookupStreamImporter::new(self.indexer.store.as_ref(), self.generation, fence);
+        produce(&mut |row| importer.add_row(row))?;
+        importer.finish(base, floor)
     }
 
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
@@ -413,62 +352,23 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: fence.watermarks.tx_lookup,
             })?;
         let current = fence.watermarks.selected(capabilities)?;
-        let mut expected_height = match current {
+        let expected_height = match current {
             None => 0,
             Some(w) => w
                 .height
                 .checked_add(1)
                 .ok_or(IndexError::NonContiguousPrepared { watermark: current })?,
         };
-        let mut expected_parent = current.map(|w| w.hash);
-        let mut previous_filter_header = if capabilities.contains(IndexCapability::CompactFilters) {
-            ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
-            match current {
-                None => [0; 32],
-                Some(w) => {
-                    let parent =
-                        super::filters::read(self.indexer.store.snapshot()?.as_ref(), &w.hash)?;
-                    if parent.is_none() {
-                        ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
-                    }
-                    parent.ok_or(IndexError::InvalidCompactFilter)?.header
-                }
-            }
-        } else {
-            [0; 32]
-        };
+        let expected_parent = current.map(|w| w.hash);
+        let previous_filter_header = self.initial_filter_header(&fence, capabilities, current)?;
         let batch_family_bytes = batch.family_bytes();
-        let mut merged = PendingRows::default();
-        let mut last = None;
-        let block_count = batch.len();
-        for (block_index, mut block) in batch.into_blocks().into_iter().enumerate() {
-            if block.height != expected_height {
-                return Err(IndexError::NonContiguousPrepared { watermark: current });
-            }
-            if let Some(parent) = expected_parent {
-                if block.parent_hash != parent {
-                    return Err(IndexError::NonContiguousPrepared { watermark: current });
-                }
-            }
-            for (_, filter) in &mut block.rows.filter_rows {
-                filter.chain(previous_filter_header);
-                previous_filter_header = filter.header;
-            }
-            merged.append(block.rows);
-            if block_index + 1 < block_count {
-                expected_height = expected_height
-                    .checked_add(1)
-                    .ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
-            }
-            expected_parent = Some(block.hash);
-            last = Some(IndexWatermark {
-                height: block.height,
-                hash: block.hash,
-            });
-        }
-        merged.sort();
-        let final_watermark =
-            last.ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
+        let (merged, final_watermark) = chain_forward_blocks(
+            batch,
+            current,
+            expected_height,
+            expected_parent,
+            previous_filter_header,
+        )?;
         let mut store_batch = self.indexer.store.new_batch();
         put_rows(&mut store_batch, &merged);
         store_batch.put(
@@ -477,15 +377,7 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         put_selected_watermarks(&mut store_batch, capabilities, Some(final_watermark));
-        match cursor {
-            ConsumerCursorUpdate::Keep => {}
-            ConsumerCursorUpdate::Set(bytes) => {
-                store_batch.put(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY, bytes);
-            }
-            ConsumerCursorUpdate::Clear => {
-                store_batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
-            }
-        }
+        apply_cursor_update(&mut store_batch, cursor);
         commit_ordinary(
             self.indexer.store.as_ref(),
             self.generation,
@@ -539,25 +431,7 @@ impl<S: KvStore> IndexWriter<S> {
             body,
             spent_scripts,
         )?;
-        if let Some(prev) = &prev {
-            let expected_prev_height =
-                current
-                    .height
-                    .checked_sub(1)
-                    .ok_or(IndexError::NonContiguousPrepared {
-                        watermark: Some(current),
-                    })?;
-            if prev.height != expected_prev_height || prev.hash != prepared.parent_hash {
-                return Err(IndexError::WatermarkMismatch {
-                    expected: Some(*prev),
-                    actual: Some(current),
-                });
-            }
-        } else if current.height != 0 {
-            return Err(IndexError::NonContiguousPrepared {
-                watermark: Some(current),
-            });
-        }
+        validate_rollback_prev(current, prepared.parent_hash, prev.as_ref())?;
         let header =
             prepared
                 .rows
@@ -567,18 +441,13 @@ impl<S: KvStore> IndexWriter<S> {
                     height: current.height,
                     hash: current.hash,
                 })?;
-        let header_present = self
-            .indexer
-            .store
-            .get(ColumnFamily::BlockHeaders, header)?
-            .is_some();
-        ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
-        if !header_present {
-            return Err(IndexError::MissingWatermarkIdentity {
-                height: current.height,
-                hash: current.hash,
-            });
-        }
+        verify_rollback_header_present(
+            self.indexer.store.as_ref(),
+            self.generation,
+            &fence,
+            current,
+            header,
+        )?;
         let mut store_batch = self.indexer.store.new_batch();
         let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
             !capabilities.contains(capability)
@@ -598,15 +467,7 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         put_selected_watermarks(&mut store_batch, capabilities, prev);
-        match cursor {
-            ConsumerCursorUpdate::Keep => {}
-            ConsumerCursorUpdate::Set(bytes) => {
-                store_batch.put(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY, bytes);
-            }
-            ConsumerCursorUpdate::Clear => {
-                store_batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
-            }
-        }
+        apply_cursor_update(&mut store_batch, cursor);
         commit_ordinary(
             self.indexer.store.as_ref(),
             self.generation,
@@ -706,4 +567,222 @@ pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
         metrics::histogram!(FAMILY_PLANNED_WRITE_BYTES_HISTOGRAM, FAMILY_LABEL => FAMILY_FILTERS)
             .record(metric_f64_from_usize(family_bytes.filters));
     }
+}
+fn refuse_tx_lookup_populated(fence: &IndexWriteFence) -> Result<(), IndexError> {
+    match fence.watermarks.tx_lookup {
+        Some(actual) => Err(IndexError::WatermarkMismatch {
+            expected: None,
+            actual: Some(actual),
+        }),
+        None => Ok(()),
+    }
+}
+
+struct TxLookupStreamImporter<'a, S: KvStore> {
+    store: &'a S,
+    generation: u64,
+    fence: IndexWriteFence,
+    batch: BufferedWriteBatch,
+    written: usize,
+    in_batch: usize,
+    in_bytes: usize,
+}
+
+impl<'a, S: KvStore> TxLookupStreamImporter<'a, S> {
+    const IMPORT_BATCH_ROWS: usize = 65_536;
+    const IMPORT_BATCH_BYTES: usize = 8 << 20;
+
+    fn new(store: &'a S, generation: u64, fence: IndexWriteFence) -> Self {
+        let mut batch = store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        Self {
+            store,
+            generation,
+            fence,
+            batch,
+            written: 0,
+            in_batch: 0,
+            in_bytes: 0,
+        }
+    }
+
+    fn add_row(&mut self, row: PortableImportRow<'_>) -> Result<(), IndexError> {
+        match row {
+            PortableImportRow::Header(header) => {
+                if self
+                    .store
+                    .get(ColumnFamily::BlockHeaders, header)?
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                self.batch.put(ColumnFamily::BlockHeaders, header, &[]);
+                self.in_bytes = self.in_bytes.saturating_add(header.len());
+            }
+            PortableImportRow::TxLookup { row, value } => {
+                self.batch
+                    .put(ColumnFamily::TxConfirmed, &row.to_db_row(), value);
+                self.in_bytes = self
+                    .in_bytes
+                    .saturating_add(crate::HASH_PREFIX_ROW_SIZE)
+                    .saturating_add(value.len());
+                self.written += 1;
+            }
+        }
+        self.in_batch += 1;
+        if self.in_batch >= Self::IMPORT_BATCH_ROWS || self.in_bytes >= Self::IMPORT_BATCH_BYTES {
+            let next = self.store.new_batch();
+            let old = std::mem::replace(&mut self.batch, next);
+            commit_ordinary(self.store, self.generation, &self.fence, old)?;
+            self.fence = capture_write_fence(self.store, self.generation)?;
+            refuse_tx_lookup_populated(&self.fence)?;
+            self.batch.put(
+                ColumnFamily::UtxoMeta,
+                FORMAT_VERSION_KEY,
+                &FORMAT_VERSION_VALUE,
+            );
+            self.in_batch = 0;
+            self.in_bytes = 0;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, base: IndexWatermark, floor: u32) -> Result<usize, IndexError> {
+        put_selected_watermarks(&mut self.batch, IndexCapabilities::TX_LOOKUP, Some(base));
+        crate::index::capability::put_selected_floors(
+            &mut self.batch,
+            IndexCapabilities::TX_LOOKUP,
+            floor,
+        );
+        commit_ordinary(self.store, self.generation, &self.fence, self.batch)?;
+        Ok(self.written)
+    }
+}
+
+impl<S: KvStore> IndexWriter<S> {
+    fn initial_filter_header(
+        &self,
+        fence: &IndexWriteFence,
+        capabilities: IndexCapabilities,
+        current: Option<IndexWatermark>,
+    ) -> Result<[u8; 32], IndexError> {
+        if !capabilities.contains(IndexCapability::CompactFilters) {
+            return Ok([0; 32]);
+        }
+        ensure_fence_live(self.indexer.store.as_ref(), self.generation, fence)?;
+        match current {
+            None => Ok([0; 32]),
+            Some(w) => {
+                let parent =
+                    super::filters::read(self.indexer.store.snapshot()?.as_ref(), &w.hash)?;
+                if parent.is_none() {
+                    ensure_fence_live(self.indexer.store.as_ref(), self.generation, fence)?;
+                }
+                parent
+                    .ok_or(IndexError::InvalidCompactFilter)
+                    .map(|f| f.header)
+            }
+        }
+    }
+}
+
+fn chain_forward_blocks(
+    batch: PreparedBatch,
+    current: Option<IndexWatermark>,
+    mut expected_height: u32,
+    mut expected_parent: Option<[u8; 32]>,
+    mut previous_filter_header: [u8; 32],
+) -> Result<(PendingRows, IndexWatermark), IndexError> {
+    let mut merged = PendingRows::default();
+    let mut last = None;
+    let block_count = batch.len();
+    for (block_index, mut block) in batch.into_blocks().into_iter().enumerate() {
+        if block.height != expected_height {
+            return Err(IndexError::NonContiguousPrepared { watermark: current });
+        }
+        if let Some(parent) = expected_parent {
+            if block.parent_hash != parent {
+                return Err(IndexError::NonContiguousPrepared { watermark: current });
+            }
+        }
+        for (_, filter) in &mut block.rows.filter_rows {
+            filter.chain(previous_filter_header);
+            previous_filter_header = filter.header;
+        }
+        merged.append(block.rows);
+        if block_index + 1 < block_count {
+            expected_height = expected_height
+                .checked_add(1)
+                .ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
+        }
+        expected_parent = Some(block.hash);
+        last = Some(IndexWatermark {
+            height: block.height,
+            hash: block.hash,
+        });
+    }
+    merged.sort();
+    let final_watermark = last.ok_or(IndexError::NonContiguousPrepared { watermark: current })?;
+    Ok((merged, final_watermark))
+}
+
+fn apply_cursor_update(store_batch: &mut BufferedWriteBatch, cursor: ConsumerCursorUpdate<'_>) {
+    match cursor {
+        ConsumerCursorUpdate::Keep => {}
+        ConsumerCursorUpdate::Set(bytes) => {
+            store_batch.put(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY, bytes);
+        }
+        ConsumerCursorUpdate::Clear => {
+            store_batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
+        }
+    }
+}
+
+fn validate_rollback_prev(
+    current: IndexWatermark,
+    parent_hash: [u8; 32],
+    prev: Option<&IndexWatermark>,
+) -> Result<(), IndexError> {
+    if let Some(prev) = prev {
+        let expected_prev_height =
+            current
+                .height
+                .checked_sub(1)
+                .ok_or(IndexError::NonContiguousPrepared {
+                    watermark: Some(current),
+                })?;
+        if prev.height != expected_prev_height || prev.hash != parent_hash {
+            return Err(IndexError::WatermarkMismatch {
+                expected: Some(*prev),
+                actual: Some(current),
+            });
+        }
+    } else if current.height != 0 {
+        return Err(IndexError::NonContiguousPrepared {
+            watermark: Some(current),
+        });
+    }
+    Ok(())
+}
+
+fn verify_rollback_header_present<S: KvStore>(
+    store: &S,
+    generation: u64,
+    fence: &IndexWriteFence,
+    current: IndexWatermark,
+    header: &[u8],
+) -> Result<(), IndexError> {
+    let header_present = store.get(ColumnFamily::BlockHeaders, header)?.is_some();
+    ensure_fence_live(store, generation, fence)?;
+    if !header_present {
+        return Err(IndexError::MissingWatermarkIdentity {
+            height: current.height,
+            hash: current.hash,
+        });
+    }
+    Ok(())
 }

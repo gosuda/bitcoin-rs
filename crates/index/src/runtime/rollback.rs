@@ -21,6 +21,7 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
 use bitcoin_rs_utxo::snapshot::RawSeedError;
+use bitcoin_rs_utxo::snapshot::VerifiedSnapshotArtifact;
 use std::cell::Cell;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
@@ -108,7 +109,6 @@ impl Worker {
         }
     }
 
-    #[expect(clippy::too_many_lines, reason = "Seed outcomes share one owner")]
     fn seed_from_bundle(&self) -> Result<SeedFlow, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
             return Ok(SeedFlow::Return(ReconcileAction::Stalled));
@@ -123,28 +123,14 @@ impl Worker {
             });
         };
         let (height, tip_hash) = artifact.tip();
-        let lease_covers = bundle
-            .lease
-            .as_ref()
-            .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= height));
-        if !lease_covers {
-            bundle.lease = None;
-            match self.history.request_history(height) {
-                Ok(lease) => bundle.lease = Some(lease),
-                Err(HistoryUnavailable::Pruned { .. }) => {
-                    drop(artifact);
-                    return Ok(SeedFlow::FallThrough {
-                        want_on_stall: true,
-                    });
-                }
-                Err(_) => {
-                    *self.seed_bundle.lock() = Some(SeedBundle {
-                        artifact: Some(artifact),
-                        lease: None,
-                    });
-                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
-                }
+        if let Some(early_exit) = self.ensure_bundle_lease(height, &mut bundle, &artifact)? {
+            if matches!(early_exit, SeedFlow::Return(ReconcileAction::Stalled)) {
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: Some(artifact),
+                    lease: None,
+                });
             }
+            return Ok(early_exit);
         }
         let tip = IndexWatermark {
             height,
@@ -169,63 +155,7 @@ impl Worker {
             tip,
             &cancelled,
         );
-        match result {
-            Ok(written) => {
-                drop(artifact);
-                self.runtime.clear_script_live();
-                tracing::info!(
-                    height,
-                    rows = written,
-                    "seeded ScriptLive from snapshot artifact"
-                );
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: None,
-                    lease: bundle.lease,
-                });
-                Ok(SeedFlow::Seeded)
-            }
-            Err(IndexError::Cancelled) => {
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: Some(artifact),
-                    lease: bundle.lease,
-                });
-                Ok(SeedFlow::Return(ReconcileAction::Stalled))
-            }
-            Err(_) if poisoned.take() => {
-                drop(artifact);
-                drop(bundle.lease);
-                if let Err(error) = self
-                    .writer
-                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                {
-                    tracing::debug!(%error, "seed poison cleanup reset deferred");
-                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
-                }
-                Ok(SeedFlow::Seeded)
-            }
-            Err(IndexError::LiveAlreadySeeded) => {
-                drop(artifact);
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: None,
-                    lease: bundle.lease,
-                });
-                Ok(SeedFlow::Seeded)
-            }
-            Err(
-                IndexError::StaleIndexState | IndexError::ResetInProgress | IndexError::Storage(_),
-            ) => {
-                *self.seed_bundle.lock() = Some(SeedBundle {
-                    artifact: Some(artifact),
-                    lease: bundle.lease,
-                });
-                Ok(SeedFlow::Return(ReconcileAction::Stalled))
-            }
-            Err(error) => {
-                drop(artifact);
-                drop(bundle.lease);
-                Err(DerivedIndexWorkerError::Index(error))
-            }
-        }
+        self.handle_seed_result(result, height, artifact, bundle.lease, poisoned.take())
     }
 
     pub(super) fn rest_seed_cell(&self) {
@@ -444,5 +374,100 @@ impl Worker {
             .ok_or(DerivedIndexWorkerError::UndoUnavailable { height, hash })?;
         UndoScripts::from_undo_bytes(&bytes, hash)
             .map_err(|_| DerivedIndexWorkerError::UndoUnavailable { height, hash })
+    }
+}
+impl Worker {
+    fn ensure_bundle_lease(
+        &self,
+        height: u32,
+        bundle: &mut SeedBundle,
+        _artifact: &VerifiedSnapshotArtifact,
+    ) -> Result<Option<SeedFlow>, DerivedIndexWorkerError> {
+        let lease_covers = bundle
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.floor().is_some_and(|floor| floor <= height));
+        if !lease_covers {
+            bundle.lease = None;
+            match self.history.request_history(height) {
+                Ok(lease) => bundle.lease = Some(lease),
+                Err(HistoryUnavailable::Pruned { .. }) => {
+                    return Ok(Some(SeedFlow::FallThrough {
+                        want_on_stall: true,
+                    }));
+                }
+                Err(_) => {
+                    return Ok(Some(SeedFlow::Return(ReconcileAction::Stalled)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn handle_seed_result(
+        &self,
+        result: Result<usize, IndexError>,
+        height: u32,
+        artifact: VerifiedSnapshotArtifact,
+        lease: Option<HistoryLease>,
+        poisoned: bool,
+    ) -> Result<SeedFlow, DerivedIndexWorkerError> {
+        match result {
+            Ok(written) => {
+                drop(artifact);
+                self.runtime.clear_script_live();
+                tracing::info!(
+                    height,
+                    rows = written,
+                    "seeded ScriptLive from snapshot artifact"
+                );
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: None,
+                    lease,
+                });
+                Ok(SeedFlow::Seeded)
+            }
+            Err(IndexError::Cancelled) => {
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: Some(artifact),
+                    lease,
+                });
+                Ok(SeedFlow::Return(ReconcileAction::Stalled))
+            }
+            Err(_) if poisoned => {
+                drop(artifact);
+                drop(lease);
+                if let Err(error) = self
+                    .writer
+                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                {
+                    tracing::debug!(%error, "seed poison cleanup reset deferred");
+                    return Ok(SeedFlow::Return(ReconcileAction::Stalled));
+                }
+                Ok(SeedFlow::Seeded)
+            }
+            Err(IndexError::LiveAlreadySeeded) => {
+                drop(artifact);
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: None,
+                    lease,
+                });
+                Ok(SeedFlow::Seeded)
+            }
+            Err(
+                IndexError::StaleIndexState | IndexError::ResetInProgress | IndexError::Storage(_),
+            ) => {
+                *self.seed_bundle.lock() = Some(SeedBundle {
+                    artifact: Some(artifact),
+                    lease,
+                });
+                Ok(SeedFlow::Return(ReconcileAction::Stalled))
+            }
+            Err(error) => {
+                drop(artifact);
+                drop(lease);
+                Err(DerivedIndexWorkerError::Index(error))
+            }
+        }
     }
 }

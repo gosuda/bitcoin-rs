@@ -18,10 +18,11 @@ use crate::reconcile::ReconcileLeg;
 use crate::reconcile::ReconcilePhase;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_storage::pruning::HistoryLease;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
-
 /// First height a capability whose durable watermark is `watermark` still
 fn forward_start(watermark: Option<IndexWatermark>) -> u32 {
     watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
@@ -127,10 +128,6 @@ impl Worker {
         Ok(ReconcileAction::CaughtUp)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep rollback recovery decisions and their fence updates together"
-    )]
     pub(super) fn reconcile_pass(
         &self,
         pending: &mut Option<PendingForward>,
@@ -148,117 +145,11 @@ impl Worker {
             return self.reconcile_pending(pending, fence, watermarks, target.as_deref());
         }
 
-        let mut fence = fence;
-        let mut watermarks = watermarks;
-        let mut reported_ahead = false;
-        while let Some((capabilities, watermark)) =
-            self.rollback_selection(watermarks, target.as_deref())
-        {
-            if let Some(target) = target.as_deref()
-                && !reported_ahead
-                && watermark.height > target.height
-            {
-                reported_ahead = true;
-                self.report_index_ahead(capabilities, watermark, target)?;
-            }
-            let depth = target.as_ref().and_then(|target| {
-                crate::reconcile::block_tree::rollback_depth(
-                    &self.block_tree.read(),
-                    Hash256::from_le_bytes(&watermark.hash),
-                    watermark.height,
-                    target.tip_id,
-                )
-            });
-            if depth.is_some_and(|depth| depth > self.rollback_rebuild_cutover) {
-                tracing::warn!(
-                    depth,
-                    cutover = self.rollback_rebuild_cutover,
-                    tx_lookup = capabilities.contains(IndexCapability::TxLookup),
-                    script_history = capabilities.contains(IndexCapability::ScriptHistory),
-                    script_live = capabilities.contains(IndexCapability::ScriptLive),
-                    "stale index watermark exceeds the rollback cutover; rebuilding selected capabilities"
-                );
-                (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
-                continue;
-            }
-            self.runtime.publish_leg(
-                capabilities,
-                ReconcileLeg::RollingBack {
-                    from_height: watermark.height,
-                    to_height: depth.map_or(0, |depth| watermark.height.saturating_sub(depth)),
-                },
-            );
-            match self.rollback_one(fence, watermarks, capabilities, watermark) {
-                Ok(_) => {
-                    let (next_fence, next_watermarks) = self
-                        .writer
-                        .fenced_watermarks()
-                        .map_err(DerivedIndexWorkerError::Index)?;
-                    fence = next_fence;
-                    watermarks = next_watermarks;
-                }
-                Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
-                    if capabilities.contains(IndexCapability::CompactFilters) {
-                        self.runtime.fail_compact_filters(&error);
-                        continue;
-                    }
-                    tracing::warn!(
-                        error = %error,
-                        "index cursor cannot restore ScriptLive without undo; rebuilding ScriptLive"
-                    );
-                    (fence, watermarks) = self.reset_for_rebuild(IndexCapabilities::SCRIPT_LIVE)?;
-                    continue;
-                }
-                Err(error @ DerivedIndexWorkerError::HistoryUnavailable(_)) => {
-                    if matches!(
-                        error,
-                        DerivedIndexWorkerError::HistoryUnavailable(
-                            bitcoin_rs_storage::pruning::HistoryUnavailable::Pruned { .. }
-                        )
-                    ) && capabilities.contains(IndexCapability::CompactFilters)
-                    {
-                        self.runtime.fail_compact_filters(&error);
-                        continue;
-                    }
-                    tracing::debug!(
-                        error = %error,
-                        "index rollback waits on a provisional history answer"
-                    );
-                    return Ok(ReconcileAction::Stalled);
-                }
-                Err(error) if error.requires_capability_rebuild() => {
-                    if matches!(error, DerivedIndexWorkerError::MissingBody { .. })
-                        && capabilities.contains(IndexCapability::ScriptLive)
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "ScriptLive rollback history pruned; marking unavailable"
-                        );
-                        self.runtime
-                            .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
-                        if let Some(slot) = self.seed_slot.as_ref() {
-                            slot.want();
-                        }
-                        continue;
-                    }
-                    tracing::warn!(
-                        error = %error,
-                        tx_lookup = capabilities.contains(IndexCapability::TxLookup),
-                        script_history = capabilities.contains(IndexCapability::ScriptHistory),
-                        script_live = capabilities.contains(IndexCapability::ScriptLive),
-                        "index cursor cannot be rolled back; rebuilding selected capabilities"
-                    );
-                    (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
-                    continue;
-                }
-                Err(DerivedIndexWorkerError::Index(
-                    IndexError::ResetInProgress | IndexError::StaleIndexState,
-                )) => {
-                    return Ok(ReconcileAction::Stalled);
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        let (fence, watermarks) =
+            match self.drain_rollbacks(fence, watermarks, target.as_deref())? {
+                ControlFlow::Break(action) => return Ok(action),
+                ControlFlow::Continue(pair) => pair,
+            };
         self.finish_reconcile_pass(target, fence, watermarks, pending)
     }
 
@@ -274,78 +165,23 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        let mut want_on_stall = false;
-        if self.enabled.contains(IndexCapability::ScriptLive) {
-            if watermarks.script_live.is_some() {
-                if self.runtime.script_live_failure.read().is_none() {
-                    self.rest_seed_cell();
-                } else {
-                    self.writer
-                        .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                        .map_err(DerivedIndexWorkerError::Index)?;
-                    (fence, watermarks) = self
-                        .writer
-                        .fenced_watermarks()
-                        .map_err(DerivedIndexWorkerError::Index)?;
-                    self.runtime.clear_script_live();
-                    match self.seed_dispatch(pending.as_ref())? {
-                        SeedFlow::Return(action) => return Ok(action),
-                        SeedFlow::Seeded => return Ok(ReconcileAction::Progressed),
-                        SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
-                    }
-                }
-                self.release_seed_lease_if_superseded(watermarks.script_live);
-            } else {
-                match self.seed_dispatch(pending.as_ref())? {
-                    SeedFlow::Return(action) => return Ok(action),
-                    SeedFlow::Seeded => return Ok(ReconcileAction::Progressed),
-                    SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
-                }
-            }
-        }
-        let mut seed_lease = self.take_seed_lease();
-        let mut after_start = None;
-        loop {
-            let Some((capabilities, watermark)) =
-                self.forward_selection(watermarks, &target, after_start)
-            else {
-                let action = if after_start.is_some() {
-                    ReconcileAction::Stalled
-                } else {
-                    ReconcileAction::CaughtUp
-                };
-                self.park_seed_lease(seed_lease.take());
-                if want_on_stall
-                    && matches!(action, ReconcileAction::Stalled)
-                    && watermarks.script_live.is_none()
-                    && self.seed_bundle.lock().is_none()
-                    && !self.runtime.should_stop()
-                {
-                    if let Some(slot) = self.seed_slot.as_ref() {
-                        slot.want();
-                    }
-                }
-                return Ok(action);
-            };
-            let leg = self.catch_up_to(
-                &target,
-                fence,
-                watermarks,
-                watermark,
-                capabilities,
-                pending,
-                &mut seed_lease,
-            )?;
-            match leg {
-                ForwardLeg::Settled(action) => {
-                    if !matches!(action, ReconcileAction::CaughtUp) {
-                        self.park_seed_lease(seed_lease.take());
-                    }
-                    return Ok(action);
-                }
-                ForwardLeg::BodyAbsent => after_start = Some(forward_start(watermark)),
-            }
-        }
+        let want_on_stall = match self.dispatch_script_live_seed_pass(
+            &mut fence,
+            &mut watermarks,
+            pending.as_ref(),
+        )? {
+            ControlFlow::Break(action) => return Ok(action),
+            ControlFlow::Continue(w) => w,
+        };
+        let seed_lease = self.take_seed_lease();
+        self.execute_forward_pass(
+            &target,
+            fence,
+            watermarks,
+            pending,
+            seed_lease,
+            want_on_stall,
+        )
     }
 
     pub(super) fn reconcile_pending(
@@ -544,5 +380,235 @@ impl Worker {
             watermark.height,
             target.tip_id,
         )
+    }
+}
+impl Worker {
+    fn drain_rollbacks(
+        &self,
+        mut fence: IndexWriteFence,
+        mut watermarks: IndexWatermarks,
+        target: Option<&TipSnapshot>,
+    ) -> Result<
+        ControlFlow<ReconcileAction, (IndexWriteFence, IndexWatermarks)>,
+        DerivedIndexWorkerError,
+    > {
+        let mut reported_ahead = false;
+        while let Some((capabilities, watermark)) = self.rollback_selection(watermarks, target) {
+            if let Some(target) = target
+                && !reported_ahead
+                && watermark.height > target.height
+            {
+                reported_ahead = true;
+                self.report_index_ahead(capabilities, watermark, target)?;
+            }
+            let depth = target.and_then(|t| {
+                crate::reconcile::block_tree::rollback_depth(
+                    &self.block_tree.read(),
+                    Hash256::from_le_bytes(&watermark.hash),
+                    watermark.height,
+                    t.tip_id,
+                )
+            });
+            if depth.is_some_and(|depth| depth > self.rollback_rebuild_cutover) {
+                tracing::warn!(
+                    depth,
+                    cutover = self.rollback_rebuild_cutover,
+                    tx_lookup = capabilities.contains(IndexCapability::TxLookup),
+                    script_history = capabilities.contains(IndexCapability::ScriptHistory),
+                    script_live = capabilities.contains(IndexCapability::ScriptLive),
+                    "stale index watermark exceeds the rollback cutover; rebuilding selected capabilities"
+                );
+                (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
+                continue;
+            }
+            self.runtime.publish_leg(
+                capabilities,
+                ReconcileLeg::RollingBack {
+                    from_height: watermark.height,
+                    to_height: depth.map_or(0, |depth| watermark.height.saturating_sub(depth)),
+                },
+            );
+            match self.handle_rollback_step(fence, watermarks, capabilities, watermark)? {
+                ControlFlow::Break(action) => return Ok(ControlFlow::Break(action)),
+                ControlFlow::Continue((next_f, next_w)) => {
+                    fence = next_f;
+                    watermarks = next_w;
+                }
+            }
+        }
+        Ok(ControlFlow::Continue((fence, watermarks)))
+    }
+
+    fn handle_rollback_step(
+        &self,
+        fence: IndexWriteFence,
+        watermarks: IndexWatermarks,
+        capabilities: IndexCapabilities,
+        watermark: IndexWatermark,
+    ) -> Result<
+        ControlFlow<ReconcileAction, (IndexWriteFence, IndexWatermarks)>,
+        DerivedIndexWorkerError,
+    > {
+        match self.rollback_one(fence, watermarks, capabilities, watermark) {
+            Ok(_) => {
+                let (next_fence, next_watermarks) = self
+                    .writer
+                    .fenced_watermarks()
+                    .map_err(DerivedIndexWorkerError::Index)?;
+                Ok(ControlFlow::Continue((next_fence, next_watermarks)))
+            }
+            Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
+                if capabilities.contains(IndexCapability::CompactFilters) {
+                    self.runtime.fail_compact_filters(&error);
+                    return Ok(ControlFlow::Continue((fence, watermarks)));
+                }
+                tracing::warn!(
+                    error = %error,
+                    "index cursor cannot restore ScriptLive without undo; rebuilding ScriptLive"
+                );
+                let next = self.reset_for_rebuild(IndexCapabilities::SCRIPT_LIVE)?;
+                Ok(ControlFlow::Continue(next))
+            }
+            Err(error @ DerivedIndexWorkerError::HistoryUnavailable(_)) => {
+                if matches!(
+                    error,
+                    DerivedIndexWorkerError::HistoryUnavailable(
+                        bitcoin_rs_storage::pruning::HistoryUnavailable::Pruned { .. }
+                    )
+                ) && capabilities.contains(IndexCapability::CompactFilters)
+                {
+                    self.runtime.fail_compact_filters(&error);
+                    return Ok(ControlFlow::Continue((fence, watermarks)));
+                }
+                tracing::debug!(
+                    error = %error,
+                    "index rollback waits on a provisional history answer"
+                );
+                Ok(ControlFlow::Break(ReconcileAction::Stalled))
+            }
+            Err(error) if error.requires_capability_rebuild() => {
+                if matches!(error, DerivedIndexWorkerError::MissingBody { .. })
+                    && capabilities.contains(IndexCapability::ScriptLive)
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "ScriptLive rollback history pruned; marking unavailable"
+                    );
+                    self.runtime
+                        .fail_script_live(&DerivedIndexWorkerError::ScriptLiveHistoryPruned);
+                    if let Some(slot) = self.seed_slot.as_ref() {
+                        slot.want();
+                    }
+                    return Ok(ControlFlow::Continue((fence, watermarks)));
+                }
+                tracing::warn!(
+                    error = %error,
+                    tx_lookup = capabilities.contains(IndexCapability::TxLookup),
+                    script_history = capabilities.contains(IndexCapability::ScriptHistory),
+                    script_live = capabilities.contains(IndexCapability::ScriptLive),
+                    "index cursor cannot be rolled back; rebuilding selected capabilities"
+                );
+                let next = self.reset_for_rebuild(capabilities)?;
+                Ok(ControlFlow::Continue(next))
+            }
+            Err(DerivedIndexWorkerError::Index(
+                IndexError::ResetInProgress | IndexError::StaleIndexState,
+            )) => Ok(ControlFlow::Break(ReconcileAction::Stalled)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn dispatch_script_live_seed_pass(
+        &self,
+        fence: &mut IndexWriteFence,
+        watermarks: &mut IndexWatermarks,
+        pending: Option<&PendingForward>,
+    ) -> Result<ControlFlow<ReconcileAction, bool>, DerivedIndexWorkerError> {
+        if !self.enabled.contains(IndexCapability::ScriptLive) {
+            return Ok(ControlFlow::Continue(false));
+        }
+        let mut want_on_stall = false;
+        if watermarks.script_live.is_some() {
+            if self.runtime.script_live_failure.read().is_none() {
+                self.rest_seed_cell();
+            } else {
+                self.writer
+                    .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
+                    .map_err(DerivedIndexWorkerError::Index)?;
+                let (next_fence, next_watermarks) = self
+                    .writer
+                    .fenced_watermarks()
+                    .map_err(DerivedIndexWorkerError::Index)?;
+                *fence = next_fence;
+                *watermarks = next_watermarks;
+                self.runtime.clear_script_live();
+                match self.seed_dispatch(pending)? {
+                    SeedFlow::Return(action) => return Ok(ControlFlow::Break(action)),
+                    SeedFlow::Seeded => return Ok(ControlFlow::Break(ReconcileAction::Progressed)),
+                    SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
+                }
+            }
+            self.release_seed_lease_if_superseded(watermarks.script_live);
+        } else {
+            match self.seed_dispatch(pending)? {
+                SeedFlow::Return(action) => return Ok(ControlFlow::Break(action)),
+                SeedFlow::Seeded => return Ok(ControlFlow::Break(ReconcileAction::Progressed)),
+                SeedFlow::FallThrough { want_on_stall: w } => want_on_stall = w,
+            }
+        }
+        Ok(ControlFlow::Continue(want_on_stall))
+    }
+
+    fn execute_forward_pass(
+        &self,
+        target: &TipSnapshot,
+        fence: IndexWriteFence,
+        watermarks: IndexWatermarks,
+        pending: &mut Option<PendingForward>,
+        mut seed_lease: Option<HistoryLease>,
+        want_on_stall: bool,
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
+        let mut after_start = None;
+        loop {
+            let Some((capabilities, watermark)) =
+                self.forward_selection(watermarks, target, after_start)
+            else {
+                let action = if after_start.is_some() {
+                    ReconcileAction::Stalled
+                } else {
+                    ReconcileAction::CaughtUp
+                };
+                self.park_seed_lease(seed_lease.take());
+                if want_on_stall
+                    && matches!(action, ReconcileAction::Stalled)
+                    && watermarks.script_live.is_none()
+                    && self.seed_bundle.lock().is_none()
+                    && !self.runtime.should_stop()
+                {
+                    if let Some(slot) = self.seed_slot.as_ref() {
+                        slot.want();
+                    }
+                }
+                return Ok(action);
+            };
+            let leg = self.catch_up_to(
+                target,
+                fence,
+                watermarks,
+                watermark,
+                capabilities,
+                pending,
+                &mut seed_lease,
+            )?;
+            match leg {
+                ForwardLeg::Settled(action) => {
+                    if !matches!(action, ReconcileAction::CaughtUp) {
+                        self.park_seed_lease(seed_lease.take());
+                    }
+                    return Ok(action);
+                }
+                ForwardLeg::BodyAbsent => after_start = Some(forward_start(watermark)),
+            }
+        }
     }
 }
