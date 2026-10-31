@@ -1149,3 +1149,61 @@ fn queued_frames_release_on_writer_exit() {
     drop(bystander_credit);
     assert_eq!(shared.pending(), 0);
 }
+
+#[test]
+fn forward_block_cancels_promptly_on_latch() {
+    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+    shared.session_cancel = latch.reader();
+    let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new(outbound_tx);
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let first = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(
+        bitcoin::consensus::encode::serialize(&genesis),
+    ))
+    .expect("payload");
+    let second = first.clone();
+    let source = lease.source(None);
+    assert!(shared.forward_block(first, source, None, None));
+    let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+    let worker = std::thread::spawn(move || {
+        let result = shared.forward_block(second, source, None, None);
+        let _ = join_tx.send(result);
+    });
+    std::thread::sleep(Duration::from_millis(10));
+    latch.trigger();
+    let delivered = join_rx.recv_timeout(Duration::from_millis(40));
+    assert!(
+        delivered.is_ok(),
+        "forward_block must unblock promptly upon latch trigger without waiting for poll timeout"
+    );
+    assert!(!delivered.expect("result"));
+    let _ = worker.join();
+}
+
+#[test]
+fn enqueue_headers_cancels_promptly_on_latch() {
+    let (headers_tx, _headers_rx) = crossbeam_channel::bounded(1);
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let mut shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
+    shared.session_cancel = latch.reader();
+    let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new(outbound_tx);
+    let source = lease.source(None);
+    shared.send_headers_response(&lease, source, Vec::new());
+    let (join_tx, join_rx) = crossbeam_channel::bounded(1);
+    let worker = std::thread::spawn(move || {
+        shared.send_headers_response(&lease, source, Vec::new());
+        let _ = join_tx.send(());
+    });
+    std::thread::sleep(Duration::from_millis(10));
+    latch.trigger();
+    assert!(
+        join_rx.recv_timeout(Duration::from_millis(40)).is_ok(),
+        "enqueue_headers must unblock promptly upon latch trigger without waiting for poll timeout"
+    );
+    let _ = worker.join();
+}

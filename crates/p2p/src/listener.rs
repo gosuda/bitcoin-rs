@@ -9,7 +9,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::{Network, unix_time_secs};
-use crossbeam_channel::{SendTimeoutError, Sender};
+use crossbeam_channel::Sender;
 use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
@@ -373,26 +373,25 @@ impl ConnectionShared {
         headers: Vec<bitcoin_rs_primitives::Header>,
         kind: HeaderKind,
     ) {
-        let mut inbound = crate::InboundHeaders {
+        let inbound = crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response: matches!(kind, HeaderKind::WireResponse),
         };
-        loop {
-            if self.is_session_cancelled() || lease.is_cancelled() {
-                return;
-            }
-            match self.headers_tx.send_timeout(inbound, POLL_INTERVAL) {
-                Ok(()) => {
+        if self.is_session_cancelled() || lease.is_cancelled() {
+            return;
+        }
+        let close_rx = lease.close_signal();
+        crossbeam_channel::select! {
+            send(self.headers_tx, inbound) -> res => {
+                if res.is_ok() {
                     wake_sync(self.wake_tx.as_ref());
-                    return;
-                }
-                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
-                Err(SendTimeoutError::Disconnected(_)) => {
+                } else {
                     tracing::warn!(peer_addr = ?source.endpoint, "p2p inbound headers channel disconnected");
-                    return;
                 }
             }
+            recv(self.session_cancel.closed()) -> _ => {}
+            recv(close_rx) -> _ => {}
         }
     }
 
@@ -420,7 +419,7 @@ impl ConnectionShared {
         }
     }
 
-    fn forward_block(
+    pub(crate) fn forward_block(
         &self,
         payload: bitcoin_rs_primitives::BlockPayload,
         source: crate::PeerSource,
@@ -429,27 +428,32 @@ impl ConnectionShared {
     ) -> bool {
         let mut inbound = crate::InboundBlock::new(payload, Some(source), forward_credit);
         inbound.memory_credit = memory_credit;
-        loop {
-            if self.is_session_cancelled() {
-                tracing::debug!(
-                    peer_addr = ?source.endpoint,
-                    "dropping inbound block: session cancelled"
-                );
-                return false;
-            }
-            match self.blocks_tx.send_timeout(inbound, POLL_INTERVAL) {
-                Ok(()) => {
+        if self.is_session_cancelled() {
+            tracing::debug!(
+                peer_addr = ?source.endpoint,
+                "dropping inbound block: session cancelled"
+            );
+            return false;
+        }
+        crossbeam_channel::select! {
+            send(self.blocks_tx, inbound) -> res => {
+                if res.is_ok() {
                     wake_sync(self.wake_tx.as_ref());
-                    return true;
-                }
-                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
-                Err(SendTimeoutError::Disconnected(_)) => {
+                    true
+                } else {
                     tracing::warn!(
                         peer_addr = ?source.endpoint,
                         "p2p inbound blocks channel disconnected"
                     );
-                    return false;
+                    false
                 }
+            }
+            recv(self.session_cancel.closed()) -> _ => {
+                tracing::debug!(
+                    peer_addr = ?source.endpoint,
+                    "dropping inbound block: session cancelled"
+                );
+                false
             }
         }
     }
@@ -2787,7 +2791,7 @@ fn test_shared(
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false))),
+        bitcoin_rs_chain::LatchWriter::new().reader(),
         None,
         Magic::BITCOIN,
         headers_tx,
