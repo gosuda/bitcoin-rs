@@ -1,5 +1,5 @@
-use bitcoin_rs_primitives::{OutPoint, Tx};
-use hashbrown::HashSet;
+use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
+use hashbrown::{HashMap, HashSet};
 
 use crate::{
     Mempool,
@@ -60,30 +60,46 @@ pub(crate) fn unfinished(tx: &Tx) -> TxAcceptanceFact {
     }
 }
 
+fn parent_has_unspent_dust(
+    parent: &Tx,
+    spent: &HashSet<OutPoint>,
+    parent_txid: Txid,
+    dust_rate: u64,
+) -> bool {
+    for (vout, output) in parent.outputs.iter().enumerate() {
+        if !crate::standardness::is_dust(output, dust_rate) {
+            continue;
+        }
+        let Ok(vout) = u32::try_from(vout) else {
+            return true;
+        };
+        if !spent.contains(&OutPoint::new(parent_txid, vout)) {
+            return true;
+        }
+    }
+    false
+}
+
+// POL-03
 pub(crate) fn missing_ephemeral_spends(
     pool: &Mempool,
     txs: &[Tx],
     dust_rate: u64,
 ) -> Option<usize> {
+    let mut candidates_by_txid = HashMap::with_capacity(txs.len());
+    for (index, candidate) in txs.iter().enumerate() {
+        candidates_by_txid.entry(candidate.txid()).or_insert(index);
+    }
     for (index, tx) in txs.iter().enumerate() {
         let spent: HashSet<_> = tx.inputs.iter().map(|i| i.previous_output).collect();
         let parents: HashSet<_> = tx.inputs.iter().map(|i| i.previous_output.txid).collect();
         for id in parents {
-            let parent = txs
-                .iter()
-                .find(|candidate| candidate.txid() == id)
+            let parent = candidates_by_txid
+                .get(&id)
+                .map(|&idx| &txs[idx])
                 .or_else(|| pool.entry_by_txid(&id).map(|entry| entry.tx.as_ref()));
-            if let Some(parent) = parent {
-                for (vout, output) in parent.outputs.iter().enumerate() {
-                    if crate::standardness::is_dust(output, dust_rate) {
-                        let Ok(vout) = u32::try_from(vout) else {
-                            return Some(index);
-                        };
-                        if !spent.contains(&OutPoint::new(id, vout)) {
-                            return Some(index);
-                        }
-                    }
-                }
+            if parent.is_some_and(|p| parent_has_unspent_dust(p, &spent, id, dust_rate)) {
+                return Some(index);
             }
         }
     }

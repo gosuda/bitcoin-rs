@@ -1463,3 +1463,57 @@ fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
     assert_eq!(surcharged.read().len(), 1);
     Ok(())
 }
+
+// POL-03
+#[test]
+fn missing_ephemeral_spends_candidate_lookup_scales_linearly_with_parent_count() {
+    let inputs: Vec<OutPoint> = (1..=2_400).map(coin).collect();
+    let large_tx = spend(&inputs, &[50_000], true);
+    let candidate = spend(&[coin(999_999)], &[10_000], false);
+    let txs = vec![candidate, large_tx];
+    let pool = Mempool::new(MempoolLimits::default());
+    let dust_rate = 3_000;
+
+    let start = std::time::Instant::now();
+    let actual = missing_ephemeral_spends(&pool, &txs, dust_rate);
+    let elapsed = start.elapsed();
+
+    let mut lookup = std::collections::HashMap::new();
+    for tx in &txs {
+        lookup.insert(tx.txid(), tx);
+    }
+    let reference_has_unspent_dust =
+        |parent: &Tx, spent: &std::collections::HashSet<OutPoint>, id: Txid| {
+            parent.outputs.iter().enumerate().any(|(vout, output)| {
+                crate::standardness::is_dust(output, dust_rate)
+                    && u32::try_from(vout).map_or(true, |v| !spent.contains(&OutPoint::new(id, v)))
+            })
+        };
+    let mut expected = None;
+    for (index, tx) in txs.iter().enumerate() {
+        let spent: std::collections::HashSet<_> =
+            tx.inputs.iter().map(|i| i.previous_output).collect();
+        let parents: std::collections::HashSet<_> =
+            tx.inputs.iter().map(|i| i.previous_output.txid).collect();
+        let missing = parents.into_iter().any(|id| {
+            let parent = lookup
+                .get(&id)
+                .copied()
+                .or_else(|| pool.entry_by_txid(&id).map(|entry| entry.tx.as_ref()));
+            parent.is_some_and(|p| reference_has_unspent_dust(p, &spent, id))
+        });
+        if missing {
+            expected = Some(index);
+            break;
+        }
+    }
+
+    assert_eq!(
+        actual, expected,
+        "oracle mismatch: missing_ephemeral_spends must match independent hashmap reference"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "quadratic candidate scan in missing_ephemeral_spends took {elapsed:?}, expected under 250ms for linear resolution"
+    );
+}
