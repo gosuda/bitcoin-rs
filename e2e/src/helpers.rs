@@ -1,5 +1,3 @@
-//! Transaction, block, and chain helpers for scenario tests.
-
 pub mod taproot;
 
 use std::time::Duration;
@@ -265,7 +263,7 @@ pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) 
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: coinbase_script_sig(height),
+            script_sig: bip34_coinbase_script_sig(height),
             sequence: Sequence::MAX,
             witness: Witness::from_slice(&[[0u8; 32]]),
         }],
@@ -294,9 +292,8 @@ pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) 
     Ok(block)
 }
 
-/// BIP34 coinbase `script_sig` for `height`, padded to the two-byte minimum
 #[must_use]
-pub fn coinbase_script_sig(height: u32) -> ScriptBuf {
+pub fn bip34_coinbase_script_sig(height: u32) -> ScriptBuf {
     let mut builder = Builder::new().push_int(i64::from(height));
     if builder.as_bytes().len() < 2 {
         builder = builder.push_int(0);
@@ -368,7 +365,6 @@ fn bip34_script_sig(height: u32, tag: u8) -> Vec<u8> {
     script
 }
 
-/// Builds a BIP141 segwit coinbase-only block on `parent`.
 #[must_use]
 pub fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
     let reserved = [tag; 32];

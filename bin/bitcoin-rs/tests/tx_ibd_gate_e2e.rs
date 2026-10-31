@@ -11,7 +11,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
-use bitcoin_rs_e2e::helpers::coinbase_script_sig;
+use bitcoin_rs_e2e::helpers::bip34_coinbase_script_sig;
 use bitcoin_rs_e2e::process_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use wire_peer::Peer;
@@ -176,7 +176,7 @@ fn p2sh_true_coinbase(height: u32, value: u64) -> Transaction {
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: coinbase_script_sig(height),
+            script_sig: bip34_coinbase_script_sig(height),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

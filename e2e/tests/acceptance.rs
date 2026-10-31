@@ -1,5 +1,3 @@
-//! Curated acceptance comparisons against a pinned live Bitcoin Core.
-
 use std::fs;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
@@ -7,7 +5,7 @@ use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::{Amount, Block, ScriptBuf, Sequence, Transaction, TxMerkleNode, Txid};
 use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::helpers::{
-    coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
+    bip34_coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -313,7 +311,7 @@ fn curated_live_acceptance() -> Result<()> {
     grind_pow(&mut bad_merkle.header)?;
     let mut multiple_coinbase = template.clone();
     let mut second_coinbase = multiple_coinbase.txdata[0].clone();
-    second_coinbase.input[0].script_sig = coinbase_script_sig(999);
+    second_coinbase.input[0].script_sig = bip34_coinbase_script_sig(999);
     multiple_coinbase.txdata.push(second_coinbase);
     update_merkle_and_pow(&mut multiple_coinbase)?;
     let mut short_coinbase = template.clone();
@@ -323,7 +321,7 @@ fn curated_live_acceptance() -> Result<()> {
     excessive_coinbase.txdata[0].output[0].value += Amount::from_sat(1);
     update_merkle_and_pow(&mut excessive_coinbase)?;
     let mut wrong_height = template.clone();
-    wrong_height.txdata[0].input[0].script_sig = coinbase_script_sig(501);
+    wrong_height.txdata[0].input[0].script_sig = bip34_coinbase_script_sig(501);
     update_merkle_and_pow(&mut wrong_height)?;
     let chain = core.rpc("getblockchaininfo", &json!([]))?;
     let mut old_time = template;

@@ -1,5 +1,3 @@
-//! One scripted loopback wire peer for the live-sync scenarios.
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write as _;
@@ -37,8 +35,7 @@ pub struct LivePeer {
     pub headers: Vec<BlockHeader>,
     pub getdata_seen: Vec<GetdataSeen>,
     pub inventory_seen: Vec<Inventory>,
-    /// Proactive BIP133 thresholds observed from the node (sat/kvB).
-    pub fee_filters_seen: Vec<i64>,
+    pub fee_filter_sat_per_kvb: Vec<i64>,
     pub getheaders_at: Vec<u64>,
     pub stripped_served: usize,
     pub dropped: bool,
@@ -54,7 +51,6 @@ impl LivePeer {
         Self::connect_with_wtxid_relay(node, name, start_height, true)
     }
 
-    /// Handshake with an explicit BIP339 profile for mixed txid/wtxid peers.
     pub fn connect_with_wtxid_relay(
         node: &ProcessNode,
         name: &str,
@@ -74,7 +70,7 @@ impl LivePeer {
             headers: Vec::new(),
             getdata_seen: Vec::new(),
             inventory_seen: Vec::new(),
-            fee_filters_seen: Vec::new(),
+            fee_filter_sat_per_kvb: Vec::new(),
             getheaders_at: Vec::new(),
             stripped_served: 0,
             dropped: false,
@@ -242,7 +238,7 @@ impl LivePeer {
                     serve(self, &items);
                 }
                 Ok(NetworkMessage::Inv(items)) => self.inventory_seen.extend(items),
-                Ok(NetworkMessage::FeeFilter(rate)) => self.fee_filters_seen.push(rate),
+                Ok(NetworkMessage::FeeFilter(rate)) => self.fee_filter_sat_per_kvb.push(rate),
                 Ok(NetworkMessage::GetHeaders(_)) => {
                     let at = self.at_ms();
                     self.getheaders_at.push(at);

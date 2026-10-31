@@ -1,4 +1,3 @@
-//! BIP133 and delayed inventory observed over real bitcoin-rs and Core sockets.
 use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin_rs_e2e::helpers::{
     coinbase_at, funding_address, funding_output, signed_spend, submit_genesis, tx_hex,
@@ -102,10 +101,10 @@ fn scenario(kind: Kind) -> Result<()> {
     .to_sat();
     for peer in &peers {
         assert!(
-            !peer.fee_filters_seen.is_empty(),
+            !peer.fee_filter_sat_per_kvb.is_empty(),
             "node never advertised its relay floor"
         );
-        for rate in &peer.fee_filters_seen {
+        for rate in &peer.fee_filter_sat_per_kvb {
             let rate = u64::try_from(*rate).map_err(|error| Error::Assertion(error.to_string()))?;
             assert!(
                 rate >= minimum,

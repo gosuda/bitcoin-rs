@@ -15,7 +15,6 @@ pub enum IntervalKind {
 pub struct Interval {
     pub kind: IntervalKind,
     pub start_ns: u64,
-    /// End offset, never before the start.
     pub end_ns: u64,
 }
 
@@ -27,8 +26,6 @@ impl Interval {
         Ok(())
     }
 
-    /// True when the intervals share any instant, which covers both nesting
-    /// and concurrency.
     #[must_use]
     pub fn overlaps(self, other: Self) -> bool {
         self.start_ns < other.end_ns && other.start_ns < self.end_ns
@@ -317,6 +314,25 @@ mod tests {
             "11".repeat(32).parse::<Sha256Hex>(),
             Ok(Sha256Hex([0x11; 32]))
         );
+    }
+
+    #[test]
+    fn an_interval_never_ends_before_it_starts() {
+        let inverted = Interval {
+            kind: IntervalKind::Inside,
+            start_ns: 10,
+            end_ns: 9,
+        };
+        assert_eq!(
+            inverted.check(),
+            Err(EvidenceError::InvertedInterval(inverted))
+        );
+        let level = Interval {
+            kind: IntervalKind::Inside,
+            start_ns: 9,
+            end_ns: 9,
+        };
+        assert_eq!(level.check(), Ok(()));
     }
 
 // HPA-04, HPA-12
