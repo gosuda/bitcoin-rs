@@ -103,10 +103,10 @@ pub(super) fn run_worker_with_open(
         generation,
         applied_tip: &applied_tip,
         block_tree: &block_tree,
-        body_source: &body_source,
+        body_source,
         shutdown,
     };
-    let worker_result = open_and_run(setup, &body_store, history, chain_events, reporter, wake_rx);
+    let worker_result = open_and_run(&setup, body_store, history, chain_events, reporter, wake_rx);
     heartbeat.stop_and_join();
 
     finish_worker(
@@ -178,7 +178,7 @@ pub(super) struct WorkerSetup<'a> {
     generation: &'a Generation,
     applied_tip: &'a TipReader,
     block_tree: &'a BlockTreeReader,
-    body_source: &'a Option<Arc<dyn BlockBodySource>>,
+    body_source: Option<Arc<dyn BlockBodySource>>,
     shutdown: &'a bitcoin_rs_chain::LatchReader,
 }
 
@@ -189,8 +189,8 @@ impl WorkerSetup<'_> {
 }
 
 pub(super) fn open_and_run(
-    setup: WorkerSetup<'_>,
-    body_store: &Option<Arc<dyn BlockBodyStore>>,
+    setup: &WorkerSetup<'_>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
@@ -209,13 +209,13 @@ pub(super) fn open_and_run(
         return Ok(());
     }
 
-    publish_serving_query_engine(&open, &setup);
+    publish_serving_query_engine(&open, setup);
 
     if setup.is_interrupted() {
         return Ok(());
     }
 
-    execute_portable_bundle(&open, &setup)?;
+    execute_portable_bundle(&open, setup)?;
 
     if setup.is_interrupted() {
         return Ok(());
@@ -223,7 +223,7 @@ pub(super) fn open_and_run(
 
     let worker = build_worker(
         open,
-        &setup,
+        setup,
         body_store,
         history,
         chain_events,
@@ -307,7 +307,7 @@ fn execute_portable_bundle(
 fn build_worker(
     open: OpenDerivedIndex,
     setup: &WorkerSetup<'_>,
-    body_store: &Option<Arc<dyn BlockBodyStore>>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     history: HistoryAccess,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
@@ -318,7 +318,7 @@ fn build_worker(
         writer: open.writer,
         applied_tip: setup.applied_tip.clone(),
         block_tree: setup.block_tree.clone(),
-        body_store: body_store.clone(),
+        body_store,
         history,
         batch_limits: open.batch_limits,
         enabled: setup.spec.enabled,

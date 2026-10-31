@@ -133,7 +133,7 @@ impl Worker {
             scope,
         )? {
             PrefetchOutcome::Leg(leg) => return Ok(leg),
-            PrefetchOutcome::Finished(state, history) => (state, history),
+            PrefetchOutcome::Finished(state, history) => (*state, history),
         };
 
         let action = self.finish_catch_up(state, chunk_end, target, &pass_history, pending)?;
@@ -157,7 +157,6 @@ impl Worker {
             *seed_lease = Some(pass_history);
         }
     }
-
     fn grant_leg_history(
         &self,
         start_height: u32,
@@ -167,15 +166,15 @@ impl Worker {
         pending: &mut Option<PendingForward>,
         seed_lease: &mut Option<HistoryLease>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
-        if !capabilities.contains(IndexCapability::ScriptLive) {
-            self.grant_non_live_history(start_height, capabilities, target, state, pending)
-        } else {
-            let grant_state = LiveGrantState {
+        if capabilities.contains(IndexCapability::ScriptLive) {
+            let mut grant_state = LiveGrantState {
                 state,
                 pending,
                 seed_lease,
             };
-            self.grant_live_history(start_height, capabilities, target, grant_state)
+            self.grant_live_history(start_height, capabilities, target, &mut grant_state)
+        } else {
+            self.grant_non_live_history(start_height, capabilities, target, state, pending)
         }
     }
 
@@ -210,7 +209,11 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let prepared = self.prepare_subchunk(sub_chunk, &bodies, capabilities, state, pending)?;
+        let prepared =
+            match self.prepare_subchunk(sub_chunk, &bodies, capabilities, state, pending)? {
+                ControlFlow::Break(action) => return Ok(action),
+                ControlFlow::Continue(prepared) => prepared,
+            };
 
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
@@ -401,7 +404,7 @@ struct PrefetchScope<'a> {
 
 enum PrefetchOutcome {
     Leg(ForwardLeg),
-    Finished(PendingForward, HistoryLease),
+    Finished(Box<PendingForward>, HistoryLease),
 }
 
 struct LiveGrantState<'a, 'b> {
@@ -485,7 +488,10 @@ impl Worker {
                 }
             }
         }
-        Ok(PrefetchOutcome::Finished(state, scope.pass_history))
+        Ok(PrefetchOutcome::Finished(
+            Box::new(state),
+            scope.pass_history,
+        ))
     }
 
     fn grant_non_live_history(
@@ -532,7 +538,7 @@ impl Worker {
         start_height: u32,
         capabilities: IndexCapabilities,
         target: &TipSnapshot,
-        s: LiveGrantState<'_, '_>,
+        s: &mut LiveGrantState<'_, '_>,
     ) -> Result<ControlFlow<ForwardLeg, HistoryLease>, DerivedIndexWorkerError> {
         let mut parked = None;
         if let Some(lease) = s.seed_lease.take() {
@@ -593,7 +599,10 @@ impl Worker {
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
         pending: &mut Option<PendingForward>,
-    ) -> Result<Vec<Result<PreparedBlock, IndexError>>, DerivedIndexWorkerError> {
+    ) -> Result<
+        ControlFlow<ChunkAction, Vec<Result<PreparedBlock, IndexError>>>,
+        DerivedIndexWorkerError,
+    > {
         let needs_anchor = capabilities.contains(IndexCapability::ScriptHistory)
             || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
@@ -620,12 +629,12 @@ impl Worker {
             .collect();
 
         match outcomes.into_iter().collect::<Result<Vec<_>, _>>() {
-            Ok(prepared) => Ok(prepared),
+            Ok(prepared) => Ok(ControlFlow::Continue(prepared)),
             Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                 *pending = None;
                 if capabilities.contains(IndexCapability::CompactFilters) {
                     self.runtime.fail_compact_filters(&error);
-                    return Err(error);
+                    return Ok(ControlFlow::Break(ChunkAction::Progressed));
                 }
                 self.writer
                     .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
@@ -636,7 +645,7 @@ impl Worker {
                     slot.want();
                 }
                 tracing::warn!(error = %error, "ScriptLive unavailable after missing undo; awaiting verified seed");
-                Err(error)
+                Ok(ControlFlow::Break(ChunkAction::MissingBody))
             }
             Err(error) => Err(error),
         }

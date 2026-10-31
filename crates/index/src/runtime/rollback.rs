@@ -123,7 +123,7 @@ impl Worker {
             });
         };
         let (height, tip_hash) = artifact.tip();
-        if let Some(early_exit) = self.ensure_bundle_lease(height, &mut bundle, &artifact)? {
+        if let Some(early_exit) = self.ensure_bundle_lease(height, &mut bundle, &artifact) {
             if matches!(early_exit, SeedFlow::Return(ReconcileAction::Stalled)) {
                 *self.seed_bundle.lock() = Some(SeedBundle {
                     artifact: Some(artifact),
@@ -382,7 +382,7 @@ impl Worker {
         height: u32,
         bundle: &mut SeedBundle,
         _artifact: &VerifiedSnapshotArtifact,
-    ) -> Result<Option<SeedFlow>, DerivedIndexWorkerError> {
+    ) -> Option<SeedFlow> {
         let lease_covers = bundle
             .lease
             .as_ref()
@@ -392,16 +392,16 @@ impl Worker {
             match self.history.request_history(height) {
                 Ok(lease) => bundle.lease = Some(lease),
                 Err(HistoryUnavailable::Pruned { .. }) => {
-                    return Ok(Some(SeedFlow::FallThrough {
+                    return Some(SeedFlow::FallThrough {
                         want_on_stall: true,
-                    }));
+                    });
                 }
                 Err(_) => {
-                    return Ok(Some(SeedFlow::Return(ReconcileAction::Stalled)));
+                    return Some(SeedFlow::Return(ReconcileAction::Stalled));
                 }
             }
         }
-        Ok(None)
+        None
     }
 
     fn handle_seed_result(

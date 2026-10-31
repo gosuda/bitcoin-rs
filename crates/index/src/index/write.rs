@@ -205,7 +205,7 @@ impl<S: KvStore> IndexWriter<S> {
 
         let mut importer =
             TxLookupStreamImporter::new(self.indexer.store.as_ref(), self.generation, fence);
-        produce(&mut |row| importer.add_row(row))?;
+        produce(&mut |row| importer.add_row(&row))?;
         importer.finish(base, floor)
     }
 
@@ -542,6 +542,7 @@ pub(crate) const FAMILY_SCRIPT_LIVE: &str = "script_live";
 pub(crate) const FAMILY_HEADERS: &str = "headers";
 pub(crate) const FAMILY_FILTERS: &str = "filters";
 
+#[expect(clippy::expect_used, reason = "usize metric value fits in u64")]
 fn metric_f64_from_usize(val: usize) -> f64 {
     bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).expect("usize fits in u64"))
 }
@@ -610,8 +611,8 @@ impl<'a, S: KvStore> TxLookupStreamImporter<'a, S> {
         }
     }
 
-    fn add_row(&mut self, row: PortableImportRow<'_>) -> Result<(), IndexError> {
-        match row {
+    fn add_row(&mut self, row: &PortableImportRow<'_>) -> Result<(), IndexError> {
+        match *row {
             PortableImportRow::Header(header) => {
                 if self
                     .store

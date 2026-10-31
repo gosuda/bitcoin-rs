@@ -87,6 +87,10 @@ impl BlockLog {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "usize block body size and tx count fit in u64"
+    )]
     pub fn push(&mut self, record: BlockRecord) {
         self.total_body_size = self
             .total_body_size
@@ -101,6 +105,7 @@ impl BlockLog {
         self.records.push(record);
     }
 
+    #[expect(clippy::expect_used, reason = "usize block body size fits in u64")]
     pub fn pop(&mut self) -> Option<BlockRecord> {
         let record = self.records.pop()?;
         let _ = self.cumulative_tx_count.pop();
@@ -122,6 +127,7 @@ impl BlockLog {
     }
 
     #[must_use]
+    #[expect(clippy::expect_used, reason = "usize block body size fits in u64")]
     pub fn size_on_disk(&self) -> u64 {
         debug_assert_eq!(
             self.total_body_size,
@@ -133,6 +139,7 @@ impl BlockLog {
     }
 
     #[must_use]
+    #[expect(clippy::expect_used, reason = "usize tx count fits in u64")]
     pub fn tx_count_before(&self, count: usize) -> u64 {
         debug_assert_eq!(
             self.records.len(),
