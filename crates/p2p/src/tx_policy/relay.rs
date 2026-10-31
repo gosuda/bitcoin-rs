@@ -62,8 +62,12 @@ pub(super) struct RelayPeer {
 
 /// Core uses exponential clocks. A 30-second ceiling additionally bounds
 /// inventory latency; the random deadline is independent of admissions.
-fn next_inv(now: Instant, inbound: bool, rng: &mut impl RngCore) -> Instant {
-    now + exponential(if inbound { 5 } else { 2 }, rng).min(Duration::from_secs(30))
+fn next_inbound_inv(now: Instant, rng: &mut impl RngCore) -> Instant {
+    now + exponential(5, rng).min(Duration::from_secs(30))
+}
+
+fn next_outbound_inv(now: Instant, rng: &mut impl RngCore) -> Instant {
+    now + exponential(2, rng).min(Duration::from_secs(30))
 }
 
 fn exponential(mean_secs: u32, rng: &mut impl RngCore) -> Duration {
@@ -115,10 +119,38 @@ fn rounded_filter(floor: u64, minimum: u64, rng: &mut impl RngCore) -> u64 {
     truncate_fee_bucket(rounded).max(minimum)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RelayDirection {
+    Inbound,
+    Outbound,
+}
+
+impl RelayDirection {
+    pub(super) const fn from_inbound(inbound: bool) -> Self {
+        if inbound {
+            Self::Inbound
+        } else {
+            Self::Outbound
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RelayIdentityScheme {
+    Wtxid,
+    Txid,
+}
+
+impl RelayIdentityScheme {
+    pub(super) const fn from_wtxid(wtxid: bool) -> Self {
+        if wtxid { Self::Wtxid } else { Self::Txid }
+    }
+}
+
 impl RelayPeer {
     fn new(
         now: Instant,
-        inbound: bool,
+        direction: RelayDirection,
         key: Option<InboundClockKey>,
         clocks: &mut HashMap<InboundClockKey, Instant>,
         rng: &mut impl RngCore,
@@ -126,8 +158,11 @@ impl RelayPeer {
         let next_inv = match key {
             Some(key) => *clocks
                 .entry(key)
-                .or_insert_with(|| next_inv(now, true, rng)),
-            None => next_inv(now, inbound, rng),
+                .or_insert_with(|| next_inbound_inv(now, rng)),
+            None => match direction {
+                RelayDirection::Inbound => next_inbound_inv(now, rng),
+                RelayDirection::Outbound => next_outbound_inv(now, rng),
+            },
         };
         Self {
             pending: HashMap::new(),
@@ -227,7 +262,15 @@ impl PeerTable {
             } = &mut *policy;
             let peer = relay
                 .entry(session.lease.source(session.endpoint))
-                .or_insert_with(|| RelayPeer::new(now, is_inbound, inbound, inbound_inv, rng));
+                .or_insert_with(|| {
+                    RelayPeer::new(
+                        now,
+                        RelayDirection::from_inbound(is_inbound),
+                        inbound,
+                        inbound_inv,
+                        rng,
+                    )
+                });
             if request.source == Some(session.lease.node_id()) {
                 peer.note_known(Identity::Txid(request.txid.0));
                 peer.note_known(Identity::Wtxid(request.wtxid.0));
@@ -295,7 +338,13 @@ impl PeerTable {
             relay, inbound_inv, ..
         } = &mut *policy;
         let peer = relay.entry(source).or_insert_with(|| {
-            RelayPeer::new(Instant::now(), is_inbound, inbound, inbound_inv, &mut rng)
+            RelayPeer::new(
+                Instant::now(),
+                RelayDirection::from_inbound(is_inbound),
+                inbound,
+                inbound_inv,
+                &mut rng,
+            )
         });
         for identity in identities {
             peer.note_known(identity);
@@ -340,7 +389,13 @@ impl PeerTable {
         relay
             .entry(source)
             .or_insert_with(|| {
-                RelayPeer::new(Instant::now(), is_inbound, inbound, inbound_inv, &mut rng)
+                RelayPeer::new(
+                    Instant::now(),
+                    RelayDirection::from_inbound(is_inbound),
+                    inbound,
+                    inbound_inv,
+                    &mut rng,
+                )
             })
             .fee_filter = rate;
     }
@@ -391,9 +446,15 @@ impl PeerTable {
                 let TxPolicy {
                     relay, inbound_inv, ..
                 } = &mut *policy;
-                let peer = relay
-                    .entry(source)
-                    .or_insert_with(|| RelayPeer::new(now, is_inbound, inbound, inbound_inv, rng));
+                let peer = relay.entry(source).or_insert_with(|| {
+                    RelayPeer::new(
+                        now,
+                        RelayDirection::from_inbound(is_inbound),
+                        inbound,
+                        inbound_inv,
+                        rng,
+                    )
+                });
                 if info.version >= 70_013 && minimum <= Amount::MAX_MONEY.to_sat() {
                     let before = (peer.last_filter, peer.sent_ibd_filter);
                     if let Some(rate) = peer.filter_due(now, floor, minimum, ibd, rng) {
@@ -415,11 +476,17 @@ impl PeerTable {
                     Some(key) => {
                         let shared = inbound_inv.entry(key).or_insert(now);
                         if *shared <= now {
-                            *shared = next_inv(now, true, rng);
+                            *shared = next_inbound_inv(now, rng);
                         }
                         *shared
                     }
-                    None => next_inv(now, is_inbound, rng),
+                    None => {
+                        if is_inbound {
+                            next_inbound_inv(now, rng)
+                        } else {
+                            next_outbound_inv(now, rng)
+                        }
+                    }
                 };
                 if !info.relay_transactions {
                     peer.pending.clear();
@@ -432,14 +499,19 @@ impl PeerTable {
                     .into_values()
                     .collect::<Vec<_>>()
             };
-            self.drain_relay_batch(source, info.wtxid_relay, requests, gateway);
+            self.drain_relay_batch(
+                source,
+                RelayIdentityScheme::from_wtxid(info.wtxid_relay),
+                requests,
+                gateway,
+            );
         }
     }
 
     fn drain_relay_batch(
         &self,
         source: PeerSource,
-        wtxid: bool,
+        scheme: RelayIdentityScheme,
         requests: Vec<RelayRequest>,
         gateway: &MempoolGateway,
     ) {
@@ -483,10 +555,9 @@ impl PeerTable {
         let mut offered = Vec::new();
         for candidate in candidates {
             let request = candidate.request;
-            let identity = if wtxid {
-                Identity::Wtxid(request.wtxid.0)
-            } else {
-                Identity::Txid(request.txid.0)
+            let identity = match scheme {
+                RelayIdentityScheme::Wtxid => Identity::Wtxid(request.wtxid.0),
+                RelayIdentityScheme::Txid => Identity::Txid(request.txid.0),
             };
             let fee_allowed = bitcoin_rs_mempool::required_fee(peer.fee_filter, candidate.vsize)
                 .is_ok_and(|required| i128::from(candidate.fee) >= required);
@@ -503,10 +574,13 @@ impl PeerTable {
                 }
                 continue;
             }
-            items.push(if wtxid {
-                Inventory::WTx(bitcoin::Wtxid::from_byte_array(*request.wtxid.as_bytes()))
-            } else {
-                Inventory::Transaction(bitcoin::Txid::from_byte_array(*request.txid.as_bytes()))
+            items.push(match scheme {
+                RelayIdentityScheme::Wtxid => {
+                    Inventory::WTx(bitcoin::Wtxid::from_byte_array(*request.wtxid.as_bytes()))
+                }
+                RelayIdentityScheme::Txid => {
+                    Inventory::Transaction(bitcoin::Txid::from_byte_array(*request.txid.as_bytes()))
+                }
             });
             identities.push(identity);
             offered.push(request);

@@ -12,7 +12,7 @@ use bitcoin_rs_primitives::{EndpointHost, NetworkLabel, PeerEndpoint};
 use sha2::{Digest, Sha256};
 
 use crate::sam::SamSession;
-use crate::socks::{SocksTarget, socks_connect};
+use crate::socks::{SocksTarget, socks_connect, socks_connect_isolated};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TransportRemote(SocketAddr);
@@ -351,12 +351,13 @@ pub fn connect_peer_stream(
     }
     match endpoint {
         PeerEndpoint::Ip(addr) => match routes.proxy {
-            Some(proxy) => socks_connect(
-                proxy,
-                &SocksTarget::Ip(addr),
-                routes.proxy_randomize_credentials,
-                timeout,
-            ),
+            Some(proxy) => {
+                if routes.proxy_randomize_credentials {
+                    socks_connect_isolated(proxy, &SocksTarget::Ip(addr), timeout)
+                } else {
+                    socks_connect(proxy, &SocksTarget::Ip(addr), timeout)
+                }
+            }
             None => match TcpStream::connect_timeout(&addr, timeout) {
                 Ok(stream) => Ok(stream),
                 Err(error) => Err(match error.kind() {
@@ -377,7 +378,7 @@ pub fn connect_peer_stream(
                 bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&key))
             );
             debug_assert_eq!(host.len(), 62);
-            socks_connect(proxy, &SocksTarget::Domain(host, port), true, timeout)
+            socks_connect_isolated(proxy, &SocksTarget::Domain(host, port), timeout)
         }
         PeerEndpoint::I2p { hash, port } => {
             let Some(session) = &routes.sam_session else {

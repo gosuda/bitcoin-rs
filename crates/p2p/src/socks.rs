@@ -184,6 +184,22 @@ fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), D
 pub(crate) fn socks_connect(
     proxy: SocketAddr,
     target: &SocksTarget,
+    timeout: Duration,
+) -> Result<TcpStream, DialFailure> {
+    socks_connect_impl(proxy, target, false, timeout)
+}
+
+pub(crate) fn socks_connect_isolated(
+    proxy: SocketAddr,
+    target: &SocksTarget,
+    timeout: Duration,
+) -> Result<TcpStream, DialFailure> {
+    socks_connect_impl(proxy, target, true, timeout)
+}
+
+fn socks_connect_impl(
+    proxy: SocketAddr,
+    target: &SocksTarget,
     isolate: bool,
     timeout: Duration,
 ) -> Result<TcpStream, DialFailure> {

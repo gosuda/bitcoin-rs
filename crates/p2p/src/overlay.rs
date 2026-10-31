@@ -212,12 +212,11 @@ impl OverlayTransport {
         let stream = match endpoint.address() {
             PeerAddress::Ip(_) => {
                 if let Some(proxy) = self.config.proxy {
-                    socks(
-                        proxy,
-                        endpoint,
-                        self.config.randomize_credentials,
-                        cancelled,
-                    )
+                    if self.config.randomize_credentials {
+                        socks_isolated(proxy, endpoint, cancelled)
+                    } else {
+                        socks_unauthenticated(proxy, endpoint, cancelled)
+                    }
                 } else {
                     TcpStream::connect_timeout(
                         &endpoint
@@ -227,14 +226,17 @@ impl OverlayTransport {
                     )
                 }
             }
-            PeerAddress::Onion(_) => socks(
-                self.config
+            PeerAddress::Onion(_) => {
+                let onion_proxy = self
+                    .config
                     .onion_proxy
-                    .ok_or_else(|| invalid("onion route disabled"))?,
-                endpoint,
-                self.config.randomize_credentials,
-                cancelled,
-            ),
+                    .ok_or_else(|| invalid("onion route disabled"))?;
+                if self.config.randomize_credentials {
+                    socks_isolated(onion_proxy, endpoint, cancelled)
+                } else {
+                    socks_unauthenticated(onion_proxy, endpoint, cancelled)
+                }
+            }
             PeerAddress::I2p(_) => return self.sam_connect(endpoint, cancelled),
         }?;
         Ok(Connected {
@@ -503,7 +505,23 @@ fn connect(
     }
 }
 
-fn socks(
+fn socks_unauthenticated(
+    proxy: SocketAddr,
+    endpoint: PeerEndpoint,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<TcpStream> {
+    socks_impl(proxy, endpoint, false, cancelled)
+}
+
+fn socks_isolated(
+    proxy: SocketAddr,
+    endpoint: PeerEndpoint,
+    cancelled: &dyn Fn() -> bool,
+) -> io::Result<TcpStream> {
+    socks_impl(proxy, endpoint, true, cancelled)
+}
+
+fn socks_impl(
     proxy: SocketAddr,
     endpoint: PeerEndpoint,
     isolate: bool,

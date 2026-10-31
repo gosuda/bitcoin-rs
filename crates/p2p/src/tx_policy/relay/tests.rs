@@ -681,7 +681,13 @@ fn relay_queue_and_known_inventory_have_explicit_bounds() {
     );
     assert!(dropped > 0);
     drop(policy);
-    let mut peer = RelayPeer::new(now, false, None, &mut HashMap::new(), &mut rng);
+    let mut peer = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut HashMap::new(),
+        &mut rng,
+    );
     for marker in 0u32..5_001 {
         let mut bytes = [0; 32];
         bytes[..4].copy_from_slice(&marker.to_le_bytes());
@@ -726,7 +732,7 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
     let now = Instant::now();
     let mut inbound = StdRng::seed_from_u64(7);
     let mut outbound = inbound.clone();
-    assert!(next_inv(now, true, &mut inbound) > next_inv(now, false, &mut outbound));
+    assert!(next_inbound_inv(now, &mut inbound) > next_outbound_inv(now, &mut outbound));
     let mut rng = StdRng::seed_from_u64(8);
     let values = (0..100)
         .map(|_| rounded_filter(1500, 1000, &mut rng))
@@ -737,7 +743,13 @@ fn seeded_clocks_rounding_and_fee_refresh_are_deterministic() {
         "Core 1.1-spaced bucket boundaries"
     );
     assert!((0..100).all(|_| rounded_filter(500, 1000, &mut rng) >= 1000));
-    let mut peer = RelayPeer::new(now, false, None, &mut HashMap::new(), &mut rng);
+    let mut peer = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut HashMap::new(),
+        &mut rng,
+    );
     assert!(peer.filter_due(now, 1500, 1000, false, &mut rng).is_some());
     let scheduled = peer.next_filter;
     assert!(peer.filter_due(now, 1501, 1000, false, &mut rng).is_none());
@@ -874,8 +886,14 @@ fn inbound_without_ip_key_keeps_inbound_cadence() {
     let mut clocks = HashMap::new();
     let mut rng_in = StdRng::seed_from_u64(42);
     let mut rng_out = StdRng::seed_from_u64(42);
-    let inbound = RelayPeer::new(now, true, None, &mut clocks, &mut rng_in);
-    let outbound = RelayPeer::new(now, false, None, &mut clocks, &mut rng_out);
+    let inbound = RelayPeer::new(now, RelayDirection::Inbound, None, &mut clocks, &mut rng_in);
+    let outbound = RelayPeer::new(
+        now,
+        RelayDirection::Outbound,
+        None,
+        &mut clocks,
+        &mut rng_out,
+    );
     assert!(
         inbound.next_inv > outbound.next_inv,
         "an inbound peer without an IP key must keep its inbound cadence, not degrade to outbound"

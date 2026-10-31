@@ -82,7 +82,7 @@ fn socks_routes_onion_as_a_domain_and_preserves_stream_bytes() {
         }
         stream.write_all(b"bitcoin").expect("P2P bytes");
     });
-    let mut stream = socks(proxy, endpoint, false, &|| false).expect("SOCKS stream");
+    let mut stream = socks_unauthenticated(proxy, endpoint, &|| false).expect("SOCKS stream");
     let mut bytes = [0; 7];
     stream.read_exact(&mut bytes).expect("unconsumed P2P bytes");
     assert_eq!(&bytes, b"bitcoin");
@@ -102,11 +102,10 @@ fn socks_requires_the_selected_auth_policy_and_refuses_bad_replies() {
             stream.write_all(&response).expect("reply");
         });
         assert!(
-            socks(
+            socks_isolated(
                 address,
                 PeerEndpoint::new(PeerAddress::Onion([1; 32]), 8333),
-                true,
-                &|| false
+                &|| false,
             )
             .is_err()
         );
@@ -138,13 +137,9 @@ fn socks_destination_refusals_are_distinct_from_local_and_malformed_failures() {
             stream.read_exact(&mut [0; 10]).expect("IP request");
             stream.write_all(&reply).expect("refusal");
         });
-        let error = socks(
-            address,
-            PeerEndpoint::from(([8, 8, 8, 8], 8333)),
-            false,
-            &|| false,
-        )
-        .expect_err("refused connection");
+        let error =
+            socks_unauthenticated(address, PeerEndpoint::from(([8, 8, 8, 8], 8333)), &|| false)
+                .expect_err("refused connection");
         assert_eq!(
             remote_connect_failed(&error),
             matches!(reply, [5, 3..=6, 0, 1])
