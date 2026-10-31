@@ -1,11 +1,13 @@
 use bitcoin_rs_chain::{BlockHeader, BlockTree, NodeId, NodeStatus, plan_reorg};
 
+use crate::support::error::TestError;
 use crate::support::pow_oracle;
+
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
 use pow_oracle::pow_is_met;
 
 #[test]
-fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
+fn plans_deep_reorg_to_common_fork() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let genesis = mine_header(BlockHash::default(), 0, 0);
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -51,7 +53,7 @@ fn mine_child(
     parent: NodeId,
     height: u32,
     branch: u8,
-) -> Result<BlockHeader, Box<dyn std::error::Error>> {
+) -> Result<BlockHeader, TestError> {
     let parent_hash = BlockHash::from(Hash256::from_le_bytes(
         &tree.node(parent)?.hash.to_le_bytes(),
     ));

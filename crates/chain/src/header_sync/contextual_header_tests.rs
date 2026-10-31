@@ -2,11 +2,13 @@ use super::{
     HeaderValidationMode, MAX_FUTURE_TIME_SECONDS, accept_headers, demoted_tip_after_rejection,
     fixture::mine_regtest, next_work_required, validate_contextual_header,
 };
+use crate::test_error::TestError;
 use crate::{
     ChainError,
     node::{BlockHeader, NodeStatus},
     tree::BlockTree,
 };
+
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 
 const TESTNET4_POW_LIMIT: u32 = 0x1d00_ffff;
@@ -33,7 +35,7 @@ fn extend_regtest(
 }
 
 #[test]
-fn rejects_outdated_versions_after_activation() -> Result<(), Box<dyn std::error::Error>> {
+fn rejects_outdated_versions_after_activation() -> Result<(), TestError> {
     let network = Network::Regtest;
     let genesis = network.genesis_block();
     let base_time = genesis.header.time;
@@ -83,17 +85,14 @@ fn rejects_outdated_versions_after_activation() -> Result<(), Box<dyn std::error
             network,
             now,
             HeaderValidationMode::LiveAdmission,
-        )
-        .map_err(|error| {
-            format!("version {required} is legal at height {activation}: {error:?}")
-        })?;
+        )?;
         prev = accepted.compute_hash();
     }
     Ok(())
 }
 
 #[test]
-fn rejects_testnet4_bip94_timewarp_candidate() -> Result<(), Box<dyn std::error::Error>> {
+fn rejects_testnet4_bip94_timewarp_candidate() -> Result<(), TestError> {
     let network = Network::Testnet4;
     let mut tree = BlockTree::new();
     let mut prev = BlockHash::default();
@@ -149,13 +148,12 @@ fn rejects_testnet4_bip94_timewarp_candidate() -> Result<(), Box<dyn std::error:
         network,
         now,
         HeaderValidationMode::LiveAdmission,
-    )
-    .map_err(|error| format!("a timestamp exactly at the timewarp floor is legal: {error:?}"))?;
+    )?;
     Ok(())
 }
 
 #[test]
-fn child_of_invalid_parent_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+fn child_of_invalid_parent_is_rejected() -> Result<(), TestError> {
     let network = Network::Regtest;
     let genesis = network.genesis_block();
     let base_time = genesis.header.time;
@@ -229,7 +227,7 @@ fn chain_with_median_five() -> (BlockTree, BlockHeader) {
 }
 
 #[test]
-fn timestamp_bounds_hold_per_validation_mode() -> Result<(), Box<dyn std::error::Error>> {
+fn timestamp_bounds_hold_per_validation_mode() -> Result<(), TestError> {
     let (tree, tip) = chain_with_median_five();
     let parent_id = tree.lookup(tip.compute_hash().0).ok_or("tip in tree")?;
     let rolled_back = 1_000_u32;
@@ -310,8 +308,7 @@ fn timestamp_bounds_hold_per_validation_mode() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn partial_prefix_failure_preserves_demoted_tip_via_helper()
--> Result<(), Box<dyn std::error::Error>> {
+fn partial_prefix_failure_preserves_demoted_tip_via_helper() -> Result<(), TestError> {
     let network = Network::Regtest;
     let genesis = network.genesis_block();
     let base_time = genesis.header.time;

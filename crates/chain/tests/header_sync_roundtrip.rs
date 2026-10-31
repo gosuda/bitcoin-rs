@@ -3,13 +3,14 @@ use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, NodeStatus, accept_headers, current_unix_seconds,
 };
 
+use crate::support::error::TestError;
+
 use crate::support::pow_oracle;
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 use pow_oracle::pow_is_met;
 
 #[test]
-fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
--> Result<(), Box<dyn std::error::Error>> {
+fn accepts_valid_headers_across_batches_and_rejects_bad_bits() -> Result<(), TestError> {
     let headers = mine_headers(100);
     let mut tree = BlockTree::new();
 
@@ -85,7 +86,7 @@ fn rejects_post_genesis_header_as_empty_tree_root() {
 
 #[test]
 fn rejects_non_retarget_header_that_does_not_inherit_parent_bits_before_insertion()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let parent_bits = 0x207e_ffff_u32;
     let easier_child_bits = 0x207f_ffff_u32;
@@ -118,8 +119,7 @@ fn rejects_non_retarget_header_that_does_not_inherit_parent_bits_before_insertio
 }
 
 #[test]
-fn rejects_retarget_header_that_keeps_parent_bits_when_timespan_clamps()
--> Result<(), Box<dyn std::error::Error>> {
+fn rejects_retarget_header_that_keeps_parent_bits_when_timespan_clamps() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let bits = 0x1d00_ffff_u32;
     let interval = Network::Mainnet.retarget_interval();
@@ -160,8 +160,7 @@ fn rejects_retarget_header_that_keeps_parent_bits_when_timespan_clamps()
 }
 
 #[test]
-fn next_work_required_is_exactly_what_validate_header_nbits_enforces()
--> Result<(), Box<dyn std::error::Error>> {
+fn next_work_required_is_exactly_what_validate_header_nbits_enforces() -> Result<(), TestError> {
     let mut tree = BlockTree::new();
     let bits = 0x207e_ffff_u32;
     let parent = raw_header_with(BlockHash::default(), 0, 0, bits);
@@ -183,8 +182,8 @@ fn next_work_required_is_exactly_what_validate_header_nbits_enforces()
 }
 
 #[test]
-fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
--> Result<(), Box<dyn std::error::Error>> {
+fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window() -> Result<(), TestError>
+{
     let mut tree = BlockTree::new();
     let bits = 0x1b0e_3ea6_u32;
     let parent = raw_header_with(BlockHash::default(), 0, 0, bits);
@@ -210,7 +209,7 @@ fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
 
 #[test]
 fn duplicate_genesis_in_overlapping_batch_returns_original_ids_and_inserts_only_new_nodes()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), TestError> {
     let headers = mine_headers(5);
     let mut tree = BlockTree::new();
 
@@ -271,7 +270,7 @@ fn duplicate_genesis_in_overlapping_batch_returns_original_ids_and_inserts_only_
 
 #[test]
 fn duplicate_equal_work_competing_child_returns_original_id_and_does_not_reorg()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), TestError> {
     let genesis = genesis_header();
     let active_child = mine_header_with(
         genesis.compute_hash(),
@@ -366,7 +365,7 @@ fn duplicate_equal_work_competing_child_returns_original_id_and_does_not_reorg()
 
 #[test]
 fn invalid_unknown_suffix_after_duplicate_inputs_propagates_consensus_error_without_advancing_tip()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), TestError> {
     let headers = mine_headers(5);
     let mut tree = BlockTree::new();
 
@@ -531,7 +530,7 @@ fn retarget_bits_for_test(
 fn seed_headers(
     tree: &mut BlockTree,
     headers: &[(u32, u32)],
-) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), Box<dyn std::error::Error>> {
+) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), TestError> {
     let mut parent = None;
     let mut previous_hash = BlockHash::default();
     let mut tip = None;
@@ -552,7 +551,7 @@ fn seed_period(
     anchor_time: u32,
     tip_time: u32,
     tip_height: u32,
-) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), Box<dyn std::error::Error>> {
+) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), TestError> {
     let headers: Vec<_> = (0..=tip_height)
         .map(|height| {
             (
@@ -731,7 +730,7 @@ fn testnet_nbits_cases() -> Vec<NbitsCase> {
 }
 
 #[test]
-fn contextual_nbits_enforces_the_difficulty_rules() -> Result<(), Box<dyn std::error::Error>> {
+fn contextual_nbits_enforces_the_difficulty_rules() -> Result<(), TestError> {
     for (name, network, seed, time, bits, expected) in mainnet_nbits_cases()
         .into_iter()
         .chain(testnet_nbits_cases())

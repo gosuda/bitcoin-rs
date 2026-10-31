@@ -11,6 +11,8 @@ mod progress;
 #[cfg(feature = "test-seam")]
 pub mod regtest_fixture;
 mod reorg;
+#[cfg(test)]
+pub(crate) mod test_error;
 mod tip_wait;
 mod transition;
 mod tree;
