@@ -8,6 +8,7 @@
     clippy::significant_drop_in_scrutinee
 )]
 
+pub(crate) mod admission;
 mod backend;
 mod http;
 mod model;
@@ -20,6 +21,10 @@ use crate::rest::Response;
 
 use self::projection::Projection;
 
+/// Aggregate allowance shared by all listeners of a node.
+pub const DEFAULT_MAX_QUERIES: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::MIN.saturating_add(1);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Surface {
     Public,
@@ -31,6 +36,18 @@ pub enum Surface {
 #[must_use]
 pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
     let ctx = handler.context();
+    // Admission precedes even chain-view capture. Keep the permit until all
+    // projection and generation checks finish, including error returns.
+    let _permit = if admission::is_expensive(path) {
+        match ctx.esplora_admission.try_acquire() {
+            Some(permit) => Some(permit),
+            None => {
+                return crate::rest::service_unavailable("expensive Esplora query limit reached");
+            }
+        }
+    } else {
+        None
+    };
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
     let response = dispatch_get(handler, &ctx, surface, path, query);

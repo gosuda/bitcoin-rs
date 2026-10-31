@@ -227,7 +227,11 @@ fn bind_rpc_with_pool(
         zmq_publisher: state.zmq_publisher(),
         debug_log_path: Some(state.data_dir().join("debug.log")),
     })
-    .with_esplora_derived_index(state.esplora_derived_index_query());
+    .with_esplora_derived_index(state.esplora_derived_index_query())
+    .with_esplora_query_limit(
+        std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)
+            .context("Esplora query limit must be positive")?,
+    );
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(

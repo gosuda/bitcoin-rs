@@ -123,6 +123,18 @@ impl EvidenceIdentity {
     reason = "keep metric descriptions together in the process-wide registry"
 )]
 fn describe_node_metrics() {
+    metrics::describe_gauge!(
+        "rpc.esplora.expensive.active",
+        "admitted address and scripthash projections across all node listeners"
+    );
+    metrics::describe_counter!(
+        "rpc.esplora.expensive.rejected_total",
+        "Esplora projections rejected before index work because the query quota is full"
+    );
+    metrics::describe_histogram!(
+        "rpc.esplora.expensive.execution_seconds",
+        "admitted Esplora projection duration including failed queries, excluding socket writes"
+    );
     metrics::describe_counter!("node.event_loop.sync_ticks", "block sync ticks");
     metrics::describe_counter!(
         "node.event_loop.sync_wakes",

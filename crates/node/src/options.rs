@@ -606,6 +606,11 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_PUBLIC_MAX_CONNECTIONS", str::parse]
                         toml native("public_max_connections")
                     }
+                    esplora_max_queries as esplora_max_queries: Option<usize> {
+                        cli[#[arg(long = "esplora-max-queries")]]
+                        env["BITCOIN_RS_ESPLORA_MAX_QUERIES", str::parse]
+                        toml native("esplora_max_queries")
+                    }
                     rest as rest: Option<bool> {
                         cli[#[arg(long = "rest")]]
                         env["BITCOIN_RS_REST", parse_bool]
