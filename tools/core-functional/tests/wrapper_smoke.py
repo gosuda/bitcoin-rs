@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -141,7 +142,12 @@ expected_drops = {"-logtimemicros", "-debug", "-debugexclude=leveldb", "-debugex
 check("dropped flags are all logged", expected_drops <= dropped_tokens,
       expected_drops - dropped_tokens)
 check("drop log is valid JSONL with reasons", all(d.get("reason") for d in recorded))
-check("datadir passed as --data-dir", f"--data-dir={datadir}" in argv, argv)
+check("node data dir is the fresh subdir",
+      f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
+check("core layout dirs created 0700",
+      (datadir / "regtest").is_dir() and (datadir / "regtest" / "wallets").is_dir()
+      and (stat.S_IMODE(os.lstat(datadir / "regtest").st_mode) == 0o700)
+      and (stat.S_IMODE(os.lstat(datadir / "regtest" / "wallets").st_mode) == 0o700))
 
 print("case 2: explicit extra_args (txindex, proxy, connect, v2transport off, nolisten)")
 datadir = fresh_datadir("node1")
@@ -219,6 +225,17 @@ datadir = fresh_datadir("node7")
 argv = run_wrapper(datadir, ["-datadir=" + str(datadir), "-regtest"],
                    FRAMEWORK_CONF + "bind=127.0.0.1\n")
 check("bare bind translated with conf port", "--p2p-listen=127.0.0.1:11000" in argv, argv)
+
+print("case 10: no chain marker anywhere defaults to mainnet, cookie at datadir root")
+datadir = fresh_datadir("node8")
+mainnet_conf = FRAMEWORK_CONF.replace("regtest=1\n[regtest]\n", "")
+argv = run_wrapper(datadir, ["-datadir=" + str(datadir)], mainnet_conf)
+check("mainnet default network", "--network=mainnet" in argv, argv)
+check("cookie at <datadir>/.cookie", (datadir / ".cookie").is_file())
+check("wallets dir at datadir root", (datadir / "wallets").is_dir())
+check("printtoconsole=0 -> warn console", "--log-level=warn" in argv, argv)
+check("node data dir still the fresh subdir",
+      f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
 
 print()
 if failures:

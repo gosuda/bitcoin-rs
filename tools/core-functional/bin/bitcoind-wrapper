@@ -18,7 +18,12 @@ binary named by $BITCOIN_RS_BIN. Design rules:
   * the RPC cookie file the framework reads is created here, because
     bitcoin-rs's --rpc-cookie option *reads* an existing user:password file
     while its default generated cookie lands at <data-dir>/.cookie, one
-    directory shallower than the framework's <datadir>/<chain>/.cookie lookup.
+    directory shallower than the framework's <datadir>/<chain>/.cookie lookup;
+  * the node's data directory is <datadir>/bitcoin-rs-data, not <datadir>
+    itself: bitcoin-rs refuses a fresh datadir holding foreign entries, and
+    the framework always pre-populates <datadir>/ with bitcoin.conf and
+    stderr//stdout/ capture directories. Core-facing side-effect layout
+    (<datadir>/<chain>/{,wallets}, mode 0700) is created here.
 
 Translation table and rationale: tools/core-functional/README.md.
 """
@@ -34,17 +39,35 @@ import time
 DROP_LOG_NAME = "wrapper-dropped-flags.log"
 DERIVED_CONF_NAME = "bitcoin-rs-derived.conf"
 COOKIE_NAME = ".cookie"
+# bitcoin-rs refuses to open a fresh datadir that already holds foreign
+# entries (crates/storage/src/checkpoint/fs.rs ensure_current_schema), while
+# the framework always pre-populates <datadir>/ with bitcoin.conf, stderr/
+# and stdout/ before the node starts. The node therefore gets its own,
+# initially-empty data directory inside the framework datadir. Keeping it at
+# the top level of <datadir>/ matters for the cache flow: the framework's
+# _initialize_chain copytree copies the whole cache node0/ (including this
+# directory), so the premined chain travels with the node's own storage.
+NODE_DATA_DIR_NAME = "bitcoin-rs-data"
 
 # Core network marker -> (bitcoin-rs --network value, framework chain subdir).
+# The chain subdir is the framework's TestNode.chain value: "" for main (Core
+# keeps mainnet data directly under the datadir), the network name otherwise.
 NETWORKS = {
     "regtest": ("regtest", "regtest"),
     "testnet": ("testnet3", "testnet3"),
     "testnet3": ("testnet3", "testnet3"),
     "testnet4": ("testnet4", "testnet4"),
     "signet": ("signet", "signet"),
-    "main": ("mainnet", "main"),
-    "mainnet": ("mainnet", "main"),
+    "main": ("mainnet", ""),
+    "mainnet": ("mainnet", ""),
 }
+
+# Core's default chain when no network marker appears anywhere: mainnet.
+# The framework writes chain=1 markers for every non-main chain and writes
+# nothing for main (e.g. rpc_validateaddress.py and mining_mainnet.py set
+# self.chain = ""), so "no marker" must translate to mainnet, and the cookie
+# then lands at <datadir>/.cookie where get_auth_cookie(datadir, "") reads it.
+DEFAULT_NETWORK = ("mainnet", "")
 
 # Section headers the node conf parser recognizes, by bitcoin-rs network value.
 SECTIONS_FOR_NETWORK = {
@@ -61,7 +84,7 @@ FALSE = {"0", "false", "no", "off"}
 # Framework-mandatory or Core-only flags that are always dropped from argv.
 ALWAYS_DROP_ARGV = {
     "logtimemicros", "logthreadnames", "debug", "debugexclude", "uacomment",
-    "printtoconsole", "shrinkdebugfile", "debuglogfile", "pid", "daemon",
+    "shrinkdebugfile", "debuglogfile", "pid", "daemon",
     "daemonwait", "allowignoredconf",
 }
 # Peer-discovery / net-policy flags with no bitcoin-rs equivalent.
@@ -102,6 +125,19 @@ CONF_PASSTHROUGH = {
     "v2transport", "proxyrandomize", "i2pacceptincoming",
 }
 CONF_SOCKET_KEYS = {"proxy", "onion", "i2psam", "torcontrol"}
+# conf key -> bitcoin-rs CLI flag prefix it duplicates when both are present.
+# The node rejects an option supplied via both conf and argv ("cannot be used
+# multiple times"), while Core's rule is CLI-wins; the wrapper implements that
+# rule by suppressing a conf line whose option was already emitted as a flag.
+CONF_KEY_TO_FLAG = {
+    "dbcache": "--dbcache-mb", "prune": "--prune-target-mb",
+    "txindex": "--txindex", "blockfilterindex": "--blockfilterindex",
+    "rest": "--rest", "v2transport": "--v2transport",
+    "proxyrandomize": "--proxy-randomize-credentials",
+    "i2pacceptincoming": "--i2p-accept", "dnsseed": "--dns-seeds-enabled",
+    "onlynet": "--onlynet", "proxy": "--proxy", "onion": "--onion-proxy",
+    "i2psam": "--i2p-sam", "torcontrol": "--tor-control",
+}
 WALLET_DROP = {"nowallet", "disablewallet", "wallet", "walletdir", "walletrectx",
                "unsafesqlitesync", "keypool", "fallbackfee", "server",
                "rpckeypool", "walletrejectlongchains"}
@@ -174,6 +210,14 @@ class Translation:
         self.cookie_path_override = None
         self.argv = argv
 
+    def conf_key_duplicated_on_argv(self, key):
+        """True when the bitcoin-rs flag for this conf key was already
+        emitted as a CLI flag (Core's CLI-wins rule; the node instead errors
+        on an option present through both channels)."""
+        prefix = CONF_KEY_TO_FLAG.get(key)
+        return bool(prefix) and any(
+            flag == prefix or flag.startswith(prefix + "=") for flag in self.out)
+
     def drop(self, origin, raw, reason):
         self.drops.append((origin, raw, reason))
 
@@ -209,6 +253,17 @@ class Translation:
             return
         if key in ALWAYS_DROP_ARGV:
             self.drop("argv", raw, "logging/diagnostics flag has no bitcoin-rs equivalent")
+            return
+        if key == "printtoconsole":
+            # Core: 0 routes logs to debug.log and keeps the console silent;
+            # bitcoin-rs has no log-file/console split, so the closest
+            # translation of the framework's printtoconsole=0 is a warn-only
+            # console. Tests assert an empty stderr at stop.
+            normalized = bool_value(value) if value is not None else "true"
+            if normalized is None:
+                self.drop("argv", raw, "unparseable boolean")
+            elif normalized == "false":
+                self.out.append("--log-level=warn")
             return
         if key in WALLET_DROP:
             self.drop("argv", raw, "wallet/server option has no bitcoin-rs equivalent")
@@ -253,7 +308,7 @@ class Translation:
         if key == "onlynet":
             labels = {part.strip().lower() for part in (value or "").split(",") if part.strip()}
             if labels and labels.issubset({"ipv4", "ipv6", "onion", "i2p"}):
-                self.out.append(f"--onlynet={value}")
+                self.replace_flag(f"--onlynet={value}")
             else:
                 self.drop("argv", raw, "onlynet value not understood by bitcoin-rs")
             return
@@ -286,7 +341,7 @@ class Translation:
             return
         if key in SOCKET_FLAG_MAP:
             if split_host_port(value):
-                self.out.append(f"{SOCKET_FLAG_MAP[key]}={value}")
+                self.replace_flag(f"{SOCKET_FLAG_MAP[key]}={value}")
             else:
                 self.drop("argv", raw, f"{SOCKET_FLAG_MAP[key]} requires a literal ip:port")
             return
@@ -294,7 +349,7 @@ class Translation:
             flag, style = VALUE_FLAG_MAP[key]
             if style == "int":
                 if value and value.isdigit():
-                    self.out.append(f"{flag}={value}")
+                    self.replace_flag(f"{flag}={value}")
                 else:
                     self.drop("argv", raw, "unparseable numeric value")
             else:
@@ -305,9 +360,19 @@ class Translation:
     def push_bool(self, flag, value, raw):
         normalized = bool_value(value) if value is not None else "true"
         if normalized:
-            self.out.append(f"{flag}={normalized}")
+            self.replace_flag(f"{flag}={normalized}")
         else:
             self.drop("argv", raw, "unparseable boolean")
+
+    def replace_flag(self, token):
+        """Emit a value flag with Core's last-occurrence-wins rule: the
+        framework may pass the same flag twice (e.g. its base -v2transport=0
+        plus a test's -v2transport=1); bitcoin-rs rejects repeated CLI flags,
+        so the earlier occurrence is removed instead of appended."""
+        flag = token.split("=", 1)[0]
+        self.out = [existing for existing in self.out
+                    if not (existing == flag or existing.startswith(flag + "="))]
+        self.out.append(token)
 
     def set_network(self, marker, raw):
         entry = NETWORKS.get((marker or "").strip().lower())
@@ -328,7 +393,6 @@ class Translation:
         except OSError:
             self.drop("conf", str(path), "framework bitcoin.conf unreadable")
             lines = []
-        allowed = SECTIONS_FOR_NETWORK.get(self.network_value or "regtest", set())
         section = None  # None = global scope
         for raw in lines:
             line = raw.split("#", 1)[0].split(";", 1)[0].strip()
@@ -341,9 +405,19 @@ class Translation:
             key = key.strip().lstrip("-").lower()
             value = value.strip()
             origin = "conf" if section is None else f"conf:[{section}]"
-            if section is not None and section not in allowed:
+            # Re-evaluate per line: a global chain marker earlier in the file
+            # (e.g. "regtest=1" as the framework's first line) selects the
+            # network that decides which sections this node would read.
+            if section is not None and section not in (
+                    SECTIONS_FOR_NETWORK.get(self.network_value or "mainnet", set())):
                 continue  # other-network section; the node would skip it too
             if not sep:
+                continue
+            if key == "printtoconsole":
+                # See the argv branch: 0 means "console stays quiet" in Core.
+                if bool_value(value) == "false" and not any(
+                        flag.startswith("--log-level") for flag in self.out):
+                    self.out.append("--log-level=warn")
                 continue
             if key in NETWORKS:
                 if section is None and self.network_value is None and bool_value(value) == "true":
@@ -377,20 +451,27 @@ class Translation:
                     self.cookie_path_override = value
                 continue
             if key in CONF_SOCKET_KEYS:
-                if split_host_port(value):
+                if self.conf_key_duplicated_on_argv(key):
+                    self.drop(origin, raw, "suppressed: option already set on the command line (CLI outranks conf)")
+                elif split_host_port(value):
                     self.conf_lines.append((section, line))
                 else:
                     self.drop(origin, raw, "bitcoin-rs requires a literal ip:port here")
                 continue
             if key == "onlynet":
                 labels = {part.strip().lower() for part in value.split(",") if part.strip()}
-                if labels and labels.issubset({"ipv4", "ipv6", "onion", "i2p"}):
+                if self.conf_key_duplicated_on_argv(key):
+                    self.drop(origin, raw, "suppressed: option already set on the command line (CLI outranks conf)")
+                elif labels and labels.issubset({"ipv4", "ipv6", "onion", "i2p"}):
                     self.conf_lines.append((section, line))
                 else:
                     self.drop(origin, raw, "onlynet value not understood by bitcoin-rs")
                 continue
             if key in CONF_PASSTHROUGH:
-                self.conf_lines.append((section, line))
+                if self.conf_key_duplicated_on_argv(key):
+                    self.drop(origin, raw, "suppressed: option already set on the command line (CLI outranks conf)")
+                else:
+                    self.conf_lines.append((section, line))
                 continue
             self.drop(origin, raw, "conf key has no bitcoin-rs equivalent")
 
@@ -399,8 +480,8 @@ class Translation:
     def finish(self):
         """Resolve listeners/ports/cookie/derived conf; return bitcoin-rs argv."""
         if self.network_value is None:
-            self.network_value, self.chain_dir = NETWORKS["regtest"]
-        argv = [f"--network={self.network_value}", f"--data-dir={self.datadir}"]
+            self.network_value, self.chain_dir = DEFAULT_NETWORK
+        argv = [f"--network={self.network_value}"]
 
         if self.listening:
             effective_port = self.argv_port or self.conf_port
@@ -414,6 +495,8 @@ class Translation:
             self.conf_lines.append((None, "listen=0"))
 
         if self.datadir:
+            argv.append(f"--data-dir={os.path.join(self.datadir, NODE_DATA_DIR_NAME)}")
+            self.create_core_layout()
             derived = os.path.join(self.datadir, DERIVED_CONF_NAME)
             with open(derived, "w", encoding="utf-8") as handle:
                 handle.write(self.render_conf())
@@ -473,6 +556,19 @@ class Translation:
         self.drop(origin, raw, "bind address is not a literal IP or lacks a port")
         return False
 
+    def create_core_layout(self):
+        """Create the Core datadir side effects the framework and tests rely
+        on: <datadir>/<chain>/ and <datadir>/<chain>/wallets/, both 0700.
+        Core bitcoind always creates these; _initialize_chain rmdirs the
+        empty wallets/ dir after building the cache, and
+        feature_posix_fs_permissions.py asserts both modes. The node's real
+        data lives in NODE_DATA_DIR_NAME, so these are framework-facing
+        bookkeeping directories only."""
+        chain_path = os.path.join(self.datadir, self.chain_dir)
+        for directory in (chain_path, os.path.join(chain_path, "wallets")):
+            os.makedirs(directory, exist_ok=True)
+            os.chmod(directory, 0o700)
+
     def emit_cookie(self, argv):
         """Create the cookie file where the framework reads it and point the
         node at it: one user:password file serves both sides (get_auth_cookie
@@ -515,7 +611,7 @@ def main():
 
     fast = [flag for flag in translation.out if flag in ("--help", "--version")]
     if fast:  # -h/-version short-circuit before any datadir work, like bitcoind
-        network = translation.network_value or "regtest"
+        network = translation.network_value or DEFAULT_NETWORK[0]
         os.execv(binary, [binary, f"--network={network}"] + fast)
 
     if not translation.datadir:

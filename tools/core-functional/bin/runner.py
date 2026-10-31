@@ -58,18 +58,25 @@ def log_tail(path):
     return "\n".join(lines[-LOG_TAIL_LINES:]) if lines else None
 
 
+def tail_text(text):
+    if not text:
+        return None
+    return "\n".join(text.splitlines()[-LOG_TAIL_LINES:])
+
+
 def run_one(test, args, env):
     """Run a single test file; return its result record."""
-    test_dir = pathlib.Path(args.dest) / "test" / "functional"
+    test_dir = pathlib.Path(args.dest).resolve() / "test" / "functional"
     script = test_dir / f"{test}.py"
-    tmpdir = pathlib.Path(args.results_dir) / "tmp" / test
+    results_dir = pathlib.Path(args.results_dir).resolve()
+    tmpdir = results_dir / "tmp" / test
     if tmpdir.exists():
         shutil.rmtree(tmpdir)  # framework requires a nonexistent --tmpdir
     command = [
         "timeout", str(args.timeout), sys.executable, str(script),
-        f"--configfile={args.config}",
+        f"--configfile={pathlib.Path(args.config).resolve()}",
         f"--tmpdir={tmpdir}",
-        f"--cachedir={pathlib.Path(args.results_dir) / 'cache'}",
+        f"--cachedir={results_dir / 'cache'}",
     ]
     started = time.monotonic()
     proc = subprocess.run(command, cwd=test_dir, env=env, capture_output=True, text=True)
@@ -82,15 +89,17 @@ def run_one(test, args, env):
         "timeout": timed_out,
         "duration_secs": round(duration, 1),
         "log_tail": log_tail(tmpdir / "test_framework.log") if proc.returncode != 0 else None,
+        "stdout_tail": tail_text(proc.stdout),
+        "stderr_tail": tail_text(proc.stderr),
     }
 
 
 def main():
     args = parse_args()
-    results_dir = pathlib.Path(args.results_dir)
+    results_dir = pathlib.Path(args.results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     config_path = results_dir / "config.ini"
-    render_config(args.template, args.dest, config_path)
+    render_config(args.template, pathlib.Path(args.dest).resolve(), config_path)
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
