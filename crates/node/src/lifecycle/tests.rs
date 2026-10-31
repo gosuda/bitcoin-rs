@@ -895,7 +895,7 @@ impl<T: Send + 'static> BoundedThread<T> {
 }
 
 struct ServedWitness {
-    stop: Arc<AtomicBool>,
+    stop: Box<dyn Fn() + Send>,
     gate: Option<Arc<BodyGate>>,
     server: Option<BoundedThread<std::io::Result<()>>>,
     client: Option<BoundedThread<Result<String, TestError>>>,
@@ -903,9 +903,9 @@ struct ServedWitness {
 }
 
 impl ServedWitness {
-    fn new(stop: Arc<AtomicBool>, gate: Option<Arc<BodyGate>>) -> Self {
+    fn new(stop: impl Fn() + Send + 'static, gate: Option<Arc<BodyGate>>) -> Self {
         Self {
-            stop,
+            stop: Box::new(stop),
             gate,
             server: None,
             client: None,
@@ -953,7 +953,7 @@ impl ServedWitness {
 
 impl Drop for ServedWitness {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        (self.stop)();
         if let Some(server) = self.server.take() {
             let _ = server.finish();
         }
@@ -1097,8 +1097,9 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> Result<(), Te
     let addr = server.local_addr()?;
 
     gate.arm();
+    let stop_flag = state.chainstate().shutdown_handle();
     let mut witness = ServedWitness::new(
-        state.chainstate().shutdown_handle(),
+        move || stop_flag.store(true, Ordering::Release),
         Some(Arc::clone(&gate)),
     );
     witness.serve(server, state.shutdown_reader())?;
@@ -1124,16 +1125,19 @@ fn verifychain_socket_reports_recovery_closure() -> Result<(), TestError> {
     let server = bind_test_rpc(&state)?;
     let addr = server.local_addr()?;
 
-    let latch = Arc::new(AtomicBool::new(false));
-    let mut witness = ServedWitness::new(Arc::clone(&latch), None);
-    witness.serve(
-        server,
-        bitcoin_rs_chain::LatchReader::new(Arc::clone(&latch)),
-    )?;
+    let stop = Arc::new(bitcoin_rs_chain::LatchWriter::new());
+    let mut witness = ServedWitness::new(
+        {
+            let stop = Arc::clone(&stop);
+            move || stop.trigger()
+        },
+        None,
+    );
+    witness.serve(server, stop.reader())?;
     state.chainstate().fail_closed_for_recovery();
     witness.send(addr)?;
     let response = witness.finish_client()?;
-    latch.store(true, Ordering::Release);
+    stop.trigger();
     witness.finish_server()?;
     assert_socket_error(&response, "Chainstate is unavailable for verification")
 }
