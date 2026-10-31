@@ -446,3 +446,71 @@ fn a_disconnect_armed_while_the_marker_is_disarmed_survives() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn disconnect_marker_decode_rejects_every_truncated_slice() {
+    for len in 0..37 {
+        let input = vec![0x5a_u8; len];
+        assert!(matches!(
+            DisconnectMarker::decode(&input),
+            Err(StorageError::Backend(_))
+        ));
+    }
+}
+
+#[test]
+fn disconnect_marker_decode_rejects_oversized_slices() {
+    for len in [38, 39, 40, 64, 100, 1024, 65_536] {
+        let input = vec![0x5a_u8; len];
+        assert!(matches!(
+            DisconnectMarker::decode(&input),
+            Err(StorageError::Backend(_))
+        ));
+    }
+}
+
+#[cfg(feature = "fjall")]
+#[test]
+fn corrupt_marker_rows_fail_closed_across_all_store_operations() -> TestResult {
+    let malformed_phase = {
+        let mut row = [0_u8; 37];
+        row[36] = 2;
+        row
+    };
+    let bad_payloads: &[&[u8]] = &[
+        b"",
+        b"x",
+        &[0x7f; 36],
+        &[0x7f; 38],
+        &[0x7f; 100],
+        &malformed_phase,
+    ];
+
+    for &payload in bad_payloads {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(crate::FjallStore::open(dir.path())?);
+        store.put(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY, payload)?;
+        let undo = KvUndoStore::new(Arc::clone(&store));
+
+        assert!(matches!(
+            undo.load_disconnect_marker(),
+            Err(StorageError::Backend(_))
+        ));
+
+        assert!(matches!(
+            undo.complete_disconnect(1, test_hash(0x01)),
+            Err(StorageError::Backend(_))
+        ));
+
+        assert!(matches!(
+            undo.disarm_disconnect(),
+            Err(StorageError::Backend(_))
+        ));
+
+        assert_eq!(
+            store.get(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY)?,
+            Some(payload.to_vec())
+        );
+    }
+    Ok(())
+}
