@@ -4,7 +4,8 @@ const MAX_ITEMS: usize = 4;
 const MAX_ITEM_LEN: usize = 4;
 
 #[kani::proof]
-#[kani::unwind(8)]
+#[kani::unwind(5)]
+#[kani::solver(minisat)]
 fn witness_push_then_get_returns_the_pushed_items_in_order() {
     let count: usize = kani::any();
     kani::assume(count <= MAX_ITEMS);
@@ -14,10 +15,7 @@ fn witness_push_then_get_returns_the_pushed_items_in_order() {
     for index in 0..count {
         let length: usize = kani::any();
         kani::assume(length <= MAX_ITEM_LEN);
-        let mut item = [0_u8; MAX_ITEM_LEN];
-        for byte in 0..length {
-            item[byte] = kani::any();
-        }
+        let item: [u8; MAX_ITEM_LEN] = kani::any();
         witness.push(&item[..length]);
         items[index] = item;
         lengths[index] = length;

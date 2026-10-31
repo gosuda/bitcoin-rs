@@ -13,15 +13,15 @@ fn chunk_key_cmp_is_antisymmetric() {
 fn any_key() -> ChunkKey {
     let fee: i128 = kani::any();
     kani::assume(fee >= -MAX_CHUNK_FEE && fee <= MAX_CHUNK_FEE);
-    let charged_weight: u64 = kani::any();
-    kani::assume(charged_weight > 0 && charged_weight <= u64::from(u32::MAX));
+    let charged_weight: u32 = kani::any();
+    kani::assume(charged_weight > 0);
     let prefix_weight: u64 = kani::any();
     let bytes: [u8; 32] = kani::any();
     let component: u32 = kani::any();
     let ordinal: u32 = kani::any();
     ChunkKey {
         modified_fee: fee,
-        charged_weight,
+        charged_weight: u64::from(charged_weight),
         prefix_weight,
         max_txid: Txid(Hash256::from_le_bytes(&bytes)),
         component,
