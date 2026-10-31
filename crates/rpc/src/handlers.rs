@@ -97,7 +97,7 @@ impl Handler {
                     if matches!(row.execution, crate::registry::Execution::Scan)
                         && self.ctx.chain.utxo.scan_progress().is_some()
                     {
-                        RpcError::InvalidParameter(
+                        RpcError::ScanInProgress(
                             bitcoin_rs_utxo::scan::UtxoScanError::InProgress.to_string(),
                         )
                     } else {

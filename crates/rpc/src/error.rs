@@ -31,6 +31,12 @@ pub enum RpcError {
     /// [`RpcError::InvalidParams`], which is the JSON-RPC shape error.
     #[error("{0}")]
     InvalidParameter(String),
+    /// A `scantxoutset` call refused because another scan holds the
+    /// reservation. Wire-identical to `InvalidParameter` (-8) but carried
+    /// as its own variant so the server can recognize the refusal as
+    /// pre-reservation: the request held no worker a close would release.
+    #[error("{0}")]
+    ScanInProgress(String),
     /// Bitcoin Core's `RPC_INVALID_ADDRESS_OR_KEY` (-5).
     #[error("{0}")]
     InvalidAddressOrKey(String),
@@ -87,7 +93,7 @@ impl RpcError {
             Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
             Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
             Self::Deserialization(_) => Self::CORE_DESERIALIZATION_ERROR,
-            Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
+            Self::InvalidParameter(_) | Self::ScanInProgress(_) => Self::CORE_INVALID_PARAMETER,
             Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
             Self::MethodDisabled(_) | Self::Internal(_) | Self::CoreInternal(_) => {
