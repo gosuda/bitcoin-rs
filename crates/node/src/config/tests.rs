@@ -47,6 +47,7 @@ fn pool_requires_compiled_feature() {
     }
 }
 
+// POOL-01
 #[cfg(feature = "pool")]
 #[test]
 fn pool_requires_explicit_policy_and_listener() {
@@ -133,6 +134,7 @@ fn pool_non_loopback_requires_explicit_opt_in() {
     assert!(super::resolve(&[&layer]).is_err());
 }
 
+// POOL-01
 #[cfg(feature = "pool")]
 #[test]
 fn pool_money_depth_and_capacity_bounds_are_validated() {

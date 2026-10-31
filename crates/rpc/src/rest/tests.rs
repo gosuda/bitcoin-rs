@@ -584,6 +584,7 @@ fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
     }
 }
 
+// API-03
 #[test]
 fn route_status_table() {
     const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -722,6 +723,7 @@ fn getutxos_json_returns_empty_utxos_for_unknown_outpoint() {
     assert!(utxos.as_array().expect("utxos array").is_empty());
 }
 
+// API-03
 #[test]
 fn getutxos_post_canonical_wire_and_input_boundaries() {
     let ctx = Arc::new(Context::new());

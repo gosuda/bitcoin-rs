@@ -471,6 +471,7 @@ fn confirm_tx(fund: &Fund, txid: Hash32, block_tag: u8, height: u32, tip: u32) {
 }
 
 
+// POOL-07
 #[test]
 fn equal_height_fork_reverses_matured_credits() {
     let fund = funded(0, 1_000_001);
@@ -593,6 +594,7 @@ fn mul_div_rem_is_exact_across_the_192_bit_range() {
     ));
 }
 
+// POOL-06
 #[test]
 fn split_reward_rounds_deterministically_and_conserves_the_total() {
     let thirds = [(MinerId(1), 1u128), (MinerId(2), 1), (MinerId(3), 1)];
@@ -625,6 +627,7 @@ fn split_reward_rounds_deterministically_and_conserves_the_total() {
     ));
 }
 
+// POOL-06
 #[test]
 fn split_reward_property_sum_equals_net_and_each_share_is_floor_or_ceil() {
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -1595,6 +1598,7 @@ fn canonical_depth_loss_below_maturity_demotes_to_immature() {
     fund.ledger.check_invariants().fixture("invariants after re-mature");
 }
 
+// POOL-07
 #[test]
 fn reversing_credits_that_were_already_reserved_creates_an_explicit_deficit() {
     let fund = funded(0, 1_000_001);

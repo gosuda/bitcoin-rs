@@ -207,6 +207,7 @@ fn signet_submit_reports_bad_signet_blksig_and_proposal_skips_the_solution() -> 
     Ok(())
 }
 
+// API-21
 #[test]
 fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -238,6 +239,7 @@ fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> Resu
     Ok(())
 }
 
+// API-21
 #[test]
 fn proposal_witness_without_commitment_is_unexpected_witness() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -274,6 +276,7 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> Result<()> {
     Ok(())
 }
 
+// API-21
 #[test]
 fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -376,6 +379,7 @@ fn foreign_valid_bytes_apply_as_their_own_block() -> Result<()> {
     Ok(())
 }
 
+// API-17
 #[test]
 fn submit_block_fills_omitted_coinbase_witness() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -449,6 +453,7 @@ fn submit_block_accepts_prefill_image_when_fill_applies() -> Result<()> {
     Ok(())
 }
 
+// API-13
 #[test]
 fn submit_header_admits_a_mined_child_and_is_idempotent() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -534,6 +539,7 @@ fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> Result<(
     Ok(())
 }
 
+// API-13
 #[test]
 fn submit_header_requires_the_previous_header() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -742,6 +748,7 @@ fn duplicate_solved_submission_is_idempotent() -> Result<()> {
     Ok(())
 }
 
+// API-18
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
@@ -754,6 +761,7 @@ fn proposal_of_an_applied_block_is_duplicate() -> Result<()> {
     Ok(())
 }
 
+// API-18
 #[test]
 fn proposal_of_an_invalid_header_is_duplicate_invalid() -> Result<()> {
     let (state, mining) = regtest_mining()?;
@@ -777,6 +785,7 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> Result<()> {
     Ok(())
 }
 
+// API-18
 #[test]
 fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> Result<()> {
     let (state, mining) = regtest_mining()?;

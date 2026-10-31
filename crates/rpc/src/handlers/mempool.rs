@@ -541,6 +541,7 @@ mod spentby_tests {
         }
     }
 
+    // API-32
     #[test]
     #[expect(
         clippy::expect_used,
@@ -593,6 +594,7 @@ mod spentby_tests {
         assert_eq!(after[3], outputs[3]);
     }
 
+    // API-32
     #[test]
     #[expect(
         clippy::expect_used,

@@ -581,6 +581,7 @@ fn format_and_schema_helpers_round_trip() -> TestResult {
     Ok(())
 }
 
+// RCV-09
 #[test]
 fn schema_init_exempts_only_a_regular_lock_file() -> TestResult {
     let dir = tempdir()?;

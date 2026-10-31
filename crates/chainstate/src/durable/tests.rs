@@ -56,6 +56,7 @@ fn install_arbitrary_head(
     Ok(())
 }
 
+// RCV-04, RCV-14
 #[test]
 fn committed_gap_replays_to_head_without_recommitting_it() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
@@ -224,6 +225,7 @@ fn committed_gap_with_missing_body_fails_closed() -> TestResult {
     Ok(())
 }
 
+// RCV-15
 #[test]
 fn cold_chainstate_replays_head_chain_from_genesis() -> TestResult {
     let (mut handles, child) = restored_chainstate()?;
@@ -322,6 +324,7 @@ fn matching_durable_head_requires_no_replay() -> TestResult {
     Ok(())
 }
 
+// RCV-14
 #[test]
 fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap() -> TestResult {
     let (handles, child) = restored_chainstate()?;
@@ -505,6 +508,7 @@ fn committed_gap_replay_failure_fails_closed() -> TestResult {
 
 /// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
 /// a progress checkpoint or a retry. The original writer error stays intact.
+// RCV-02, JW-ORDER-1
 #[cfg(feature = "fjall")]
 #[test]
 fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {

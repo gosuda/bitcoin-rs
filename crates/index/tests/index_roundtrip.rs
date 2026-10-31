@@ -577,6 +577,7 @@ fn open_rejects_incompatible_durable_metadata() -> Result<(), TestError> {
     }
     Ok(())
 }
+// RCV-11
 #[test]
 fn format_4_open_refuses_for_rebuild() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
@@ -597,6 +598,7 @@ fn format_4_open_refuses_for_rebuild() -> Result<(), TestError> {
     Ok(())
 }
 
+// RCV-11
 #[test]
 fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), TestError> {
     let store = Arc::new(MemoryStore::default());
@@ -2033,6 +2035,7 @@ fn double_reset_same_generation_still_rejects_stale_commit()
     Ok(())
 }
 
+// EVT-03
 #[test]
 fn intermediate_rollback_deletes_cursor_and_survives_reopen()
 -> Result<(), TestError> {

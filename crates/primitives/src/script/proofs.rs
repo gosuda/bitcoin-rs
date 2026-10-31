@@ -3,7 +3,6 @@ use super::Witness;
 const MAX_ITEMS: usize = 4;
 const MAX_ITEM_LEN: usize = 4;
 
-// QAC-05, SYNC-03
 #[kani::proof]
 #[kani::unwind(8)]
 fn witness_push_then_get_returns_the_pushed_items_in_order() {

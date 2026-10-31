@@ -601,6 +601,7 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
     Ok(())
 }
 
+// POOL-09
 #[test]
 fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
     use std::sync::Mutex;
@@ -651,6 +652,7 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
     Ok(())
 }
 
+// POOL-09
 #[test]
 fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
     use std::sync::Mutex;

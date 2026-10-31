@@ -398,6 +398,7 @@ fn late_or_foreign_receipts_do_not_redeem_silent_header_sources() -> TestResult 
     Ok(())
 }
 
+// P2P-10
 #[test]
 fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
@@ -459,6 +460,7 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     Ok(())
 }
 
+// P2P-10
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -576,6 +578,7 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     Ok(())
 }
 
+// P2P-10
 #[test]
 fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);

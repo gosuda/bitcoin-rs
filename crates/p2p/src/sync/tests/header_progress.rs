@@ -1,5 +1,6 @@
 use super::*;
 
+// SYNC-06
 #[test]
 fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
     let mut tree = BlockTree::new();
@@ -56,6 +57,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
     Ok(())
 }
 
+// SYNC-06
 #[test]
 fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
     let mut tree = BlockTree::new();

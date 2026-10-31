@@ -426,6 +426,7 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> Result<
     Ok(())
 }
 
+// EMB-01
 #[test]
 fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
@@ -515,6 +516,7 @@ fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> Result<(
     Ok(())
 }
 
+// EMB-01
 #[test]
 fn daemon_and_embedded_paths_share_one_teardown() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
@@ -624,6 +626,7 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
     Ok(())
 }
 
+// EMB-09
 #[test]
 fn a_queued_shutdown_wake_does_not_block_teardown() -> Result<(), TestError> {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);

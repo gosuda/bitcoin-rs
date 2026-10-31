@@ -2288,6 +2288,7 @@ mod dumptxoutset_tests {
         }
     }
 
+    // API-33
     #[test]
     fn positional_and_named_arguments_delegate_and_report_the_core_fields() {
         for params in [
@@ -2314,6 +2315,7 @@ mod dumptxoutset_tests {
         }
     }
 
+    // API-33
     #[test]
     fn only_the_latest_type_is_served_and_refusals_never_reach_the_control() {
         for params in [

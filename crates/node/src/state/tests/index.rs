@@ -2,6 +2,7 @@ use super::*;
 
 use crate::test_support::TestError;
 
+// IDX-01
 #[test]
 fn script_index_capabilities_match_the_storage_contract() {
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -44,6 +45,7 @@ fn script_index_capabilities_match_the_storage_contract() {
     );
 }
 
+// IDX-01
 #[test]
 fn open_skips_tx_index_when_disabled() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;

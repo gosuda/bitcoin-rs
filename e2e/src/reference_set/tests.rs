@@ -21,6 +21,7 @@ fn edit_reference(section: Option<&str>, edit: impl FnOnce(&mut toml::Table)) ->
     toml::to_string(&manifest).expect("edited manifest")
 }
 
+// REF-03
 #[test]
 fn kernel_package_custody_matches_the_lockfile() {
     let set = reference_set().expect("complete reference set");
@@ -40,6 +41,7 @@ fn kernel_package_custody_matches_the_lockfile() {
     assert_eq!(kernel["checksum"].as_str(), Some(checksum.as_str()));
 }
 
+// REF-01
 #[test]
 fn source_revisions_require_immutable_complete_identities() {
     let malformed = "g".repeat(40);
@@ -72,6 +74,7 @@ fn source_revisions_require_immutable_complete_identities() {
     }
 }
 
+// REF-01, REF-02
 #[test]
 fn unbound_source_and_artifact_identities_are_rejected() {
     for (section, field, width, identity) in [
@@ -93,6 +96,7 @@ fn unbound_source_and_artifact_identities_are_rejected() {
     }
 }
 
+// REF-02
 #[test]
 fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
     let edit_platform_target = |target: &str| {
@@ -145,6 +149,7 @@ fn malformed_release_digests_are_rejected() {
     }
 }
 
+// REF-01, REF-03
 #[test]
 fn the_kernel_tree_written_as_the_release_is_identity_confusion() {
     let set = reference_set().expect("reference set");
@@ -157,6 +162,7 @@ fn the_kernel_tree_written_as_the_release_is_identity_confusion() {
     );
 }
 
+// REF-01, REF-04
 #[test]
 fn corpus_custody_distinguishes_missing_unpinned_and_pinned() {
     let set = reference_set().expect("reference set");

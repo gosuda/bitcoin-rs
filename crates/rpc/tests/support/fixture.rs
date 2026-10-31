@@ -920,6 +920,7 @@ mod tests {
         Ok(())
     }
 
+    // API-07
     #[test]
     fn corpus_rejects_missing_core_reference_fields() -> Result<(), TestError> {
         for field in ["core_version", "core_source_commit", "core_binary_sha256"] {
@@ -943,6 +944,7 @@ mod tests {
         Ok(())
     }
 
+    // API-07
     #[test]
     fn corpus_rejects_mismatched_or_empty_core_digest() -> Result<(), TestError> {
         let original = captured_fixture()?;

@@ -237,6 +237,7 @@ fn a_vectored_write_counts_every_slice() {
     assert_eq!(stream.inner.bytes, [1, 2, 3, 4, 5, 6, 7]);
 }
 
+// P2P-04
 #[test]
 fn write_message_through_the_wrapper_is_one_vectored_write() {
     use bitcoin::p2p::Magic;
@@ -281,6 +282,7 @@ fn write_message_through_the_wrapper_is_one_vectored_write() {
     assert!(written > 24, "framed ping is header plus 8-byte payload");
 }
 
+// P2P-04
 #[test]
 fn from_connected_disables_nagle() {
     use std::net::{TcpListener, TcpStream};
@@ -312,6 +314,7 @@ fn from_connected_disables_nagle() {
     let _accepted = accepting.join();
 }
 
+// P2P-04
 #[test]
 fn a_cloned_socket_counts_into_the_same_place() {
     use std::net::{TcpListener, TcpStream};

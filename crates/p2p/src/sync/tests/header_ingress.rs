@@ -3,6 +3,7 @@
 use super::super::headers::{MAX_HEADER_BATCHES_PER_TICK, MAX_HEADERS_PER_TICK};
 use super::*;
 
+// P2P-07
 #[test]
 fn header_backlog_yields_to_block_apply_and_request_scheduling() -> TestResult {
     let (tree, blocks) = mined_chain(2, 0)?;

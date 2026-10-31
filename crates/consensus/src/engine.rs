@@ -48,7 +48,8 @@ impl fmt::Display for ValidationEngine {
 mod tests {
     use super::ValidationEngine;
 
-    #[test]
+// VAL-01
+#[test]
     fn native_is_the_default_and_is_supported_in_every_build() {
         assert_eq!(ValidationEngine::default(), ValidationEngine::Native);
         assert!(ValidationEngine::Native.is_supported());

@@ -51,6 +51,7 @@ impl BodyText for HttpResponse {
     }
 }
 
+// WF-01, WF-02, WF-03
 #[test]
 fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     let workspace = tempfile::tempdir()?;

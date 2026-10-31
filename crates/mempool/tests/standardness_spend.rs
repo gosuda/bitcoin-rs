@@ -140,6 +140,7 @@ fn core_reason_strings_name_the_input_and_witness_rules() {
     );
 }
 
+// POL-07
 #[test]
 fn undefined_witness_program_input_is_not_standard() {
     for program in [
@@ -156,6 +157,7 @@ fn undefined_witness_program_input_is_not_standard() {
     }
 }
 
+// POL-07
 #[test]
 fn p2sh_redeem_script_sigop_limit_is_core_max_p2sh_sigops() {
     let redeem = |sigops: usize| vec![opcode::OP_CHECKSIG; sigops];
@@ -213,6 +215,7 @@ fn bip54_legacy_sigop_limit_is_core_max_tx_legacy_sigops() {
     );
 }
 
+// POL-07
 #[test]
 fn p2wsh_witness_script_limit_is_core_max_standard_p2wsh_script_size() {
     let with_script_size = |size: usize| {

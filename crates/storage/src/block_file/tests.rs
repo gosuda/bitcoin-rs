@@ -361,6 +361,7 @@ fn reader_and_one_shot_reject_a_short_record() -> Result<(), crate::StorageError
     Ok(())
 }
 
+// RCV-03
 #[test]
 fn reorg_hashes_at_one_height_remain_independent() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
@@ -379,6 +380,7 @@ fn reorg_hashes_at_one_height_remain_independent() -> Result<(), crate::StorageE
     Ok(())
 }
 
+// RCV-03, RCV-04
 #[test]
 fn recovery_discards_a_torn_tail_before_the_next_append() -> Result<(), crate::StorageError> {
     let data_dir = tempdir()?;
@@ -406,6 +408,7 @@ fn recovery_discards_a_torn_tail_before_the_next_append() -> Result<(), crate::S
     Ok(())
 }
 
+// RCV-03
 #[test]
 fn committed_extent_refuses_corruption_without_changing_any_file() -> Result<(), crate::StorageError>
 {

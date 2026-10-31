@@ -17,6 +17,7 @@ fn an_unknown_count_stays_unknown_above_genesis() {
     );
 }
 
+// RCV-13
 #[test]
 fn a_known_count_advances_and_rewinds_by_the_same_delta() {
     let counted = ChainTxCount::UNKNOWN
@@ -34,6 +35,7 @@ fn rewinding_an_unknown_count_leaves_it_unknown() {
     assert_eq!(ChainTxCount::UNKNOWN.rewind(5), ChainTxCount::UNKNOWN);
 }
 
+// RCV-13
 #[test]
 fn a_rewind_past_zero_admits_it_does_not_know_rather_than_clamping() {
     assert_eq!(
@@ -42,6 +44,7 @@ fn a_rewind_past_zero_admits_it_does_not_know_rather_than_clamping() {
     );
 }
 
+// RCV-13
 #[test]
 fn an_advance_past_u64_marks_the_count_unknown_instead_of_wrapping() {
     assert_eq!(
@@ -50,6 +53,7 @@ fn an_advance_past_u64_marks_the_count_unknown_instead_of_wrapping() {
     );
 }
 
+// RCV-13
 #[test]
 fn the_wire_encoding_round_trips_the_unknown_sentinel() {
     assert_eq!(ChainTxCount::from_wire(0), ChainTxCount::UNKNOWN);

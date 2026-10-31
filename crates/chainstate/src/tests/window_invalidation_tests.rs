@@ -107,6 +107,7 @@ fn deliver_coinbase_less_body(
     Ok((error, before, after, applied))
 }
 
+// SYNC-04
 #[test]
 fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid() -> TestResult {
     let (error, before, after, applied) = deliver_coinbase_less_body(4)?;
@@ -140,6 +141,7 @@ fn a_64_byte_transaction_in_a_coinbase_less_body_leaves_its_header_valid() -> Te
     Ok(())
 }
 
+// SYNC-04
 #[test]
 fn a_coinbase_less_body_of_another_size_still_poisons_its_header() -> TestResult {
     let (error, _, status, _) = deliver_coinbase_less_body(0)?;

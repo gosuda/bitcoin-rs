@@ -128,7 +128,6 @@ fn an_unknown_disconnect_phase_byte_is_an_error() {
 }
 
 proptest! {
-    // EVT-05
     #[test]
     fn every_accepted_marker_row_re_encodes_to_the_same_bytes(
         hash_bytes in proptest::array::uniform32(any::<u8>()),

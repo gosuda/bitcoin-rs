@@ -6,6 +6,7 @@ fn values(rows: &[(i128, u32)]) -> Vec<FeeWeight> {
         .collect()
 }
 
+// POL-05
 #[test]
 fn core_311_diagram_vectors() -> Result<(), FeeDiagramError> {
     let old = values(&[(950, 300), (100, 100)]);

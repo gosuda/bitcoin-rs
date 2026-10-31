@@ -124,6 +124,7 @@ fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
     }
 }
 
+// EVT-02
 #[test]
 fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
@@ -521,6 +522,7 @@ fn active_chain_change_is_retryable_not_shutdown() -> Result<(), TestError> {
     Ok(())
 }
 
+// EVT-02
 #[test]
 fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> Result<(), TestError>
 {

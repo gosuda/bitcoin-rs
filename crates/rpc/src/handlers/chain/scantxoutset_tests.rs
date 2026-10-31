@@ -302,6 +302,7 @@ fn scantxoutset_empty_and_named_start_match_genesis() {
     );
 }
 
+// API-35
 #[test]
 fn scantxoutset_status_abort_release_and_failure_cleanup() {
     let ctx = Arc::new(Context::new());
@@ -880,6 +881,7 @@ fn multipath_expansion_uses_index_major_branch_inner_order() {
     );
 }
 
+// API-35
 #[test]
 fn ranged_descriptor_budget_bounds_and_omitted_multipath_default() {
     let ctx = Arc::new(Context::new());

@@ -75,6 +75,7 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> Result<()> {
     Ok(())
 }
 
+// API-05
 #[test]
 fn generate_without_submit_does_not_advance_the_tip() -> Result<()> {
     let (state, mining) = regtest_mining()?;

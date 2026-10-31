@@ -139,6 +139,7 @@ fn register_dummy_peer(ctx: &Context) {
     );
 }
 
+// API-12
 #[test]
 fn getblocktemplate_rejects_mainnet_without_peers() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -151,6 +152,7 @@ fn getblocktemplate_rejects_mainnet_without_peers() {
     assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
 }
 
+// API-12
 #[test]
 fn getblocktemplate_rejects_mainnet_during_ibd() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -188,6 +190,7 @@ fn getblocktemplate_proposal_skips_mainnet_connection_gates() {
     assert!(result.is_null());
 }
 
+// API-22
 #[test]
 fn getblocktemplate_renders_candidate_and_reuses_control_result() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -265,6 +268,7 @@ fn getblocktemplate_forwards_longpollid() {
     );
 }
 
+// API-14
 #[test]
 fn getblocktemplate_requires_signet_rule_on_signet() {
     let mut template = sample_template();
@@ -306,6 +310,7 @@ fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
     assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
 }
 
+// API-14
 #[test]
 fn getblocktemplate_rejects_missing_segwit_rule() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -351,6 +356,7 @@ fn getblocktemplate_proposal_skips_client_rule_negotiation() {
     assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
 }
 
+// API-16
 #[test]
 fn getblocktemplate_rejects_invalid_mode() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -364,6 +370,7 @@ fn getblocktemplate_rejects_invalid_mode() {
     assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
 }
 
+// API-16
 #[test]
 fn getblocktemplate_proposal_decode_matches_core() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -466,6 +473,7 @@ fn mining_methods_without_a_control_answer_method_not_found() {
     }
 }
 
+// API-15
 #[test]
 fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
     let missing = Arc::new(Context::new());
@@ -484,6 +492,7 @@ fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
     }
 }
 
+// API-15
 #[test]
 fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -581,6 +590,7 @@ fn getmininginfo_projects_control_state() {
     assert_eq!(control.info_calls.load(Ordering::Relaxed), 1);
 }
 
+// API-25
 #[test]
 fn getmininginfo_omits_unset_optional_fields() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -677,6 +687,7 @@ fn prioritisetransaction_calls_mempool_prioritise_directly() {
     assert_eq!(entry.fee, 1_000);
 }
 
+// API-23
 #[test]
 fn prioritisetransaction_rejects_nonzero_dummy_like_core() {
     let ctx = Arc::new(Context::new());
@@ -688,6 +699,7 @@ fn prioritisetransaction_rejects_nonzero_dummy_like_core() {
     assert_eq!(nonzero_dummy.to_string(), PRIORITISE_DUMMY_ERROR);
 }
 
+// API-23
 #[test]
 fn prioritisetransaction_requires_fee_delta_as_third_parameter() {
     let ctx = Arc::new(Context::new());
@@ -710,6 +722,7 @@ fn dust_priority_tx() -> Tx {
     }
 }
 
+// API-24
 #[test]
 fn prioritisetransaction_rejects_dust_outputs_like_core() {
     use bitcoin_rs_mempool::MempoolEntry;
@@ -731,6 +744,7 @@ fn prioritisetransaction_rejects_dust_outputs_like_core() {
     assert_eq!(error.to_string(), PRIORITISE_DUST_ERROR);
 }
 
+// API-24
 #[test]
 fn prioritisetransaction_allows_dust_overlay_on_regtest() {
     use bitcoin_rs_mempool::MempoolEntry;
@@ -922,6 +936,7 @@ fn getnetworkhashps_forwards_defaults_and_caller_window() {
     assert_eq!(*control.last_hash_ps.lock(), Some((60, 10)));
 }
 
+// API-06
 #[test]
 fn getnetworkhashps_rejects_arity_and_core_invalid_windows() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -975,6 +990,7 @@ fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
     ));
 }
 
+// API-28
 #[test]
 fn getprioritisedtransactions_projects_the_overlay() {
     use bitcoin_rs_mempool::MempoolEntry;
@@ -1077,6 +1093,7 @@ fn generatetoaddress_projects_solved_hashes() {
     assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
 }
 
+// API-29
 #[test]
 fn generatetoaddress_rejects_script_hex_and_descriptors() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1228,6 +1245,7 @@ fn generateblock_keeps_raw_transactions() {
     );
 }
 
+// API-27
 #[test]
 fn generateblock_rejects_unknown_mempool_txid_like_core() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1243,6 +1261,7 @@ fn generateblock_rejects_unknown_mempool_txid_like_core() {
     );
 }
 
+// API-27
 #[test]
 fn generateblock_rejects_undecodable_raw_tx_like_core() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1279,6 +1298,7 @@ fn generateblock_rejects_trailing_parameters() {
     ));
 }
 
+// API-29
 #[test]
 fn generateblock_rejects_invalid_supplied_checksums() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1305,6 +1325,7 @@ fn generateblock_rejects_invalid_supplied_checksums() {
     }
 }
 
+// API-30
 #[test]
 fn generateblock_maps_test_block_validity_to_verify_error() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1332,6 +1353,7 @@ fn generateblock_rejects_garbage_output_like_core() {
     assert_eq!(error.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
 }
 
+// API-31
 #[test]
 fn generateblock_rejects_multipath_before_ranged_like_core() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
@@ -1362,6 +1384,7 @@ fn generateblock_rejects_multipath_before_ranged_like_core() {
     assert_eq!(ranged.to_string(), GENERATEBLOCK_RANGED);
 }
 
+// API-31
 #[test]
 fn generateblock_rejects_hardened_xpub_like_core() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());

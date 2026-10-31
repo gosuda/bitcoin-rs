@@ -348,6 +348,7 @@ fn run_bounded_scan_suite<S: KvStore>(store: &S) -> Result<(), StorageError> {
     assert_oversized_first_row(store)
 }
 
+// ARCH-02
 #[cfg(feature = "fjall")]
 #[test]
 fn fjall_bounded_prefix_scan() -> TestResult<()> {

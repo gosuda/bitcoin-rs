@@ -247,6 +247,7 @@ fn error_kind(error: &DecodeError) -> String {
     }
 }
 
+// QAC-05
 #[test]
 fn corpus_seeds_decode_with_typed_verdicts() {
     for target in ["tx_validate", "block_validate"] {
@@ -254,6 +255,7 @@ fn corpus_seeds_decode_with_typed_verdicts() {
     }
 }
 
+// QAC-05
 #[test]
 fn malformed_input_returns_typed_errors_without_panicking() {
     let mut bad_flag = 2_i32.to_le_bytes().to_vec();

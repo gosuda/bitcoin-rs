@@ -3,6 +3,7 @@ use crate::chainstate_journal::CheckpointBase;
 use crate::test_support::{TestError, TestResult};
 use std::io::Write;
 
+// JW-BOOT-1
 #[test]
 fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
@@ -21,6 +22,7 @@ fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
 #[test]
 fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -41,6 +43,7 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
 #[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -59,6 +62,7 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -80,6 +84,7 @@ fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> Test
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -104,6 +109,7 @@ fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     Ok(())
 }
 
+// JW-REC-1
 #[test]
 fn partial_append_rolls_back_tail_and_restart_can_retry() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -163,6 +169,7 @@ fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
     Ok(())
 }
 
+// JW-ROT-1
 #[test]
 fn rotation_keeps_cursor_invariants() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -182,6 +189,7 @@ fn rotation_keeps_cursor_invariants() -> TestResult {
     Ok(())
 }
 
+// JW-FAIL-1
 #[test]
 fn failpoints_fire_documented_errors() -> TestResult {
     for boundary in [
@@ -213,6 +221,7 @@ fn failpoints_fire_documented_errors() -> TestResult {
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -237,6 +246,7 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     Ok(())
 }
 
+// JW-MARK-2
 #[test]
 fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -260,6 +270,7 @@ fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResu
     Ok(())
 }
 
+// JW-ORDER-1
 #[test]
 fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -305,6 +316,7 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     Ok(())
 }
 
+// JW-MARK-2
 #[test]
 fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -411,6 +423,7 @@ fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn failed_boundary_retries_before_next_apply_below_lag_limit() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -440,6 +453,7 @@ fn failed_boundary_retries_before_next_apply_below_lag_limit() -> TestResult {
     Ok(())
 }
 
+// JW-ROT-1
 #[test]
 fn rotation_head_never_names_a_missing_segment() -> TestResult {
     let store = Arc::new(CountingStore::new());

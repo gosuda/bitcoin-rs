@@ -3,6 +3,7 @@ use super::*;
 use crate::test_support::TestError;
 use bitcoin_rs_primitives::BlockPayload;
 
+// EVT-01
 #[test]
 fn process_epoch_is_strictly_monotonic_across_restart() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -34,6 +35,7 @@ fn process_epoch_is_strictly_monotonic_across_restart() -> Result<(), TestError>
     Ok(())
 }
 
+// EVT-01
 #[test]
 fn active_chain_snapshot_starts_at_genesis_on_fresh_node() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -89,6 +91,7 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> Result<(), T
     Ok(())
 }
 
+// EVT-01
 #[test]
 fn record_returns_hints_in_commit_order_and_advances_the_snapshot() {
     let publisher = ChainEventPublisher::detached(7);

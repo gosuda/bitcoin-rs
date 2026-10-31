@@ -1153,6 +1153,7 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     Ok(())
 }
 
+// ARCH-07b
 #[test]
 fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
     let fixture = Fixture::new()?;

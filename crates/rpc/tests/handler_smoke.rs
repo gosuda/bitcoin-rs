@@ -824,6 +824,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), TestError> {
     Ok(())
 }
 
+// WF-01
 #[test]
 fn removed_wallet_methods_return_method_not_found() {
     let ctx = Arc::new(Context::new());

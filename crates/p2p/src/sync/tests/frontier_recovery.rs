@@ -11,6 +11,7 @@ fn next_getheaders(
     Err(std::io::Error::other("expected getheaders").into())
 }
 
+// P2P-05
 #[test]
 fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestResult {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(3)?;
@@ -58,6 +59,7 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer() -> TestRes
     Ok(())
 }
 
+// P2P-05
 #[test]
 fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
     let (tree, _blocks) = mined_chain(1, 0)?;

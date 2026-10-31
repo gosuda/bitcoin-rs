@@ -565,6 +565,7 @@ fn gateway() -> MempoolGateway {
     gateway_observed(None)
 }
 
+// POL-02
 #[test]
 fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> TestResult {
     use crate::PackageTxResult;
@@ -645,6 +646,7 @@ fn rpc_cpfp_commits_one_ordered_batch_with_actual_fees_and_pure_preview() -> Tes
     Ok(())
 }
 
+// POL-02
 #[test]
 fn rpc_package_keeps_independent_parent_but_never_uses_its_fees_twice() -> TestResult {
     use crate::PackageTxResult;
@@ -1464,7 +1466,6 @@ fn single_tx_maxfeerate_gates_on_base_fee_not_modified_fee() -> TestResult {
     Ok(())
 }
 
-// POL-03
 #[test]
 fn missing_ephemeral_spends_candidate_lookup_scales_linearly_with_parent_count() {
     let inputs: Vec<OutPoint> = (1..=2_400).map(coin).collect();

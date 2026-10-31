@@ -34,7 +34,6 @@ theorem canonical_digit {n : Nat} (_hn : 0 < n) (h : n % 10 ≠ 0) :
   have hlt : n % 10 < 10 := Nat.mod_lt n (by decide)
   omega
 
--- ARCH-07a
 /-- `dec` is a left inverse of `enc` on every canonical decimal form of at most
 nine trailing-zero digits. -/
 theorem dec_enc (n e : Nat) (hn : 0 < n) (he : e ≤ 9) (hcanon : e < 9 → n % 10 ≠ 0) :

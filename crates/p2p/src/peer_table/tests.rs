@@ -440,6 +440,7 @@ fn try_register_inbound_refuses_at_zero_capacity() {
     assert!(table.is_empty(), "a refusal changes no table state");
 }
 
+// P2P-08
 #[test]
 fn try_register_inbound_admits_below_the_cap_only() {
     let table = PeerTable::new();

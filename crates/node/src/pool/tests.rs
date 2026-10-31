@@ -396,6 +396,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
     Ok(())
 }
 
+// POOL-03
 #[test]
 fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResult {
     let shared = Arc::new(bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter::new(1, 1)?);
@@ -509,6 +510,7 @@ backend_tests!(redb, bitcoin_rs_storage::RedbStore);
 #[cfg(feature = "fjall")]
 backend_tests!(fjall, bitcoin_rs_storage::FjallStore);
 
+// POOL-03
 #[test]
 fn composed_core_bounds_pin_the_contract_literals() -> TestResult {
     let composed = super::composed_core_config(128)?;
@@ -536,6 +538,7 @@ fn composed_core_bounds_pin_the_contract_literals() -> TestResult {
     Ok(())
 }
 
+// POOL-02
 #[test]
 fn pool_directory_lock_is_exclusive_while_prepare_resources_live() -> TestResult {
     let directory = tempfile::tempdir()?;
@@ -605,12 +608,14 @@ fn ledger_create_open_and_epoch_under_guard(
     Ok(())
 }
 
+// POOL-02
 #[cfg(feature = "redb")]
 #[test]
 fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_redb() -> TestResult {
     ledger_create_open_and_epoch_under_guard(bitcoin_rs_storage::StorageBackend::Redb)
 }
 
+// POOL-02
 #[cfg(feature = "fjall")]
 #[test]
 fn pool_prepare_create_open_and_epoch_run_under_the_directory_lock_fjall() -> TestResult {

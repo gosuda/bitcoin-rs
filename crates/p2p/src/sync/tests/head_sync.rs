@@ -13,6 +13,7 @@ fn next_getheaders(
     Err(std::io::Error::other("expected getheaders").into())
 }
 
+// P2P-06
 #[test]
 fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResult {
     let (tree, blocks) = mined_chain(1, 0)?;
@@ -46,6 +47,7 @@ fn body_delivered_without_headers_announcement_admits_and_applies() -> TestResul
     Ok(())
 }
 
+// P2P-06
 #[test]
 fn body_arriving_ahead_of_its_header_chain_requests_the_gap() -> TestResult {
     let (tree, blocks) = mined_chain(1, 0)?;
@@ -814,6 +816,7 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> TestResult {
     Ok(())
 }
 
+// P2P-06
 #[test]
 fn body_carried_header_does_not_consume_a_pending_getheaders() -> TestResult {
     let mut tree = BlockTree::new();
@@ -910,6 +913,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
     let (tree, blocks) = mined_chain(3, 0)?;
@@ -987,6 +991,7 @@ fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     let (tree, blocks) = mined_chain(10, 0)?;
@@ -1060,6 +1065,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     Ok(())
 }
 
+// P2P-03
 #[test]
 fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip() -> TestResult {
     let mut tree = BlockTree::new();

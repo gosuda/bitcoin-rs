@@ -76,6 +76,7 @@ fn sequence_event_payload_uses_core_hash_orientation_and_label() {
     );
 }
 
+// MPL-03
 #[test]
 fn mempool_event_payloads_carry_reversed_txid_label_and_le_sequence() {
     let txid = Txid(Hash256::from_le_bytes(&[

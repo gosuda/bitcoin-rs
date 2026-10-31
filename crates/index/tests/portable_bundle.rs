@@ -766,6 +766,7 @@ fn assert_untouched_fresh(receiver: &Path) {
     assert_eq!(state.watermark, None);
 }
 
+// IDX-11
 #[test]
 fn export_then_restore_serves_the_same_queries_as_backfill() {
     let fixture = ChainFixture::new(6, 40);
@@ -903,6 +904,7 @@ fn restore_below_a_restarted_receivers_tip_then_reconciles_forward() {
     assert_eq!(durable(&receiver), truth_state);
 }
 
+// IDX-11
 #[test]
 fn damaged_bundles_are_refused_before_any_write_or_reset() {
     type Damage = fn(&Path, u64);

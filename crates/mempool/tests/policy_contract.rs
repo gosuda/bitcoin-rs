@@ -170,6 +170,7 @@ fn conflict_pool(signaling: bool) -> Result<ConflictFixture, TestError> {
     })
 }
 
+// POL-05
 #[test]
 fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(), TestError> {
     let fixture = conflict_pool(false)?;
@@ -543,6 +544,7 @@ fn relative_lock_cases() -> [Case; 7] {
     ]
 }
 
+// POL-06
 #[test]
 fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), TestError> {
     let pool = Mempool::new(MempoolLimits::default());

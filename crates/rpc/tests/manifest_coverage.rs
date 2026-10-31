@@ -38,6 +38,7 @@ fn not_dispatchable(handler: &Handler, name: &str) -> bool {
     )
 }
 
+// API-01
 #[test]
 fn rpc_rows_and_the_live_registry_agree_both_ways() {
     let live: BTreeSet<&str> = bitcoin_rs_rpc::handlers::live_registry().collect();
@@ -58,6 +59,7 @@ fn rpc_rows_and_the_live_registry_agree_both_ways() {
     );
 }
 
+// API-01
 #[test]
 fn every_unimplemented_rpc_row_answers_method_not_found() {
     let handler = handler();

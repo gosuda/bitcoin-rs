@@ -1402,6 +1402,7 @@ mod tests {
         );
     }
 
+    // API-26
     #[test]
     fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());

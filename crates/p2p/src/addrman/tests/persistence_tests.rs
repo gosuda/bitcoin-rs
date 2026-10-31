@@ -190,6 +190,7 @@ fn faithful_old_v9_without_marker_is_preserved_and_never_decoded() {
     }
 }
 
+// RCV-11
 #[test]
 fn synthetic_old_shapes_are_preserved_without_decoding() {
     for version in [1, 8, 9] {

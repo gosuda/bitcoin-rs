@@ -120,6 +120,7 @@ mod tests {
         }
     }
 
+    // IDX-02
     #[test]
     fn missing_source_is_the_disabled_txindex_row() {
         let snapshot = txindex_snapshot(None);
@@ -156,6 +157,7 @@ mod tests {
         );
     }
 
+    // IDX-02
     #[test]
     fn attached_source_is_the_worker_row() {
         let snapshot = txindex_snapshot(Some(&ReadyEnabled));

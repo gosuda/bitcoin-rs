@@ -101,7 +101,6 @@ theorem field_reduce_lt (x : Nat) (h : x < 2 * modulus) :
     reduceStep modulus x < modulus :=
   reduceStep_lt modulus_pos h
 
--- ARCH-07b
 theorem field_fold_reduces (x k : Nat) (h : x < (k + 1) * modulus) :
     fold modulus k x = x % modulus :=
   fold_reduces modulus modulus_pos k x h

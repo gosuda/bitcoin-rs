@@ -468,6 +468,7 @@ fn headroom(candidate: &Candidate) -> u32 {
     fits
 }
 
+// ECO-08
 #[tokio::test]
 async fn partial_noise_frame_survives_a_job_refresh() -> TestResult {
     let embedded = EmbeddedNode::start(None).await;
@@ -546,6 +547,7 @@ async fn partial_noise_frame_survives_a_job_refresh() -> TestResult {
     Ok(())
 }
 
+// ECO-08
 #[tokio::test]
 async fn tight_budget_gets_a_fitting_job_and_budgets_stay_independent() -> TestResult {
     let embedded = EmbeddedNode::start(None).await;

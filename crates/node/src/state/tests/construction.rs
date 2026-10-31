@@ -150,6 +150,7 @@ fn new_datadir_initializes_current_schema_before_storage() -> Result<(), TestErr
     Ok(())
 }
 
+// RCV-09
 #[test]
 fn unmarked_nonempty_datadir_is_refused_without_modification() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -213,6 +214,7 @@ fn overlay_identity_dir_is_rooted_in_data_dir() -> Result<(), TestError> {
     Ok(())
 }
 
+// RCV-09
 #[test]
 fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;

@@ -267,6 +267,7 @@ fn marker_last_event_wins_preserves_prev() {
     );
 }
 
+// RCV-12
 #[test]
 fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -291,6 +292,7 @@ fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
     assert!(read_marker(dir.path(), G).is_some());
 }
 
+// RCV-12
 #[test]
 fn index_marker_failure_preserves_checkpoint_warning() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -310,6 +312,7 @@ fn index_marker_failure_preserves_checkpoint_warning() {
     assert!(warnings[1].contains("txindex"));
 }
 
+// RCV-12
 #[test]
 fn oversized_evidence_file_is_ignored() {
     let dir = tempfile::tempdir().expect("tempdir");

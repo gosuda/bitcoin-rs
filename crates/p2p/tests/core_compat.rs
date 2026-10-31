@@ -444,6 +444,7 @@ fn is_own_typed_empty_payload_outcome(
     }
 }
 
+// P2P-01
 #[test]
 fn command_inventory_is_the_core_compat_set_plus_the_declared_extensions() {
     let core: BTreeSet<&str> = CORE_COMPAT_COMMANDS.iter().copied().collect();
@@ -512,6 +513,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), T
     Ok(())
 }
 
+// P2P-01
 #[test]
 fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), TestError> {
     let version = version_message(
@@ -549,6 +551,7 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
     Ok(())
 }
 
+// P2P-01
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
     let version = version_message(
@@ -1441,6 +1444,7 @@ fn remote_version(services: ServiceFlags) -> Message {
     Message::Version(version)
 }
 
+// P2P-08
 #[test]
 fn desirable_service_policy_matches_core() {
     let network_witness = ServiceFlags::NETWORK | ServiceFlags::WITNESS;

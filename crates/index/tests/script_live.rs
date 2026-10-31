@@ -864,6 +864,7 @@ fn sorted(mut outpoints: Vec<OutPoint>) -> Vec<OutPoint> {
     outpoints
 }
 
+// IDX-04
 #[test]
 fn leftover_capabilities_are_persisted_families_outside_the_selection() {
     let cursor = IndexWatermark {

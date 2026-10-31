@@ -236,6 +236,7 @@ impl MempoolObserver for LockOrderObserver {
     }
 }
 
+// MPL-01
 #[test]
 fn commit_runs_no_observer_code_under_the_pool_write_lock()
 -> Result<(), crate::test_error::TestError> {
@@ -599,6 +600,7 @@ fn no_observer_still_mutates() {
     assert_eq!(gateway.read().sequence_number(), 1);
 }
 
+// MPL-02
 #[test]
 fn sequence_base_matches_per_change_assignment() {
     let gateway = gateway_with(None);
@@ -847,6 +849,7 @@ impl MempoolObserver for ReentrantObserver {
     }
 }
 
+// MPL-01
 #[test]
 fn reentrant_observer_mutation_completes_with_callback_sequence_1_2() {
     let observer = Arc::new(ReentrantObserver {
@@ -1902,6 +1905,7 @@ fn explicit_finish_restores_even_generation() {
     );
 }
 
+// MPL-04
 #[test]
 fn dropping_chain_change_stays_unstable() {
     let gateway = gateway_with(None);

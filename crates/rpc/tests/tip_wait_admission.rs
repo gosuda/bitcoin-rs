@@ -138,6 +138,7 @@ fn ordinary_rpc(address: SocketAddr) -> Value {
     }
 }
 
+// ARCH-09, API-34
 #[test]
 fn wait_quota_preserves_ordinary_http_and_server_only_shutdown_returns_tip() {
     let (ctx, chainstate, observable) = context();

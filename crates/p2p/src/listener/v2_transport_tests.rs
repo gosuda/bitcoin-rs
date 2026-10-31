@@ -223,6 +223,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
     let (listener_shared, _) = v2_shared();
@@ -293,6 +294,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     let (listener_shared, listener_table) = v2_shared();
@@ -331,6 +333,7 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
     Ok(())
 }
 
+// P2P-11
 #[test]
 fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
     let (listener_shared, listener_table) = v1_shared();

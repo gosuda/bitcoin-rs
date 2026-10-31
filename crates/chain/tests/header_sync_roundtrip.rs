@@ -181,6 +181,7 @@ fn next_work_required_is_exactly_what_validate_header_nbits_enforces() -> Result
     Ok(())
 }
 
+// DAA-01
 #[test]
 fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window() -> Result<(), TestError>
 {
@@ -729,6 +730,7 @@ fn testnet_nbits_cases() -> Vec<NbitsCase> {
     cases
 }
 
+// DAA-01
 #[test]
 fn contextual_nbits_enforces_the_difficulty_rules() -> Result<(), TestError> {
     for (name, network, seed, time, bits, expected) in mainnet_nbits_cases()

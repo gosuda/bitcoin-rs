@@ -52,6 +52,7 @@ fn checkpoint_config() -> HeaderCheckpointConfig {
     }
 }
 
+// RCV-10
 #[test]
 fn corrupt_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -90,6 +91,7 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     Ok(())
 }
 
+// RCV-10
 #[test]
 fn valid_checkpoint_with_marker_selects_cold_replay() -> TestResult {
     let dir = tempfile::tempdir()?;

@@ -40,7 +40,6 @@ theorem decodeReservation_le_succ (expansion wire : Nat) :
   rw [decodeReservation_eq_min]
   exact Nat.min_le_left _ _
 
--- P2P-07
 /-- With every element factor at most fifteen, the reservation is at most sixteen wire multiples.
 -/
 theorem decodeReservation_linear {expansion wire : Nat} (he : expansion ≤ 15) :

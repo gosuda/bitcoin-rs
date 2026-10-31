@@ -87,6 +87,7 @@ fn progress_due(last: Instant, now: Instant) -> bool {
 mod tests {
     use super::*;
 
+    // EMB-10
     #[test]
     fn telemetry_uses_elapsed_time_not_wake_count() {
         let start = Instant::now();

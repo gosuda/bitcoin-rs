@@ -82,6 +82,7 @@ fn canonical_regtest_chain_connects_through_bip34_activation() -> TestResult {
     Ok(())
 }
 
+// ARCH-09, RCV-04
 #[test]
 fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
@@ -151,6 +152,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
     Ok(())
 }
 
+// RCV-08
 #[test]
 fn bip30_overwrite_undo_restores_original_coin() -> TestResult {
     let utxo = UtxoSet::new();
@@ -255,6 +257,7 @@ fn direct_transition_fatal_error_closes_admission() -> TestResult {
     Ok(())
 }
 
+// RCV-08
 #[test]
 fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     let genesis = Network::Regtest.genesis_block();

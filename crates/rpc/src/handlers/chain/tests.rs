@@ -515,7 +515,7 @@ fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
     }
 }
 
-// API-34
+// API-08, API-34
 #[test]
 fn gettxoutsetinfo_holds_one_blocking_slot_and_refuses_a_concurrent_run() {
     let ctx = Arc::new(Context::new());
@@ -622,6 +622,7 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
 }
 
 /// Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
+// MRPC-01
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() {
     let ctx = Arc::new(Context::new());

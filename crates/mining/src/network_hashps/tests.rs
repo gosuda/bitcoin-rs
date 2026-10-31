@@ -113,6 +113,7 @@ fn assert_matches_core(
     );
 }
 
+// API-06
 #[test]
 fn estimate_network_hashps_matches_core_getnetworkhashps() {
     let mut tree = BlockTree::new();

@@ -1071,6 +1071,7 @@ fn a_second_setup_and_a_wrong_channel_bit_are_protocol_violations() {
     ));
 }
 
+// POOL-09
 #[test]
 fn frames_of_an_unnegotiated_extension_are_discarded() {
     let mut wire = Wire::new();

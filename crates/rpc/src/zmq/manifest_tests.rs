@@ -329,6 +329,7 @@ fn mixed_package_changes_publish_only_their_indexed_admitted_bodies() {
     );
 }
 
+// API-04
 #[test]
 fn admission_publishes_one_a_frame_with_core_payload_bytes() {
     use bitcoin_rs_mempool::AdmissionOrigin;
@@ -372,6 +373,7 @@ fn policy_eviction_publishes_r_frames_in_commit_order() {
     );
 }
 
+// API-04, MPL-03
 #[test]
 fn block_inclusion_suppresses_r_frames() {
     use bitcoin_rs_mempool::AdmissionOrigin;
@@ -429,6 +431,7 @@ fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
     );
 }
 
+// EMB-08
 #[test]
 fn composite_observer_fans_out_to_sequence_then_mining_wake() {
     use bitcoin_rs_mempool::{

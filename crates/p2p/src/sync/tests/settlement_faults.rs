@@ -323,6 +323,7 @@ fn tick_sorts_out_of_order_peers_before_requesting_blocks() -> TestResult {
     Ok(())
 }
 
+// P2P-05
 #[test]
 fn same_address_registration_clears_getheaders_gate_and_routes_replacement() -> TestResult {
     let HeaderSyncFixture { sync, peers, .. } = header_sync_with_genesis()?;

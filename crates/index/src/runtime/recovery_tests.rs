@@ -312,6 +312,7 @@ struct Harness {
     worker: Worker,
 }
 
+// EVT-04, IDX-07
 #[test]
 fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
     let fixture = ForkFixture::new(2);
@@ -520,6 +521,7 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     }
 }
 
+// RCV-05
 #[test]
 fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     let f = ForkFixture::new(3);
@@ -551,6 +553,7 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 }
 
+// RCV-07
 #[test]
 fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     let f = ForkFixture::new(3);
@@ -939,6 +942,7 @@ fn preparation_failure_keeps_its_height_after_committed_successes() {
     assert_eq!(h.watermarks().script_live, committed);
 }
 
+// IDX-07
 #[test]
 fn undo_read_failure_is_not_a_missing_undo() {
     let f = ForkFixture::new(5);
@@ -1254,6 +1258,7 @@ fn cell_seed_artifact(
     );
     (artifact, dir)
 }
+// EVT-03
 #[test]
 fn malformed_stored_consumer_cursor_never_causes_panic_and_overwrites_cleanly() {
     let f = ForkFixture::new(3);

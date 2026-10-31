@@ -338,6 +338,7 @@ mod tests {
         config
     }
 
+    // EMB-05
     #[test]
     #[expect(
         clippy::too_many_lines,

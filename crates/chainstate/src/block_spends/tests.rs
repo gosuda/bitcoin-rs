@@ -109,6 +109,7 @@ fn tip(chain: &Chainstate) -> TestResult<Hash256> {
         .hash)
 }
 
+// ARCH-07
 #[test]
 fn read_uses_receipts_and_rejects_uncertified_old_branches() -> TestResult {
     let f = fixture(2)?;
@@ -139,6 +140,7 @@ fn read_uses_receipts_and_rejects_uncertified_old_branches() -> TestResult {
     Ok(())
 }
 
+// ARCH-07
 #[test]
 fn snapshot_prefix_needs_archived_progress_even_when_rows_exist() -> TestResult {
     let f = fixture(2)?;

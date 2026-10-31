@@ -436,6 +436,7 @@ mod tests {
         raw
     }
 
+    // POOL-08
     #[test]
     fn funded_external_payout_round_trip_preserves_reservations_on_rejection() -> Result<(), crate::test_error::TestError> {
         let dir = tempfile::tempdir()?;
@@ -583,6 +584,7 @@ mod tests {
         assert!(number(&json!(1.5)).is_err());
     }
 
+    // POOL-08
     #[test]
     fn external_receipt_hex_preserves_canonical_brpt_and_rejects_trailing_bytes() {
         let receipt = PayoutReceipt {

@@ -628,6 +628,7 @@ fn exact_request_head_budget_is_accepted() -> std::io::Result<()> {
     Ok(())
 }
 
+// WF-02
 #[test]
 fn listener_directory_table_is_closed_over_http() -> std::io::Result<()> {
     let auth = Arc::new(Auth::basic("alice", "secret"));
@@ -806,6 +807,7 @@ fn non_array_or_object_params_are_an_invalid_request() {
     }
 }
 
+// API-02
 #[test]
 fn a_rejected_envelope_never_dispatches_the_method() {
     let handler = Handler::new(Arc::new(Context::new()));
@@ -1071,6 +1073,7 @@ fn json_rpc_2_post_classification_error_keeps_the_v2_envelope() {
     );
 }
 
+// API-02
 #[test]
 fn an_explicit_null_method_is_missing() {
     let handler = Handler::new(Arc::new(Context::new()));

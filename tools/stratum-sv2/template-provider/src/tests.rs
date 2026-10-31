@@ -184,6 +184,7 @@ async fn next(hub: &Hub, wakes: &mut watch::Receiver<u64>, node: &Node) -> Arc<T
     hub.issue(candidate(node))
 }
 
+// ECO-08
 #[tokio::test]
 async fn embedded_templates_preserve_wire_data_commit_and_cancel_on_shutdown() -> TestResult {
     let dir = tempfile::tempdir()?;

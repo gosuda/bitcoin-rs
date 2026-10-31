@@ -292,6 +292,7 @@ fn transaction_cases(
     Ok(valid)
 }
 
+// CORE-04
 #[test]
 fn curated_live_acceptance() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;

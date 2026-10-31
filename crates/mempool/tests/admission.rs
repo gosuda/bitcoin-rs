@@ -200,6 +200,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), TestError> {
     Ok(())
 }
 
+// POL-04
 #[test]
 fn p2sh_sigop_cost_exceeds_standard_limit() {
     assert_eq!(
@@ -385,6 +386,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), TestErr
     Ok(())
 }
 
+// POL-04
 #[test]
 #[expect(
     clippy::expect_used,

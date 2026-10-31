@@ -155,6 +155,7 @@ mod tests {
         assert_eq!(port(select_inbound_to_evict(thirteen)), Some(12));
     }
 
+        // P2P-08
     #[test]
     fn the_flooding_netgroup_loses_its_newest_member() {
         let base = Instant::now();

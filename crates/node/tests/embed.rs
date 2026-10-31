@@ -34,6 +34,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+// EMB-06, EMB-07
 #[test]
 fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -276,6 +277,7 @@ fn wait_historical_transaction(
     }
 }
 
+// IDX-12
 #[test]
 fn embedded_node_historical_prefix_queries() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -443,6 +445,7 @@ fn seed_coinbase_spend() -> Tx {
     }
 }
 
+// EMB-07
 #[test]
 fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     let dir = tempfile::tempdir()?;

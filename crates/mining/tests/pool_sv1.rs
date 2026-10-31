@@ -1096,6 +1096,7 @@ impl MinerFixture {
     }
 }
 
+// POOL-05
 #[test]
 fn applied_block_retires_job_and_second_submit_is_stale() {
     let mut miner = MinerFixture::start(0x22);
@@ -1192,6 +1193,7 @@ fn inconclusive_block_submission_retries_with_bounded_recovery() {
 /// An already-validated share whose block the node rejects as a stale parent
 /// is a `STALE_SHARE` protocol error, not success: the ledger record stays
 /// durable, nothing else is submitted, and the connection remains usable.
+// POOL-05
 #[test]
 fn stale_parent_backend_verdict_is_stale_error() {
     let mut miner = MinerFixture::start(0x44);
@@ -1541,6 +1543,7 @@ fn unknown_wire_job_rejects_before_the_common_submit_owner() {
     miner.server.shutdown();
 }
 
+// POOL-03
 #[test]
 fn block_with_tiny_outbox_sheds_before_validation_instead_of_growing_unbounded() {
     let mut miner = MinerFixture::start_with(0x22, Some((2, 1024)), None);

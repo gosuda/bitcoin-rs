@@ -27,6 +27,7 @@ fn asmap_path_uses_the_existing_configuration_precedence() {
     );
 }
 
+// FP-03
 #[test]
 fn measurement_options_are_not_node_options() {
     use clap::Parser as _;
@@ -390,6 +391,7 @@ fn validation_engine_kernel_is_rejected_without_kernel_support() {
     );
 }
 
+// VAL-01
 #[test]
 fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
     use bitcoin_rs_node::ValidationEngine;
@@ -485,6 +487,7 @@ fn cli_network_profile_precedes_cli_explicit_p2p_overrides() {
     assert!(!config.p2p.dns_seeds_enabled);
 }
 
+// IDX-01
 #[test]
 fn cli_scriptindex_flag_enables_full_index() {
     let config = resolved(&["bitcoin-rs", "--txindex=false", "--scriptindex"], &[]);
@@ -493,6 +496,7 @@ fn cli_scriptindex_flag_enables_full_index() {
     assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
 }
 
+// IDX-01
 #[test]
 fn cli_scriptindex_utxo_enables_live_only_index() {
     let config = resolved(

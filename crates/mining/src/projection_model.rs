@@ -82,7 +82,6 @@ pub(crate) const fn step(state: &State, action: Action) -> Option<State> {
     }
 }
 
-// POOL-05
 #[must_use]
 pub(crate) const fn safety(state: &State) -> bool {
     state.active_gen <= state.tip_gen

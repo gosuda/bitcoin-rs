@@ -88,6 +88,7 @@ impl MempoolPolicySnapshot {
 mod tests {
     use super::*;
 
+// POL-01
     #[test]
     fn default_snapshot_projects_the_enforced_defaults() {
         let snapshot = MempoolPolicySnapshot::from_enforced(
@@ -103,6 +104,7 @@ mod tests {
         assert!(snapshot.optimal);
     }
 
+// POL-01
     #[test]
     fn enforced_cluster_count_rejects_a_joining_transaction() {
         use alloc::sync::Arc;

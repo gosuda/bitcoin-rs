@@ -5,6 +5,7 @@ use bitcoin_rs_storage::StorageError;
 
 use crate::{ApplyError, WindowApplyDisposition, classify_apply_error};
 
+// SYNC-04
 #[test]
 fn apply_errors_classify_into_their_documented_dispositions() {
     use ApplyError::{Chain, Consensus, DurableHeadCommit, ProofOfWork};

@@ -75,6 +75,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
     Ok(())
 }
 
+// SYNC-01, SYNC-02, SYNC-05
 #[test]
 #[expect(
     clippy::too_many_lines,

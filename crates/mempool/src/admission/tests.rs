@@ -1536,6 +1536,7 @@ fn package_prevouts_preserve_sigops_without_mutating_the_pool()
     Ok(())
 }
 
+// POL-06
 #[test]
 fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::test_error::TestError>
 {
@@ -1622,6 +1623,7 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::tes
     Ok(())
 }
 
+// POL-03
 #[test]
 fn preview_and_submission_check_scripts_before_maxfeerate()
 -> Result<(), crate::test_error::TestError> {
@@ -1651,6 +1653,7 @@ fn preview_and_submission_check_scripts_before_maxfeerate()
     Ok(())
 }
 
+// POL-03
 #[test]
 fn preview_retries_chain_pool_and_policy_changes() -> Result<(), crate::test_error::TestError> {
     struct ChangingRead {
@@ -2583,6 +2586,7 @@ fn remove_for_reorg_refuses_a_moved_generation() {
     assert!(gateway.read().contains_txid(&parent_txid));
 }
 
+// MPL-04
 #[test]
 #[expect(clippy::expect_used)]
 fn admission_state_accepts_only_the_current_generation() {

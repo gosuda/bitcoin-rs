@@ -175,6 +175,7 @@ mod tests {
         }
     }
 
+    // POOL-04
     #[cfg(unix)]
     #[test]
     fn load_rejects_inputs_larger_than_256_bytes() {
@@ -217,6 +218,7 @@ mod tests {
         }
     }
 
+    // POOL-04
     #[cfg(unix)]
     #[test]
     fn load_enforces_regular_file_and_0600_descriptor_checks() {
@@ -248,6 +250,7 @@ mod tests {
         );
     }
 
+    // POOL-04
     #[cfg(unix)]
     #[test]
     fn load_refuses_a_final_component_symlink() {

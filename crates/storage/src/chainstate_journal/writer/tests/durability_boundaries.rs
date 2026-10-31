@@ -2,6 +2,7 @@ use super::*;
 use crate::test_support::TestError;
 use crate::chainstate_journal::CheckpointBase;
 
+// JW-MARK-1
 #[test]
 fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -16,6 +17,7 @@ fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> Te
     Ok(())
 }
 
+// JW-MARK-1
 #[test]
 fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -41,6 +43,7 @@ fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn head_never_advances_without_counted_storage_flush() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -57,6 +60,7 @@ fn head_never_advances_without_counted_storage_flush() -> TestResult {
     Ok(())
 }
 
+// JW-DUR-1
 #[test]
 fn configured_lag_limits_retry_persistent_flush_failures() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -107,6 +111,7 @@ fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
     Ok(())
 }
 
+// JW-RET-1
 #[test]
 fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -143,6 +148,7 @@ fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn freeze_failures_restore_open_state_for_retry() -> TestResult {
     for boundary in [
@@ -167,6 +173,7 @@ fn freeze_failures_restore_open_state_for_retry() -> TestResult {
     Ok(())
 }
 
+// JW-LIFE-1
 #[test]
 fn resume_failure_does_not_strand_frozen_writer() -> TestResult {
     let store = Arc::new(CountingStore::new());

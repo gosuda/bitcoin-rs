@@ -1202,6 +1202,7 @@ impl MempoolObserver for BroadcastObserver {
 
 /// API-10: both directories identify Esplora at the existing publication
 /// boundary; successful retries publish no second acceptance.
+// API-10
 #[test]
 fn broadcast_preserves_esplora_origin_and_idempotence() {
     for path in ["/api/tx", "/esplora/tx"] {
@@ -1232,6 +1233,7 @@ fn broadcast_preserves_esplora_origin_and_idempotence() {
 
 /// The HTTP rejection dialect and lack of publication are observable
 /// contracts, including malformed input and a missing UTXO.
+// API-10
 #[test]
 fn broadcast_rejections_are_400_without_mutation() {
     for path in ["/api/tx", "/esplora/tx"] {
@@ -1380,6 +1382,7 @@ fn broadcast_transaction_is_immediately_visible_as_unconfirmed() {
     assert_eq!(value["status"], json!({"confirmed":false}));
 }
 
+// API-09
 #[test]
 fn history_cursors_follow_api_09_on_both_esplora_surfaces() -> Result<(), TestError> {
     let (handler, transaction, _, address) = contract_fixture()?;

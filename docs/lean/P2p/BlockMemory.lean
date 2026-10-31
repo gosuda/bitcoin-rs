@@ -48,7 +48,6 @@ theorem retain_never_raises_used (s : State) (c : Credit) (retained : Nat)
   · dsimp only
     omega
 
--- P2P-07, SYNC-03
 /-- Dropping the credit returns `used` to the pre-reservation total. -/
 theorem reserve_retain_release_identity (s : State) (reserved retained : Nat)
     (hres : reserved ≤ blockIngressBytes) (hfit : s.used + reserved ≤ blockIngressBytes) :

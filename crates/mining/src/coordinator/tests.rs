@@ -98,6 +98,7 @@ fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
     );
 }
 
+// API-11
 #[test]
 fn template_projects_candidate_generation_and_deployment_flags() {
     let cases = [
@@ -188,6 +189,7 @@ fn template_projects_candidate_generation_and_deployment_flags() {
     }
 }
 
+// API-11
 #[test]
 fn long_poll_round_trips_template_id() {
     let tip = Hash256::from_le_bytes(&[0x11; 32]);

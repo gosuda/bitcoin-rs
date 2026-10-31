@@ -37,6 +37,7 @@ fn prepare<S: KvStore>(
     Ok(batch)
 }
 
+// IDX-04
 #[test]
 fn filter_rows_and_cursor_publish_atomically_and_reset_preserves_txindex() -> Result<(), TestError> {
     let store = Arc::new(common::MemoryStore::default());

@@ -93,6 +93,7 @@ fn write_body_rows(
     Ok(appended)
 }
 
+// ARCH-08, SYNC-07
 #[test]
 fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> TestResult
 {
@@ -164,6 +165,7 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
     Ok(())
 }
 
+// SYNC-07
 #[test]
 fn prune_to_height_respects_an_active_retention_lease() -> TestResult {
     let (store, _data_dir, block_files) = memory_store_with_block_files()?;

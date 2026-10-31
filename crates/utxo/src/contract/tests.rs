@@ -199,6 +199,7 @@ fn persisted_record_bytes_decode_back_to_the_batch() -> TestResult {
     Ok(())
 }
 
+// ARCH-07a
 #[test]
 fn rollback_restores_the_exact_prior_state() -> TestResult {
     let (utxo, coin_stats, before, undo) = connected()?;

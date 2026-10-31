@@ -368,6 +368,7 @@ fn from_handles_shares_chain_handles_with_caller() {
     );
 }
 
+// SYNC-05
 #[test]
 fn status_keeps_the_captured_applied_pair() {
     let ctx = Context::new();

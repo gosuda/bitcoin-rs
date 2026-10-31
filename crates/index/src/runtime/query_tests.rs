@@ -391,6 +391,7 @@ impl QueryFixture {
     }
 }
 
+// SYNC-03, IDX-03
 #[test]
 fn unusable_worker_makes_queries_unavailable() -> Result<(), crate::portable::TestError> {
     for publish in [true, false] {
@@ -434,6 +435,7 @@ fn unusable_worker_makes_queries_unavailable() -> Result<(), crate::portable::Te
     Ok(())
 }
 
+// SYNC-03
 #[test]
 fn filter_failure_refuses_filters_but_preserves_durable_progress_and_tx_queries()
 -> Result<(), crate::portable::TestError> {
@@ -821,6 +823,7 @@ fn history_snapshot_reports_unavailable_when_a_funding_body_is_missing()
     Ok(())
 }
 
+// IDX-03
 #[test]
 fn transaction_reports_storage_when_body_read_fails() -> Result<(), crate::portable::TestError> {
     let block = Network::Regtest.genesis_block();
@@ -2294,6 +2297,7 @@ fn historical_stale_watermark_anchors_at_fork_and_excludes_orphans()
     Ok(())
 }
 
+// IDX-12
 #[test]
 fn historical_tx_positive_floor_scopes_absence_and_rejects_anchor_below_floor()
 -> Result<(), crate::portable::TestError> {

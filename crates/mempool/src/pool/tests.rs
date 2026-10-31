@@ -9,6 +9,7 @@ fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
     result.changes.iter().map(|change| change.txid).collect()
 }
 
+// MPL-02
 #[test]
 fn mutation_batch_crossing_sequence_rollover_keeps_base_and_lookups() {
     let mut pool = Mempool::new(MempoolLimits::default());
@@ -1564,6 +1565,7 @@ fn remove_for_block_stamps_the_floor_for_decay_even_when_empty() {
     assert_eq!(pool.min_fee_sat_per_kvb(1_000 + 12 * 60 * 60), 1_500);
 }
 
+// MPL-02
 #[test]
 fn expire_removes_stale_root_with_descendants() {
     let mut pool = Mempool::new(MempoolLimits::default());

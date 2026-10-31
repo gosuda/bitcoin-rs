@@ -46,6 +46,7 @@ fn block(parent: BlockHash, height: u32, tag: u32) -> Result<Block, TestError> {
     Ok(block)
 }
 
+// EVT-06
 #[test]
 fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -121,6 +122,7 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), Test
     Ok(())
 }
 
+// EVT-06
 #[test]
 fn unsettled_or_failed_chain_fences_never_publish_a_stable_hint() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;

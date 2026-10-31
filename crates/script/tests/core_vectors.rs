@@ -1154,6 +1154,7 @@ const NATIVE_SCRIPT_TESTS_EXECUTED: usize = 1233;
 const SCRIPT_TESTS_PROSE_SKIP: &str =
     "prose row (1 string element: format note or section header, no test fields)";
 
+// VAL-02
 #[test]
 fn script_tests_native_column() {
     let mut counts = Counts::default();
@@ -1295,6 +1296,7 @@ const NATIVE_TX_VALID_FAILURES: usize = 0;
 const NATIVE_TX_VALID_SKIPS: usize = 0;
 const NATIVE_TX_VALID_EXECUTED: usize = 121;
 
+// VAL-02
 #[test]
 fn tx_valid_native_column() {
     let mut counts = Counts::default();
@@ -1370,6 +1372,7 @@ const NATIVE_TX_INVALID_SKIPS: usize = 9;
 const NATIVE_TX_INVALID_EXECUTED: usize = 84;
 const TX_INVALID_BADTX_SKIP: &str = "BADTX: fails CheckTransaction, not script verification";
 
+// VAL-02
 #[test]
 fn tx_invalid_native_column() {
     let mut counts = Counts::default();

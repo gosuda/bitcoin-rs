@@ -54,6 +54,7 @@ fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::Error) {
     assert_eq!(last["error"], error.to_string());
 }
 
+// REF-07
 #[test]
 fn checksum_failure_keeps_the_frame_and_error() {
     let (mut peer, mut remote, dir) = fixture();

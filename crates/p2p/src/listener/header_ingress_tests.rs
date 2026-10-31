@@ -3,6 +3,7 @@
 use super::*;
 use crate::test_support::TestResult;
 
+// P2P-07
 #[test]
 fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult {
     let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
@@ -103,6 +104,7 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
 /// Exercise the actual send paths against real sync ticks, with a producer
 /// kept ahead of the consumer. The payload estimate excludes channel/Vec
 /// metadata, in-flight senders, bodies, allocator overhead and process RSS.
+// P2P-07
 #[test]
 fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
     run_sustained_wire_headers_case()?;

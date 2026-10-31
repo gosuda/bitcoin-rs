@@ -172,6 +172,7 @@ fn assert_chain_identity(evidence: &Value) -> Result<(), LiveError> {
     Ok(())
 }
 
+// CORE-02, CORE-03, CORE-05, CORE-06
 #[test]
 #[ignore = "requires live bitcoind; run scripts/run-p2p-core-interop.sh"]
 fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), LiveError> {
