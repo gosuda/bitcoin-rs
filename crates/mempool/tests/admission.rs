@@ -1,8 +1,8 @@
 extern crate alloc;
 
+use super::TestError;
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
-use std::error::Error;
 use std::sync::mpsc;
 use std::thread;
 
@@ -128,7 +128,7 @@ fn admission_request(
     clippy::expect_used,
     reason = "test invariants are checked with expect"
 )]
-fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
+fn stale_policy_verdict_becomes_retryable() -> Result<(), TestError> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
@@ -306,7 +306,7 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
 }
 
 #[test]
-fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn Error>> {
+fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), TestError> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
@@ -390,7 +390,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     clippy::expect_used,
     reason = "test invariants are checked with expect"
 )]
-fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> {
+fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), TestError> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));
@@ -444,7 +444,7 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door()
--> Result<(), Box<dyn Error>> {
+-> Result<(), TestError> {
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));

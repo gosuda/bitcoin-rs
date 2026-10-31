@@ -310,7 +310,7 @@ fn rejects_non_standard_output_script() {
 
 #[test]
 fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let mut pool = Mempool::new(crate::MempoolLimits::default());
     let tx = standard_tx(2);
     let prevouts = [(
@@ -353,7 +353,7 @@ fn signed_delta_clamp_prevents_maxfeerate_rejection_and_retains_effective_rate()
 }
 
 #[test]
-fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), Box<dyn std::error::Error>> {
+fn three_vsize_meanings_on_sigop_heavy_tx() -> Result<(), crate::test_error::TestError> {
     use crate::accounting::prepared_context;
     use crate::entry::MempoolEntry;
     use alloc::sync::Arc;

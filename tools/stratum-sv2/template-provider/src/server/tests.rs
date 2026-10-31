@@ -31,7 +31,87 @@ use tokio::{
     task::JoinHandle,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Debug)]
+enum TestError {
+    Io(std::io::Error),
+    Node(bitcoin_rs_node::NodeError),
+    Elapsed(tokio::time::error::Elapsed),
+    Recv(tokio::sync::oneshot::error::RecvError),
+    Join(tokio::task::JoinError),
+    Send,
+    Message(String),
+}
+
+impl std::fmt::Display for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "io error: {e}"),
+            Self::Node(e) => write!(f, "node error: {e}"),
+            Self::Elapsed(e) => write!(f, "elapsed: {e}"),
+            Self::Recv(e) => write!(f, "recv: {e}"),
+            Self::Join(e) => write!(f, "join: {e}"),
+            Self::Send => write!(f, "send error"),
+            Self::Message(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for TestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Node(e) => Some(e),
+            Self::Elapsed(e) => Some(e),
+            Self::Recv(e) => Some(e),
+            Self::Join(e) => Some(e),
+            Self::Send | Self::Message(_) => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for TestError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<bitcoin_rs_node::NodeError> for TestError {
+    fn from(e: bitcoin_rs_node::NodeError) -> Self {
+        Self::Node(e)
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for TestError {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        Self::Elapsed(e)
+    }
+}
+
+impl From<tokio::sync::oneshot::error::RecvError> for TestError {
+    fn from(e: tokio::sync::oneshot::error::RecvError) -> Self {
+        Self::Recv(e)
+    }
+}
+
+impl From<tokio::task::JoinError> for TestError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        Self::Join(e)
+    }
+}
+
+impl<T> From<crossbeam_channel::SendError<T>> for TestError {
+    fn from(_: crossbeam_channel::SendError<T>) -> Self {
+        Self::Send
+    }
+}
+
+impl From<String> for TestError {
+    fn from(s: String) -> Self {
+        Self::Message(s)
+    }
+}
+
+type TestResult = Result<(), TestError>;
 const DEADLINE: Duration = Duration::from_secs(5);
 const LOOSE: CoinbaseBudget = CoinbaseBudget {
     additional_size: 1000,

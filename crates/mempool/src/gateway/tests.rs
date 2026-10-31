@@ -130,7 +130,7 @@ impl MempoolObserver for PayloadObserver {
 
 #[test]
 fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(PayloadObserver::default());
     let gateway = gateway_with_bodies(observer.clone());
     let expired = tx(181);
@@ -186,7 +186,7 @@ fn package_expiry_preserves_same_batch_accepted_bodies_and_indices()
 
 #[test]
 fn failed_mutation_clears_capture_scope_before_the_next_success()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(PayloadObserver::default());
     let gateway = gateway_with_bodies(observer.clone());
     let stale = Arc::new(tx(183));
@@ -237,8 +237,8 @@ impl MempoolObserver for LockOrderObserver {
 }
 
 #[test]
-fn commit_runs_no_observer_code_under_the_pool_write_lock() -> Result<(), Box<dyn std::error::Error>>
-{
+fn commit_runs_no_observer_code_under_the_pool_write_lock()
+-> Result<(), crate::test_error::TestError> {
     let composite = CompositeObserver::new();
     assert!(!composite.wants_bodies());
     let metadata = Arc::new(RecordingObserver::default());
@@ -1191,7 +1191,7 @@ fn admit_transaction_rejects_a_script_invalid_input() {
 }
 
 #[test]
-fn admission_counts_resolved_sigops_before_verification() -> Result<(), Box<dyn std::error::Error>>
+fn admission_counts_resolved_sigops_before_verification() -> Result<(), crate::test_error::TestError>
 {
     let gateway = gateway_with(None);
     let mut tx = standard_tx(0x84);
@@ -1299,7 +1299,7 @@ fn stale_mempool_sequence_rejects_without_mutation_or_publication() {
 
 #[test]
 fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     let observer = Arc::new(RecordingObserver::default());
     let gateway = gateway_with(Some(dyn_observer(&observer)));
     let resident = tx(60);

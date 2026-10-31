@@ -632,7 +632,7 @@ fn unspendable_pool_outpoint_refusal_is_not_retained_for_reconstruction() {
 
 #[test]
 fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     struct ResetPark;
     impl Drop for ResetPark {
         fn drop(&mut self) {
@@ -689,7 +689,7 @@ fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
 
 fn assert_verified_admission_rebuilds_after_change(
     mode: u8,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), crate::test_error::TestError> {
     struct MutableCoins(Mutex<Coins>, AtomicUsize);
     impl AdmissionChain for MutableCoins {
         fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
@@ -1431,7 +1431,7 @@ fn witness_spend() -> (Arc<Tx>, Coins) {
     reason = "keep the independent BIP141 oracle and offered-output boundary vectors together"
 )]
 fn package_prevouts_preserve_sigops_without_mutating_the_pool()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_primitives::consensus_bytes;
     let gateway = gateway();
     let sequence = gateway.read().sequence_number();
@@ -1537,7 +1537,8 @@ fn package_prevouts_preserve_sigops_without_mutating_the_pool()
 }
 
 #[test]
-fn preview_matches_submission_and_has_no_side_effects() -> Result<(), Box<dyn std::error::Error>> {
+fn preview_matches_submission_and_has_no_side_effects() -> Result<(), crate::test_error::TestError>
+{
     struct Observer(AtomicUsize);
     impl crate::MempoolObserver for Observer {
         fn on_mutation(&self, _: &crate::MutationEnvelope) {
@@ -1622,8 +1623,8 @@ fn preview_matches_submission_and_has_no_side_effects() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn preview_and_submission_check_scripts_before_maxfeerate() -> Result<(), Box<dyn std::error::Error>>
-{
+fn preview_and_submission_check_scripts_before_maxfeerate()
+-> Result<(), crate::test_error::TestError> {
     let gateway = gateway();
     let (valid, chain) = witness_spend();
     let mut invalid = (*valid).clone();
@@ -1651,7 +1652,7 @@ fn preview_and_submission_check_scripts_before_maxfeerate() -> Result<(), Box<dy
 }
 
 #[test]
-fn preview_retries_chain_pool_and_policy_changes() -> Result<(), Box<dyn std::error::Error>> {
+fn preview_retries_chain_pool_and_policy_changes() -> Result<(), crate::test_error::TestError> {
     struct ChangingRead {
         gateway: Arc<MempoolGateway>,
         coins: Coins,

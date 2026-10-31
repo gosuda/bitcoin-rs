@@ -91,7 +91,7 @@ fn check_via_script(
     Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &script_sig,
-        &Witness::from_stack(witness.clone()),
+        &Witness::from_stack(witness),
         effective_flags,
         &prevouts,
         tx,

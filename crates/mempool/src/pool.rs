@@ -2312,7 +2312,7 @@ fn txid_of(bytes: [u8; 32]) -> Txid {
 mod package_tests {
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    type TestResult = Result<(), crate::test_error::TestError>;
 
     fn linked(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
         Tx {

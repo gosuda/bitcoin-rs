@@ -11,7 +11,125 @@ use bitcoin_rs_primitives::{
 use std::time::Instant;
 use stratum_apps::stratum_core::{bitcoin, template_distribution_sv2::SubmitSolutionOwned};
 
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Debug)]
+enum TestError {
+    Io(std::io::Error),
+    AddrParse(std::net::AddrParseError),
+    Node(bitcoin_rs_node::NodeError),
+    Mining(bitcoin_rs_mining::MiningError),
+    MiningControl(bitcoin_rs_mining::MiningControlError),
+    Consensus(bitcoin::consensus::encode::Error),
+    Join(tokio::task::JoinError),
+    Elapsed(tokio::time::error::Elapsed),
+    Send,
+    StringError(String),
+}
+
+impl std::fmt::Display for TestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "io error: {e}"),
+            Self::AddrParse(e) => write!(f, "addr parse error: {e}"),
+            Self::Node(e) => write!(f, "node error: {e}"),
+            Self::Mining(e) => write!(f, "mining error: {e}"),
+            Self::MiningControl(e) => write!(f, "mining control error: {e}"),
+            Self::Consensus(e) => write!(f, "consensus decode error: {e}"),
+            Self::Join(e) => write!(f, "join error: {e}"),
+            Self::Elapsed(e) => write!(f, "elapsed: {e}"),
+            Self::Send => write!(f, "send error"),
+            Self::StringError(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for TestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::AddrParse(e) => Some(e),
+            Self::Node(e) => Some(e),
+            Self::Mining(e) => Some(e),
+            Self::MiningControl(e) => Some(e),
+            Self::Consensus(e) => Some(e),
+            Self::Join(e) => Some(e),
+            Self::Elapsed(e) => Some(e),
+            Self::Send | Self::StringError(_) => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for TestError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<std::net::AddrParseError> for TestError {
+    fn from(e: std::net::AddrParseError) -> Self {
+        Self::AddrParse(e)
+    }
+}
+
+impl From<bitcoin_rs_node::NodeError> for TestError {
+    fn from(e: bitcoin_rs_node::NodeError) -> Self {
+        Self::Node(e)
+    }
+}
+
+impl From<bitcoin_rs_mining::MiningError> for TestError {
+    fn from(e: bitcoin_rs_mining::MiningError) -> Self {
+        Self::Mining(e)
+    }
+}
+
+impl From<bitcoin::consensus::encode::Error> for TestError {
+    fn from(e: bitcoin::consensus::encode::Error) -> Self {
+        Self::Consensus(e)
+    }
+}
+
+impl From<tokio::task::JoinError> for TestError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        Self::Join(e)
+    }
+}
+
+impl From<String> for TestError {
+    fn from(s: String) -> Self {
+        Self::StringError(s)
+    }
+}
+
+impl From<&'static str> for TestError {
+    fn from(s: &'static str) -> Self {
+        Self::StringError(s.to_string())
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for TestError {
+    fn from(_: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        Self::Send
+    }
+}
+impl From<bitcoin_rs_mining::MiningControlError> for TestError {
+    fn from(e: bitcoin_rs_mining::MiningControlError) -> Self {
+        Self::MiningControl(e)
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for TestError {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        Self::Elapsed(e)
+    }
+}
+
+impl<T> From<crossbeam_channel::SendError<T>> for TestError {
+    fn from(_: crossbeam_channel::SendError<T>) -> Self {
+        Self::Send
+    }
+}
+
+type TestResult = Result<(), TestError>;
 
 pub(super) fn empty_candidate(parent: u8) -> Arc<Candidate> {
     use bitcoin_rs_mining::{CandidateContext, assemble_candidate};

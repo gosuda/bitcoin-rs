@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
+use super::TestError;
 use alloc::sync::Arc;
-use std::error::Error;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
 use bitcoin_rs_primitives::{
@@ -11,8 +11,7 @@ use bitcoin_rs_primitives::{
 };
 
 #[test]
-fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), Box<dyn Error>>
-{
+fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), TestError> {
     fn weighted(mut tx: Tx, target: u64) -> Tx {
         let padding = usize::try_from(target - tx.weight() - 4).expect("small padding");
         assert!(padding < 253);
@@ -56,7 +55,7 @@ fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<
 }
 
 #[test]
-fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), Box<dyn Error>> {
+fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let mut previous = outpoint(1, 0);
 
@@ -96,7 +95,7 @@ fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), 
 }
 
 #[test]
-fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), Box<dyn Error>> {
+fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
 
     let root = chained_tx(50, outpoint(49, 0));
@@ -151,7 +150,7 @@ fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), B
 }
 
 #[test]
-fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn Error>> {
+fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let parent_tx = multi_output_tx(70, 64);
     let parent_txid = parent_tx.txid();
@@ -182,7 +181,7 @@ fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn raw_pool_view_and_entry_metadata_facts() -> Result<(), Box<dyn Error>> {
+fn raw_pool_view_and_entry_metadata_facts() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let before = pool.sequence_number();
     let tx = chained_tx(80, outpoint(79, 0));
@@ -206,7 +205,7 @@ fn raw_pool_view_and_entry_metadata_facts() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error>> {
+fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     assert_eq!(pool.estimate_fee_rate(2), None);
 

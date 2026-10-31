@@ -1,5 +1,4 @@
 use std::{
-    error::Error,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -20,7 +19,22 @@ fn run(args: &[&str], file: &Path) -> Result<Output, std::io::Error> {
         .output()
 }
 
-fn report(output: &Output) -> Result<Value, Box<dyn Error>> {
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json format error: {0}")]
+    Json(#[from] sonic_rs::Error),
+    #[error("try-from-int error: {0}")]
+    TryFromInt(#[from] std::num::TryFromIntError),
+    #[error("utf8 error: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[cfg(target_os = "linux")]
+    #[error("rustix errno: {0}")]
+    Rustix(#[from] rustix::io::Errno),
+}
+
+fn report(output: &Output) -> Result<Value, TestError> {
     assert!(
         output.status.success(),
         "{}",
@@ -31,8 +45,8 @@ fn report(output: &Output) -> Result<Value, Box<dyn Error>> {
 }
 
 #[test]
-fn core_file_inspection_and_verification_are_distinct_read_only_operations()
--> Result<(), Box<dyn Error>> {
+fn core_file_inspection_and_verification_are_distinct_read_only_operations() -> Result<(), TestError>
+{
     let path = fixture();
     let original = fs::read(&path)?;
     let inspected = report(&run(&["inspect", "--json"], &path)?)?;
@@ -68,8 +82,8 @@ fn core_file_inspection_and_verification_are_distinct_read_only_operations()
 }
 
 #[test]
-fn a_complete_header_can_be_inspected_without_verifying_a_truncated_body()
--> Result<(), Box<dyn Error>> {
+fn a_complete_header_can_be_inspected_without_verifying_a_truncated_body() -> Result<(), TestError>
+{
     let dir = tempdir()?;
     let path = dir.path().join("header-only.dat");
     let original = fs::read(fixture())?;
@@ -86,7 +100,7 @@ fn a_complete_header_can_be_inspected_without_verifying_a_truncated_body()
 }
 
 #[test]
-fn verification_rejects_wrong_network_and_resource_limits() -> Result<(), Box<dyn Error>> {
+fn verification_rejects_wrong_network_and_resource_limits() -> Result<(), TestError> {
     for args in [
         vec!["verify", "--network", "mainnet"],
         vec!["verify", "--network", "regtest", "--max-coins", "199"],
@@ -100,7 +114,7 @@ fn verification_rejects_wrong_network_and_resource_limits() -> Result<(), Box<dy
 }
 
 #[test]
-fn unpinned_base_is_metadata_only_and_never_verifies() -> Result<(), Box<dyn Error>> {
+fn unpinned_base_is_metadata_only_and_never_verifies() -> Result<(), TestError> {
     let dir = tempdir()?;
     let path = dir.path().join("unknown-base.dat");
     let mut bytes = fs::read(fixture())?;
@@ -120,8 +134,7 @@ fn unpinned_base_is_metadata_only_and_never_verifies() -> Result<(), Box<dyn Err
 }
 
 #[test]
-fn corrupt_and_native_files_fail_with_nonzero_status_without_mutation() -> Result<(), Box<dyn Error>>
-{
+fn corrupt_and_native_files_fail_with_nonzero_status_without_mutation() -> Result<(), TestError> {
     let dir = tempdir()?;
     let fixture = fs::read(fixture())?;
     let mut cases = Vec::new();
@@ -155,7 +168,7 @@ fn corrupt_and_native_files_fail_with_nonzero_status_without_mutation() -> Resul
 }
 
 #[test]
-fn help_usage_and_input_errors_have_stable_exit_codes() -> Result<(), Box<dyn Error>> {
+fn help_usage_and_input_errors_have_stable_exit_codes() -> Result<(), TestError> {
     let binary = env!("CARGO_BIN_EXE_bitcoin-rs-snapshot");
     let help = Command::new(binary).arg("--help").output()?;
     assert!(help.status.success());
@@ -176,7 +189,7 @@ fn help_usage_and_input_errors_have_stable_exit_codes() -> Result<(), Box<dyn Er
 
 #[test]
 fn human_output_preserves_the_inspection_and_historical_validation_boundaries()
--> Result<(), Box<dyn Error>> {
+-> Result<(), TestError> {
     let inspected = run(&["inspect"], &fixture())?;
     assert!(inspected.status.success());
     assert!(String::from_utf8(inspected.stdout)?.contains("contents are NOT verified"));
@@ -190,7 +203,7 @@ fn human_output_preserves_the_inspection_and_historical_validation_boundaries()
 
 #[cfg(target_os = "linux")]
 #[test]
-fn pipes_are_rejected_as_inputs() -> Result<(), Box<dyn Error>> {
+fn pipes_are_rejected_as_inputs() -> Result<(), TestError> {
     let dir = tempdir()?;
     let path = dir.path().join("not-a-snapshot.fifo");
     rustix::fs::mkfifoat(

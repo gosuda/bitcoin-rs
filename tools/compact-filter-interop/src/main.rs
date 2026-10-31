@@ -6,14 +6,70 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug)]
+enum InteropError {
+    Usage,
+    ParsePort(std::num::ParseIntError),
+    ParseHeight(std::num::ParseIntError),
+    ConsumerStopped,
+    MissingFilter,
+    FetchBlock(bip157::error::FetchBlockError),
+    HeightMismatch,
+    Timeout(tokio::time::error::Elapsed),
+}
+
+impl std::fmt::Display for InteropError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage => write!(
+                f,
+                "usage: compact-filter-interop LOOPBACK_PORT TARGET_HEIGHT"
+            ),
+            Self::ParsePort(err) => write!(f, "invalid port: {err}"),
+            Self::ParseHeight(err) => write!(f, "invalid height: {err}"),
+            Self::ConsumerStopped => write!(f, "consumer stopped before reaching target"),
+            Self::MissingFilter => write!(f, "target filter was not received"),
+            Self::FetchBlock(err) => write!(f, "failed to fetch block: {err}"),
+            Self::HeightMismatch => write!(f, "fetched block does not match target height"),
+            Self::Timeout(err) => write!(f, "timed out: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for InteropError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ParsePort(err) => Some(err),
+            Self::ParseHeight(err) => Some(err),
+            Self::FetchBlock(err) => Some(err),
+            Self::Timeout(err) => Some(err),
+            Self::Usage | Self::ConsumerStopped | Self::MissingFilter | Self::HeightMismatch => {
+                None
+            }
+        }
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for InteropError {
+    fn from(err: tokio::time::error::Elapsed) -> Self {
+        Self::Timeout(err)
+    }
+}
+
+impl From<bip157::error::FetchBlockError> for InteropError {
+    fn from(err: bip157::error::FetchBlockError) -> Self {
+        Self::FetchBlock(err)
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), InteropError> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 3 {
-        return Err("usage: compact-filter-interop LOOPBACK_PORT TARGET_HEIGHT".into());
+        return Err(InteropError::Usage);
     }
-    let port: u16 = args[1].parse()?;
-    let height: u32 = args[2].parse()?;
+    let port: u16 = args[1].parse().map_err(InteropError::ParsePort)?;
+    let height: u32 = args[2].parse().map_err(InteropError::ParseHeight)?;
     let watched = ScriptBuf::from_bytes(vec![0x52]);
     let (node, mut client) = Builder::new(Network::Regtest)
         .chain_state(ChainState::Checkpoint(HashCheckpoint::from_genesis(
@@ -31,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 Some(info) = client.info_rx.recv() => eprintln!("{info:?}"),
                 Some(warning) = client.warn_rx.recv() => eprintln!("{warning:?}"),
-                event = client.event_rx.recv() => match event.ok_or("consumer stopped before reaching target")? {
+                event = client.event_rx.recv() => match event.ok_or(InteropError::ConsumerStopped)? {
                     Event::IndexedFilter(filter) => {
                         if filter.height() == height { target_hash = Some(filter.block_hash()); }
                         let matched = filter.contains_any(std::iter::once(&watched));
@@ -40,10 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Event::FiltersSynced(update) => {
                         println!("{}", json!({"event": "synced", "height": update.tip.height, "hash": update.tip.hash.to_string()}));
                         if update.tip.height >= height {
-                            let block = client.requester.get_block(target_hash.ok_or("target filter was not received")?).await?;
-                            if block.height != height { return Err("fetched block does not match target height".into()); }
+                            let block = client.requester.get_block(target_hash.ok_or(InteropError::MissingFilter)?).await?;
+                            if block.height != height { return Err(InteropError::HeightMismatch); }
                             println!("{}", json!({"event": "block", "height": block.height, "hash": block.block.block_hash().to_string()}));
-                            return Ok::<(), Box<dyn std::error::Error>>(());
+                            return Ok::<(), InteropError>(());
                         }
                     },
                     _ => {},

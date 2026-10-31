@@ -5,7 +5,7 @@ use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, 
 use parking_lot::{Mutex, RwLock};
 use std::time::Duration;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), crate::test_error::TestError>;
 const NOW: u64 = 2_000_000;
 const INTERRUPTED_STAGE: &str = "mempool-snapshot-interrupted.tmp";
 

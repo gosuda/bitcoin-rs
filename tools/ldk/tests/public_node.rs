@@ -1,7 +1,5 @@
 //! Real public-API consumer on a blocking OS thread; no test-seam or RPC client.
 
-use std::error::Error;
-
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
     WPubkeyHash, Witness, absolute, consensus, hashes::Hash, transaction,
@@ -12,7 +10,25 @@ use futures_executor::block_on;
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 use lightning_block_sync::{BlockData, BlockSource, BlockSourceErrorKind};
 
-type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("node error: {0}")]
+    Node(#[from] NodeError),
+    #[error("bitcoin consensus error: {0}")]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
+    #[error("primitives decode error: {0}")]
+    Primitives(#[from] bitcoin_rs_primitives::DecodeError),
+    #[error("addr parse error: {0}")]
+    AddrParse(#[from] std::net::AddrParseError),
+    #[error("adapter error: {0}")]
+    Adapter(#[from] AdapterError),
+    #[error("block source error: {0}")]
+    BlockSource(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+type TestResult = Result<(), TestError>;
 
 #[test]
 fn public_node_reads_fees_and_admission_refusals() -> TestResult {

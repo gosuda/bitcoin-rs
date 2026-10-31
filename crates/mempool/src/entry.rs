@@ -253,7 +253,8 @@ mod wire_metadata_tests {
     }
 
     #[test]
-    fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), Box<dyn std::error::Error>> {
+    fn wire_metadata_matches_bip141_and_bip144_vectors() -> Result<(), crate::test_error::TestError>
+    {
         let expected_txid = Txid(Hash256::from_str_be(
             "9e3f408ee773b8b6473f7cc02cbdef80644f916cee3981ee0704e279b7cdc6dc",
         )?);

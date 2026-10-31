@@ -204,8 +204,14 @@ const BIP341_VECTORS: [CommitmentVector; 6] = [
     },
 ];
 
+#[derive(Debug, thiserror::Error)]
+enum TestError {
+    #[error("invalid leaf width")]
+    LeafWidth,
+}
+
 #[test]
-fn bip341_published_commitment_vectors() -> Result<(), Box<dyn std::error::Error>> {
+fn bip341_published_commitment_vectors() -> Result<(), TestError> {
     for CommitmentVector {
         control,
         leaf,
@@ -215,7 +221,9 @@ fn bip341_published_commitment_vectors() -> Result<(), Box<dyn std::error::Error
     } in BIP341_VECTORS
     {
         let mut control = fixture_hex(control);
-        let leaf: [u8; 32] = fixture_hex(leaf).try_into().map_err(|_| "leaf width")?;
+        let leaf: [u8; 32] = fixture_hex(leaf)
+            .try_into()
+            .map_err(|_| TestError::LeafWidth)?;
         let leaf = Hash256::from_le_bytes(&leaf);
         let expected_root = fixture_hex(root);
         let actual = compute_taproot_merkle_root(&control, &leaf);

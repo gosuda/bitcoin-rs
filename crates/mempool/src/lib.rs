@@ -23,6 +23,8 @@ mod rolling_min_fee;
 pub mod snapshot;
 pub mod standardness;
 mod submit_package;
+#[cfg(test)]
+pub(crate) mod test_error;
 mod truc;
 
 pub use admission::{

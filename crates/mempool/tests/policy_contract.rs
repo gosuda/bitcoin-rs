@@ -2,9 +2,9 @@
 
 extern crate alloc;
 
+use super::TestError;
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
-use std::error::Error;
 
 use bitcoin_rs_mempool::standardness::{
     AcceptanceRejectReason, StandardnessError, StandardnessPolicy, is_standard_tx,
@@ -100,7 +100,7 @@ fn entry(tx: Tx, vsize: u32, fee: u64) -> MempoolEntry {
 }
 
 #[test]
-fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<(), Box<dyn Error>> {
+fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let low = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     let err = pool
@@ -122,7 +122,7 @@ fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<()
 }
 
 #[test]
-fn configured_min_relay_floor_overrides_the_default() -> Result<(), Box<dyn Error>> {
+fn configured_min_relay_floor_overrides_the_default() -> Result<(), TestError> {
     let limits = MempoolLimits {
         min_relay_fee_sat_per_kvb: 5_000,
         ..MempoolLimits::default()
@@ -152,7 +152,7 @@ struct ConflictFixture {
     child: Tx,
 }
 
-fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
+fn conflict_pool(signaling: bool) -> Result<ConflictFixture, TestError> {
     let sequence = if signaling {
         0xFF_FF_FF_FD
     } else {
@@ -171,7 +171,7 @@ fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
 }
 
 #[test]
-fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(), Box<dyn Error>> {
+fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(), TestError> {
     let fixture = conflict_pool(false)?;
     let mut pool = fixture.pool;
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
@@ -206,7 +206,7 @@ fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(),
 }
 
 #[test]
-fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
+fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), TestError> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
@@ -223,7 +223,7 @@ fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(), Box<dyn Error>> {
+fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(), TestError> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
@@ -237,7 +237,7 @@ fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(
 }
 
 #[test]
-fn replacement_may_add_an_unconfirmed_input() -> Result<(), Box<dyn Error>> {
+fn replacement_may_add_an_unconfirmed_input() -> Result<(), TestError> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
     let unrelated = tx(outpoint(9, 9), 1_000, 0xFF_FF_FF_FF);
@@ -286,8 +286,7 @@ fn fanout_root(label: u8, output_count: usize) -> Tx {
 }
 
 #[test]
-fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<(), Box<dyn Error>>
-{
+fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 2,
         ..MempoolLimits::default()
@@ -308,7 +307,7 @@ fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<
 }
 
 #[test]
-fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), Box<dyn Error>> {
+fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 100,
         cluster_size_vbytes: 250,
@@ -328,7 +327,7 @@ fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), Box<dyn Error>> {
+fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), TestError> {
     let limits = MempoolLimits {
         cluster_count: 2,
         ..MempoolLimits::default()
@@ -386,7 +385,7 @@ fn multiple_dust_outputs_are_not_standard() {
 }
 
 #[test]
-fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>> {
+fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), TestError> {
     let pool = Mempool::new(MempoolLimits::default());
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(pool)),
@@ -545,7 +544,7 @@ fn relative_lock_cases() -> [Case; 7] {
 }
 
 #[test]
-fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn Error>> {
+fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), TestError> {
     let pool = Mempool::new(MempoolLimits::default());
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(pool)),
@@ -583,7 +582,7 @@ fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn Error>> {
+fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), TestError> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let parent = tx_multi(
         &[(outpoint(48, 0), 0xFF_FF_FF_FF)],
@@ -632,7 +631,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
 }
 
 #[test]
-fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<dyn Error>> {
+fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), TestError> {
     let limits = MempoolLimits {
         max_total_bytes: 3 * unit(),
         ..MempoolLimits::default()
@@ -691,7 +690,7 @@ fn preview_spend(
     gateway: &MempoolGateway,
     tag: u8,
     fee: u64,
-) -> Result<Option<AcceptanceRejectReason>, Box<dyn Error>> {
+) -> Result<Option<AcceptanceRejectReason>, TestError> {
     let coin = TxOut {
         value: Amount::from_sat(SPEND_OUTPUT_SATS + fee),
         script_pubkey: Script::from_bytes(p2sh_true_script()),
@@ -726,7 +725,7 @@ fn gateway_over(pool: Mempool) -> MempoolGateway {
     )
 }
 
-fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Error>> {
+fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, TestError> {
     let wide = |label: u8| {
         let mut wide = tx(outpoint(label, 0), 1_000, 0xFF_FF_FF_FF);
         wide.outputs[0].script_pubkey =
@@ -771,8 +770,8 @@ fn pool_after_capacity_eviction(evicted_rate: u64) -> Result<Mempool, Box<dyn Er
 }
 
 #[test]
-fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted()
--> Result<(), Box<dyn Error>> {
+fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted() -> Result<(), TestError>
+{
     let limits = MempoolLimits {
         max_total_bytes: 4 * unit(),
         ..MempoolLimits::default()
@@ -800,7 +799,7 @@ fn mempool_min_fee_stays_at_the_relay_floor_while_nothing_has_been_evicted()
 
 #[test]
 fn mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it()
--> Result<(), Box<dyn Error>> {
+-> Result<(), TestError> {
     const EVICTED_RATE: u64 = 1_000;
     let pool = pool_after_capacity_eviction(EVICTED_RATE)?;
     let relay_floor = pool.min_relay_fee_sat_per_kvb();
@@ -832,8 +831,8 @@ fn mempool_min_fee_remembers_a_capacity_eviction_and_the_preview_enforces_it()
 }
 
 #[test]
-fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life()
--> Result<(), Box<dyn Error>> {
+fn mempool_min_fee_holds_until_a_block_connects_then_halves_each_half_life() -> Result<(), TestError>
+{
     const EVICTED_RATE: u64 = 7_000;
     let mut pool = pool_after_capacity_eviction(EVICTED_RATE)?;
     let floor = EVICTED_RATE + pool.policy_snapshot().incremental_relay_fee_sat_per_kvb;

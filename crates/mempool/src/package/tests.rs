@@ -10,7 +10,7 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness, unix_time_secs,
 };
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), crate::test_error::TestError>;
 
 #[derive(Default)]
 struct Seen(parking_lot::Mutex<Vec<crate::MutationEnvelope>>);

@@ -19,9 +19,7 @@ pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
     if !is_p2wsh(script) {
         return 0;
     }
-    witness
-        .last()
-        .map_or(0, |witness_script| count_accurate(witness_script))
+    witness.last().map_or(0, count_accurate)
 }
 
 pub fn count_tx_legacy(tx: &Tx) -> u32 {
