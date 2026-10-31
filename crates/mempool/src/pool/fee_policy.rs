@@ -23,6 +23,12 @@ impl PolicyStamp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionScope {
+    ComponentOnly,
+    AllEntries,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GraphNode {
     pub(crate) id: Option<EntryId>,
@@ -130,7 +136,7 @@ impl Mempool {
         &self,
         candidates: &[MempoolEntry],
         evicted: &[EntryId],
-        include_all: bool,
+        scope: ProjectionScope,
     ) -> Result<(PolicyGraph, PolicyGraph), RbfError> {
         let excluded: HashSet<_> = evicted.iter().copied().collect();
         let parents: Vec<_> = candidates
@@ -151,7 +157,7 @@ impl Mempool {
         }
         let affected: HashSet<_> = affected.into_iter().collect();
         let mut members = Vec::new();
-        if include_all {
+        if scope == ProjectionScope::AllEntries {
             members.extend(
                 self.entries
                     .iter()

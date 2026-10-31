@@ -23,6 +23,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 mod chunk_order_tests;
 pub(crate) mod fee_policy;
+pub(crate) use fee_policy::ProjectionScope;
 pub(crate) mod package;
 
 #[derive(

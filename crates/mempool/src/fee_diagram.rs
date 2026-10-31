@@ -211,7 +211,7 @@ pub(crate) fn linearize(
                 optimal = Some(flow);
                 break;
             }
-            let reached = flow.reachable(fees.len(), false);
+            let reached = flow.reachable(fees.len());
             let next: Vec<_> = members.iter().copied().filter(|&i| reached[i]).collect();
             if next.is_empty() {
                 return Err(FeeDiagramError::Dependencies);
@@ -223,13 +223,13 @@ pub(crate) fn linearize(
             rate = next_rate;
         }
         let flow = optimal.ok_or(FeeDiagramError::Dependencies)?;
-        let reaches_sink = flow.reachable(fees.len() + 1, true);
+        let reaches_sink = flow.reverse_reachable(fees.len() + 1);
         let mut minimal: Option<Vec<usize>> = None;
         for &member in &members {
             if reaches_sink[member] {
                 continue;
             }
-            let reached = flow.reachable(member, false);
+            let reached = flow.reachable(member);
             let closed: Vec<_> = members.iter().copied().filter(|&i| reached[i]).collect();
             if minimal
                 .as_ref()
@@ -285,17 +285,28 @@ impl Flow {
         });
     }
 
-    fn reachable(&self, start: usize, reverse: bool) -> Vec<bool> {
+    fn reachable(&self, start: usize) -> Vec<bool> {
         let mut reached = vec![false; self.edges.len()];
         let mut queue = VecDeque::from([start]);
         reached[start] = true;
         while let Some(node) = queue.pop_front() {
             for edge in &self.edges[node] {
-                let capacity = if reverse {
-                    self.edges[edge.to][edge.reverse].capacity
-                } else {
-                    edge.capacity
-                };
+                if edge.capacity > 0 && !reached[edge.to] {
+                    reached[edge.to] = true;
+                    queue.push_back(edge.to);
+                }
+            }
+        }
+        reached
+    }
+
+    fn reverse_reachable(&self, start: usize) -> Vec<bool> {
+        let mut reached = vec![false; self.edges.len()];
+        let mut queue = VecDeque::from([start]);
+        reached[start] = true;
+        while let Some(node) = queue.pop_front() {
+            for edge in &self.edges[node] {
+                let capacity = self.edges[edge.to][edge.reverse].capacity;
                 if capacity > 0 && !reached[edge.to] {
                     reached[edge.to] = true;
                     queue.push_back(edge.to);

@@ -22,12 +22,18 @@ pub enum TrucError {
     Descendants,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SiblingEviction {
+    Forbidden,
+    Allowed,
+}
+
 impl Mempool {
     pub(crate) fn truc_conflicts(
         &self,
         tx: &Tx,
         vsize: u32,
-        allow_sibling: bool,
+        sibling_policy: SiblingEviction,
     ) -> Result<(Vec<EntryId>, bool), RbfError> {
         let mut conflicts = self.conflicts_for(tx);
         let mut sibling_eviction = false;
@@ -65,7 +71,7 @@ impl Mempool {
             let replacing_child = descendants.iter().any(|id| conflicts.contains(id));
             if !descendants.is_empty() && !replacing_child {
                 let sibling = descendants.first().copied().filter(|id| {
-                    allow_sibling
+                    sibling_policy == SiblingEviction::Allowed
                         && descendants.len() == 1
                         && self.ancestor_ids_for_entry(*id).len() == 1
                 });

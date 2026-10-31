@@ -3,6 +3,7 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::{
     Mempool,
+    pool::ProjectionScope,
     standardness::{
         AcceptanceRejectReason, MAX_PACKAGE_COUNT, MAX_PACKAGE_WEIGHT, TxAcceptanceFact,
     },
@@ -140,7 +141,7 @@ pub(crate) fn capture_package_checks(
 ) -> PackageChecks {
     PackageChecks {
         graph: pool
-            .projected_graphs(entries, &[], false)
+            .projected_graphs(entries, &[], ProjectionScope::ComponentOnly)
             .map(|(_, after)| after),
         limits: pool.limits,
         truc: pool.check_package_truc(txs, &entries.iter().map(|e| e.vsize).collect::<Vec<_>>()),

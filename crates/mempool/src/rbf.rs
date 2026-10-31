@@ -8,8 +8,9 @@ use hashbrown::HashSet;
 use thiserror::Error;
 
 use crate::mutation::{AdmissionOrigin, RemovalReason};
+use crate::pool::ProjectionScope;
+use crate::truc::SiblingEviction;
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FeeEstimation {
     Estimate,
@@ -373,7 +374,7 @@ impl Mempool {
         fee_estimation: FeeEstimation,
     ) -> Result<ReplacementInputs, RbfError> {
         let (conflicts, sibling_eviction) =
-            self.truc_conflicts(&candidate.tx, candidate.vsize, true)?;
+            self.truc_conflicts(&candidate.tx, candidate.vsize, SiblingEviction::Allowed)?;
         let entry = MempoolEntry::new(
             Arc::clone(&candidate.tx),
             candidate.vsize,
@@ -457,18 +458,23 @@ impl Mempool {
             .checked_sub(removed_memory)
             .and_then(|size| size.checked_add(self.admission_memory(&entry)))
             .ok_or(RbfError::ArithmeticOverflow)?;
-        let include_all = enforcement != LimitEnforcement::Deferred
+        let scope = if enforcement != LimitEnforcement::Deferred
             && self.limits.max_total_bytes > 0
-            && projected_memory > self.limits.max_total_bytes;
-        let graphs = if conflicts.is_empty() && !include_all {
+            && projected_memory > self.limits.max_total_bytes
+        {
+            ProjectionScope::AllEntries
+        } else {
+            ProjectionScope::ComponentOnly
+        };
+        let graphs = if conflicts.is_empty() && scope == ProjectionScope::ComponentOnly {
             None
         } else {
-            Some(self.projected_graphs(core::slice::from_ref(&entry), &evicted, include_all)?)
+            Some(self.projected_graphs(core::slice::from_ref(&entry), &evicted, scope)?)
         };
         let excluded: HashSet<_> = evicted.iter().copied().collect();
         let trim_graph = if let LimitEnforcement::ExpireBeforeTrim(now) = enforcement {
             let expired: HashSet<_> = self.expired_entry_ids(now).into_iter().collect();
-            if include_all && !expired.is_empty() {
+            if scope == ProjectionScope::AllEntries && !expired.is_empty() {
                 let mut excluded_trim = excluded.clone();
                 for &id in &expired {
                     if excluded_trim.insert(id) {
@@ -495,7 +501,10 @@ impl Mempool {
                 };
                 let mut excluded_trim: Vec<_> = excluded_trim.into_iter().collect();
                 excluded_trim.sort_unstable();
-                Some(self.projected_graphs(candidates, &excluded_trim, true)?.1)
+                Some(
+                    self.projected_graphs(candidates, &excluded_trim, ProjectionScope::AllEntries)?
+                        .1,
+                )
             } else {
                 None
             }

@@ -1025,7 +1025,11 @@ impl MempoolGateway {
                 );
             }
             if prepared.rejection.is_none() {
-                match pool.truc_conflicts(&request.tx, prepared.fact.vsize, false) {
+                match pool.truc_conflicts(
+                    &request.tx,
+                    prepared.fact.vsize,
+                    crate::truc::SiblingEviction::Forbidden,
+                ) {
                     Ok(_) => prepared.replacement = ReplacementStage::Package,
                     Err(error) => {
                         prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
@@ -1034,7 +1038,11 @@ impl MempoolGateway {
             }
         } else if prepared.rejection.is_none() {
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
+            let conflict_set = pool.truc_conflicts(
+                &request.tx,
+                prepared.fact.vsize,
+                crate::truc::SiblingEviction::Allowed,
+            );
             let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
                 let entry = MempoolEntry::new(
                     Arc::clone(&request.tx),
