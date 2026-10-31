@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin_rs_chain::ChainError;
+use bitcoin_rs_chain::HookGuard;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::transaction_sigop_cost;
@@ -236,7 +237,8 @@ pub struct MiningService {
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
     state: Mutex<CoordinatorState>,
-    wake: Condvar,
+    wake: Arc<Condvar>,
+    _wake_guard: HookGuard,
     prep: PrepWorker,
 }
 
@@ -252,6 +254,11 @@ impl MiningService {
     ) -> Self {
         let seed = mempool.current_revisions().0;
         let shutdown = shutdown.into();
+        let wake = Arc::new(Condvar::new());
+        let wake_hook = Arc::clone(&wake);
+        let wake_guard = shutdown.on_cancel(move || {
+            wake_hook.notify_all();
+        });
         let shared = Arc::new(PrepShared {
             network,
             coinbase_script: coinbase_script.clone(),
@@ -272,7 +279,8 @@ impl MiningService {
                 seed,
                 ..CoordinatorState::default()
             }),
-            wake: Condvar::new(),
+            wake,
+            _wake_guard: wake_guard,
             prep: PrepWorker::spawn(shared),
         }
     }
@@ -1076,11 +1084,18 @@ struct PrepShared {
 struct PrepWorker {
     shared: Arc<PrepShared>,
     handle: Option<std::thread::JoinHandle<()>>,
+    _wake_guard: HookGuard,
 }
 
 impl PrepWorker {
     fn spawn(shared: Arc<PrepShared>) -> Self {
         let worker = Arc::clone(&shared);
+        let weak_shared = Arc::downgrade(&shared);
+        let wake_guard = shared.shutdown.on_cancel(move || {
+            if let Some(shared) = weak_shared.upgrade() {
+                shared.wake.notify_all();
+            }
+        });
         let handle = match std::thread::Builder::new()
             .name("btcrs-template-prep".into())
             .spawn(move || {
@@ -1100,7 +1115,11 @@ impl PrepWorker {
                 None
             }
         };
-        Self { shared, handle }
+        Self {
+            shared,
+            handle,
+            _wake_guard: wake_guard,
+        }
     }
 
     fn owns_tip(&self, target: Hash256) -> bool {

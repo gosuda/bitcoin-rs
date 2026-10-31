@@ -1,12 +1,12 @@
 //! Per-connection SV1 session state machine, the shared pool core, and the
 //! bounded TCP server.
 
+use bitcoin_rs_chain::{LatchReader, LatchWriter};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -120,7 +120,6 @@ pub struct ServerConfig {
     pub max_frame_bytes: usize,
     pub max_notify_bytes: usize,
     pub poll_interval: Duration,
-    pub accept_poll: Duration,
     pub handshake_timeout: Duration,
     pub idle_timeout: Duration,
     pub frame_timeout: Duration,
@@ -145,7 +144,6 @@ impl ServerConfig {
             max_frame_bytes: 64 * 1024,
             max_notify_bytes: 1024 * 1024,
             poll_interval: Duration::from_millis(100),
-            accept_poll: Duration::from_millis(10),
             handshake_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(300),
             frame_timeout: Duration::from_secs(15),
@@ -190,11 +188,6 @@ impl ServerConfig {
             !self.poll_interval.is_zero() && self.poll_interval <= self.frame_timeout,
             "poll_interval",
             "must be nonzero and at most frame_timeout",
-        )?;
-        require(
-            !self.accept_poll.is_zero(),
-            "accept_poll",
-            "must be nonzero",
         )
     }
 
@@ -361,7 +354,7 @@ struct Shared {
     pool: Arc<PoolCore>,
     accounts: Arc<dyn AccountResolver>,
     observer: Option<Observer>,
-    cancel: AtomicBool,
+    cancel: LatchReader,
     limiter: Arc<ConnectionLimiter>,
     children: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -1018,12 +1011,20 @@ fn run_connection(
     peer: SocketAddr,
     ordinal: u64,
     shared: &Arc<Shared>,
+    cancel: &LatchReader,
 ) -> SessionEnd {
     let config = &shared.config;
     if let Err(end) = configure_stream(&stream, config) {
         return end;
     }
     shared.emit(&ServerEvent::Accepted { peer });
+
+    let Ok(stream_cancel) = stream.try_clone() else {
+        return SessionEnd::Io(io::ErrorKind::Other);
+    };
+    let cancel_guard = cancel.on_cancel(move || {
+        let _ = stream_cancel.shutdown(Shutdown::Both);
+    });
 
     let mut session = SessionState::new(Arc::clone(shared), ordinal, peer);
     let mut inbound = Inbound::new(config.max_frame_bytes);
@@ -1034,13 +1035,18 @@ fn run_connection(
     let mut partial_since: Option<Instant> = None;
 
     let end = loop {
-        if shared.cancel.load(Ordering::Acquire) {
+        if cancel.is_triggered() {
             break SessionEnd::Cancelled;
         }
         let completed_frame =
             match inbound.read(&mut stream, &mut session, &mut out, &mut last_activity) {
                 Ok(completed) => completed,
-                Err(end) => break end,
+                Err(end) => {
+                    if cancel.is_triggered() {
+                        break SessionEnd::Cancelled;
+                    }
+                    break end;
+                }
             };
         let now = Instant::now();
         if completed_frame {
@@ -1077,6 +1083,7 @@ fn run_connection(
     };
     let _peer_gone = flush(&mut stream, &mut out);
     let _peer_gone = stream.shutdown(Shutdown::Both);
+    drop(cancel_guard);
     end
 }
 
@@ -1089,6 +1096,7 @@ pub struct ShutdownReport {
 pub struct Server {
     local_addr: SocketAddr,
     shared: Arc<Shared>,
+    cancel: LatchWriter,
     accept: Option<JoinHandle<(ShutdownReport, Vec<JoinHandle<()>>)>>,
     pending: Vec<JoinHandle<()>>,
 }
@@ -1108,6 +1116,7 @@ fn admit(shared: &Arc<Shared>, stream: TcpStream, peer: &SocketAddr, ordinal: u6
             return;
         }
     };
+    let cancel = shared.cancel.child().reader();
     let slot = ConnectionSlot { _permit: permit };
     let thread_shared = Arc::clone(shared);
     let spawned = thread::Builder::new()
@@ -1115,7 +1124,7 @@ fn admit(shared: &Arc<Shared>, stream: TcpStream, peer: &SocketAddr, ordinal: u6
         .stack_size(config.thread_stack_bytes)
         .spawn(move || {
             let _slot = slot;
-            let end = run_connection(stream, peer_value, ordinal, &thread_shared);
+            let end = run_connection(stream, peer_value, ordinal, &thread_shared, &cancel);
             thread_shared.emit(&ServerEvent::SessionEnded {
                 peer: peer_value,
                 end,
@@ -1156,18 +1165,37 @@ fn accept_loop(
 ) -> (ShutdownReport, Vec<JoinHandle<()>>) {
     let mut report = ShutdownReport::default();
     let mut ordinal = 0_u64;
-    while !shared.cancel.load(Ordering::Acquire) {
+    let loopback = listener.local_addr().ok().map(|addr| match addr {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), v4.port())
+        }
+        SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), v6.port())
+        }
+        other => other,
+    });
+    let _accept_guard = loopback.map(|addr| {
+        shared.cancel.on_cancel(move || {
+            let _ = TcpStream::connect(addr);
+        })
+    });
+    while !shared.cancel.is_triggered() {
         match listener.accept() {
             Ok((stream, peer)) => {
+                if shared.cancel.is_triggered() {
+                    break;
+                }
                 ordinal += 1;
                 admit(shared, stream, &peer, ordinal);
             }
-            Err(error) => match error.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
-                    thread::sleep(shared.config.accept_poll);
+            Err(error) => {
+                if error.kind() != io::ErrorKind::Interrupted {
+                    if shared.cancel.is_triggered() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
                 }
-                _ => thread::sleep(shared.config.accept_poll * 10),
-            },
+            }
         }
         let mut children = locked(&shared.children);
         reap(&mut children, &mut report);
@@ -1202,14 +1230,15 @@ impl Server {
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let listener = TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
+        listener.set_nonblocking(false)?;
         let local_addr = listener.local_addr()?;
+        let cancel = LatchWriter::new();
         let shared = Arc::new(Shared {
             config,
             pool: deps.pool,
             accounts: deps.accounts,
             observer: deps.observer,
-            cancel: AtomicBool::new(false),
+            cancel: cancel.reader(),
             limiter,
             children: Mutex::new(Vec::new()),
         });
@@ -1220,6 +1249,7 @@ impl Server {
         Ok(Self {
             local_addr,
             shared,
+            cancel,
             accept: Some(accept),
             pending: Vec::new(),
         })
@@ -1240,7 +1270,7 @@ impl Server {
     }
 
     pub fn shutdown_until(&mut self, deadline: Instant) -> io::Result<ShutdownReport> {
-        self.shared.cancel.store(true, Ordering::Release);
+        self.cancel.trigger();
         let Some(accept) = self.accept.take() else {
             return self.join_pending_until(deadline, ShutdownReport::default());
         };
@@ -1302,7 +1332,7 @@ impl Server {
     }
 
     fn stop(&mut self) -> ShutdownReport {
-        self.shared.cancel.store(true, Ordering::Release);
+        self.cancel.trigger();
         let mut report = match self.accept.take() {
             Some(handle) => {
                 if let Ok((report, children)) = handle.join() {
@@ -1326,6 +1356,15 @@ impl Server {
             }
         }
         report
+    }
+    #[must_use]
+    pub fn cancel_writer(&self) -> &LatchWriter {
+        &self.cancel
+    }
+
+    #[must_use]
+    pub fn cancel_token(&self) -> LatchReader {
+        self.cancel.reader()
     }
 }
 

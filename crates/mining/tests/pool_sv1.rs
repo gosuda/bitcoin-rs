@@ -2,14 +2,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::support::TestError;
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, FrameError, LineBuffer, Observer, RefusalReason, Server,
-    ServerConfig, ServerDeps, ServerEvent, StaticAccountResolver, prevhash_from_wire,
-    prevhash_to_wire, swap_words,
+    ServerConfig, ServerDeps, ServerEvent, ShutdownReport, StaticAccountResolver,
+    prevhash_from_wire, prevhash_to_wire, swap_words,
 };
 use bitcoin_rs_mining::pool::{
     AcceptedShare, Extranonce, ExtranonceLayout, FoundBlock, Job, JobBookConfig, PoolCore,
@@ -1578,4 +1579,101 @@ fn block_with_tiny_outbox_sheds_before_validation_instead_of_growing_unbounded()
         "a shed block must not reach the node before reservation"
     );
     miner.server.shutdown();
+}
+
+#[test]
+fn cancel_wakes_idle_connection_without_waiting_for_poll_interval() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("user", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let mut config = ServerConfig::new(
+        DifficultyPolicy::new("10.0", "1.0", "100.0")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    config.poll_interval = Duration::from_secs(10);
+    config.frame_timeout = Duration::from_secs(15);
+
+    let (events, observed) = mpsc::sync_channel::<ServerEvent>(16);
+    let observer: Observer = Arc::new(move |event: &ServerEvent| {
+        let _ = events.try_send(event.clone());
+    });
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: Some(observer),
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    let client = TestClient::connect(addr);
+    let accepted = observed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    assert!(matches!(accepted, ServerEvent::Accepted { .. }));
+
+    let (done_tx, done_rx) = mpsc::sync_channel::<ShutdownReport>(1);
+    let join_thread = thread::spawn(move || {
+        let report = server.shutdown();
+        let _ = done_tx.send(report);
+    });
+
+    let report = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("idle session did not wake promptly: {error}"));
+    assert_eq!(report.sessions_joined, 1);
+    join_thread
+        .join()
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    drop(client);
+}
+
+#[test]
+fn cancel_wakes_blocked_accept_loop() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("user", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let config = ServerConfig::new(
+        DifficultyPolicy::new("10.0", "1.0", "100.0")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: None,
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+
+    let (done_tx, done_rx) = mpsc::sync_channel::<ShutdownReport>(1);
+    let join_thread = thread::spawn(move || {
+        let report = server.shutdown();
+        let _ = done_tx.send(report);
+    });
+
+    let report = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|error| panic!("accept loop did not wake promptly: {error}"));
+    assert_eq!(report.sessions_joined, 0);
+    join_thread
+        .join()
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
 }
