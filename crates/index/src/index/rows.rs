@@ -272,9 +272,28 @@ impl PendingRows {
     }
 }
 
-fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp], invert: bool) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveOpsOrientation {
+    Forward,
+    Inverse,
+}
+
+pub(super) fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp]) {
+    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Forward);
+}
+
+pub(super) fn invert_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp]) {
+    apply_live_ops_oriented(batch, ops, LiveOpsOrientation::Inverse);
+}
+
+fn apply_live_ops_oriented(
+    batch: &mut BufferedWriteBatch,
+    ops: &[LiveOp],
+    orientation: LiveOpsOrientation,
+) {
     let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], bool> =
         hashbrown::HashMap::new();
+    let invert = matches!(orientation, LiveOpsOrientation::Inverse);
     let record = |op: &LiveOp| {
         let (row, insert) = match op {
             LiveOp::Insert(row) => (row, !invert),
@@ -326,14 +345,21 @@ pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
             &filter.encode(),
         );
     }
-    apply_live_ops(batch, &rows.live_ops, false);
+    apply_live_ops(batch, &rows.live_ops);
 }
 
-pub(super) fn delete_rows(
-    batch: &mut BufferedWriteBatch,
-    rows: &PendingRows,
-    delete_shared_identity: bool,
-) {
+pub(super) fn delete_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
+    delete_rows_internal(batch, rows);
+}
+
+pub(super) fn delete_rows_with_headers(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
+    delete_rows_internal(batch, rows);
+    for row in &rows.header_rows {
+        batch.delete(ColumnFamily::BlockHeaders, row);
+    }
+}
+
+fn delete_rows_internal(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
@@ -351,12 +377,7 @@ pub(super) fn delete_rows(
     for (hash, _) in &rows.filter_rows {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
     }
-    apply_live_ops(batch, &rows.live_ops, true);
-    if delete_shared_identity {
-        for row in &rows.header_rows {
-            batch.delete(ColumnFamily::BlockHeaders, row);
-        }
-    }
+    invert_live_ops(batch, &rows.live_ops);
 }
 
 #[cfg(test)]

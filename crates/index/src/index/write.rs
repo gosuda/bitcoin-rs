@@ -6,10 +6,10 @@ use super::{
     capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, error::IndexError, prepared::PreparedBatch,
     prepared::PreparedBatchLimits, prepared::PreparedBlock, reader::Indexer, rows::IndexRowBytes,
-    rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
-    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
-    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
-    state::ensure_fence_live, state::resume_capability_reset,
+    rows::PendingRows, rows::delete_rows, rows::delete_rows_with_headers, rows::put_rows,
+    state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY,
+    state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::capture_write_fence,
+    state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
@@ -587,7 +587,11 @@ impl<S: KvStore> IndexWriter<S> {
                     .get(capability)
                     .is_some_and(|watermark| watermark.height >= current.height)
         });
-        delete_rows(&mut store_batch, &prepared.rows, !unselected_keeps_identity);
+        if unselected_keeps_identity {
+            delete_rows(&mut store_batch, &prepared.rows);
+        } else {
+            delete_rows_with_headers(&mut store_batch, &prepared.rows);
+        }
         store_batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,

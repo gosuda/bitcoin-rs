@@ -373,7 +373,11 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
     assert_eq!(rows.encoded_bytes()?, encoded_bytes);
     for delete_shared_identity in [false, true] {
         let mut deletes = BufferedWriteBatch::default();
-        delete_rows(&mut deletes, &rows, delete_shared_identity);
+        if delete_shared_identity {
+            delete_rows_with_headers(&mut deletes, &rows);
+        } else {
+            delete_rows(&mut deletes, &rows);
+        }
         let deletes = deletes.into_ops();
         let expected: Vec<_> = puts
             .iter()
@@ -422,7 +426,11 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
             }
             for invert in [false, true] {
                 let mut batch = BufferedWriteBatch::default();
-                apply_live_ops(&mut batch, &ops, invert);
+                if invert {
+                    invert_live_ops(&mut batch, &ops);
+                } else {
+                    apply_live_ops(&mut batch, &ops);
+                }
                 let mut expected = BTreeMap::new();
                 for key in keys {
                     let matches_key = |op: &&LiveOp| match op {

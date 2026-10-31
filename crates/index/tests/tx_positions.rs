@@ -12,7 +12,7 @@ use bitcoin_rs_index::{
 };
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
@@ -69,7 +69,15 @@ fn script(tag: u8) -> Vec<u8> {
     bytes
 }
 
-fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
+fn tx_legacy(seed: u8, outputs: Vec<TxOut>) -> Tx {
+    tx_with_witness(seed, outputs, Vec::new().into())
+}
+
+fn tx_witness(seed: u8, outputs: Vec<TxOut>) -> Tx {
+    tx_with_witness(seed, outputs, vec![vec![0xab; 71], vec![0xcd; 33]].into())
+}
+
+fn tx_with_witness(seed: u8, outputs: Vec<TxOut>, witness: Witness) -> Tx {
     Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -80,12 +88,7 @@ fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
             },
             script_sig: Script::new(),
             sequence: Sequence::MAX,
-            witness: if witness {
-                vec![vec![0xab; 71], vec![0xcd; 33]]
-            } else {
-                Vec::new()
-            }
-            .into(),
+            witness,
         }],
         outputs,
     }
@@ -102,18 +105,10 @@ fn mixed_block() -> Block {
     Block {
         header: header(),
         txs: vec![
-            tx(1, vec![out(script(0x11), 1_000)], false),
-            tx(
-                2,
-                vec![out(script(0x22), 2_000), out(script(0x11), 3_000)],
-                true,
-            ),
-            tx(3, vec![out(script(0x33), 4_000)], true),
-            tx(
-                4,
-                vec![out(script(0x44), 5_000), out(vec![0x6a, 0x01], 0)],
-                false,
-            ),
+            tx_legacy(1, vec![out(script(0x11), 1_000)]),
+            tx_witness(2, vec![out(script(0x22), 2_000), out(script(0x11), 3_000)]),
+            tx_witness(3, vec![out(script(0x33), 4_000)]),
+            tx_legacy(4, vec![out(script(0x44), 5_000), out(vec![0x6a, 0x01], 0)]),
         ],
     }
 }
