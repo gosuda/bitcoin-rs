@@ -1,4 +1,3 @@
-//! The ordered durable commit between chain mutation and publication.
 use super::error::ApplyError;
 use super::tx_count_delta_for;
 use super::{BlockProvenance, Chainstate, ProvenApply, PublishMode};
@@ -326,8 +325,6 @@ fn resolve_head_anchor(
     }
 }
 
-/// The single fail-closed refusal every recovery step reports, naming the
-/// stored head and the state recovery found.
 fn gap_unrecoverable(
     head: &DurableHead,
     restored: Option<&TipSnapshot>,
@@ -562,9 +559,6 @@ fn apply_replayed_gap_block(
                 handles.validation_engine,
             )?,
         )),
-        // Cold recovery resolves inputs from the UTXO view it is rebuilding,
-        // not the previous run's undo-derived preparation. Still refuse a
-        // corrupt stored undo record through the existing error below.
         Ok(_) | Err(UndoLoadError::Missing { .. }) => None,
         Err(_) => {
             return Err(ApplyError::DurableHeadGapUnrecoverable {

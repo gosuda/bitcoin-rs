@@ -56,7 +56,6 @@ mod serde_opt_hash256 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChainstateRole {
     Ordinary,
-    /// Serves normal node consumers, but rejects reorgs at or below `base_height`.
     AssumedActive {
         base_height: u32,
         #[serde(with = "serde_hash256")]
@@ -104,7 +103,6 @@ pub enum HistoricalAdvance {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssumeUtxoError {
-    /// The snapshot base must have strictly more accumulated work than the applied tip.
     #[error("snapshot base does not have more accumulated work than the applied tip")]
     ActivationBehindTip,
     #[error(
@@ -674,8 +672,6 @@ impl AssumeUtxoManager {
         Ok(())
     }
 
-    /// - On mismatch: fails closed immediately, sets both chainstates to closed,
-    ///   persists [`AssumeUtxoDiskStatus::Failed`], and returns an error.
     pub fn take_pending_activation_witness(&self) -> Option<bitcoin_rs_utxo::V4Witness> {
         self.pending_activation_mint.lock().take()
     }

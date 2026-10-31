@@ -1,12 +1,10 @@
-//! Chainstate-owned idle maintenance: journal durability and retention.
-
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::checkpoint::publisher::CheckpointPublisher;
 use crate::checkpoint::{CheckpointError, CheckpointWrite};
-/// Failures while starting the chainstate maintenance worker.
+
 #[derive(Debug, thiserror::Error)]
 pub enum MaintenanceError {
     #[error("maintenance requires checkpoint configuration")]

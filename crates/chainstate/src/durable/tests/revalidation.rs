@@ -116,8 +116,6 @@ fn commit_spent_script(
         }],
         lock_time: LockTime::ZERO,
     };
-    // An independent transaction-verification boundary confirms the fixture's
-    // script verdict before AssumeValid deliberately skips it during block connect.
     let verdict = bitcoin_rs_consensus::verify_transaction(
         &spend,
         &SpendView(funding, funding_output),
@@ -197,8 +195,6 @@ fn prepare_cold_with_optional_marker(
     };
     let dir = if let Some(dir) = checkpoint_dir {
         if let Some(marker) = marker {
-            // Prove selector validity: without the marker, this accepted checkpoint
-            // restores as ResumeSource::Checkpoint with applied_tip at height 100.
             let baseline = prepare_initial_chainstate(
                 dir.path(),
                 Network::Regtest,
@@ -379,7 +375,6 @@ fn valid_cold_revalidation_reuses_the_durable_receipt() -> TestResult {
                 .is_some()
         );
         assert!(chain.begin_transition().is_ok());
-        // Replay alone cannot retire the marker: publication owns retirement.
         assert_eq!(
             crate::recovery::requires_full_revalidation(dir.path()),
             marker
@@ -453,8 +448,6 @@ fn warm_assume_valid_start_over_an_accepted_checkpoint_reuses_the_durable_receip
         .load()?
         .ok_or(TestError::Missing("missing durable head"))?;
     let _dir = prepare_warm(&mut chain, checkpoint_dir, ValidationMode::AssumeValid)?;
-    // An AssumeValid start trusts the committed gap above an accepted checkpoint,
-    // so scripts are not re-verified and the gap replays to the stored head.
     super::super::reconcile_at_boot(&chain)?;
     let tip = chain
         .applied_tip_snapshot()

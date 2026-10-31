@@ -1,17 +1,3 @@
-//! Executable reference model for the ordered chain-admission pipeline.
-//!
-//! [`step`] is the same machine as `docs/lean/ChainAdmission/Safety.lean`,
-//! where `safety` is proved inductive. `Action` names come from the
-//! `ChainAdmission` TLA actions; `ReleaseWriter`, `AcquireReader` and
-//! `ReleaseReader` name reader-gate control the TLA sub-machines do not carry.
-//! The model folds `Commit.tla` `MarkBody`, `MarkUndo`, `SyncFile` and
-//! `SyncDirectory` into [`Action::Prove`] and [`Action::Commit`], and
-//! `Frontier.tla` Complete into [`Action::Finish`]; `CloseInput` is absent
-//! because the driven owner never closes admission. One
-//! `Chainstate::apply_block` call performs [`Action::Commit`] and
-//! [`Action::Publish`] inside one transition, so those two model steps are
-//! observable only at the call boundary.
-
 pub(crate) const MAX_ATTEMPTS: u32 = 4;
 pub(crate) const JOB_SLOTS: u32 = 12;
 pub(crate) const COUNTER_BOUND: u32 = 1_024;
@@ -31,31 +17,18 @@ pub(crate) struct State {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// TLA `StartJob`: allocate one job slot for a transition from the live tip.
     StartJob,
-    /// TLA `Prove`: stage the candidate block for the next height.
     Prove,
-    /// TLA `Commit`: commit the staged batch to the durable head.
     Commit,
-    /// TLA `Publish`: publish the committed tip to readers and observers.
     Publish,
-    /// TLA `Fail`: a staging or validation refusal commits nothing.
     Fail,
-    /// TLA `Retry`: retry the same candidate under a fresh stamp.
     Retry,
-    /// TLA `Finish`: release the job slot.
     Finish,
-    /// TLA `Admit`: install the staged-tip observer.
     Admit,
-    /// TLA `Serve`: consume one published tip at the observer cursor.
     Serve,
-    /// No TLA action: take the chain-transition reservation (the TLA writer flag).
     AcquireWriter,
-    /// No TLA action: release the chain-transition reservation.
     ReleaseWriter,
-    /// No TLA action: take a stable-view read of the applied tip.
     AcquireReader,
-    /// No TLA action: release the applied-tip read.
     ReleaseReader,
     Stutter,
 }
@@ -101,9 +74,6 @@ impl State {
     }
 }
 
-/// Returns the successor state, or `None` when the action is blocked.
-///
-/// `None` is the Lean model's blocked action, which leaves the state unchanged.
 #[must_use]
 pub(crate) const fn step(state: &State, action: Action) -> Option<State> {
     let next = match action {

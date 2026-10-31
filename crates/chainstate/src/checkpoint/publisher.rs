@@ -1,5 +1,3 @@
-//! Full-checkpoint publication: the chainstate maintenance export.
-
 use arc_swap::ArcSwapOption;
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
@@ -47,15 +45,9 @@ fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), Che
     )
 }
 
-/// How a checkpoint publication treats the disconnect marker.
 #[derive(Clone, Copy)]
 enum DisconnectRetirement {
-    /// Ordinary publication: an `InFlight` marker refuses, and only a
-    /// completed rollback's `RolledBack` marker is disarmed after `CURRENT`.
     Ordinary,
-    /// The disconnect-recovery transaction: reconstruction already made the
-    /// state coherent, so neither phase refuses publication, and the marker
-    /// retires unconditionally after the checkpoint lands.
     Recovered,
     /// Boot replay is still below the durable head. Publish a compaction base
     /// without retiring either recovery marker; a crash must resume recovery,

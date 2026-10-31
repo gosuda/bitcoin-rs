@@ -1,6 +1,5 @@
 use super::*;
 
-/// The applied tip carries the count the checkpoint writes.
 #[test]
 fn checkpoint_transaction_counts_must_agree_when_known() -> TestResult {
     for chain_tx_count in [0, 1] {
@@ -73,9 +72,6 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts()
     Ok(())
 }
 
-/// The ordering claim needs a count disagreement to actually exist: an
-/// UNKNOWN tip count is skipped by validation, which would report the
-/// height error even if count validation ran first.
 #[test]
 fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
 -> TestResult {
@@ -209,8 +205,6 @@ fn authenticated_utxo_value_mutation_requires_resync() -> TestResult {
     Ok(())
 }
 
-/// Fused traversal over live coins disagrees with a stale listener:
-/// publication proceeds exactly as before, but no witness is minted.
 #[test]
 fn publish_gate_withholds_token_on_fused_mismatch() -> TestResult {
     let dir = tempfile::tempdir()?;

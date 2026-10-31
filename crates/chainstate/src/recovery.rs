@@ -1,5 +1,3 @@
-//! Checkpoint selection, journal replay, and fail-closed startup recovery.
-
 use crate::{ChainstateJournalConfig, JournalBootstrap};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_storage::ScriptAttestation;
@@ -11,24 +9,18 @@ use std::path::{Path, PathBuf};
 
 use crate::assumeutxo_snapshot::SnapshotArchiveError;
 
-/// Threshold for classifying a restored checkpoint as catastrophically stale.
 pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResumeSource {
-    /// A pinned snapshot selected by the authoritative durable head.
     Snapshot,
-    /// No checkpoint was accepted, including marker-forced revalidation.
     Cold,
-    /// State came directly from a full checkpoint.
     Checkpoint,
-    /// State came from checkpoint plus committed journal replay.
     Journal,
 }
 
 pub const CHAINSTATE_JOURNAL_DIR: &str = bitcoin_rs_storage::chainstate_journal::JOURNAL_DIR_NAME;
 
-/// Failures while selecting, restoring, or rebuilding the startup chainstate.
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
     #[error(transparent)]
@@ -98,13 +90,6 @@ pub fn requires_full_revalidation(data_dir: &Path) -> bool {
         .is_file()
 }
 
-/// Make a `Full` start execute every script again when the stored chain was not attested as
-/// fully executed: the datadir is marked for a cold rebuild.
-///
-/// # Errors
-///
-/// Fails when the datadir is pruned, because a cold rebuild needs every block body, and when
-/// the attestation or the marker cannot be read or written.
 pub fn require_full_script_attestation(
     data_dir: &Path,
     mode: crate::ValidationMode,

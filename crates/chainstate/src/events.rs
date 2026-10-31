@@ -1,5 +1,3 @@
-//! Coherent chain-event publication and durable process epoch allocation.
-
 use bitcoin_rs_primitives::Hash256;
 use parking_lot::RwLock;
 use std::io;
@@ -15,7 +13,6 @@ const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
 
 const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
 
-/// Failures while opening a datadir and allocating its process epoch.
 #[derive(Debug, thiserror::Error)]
 pub enum DataDirError {
     #[error("read {PROCESS_EPOCH_FILE}")]

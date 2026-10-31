@@ -270,7 +270,6 @@ fn same_block_p2sh_and_witness_sigops_count_toward_the_budget() -> TestResult {
             let program = if witness {
                 [vec![0, 32], Sha256::digest(&script).to_vec()].concat()
             } else {
-                // HASH160 of the script above, independently computed fixture.
                 let hash = vec![
                     0x60, 0xdc, 0xe5, 0xf8, 0x78, 0x81, 0x19, 0xd9, 0x6e, 0x0d, 0x6e, 0xf6, 0x8b,
                     0x00, 0x72, 0x63, 0x85, 0xdc, 0x39, 0xe5,

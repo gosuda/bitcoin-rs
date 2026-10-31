@@ -1,5 +1,3 @@
-//! Payload parsing, transaction planning, and resolved prevout preparation.
-
 use super::SameBlockSpentSet;
 use super::{
     BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
@@ -12,7 +10,6 @@ use hashbrown::HashSet;
 use rayon::prelude::*;
 use std::sync::Arc;
 
-/// Returns true iff `raw` is exactly the consensus serialization of `block`.
 pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     let mut sink = ByteEquality {
         expected: raw,

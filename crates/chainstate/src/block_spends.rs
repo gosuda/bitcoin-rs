@@ -1,5 +1,3 @@
-//! Read-only, receipt-checked access to the existing retained undo owner.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_primitives::{Block, Hash256, deserialize};
 use bitcoin_rs_storage::{DurableHead, pruning::HistoryLease};

@@ -1,5 +1,3 @@
-//! Switching the applied chain from one tip to another.
-
 use crate::{
     ApplyError, ChainTransition, Chainstate, ConnectOutcome, DisconnectError, DisconnectOutcome,
 };

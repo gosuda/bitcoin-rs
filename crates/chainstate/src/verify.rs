@@ -1,5 +1,3 @@
-//! Read-only verification of the newest applied blocks.
-
 use core::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -109,10 +107,6 @@ pub enum VerifyError {
         #[source]
         source: BoundedReadError,
     },
-    /// The chainstate closed for recovery: verification refuses to declare anything
-    /// verified from a chain that can no longer admit mutations.
-    ///
-    /// This names no block; it is fail-closed admission state, not damage.
     #[error("chainstate is closed for recovery")]
     ClosedForRecovery,
     #[error("block verification was interrupted")]
@@ -258,9 +252,6 @@ impl Walk<'_> {
         Ok(checked)
     }
 
-    /// One boundary poll: cancellation first, then fail-closed recovery,
-    /// then process shutdown, then the bounded history pin. A withdrawn pin
-    /// is skipped even when the rows it covered are still readable.
     fn poll_boundaries(&self, height: u32) -> Result<(), Stop> {
         if self
             .cancellation

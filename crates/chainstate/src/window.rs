@@ -1,5 +1,3 @@
-//! Bounded script-proof windows, ordered prefix commits, and failure disposition.
-
 use super::connect::{apply_committed_block_admitted, emit_journal_record};
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
@@ -17,7 +15,6 @@ use std::sync::Arc;
 
 pub(super) const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
 
-/// Serialized block bytes one group may hold before it must commit.
 const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 
 pub(super) enum PublishMode<'a> {
@@ -36,8 +33,6 @@ pub(super) struct PendingBlockCommit {
     /// The derived journal record, emitted at flush — after the batch, so
     /// the journal never leads the durable head.
     pub journal_record: super::connect::BuiltJournalRecord,
-    /// Strength of the scripts this block executed; `None` for a replay that keeps the
-    /// previous attestation.
     pub attestation: Option<bitcoin_rs_storage::ScriptAttestation>,
 }
 

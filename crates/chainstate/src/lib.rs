@@ -1,5 +1,3 @@
-//! Authoritative chainstate mutation: connect, disconnect, and window apply.
-
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
@@ -340,7 +338,6 @@ pub struct ConnectOutcome {
     pub commit_id: u64,
     pub height: u32,
     pub hash: Hash256,
-    /// Transaction ids in block order.
     pub txids: Vec<Txid>,
     pub block_bytes: bytes::Bytes,
     pub raw_txs: Option<Vec<Vec<u8>>>,

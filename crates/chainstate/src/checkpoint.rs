@@ -1,5 +1,3 @@
-//! Checkpoint formats, loading, and publication.
-
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::hex::hex_encode;
@@ -129,7 +127,6 @@ pub enum CheckpointError {
     FullRevalidationMarker(std::io::Error),
 }
 
-/// Failures while attaching a checkpoint publisher to a chainstate.
 #[derive(Debug, Error)]
 pub enum CheckpointSetupError {
     #[error(transparent)]
