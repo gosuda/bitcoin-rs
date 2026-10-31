@@ -50,6 +50,9 @@ pub(crate) mod tx_policy;
 pub(crate) mod tx_relay;
 pub mod wire;
 
+#[cfg(any(test, verification))]
+pub(crate) mod lease_model;
+
 #[cfg(test)]
 mod test_support;
 

@@ -1529,6 +1529,9 @@ impl UtxoView for BlockLocalUtxoView<'_> {
     }
 }
 
+#[cfg(any(test, verification))]
+pub(crate) mod admission_model;
+
 #[cfg(test)]
 mod test_fixtures;
 

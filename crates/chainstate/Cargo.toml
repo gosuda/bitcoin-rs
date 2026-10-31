@@ -64,3 +64,5 @@ sonic-rs.workspace = true
 bitcoin-rs-chainstate = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
+proptest.workspace = true
+proptest-state-machine.workspace = true

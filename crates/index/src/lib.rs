@@ -1,6 +1,9 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+#[cfg(any(test, verification))]
+pub(crate) mod projection_model;
+
 pub mod block_log;
 pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 mod capabilities;

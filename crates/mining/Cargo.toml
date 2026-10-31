@@ -49,6 +49,7 @@ pool-sv2 = [
 [dev-dependencies]
 sonic-rs.workspace = true
 proptest.workspace = true
+proptest-state-machine.workspace = true
 bitcoin.workspace = true
 criterion.workspace = true
 # Own integration tests compile the mempool lib without cfg(test): the gated

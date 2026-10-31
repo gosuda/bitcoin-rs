@@ -60,6 +60,7 @@ bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 proptest.workspace = true
+proptest-state-machine.workspace = true
 tempfile.workspace = true
 
 [[bench]]
