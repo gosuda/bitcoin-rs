@@ -71,6 +71,10 @@ pub struct P2pServiceConfig {
     pub max_peer_connections: usize,
     pub outbound_full_relay_slots: usize,
     pub local_services: ServiceFlags,
+    /// The subversion advertised in the version handshake and reported by
+    /// `getnetworkinfo`; defaults to [`bitcoin_rs_primitives::USER_AGENT`]
+    /// and carries the composed `-uacomment` comments when configured.
+    pub user_agent: String,
     /// Whether connections try BIP324 v2 (see [`ConnectionShared::v2_transport`]).
     pub v2_transport: bool,
     /// The opt-in relay capabilities connections offer: BIP331 ancestor package relay
@@ -104,6 +108,7 @@ impl Default for P2pServiceConfig {
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
             v2_transport: false,
             relay_offers: crate::RelayOffers::default(),
             overlay: crate::overlay::OverlayConfig::default(),
@@ -136,6 +141,7 @@ impl P2pServiceConfig {
     fn apply_to(&self, shared: &mut crate::listener::ConnectionShared) {
         shared.max_inbound = self.max_inbound();
         shared.local_services = self.local_services;
+        shared.user_agent.clone_from(&self.user_agent);
         shared.v2_transport = self.v2_transport;
         shared.relay_offers = self.relay_offers;
         shared.dial_routes = self.overlay.dial_routes();
@@ -926,6 +932,11 @@ impl P2pService {
     #[must_use]
     pub fn local_services(&self) -> bitcoin::p2p::ServiceFlags {
         self.config.local_services
+    }
+
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.config.user_agent
     }
 
     #[must_use]

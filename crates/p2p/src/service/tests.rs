@@ -1255,6 +1255,7 @@ fn anchors_require_automatic_block_relay_and_demonstrated_chain_evidence() {
             1_000_000,
             crate::PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            bitcoin_rs_primitives::USER_AGENT,
         );
         let info = crate::PeerInfo::outbound_from_version(
             address,
@@ -1574,6 +1575,7 @@ fn register_ready_block_peer(table: &crate::PeerTable, addr: PeerEndpoint) -> cr
         0,
         crate::PeerRole::FullRelay,
         ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        bitcoin_rs_primitives::USER_AGENT,
     );
     let info = crate::PeerInfo::outbound_from_version(
         addr,

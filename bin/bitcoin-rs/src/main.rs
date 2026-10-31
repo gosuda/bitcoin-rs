@@ -17,11 +17,36 @@ fn load(
     config::resolve(cli, vars)
 }
 
+/// Core's `-version` output shape (`src/bitcoind.cpp` `ProcessInitCommands`: a
+/// `<client> daemon version <version>` line followed by the license paragraph
+/// from `src/common/license_info.cpp`), rendered with this node's own
+/// identity, workspace version, and license. Core's version number is never
+/// imitated.
+fn version_notice() -> String {
+    format!(
+        "bitcoin-rs daemon version {version}\n\
+         Copyright (C) 2026 The bitcoin-rs developers\n\
+         \n\
+         Please contribute if you find bitcoin-rs useful. \
+         Visit <https://github.com/gosuda/bitcoin-rs> for further information about the software.\n\
+         The source code is available from <https://github.com/gosuda/bitcoin-rs>.\n\
+         \n\
+         This is experimental software.\n\
+         Distributed under the Apache License 2.0, see the accompanying file LICENSE \
+         or <https://www.apache.org/licenses/LICENSE-2.0>\n",
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn main() -> ExitCode {
     let cli = match <config::CliArgs as clap::Parser>::try_parse() {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
+    if cli.version {
+        print!("{}", version_notice());
+        return ExitCode::SUCCESS;
+    }
     let import = (cli.corpus.clone(), cli.manifest.clone(), cli.state.clone());
     let result = config::resolve(cli, std::env::vars_os()).and_then(|config| match import {
         (Some(corpus), Some(manifest), Some(state)) => {
@@ -37,7 +62,10 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("bitcoin-rs: {error:#}");
+            // Core's init errors print `Error: <message>` on stderr
+            // (`InitError` -> `noui.cpp`); the functional framework matches
+            // startup failures against exactly that shape.
+            eprintln!("Error: {error:#}");
             ExitCode::FAILURE
         }
     }

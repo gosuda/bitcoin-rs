@@ -77,6 +77,18 @@ pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
     })
 }
 
+/// Core `src/rpc/server.cpp` `stop`: trips the node's graceful-shutdown latch,
+/// then returns Core's exact status string; the reply is written before
+/// teardown can begin.
+pub(crate) fn stop(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    crate::handlers::ensure_no_params(params)?;
+    let request_shutdown = ctx.shutdown_request.as_ref().ok_or_else(|| {
+        RpcError::Internal("node shutdown control is not attached to this context".to_owned())
+    })?;
+    request_shutdown();
+    Ok(json!("Bitcoin Core stopping"))
+}
+
 pub(crate) fn getmemoryinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let mode = array
@@ -1339,7 +1351,44 @@ pub(crate) fn descriptor_checksum(payload: &str) -> Option<String> {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+
+    #[test]
+    fn stop_returns_core_status_and_triggers_the_attached_shutdown() {
+        let called = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&called);
+        let ctx = Arc::new(
+            Context::new().with_shutdown_request(move || witness.store(true, Ordering::SeqCst)),
+        );
+        let result = stop(&ctx, &json!([])).unwrap_or_else(|err| panic!("stop failed: {err}"));
+        assert_eq!(result, json!("Bitcoin Core stopping"));
+        assert!(
+            called.load(Ordering::SeqCst),
+            "stop must request the node shutdown"
+        );
+    }
+
+    #[test]
+    fn stop_without_attached_node_control_is_an_internal_error() {
+        let ctx = Arc::new(Context::new());
+        let error = match stop(&ctx, &json!([])) {
+            Err(error) => error,
+            Ok(_) => panic!("stop without node control must fail"),
+        };
+        assert!(matches!(error, RpcError::Internal(_)));
+        assert_eq!(error.code(), RpcError::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn stop_rejects_arguments() {
+        let ctx = Arc::new(Context::new().with_shutdown_request(|| ()));
+        let error = match stop(&ctx, &json!([1000])) {
+            Err(error) => error,
+            Ok(_) => panic!("the hidden wait argument is refused"),
+        };
+        assert!(matches!(error, RpcError::InvalidParams(_)));
+    }
 
     #[test]
     fn estimatesmartfee_reports_unavailable_when_estimator_has_no_history() {

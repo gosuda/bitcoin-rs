@@ -529,6 +529,7 @@ mod tests {
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
+            bitcoin_rs_primitives::USER_AGENT,
         );
         version.version = crate::feature::FEATURE_VERSION - 1;
         peer.remote_version = Some(version.clone());
@@ -573,6 +574,7 @@ mod tests {
             0,
             crate::PeerRole::FullRelay,
             bitcoin::p2p::ServiceFlags::NETWORK,
+            bitcoin_rs_primitives::USER_AGENT,
         ));
         let feature = Message::Feature(crate::feature::FeatureAnnouncement::bip332(true));
         assert!(matches!(peer.send(&Message::Verack), Err(PeerError::Io(_))));

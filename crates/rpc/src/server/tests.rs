@@ -1109,6 +1109,64 @@ fn absent_and_null_params_dispatch_as_an_empty_array() {
     }
 }
 
+/// Core accepts `"params": {}` for every method: the object form always runs
+/// through transformNamedArguments (src/rpc/server.cpp), which maps an empty
+/// object to an empty positional array exactly like an absent or null params
+/// field (src/rpc/request.cpp). The framework's zero-argument client calls
+/// serialize exactly this form.
+#[test]
+fn empty_object_params_dispatch_as_an_empty_array() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    for request in [
+        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":{}}"#.as_slice(),
+        br#"{"id":1,"method":"getblockcount","params":{}}"#.as_slice(),
+    ] {
+        let response = handle_json(&handler, request);
+        let body = response.body.expect("empty-object params reply");
+        assert_eq!(response.status, 200, "{request:?}");
+        assert!(
+            body.get("result").is_some(),
+            "an empty params object must dispatch with defaults: {body:?}"
+        );
+    }
+}
+
+/// A non-empty named-object params is bound to positional order per method by
+/// the handler that declares its parameter names
+/// (`handlers::bind_named_params`, mirroring Core's per-command argNames);
+/// this server-level test pins the honest partial coverage: a method without
+/// a name map keeps its local `-32602` (documented in API-02), while a bound
+/// method accepts the same names Core documents.
+#[test]
+fn named_object_params_are_bound_only_by_methods_with_a_name_map() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let refused = handle_json(
+        &handler,
+        br#"{"id":1,"method":"getblockhash","params":{"blockheight":0}}"#,
+    );
+    let body = refused.body.expect("unbound method replies");
+    assert_eq!(
+        body.get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64),
+        Some(-32602),
+        "a method without a name map rejects the named form honestly: {body:?}"
+    );
+
+    // The framework's setnetworkactive(state=False) shape (feature_loadblock)
+    // binds and executes since NG-17's closure.
+    let bound = handle_json(
+        &handler,
+        br#"{"id":1,"method":"setnetworkactive","params":{"state":false}}"#,
+    );
+    let body = bound.body.expect("bound method replies");
+    assert_eq!(body.get("result").and_then(Value::as_bool), Some(false));
+    assert!(
+        !handler.context().network.p2p.network_active(),
+        "the named call must execute the method"
+    );
+}
+
 #[test]
 fn batch_members_keep_per_member_envelope_dialect() {
     let handler = Handler::new(Arc::new(Context::new()));

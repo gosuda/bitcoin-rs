@@ -94,6 +94,8 @@ pub struct ConnectionShared {
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     pub max_inbound: usize,
     pub local_services: ServiceFlags,
+    /// The subversion this node advertises in its version handshake.
+    pub user_agent: String,
     /// Whether connections try BIP324 v2: inbound detects v1 and v2, and
     pub v2_transport: bool,
     pub relay_offers: RelayOffers,
@@ -156,6 +158,7 @@ impl ConnectionShared {
             block_announcer: extras.block_announcer,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            user_agent: bitcoin_rs_primitives::USER_AGENT.to_owned(),
             v2_transport: false,
             relay_offers: RelayOffers::default(),
             overlay: Arc::new(crate::overlay::OverlayTransport::new(Arc::default())),
@@ -965,6 +968,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
         start_height,
         lease.role(),
         shared.advertised_services(),
+        &shared.user_agent,
     );
     for message in outbound_messages {
         peer.send(&message)?;
@@ -1162,6 +1166,7 @@ fn run_handshake(
         nonce,
         0,
         shared.advertised_services(),
+        &shared.user_agent,
         &lease,
         handshake_deadline,
     ) {
@@ -2738,6 +2743,7 @@ fn test_shared(
 #[cfg(test)]
 mod transaction_poll_tests {
     use super::*;
+    use bitcoin_rs_primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct InventoryReads(AtomicUsize);
@@ -2781,6 +2787,7 @@ mod transaction_poll_tests {
             0,
             crate::PeerRole::FullRelay,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
         );
         table.publish_info(
             addr,
@@ -3612,6 +3619,7 @@ mod address_tests {
 #[expect(clippy::expect_used)]
 mod feeler_tests {
     use super::*;
+    use bitcoin_rs_primitives::USER_AGENT;
     use std::sync::atomic::AtomicUsize;
 
     struct Scripted(std::io::Cursor<Vec<u8>>);
@@ -3627,6 +3635,16 @@ mod feeler_tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    fn feeler_version(services: u64) -> crate::Message {
+        crate::Message::Version(crate::handshake::version_message(
+            123,
+            0,
+            crate::PeerRole::FullRelay,
+            ServiceFlags::from(services),
+            USER_AGENT,
+        ))
     }
 
     #[test]
@@ -3687,12 +3705,7 @@ mod feeler_tests {
                     let replacement = crate::PeerLease::new(crossbeam_channel::unbounded().0);
                     remote_table.register(address, replacement);
                 }
-                let sent = peer.send(&crate::Message::Version(crate::handshake::version_message(
-                    123,
-                    0,
-                    crate::PeerRole::FullRelay,
-                    ServiceFlags::from(services),
-                )));
+                let sent = peer.send(&feeler_version(services));
                 if revoked == 0 {
                     sent.expect("VERSION only");
                 }
@@ -3745,6 +3758,7 @@ mod feeler_tests {
                     0,
                     crate::PeerRole::FullRelay,
                     ServiceFlags::from(services),
+                    USER_AGENT,
                 )),
             )
             .expect("wire");
@@ -3805,6 +3819,7 @@ mod feeler_tests {
                     0,
                     crate::PeerRole::FullRelay,
                     ServiceFlags::from(services),
+                    USER_AGENT,
                 )),
             )
             .expect("VERSION");

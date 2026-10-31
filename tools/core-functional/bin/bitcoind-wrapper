@@ -83,7 +83,7 @@ FALSE = {"0", "false", "no", "off"}
 
 # Framework-mandatory or Core-only flags that are always dropped from argv.
 ALWAYS_DROP_ARGV = {
-    "logtimemicros", "logthreadnames", "debug", "debugexclude", "uacomment",
+    "logtimemicros", "logthreadnames", "debug", "debugexclude",
     "shrinkdebugfile", "debuglogfile", "pid", "daemon",
     "daemonwait", "allowignoredconf",
 }
@@ -122,7 +122,7 @@ SOCKET_FLAG_MAP = {
 # carry verbatim when the value satisfies the node's strict parser.
 CONF_PASSTHROUGH = {
     "dbcache", "prune", "txindex", "blockfilterindex", "rest", "dnsseed",
-    "v2transport", "proxyrandomize", "i2pacceptincoming",
+    "v2transport", "proxyrandomize", "i2pacceptincoming", "uacomment",
 }
 CONF_SOCKET_KEYS = {"proxy", "onion", "i2psam", "torcontrol"}
 # conf key -> bitcoin-rs CLI flag prefix it duplicates when both are present.
@@ -137,6 +137,7 @@ CONF_KEY_TO_FLAG = {
     "i2pacceptincoming": "--i2p-accept", "dnsseed": "--dns-seeds-enabled",
     "onlynet": "--onlynet", "proxy": "--proxy", "onion": "--onion-proxy",
     "i2psam": "--i2p-sam", "torcontrol": "--tor-control",
+    "uacomment": "--uacomment",
 }
 WALLET_DROP = {"nowallet", "disablewallet", "wallet", "walletdir", "walletrectx",
                "unsafesqlitesync", "keypool", "fallbackfee", "server",
@@ -256,14 +257,14 @@ class Translation:
             return
         if key == "printtoconsole":
             # Core: 0 routes logs to debug.log and keeps the console silent;
-            # bitcoin-rs has no log-file/console split, so the closest
-            # translation of the framework's printtoconsole=0 is a warn-only
-            # console. Tests assert an empty stderr at stop.
+            # bitcoin-rs has no log-file/console split (NG-6), so the closest
+            # translation of the framework's printtoconsole=0 is the node's
+            # fully silent console level. Tests assert an empty stderr at stop.
             normalized = bool_value(value) if value is not None else "true"
             if normalized is None:
                 self.drop("argv", raw, "unparseable boolean")
             elif normalized == "false":
-                self.out.append("--log-level=warn")
+                self.out.append("--log-level=off")
             return
         if key in WALLET_DROP:
             self.drop("argv", raw, "wallet/server option has no bitcoin-rs equivalent")
@@ -314,6 +315,15 @@ class Translation:
             return
         if key == "v2transport":
             self.push_bool("--v2transport", value, raw)
+            return
+        if key == "uacomment":
+            # Repeatable like Core: every occurrence composes into the
+            # subversion ((c1; c2)), so occurrences append instead of
+            # last-wins. Bare -uacomment carries no comment value.
+            if value:
+                self.out.append(f"--uacomment={value}")
+            else:
+                self.drop("argv", raw, "uacomment requires a value")
             return
         if key == "dnsseed":
             self.push_bool("--dns-seeds-enabled", value, raw)
@@ -417,7 +427,7 @@ class Translation:
                 # See the argv branch: 0 means "console stays quiet" in Core.
                 if bool_value(value) == "false" and not any(
                         flag.startswith("--log-level") for flag in self.out):
-                    self.out.append("--log-level=warn")
+                    self.out.append("--log-level=off")
                 continue
             if key in NETWORKS:
                 if section is None and self.network_value is None and bool_value(value) == "true":

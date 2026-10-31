@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::PeerEndpoint;
+use bitcoin_rs_primitives::{PeerEndpoint, USER_AGENT};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,6 +132,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
                     0,
                     PeerRole::FullRelay,
                     ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+                    USER_AGENT,
                 );
                 announcement.version = version;
                 peer.send(&Message::Version(announcement))?;
@@ -239,6 +240,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
             9,
             0,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
             &lease,
             deadline(),
         )
@@ -414,6 +416,7 @@ fn spawn_decoy_then_ping_writer(
             9,
             0,
             ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            USER_AGENT,
             &writer_lease,
             deadline(),
         )
