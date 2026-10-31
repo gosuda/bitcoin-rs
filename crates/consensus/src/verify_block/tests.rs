@@ -95,7 +95,7 @@ fn check_block_rules(block: &Block, context: BlockRuleContext) -> Result<(), Con
 }
 
 #[test]
-fn non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots() {
+fn live_and_non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots() {
     type Case = (fn(&mut Vec<Tx>), ConsensusError);
     let cases: &[Case] = &[
         (
@@ -116,6 +116,11 @@ fn non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots() {
         ),
         (|txs| txs[1].inputs.clear(), ConsensusError::EmptyInputs),
         (|txs| txs[1].outputs.clear(), ConsensusError::EmptyOutputs),
+        (|txs| txs[0].outputs.clear(), ConsensusError::EmptyOutputs),
+        (
+            |txs| txs[0].outputs[0].value = Amount::from_sat(u64::MAX),
+            ConsensusError::OutputValueOverflow,
+        ),
         (
             |txs| txs[1].outputs[0].value = Amount::from_sat(u64::MAX),
             ConsensusError::OutputValueOverflow,
@@ -154,6 +159,7 @@ fn non_contextual_checks_reject_invalid_transactions_with_valid_merkle_roots() {
         let block = block_with_transactions(txs);
         assert!(verify_merkle_root_with_txids(&block, &block.txids()).is_ok());
         assert_eq!(verify_block_non_contextual(&block), Err(error.clone()));
+        assert_eq!(verify_block_rules(&block), Err(error.clone()));
     }
 }
 
@@ -165,15 +171,22 @@ fn non_contextual_size_and_aggregate_legacy_sigops_have_core_boundaries() {
             Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 10_000]);
     }
     assert!(verify_block_non_contextual(&block_with_transactions(txs.clone())).is_ok());
+    assert!(verify_block_rules(&block_with_transactions(txs.clone())).is_ok());
     txs[1].outputs[0].script_pubkey =
         Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 10_001]);
-    assert_eq!(
-        verify_block_non_contextual(&block_with_transactions(txs)),
-        Err(ConsensusError::SigopsLimit {
-            cost: 80_004,
-            max: 80_000
-        })
-    );
+    let over_limit = block_with_transactions(txs);
+    for result in [
+        verify_block_non_contextual(&over_limit),
+        verify_block_rules(&over_limit),
+    ] {
+        assert_eq!(
+            result,
+            Err(ConsensusError::SigopsLimit {
+                cost: 80_004,
+                max: 80_000
+            })
+        );
+    }
 
     let mut tx = coinbase_tx();
     tx.outputs[0].script_pubkey = Script::from_bytes(vec![0; 1_000_000]);

@@ -76,6 +76,13 @@ Proof: `crates/chainstate/src/durable/tests/revalidation.rs` (script-invalid Fas
 
 ### `RCV-04`: Crash matrix
 
+Both checkpoint-gap and cold replay retain the shared [block admission
+invariants](validation-default.md#block-admission-invariants), including
+coinbase transaction structure. A receipt does not exempt an invalid body from
+these checks. Refusal preserves the durable head and retained evidence, leaves
+only the valid prefix published, and closes admission; it does not reset or
+repair previously committed invalid data.
+
 The crash and error points in this contract and `docs/policies/db-migration.md` produce exactly these results:
 
 | Crash or error point | Recovery result |

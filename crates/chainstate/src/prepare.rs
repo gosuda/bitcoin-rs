@@ -204,7 +204,6 @@ fn run_non_script_checks_only(
     if !tx_plan.needs_local_utxo_overlay {
         txs.par_iter().try_for_each(|tx| {
             if tx.is_coinbase() {
-                bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
                 return Ok(());
             }
             bitcoin_rs_consensus::verify_tx::verify_transaction_non_script(
@@ -220,7 +219,6 @@ fn run_non_script_checks_only(
     let mut view = BlockLocalUtxoView::new(resolved, txs, height, tx_plan.overlay_capacity);
     for (tx_index, (tx, txid)) in (0_u32..).zip(txs.iter().zip(txids)) {
         if tx.is_coinbase() {
-            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx_index, *txid, tx.outputs.len())?;
             continue;
         }
@@ -254,9 +252,7 @@ pub(super) fn verify_block_transactions(
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(view.txs().len(), view.txids().len());
     if tx_plan.only_coinbase {
-        for tx in view.txs() {
-            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
-        }
+        // The shared block rules already checked every transaction's structure.
         return Ok(());
     }
     let skip_scripts = handles.scripts_verified_upstream(provenance, context.height, context.hash);

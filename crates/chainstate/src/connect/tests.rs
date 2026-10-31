@@ -20,6 +20,7 @@ use super::ApplyError;
 use crate::test_fixtures::{handles, seed_genesis};
 
 mod sigops;
+mod transaction_structure;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

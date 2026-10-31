@@ -199,8 +199,8 @@ pub(super) fn apply_block_admitted<'b>(
     {
         bitcoin_rs_consensus::check_signet_block_solution(block, challenge)?;
     }
+    check_block_finality(block, height, locktime_cutoff)?;
     if intent == ApplyIntent::Commit {
-        check_block_finality(block, height, locktime_cutoff)?;
         check_bip34(handles, block, height)?;
     }
     if intent == ApplyIntent::Commit

@@ -17,6 +17,64 @@ use crate::{ApplyError, Chainstate};
 
 mod revalidation;
 
+#[test]
+fn replay_refuses_zero_output_coinbase_and_preserves_committed_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    // RCV-04: old invalid durable data must fail closed, never be reset or
+    // published merely because a receipt or replay provenance exists.
+    for cold in [false, true] {
+        for mode in [
+            crate::ValidationMode::Full,
+            crate::ValidationMode::Fast,
+            crate::ValidationMode::AssumeValid,
+        ] {
+            let (mut chain, mut child) = restored_chainstate()?;
+            chain.validation_mode = mode;
+            child.txs[0].outputs.clear();
+            child.header.merkle_root =
+                bitcoin_rs_chain::regtest_fixture::merkle_root(&child.txs).ok_or("merkle root")?;
+            bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut child)?;
+            let bodies = Arc::new(MemoryBodies::default());
+            let genesis = Network::Regtest.genesis_block();
+            bodies.persist_block_body(0, genesis.block_hash().0, &consensus_bytes(&genesis))?;
+            let hash = child.block_hash().0;
+            let bytes = consensus_bytes(&child);
+            bodies.persist_block_body(1, hash, &bytes)?;
+            let head = install_head(&mut chain, &child, Arc::clone(&bodies))?;
+            let stats = chain.coin_stats.snapshot().to_bytes();
+            if cold {
+                chain.applied_tip.store(None);
+                chain.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+            }
+            let result = super::reconcile_at_boot(&chain);
+            assert!(
+                matches!(
+                    result,
+                    Err(ApplyError::Consensus(
+                        bitcoin_rs_consensus::ConsensusError::EmptyOutputs
+                    ))
+                ),
+                "cold={cold}, mode={mode:?}: {result:?}"
+            );
+            let tip = chain
+                .applied_tip_snapshot()
+                .ok_or("valid prefix remains published")?;
+            assert_eq!((tip.height, tip.hash), (0, genesis.block_hash().0));
+            assert_ne!(chain.chain_snapshot().tip_hash, hash);
+            assert_eq!(chain.utxo.len(), 0);
+            assert_eq!(chain.coin_stats.snapshot().to_bytes(), stats);
+            assert_eq!(chain.durable_head.load()?, Some(head));
+            assert_eq!(bodies.load_block_body(1, hash)?, Some(bytes));
+            assert!(chain.undo_store.load_undo(1, hash)?.is_none());
+            assert!(
+                chain.begin_transition().is_err(),
+                "replay failure closes admission"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Error>> {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis_tip = seed_genesis(&handles)?;
