@@ -5,13 +5,10 @@ use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum FeeDiagramError {
-    /// The fee or accumulated weight exceeds the checked representation.
     #[error("fee diagram arithmetic overflow")]
     Arithmetic,
-    /// A chunk has no positive representable weight.
     #[error("invalid fee diagram weight")]
     Weight,
-    /// Dependency references are inconsistent or cyclic.
     #[error("inconsistent fee diagram dependencies")]
     Dependencies,
 }

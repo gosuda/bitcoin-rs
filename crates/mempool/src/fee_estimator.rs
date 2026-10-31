@@ -13,7 +13,6 @@ const DECAY_FACTOR: f64 = 0.998;
 const MIN_OBSERVATIONS: f64 = 1.0;
 const MAX_PENDING_ENTRIES: usize = 10_000;
 
-/// Fee rate in satoshis per kilo-virtual-byte (sat/kvB).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FeeRate(u64);
 

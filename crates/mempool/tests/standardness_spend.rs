@@ -1,5 +1,3 @@
-//! Consumer-boundary tests for Core's input and witness standardness.
-
 use bitcoin_rs_mempool::standardness::{StandardnessError, is_standard_spend};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,

@@ -4,14 +4,10 @@ use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolLimits {
-    /// Maximum distinct clusters containing direct replacement conflicts.
     pub max_replacement_clusters: u32,
-    /// Bound on dynamic memory usage in bytes; 0 disables size-bound eviction.
     pub max_total_bytes: u64,
     pub min_relay_fee_sat_per_kvb: u64,
-    /// Maximum number of transactions in one cluster, including the candidate.
     pub cluster_count: u32,
-    /// Maximum virtual size of one cluster in vbytes, including the candidate.
     pub cluster_size_vbytes: u64,
 }
 
@@ -29,13 +25,10 @@ impl Default for MempoolLimits {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
-    /// The caller supplied no positive policy size.
     #[error("invalid transaction virtual size")]
     InvalidVirtualSize,
-    /// Fee-policy arithmetic exceeds the supported monetary representation.
     #[error("fee policy arithmetic overflow")]
     FeeArithmetic,
-    /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
     BelowMinRelayFee { tx_rate: u64, min_rate: u64 },
     #[error("too many transactions in cluster")]
@@ -56,9 +49,7 @@ pub struct MempoolPolicySnapshot {
     pub cluster_count: u32,
     pub cluster_size_vbytes: u64,
     pub incremental_relay_fee_sat_per_kvb: u64,
-    /// Replacements do not require BIP125 signaling, so this is always `true`.
     pub full_rbf: bool,
-    /// The graph owner computes exact optimal chunks for immutable snapshots.
     pub optimal: bool,
 }
 
@@ -88,7 +79,7 @@ impl MempoolPolicySnapshot {
 mod tests {
     use super::*;
 
-// POL-01
+    // POL-01
     #[test]
     fn default_snapshot_projects_the_enforced_defaults() {
         let snapshot = MempoolPolicySnapshot::from_enforced(
@@ -104,7 +95,7 @@ mod tests {
         assert!(snapshot.optimal);
     }
 
-// POL-01
+    // POL-01
     #[test]
     fn enforced_cluster_count_rejects_a_joining_transaction() {
         use alloc::sync::Arc;

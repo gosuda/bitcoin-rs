@@ -224,9 +224,7 @@ pub struct ChunkView<'a> {
     pool: &'a Mempool,
     pub members: &'a [EntryId],
     pub txids: &'a [Txid],
-    /// Modified fee of the whole chunk: actual fees plus signed overlays.
     pub modified_fee: i128,
-    /// Charged weight of the whole chunk, the feerate denominator.
     pub charged_weight: u64,
     confirmed: Option<&'a HashSet<EntryId>>,
 }

@@ -402,9 +402,6 @@ impl MempoolGateway {
         )
     }
 
-    /// # Errors
-    ///
-    /// Returns the gateway's refusal; nothing is inserted when this fails.
     pub fn submit_local_transaction(
         &self,
         tx: Arc<Tx>,

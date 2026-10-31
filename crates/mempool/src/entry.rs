@@ -12,19 +12,12 @@ pub struct MempoolEntry {
     pub tx: Arc<Tx>,
     pub txid: Txid,
     pub wtxid: Wtxid,
-    /// Policy-adjusted virtual transaction size in vbytes.
     pub vsize: u32,
-    /// BIP141 virtual transaction size in vbytes.
     pub bip141_vsize: u32,
-    /// Consensus serialization size, including witness, in bytes.
     pub size: u32,
-    /// Consensus transaction weight in weight units.
     pub weight: u64,
-    /// Actual transaction fee in satoshis.
     pub fee: u64,
-    /// Actual fee rate in sat/kvB.
     pub fee_rate: u64,
-    /// Signed mining-only fee adjustment for this transaction.
     pub fee_delta: i64,
     pub ancestor_size: u64,
     pub ancestor_fee: u64,
@@ -32,12 +25,9 @@ pub struct MempoolEntry {
     pub descendant_size: u64,
     pub descendant_fee: u64,
     pub descendant_fee_delta: i128,
-    /// Mempool acceptance time in wall-clock seconds since the Unix epoch.
     pub time: u64,
     pub unbroadcast: bool,
-    /// Chain height at acceptance.
     pub height: u32,
-    /// BIP141 sigop cost, counted against the resolved prevouts.
     pub sigop_cost: u32,
 }
 
@@ -83,7 +73,6 @@ impl MempoolEntry {
         }
     }
 
-    /// Actual fee plus the signed mining-only adjustment.
     #[must_use]
     pub fn modified_fee(&self) -> i128 {
         i128::from(self.fee) + i128::from(self.fee_delta)

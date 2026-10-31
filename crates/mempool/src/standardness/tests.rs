@@ -131,14 +131,11 @@ fn accepts_a_well_formed_bare_multisig() {
 #[test]
 fn accepts_three_of_three_bare_multisig() {
     let key = [0x02_u8; 33];
-    let mut script = vec![opcode::OP_PUSHNUM_1 + 2 /* OP_PUSHNUM_3 */];
+    let mut script = vec![opcode::OP_PUSHNUM_1 + 2];
     for _ in 0..3 {
         script.extend(push_data(&key));
     }
-    script.extend([
-        opcode::OP_PUSHNUM_1 + 2, /* OP_PUSHNUM_3 */
-        opcode::OP_CHECKMULTISIG,
-    ]);
+    script.extend([opcode::OP_PUSHNUM_1 + 2, opcode::OP_CHECKMULTISIG]);
 
     let mut tx = standard_tx(1);
     tx.outputs[0].script_pubkey = script.into();
@@ -152,10 +149,7 @@ fn rejects_one_of_four_bare_multisig() {
     for _ in 0..4 {
         script.extend(push_data(&key));
     }
-    script.extend([
-        opcode::OP_PUSHNUM_1 + 3, /* OP_PUSHNUM_4 */
-        opcode::OP_CHECKMULTISIG,
-    ]);
+    script.extend([opcode::OP_PUSHNUM_1 + 3, opcode::OP_CHECKMULTISIG]);
 
     let mut tx = standard_tx(1);
     tx.outputs[0].script_pubkey = script.into();

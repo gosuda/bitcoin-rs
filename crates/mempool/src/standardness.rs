@@ -47,9 +47,7 @@ const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StandardnessPolicy {
-    /// Fee rate used to classify outputs as dust, in sat/kvB.
     pub dust_relay_fee: u64,
-    /// Maximum aggregate serialized nulldata script bytes, or `None` to disable nulldata.
     pub max_datacarrier_bytes: Option<usize>,
 }
 
@@ -112,11 +110,8 @@ pub fn is_standard_spend(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<(), 
     check_witness_standardness(tx, &prevouts)
 }
 
-/// Bitcoin Core `MAX_PACKAGE_COUNT` for package acceptance / `testmempoolaccept`.
 pub const MAX_PACKAGE_COUNT: usize = 25;
 
-/// Bitcoin Core `MAX_PACKAGE_WEIGHT`: the aggregate weight-unit bound of a
-/// multi-transaction package.
 pub const MAX_PACKAGE_WEIGHT: u64 = 404_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,8 +150,6 @@ pub(crate) struct Bip68Admission<'a> {
     pub resolved_prevouts: Option<&'a HashSet<OutPoint>>,
 }
 
-/// Per-transaction relay sigop limit: one fifth of the block limit,
-/// matching Core v31.1's `MAX_STANDARD_TX_SIGOPS_COST`.
 pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

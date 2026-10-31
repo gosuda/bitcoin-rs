@@ -1,24 +1,16 @@
-//! BIP431 TRUC topology checks over the admitted graph.
-
 use bitcoin_rs_primitives::{Tx, Txid};
 use hashbrown::HashSet;
 use thiserror::Error;
 
 use crate::{EntryId, Mempool, RbfError};
 
-/// A typed TRUC rejection. The public policy reason is `TRUC-violation`.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("TRUC-violation")]
 pub enum TrucError {
-    /// Confirmed transactions may cross versions; unconfirmed parents may not.
     Version,
-    /// A version-3 transaction exceeds 10,000 sigop-adjusted virtual bytes.
     Size,
-    /// A version-3 child exceeds 1,000 sigop-adjusted virtual bytes.
     ChildSize,
-    /// A version-3 transaction would have more than one unconfirmed ancestor.
     Ancestors,
-    /// A version-3 parent would have more than one descendant.
     Descendants,
 }
 

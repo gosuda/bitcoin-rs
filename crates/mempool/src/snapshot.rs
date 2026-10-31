@@ -408,8 +408,6 @@ pub fn save(
     prepare(data_dir, gateway, network, max_bytes, deadline)?.publish()
 }
 
-/// No saved membership, base fee, height or admission token is trusted. A malformed artifact changes
-/// nothing; a budget-limited restore retains only successfully re-admitted rows.
 pub fn restore(
     data_dir: &Path,
     gateway: &MempoolGateway,

@@ -1028,10 +1028,6 @@ impl Mempool {
         }
     }
 
-    /// Estimated live heap of the pool, maintained as entries and links change.
-    ///
-    /// Each entry contributes its transaction heap, its slot in every index, and its links; the
-    /// unit is bytes of memory, not virtual size.
     #[must_use]
     pub const fn dynamic_memory_usage(&self) -> u64 {
         self.derived.inner_usage
@@ -1052,7 +1048,6 @@ impl Mempool {
         entries.saturating_add(links)
     }
 
-    /// Memory released by removing one entry, not counting the mirrored record in each neighbour.
     pub(crate) fn entry_memory(&self, id: EntryId) -> Option<u64> {
         let entry = self.entry(id)?;
         let links = self.links(id)?;
@@ -1064,7 +1059,6 @@ impl Mempool {
         )
     }
 
-    /// Memory an admitted entry adds: its own cost and the link records it creates on both sides.
     pub(crate) fn admission_memory(&self, entry: &MempoolEntry) -> u64 {
         let edges = self.in_pool_parents(&entry.tx).len() + self.in_pool_children(entry.txid).len();
         entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(edges, 2))
@@ -2276,7 +2270,6 @@ pub(crate) const fn chunk_index_memory_per_entry() -> usize {
             + size_of::<crate::chunk_index::ChunkSlot>())
 }
 
-/// Heap one live entry holds apart from its links: the transaction and one record per index.
 pub fn entry_memory_usage(tx: &Tx) -> u64 {
     use core::mem::size_of;
 

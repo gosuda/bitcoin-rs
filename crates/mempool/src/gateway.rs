@@ -85,17 +85,12 @@ where
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ChainChangeError {
-    /// A chain change is already active (the current generation is odd).
     #[error("a chain change is already active")]
     AlreadyActive,
-    /// The reserved odd or even value would overflow `u64`.
     #[error("chain generation overflow")]
     Overflow,
-    /// The compare-exchange from the odd value to the reserved even value
-    /// failed because the generation moved underneath the guard.
     #[error("chain generation changed before finish")]
     GenerationMoved,
-    /// The guard was issued by a different gateway.
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
 }
@@ -108,14 +103,10 @@ pub struct AdmissionRequest {
         bitcoin_rs_primitives::TxOut,
     )>,
     pub prevout_meta: hashbrown::HashMap<OutPoint, crate::PrevoutMeta>,
-    /// Median-time-past of the applied chain tip for BIP113 finality checks.
-    /// Zero disables the locktime cutoff (pre-genesis).
     pub locktime_cutoff: u32,
     pub csv_active: bool,
     pub next_block_script_flags: VerifyFlags,
-    /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
-    /// Wall-clock seconds for the mempool entry timestamp.
     pub time: u64,
     pub height: u32,
     pub origin: AdmissionOrigin,
@@ -131,21 +122,12 @@ pub enum AdmitOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdmitError {
-    /// The chain generation changed between capture and the write-lock
-    /// check. The caller must retry with a fresh stable generation.
     #[error("chain generation changed before admission")]
     GenerationChanged,
-    /// The mempool sequence changed between capture and the write-lock
-    /// check. The caller must retry with fresh facts.
     #[error("mempool sequence changed before admission")]
     MempoolChanged,
-    /// The transaction was rejected by policy. The reason is mempool-owned.
     #[error(transparent)]
     Policy(#[from] crate::standardness::AcceptanceRejectReason),
-    /// The transaction failed consensus verification (finality, duplicate
-    /// inputs, overspend, sigop limits) or failed its input scripts under
-    /// Core's policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp
-    /// `PolicyScriptChecks`).
     #[error("consensus verification failed")]
     Consensus,
 }
@@ -406,15 +388,12 @@ use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
 
 pub trait MempoolObserver: Send + Sync {
-    /// Called once per committed, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BodyInterest {
-    /// Retain accepted transaction bodies until ordered publication.
     Bodies,
-    /// Envelope metadata only; no body retention.
     Metadata,
 }
 
@@ -644,14 +623,10 @@ impl MempoolGateway {
         &self.pool
     }
 
-    /// Read passthrough for lookup callers. Never mutate through this guard:
-    /// mutations must go through the gateway so observers stay in the loop.
     pub fn read(&self) -> RwLockReadGuard<'_, Mempool> {
         self.pool.read()
     }
 
-    /// Returns the exact even chain generation, or `None` when a chain change
-    /// is active (odd) or a failed chain change has closed admission.
     #[must_use]
     pub fn stable_generation(&self) -> Option<u64> {
         let value = self.chain_generation.load(Ordering::Acquire);
@@ -662,8 +637,6 @@ impl MempoolGateway {
         self.chain_generation.load(Ordering::Acquire)
     }
 
-    /// Reserves the next chain-change generation and returns a guard that owns
-    /// the exact odd value and the reserved next even value.
     pub fn begin_chain_change(self: &Arc<Self>) -> Result<ChainChangeGuard, ChainChangeError> {
         let pool_guard = self.pool.write();
         let current = self.chain_generation.load(Ordering::Relaxed);
@@ -1198,7 +1171,6 @@ impl MempoolGateway {
         })
     }
 
-    /// The configured memory ceiling of the underlying pool, in bytes of dynamic memory usage.
     #[must_use]
     pub fn max_total_bytes(&self) -> u64 {
         self.pool.read().limits.max_total_bytes
@@ -1226,15 +1198,11 @@ impl MempoolGateway {
         self.commit_infallible(origin, Mempool::clear)
     }
 
-    /// Commits `pool.prioritise`. Never publishes: prioritisation emits no
-    /// mutation change, so there is nothing to order.
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
         self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
-    /// A successful P2P getdata response completes initial broadcast of this
-    /// exact witness body. Membership and its public sequence do not change.
     pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, false);
     }
@@ -1243,7 +1211,6 @@ impl MempoolGateway {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 
-    /// Atomically rejects pooled dust before applying a fee overlay.
     pub fn prioritise_if_not_dust(
         &self,
         txid: Txid,
@@ -1428,8 +1395,6 @@ impl MempoolGateway {
         }
     }
 
-    /// Invokes `f` for every transaction a BIP152 reconstruction may match:
-    /// each pool entry, then each retained extra not already in the pool.
     pub fn for_each_reconstruction_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
         let pool = self.pool.read();
         for entry in pool.iter_entries() {
@@ -1443,8 +1408,6 @@ impl MempoolGateway {
         }
     }
 
-    /// The pool body for `txid`, else a retained reconstruction extra. Hint
-    /// use only; see [`Self::for_each_reconstruction_identity`].
     #[must_use]
     pub fn reconstruction_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
         let pool = self.pool.read();
@@ -1454,8 +1417,6 @@ impl MempoolGateway {
         self.extra_txn.lock().by_txid(txid).map(|tx| (**tx).clone())
     }
 
-    /// The pool body for `wtxid`, else a retained reconstruction extra. Hint
-    /// use only; see [`Self::for_each_reconstruction_identity`].
     #[must_use]
     pub fn reconstruction_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
         let pool = self.pool.read();
@@ -1531,8 +1492,6 @@ impl MempoolGateway {
     }
 }
 
-/// Owns an active chain-change reservation: the exact odd generation and the
-/// reserved next even value.
 #[derive(Debug)]
 pub struct ChainChangeGuard {
     gateway: Arc<MempoolGateway>,
@@ -1556,7 +1515,6 @@ impl ChainChangeGuard {
         core::ptr::eq(Arc::as_ptr(&self.gateway), gateway)
     }
 
-    /// Compare-exchanges the exact odd value to the reserved even value.
     pub fn finish(self) -> Result<(), ChainChangeError> {
         let prev = self.gateway.chain_generation.compare_exchange(
             self.odd,
