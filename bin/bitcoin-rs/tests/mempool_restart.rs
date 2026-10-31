@@ -8,9 +8,10 @@ use bitcoin::{OutPoint, Sequence, Transaction};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions, helpers};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
-
+use crate::support::TestError;
 use crate::support::wire_peer;
+
+type TestResult<T = ()> = Result<T, TestError>;
 
 fn options(enabled: bool) -> SpawnOptions<'static> {
     SpawnOptions {
@@ -24,9 +25,7 @@ fn options(enabled: bool) -> SpawnOptions<'static> {
     }
 }
 
-fn parent_and_child(
-    node: &mut ProcessNode,
-) -> Result<(Transaction, Transaction), Box<dyn std::error::Error>> {
+fn parent_and_child(node: &mut ProcessNode) -> TestResult<(Transaction, Transaction)> {
     let (point, prevout) = helpers::mature_funding(node)?;
     let script = helpers::funding_address()?.script_pubkey();
     let mut parent = helpers::spend_anyone(point, &prevout, 10_000);
@@ -64,9 +63,13 @@ fn assert_membership(node: &mut ProcessNode, transactions: &[&Transaction]) -> T
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     let ids: Vec<_> = template["transactions"]
         .as_array()
-        .ok_or("template transactions")?
+        .ok_or(TestError::Missing("template transactions"))?
         .iter()
-        .map(|tx| tx["txid"].as_str().ok_or("template txid"))
+        .map(|tx| {
+            tx["txid"]
+                .as_str()
+                .ok_or(TestError::Missing("template txid"))
+        })
         .collect::<Result<_, _>>()?;
     assert_eq!(ids.len(), transactions.len());
     for tx in transactions {
@@ -80,7 +83,7 @@ fn pending_inventory(
     wanted: &Transaction,
     forbidden: Option<&Transaction>,
     name: &str,
-) -> Result<(wire_peer::Peer, Inventory), Box<dyn std::error::Error>> {
+) -> TestResult<(wire_peer::Peer, Inventory)> {
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut peer = wire_peer::Peer::connect(node.p2p_addr, "mempool-restart", name, 0, deadline)?;
     loop {
@@ -238,16 +241,19 @@ fn clean_restart_restores_dependencies_priority_lookup_and_mining() -> TestResul
     let _dir = node.stop_keep_datadir()?;
     assert_ne!(std::fs::read(&file)?, rejected);
     assert!(
-        std::fs::read_dir(file.parent().ok_or("snapshot directory")?)?
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("mempool-snapshot-rejected-")
-                    && std::fs::read(entry.path().join("mempool-snapshot.dat"))
-                        .is_ok_and(|bytes| bytes == rejected)
-            })
+        std::fs::read_dir(
+            file.parent()
+                .ok_or(TestError::Missing("snapshot directory"))?
+        )?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("mempool-snapshot-rejected-")
+                && std::fs::read(entry.path().join("mempool-snapshot.dat"))
+                    .is_ok_and(|bytes| bytes == rejected)
+        })
     );
     let logs = std::fs::read_to_string(evidence.join("stderr.log"))?;
     assert!(logs.contains("mempool snapshot rejected"));

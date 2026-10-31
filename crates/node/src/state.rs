@@ -1,8 +1,7 @@
 use crate::NodeConfig;
+use crate::config::ConfigError;
+use crate::run::RunError;
 use crate::snapshot::SnapshotImportError;
-use anyhow::Context as _;
-use anyhow::Result;
-use anyhow::bail;
 use bitcoin_rs_chain::BlockBodySource;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TipSnapshot;
@@ -36,11 +35,11 @@ mod data_dir_lock;
 #[cfg(feature = "pool")]
 pub(crate) fn lock_pool_directory(
     path: &std::path::Path,
-) -> Result<bitcoin_rs_storage::StoreGuard> {
+) -> core::result::Result<bitcoin_rs_storage::StoreGuard, DataDirLockError> {
     Ok(Arc::new(data_dir_lock::DataDirLock::acquire(path)?))
 }
 mod index;
-mod open;
+pub(crate) mod open;
 mod storage;
 
 pub use data_dir_lock::DataDirLockError;
@@ -183,11 +182,13 @@ impl NodeState {
         self.followers.block_log_reader()
     }
 
-    pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
+    pub(crate) fn block_body_source(
+        &self,
+    ) -> core::result::Result<Arc<dyn BlockBodySource>, RunError> {
         let store = self
             .chainstate
             .block_body_store_handle()
-            .context("running node has no block body store")?;
+            .ok_or(RunError::NoBlockBodyStore)?;
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
@@ -385,13 +386,13 @@ fn build_derived_index_open_spec(
     epoch: u64,
     guard: &bitcoin_rs_storage::StoreGuard,
     seed_slot: Option<bitcoin_rs_utxo::SeedOfferCell>,
-) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
+) -> core::result::Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>, ConfigError> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
     }
     if config.storage.prune_target_mb > 0 {
-        bail!("transaction, script and compact-filter indexing are not compatible with -prune");
+        return Err(ConfigError::PruneWithIndexes);
     }
     let canonical_data_root = config
         .data_dir
@@ -426,7 +427,7 @@ fn build_derived_index_open_spec(
 
 fn index_bundle_directive(
     config: &NodeConfig,
-) -> Result<bitcoin_rs_index::portable::IndexBundleDirective> {
+) -> core::result::Result<bitcoin_rs_index::portable::IndexBundleDirective, ConfigError> {
     use bitcoin_rs_index::portable::{IndexBundleDirective, IndexBundleRequest};
     let request = |dir: &std::path::PathBuf| IndexBundleRequest {
         dir: dir.clone(),
@@ -436,9 +437,7 @@ fn index_bundle_directive(
         (None, None) => Ok(IndexBundleDirective::None),
         (Some(dir), None) => Ok(IndexBundleDirective::Restore(request(dir))),
         (None, Some(dir)) => Ok(IndexBundleDirective::Export(request(dir))),
-        (Some(_), Some(_)) => {
-            bail!("--index-bundle-import and --index-bundle-export are mutually exclusive")
-        }
+        (Some(_), Some(_)) => Err(ConfigError::IndexBundleImportExportExclusive),
     }
 }
 

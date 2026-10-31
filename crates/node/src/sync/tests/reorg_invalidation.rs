@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::TestError;
 
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -36,7 +37,7 @@ type MaturedBodyStore = (
     Arc<Bodies>,
 );
 
-fn matured_chain_with_body_store() -> Result<MaturedBodyStore, Box<dyn std::error::Error>> {
+fn matured_chain_with_body_store() -> Result<MaturedBodyStore, crate::test_support::TestError> {
     let (_, main, _) = matured_chain(101)?;
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
@@ -92,7 +93,7 @@ fn matured_chain_with_body_store() -> Result<MaturedBodyStore, Box<dyn std::erro
 
 #[test]
 fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let handles = Arc::new(handles);
@@ -111,7 +112,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut fork_prev = fork_root_hash;
     let mut fork = Vec::new();
     for height in 101..=102_u32 {
@@ -159,7 +160,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 
     let tip = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("partial switch did not publish a tip"))?;
+        .ok_or(TestError::Missing("published partial-switch tip"))?;
     assert_eq!(
         tip.hash,
         Hash256::from_le_bytes(fork[0].block_hash().as_bytes()),
@@ -189,7 +190,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 }
 
 #[test]
-fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::error::Error>> {
+fn permanent_reorg_failure_invalidates_descendants() -> Result<(), crate::test_support::TestError> {
     let (handles, main, mut bodies) = matured_chain(101)?;
     let handles = Arc::new(handles);
     let followers = crate::chain_effects::ChainFollowers::noop();
@@ -211,7 +212,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let invalid = mined_block_with_prev_hash(fork_root_hash, 101, Vec::new());
     let invalid_id = crate::sync::fixture_insert_header_node(
         &handles,
@@ -277,7 +278,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
 
 #[test]
 fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     let (handles, main, mut bodies) = matured_chain(101)?;
     let handles = Arc::new(handles);
     let adapter = super::super::NodeSyncChain {
@@ -292,7 +293,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or("missing fork root")?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let invalid = mined_block_with_prev_hash(fork_root_hash, 101, Vec::new());
     let invalid_id = crate::sync::fixture_insert_header_node(
         &handles,
@@ -341,14 +342,14 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
 
 #[test]
 fn branch_switch_rejects_a_body_for_another_header_before_mutation()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
     let applied_before = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+        .ok_or(TestError::Missing("applied tip"))?;
     let utxo_len_before = handles.utxo().len();
 
     let fork_root_hash = main[99].block_hash();
@@ -356,7 +357,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut target_coinbase = regtest_fixture::coinbase(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
@@ -400,15 +401,15 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
 }
 
 #[test]
-fn branch_switch_rejects_malformed_body_before_mutation() -> Result<(), Box<dyn std::error::Error>>
-{
+fn branch_switch_rejects_malformed_body_before_mutation()
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::Script;
     let (handles, main, bodies, bodies_store) = matured_chain_with_body_store()?;
     let followers = crate::chain_effects::ChainFollowers::noop();
     let applied_tip = handles.applied_tip_reader();
     let applied_before = applied_tip
         .load_full()
-        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+        .ok_or(TestError::Missing("applied tip"))?;
     let utxo_len_before = handles.utxo().len();
 
     let fork_root_hash = main[99].block_hash();
@@ -416,7 +417,7 @@ fn branch_switch_rejects_malformed_body_before_mutation() -> Result<(), Box<dyn 
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut target_coinbase = regtest_fixture::coinbase(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
@@ -431,9 +432,7 @@ fn branch_switch_rejects_malformed_body_before_mutation() -> Result<(), Box<dyn 
     malformed.truncate(malformed.len() - 1);
     bodies_store
         .persist_block_body(101, target_hash, &malformed)
-        .map_err(|error| {
-            std::io::Error::other(format!("malformed fixture must persist: {error:?}"))
-        })?;
+        .map_err(|_| TestError::ExpectationFailed("malformed fixture persists"))?;
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,

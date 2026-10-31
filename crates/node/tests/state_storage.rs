@@ -3,7 +3,9 @@ use std::sync::Arc;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use metrics::{
     Counter, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
@@ -25,7 +27,7 @@ fn assert_backend_opens(backend: &str) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = temp.path().join(backend);
-    config.storage.backend = backend.parse().map_err(anyhow::Error::msg)?;
+    config.storage.backend = backend.parse().map_err(TestError::message)?;
     config.p2p.listen.clear();
 
     let state = NodeState::open(config, None)?;
@@ -51,7 +53,7 @@ fn assert_chainstate_cache_share(backend: &str) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = temp.path().join(backend);
-    config.storage.backend = backend.parse().map_err(anyhow::Error::msg)?;
+    config.storage.backend = backend.parse().map_err(TestError::message)?;
     config.storage.dbcache_mb = 64;
     config.p2p.listen.clear();
 

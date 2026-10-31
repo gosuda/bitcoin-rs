@@ -1,7 +1,9 @@
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_chain::{NodeStatus, compact_is_met_by};
 use bitcoin_rs_mining::{
@@ -104,7 +106,7 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> Result<()> {
     };
     input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+        .ok_or_else(|| TestError::message("test block has no merkle root"))?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "bad-cb-missing");
@@ -261,7 +263,7 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> Result<()> {
         );
     }
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+        .ok_or_else(|| TestError::message("test block has no merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
@@ -289,7 +291,7 @@ fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> Result<()>
         output.script_pubkey[6] ^= 0xff;
     }
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+        .ok_or_else(|| TestError::message("test block has no merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
@@ -516,7 +518,7 @@ fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> Result<(
         let mut tree = tree.write();
         let genesis_id = tree
             .lookup(genesis.block_hash().into())
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+            .ok_or_else(|| TestError::message("missing genesis"))?;
         tree.insert_node(
             Some(genesis_id),
             invalid.header,
@@ -618,7 +620,7 @@ fn rejection_mapping_for_bad_prev_hash() -> Result<()> {
     let (_state, mining) = regtest_mining()?;
     let mut block = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+        .ok_or_else(|| TestError::message("test block has no merkle root"))?;
     block.header.nonce = 0;
     regtest_fixture::mine_block_to_declared_target(&mut block)?;
     let result = mining.submit_block(BlockPayload::from_local(block))?;
@@ -684,7 +686,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> Result<()> {
             .header
             .nonce
             .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("nonce exhausted while invalidating PoW"))?;
+            .ok_or_else(|| TestError::message("nonce exhausted while invalidating PoW"))?;
     }
     let proposal = mining.get_block_template(BlockTemplateRequest {
         mode: BlockTemplateMode::Proposal(block.clone()),
@@ -764,7 +766,7 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> Result<()> {
         let genesis_id = tree
             .read()
             .lookup(Hash256::from(genesis_hash))
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+            .ok_or_else(|| TestError::message("missing genesis"))?;
         tree.write()
             .insert_node(Some(genesis_id), invalid.header, NodeStatus::Invalid)?;
     }
@@ -787,7 +789,7 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> Result<()> {
         let genesis_id = tree
             .read()
             .lookup(genesis_hash)
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+            .ok_or_else(|| TestError::message("missing genesis"))?;
         tree.write()
             .insert_node(Some(genesis_id), side.header, NodeStatus::HeaderValid)?;
     }
@@ -814,7 +816,7 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> Result<()> {
         let tree = state.chainstate().block_tree_reader();
         tree.read()
             .node_by_hash(child_hash)
-            .ok_or_else(|| anyhow::anyhow!("disconnected child missing from tree"))?
+            .ok_or_else(|| TestError::message("disconnected child missing from tree"))?
             .chain_tx_count
     };
     assert_eq!(
@@ -874,7 +876,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> Result<()> {
         let mut tree = tree.write();
         let genesis_id = tree
             .lookup(genesis_hash)
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+            .ok_or_else(|| TestError::message("missing genesis"))?;
         tree.restore_chain_tx_count(genesis_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)?;
     }
     assert_eq!(

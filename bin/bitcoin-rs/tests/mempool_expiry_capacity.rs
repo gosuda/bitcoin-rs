@@ -1,14 +1,14 @@
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};
-use std::error::Error;
 
+use crate::support::TestError;
 use crate::support::regtest_blocks;
 use regtest_blocks::{block, coinbase, submit};
 
 #[test]
 #[ignore = "manual pinned-Core capacity/expiry comparison"]
-fn core_expires_stale_members_before_capacity_trim() -> Result<(), Box<dyn Error>> {
+fn core_expires_stale_members_before_capacity_trim() -> Result<(), TestError> {
     for (package, native_fee) in [(false, 100), (true, 100), (false, 11_000), (true, 11_000)] {
         let mut core = ProcessNode::spawn_with(
             Kind::Core,
@@ -50,7 +50,7 @@ fn core_expires_stale_members_before_capacity_trim() -> Result<(), Box<dyn Error
             submit(&core, &next)?;
             previous = next.block_hash();
         }
-        let funding = funding.ok_or("funding")?;
+        let funding = funding.ok_or(TestError::Missing("funding"))?;
         let transaction = |index, fee| Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -76,15 +76,17 @@ fn core_expires_stale_members_before_capacity_trim() -> Result<(), Box<dyn Error
             )?;
             count += 1;
             let info = core.rpc("getmempoolinfo", &json!([]))?;
-            let usage = info["usage"].as_u64().ok_or("usage")?;
-            let capacity = info["maxmempool"].as_u64().ok_or("capacity")?;
+            let usage = info["usage"].as_u64().ok_or(TestError::Missing("usage"))?;
+            let capacity = info["maxmempool"]
+                .as_u64()
+                .ok_or(TestError::Missing("capacity"))?;
             let delta = usage - last_usage;
             if capacity - usage < delta {
                 break info;
             }
             last_usage = usage;
             if count >= 119 {
-                return Err("fixture did not approach capacity".into());
+                return Err(TestError::FixtureDidNotApproachCapacity);
             }
         };
         core.rpc("setmocktime", &json!([time + 336 * 3600 + 1]))?;

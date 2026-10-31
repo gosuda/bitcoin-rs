@@ -83,7 +83,9 @@ fn make_consumer(
         TxOut {
             value: Amount::from_sat(50_000),
             script_pubkey: Script::from_bytes(
-                bitcoin::ScriptBuf::from_bytes(vec![0x51]).to_p2sh().into_bytes(),
+                bitcoin::ScriptBuf::from_bytes(vec![0x51])
+                    .to_p2sh()
+                    .into_bytes(),
             ),
         },
         false,

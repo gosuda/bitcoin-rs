@@ -50,6 +50,18 @@ use std::os::unix::ffi::OsStringExt;
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TestError {
+    #[error(transparent)]
+    Bin(#[from] crate::config::BinError),
+    #[error(transparent)]
+    Clap(#[from] clap::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    AddrParse(#[from] std::net::AddrParseError),
+}
+
 fn resolved(args: &[&str], vars: &[(&str, &str)]) -> bitcoin_rs_node::NodeConfig {
     super::load(
         args.iter().copied(),
@@ -64,7 +76,7 @@ fn load_file(
     text: &str,
     args: &[&str],
     vars: impl Iterator<Item = (OsString, OsString)>,
-) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
+) -> Result<bitcoin_rs_node::NodeConfig, TestError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("config");
     std::fs::write(&path, text)?;
@@ -86,7 +98,7 @@ fn bitcoin_conf_is_applied_before_environment_and_cli() {
 }
 
 #[test]
-fn mempool_persistence_resolves_toml_environment_and_cli() -> anyhow::Result<()> {
+fn mempool_persistence_resolves_toml_environment_and_cli() -> Result<(), TestError> {
     let config = load_file(
         "--config",
         "persist_mempool = false\n",
@@ -247,7 +259,7 @@ fn nonloopback_rpc_requires_explicit_auth_on_cli() {
 }
 
 #[test]
-fn public_listener_cli_overrides_environment_and_file() -> anyhow::Result<()> {
+fn public_listener_cli_overrides_environment_and_file() -> Result<(), TestError> {
     let config = load_file(
         "--config",
         "public_bind = '127.0.0.1:8080'\nrpc_max_connections = 4\npublic_max_connections = 32\n",

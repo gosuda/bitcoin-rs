@@ -1,3 +1,4 @@
+use crate::test_support::TestError;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -88,7 +89,7 @@ fn pool_composed_connection_defaults_are_pinned() {
 
 #[cfg(feature = "pool")]
 #[test]
-fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<()> {
+fn pool_layers_preserve_explicit_fields_and_override_policy() -> Result<(), TestError> {
     let base = pool_layer();
     let later = UserConfig {
         pool: crate::options::PoolOverrides {
@@ -101,11 +102,11 @@ fn pool_layers_preserve_explicit_fields_and_override_policy() -> anyhow::Result<
     let config = super::resolve(&[&base, &later])?;
     let pool = config
         .pool
-        .ok_or_else(|| anyhow::anyhow!("enabled pool must resolve"))?;
+        .ok_or(TestError::Missing("pool configuration"))?;
     let expected_datadir = base
         .pool
         .datadir
-        .ok_or_else(|| anyhow::anyhow!("fixture must specify a pool directory"))?;
+        .ok_or(TestError::Missing("pool directory"))?;
     assert_eq!(pool.datadir, expected_datadir);
     assert_eq!(pool.v1_bind, base.pool.v1_bind);
     assert!(pool.sv2_bind.is_none());
@@ -325,7 +326,7 @@ fn default_rpc_auth_uses_a_generated_cookie() {
 }
 
 #[test]
-fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
+fn generated_rpc_cookie_is_private_and_rotates() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join(".cookie");
     std::fs::write(dir.path().join(".cookie.tmp"), "stale")?;
@@ -356,7 +357,7 @@ fn generated_rpc_cookie_is_private_and_rotates() -> anyhow::Result<()> {
 }
 
 #[test]
-fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
+fn overlay_targets_without_routes_are_rejected() -> Result<(), TestError> {
     let onlynet_onion = UserConfig {
         p2p: P2pOverrides {
             onlynet: Some(vec![bitcoin_rs_p2p::PeerNetwork::Onion]),
@@ -419,7 +420,7 @@ fn overlay_targets_without_routes_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
+fn malformed_overlay_connect_targets_are_rejected() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
@@ -427,7 +428,7 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
         });
     let (good_onion_host, _) = good_tor
         .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("formatted Tor endpoint contains port separator"))?;
+        .ok_or(TestError::Missing("Tor endpoint port separator"))?;
 
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
@@ -482,7 +483,8 @@ fn malformed_overlay_connect_targets_are_rejected() -> anyhow::Result<()> {
 }
 
 #[test]
-fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> anyhow::Result<()> {
+fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> Result<(), TestError>
+{
     let good_i2p = format!("{}.b32.i2p:8333", "a".repeat(52));
     let routes_layer = UserConfig {
         p2p: P2pOverrides {
@@ -546,7 +548,7 @@ fn malformed_i2p_with_routes_configured_rejects_target_not_missing_route() -> an
 }
 
 #[test]
-fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> anyhow::Result<()> {
+fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> Result<(), TestError> {
     for target in [
         "drynet4.drivechain.dev:8533",
         "seed.bitcoin.sipa.be:8333",
@@ -566,7 +568,7 @@ fn ordinary_hostname_connect_targets_remain_accepted_at_startup() -> anyhow::Res
 }
 
 #[test]
-fn valid_overlay_connect_targets_enforce_routes() -> anyhow::Result<()> {
+fn valid_overlay_connect_targets_enforce_routes() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [3u8; 32],
@@ -653,7 +655,7 @@ fn privacy_routes_with_default_dns_seeds_are_rejected() {
 }
 
 #[test]
-fn privacy_route_with_dns_disabled_accepts_literal_ip() -> anyhow::Result<()> {
+fn privacy_route_with_dns_disabled_accepts_literal_ip() -> Result<(), TestError> {
     let layer = UserConfig {
         p2p: P2pOverrides {
             proxy: Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
@@ -705,7 +707,7 @@ fn hostname_connect_targets_are_rejected_with_privacy_route() {
 }
 
 #[test]
-fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> anyhow::Result<()> {
+fn typed_overlay_connect_targets_are_accepted_with_dns_disabled() -> Result<(), TestError> {
     let good_tor =
         bitcoin_rs_p2p::endpoint::format_endpoint(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
             key: [9u8; 32],
@@ -848,6 +850,37 @@ fn rpc_rejects_missing_or_public_credentials() {
 
 fn resolved(layers: &[&UserConfig]) -> NodeConfig {
     super::resolve(layers).unwrap_or_else(|error| panic!("valid layered configuration: {error}"))
+}
+
+#[test]
+fn apply_env_routes_unknown_network_through_the_option_parse_variant() {
+    let Err(error) =
+        UserConfig::default().apply_env("BITCOIN_RS_NETWORK", std::ffi::OsStr::new("bogus"))
+    else {
+        panic!("unknown network must fail");
+    };
+    assert!(
+        matches!(
+            error,
+            crate::config::ConfigError::OptionParse(
+                crate::options::OptionParseError::Network { ref value }
+            ) if value == "bogus"
+        ),
+        "apply_env failures must stay typed as ConfigError::OptionParse, got: {error:?}"
+    );
+}
+
+#[test]
+fn pool_suboptions_without_enablement_are_their_own_variant() {
+    let mut layer = UserConfig::default();
+    layer.pool.datadir = Some(PathBuf::from("/tmp/pool-without-flag"));
+    let Err(error) = super::resolve(&[&layer]) else {
+        panic!("pool sub-options require --pool");
+    };
+    assert!(
+        matches!(error, crate::config::ConfigError::PoolSuboptionsWithoutPool),
+        "pool sub-options without --pool must be PoolSuboptionsWithoutPool, got: {error:?}"
+    );
 }
 
 fn basic_auth(auth: &Auth) -> (String, String) {

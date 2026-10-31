@@ -1,4 +1,6 @@
 use super::*;
+use crate::state::open::NodeOpenError;
+use crate::test_support::TestError;
 use sonic_rs::JsonValueTrait as _;
 
 const CRASH_TEST_BACKEND_ENV: &str = "BITCOIN_RS_CRASH_TEST_BACKEND";
@@ -23,7 +25,7 @@ fn crash_test_backend(
 }
 
 #[test]
-fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> anyhow::Result<()> {
+fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -38,7 +40,7 @@ fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> anyhow::Resu
 }
 
 #[test]
-fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
+fn invalidate_block_settles_disconnect_debt() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -66,7 +68,7 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
     let block_two = regtest_fixture::mined_regtest_child_at_time(
         block_one.block_hash(),
         genesis.header.time + 2,
@@ -87,13 +89,13 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
     assert!(current_after > current_before);
     Ok(())
 }
 
 #[test]
-fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()> {
+fn below_base_invalidate_settles_debt_and_reopens_journal() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -126,7 +128,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
 
     crate::reorg::invalidate_block(
         &state.chainstate(),
@@ -139,7 +141,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
     assert!(
         current_after > current_before,
         "settlement must publish the rolled-back checkpoint"
@@ -155,7 +157,7 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("applied tip missing after invalidation"))?;
+        .ok_or(TestError::Missing("applied tip after invalidation"))?;
     assert_eq!(
         (tip.height, tip.hash),
         (0, Hash256::from(genesis.block_hash()))
@@ -177,13 +179,13 @@ fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("rebuilt tip missing"))?;
+        .ok_or(TestError::Missing("rebuilt tip"))?;
     assert_eq!(tip.height, 2);
     Ok(())
 }
 
 #[test]
-fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::Result<()> {
+fn invalidate_preflights_first_replacement_body_before_disconnect() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node-invalidate-preflight");
@@ -212,7 +214,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("active tip missing"))?;
+        .ok_or(TestError::Missing("active tip"))?;
 
     let replacement = regtest_fixture::mined_regtest_child_at_time(
         genesis.block_hash(),
@@ -224,7 +226,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
         .block_tree()
         .read()
         .lookup(Hash256::from(genesis.block_hash()))
-        .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        .ok_or(TestError::Missing("genesis node"))?;
     crate::sync::fixture_insert_header_node(
         &state.chainstate(),
         genesis_id,
@@ -258,7 +260,7 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
 }
 
 #[test]
-fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
+fn switch_to_branch_settles_disconnect_debt() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -284,14 +286,14 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
 
     let genesis_id = state
         .chainstate()
         .block_tree()
         .read()
         .lookup(Hash256::from(genesis.block_hash()))
-        .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        .ok_or(TestError::Missing("genesis node"))?;
     let mut parent = genesis_id;
     let mut previous_hash = genesis.block_hash();
     let mut fork_bodies = HashMap::new();
@@ -329,13 +331,13 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     )?)?
     .get("generation")
     .and_then(sonic_rs::JsonValueTrait::as_u64)
-    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    .ok_or(TestError::Missing("CURRENT generation"))?;
     assert!(current_after > current_before);
     Ok(())
 }
 
 #[test]
-fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
+fn witness_is_published_only_after_current_root_sync() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -355,7 +357,7 @@ fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
     );
     let genesis_hex = config.network.genesis_block_hash().to_string_be();
     let witness = bitcoin_rs_storage::recovery_evidence::read_witness(&data_dir, &genesis_hex)
-        .ok_or_else(|| anyhow::anyhow!("witness must be readable"))?;
+        .ok_or(TestError::Missing("durable witness"))?;
     assert_eq!(witness.height, tip.height);
     assert_eq!(witness.block_hash, tip.hash.to_string_be());
     drop(state);
@@ -364,7 +366,7 @@ fn witness_is_published_only_after_current_root_sync() -> anyhow::Result<()> {
 }
 
 #[test]
-fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()> {
+fn stale_checkpoint_restore_surfaces_warning_not_silence() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -415,7 +417,7 @@ type ForkFixture = (
     HashMap<bitcoin_rs_primitives::Hash256, bitcoin_rs_primitives::BlockPayload>,
 );
 
-fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
+fn forked_regtest_state() -> Result<ForkFixture, TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -441,7 +443,7 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
         .block_tree()
         .read()
         .lookup(Hash256::from(genesis.block_hash()))
-        .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        .ok_or(TestError::Missing("genesis node"))?;
     let mut parent = genesis_id;
     let mut previous_hash = genesis.block_hash();
     let mut fork_bodies = HashMap::new();
@@ -468,7 +470,7 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
 }
 
 #[test]
-fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
+fn switch_to_branch_releases_retention_authority_once() -> Result<(), TestError> {
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
     let handles = state.chainstate();
     assert_eq!(state.storage.retention().active_leases(), 0);
@@ -486,7 +488,7 @@ fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
 }
 
 #[test]
-fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<()> {
+fn switch_to_branch_refuses_history_the_prune_line_crossed() -> Result<(), TestError> {
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
     let handles = state.chainstate();
     let tip_before = handles.applied_tip().load_full().map(|tip| tip.hash);
@@ -517,7 +519,7 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
 fn applied_regtest_chain(
     heights: u32,
     checkpoint_height: u32,
-) -> anyhow::Result<(tempfile::TempDir, NodeState, crate::NodeConfig)> {
+) -> Result<(tempfile::TempDir, NodeState, crate::NodeConfig), TestError> {
     assert!((1..=heights).contains(&checkpoint_height));
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -547,12 +549,12 @@ fn applied_regtest_chain(
 }
 
 #[test]
-fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<()> {
+fn missing_checkpoint_replays_durable_head_chain_at_startup() -> Result<(), TestError> {
     let (_dir, state, config) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("applied tip missing"))?;
+        .ok_or(TestError::Missing("applied tip"))?;
     drop(state);
     std::fs::remove_dir_all(config.data_dir.join("chainstate-checkpoints"))?;
 
@@ -560,7 +562,7 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<
     let tip = reopened
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("replay did not publish an applied tip"))?;
+        .ok_or(TestError::Missing("replayed applied tip"))?;
     assert_eq!(
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
@@ -570,7 +572,7 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<
 }
 
 #[test]
-fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyhow::Result<()> {
+fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> Result<(), TestError> {
     for keep_checkpoint in [false, true] {
         for corrupt_length in [false, true] {
             let (_dir, state, config) = applied_regtest_chain(2, 2)?;
@@ -591,11 +593,13 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
             std::fs::write(&path, &damaged)?;
             let error = NodeState::open(config, None)
                 .err()
-                .ok_or_else(|| anyhow::anyhow!("committed corruption was accepted"))?;
+                .ok_or(TestError::UnexpectedSuccess(
+                    "committed corruption was accepted",
+                ))?;
             assert!(
                 matches!(
-                    error.downcast_ref::<bitcoin_rs_storage::StorageError>(),
-                    Some(bitcoin_rs_storage::StorageError::IncompatibleData(_))
+                    error,
+                    NodeOpenError::Storage(bitcoin_rs_storage::StorageError::IncompatibleData(_))
                 ),
                 "unexpected refusal: {error:#}"
             );
@@ -606,25 +610,28 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
 }
 
 #[test]
-fn startup_verification_refuses_a_corrupt_tip_body() -> anyhow::Result<()> {
+fn startup_verification_refuses_a_corrupt_tip_body() -> Result<(), TestError> {
     use bitcoin_rs_chainstate::verify::VerifyError;
 
     let (_dir, state, config) = applied_regtest_chain(2, 2)?;
     drop(state);
     let path = config.data_dir.join("blocks/blk00000.dat");
     let mut damaged = std::fs::read(&path)?;
-    *damaged
-        .last_mut()
-        .ok_or_else(|| anyhow::anyhow!("empty block file"))? ^= 0xff;
+    *damaged.last_mut().ok_or(TestError::Missing("block file"))? ^= 0xff;
     std::fs::write(&path, &damaged)?;
 
     let error = NodeState::open(config, None)
         .err()
-        .ok_or_else(|| anyhow::anyhow!("a damaged tip body was accepted"))?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "a damaged tip body was accepted",
+        ))?;
     assert!(
         matches!(
-            error.downcast_ref::<VerifyError>(),
-            Some(VerifyError::Binding { height: 2, .. })
+            error,
+            NodeOpenError::StartupVerification {
+                source: VerifyError::Binding { height: 2, .. },
+                ..
+            }
         ),
         "unexpected refusal: {error:#}"
     );
@@ -637,14 +644,14 @@ fn startup_verification_refuses_a_corrupt_tip_body() -> anyhow::Result<()> {
 }
 
 #[test]
-fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> anyhow::Result<()> {
+fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> Result<(), TestError> {
     use std::io::Write as _;
 
     let (_dir, state, config) = applied_regtest_chain(2, 2)?;
     let tip = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("missing fixture tip"))?;
+        .ok_or(TestError::Missing("fixture tip"))?;
     drop(state);
     let path = config.data_dir.join("blocks/blk00000.dat");
     let committed = std::fs::read(&path)?;
@@ -665,12 +672,12 @@ fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> anyhow::Resu
 }
 
 #[test]
-fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
+fn full_revalidation_marker_resumes_on_durable_head() -> Result<(), TestError> {
     let (_dir, state, config) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("applied tip missing"))?;
+        .ok_or(TestError::Missing("applied tip"))?;
     drop(state);
     let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
     std::fs::create_dir_all(&journal_dir)?;
@@ -683,7 +690,7 @@ fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
     let tip = reopened
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("replay did not publish an applied tip"))?;
+        .ok_or(TestError::Missing("replayed applied tip"))?;
     assert_eq!(
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
@@ -693,12 +700,12 @@ fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
 }
 
 #[test]
-fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<()> {
+fn cold_revalidation_relieves_journal_pressure_and_retries() -> Result<(), TestError> {
     let (_dir, state, mut config) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("applied tip missing"))?;
+        .ok_or(TestError::Missing("applied tip"))?;
     drop(state);
 
     config.chainstate_journal.max_journal_mib = 1;
@@ -721,7 +728,7 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
     let tip = reopened
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("cold replay did not publish an applied tip"))?;
+        .ok_or(TestError::Missing("cold-replayed applied tip"))?;
     assert_eq!(
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
@@ -757,7 +764,7 @@ fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<(
     let landed = restarted
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("restart at the retention limit did not land"))?;
+        .ok_or(TestError::Missing("restart at the retention limit"))?;
     assert_eq!(
         (landed.hash, landed.height),
         (remembered_tip.hash, remembered_tip.height)
@@ -784,13 +791,13 @@ fn plan_fork(
     fork_height: u32,
     depth: u32,
     time_base: u32,
-) -> anyhow::Result<ForkPlan> {
+) -> Result<ForkPlan, TestError> {
     let ancestor = {
         let tree = state.chainstate().block_tree_reader();
         let tree = tree.read();
-        let tip = tree.tip().ok_or_else(|| anyhow::anyhow!("no chain tip"))?;
+        let tip = tree.tip().ok_or(TestError::Missing("chain tip"))?;
         tree.node_at_height_from(tip.tip_id, fork_height)
-            .ok_or_else(|| anyhow::anyhow!("no active node at height {fork_height}"))?
+            .ok_or(TestError::Missing("active node at the fork height"))?
     };
     let ancestor_hash = state.chainstate().block_tree().read().node(ancestor)?.hash;
     let mut parent = ancestor;
@@ -822,17 +829,15 @@ fn plan_fork(
 }
 
 #[test]
-fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyhow::Result<()> {
+fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> Result<(), TestError> {
     let (_dir, state, _config) = applied_regtest_chain(620, 320)?;
     let (deep_tip, deep_bodies, _deep_order) = plan_fork(&state, 20, 2, 1_400_000_000)?;
     let (shallow_tip, shallow_bodies, _shallow_order) = plan_fork(&state, 400, 2, 1_500_000_000)?;
     let Some(service) = state.prune_service() else {
-        anyhow::bail!("prune service should exist when prune_target_mb > 0");
+        return Err(TestError::Missing("prune service with prune_target_mb > 0"));
     };
 
-    service
-        .prune_to_height(30)
-        .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
+    service.prune_to_height(30).map_err(TestError::from)?;
     let handles = state.chainstate();
     assert_eq!(state.storage.retention().pruned_below(), 30);
 
@@ -865,14 +870,14 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
     let landed = handles
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("reorg must publish a tip"))?;
+        .ok_or(TestError::Missing("reorg-published tip"))?;
     assert_eq!(landed.height, 402);
     assert_eq!(state.storage.retention().active_leases(), 0);
     Ok(())
 }
 
 #[test]
-fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Result<()> {
+fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> Result<(), TestError> {
     const STAGED_PREFIX: u32 = 16;
     let (_dir, state, _config) = applied_regtest_chain(320, 1)?;
     let (fork_tip, fork_bodies, ordered) = plan_fork(&state, 20, 300, 1_600_000_000)?;
@@ -883,10 +888,10 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
     let height_of = std::sync::Arc::new(height_of);
 
     let (_ref_dir, reference, _ref_config) = applied_regtest_chain(20, 1)?;
-    for (height, hash) in &ordered {
+    for (_height, hash) in &ordered {
         let block = fork_bodies
             .get(hash)
-            .ok_or_else(|| anyhow::anyhow!("fork body {height} missing from the plan"))?;
+            .ok_or(TestError::Missing("fork body in the plan"))?;
         reference.apply_block(block)?;
     }
 
@@ -928,36 +933,36 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
     let landed = handles
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("reorg must publish a tip"))?;
+        .ok_or(TestError::Missing("reorg-published tip"))?;
     let reference_tip = reference
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("reference must publish a tip"))?;
+        .ok_or(TestError::Missing("reference-published tip"))?;
     assert_eq!(landed.hash, reference_tip.hash);
     assert_eq!(landed.height, reference_tip.height);
     let restored = state
         .chainstate()
         .applied_tip_reader()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("restored node must publish a tip"))?;
+        .ok_or(TestError::Missing("restored-node published tip"))?;
     assert_eq!(restored.chain_tx_count, reference_tip.chain_tx_count);
     assert_eq!(state.storage.retention().active_leases(), 0);
     Ok(())
 }
 
 #[test]
-fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::Result<()> {
+fn restart_without_periodic_publication_restores_tip_and_commit_id() -> Result<(), TestError> {
     let (_dir, state, config) = applied_regtest_chain(4, 1)?;
     let head = state
         .storage
         .durable_head()
         .load()?
-        .ok_or_else(|| anyhow::anyhow!("applied chain must have a durable head"))?;
+        .ok_or(TestError::Missing("durable head"))?;
     let pre_tip = state
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("applied tip missing before restart"))?;
+        .ok_or(TestError::Missing("applied tip before restart"))?;
     assert_eq!(pre_tip.height, 4);
     drop(state);
 
@@ -966,14 +971,14 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("restart must publish a tip"))?;
+        .ok_or(TestError::Missing("restart-published tip"))?;
     assert_eq!(landed.as_ref(), pre_tip.as_ref());
     assert_eq!(landed.height, head.height);
     let restored = reopened
         .storage
         .durable_head()
         .load()?
-        .ok_or_else(|| anyhow::anyhow!("head must survive the restart"))?;
+        .ok_or(TestError::Missing("surviving durable head"))?;
     assert_eq!(restored.tip, head.tip);
     assert_eq!(restored.commit_id, head.commit_id);
     assert!(matches!(
@@ -987,7 +992,7 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::
         .chainstate()
         .applied_tip()
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("second restart must publish a tip"))?;
+        .ok_or(TestError::Missing("second-restart published tip"))?;
     assert_eq!(landed.hash, head.tip);
     assert_eq!(landed.height, head.height);
     Ok(())

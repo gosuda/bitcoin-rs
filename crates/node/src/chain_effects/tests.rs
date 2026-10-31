@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::TestError;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_mempool::{
@@ -124,7 +125,7 @@ fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
 }
 
 #[test]
-fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> anyhow::Result<()> {
+fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
     let hash = Hash256::from(genesis.block_hash());
     let publisher = Arc::new(RecordingPublisher::default());
@@ -158,7 +159,7 @@ fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> anyhow::R
 }
 
 #[test]
-fn disconnect_does_not_pop_a_different_tail() -> anyhow::Result<()> {
+fn disconnect_does_not_pop_a_different_tail() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let followers = ChainFollowers::noop();
@@ -189,7 +190,7 @@ impl bitcoin_rs_mining::MempoolSequenceWake for ReceiptWake {
 }
 
 #[test]
-fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> anyhow::Result<()> {
+fn gatewayless_connect_publishes_an_empty_receipt_for_the_tip() -> Result<(), TestError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = genesis_tip(&genesis)?;
     let wake = Arc::new(ReceiptWake::default());
@@ -248,7 +249,7 @@ fn orphan_child(outpoint: OutPoint) -> Arc<Tx> {
     })
 }
 
-fn genesis_tip(block: &bitcoin_rs_primitives::Block) -> anyhow::Result<TipSnapshot> {
+fn genesis_tip(block: &bitcoin_rs_primitives::Block) -> Result<TipSnapshot, TestError> {
     let mut tree = BlockTree::new();
     let tip_id = tree.insert_node(None, block.header, NodeStatus::HeaderValid)?;
     let node = tree.node(tip_id)?;
@@ -272,8 +273,8 @@ fn followers_with_gateway(gateway: &Arc<MempoolGateway>) -> ChainFollowers {
 }
 
 #[test]
-fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events() -> anyhow::Result<()>
-{
+fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events()
+-> Result<(), TestError> {
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
@@ -287,7 +288,7 @@ fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events() -
         .with_tx_index(Some(Arc::new(DerivedIndexRuntime::new(wake_tx))));
     let fence = followers
         .begin_mempool_change()?
-        .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
+        .ok_or(TestError::Missing("fence"))?;
     followers.on_snapshot();
     assert!(gateway.read().is_empty());
     assert!(gateway.stable_generation().is_none());
@@ -300,7 +301,7 @@ fn snapshot_reconciles_empty_pool_and_index_without_fabricating_block_events() -
 }
 
 #[test]
-fn snapshot_retries_each_resident_orphan_once_after_settlement() -> anyhow::Result<()> {
+fn snapshot_retries_each_resident_orphan_once_after_settlement() -> Result<(), TestError> {
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
@@ -369,13 +370,13 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> anyhow::Resu
     let accepted = retries
         .iter()
         .find(|retry| retry.wtxid == available.wtxid())
-        .ok_or_else(|| anyhow::anyhow!("snapshot did not schedule the newly funded orphan"))?;
+        .ok_or(TestError::Missing("funded orphan retry"))?;
     assert_eq!(accepted.source, replacement);
     assert!(matches!(accepted.result, Ok(SubmitOutcome::Committed(_))));
     let retained = retries
         .iter()
         .find(|retry| retry.wtxid == missing.wtxid())
-        .ok_or_else(|| anyhow::anyhow!("snapshot lost the still-missing orphan"))?;
+        .ok_or(TestError::Missing("retained orphan retry"))?;
     assert_eq!(retained.source, missing_source);
     assert!(matches!(retained.result, Ok(SubmitOutcome::Held { .. })));
     assert!(gateway.read().contains_txid(&available.txid()));
@@ -389,7 +390,7 @@ fn snapshot_retries_each_resident_orphan_once_after_settlement() -> anyhow::Resu
     Ok(())
 }
 
-fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Result<()> {
+fn assert_admission_followers_after_chain_change(connect: bool) -> Result<(), TestError> {
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
@@ -489,19 +490,19 @@ fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Resul
 }
 
 #[test]
-fn connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry() -> anyhow::Result<()>
-{
+fn connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry()
+-> Result<(), TestError> {
     assert_admission_followers_after_chain_change(true)
 }
 
 #[test]
 fn disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry()
--> anyhow::Result<()> {
+-> Result<(), TestError> {
     assert_admission_followers_after_chain_change(false)
 }
 
 #[test]
-fn active_chain_change_is_retryable_not_shutdown() -> anyhow::Result<()> {
+fn active_chain_change_is_retryable_not_shutdown() -> Result<(), TestError> {
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
@@ -521,7 +522,8 @@ fn active_chain_change_is_retryable_not_shutdown() -> anyhow::Result<()> {
 }
 
 #[test]
-fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> anyhow::Result<()> {
+fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> Result<(), TestError>
+{
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -560,7 +562,7 @@ fn committed_connect_settlement_failure_retains_outcome_and_forbids_retry() -> a
 }
 
 #[test]
-fn mining_reports_a_committed_settlement_failure_as_accepted() -> anyhow::Result<()> {
+fn mining_reports_a_committed_settlement_failure_as_accepted() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");

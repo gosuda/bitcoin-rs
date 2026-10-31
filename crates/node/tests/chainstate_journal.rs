@@ -1,4 +1,6 @@
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_chainstate::ApplyError;

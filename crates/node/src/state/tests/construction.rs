@@ -1,7 +1,9 @@
 use super::*;
+use crate::state::open::NodeOpenError;
+use crate::test_support::TestError;
 
 #[test]
-fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
+fn runtime_accessors_borrow_their_subsystem_owner() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -31,7 +33,7 @@ fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
 
 #[cfg(feature = "zmq")]
 #[test]
-fn zmq_publisher_handle_reports_active_metadata() -> anyhow::Result<()> {
+fn zmq_publisher_handle_reports_active_metadata() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -74,7 +76,7 @@ fn zmq_publisher_handle_reports_active_metadata() -> anyhow::Result<()> {
 }
 
 #[test]
-fn inbound_blocks_channel_is_bounded_against_flood() -> anyhow::Result<()> {
+fn inbound_blocks_channel_is_bounded_against_flood() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -95,7 +97,7 @@ fn inbound_blocks_channel_is_bounded_against_flood() -> anyhow::Result<()> {
 }
 
 #[test]
-fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
+fn inbound_tx_channel_is_bounded_against_flood() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -129,7 +131,7 @@ fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
 }
 
 #[test]
-fn new_datadir_initializes_current_schema_before_storage() -> anyhow::Result<()> {
+fn new_datadir_initializes_current_schema_before_storage() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -149,7 +151,7 @@ fn new_datadir_initializes_current_schema_before_storage() -> anyhow::Result<()>
 }
 
 #[test]
-fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result<()> {
+fn unmarked_nonempty_datadir_is_refused_without_modification() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("legacy-node");
@@ -158,10 +160,16 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result
     std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
     let data_dir = config.data_dir.clone();
-    let error = match NodeState::open(config, None) {
-        Ok(_) => anyhow::bail!("unmarked legacy datadir was accepted"),
-        Err(error) => format!("{error:#}"),
+    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+        source,
+        ..
+    })) = NodeState::open(config, None)
+    else {
+        return Err(TestError::ExpectationFailed(
+            "unmarked legacy datadir is refused with ValidateSchema",
+        ));
     };
+    let error = source.to_string();
     assert!(error.contains("implicitly schema epoch 0"));
     assert!(error.contains("resync"));
     assert!(
@@ -176,7 +184,7 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result
 }
 
 #[test]
-fn overlay_identity_dir_is_rooted_in_data_dir() -> anyhow::Result<()> {
+fn overlay_identity_dir_is_rooted_in_data_dir() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
 
     let mut config_a = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -206,7 +214,7 @@ fn overlay_identity_dir_is_rooted_in_data_dir() -> anyhow::Result<()> {
 }
 
 #[test]
-fn mismatched_datadir_schema_is_refused_before_storage_opens() -> anyhow::Result<()> {
+fn mismatched_datadir_schema_is_refused_before_storage_opens() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("old-node");
@@ -220,12 +228,38 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> anyhow::Result
     )?;
 
     let data_dir = config.data_dir.clone();
-    let Err(error) = NodeState::open(config, None) else {
-        anyhow::bail!("mismatched datadir schema unexpectedly opened");
+    let Err(NodeOpenError::DataDir(bitcoin_rs_chainstate::events::DataDirError::ValidateSchema {
+        source,
+        ..
+    })) = NodeState::open(config, None)
+    else {
+        return Err(TestError::ExpectationFailed(
+            "mismatched datadir schema is refused with ValidateSchema",
+        ));
     };
-    let message = format!("{error:#}");
+    let message = source.to_string();
     assert!(message.contains("CURRENT_SCHEMA is not the current datadir schema epoch"));
     assert!(message.contains("full resync"));
     assert!(!data_dir.join("chainstate").exists());
+    Ok(())
+}
+
+#[test]
+fn datadir_refusal_when_path_is_a_regular_file_is_typed() -> Result<(), TestError> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = dir.path().join("occupied");
+    config.p2p.listen.clear();
+    std::fs::write(&config.data_dir, b"not a directory")?;
+
+    let Err(error) = NodeState::open(config, None) else {
+        return Err(TestError::message(
+            "a regular file as data_dir must refuse to open",
+        ));
+    };
+    assert!(
+        matches!(error, NodeOpenError::CreateDataDir { .. }),
+        "datadir creation failure must be NodeOpenError::CreateDataDir, got: {error:?}"
+    );
     Ok(())
 }

@@ -5,11 +5,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 
-use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde::de::{Error as _, MapAccess, Visitor};
 
-use crate::config::{NetworkSelection, NotificationConfig, ScriptIndexMode};
+use crate::config::{ConfigError, NetworkSelection, NotificationConfig, ScriptIndexMode};
 use bitcoin::hex::FromHex;
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
@@ -110,11 +109,11 @@ pub fn parse_validation_engine(
     })
 }
 
-fn parse_bool(value: &str) -> Result<bool> {
+fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
-        other => bail!("invalid boolean {other}"),
+        other => Err(ConfigError::InvalidBoolean(other.to_owned())),
     }
 }
 
@@ -153,26 +152,25 @@ pub fn parse_peer_network(
         .parse()
         .map_err(|expected| OptionParseError::PeerNetwork { expected })
 }
-fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>> {
+fn parse_peer_networks(value: &str) -> Result<Vec<bitcoin_rs_p2p::PeerNetwork>, OptionParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
     value
         .split(',')
         .map(|network| parse_peer_network(network.trim()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
-    value
-        .split(',')
-        .filter(|part| !part.trim().is_empty())
-        .map(|part| Ok(part.trim().parse()?))
         .collect()
 }
 
-fn parse_connect_list(value: &str) -> Result<Vec<String>> {
+fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>, std::net::AddrParseError> {
+    value
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.trim().parse())
+        .collect()
+}
+
+fn parse_connect_list(value: &str) -> Result<Vec<String>, OptionParseError> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(Vec::new());
@@ -180,8 +178,7 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     value
         .split(',')
         .map(|part| parse_connect_endpoint(part.trim()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .collect()
 }
 
 pub fn parse_network_label(
@@ -204,13 +201,15 @@ pub fn parse_noban_subnet(
     value.parse()
 }
 
-fn parse_noban_list(value: &str) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>> {
+fn parse_noban_list(
+    value: &str,
+) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>, bitcoin_rs_p2p::SubnetParseError> {
     if value.trim().is_empty() {
         return Ok(Vec::new());
     }
     value
         .split(',')
-        .map(|part| parse_noban_subnet(part.trim()).map_err(Into::into))
+        .map(|part| parse_noban_subnet(part.trim()))
         .collect()
 }
 
@@ -224,17 +223,17 @@ fn parse_path(value: &str) -> std::result::Result<PathBuf, Infallible> {
     Ok(PathBuf::from(value))
 }
 
-fn parsed<T, E: fmt::Display>(
+fn parsed<T, E: Into<ConfigError>>(
     value: &str,
     grammar: fn(&str) -> std::result::Result<T, E>,
-) -> Result<T> {
-    grammar(value).map_err(|error| anyhow::anyhow!("{error}"))
+) -> Result<T, ConfigError> {
+    grammar(value).map_err(Into::into)
 }
 
-fn environment_text<'a>(key: &str, value: &'a OsStr) -> Result<&'a str> {
-    value
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("environment variable {key} is not valid UTF-8"))
+fn environment_text<'a>(key: &str, value: &'a OsStr) -> Result<&'a str, ConfigError> {
+    value.to_str().ok_or_else(|| ConfigError::EnvNotUtf8 {
+        key: key.to_owned(),
+    })
 }
 
 macro_rules! toml_row {
@@ -358,7 +357,11 @@ macro_rules! emit_user_config {
                 }
             }
 
-            pub fn apply_env(&mut self, key: &str, value: &OsStr) -> Result<()> {
+            pub fn apply_env(
+                &mut self,
+                key: &str,
+                value: &OsStr,
+            ) -> core::result::Result<(), $crate::config::ConfigError> {
                 match key {
                     $(
                         $(

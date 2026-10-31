@@ -1,6 +1,6 @@
 #![cfg(feature = "redb")]
 
-use anyhow::{Context as _, Result, anyhow};
+use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_node::{Auth, Network, NodeConfig, RuntimeInputs, run};
 use crossbeam_channel::bounded;
 use std::net::SocketAddr;
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 #[cfg(feature = "redb")]
 #[test]
-fn run_exits_cleanly_after_fast_shutdown_signal() -> Result<()> {
+fn run_exits_cleanly_after_fast_shutdown_signal() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let (shutdown_tx, shutdown_rx) = bounded(1);
     let (done_tx, done_rx) = bounded(1);
@@ -29,11 +29,13 @@ fn run_exits_cleanly_after_fast_shutdown_signal() -> Result<()> {
         let _ignored = done_tx.send(result.map_err(|error| error.to_string()));
     });
 
-    shutdown_tx.send(())?;
+    shutdown_tx
+        .send(())
+        .map_err(|_| TestError::message("failed to send shutdown signal"))?;
     let result = done_rx
         .recv_timeout(Duration::from_secs(6))
-        .context("node did not stop within shutdown deadline")?;
-    result.map_err(|message| anyhow!(message))?;
+        .map_err(|_| TestError::message("node did not stop within shutdown deadline"))?;
+    result.map_err(TestError::message)?;
     Ok(())
 }
 

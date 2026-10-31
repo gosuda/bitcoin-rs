@@ -32,6 +32,11 @@ mod state;
 #[doc(hidden)]
 pub mod state;
 mod storage_backend;
+#[cfg(any(test, feature = "test-seam"))]
+#[doc(hidden)]
+pub mod test_support;
+#[cfg(any(test, feature = "test-seam"))]
+pub use test_support::TestError;
 pub mod sync;
 #[cfg(not(feature = "test-seam"))]
 #[allow(
@@ -52,7 +57,8 @@ pub use chain_effects::{ChainFollowers, ConnectMutationError};
 
 pub use bitcoin_rs_consensus::ValidationEngine;
 pub use config::{
-    Auth, NetworkSelection, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, resolve,
+    Auth, ConfigError, NetworkSelection, NodeConfig, NotificationConfig, RuntimeInputs,
+    ScriptIndexMode, resolve,
 };
 
 pub use options::{
@@ -68,11 +74,12 @@ pub use chain_feed::{
 pub use embed::{Node, NodeError};
 
 pub use snapshot::SnapshotImportError;
-pub use state::DataDirLockError;
+pub use state::{DataDirLockError, open::NodeOpenError, open::StartupVerificationPaths};
 
 pub use mining::MiningCoordinator;
 
-pub use run::run;
+pub use offline_import::{OfflineImportError, run_offline_import};
+pub use run::{RunError, run};
 
 pub use sync::BlockSync;
 

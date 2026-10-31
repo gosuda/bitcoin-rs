@@ -12,6 +12,42 @@ fn entry(height: u32, hash: &str, offset: u64, len: usize) -> ManifestBlock {
 }
 
 #[test]
+fn offline_import_assume_valid_height_bail_is_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = offline_import_config(&dir.path().join("node"));
+    config.validation.assume_valid_height = 100;
+    let error = run_offline_import(
+        config,
+        std::path::Path::new("corpus"),
+        std::path::Path::new("manifest"),
+        std::path::Path::new("state"),
+    )
+    .expect_err("nonzero assume-valid height must refuse offline import");
+    assert!(
+        matches!(error, OfflineImportError::AssumeValidHeightRequired),
+        "assume-valid refusal must be OfflineImportError::AssumeValidHeightRequired, got: {error:?}"
+    );
+}
+
+#[test]
+fn offline_import_auxiliary_indexes_bail_is_typed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = offline_import_config(&dir.path().join("node"));
+    config.indexes.txindex = true;
+    let error = run_offline_import(
+        config,
+        std::path::Path::new("corpus"),
+        std::path::Path::new("manifest"),
+        std::path::Path::new("state"),
+    )
+    .expect_err("enabled txindex must refuse offline import");
+    assert!(
+        matches!(error, OfflineImportError::AuxiliaryIndexesRequiredOff),
+        "index refusal must be OfflineImportError::AuxiliaryIndexesRequiredOff, got: {error:?}"
+    );
+}
+
+#[test]
 fn manifest_shape_rejects_gaps() {
     let doc = Manifest {
         network: "mainnet".to_owned(),

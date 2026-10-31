@@ -1,6 +1,8 @@
 use std::task::{Context, Poll, Waker};
 
-use anyhow::{Result, bail};
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::query_api::HistoricalQueryError;
@@ -218,7 +220,11 @@ fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
                 "the gate must name the missing capability: {message}"
             );
         }
-        other => bail!("expected the TxLookup gate error, got {other:?}"),
+        other => {
+            return Err(TestError::message(format!(
+                "expected the TxLookup gate error, got {other:?}"
+            )));
+        }
     }
     Ok(())
 }
@@ -256,11 +262,15 @@ fn wait_historical_transaction(
             Ok(answer) => return Ok(answer),
             Err(HistoricalQueryError::Retry | HistoricalQueryError::Unavailable(_)) => {}
             Err(HistoricalQueryError::Storage(message)) => {
-                bail!("historical index storage error while waiting: {message}")
+                return Err(TestError::message(format!(
+                    "historical index storage error while waiting: {message}"
+                )));
             }
         }
         if std::time::Instant::now() >= deadline {
-            bail!("historical index did not become ready in 60s");
+            return Err(TestError::message(
+                "historical index did not become ready in 60s",
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -300,7 +310,9 @@ fn embedded_node_historical_prefix_queries() -> Result<()> {
     assert_eq!(at.prefix.height, SEED_BLOCKS);
     assert_eq!(at.prefix.hash, node.snapshot().tip_hash);
     let Some((height, tx)) = at.answer else {
-        bail!("known seed coinbase must resolve historically")
+        return Err(TestError::message(
+            "known seed coinbase must resolve historically",
+        ));
     };
     assert_eq!(height, 1);
     assert!(at.prefix.floor <= height && height <= at.prefix.height);
@@ -353,7 +365,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     let applied = state.chainstate().applied_tip_reader();
     let mut tip = applied
         .load_full()
-        .ok_or_else(|| anyhow::anyhow!("genesis must publish an applied tip"))?;
+        .ok_or_else(|| TestError::message("genesis must publish an applied tip"))?;
     let mut first_block: Option<(Hash256, Vec<u8>)> = None;
     for height in 1..=count {
         let coinbase = seed_coinbase(height);
@@ -369,21 +381,21 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
             txs: vec![coinbase],
         };
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-            .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
+            .ok_or_else(|| TestError::message("seed block must have a merkle root"))?;
         regtest_fixture::mine_block_to_declared_target(&mut block)?;
         state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
             block.clone(),
         ))?;
         tip = applied
             .load_full()
-            .ok_or_else(|| anyhow::anyhow!("applied tip must exist after apply"))?;
+            .ok_or_else(|| TestError::message("applied tip must exist after apply"))?;
         assert_eq!(tip.height, height, "seed block must become the tip");
         if height == 1 {
             first_block = Some((Hash256::from(block.block_hash()), consensus_bytes(&block)));
         }
     }
     let (first_hash, first_bytes) =
-        first_block.ok_or_else(|| anyhow::anyhow!("at least one block must be seeded"))?;
+        first_block.ok_or_else(|| TestError::message("at least one block must be seeded"))?;
     Ok((tip.hash, first_hash, first_bytes))
 }
 
@@ -506,10 +518,12 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
                 "the failure should name the bind conflict, got: {message}"
             );
         }
-        other => bail!(
-            "expected a startup failure on the held port, got {:?}",
-            other.err()
-        ),
+        other => {
+            return Err(TestError::message(format!(
+                "expected a startup failure on the held port, got {:?}",
+                other.err()
+            )));
+        }
     }
 
     let resumed = NodeState::open(seed_config(&failed_dir), None)?;

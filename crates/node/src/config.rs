@@ -1,7 +1,7 @@
 use crate::options::{
-    ChainstateJournalOverrides, OptionParseError, UserConfig, check_index_bundle_path,
+    ChainstateJournalOverrides, IndexBundleDirError, OptionParseError, UserConfig,
+    check_index_bundle_path,
 };
-use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_index::IndexCapabilities;
@@ -18,6 +18,191 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("environment variable {key} is not valid UTF-8")]
+    EnvNotUtf8 { key: String },
+    #[error(transparent)]
+    OptionParse(#[from] OptionParseError),
+    #[error(transparent)]
+    IndexBundleDir(#[from] IndexBundleDirError),
+    #[error(transparent)]
+    Subnet(#[from] bitcoin_rs_p2p::SubnetParseError),
+    #[error(transparent)]
+    SocketAddr(#[from] std::net::AddrParseError),
+    #[error(transparent)]
+    ParseInt(#[from] std::num::ParseIntError),
+    #[error(transparent)]
+    Infallible(#[from] core::convert::Infallible),
+    #[error("invalid boolean {0}")]
+    InvalidBoolean(String),
+    #[error("--pool requires the pool build feature")]
+    PoolFeatureRequired,
+    #[error("--pool-datadir must not be empty")]
+    PoolDatadirEmpty,
+    #[error("--pool requires an explicit --pool-v1-bind or --pool-sv2-bind")]
+    PoolBindMissing,
+    #[error("pool listener addresses must differ")]
+    PoolBindsEqual,
+    #[error("pool listener ports must be explicit and nonzero")]
+    PoolPortZero,
+    #[error("non-loopback pool bind requires --pool-allow-non-loopback")]
+    PoolNonLoopback,
+    #[error("SV2 requires the pool-sv2 build feature")]
+    Sv2FeatureRequired,
+    #[error("--pool-sv2-bind and --pool-sv2-authority-key must be configured together")]
+    Sv2PairingRequired,
+    #[error("pool SV2 authority key path must not be empty")]
+    Sv2AuthorityKeyEmpty,
+    #[error("pool connection limits must be positive and per-IP must not exceed total")]
+    PoolConnectionLimits,
+    #[error("pool connection limits exceed platform bounds")]
+    PoolConnectionLimitsBounds,
+    #[error("--pool-window-work must be positive")]
+    PoolWindowWork,
+    #[error("--pool-fee-bps must be at most 10000")]
+    PoolFeeBps,
+    #[error("pool maturity must be at least 100 and payout confirmations must be positive")]
+    PoolMaturity,
+    #[error("pool reorg watch depth must cover maturity, payout and abandon confirmations")]
+    PoolReorgWatchDepth,
+    #[error("pool minimum payout must be between 546 and MAX_MONEY satoshis")]
+    PoolMinPayout,
+    #[error("pool maximum payout outputs must be in 1..=2500")]
+    PoolMaxPayoutOutputs,
+    #[error("pool reward script must be spendable and bounded")]
+    PoolRewardScriptBounded,
+    #[error("pool reward script must have canonical script encoding")]
+    PoolRewardScriptCanonical,
+    #[cfg(feature = "pool")]
+    #[error(transparent)]
+    PoolLedger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    #[cfg(feature = "pool")]
+    #[error("invalid pool share difficulty: {difficulty_error}")]
+    PoolShareDifficulty {
+        difficulty_error: bitcoin_rs_mining::pool::JobError,
+    },
+    #[error("pool share target must match configured difficulty")]
+    PoolShareTargetMismatch,
+    #[error("pool sub-options require --pool")]
+    PoolSuboptionsWithoutPool,
+    #[error("--pool requires --pool-reward-script")]
+    PoolRewardScriptMissing,
+    #[error("pool reward script must be bounded even-length hex")]
+    PoolRewardScriptBoundedHex,
+    #[error("pool reward script must be even-length hex")]
+    PoolRewardScriptEvenHex,
+    #[error("pool reward script must be hex")]
+    PoolRewardScriptHex,
+    #[error("--pool requires --pool-datadir")]
+    PoolDatadirMissing,
+    #[error("--pool requires --pool-share-difficulty")]
+    PoolShareDifficultyMissing,
+    #[error("--pool requires --mining-payout-address")]
+    PoolPayoutAddressMissing,
+    #[error("invalid mining payout address: {parse_error}")]
+    PayoutAddressInvalid {
+        parse_error: Box<bitcoin::address::ParseError>,
+    },
+    #[error("mining payout address is not valid for {network}: {network_error}")]
+    PayoutAddressNetwork {
+        network: &'static str,
+        network_error: Box<bitcoin::address::ParseError>,
+    },
+    #[error("mempool-snapshot-max-mb must be positive and fit the platform byte limit")]
+    MempoolSnapshotBytes,
+    #[error(
+        "mempool-snapshot-restore-timeout-secs must be positive and fit the platform clock range"
+    )]
+    MempoolSnapshotTimeout,
+    #[error("--silent-payments requires the silent-payments build feature")]
+    SilentPaymentsFeatureRequired,
+    #[error("RPC Basic authentication requires a nonempty username and password")]
+    RpcBasicAuthEmpty,
+    #[error("RPC password must not use the publicly known legacy default")]
+    RpcPasswordDefault,
+    #[error("non-loopback RPC bind requires explicit credentials (--rpc-password or --rpc-cookie)")]
+    RpcNonLoopbackNeedsAuth,
+    #[error("RPC and public connection limits must be positive")]
+    RpcConnectionLimits,
+    #[error("public-bind and rpc-bind must not overlap")]
+    RpcBindOverlap,
+    #[error("unsupported storage backend {backend}")]
+    StorageBackendUnsupported { backend: StorageBackend },
+    #[error(
+        "validation engine `{engine}` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)"
+    )]
+    ValidationEngineUnsupported { engine: ValidationEngine },
+    #[error("--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay")]
+    StaleTipPrefersBlocks,
+    #[error(transparent)]
+    Zmq(#[from] bitcoin_rs_rpc::zmq::ZmqConfigError),
+    #[error(transparent)]
+    Overlay(#[from] std::io::Error),
+    #[error("chainstate_journal.blocks must be positive")]
+    JournalBlocks,
+    #[error("chainstate_journal.seconds must be positive")]
+    JournalSeconds,
+    #[error("chainstate_journal.rotate_mib must be positive")]
+    JournalRotateMib,
+    #[error("chainstate_journal.max_journal_mib must be >= rotate_mib")]
+    JournalMaxJournalMib,
+    #[error("chainstate_journal.max_lag_blocks must be >= blocks")]
+    JournalMaxLagBlocks,
+    #[error("chainstate_journal.max_lag_seconds must be positive")]
+    JournalMaxLagSeconds,
+    #[error("P2P magic overrides currently require --network mainnet")]
+    MagicRequiresMainnet,
+    #[error("P2P magic overrides require at least one --connect peer")]
+    MagicRequiresConnect,
+    #[error("P2P magic overrides require --dns-seeds-enabled=false")]
+    MagicRequiresDnsOff,
+    #[error(
+        "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
+    )]
+    PrivacyRequiresDnsOff,
+    #[error("--onlynet=onion requires an onion route (--onion-proxy or --proxy)")]
+    OnlynetOnion,
+    #[error("--onlynet=i2p requires an I2P SAM bridge (--i2p-sam)")]
+    OnlynetI2p,
+    #[error("--i2p-accept requires an I2P SAM bridge (--i2p-sam)")]
+    I2pAcceptRequiresSam,
+    #[error("--connect target `{target}` is an invalid overlay endpoint")]
+    ConnectInvalidOverlay { target: String },
+    #[error("--connect onion target requires an onion route (--onion-proxy or --proxy)")]
+    ConnectOnionRequiresRoute,
+    #[error("--connect I2P target requires an I2P SAM bridge (--i2p-sam)")]
+    ConnectI2pRequiresSam,
+    #[error(
+        "--connect target `{target}` is a hostname that would resolve via local DNS; with a proxy/overlay route configured, use a literal IP or overlay endpoint"
+    )]
+    ConnectHostnameWithProxy { target: String },
+    #[error("--index-bundle-import and --index-bundle-export are mutually exclusive")]
+    IndexBundleImportExportExclusive,
+    #[error("{flag}: {path_error}")]
+    IndexBundlePath {
+        flag: &'static str,
+        path_error: IndexBundleDirError,
+    },
+    #[error("{flag} requires --txindex")]
+    IndexBundleRequiresTxindex { flag: &'static str },
+    #[error("transaction, script and compact-filter indexing are not compatible with -prune")]
+    PruneWithIndexes,
+    #[error(transparent)]
+    RpcAuth(#[from] bitcoin_rs_rpc::auth::AuthError),
+    #[error("failed to generate RPC cookie randomness: {randomness_error}")]
+    CookieRandomness {
+        randomness_error: bitcoin::secp256k1::rand::Error,
+    },
+    #[error(transparent)]
+    CookieFormat(#[from] core::fmt::Error),
+    #[error("failed to create RPC cookie {path}: {io_error}")]
+    CookieCreate {
+        path: PathBuf,
+        io_error: std::io::Error,
+    },
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -127,144 +312,132 @@ impl PoolConfig {
         config
     }
 
-    fn validate(&self) -> Result<()> {
-        anyhow::ensure!(
-            cfg!(feature = "pool"),
-            "--pool requires the pool build feature"
-        );
-        anyhow::ensure!(
-            !self.datadir.as_os_str().is_empty(),
-            "--pool-datadir must not be empty"
-        );
-        anyhow::ensure!(
-            self.v1_bind.is_some() || self.sv2_bind.is_some(),
-            "--pool requires an explicit --pool-v1-bind or --pool-sv2-bind"
-        );
-        anyhow::ensure!(
-            self.v1_bind.is_none() || self.v1_bind != self.sv2_bind,
-            "pool listener addresses must differ"
-        );
-        for bind in [self.v1_bind, self.sv2_bind].into_iter().flatten() {
-            anyhow::ensure!(
-                bind.port() != 0,
-                "pool listener ports must be explicit and nonzero"
-            );
-            anyhow::ensure!(
-                bind.ip().is_loopback() || self.allow_non_loopback,
-                "non-loopback pool bind requires --pool-allow-non-loopback"
-            );
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !cfg!(feature = "pool") {
+            return Err(ConfigError::PoolFeatureRequired);
         }
-        anyhow::ensure!(
-            self.sv2_bind.is_none() || cfg!(feature = "pool-sv2"),
-            "SV2 requires the pool-sv2 build feature"
-        );
-        anyhow::ensure!(
-            self.sv2_bind.is_some() == self.sv2_authority_key.is_some(),
-            "--pool-sv2-bind and --pool-sv2-authority-key must be configured together"
-        );
-        anyhow::ensure!(
-            self.sv2_authority_key
-                .as_ref()
-                .is_none_or(|path| !path.as_os_str().is_empty()),
-            "pool SV2 authority key path must not be empty"
-        );
-        anyhow::ensure!(
-            self.max_connections > 0
-                && self.max_connections_per_ip > 0
-                && self.max_connections_per_ip <= self.max_connections,
-            "pool connection limits must be positive and per-IP must not exceed total"
-        );
-        anyhow::ensure!(
-            usize::try_from(self.max_connections).is_ok()
-                && usize::try_from(self.max_connections_per_ip).is_ok(),
-            "pool connection limits exceed platform bounds"
-        );
-        anyhow::ensure!(self.window_work > 0, "--pool-window-work must be positive");
-        anyhow::ensure!(
-            self.fee_bps <= 10_000,
-            "--pool-fee-bps must be at most 10000"
-        );
-        anyhow::ensure!(
-            self.maturity >= 100 && self.payout_confirmations > 0,
-            "pool maturity must be at least 100 and payout confirmations must be positive"
-        );
-        anyhow::ensure!(
-            self.reorg_watch_depth >= self.maturity.max(self.payout_confirmations).max(6),
-            "pool reorg watch depth must cover maturity, payout and abandon confirmations"
-        );
-        anyhow::ensure!(
-            self.min_payout_sat >= 546 && self.min_payout_sat <= 2_100_000_000_000_000,
-            "pool minimum payout must be between 546 and MAX_MONEY satoshis"
-        );
-        anyhow::ensure!(
-            (1..=2500).contains(&self.max_payout_outputs),
-            "pool maximum payout outputs must be in 1..=2500"
-        );
-        anyhow::ensure!(
-            !self.reward_script.is_empty()
-                && self.reward_script.len() <= 10_000
-                && self.reward_script[0] != 0x6a,
-            "pool reward script must be spendable and bounded"
-        );
-        anyhow::ensure!(
-            bitcoin::Script::from_bytes(&self.reward_script)
-                .instructions_minimal()
-                .all(|instruction| instruction.is_ok()),
-            "pool reward script must have canonical script encoding"
-        );
+        if self.datadir.as_os_str().is_empty() {
+            return Err(ConfigError::PoolDatadirEmpty);
+        }
+        if self.v1_bind.is_none() && self.sv2_bind.is_none() {
+            return Err(ConfigError::PoolBindMissing);
+        }
+        if self.v1_bind.is_some() && self.v1_bind == self.sv2_bind {
+            return Err(ConfigError::PoolBindsEqual);
+        }
+        for bind in [self.v1_bind, self.sv2_bind].into_iter().flatten() {
+            if bind.port() == 0 {
+                return Err(ConfigError::PoolPortZero);
+            }
+            if !(bind.ip().is_loopback() || self.allow_non_loopback) {
+                return Err(ConfigError::PoolNonLoopback);
+            }
+        }
+        if self.sv2_bind.is_some() && !cfg!(feature = "pool-sv2") {
+            return Err(ConfigError::Sv2FeatureRequired);
+        }
+        if self.sv2_bind.is_some() != self.sv2_authority_key.is_some() {
+            return Err(ConfigError::Sv2PairingRequired);
+        }
+        if self
+            .sv2_authority_key
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ConfigError::Sv2AuthorityKeyEmpty);
+        }
+        if !(self.max_connections > 0
+            && self.max_connections_per_ip > 0
+            && self.max_connections_per_ip <= self.max_connections)
+        {
+            return Err(ConfigError::PoolConnectionLimits);
+        }
+        if !(usize::try_from(self.max_connections).is_ok()
+            && usize::try_from(self.max_connections_per_ip).is_ok())
+        {
+            return Err(ConfigError::PoolConnectionLimitsBounds);
+        }
+        if self.window_work == 0 {
+            return Err(ConfigError::PoolWindowWork);
+        }
+        if self.fee_bps > 10_000 {
+            return Err(ConfigError::PoolFeeBps);
+        }
+        if !(self.maturity >= 100 && self.payout_confirmations > 0) {
+            return Err(ConfigError::PoolMaturity);
+        }
+        if self.reorg_watch_depth < self.maturity.max(self.payout_confirmations).max(6) {
+            return Err(ConfigError::PoolReorgWatchDepth);
+        }
+        if !(self.min_payout_sat >= 546 && self.min_payout_sat <= 2_100_000_000_000_000) {
+            return Err(ConfigError::PoolMinPayout);
+        }
+        if !(1..=2500).contains(&self.max_payout_outputs) {
+            return Err(ConfigError::PoolMaxPayoutOutputs);
+        }
+        if self.reward_script.is_empty()
+            || self.reward_script.len() > 10_000
+            || self.reward_script[0] == 0x6a
+        {
+            return Err(ConfigError::PoolRewardScriptBounded);
+        }
+        if !bitcoin::Script::from_bytes(&self.reward_script)
+            .instructions_minimal()
+            .all(|instruction| instruction.is_ok())
+        {
+            return Err(ConfigError::PoolRewardScriptCanonical);
+        }
         #[cfg(feature = "pool")]
         {
             self.ledger_config().validate()?;
-            let target = bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
+            return match bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
                 &self.share_difficulty,
-            )
-            .map_err(|error| anyhow::anyhow!("invalid pool share difficulty: {error}"))?;
-            anyhow::ensure!(
-                target == self.share_target,
-                "pool share target must match configured difficulty"
-            );
+            ) {
+                Ok(target) if target == self.share_target => Ok(()),
+                Ok(_) => Err(ConfigError::PoolShareTargetMismatch),
+                Err(difficulty_error) => Err(ConfigError::PoolShareDifficulty { difficulty_error }),
+            };
         }
+        #[cfg(not(feature = "pool"))]
         Ok(())
     }
 }
 
-fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
+fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError> {
     let pool = &settings.pool;
     if !pool.enabled.unwrap_or(false) {
-        anyhow::ensure!(
-            pool.datadir.is_none()
-                && pool.v1_bind.is_none()
-                && pool.sv2_bind.is_none()
-                && pool.sv2_authority_key.is_none()
-                && pool.allow_non_loopback.is_none()
-                && pool.max_connections.is_none()
-                && pool.max_connections_per_ip.is_none()
-                && pool.share_difficulty.is_none()
-                && pool.window_work.is_none()
-                && pool.fee_bps.is_none()
-                && pool.reward_script.is_none()
-                && pool.maturity.is_none()
-                && pool.payout_confirmations.is_none()
-                && pool.reorg_watch_depth.is_none()
-                && pool.min_payout_sat.is_none()
-                && pool.max_payout_outputs.is_none(),
-            "pool sub-options require --pool"
-        );
+        if pool.datadir.is_some()
+            || pool.v1_bind.is_some()
+            || pool.sv2_bind.is_some()
+            || pool.sv2_authority_key.is_some()
+            || pool.allow_non_loopback.is_some()
+            || pool.max_connections.is_some()
+            || pool.max_connections_per_ip.is_some()
+            || pool.share_difficulty.is_some()
+            || pool.window_work.is_some()
+            || pool.fee_bps.is_some()
+            || pool.reward_script.is_some()
+            || pool.maturity.is_some()
+            || pool.payout_confirmations.is_some()
+            || pool.reorg_watch_depth.is_some()
+            || pool.min_payout_sat.is_some()
+            || pool.max_payout_outputs.is_some()
+        {
+            return Err(ConfigError::PoolSuboptionsWithoutPool);
+        }
         return Ok(None);
     }
     let reward = pool
         .reward_script
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-reward-script"))?;
-    anyhow::ensure!(
-        reward.len() <= 20_000 && reward.len().is_multiple_of(2),
-        "pool reward script must be bounded even-length hex"
-    );
+        .ok_or(ConfigError::PoolRewardScriptMissing)?;
+    if reward.len() > 20_000 || !reward.len().is_multiple_of(2) {
+        return Err(ConfigError::PoolRewardScriptBoundedHex);
+    }
     let (pairs, remainder) = reward.as_bytes().as_chunks::<2>();
-    anyhow::ensure!(
-        remainder.is_empty(),
-        "pool reward script must be even-length hex"
-    );
+    if !remainder.is_empty() {
+        return Err(ConfigError::PoolRewardScriptEvenHex);
+    }
     let reward_script = pairs
         .iter()
         .map(|pair| {
@@ -276,15 +449,15 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
             };
             match (digit(pair[0]), digit(pair[1])) {
                 (Some(high), Some(low)) => Ok(high * 16 + low),
-                _ => Err(anyhow::anyhow!("pool reward script must be hex")),
+                _ => Err(ConfigError::PoolRewardScriptHex),
             }
         })
-        .collect::<Result<Vec<u8>>>()?;
+        .collect::<Result<Vec<u8>, ConfigError>>()?;
     Ok(Some(PoolConfig {
         datadir: pool
             .datadir
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-datadir"))?,
+            .ok_or(ConfigError::PoolDatadirMissing)?,
         v1_bind: pool.v1_bind,
         sv2_bind: pool.sv2_bind,
         sv2_authority_key: pool.sv2_authority_key.clone(),
@@ -294,17 +467,17 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>> {
         share_difficulty: pool
             .share_difficulty
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,
+            .ok_or(ConfigError::PoolShareDifficultyMissing)?,
         #[cfg(feature = "pool")]
-        share_target: bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
-            pool.share_difficulty
+        share_target: {
+            let text = pool
+                .share_difficulty
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-share-difficulty"))?,
-        )
-        .map_err(|error| anyhow::anyhow!("invalid pool share difficulty: {error}"))?,
-        window_work: pool
-            .window_work
-            .ok_or_else(|| anyhow::anyhow!("--pool requires --pool-window-work"))?,
+                .ok_or(ConfigError::PoolShareDifficultyMissing)?;
+            bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(text)
+                .map_err(|difficulty_error| ConfigError::PoolShareDifficulty { difficulty_error })?
+        },
+        window_work: pool.window_work.ok_or(ConfigError::PoolWindowWork)?,
         fee_bps: pool.fee_bps.unwrap_or(0),
         reward_script,
         maturity: pool.maturity.unwrap_or(100),
@@ -515,78 +688,68 @@ impl NodeConfig {
         }
     }
 
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if let Some(pool) = &self.pool {
             pool.validate()?;
-            anyhow::ensure!(
-                !self.mining.payout_script.is_empty(),
-                "--pool requires --mining-payout-address"
-            );
+            if self.mining.payout_script.is_empty() {
+                return Err(ConfigError::PoolPayoutAddressMissing);
+            }
         }
-        anyhow::ensure!(
-            self.mempool_snapshot_max_bytes >= 1024 * 1024
-                && self.mempool_snapshot_max_bytes < u64::try_from(usize::MAX).unwrap_or(u64::MAX),
-            "mempool-snapshot-max-mb must be positive and fit the platform byte limit"
-        );
-        anyhow::ensure!(
-            self.mempool_snapshot_restore_timeout_secs > 0
-                && std::time::Instant::now()
-                    .checked_add(std::time::Duration::from_secs(
-                        self.mempool_snapshot_restore_timeout_secs
-                    ))
-                    .is_some(),
-            "mempool-snapshot-restore-timeout-secs must be positive and fit the platform clock range"
-        );
-        anyhow::ensure!(
-            !self.rpc.silent_payments || cfg!(feature = "silent-payments"),
-            "--silent-payments requires the silent-payments build feature"
-        );
+        if !(self.mempool_snapshot_max_bytes >= 1024 * 1024
+            && self.mempool_snapshot_max_bytes < u64::try_from(usize::MAX).unwrap_or(u64::MAX))
+        {
+            return Err(ConfigError::MempoolSnapshotBytes);
+        }
+        if !(self.mempool_snapshot_restore_timeout_secs > 0
+            && std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(
+                    self.mempool_snapshot_restore_timeout_secs,
+                ))
+                .is_some())
+        {
+            return Err(ConfigError::MempoolSnapshotTimeout);
+        }
+        if self.rpc.silent_payments && !cfg!(feature = "silent-payments") {
+            return Err(ConfigError::SilentPaymentsFeatureRequired);
+        }
         if let Auth::Basic { user, password } = &self.rpc.auth {
-            anyhow::ensure!(
-                !user.is_empty() && !password.is_empty(),
-                "RPC Basic authentication requires a nonempty username and password"
-            );
-            anyhow::ensure!(
-                password != "bitcoin-rs",
-                "RPC password must not use the publicly known legacy default"
-            );
+            if user.is_empty() || password.is_empty() {
+                return Err(ConfigError::RpcBasicAuthEmpty);
+            }
+            if password == "bitcoin-rs" {
+                return Err(ConfigError::RpcPasswordDefault);
+            }
         }
-        anyhow::ensure!(
-            self.rpc.bind.ip().is_loopback() || self.rpc.auth != Auth::GeneratedCookie,
-            "non-loopback RPC bind requires explicit credentials (--rpc-password or --rpc-cookie)"
-        );
-        anyhow::ensure!(
-            self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0,
-            "RPC and public connection limits must be positive"
-        );
-        anyhow::ensure!(
-            self.rpc.public_bind.is_none_or(|address| {
-                let management = self.rpc.bind;
-                address.port() == 0
-                    || address.port() != management.port()
-                    || (address.ip() != management.ip()
-                        && (address.is_ipv4() != management.is_ipv4()
-                            || (!address.ip().is_unspecified()
-                                && !management.ip().is_unspecified())))
-            }),
-            "public-bind and rpc-bind must not overlap"
-        );
-        anyhow::ensure!(
-            self.storage.backend.is_compiled_in(),
-            "unsupported storage backend {}",
-            self.storage.backend
-        );
-        anyhow::ensure!(
-            self.validation.engine.is_supported(),
-            "validation engine `{}` is not supported by this build: bitcoinkernel \
-             support is not compiled in (enable the `kernel` feature)",
-            self.validation.engine
-        );
-        anyhow::ensure!(
-            !self.p2p.relay_offers.stale_tip_prefers_blocks
-                || self.p2p.relay_offers.stale_tip_relay,
-            "--p2p-stale-tip-prefers-blocks requires --p2p-stale-tip-relay"
-        );
+        if !(self.rpc.bind.ip().is_loopback() || self.rpc.auth != Auth::GeneratedCookie) {
+            return Err(ConfigError::RpcNonLoopbackNeedsAuth);
+        }
+        if !(self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0) {
+            return Err(ConfigError::RpcConnectionLimits);
+        }
+        if !self.rpc.public_bind.is_none_or(|address| {
+            let management = self.rpc.bind;
+            address.port() == 0
+                || address.port() != management.port()
+                || (address.ip() != management.ip()
+                    && (address.is_ipv4() != management.is_ipv4()
+                        || (!address.ip().is_unspecified() && !management.ip().is_unspecified())))
+        }) {
+            return Err(ConfigError::RpcBindOverlap);
+        }
+        if !self.storage.backend.is_compiled_in() {
+            return Err(ConfigError::StorageBackendUnsupported {
+                backend: self.storage.backend,
+            });
+        }
+        if !self.validation.engine.is_supported() {
+            return Err(ConfigError::ValidationEngineUnsupported {
+                engine: self.validation.engine,
+            });
+        }
+        if self.p2p.relay_offers.stale_tip_prefers_blocks && !self.p2p.relay_offers.stale_tip_relay
+        {
+            return Err(ConfigError::StaleTipPrefersBlocks);
+        }
         self.validate_index_bundle()?;
         self.validate_p2p_network()?;
         self.p2p.overlay.validate()?;
@@ -595,111 +758,98 @@ impl NodeConfig {
         Ok(())
     }
 
-    fn validate_chainstate_journal(&self) -> Result<()> {
+    fn validate_chainstate_journal(&self) -> Result<(), ConfigError> {
         let journal = &self.chainstate_journal;
-        anyhow::ensure!(
-            journal.blocks > 0,
-            "chainstate_journal.blocks must be positive"
-        );
-        anyhow::ensure!(
-            journal.seconds > 0,
-            "chainstate_journal.seconds must be positive"
-        );
-        anyhow::ensure!(
-            journal.rotate_mib > 0,
-            "chainstate_journal.rotate_mib must be positive"
-        );
-        anyhow::ensure!(
-            journal.max_journal_mib >= journal.rotate_mib,
-            "chainstate_journal.max_journal_mib must be >= rotate_mib"
-        );
-        anyhow::ensure!(
-            journal.max_lag_blocks >= journal.blocks,
-            "chainstate_journal.max_lag_blocks must be >= blocks"
-        );
-        anyhow::ensure!(
-            journal.max_lag_seconds > 0,
-            "chainstate_journal.max_lag_seconds must be positive"
-        );
-        Ok(())
-    }
-
-    fn validate_p2p_network(&self) -> Result<()> {
-        self.validate_overlay()?;
-        if self.p2p.magic != self.network.magic() {
-            anyhow::ensure!(
-                self.network == Network::Mainnet,
-                "P2P magic overrides currently require --network mainnet"
-            );
-            anyhow::ensure!(
-                !self.p2p.connect.is_empty(),
-                "P2P magic overrides require at least one --connect peer"
-            );
-            anyhow::ensure!(
-                !self.p2p.dns_seeds_enabled,
-                "P2P magic overrides require --dns-seeds-enabled=false"
-            );
+        if journal.blocks == 0 {
+            return Err(ConfigError::JournalBlocks);
+        }
+        if journal.seconds == 0 {
+            return Err(ConfigError::JournalSeconds);
+        }
+        if journal.rotate_mib == 0 {
+            return Err(ConfigError::JournalRotateMib);
+        }
+        if journal.max_journal_mib < journal.rotate_mib {
+            return Err(ConfigError::JournalMaxJournalMib);
+        }
+        if journal.max_lag_blocks < journal.blocks {
+            return Err(ConfigError::JournalMaxLagBlocks);
+        }
+        if journal.max_lag_seconds == 0 {
+            return Err(ConfigError::JournalMaxLagSeconds);
         }
         Ok(())
     }
 
-    fn validate_overlay(&self) -> Result<()> {
+    fn validate_p2p_network(&self) -> Result<(), ConfigError> {
+        self.validate_overlay()?;
+        if self.p2p.magic != self.network.magic() {
+            if self.network != Network::Mainnet {
+                return Err(ConfigError::MagicRequiresMainnet);
+            }
+            if self.p2p.connect.is_empty() {
+                return Err(ConfigError::MagicRequiresConnect);
+            }
+            if self.p2p.dns_seeds_enabled {
+                return Err(ConfigError::MagicRequiresDnsOff);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_overlay(&self) -> Result<(), ConfigError> {
         let overlay = &self.p2p.overlay;
         let onion_route = overlay.onion_proxy.is_some() || overlay.proxy.is_some();
         let privacy_route = onion_route || overlay.i2p_sam.is_some();
-        anyhow::ensure!(
-            !privacy_route || !self.p2p.dns_seeds_enabled,
-            "proxy/overlay routing requires --dns-seeds-enabled=false; DNS seeds resolve via local DNS and would bypass the privacy route"
-        );
-        anyhow::ensure!(
-            !overlay.onlynet.contains(&PeerNetwork::Onion) || onion_route,
-            "--onlynet=onion requires an onion route (--onion-proxy or --proxy)"
-        );
-        anyhow::ensure!(
-            !overlay.onlynet.contains(&PeerNetwork::I2p) || overlay.i2p_sam.is_some(),
-            "--onlynet=i2p requires an I2P SAM bridge (--i2p-sam)"
-        );
-        anyhow::ensure!(
-            !overlay.i2p_accept || overlay.i2p_sam.is_some(),
-            "--i2p-accept requires an I2P SAM bridge (--i2p-sam)"
-        );
+        if privacy_route && self.p2p.dns_seeds_enabled {
+            return Err(ConfigError::PrivacyRequiresDnsOff);
+        }
+        if overlay.onlynet.contains(&PeerNetwork::Onion) && !onion_route {
+            return Err(ConfigError::OnlynetOnion);
+        }
+        if overlay.onlynet.contains(&PeerNetwork::I2p) && overlay.i2p_sam.is_none() {
+            return Err(ConfigError::OnlynetI2p);
+        }
+        if overlay.i2p_accept && overlay.i2p_sam.is_none() {
+            return Err(ConfigError::I2pAcceptRequiresSam);
+        }
         for target in &self.p2p.connect {
             match classify_endpoint(target) {
                 ClassifiedEndpoint::InvalidOverlay => {
-                    anyhow::bail!("--connect target `{target}` is an invalid overlay endpoint");
+                    return Err(ConfigError::ConnectInvalidOverlay {
+                        target: target.clone(),
+                    });
                 }
                 ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::TorV3 {
                     ..
                 }) => {
-                    anyhow::ensure!(
-                        onion_route,
-                        "--connect onion target requires an onion route (--onion-proxy or --proxy)"
-                    );
+                    if !onion_route {
+                        return Err(ConfigError::ConnectOnionRequiresRoute);
+                    }
                 }
                 ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::I2p { .. }) => {
-                    anyhow::ensure!(
-                        overlay.i2p_sam.is_some(),
-                        "--connect I2P target requires an I2P SAM bridge (--i2p-sam)"
-                    );
+                    if overlay.i2p_sam.is_none() {
+                        return Err(ConfigError::ConnectI2pRequiresSam);
+                    }
                 }
                 ClassifiedEndpoint::Valid(bitcoin_rs_primitives::PeerEndpoint::Ip(..)) => {}
                 ClassifiedEndpoint::NonOverlay => {
-                    anyhow::ensure!(
-                        !privacy_route,
-                        "--connect target `{target}` is a hostname that would resolve via local DNS; with a proxy/overlay route configured, use a literal IP or overlay endpoint"
-                    );
+                    if privacy_route {
+                        return Err(ConfigError::ConnectHostnameWithProxy {
+                            target: target.clone(),
+                        });
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn validate_index_bundle(&self) -> Result<()> {
+    fn validate_index_bundle(&self) -> Result<(), ConfigError> {
         let indexes = &self.indexes;
-        anyhow::ensure!(
-            indexes.bundle_import.is_none() || indexes.bundle_export.is_none(),
-            "--index-bundle-import and --index-bundle-export are mutually exclusive"
-        );
+        if indexes.bundle_import.is_some() && indexes.bundle_export.is_some() {
+            return Err(ConfigError::IndexBundleImportExportExclusive);
+        }
         for (flag, dir) in [
             ("--index-bundle-import", &indexes.bundle_import),
             ("--index-bundle-export", &indexes.bundle_export),
@@ -707,14 +857,17 @@ impl NodeConfig {
             let Some(dir) = dir else {
                 continue;
             };
-            check_index_bundle_path(dir).map_err(|error| anyhow::anyhow!("{flag}: {error}"))?;
-            anyhow::ensure!(indexes.txindex, "{flag} requires --txindex");
+            check_index_bundle_path(dir)
+                .map_err(|path_error| ConfigError::IndexBundlePath { flag, path_error })?;
+            if !indexes.txindex {
+                return Err(ConfigError::IndexBundleRequiresTxindex { flag });
+            }
         }
         Ok(())
     }
 }
 
-pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
+pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig, ConfigError> {
     let mut settings = UserConfig::default();
     for layer in layers {
         settings.overlay(layer);
@@ -722,10 +875,9 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     let selection = settings.network.unwrap_or(NetworkSelection::Mainnet);
     let mut config = NodeConfig::materialize(&settings, selection);
     config.pool = resolve_pool(&settings)?;
-    anyhow::ensure!(
-        config.pool.is_none() || settings.mining.payout_address.is_some(),
-        "--pool requires --mining-payout-address"
-    );
+    if config.pool.is_some() && settings.mining.payout_address.is_none() {
+        return Err(ConfigError::PoolPayoutAddressMissing);
+    }
     if let Some(address) = settings.mining.payout_address {
         config.mining.payout_script = decode_payout_script(config.network, &address)?;
     }
@@ -790,18 +942,22 @@ fn bitcoin_network(network: Network) -> bitcoin::Network {
     }
 }
 
-fn decode_payout_script(network: Network, address: &str) -> Result<Vec<u8>> {
+fn decode_payout_script(network: Network, address: &str) -> Result<Vec<u8>, ConfigError> {
     use std::str::FromStr as _;
 
-    let parsed = bitcoin::Address::from_str(address)
-        .map_err(|err| anyhow::anyhow!("invalid mining payout address: {err}"))?;
-    let checked = parsed
+    let parse_error = match bitcoin::Address::from_str(address) {
+        Ok(parsed) => parsed,
+        Err(parse_error) => {
+            return Err(ConfigError::PayoutAddressInvalid {
+                parse_error: Box::new(parse_error),
+            });
+        }
+    };
+    let checked = parse_error
         .require_network(bitcoin_network(network))
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "mining payout address is not valid for {}: {err}",
-                network.identity_name()
-            )
+        .map_err(|network_error| ConfigError::PayoutAddressNetwork {
+            network: network.identity_name(),
+            network_error: Box::new(network_error),
         })?;
     Ok(checked.script_pubkey().as_bytes().to_vec())
 }
@@ -824,7 +980,7 @@ impl Auth {
         }
     }
 
-    pub(crate) fn to_rpc_auth(&self, data_dir: &Path) -> Result<bitcoin_rs_rpc::Auth> {
+    pub(crate) fn to_rpc_auth(&self, data_dir: &Path) -> Result<bitcoin_rs_rpc::Auth, ConfigError> {
         match self {
             Self::Basic { user, password } => {
                 Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
@@ -852,7 +1008,7 @@ impl fmt::Debug for Auth {
     }
 }
 
-fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
+fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth, ConfigError> {
     use bitcoin::secp256k1::rand::{RngCore as _, rngs::OsRng};
     use std::fmt::Write as _;
     use std::fs::{self, OpenOptions};
@@ -863,7 +1019,7 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
     let mut bytes = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut bytes)
-        .map_err(|error| anyhow::anyhow!("failed to generate RPC cookie randomness: {error}"))?;
+        .map_err(|randomness_error| ConfigError::CookieRandomness { randomness_error })?;
     let mut password = String::with_capacity(64);
     for byte in bytes {
         write!(&mut password, "{byte:02x}")?;
@@ -895,8 +1051,9 @@ fn generate_rpc_cookie(path: &Path) -> Result<bitcoin_rs_rpc::Auth> {
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    written.map_err(|error| {
-        anyhow::anyhow!("failed to create RPC cookie {}: {error}", path.display())
+    written.map_err(|io_error| ConfigError::CookieCreate {
+        path: path.to_path_buf(),
+        io_error,
     })?;
     Ok(bitcoin_rs_rpc::Auth::cookie(path)?)
 }

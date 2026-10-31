@@ -1,7 +1,9 @@
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::{
@@ -276,15 +278,16 @@ pub(crate) fn fresh_child(prev: Hash256, height: u32, time: u32, txs: Vec<Tx>) -
         txs: std::iter::once(coinbase).chain(txs).collect(),
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("fresh child must have a merkle root"))?;
+        .ok_or_else(|| TestError::message("fresh child must have a merkle root"))?;
     regtest_fixture::mine_block_to_declared_target(&mut block)
-        .map_err(|error| anyhow::anyhow!("fresh child mining failed: {error}"))?;
+        .map_err(|error| TestError::message(format!("fresh child mining failed: {error}")))?;
     Ok(block)
 }
 
 pub(crate) fn wall_time() -> Result<u32> {
-    u32::try_from(unix_time_secs())
-        .map_err(|_| anyhow::anyhow!("wall clock {} out of u32 range", unix_time_secs()))
+    u32::try_from(unix_time_secs()).map_err(|_| {
+        TestError::message(format!("wall clock {} out of u32 range", unix_time_secs()))
+    })
 }
 
 pub(crate) fn fresh_tip_child(state: &NodeState, txs: Vec<Tx>) -> Result<Block> {
@@ -297,23 +300,25 @@ pub(crate) fn seed_fresh_chain(state: &NodeState, count: u32) -> Result<Hash256>
         let genesis = Network::Regtest.genesis_block();
         state
             .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(genesis))
-            .map_err(|error| anyhow::anyhow!("genesis apply failed: {error}"))?;
+            .map_err(|error| TestError::message(format!("genesis apply failed: {error}")))?;
     }
     let now = u64::from(wall_time()?);
     let mut tip = current_tip(state)?;
     for index in 1..=count {
         let height = tip.height + 1;
         let time = u32::try_from(now.saturating_sub(u64::from(count - index) * 600))
-            .map_err(|_| anyhow::anyhow!("fresh seed time out of u32 range"))?;
+            .map_err(|_| TestError::message("fresh seed time out of u32 range"))?;
         let block = fresh_child(tip.hash, height, time, Vec::new())?;
         state
             .apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block))
-            .map_err(|error| anyhow::anyhow!("fresh seed block {height} failed: {error}"))?;
+            .map_err(|error| {
+                TestError::message(format!("fresh seed block {height} failed: {error}"))
+            })?;
         tip = current_tip(state)?;
         if tip.height != height {
-            return Err(anyhow::anyhow!(
+            return Err(TestError::message(format!(
                 "fresh seed block did not become the tip at height {height}"
-            ));
+            )));
         }
     }
     Ok(tip.hash)

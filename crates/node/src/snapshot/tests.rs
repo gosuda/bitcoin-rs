@@ -1,5 +1,30 @@
 use super::*;
+use crate::test_support::TestError;
 use bitcoin_rs_utxo::core_snapshot::{SnapshotError, read_and_verify};
+impl From<SnapshotExportError> for TestError {
+    fn from(error: SnapshotExportError) -> Self {
+        match error {
+            SnapshotExportError::Codec(inner) => Self::from(inner),
+            SnapshotExportError::Admission(inner) => Self::from(inner),
+            SnapshotExportError::Output(inner)
+            | SnapshotExportError::Write(inner)
+            | SnapshotExportError::DirectorySync(inner) => Self::from(inner),
+            SnapshotExportError::Interrupted => Self::Timeout("snapshot export runs to completion"),
+            SnapshotExportError::ExportInProgress => {
+                Self::ExpectationFailed("no snapshot export permit is held")
+            }
+            SnapshotExportError::Exists(_) => Self::ExpectationFailed("the export target is new"),
+            SnapshotExportError::OutputName
+            | SnapshotExportError::RecoveryOutput
+            | SnapshotExportError::NoAtomicPublish
+            | SnapshotExportError::NoAppliedTip
+            | SnapshotExportError::ChainTxCountUnknown
+            | SnapshotExportError::Length { .. } => {
+                Self::ExpectationFailed("the export target is publishable")
+            }
+        }
+    }
+}
 
 #[test]
 fn active_origin_survives_failure_and_validated_provenance_survives_finalization() {
@@ -36,14 +61,15 @@ fn active_origin_survives_failure_and_validated_provenance_survives_finalization
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
-fn input_fifo_is_rejected_without_waiting_for_a_writer() -> anyhow::Result<()> {
+fn input_fifo_is_rejected_without_waiting_for_a_writer() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("input.pipe");
     rustix::fs::mkfifoat(
         rustix::fs::CWD,
         &path,
         rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )?;
+    )
+    .map_err(std::io::Error::from)?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
         let rejected = matches!(
@@ -56,9 +82,7 @@ fn input_fifo_is_rejected_without_waiting_for_a_writer() -> anyhow::Result<()> {
         receiver.recv_timeout(std::time::Duration::from_secs(1))?,
         "FIFO must be rejected as a non-regular input"
     );
-    worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("input opener panicked"))?;
+    worker.join().map_err(|_| TestError::ThreadPanicked)?;
     Ok(())
 }
 
@@ -69,7 +93,7 @@ fn node_config(dir: &Path) -> crate::NodeConfig {
     config
 }
 
-fn core_headers() -> anyhow::Result<Vec<bitcoin_rs_primitives::Header>> {
+fn core_headers() -> Result<Vec<bitcoin_rs_primitives::Header>, TestError> {
     let raw: Vec<String> = sonic_rs::from_str(include_str!(
         "../../../utxo/tests/fixtures/core-v2/blocks200.json"
     ))?;
@@ -77,12 +101,12 @@ fn core_headers() -> anyhow::Result<Vec<bitcoin_rs_primitives::Header>> {
         .map(|hex| {
             let block: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(hex)?;
             bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&block.header))
-                .map_err(anyhow::Error::from)
+                .map_err(TestError::from)
         })
         .collect()
 }
 
-fn snapshot_inputs(dir: &Path) -> anyhow::Result<(crate::state::NodeState, PathBuf, PathBuf)> {
+fn snapshot_inputs(dir: &Path) -> Result<(crate::state::NodeState, PathBuf, PathBuf), TestError> {
     let state = crate::state::NodeState::open(node_config(dir), None)?;
     state.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(
         Network::Regtest.genesis_block(),
@@ -110,7 +134,7 @@ fn snapshot_inputs(dir: &Path) -> anyhow::Result<(crate::state::NodeState, PathB
 }
 
 #[test]
-fn native_embedding_contract_and_shared_import_budget() -> anyhow::Result<()> {
+fn native_embedding_contract_and_shared_import_budget() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, native_path) = snapshot_inputs(dir.path())?;
     let native = std::fs::read(&native_path)?;
@@ -146,7 +170,7 @@ fn native_embedding_contract_and_shared_import_budget() -> anyhow::Result<()> {
 }
 
 #[test]
-fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> anyhow::Result<()> {
+fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> Result<(), TestError> {
     use bitcoin_rs_mempool::PrioritisedTransaction;
     use bitcoin_rs_primitives::{Hash256, Txid};
 
@@ -191,7 +215,7 @@ fn successful_snapshot_import_preserves_nonresident_fee_prioritisation() -> anyh
 }
 
 #[test]
-fn nonempty_mempool_refuses_both_formats_without_changing_state() -> anyhow::Result<()> {
+fn nonempty_mempool_refuses_both_formats_without_changing_state() -> Result<(), TestError> {
     use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
     use bitcoin_rs_primitives::{
         Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
@@ -270,23 +294,23 @@ fn nonempty_mempool_refuses_both_formats_without_changing_state() -> anyhow::Res
     Ok(())
 }
 
-fn entry_names(dir: &Path) -> anyhow::Result<Vec<String>> {
+fn entry_names(dir: &Path) -> Result<Vec<String>, TestError> {
     let mut names = std::fs::read_dir(dir)?
         .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
     names.sort();
     Ok(names)
 }
 
 #[test]
-fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> anyhow::Result<()> {
+fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
     let core_bytes = std::fs::read(&core_path)?;
     let pin = Network::Regtest
         .assume_utxo_for_height(200)
-        .ok_or_else(|| anyhow::anyhow!("the regtest 200-height pin is compiled"))?;
+        .ok_or(TestError::Missing("compiled regtest 200-height pin"))?;
     let coins = read_and_verify(
         &mut core_bytes.as_slice(),
         Network::Regtest,
@@ -349,7 +373,7 @@ fn export_reproduces_the_core_snapshot_and_never_replaces_an_entry() -> anyhow::
 }
 
 #[test]
-fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> anyhow::Result<()> {
+fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
@@ -373,7 +397,7 @@ fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> anyhow:
         .snapshots
         .export_until(&output, &stop)
         .err()
-        .ok_or_else(|| anyhow::anyhow!("an interrupted export must fail"))?;
+        .ok_or(TestError::UnexpectedSuccess("interrupted export succeeded"))?;
     assert!(matches!(
         error,
         SnapshotExportError::Codec(SnapshotError::Interrupted)
@@ -401,7 +425,7 @@ fn interrupted_export_publishes_nothing_and_removes_its_staged_file() -> anyhow:
 }
 
 #[test]
-fn stale_same_pid_temp_does_not_block_a_new_export() -> anyhow::Result<()> {
+fn stale_same_pid_temp_does_not_block_a_new_export() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
@@ -426,7 +450,7 @@ fn stale_same_pid_temp_does_not_block_a_new_export() -> anyhow::Result<()> {
         names.contains(
             &stale
                 .file_name()
-                .ok_or_else(|| anyhow::anyhow!("stale file name"))?
+                .ok_or(TestError::Missing("stale file name"))?
                 .to_string_lossy()
                 .into_owned()
         )
@@ -443,7 +467,7 @@ fn stale_same_pid_temp_does_not_block_a_new_export() -> anyhow::Result<()> {
 }
 
 #[test]
-fn concurrent_export_is_refused_while_the_permit_is_held() -> anyhow::Result<()> {
+fn concurrent_export_is_refused_while_the_permit_is_held() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, _native_path) = snapshot_inputs(dir.path())?;
     state.snapshots.import(&core_path)?;
@@ -454,7 +478,7 @@ fn concurrent_export_is_refused_while_the_permit_is_held() -> anyhow::Result<()>
             .snapshots
             .export(&output, &LatchReader::fixture_never())
             .err()
-            .ok_or_else(|| anyhow::anyhow!("a held permit must refuse the export"))?;
+            .ok_or(TestError::UnexpectedSuccess("held permit allowed export"))?;
         assert!(matches!(error, SnapshotExportError::ExportInProgress));
         assert!(matches!(
             SnapshotControlError::from(error),
@@ -465,10 +489,10 @@ fn concurrent_export_is_refused_while_the_permit_is_held() -> anyhow::Result<()>
     Ok(())
 }
 
-fn regtest_pin() -> anyhow::Result<&'static bitcoin_rs_primitives::AssumeUtxoData> {
+fn regtest_pin() -> Result<&'static bitcoin_rs_primitives::AssumeUtxoData, TestError> {
     Network::Regtest
         .assume_utxo_for_height(200)
-        .ok_or_else(|| anyhow::anyhow!("regtest height-200 anchor missing"))
+        .ok_or(TestError::Missing("regtest height-200 anchor"))
 }
 
 type ValidatingIdentity = (
@@ -478,7 +502,7 @@ type ValidatingIdentity = (
     u64,
 );
 
-fn validating_identity(status: &AssumeUtxoDiskStatus) -> anyhow::Result<ValidatingIdentity> {
+fn validating_identity(status: &AssumeUtxoDiskStatus) -> Result<ValidatingIdentity, TestError> {
     match status {
         AssumeUtxoDiskStatus::Validating {
             base_height,
@@ -492,7 +516,9 @@ fn validating_identity(status: &AssumeUtxoDiskStatus) -> anyhow::Result<Validati
             *expected_hash_serialized,
             *chain_tx_count,
         )),
-        other => anyhow::bail!("expected a validating lifecycle, found {other:?}"),
+        _ => Err(TestError::ExpectationFailed(
+            "validating assumeutxo lifecycle",
+        )),
     }
 }
 
@@ -505,7 +531,7 @@ fn tip_identity(state: &crate::state::NodeState) -> Option<(u32, bitcoin_rs_prim
 
 #[test]
 fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
--> anyhow::Result<()> {
+-> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let mut installed = Vec::new();
     for native in [false, true] {
@@ -570,13 +596,13 @@ fn sealed_and_proofless_activation_install_identical_state_and_survive_restart()
 }
 
 #[test]
-fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> anyhow::Result<()> {
+fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let (state, core_path, _) = snapshot_inputs(dir.path())?;
     let mut forged = std::fs::read(&core_path)?;
     *forged
         .last_mut()
-        .ok_or_else(|| anyhow::anyhow!("empty fixture"))? ^= 1;
+        .ok_or(TestError::Missing("snapshot fixture bytes"))? ^= 1;
     let forged_path = dir.path().join("forged.dat");
     std::fs::write(&forged_path, &forged)?;
     let before_tip = state.chainstate().applied_tip_snapshot();
@@ -606,7 +632,7 @@ fn wrong_commitment_changes_nothing_and_a_valid_retry_activates() -> anyhow::Res
 }
 
 #[test]
-fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> anyhow::Result<()> {
+fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
     let (state, core_path, _) = snapshot_inputs(dir.path())?;
@@ -647,7 +673,7 @@ fn mutating_an_unproven_set_is_caught_by_the_single_verification() -> anyhow::Re
 
 #[cfg(unix)]
 #[test]
-fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> anyhow::Result<()> {
+fn interrupted_activation_fails_closed_and_restart_retries_cleanly() -> Result<(), TestError> {
     let pinned = regtest_pin()?;
     let dir = tempfile::tempdir()?;
     let (state, core_path, _) = snapshot_inputs(dir.path())?;

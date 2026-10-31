@@ -11,7 +11,7 @@ const MAX_KEY_FILE_BYTES: usize = 256;
 const MAX_KEY_FILE_READ: u64 = 257;
 
 #[derive(Debug, Error)]
-pub(crate) enum AuthorityKeyError {
+pub enum AuthorityKeyError {
     #[error("could not open or read the SV2 authority key: {0}")]
     Io(#[from] io::Error),
     #[error(

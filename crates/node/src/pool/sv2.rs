@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::pool::ledger::MinerId;
 use bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter;
@@ -20,6 +19,7 @@ use bitcoin_rs_primitives::BlockHash;
 use super::authority;
 use super::ledger::{BlockRecordOutcome, BlockRecordPermit, DeferredCharge, LedgerHost};
 use crate::config::PoolConfig;
+use crate::run::RunError;
 
 const CERTIFICATE_VALIDITY: Duration = Duration::new(86_400, 0);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -95,13 +95,13 @@ impl Sv2Service {
         self.cancel.store(true, Ordering::Release);
     }
 
-    pub(crate) fn stop_join(&mut self, deadline: Instant) -> Result<()> {
+    pub(crate) fn stop_join(&mut self, deadline: Instant) -> Result<(), RunError> {
         self.stop();
         wait_until_finished(self.listener.as_ref(), deadline, "SV2 listener")?;
         if let Some(listener) = self.listener.take() {
             listener
                 .join()
-                .map_err(|_| anyhow!("SV2 listener thread panicked"))?;
+                .map_err(|_| RunError::PoolSv2ListenerPanicked)?;
         }
 
         loop {
@@ -115,7 +115,7 @@ impl Sv2Service {
                 break;
             }
             if Instant::now() >= deadline {
-                return Err(anyhow!("timed out joining SV2 connection threads"));
+                return Err(RunError::PoolSv2ConnectionJoinTimeout);
             }
             thread::sleep(
                 ACCEPT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
@@ -135,7 +135,7 @@ impl Sv2Service {
             }
         }
         if panicked {
-            return Err(anyhow!("SV2 connection thread panicked"));
+            return Err(RunError::PoolSv2ConnectionPanicked);
         }
         Ok(())
     }
@@ -165,20 +165,20 @@ pub(crate) fn start(
     control: Arc<dyn MiningControl>,
     cancel: Arc<AtomicBool>,
     limiter: Arc<ConnectionLimiter>,
-) -> Result<Sv2Service> {
-    let bind = config
-        .sv2_bind
-        .ok_or_else(|| anyhow!("SV2 start requires a listener address"))?;
+) -> Result<Sv2Service, RunError> {
+    let bind = config.sv2_bind.ok_or(RunError::PoolSv2BindMissing)?;
     let key_path = config
         .sv2_authority_key
         .as_deref()
-        .ok_or_else(|| anyhow!("SV2 start requires an authority key"))?;
-    let authority = Arc::new(authority::load(key_path).context("loading SV2 authority key")?);
+        .ok_or(RunError::PoolSv2AuthorityKeyMissing)?;
+    let authority = Arc::new(
+        authority::load(key_path).map_err(|source| RunError::PoolSv2AuthorityKey { source })?,
+    );
     let listener =
-        TcpListener::bind(bind).with_context(|| format!("binding SV2 listener {bind}"))?;
+        TcpListener::bind(bind).map_err(|source| RunError::PoolSv2Bind { bind, source })?;
     listener
         .set_nonblocking(true)
-        .context("setting SV2 listener nonblocking")?;
+        .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
 
     let connections = Arc::new(Mutex::new(Vec::new()));
     let thread_connections = Arc::clone(&connections);
@@ -258,7 +258,7 @@ pub(crate) fn start(
                 }
             }
         })
-        .context("spawning SV2 listener")?;
+        .map_err(|source| RunError::PoolSv2ListenerSpawn { source })?;
 
     Ok(Sv2Service {
         cancel,
@@ -276,12 +276,12 @@ fn serve_connection(
     ledger: &Arc<LedgerHost>,
     control: &dyn MiningControl,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<(), RunError> {
     stream.set_nonblocking(true)?;
     stream.set_nodelay(true)?;
     let mut connection = core
         .with_job_book(|book| Connection::accept(authority, CERTIFICATE_VALIDITY, config, book))
-        .context("creating authenticated SV2 connection")?;
+        .map_err(|source| RunError::PoolSv2ConnectionAccept { source })?;
     let mut accounts = HashMap::new();
     let mut input = vec![0; MAX_FEED_LEN];
     let mut buffered_input = None;
@@ -289,13 +289,13 @@ fn serve_connection(
     let mut transmit = PendingTransmit::default();
     let start = Instant::now();
     let mut last_progress = start;
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<(), RunError> {
         while !cancel.load(Ordering::Acquire) && !connection.is_closing() {
             if !connection.session().is_open() && start.elapsed() >= HANDSHAKE_TIMEOUT {
-                return Err(anyhow!("SV2 handshake timed out"));
+                return Err(RunError::PoolSv2HandshakeTimeout);
             }
             if last_progress.elapsed() >= IDLE_TIMEOUT {
-                return Err(anyhow!("SV2 connection idle timed out"));
+                return Err(RunError::PoolSv2IdleTimeout);
             }
             let deferred_before = deferred.len();
             let mut still_deferred = Vec::with_capacity(deferred.len());
@@ -348,7 +348,7 @@ fn serve_connection(
             let mut block_permit = Some(block_permit);
             let length = buffered_input
                 .take()
-                .ok_or_else(|| anyhow!("SV2 buffered input length is missing"))?;
+                .ok_or(RunError::PoolSv2BufferedInputMissing)?;
             core.with_job_book(|book| connection.feed(&input[..length], book))?;
             let events_before = connection.session().pending_acks();
             handle_events(
@@ -391,7 +391,7 @@ fn serve_connection(
     result
 }
 
-fn announce_current_job(connection: &mut Connection, core: &PoolCore) -> Result<()> {
+fn announce_current_job(connection: &mut Connection, core: &PoolCore) -> Result<(), RunError> {
     if let Some(installed) = core.current_installed() {
         connection.announce(&installed)?;
     }
@@ -405,7 +405,7 @@ fn handle_events(
     control: &dyn MiningControl,
     accounts: &mut HashMap<u32, MinerId>,
     pipeline: BlockPipeline<'_>,
-) -> Result<()> {
+) -> Result<(), RunError> {
     let BlockPipeline {
         permit: block_permit,
         deferred,
@@ -446,11 +446,11 @@ fn handle_events(
             }
             Event::BlockFound(pending) => {
                 let Some(account) = accounts.get(&pending.channel_id()).copied() else {
-                    return Err(anyhow!("SV2 block channel has no admitted ledger account"));
+                    return Err(RunError::PoolSv2BlockChannelUnaccounted);
                 };
                 let permit = block_permit
                     .take()
-                    .ok_or_else(|| anyhow!("SV2 block event has no host record reservation"))?;
+                    .ok_or(RunError::PoolSv2BlockReservationMissing)?;
                 let found = pending.found_block();
                 let submission = pending.submit(control);
                 if let Ok(submitted) = &submission
@@ -470,11 +470,11 @@ fn handle_events(
                                 if submitted.receipt().status() == BlockStatus::Undetermined
                         ) {
                             let Ok(submitted) = submission else {
-                                return Err(anyhow!("SV2 block lost its submission"));
+                                return Err(RunError::PoolSv2BlockSubmissionLost);
                             };
                             let hash = found.share.hash;
                             let Some(charge) = charge else {
-                                return Err(anyhow!("SV2 durable recovery has no reservation"));
+                                return Err(RunError::PoolSv2DurableReservationMissing);
                             };
                             deferred.push(DeferredBlock {
                                 hash,
@@ -497,11 +497,11 @@ fn handle_events(
                                 )
                         ) {
                             let Ok(submitted) = submission else {
-                                return Err(anyhow!("SV2 block lost its submission"));
+                                return Err(RunError::PoolSv2BlockSubmissionLost);
                             };
                             let hash = found.share.hash;
                             let Some(charge) = charge else {
-                                return Err(anyhow!("SV2 queued recovery has no reservation"));
+                                return Err(RunError::PoolSv2QueuedReservationMissing);
                             };
                             deferred.push(DeferredBlock {
                                 hash,
@@ -514,25 +514,24 @@ fn handle_events(
                         }
                     }
                     (BlockRecordOutcome::Unrecordable, _) => {
-                        return Err(anyhow!(
-                            "SV2 block cannot be represented by the durable ledger"
-                        ));
+                        return Err(RunError::PoolSv2BlockUnrecordable);
                     }
                 }
-                let submission = submission.context("SV2 block submission failed")?;
+                let submission = submission
+                    .map_err(|source| RunError::PoolSv2BlockSubmissionFailed { source })?;
                 match submission.receipt().status() {
                     BlockStatus::Applied => {
                         connection.confirm_block(&submission)?;
                     }
                     BlockStatus::Undetermined => {
-                        return Err(anyhow!("SV2 Undetermined block lost its reservation"));
+                        return Err(RunError::PoolSv2UndeterminedReservationLost);
                     }
                     BlockStatus::Rejected if submission.receipt().is_stale_parent() => {
                         connection
                             .reject_block(&submission, ERROR_CODE_SUBMIT_SHARES_STALE_SHARE)?;
                     }
                     BlockStatus::Rejected => {
-                        return Err(anyhow!("node rejected submitted SV2 block"));
+                        return Err(RunError::PoolSv2BlockRejected);
                     }
                 }
             }
@@ -591,7 +590,7 @@ impl PendingTransmit {
         connection: &mut Connection,
         stream: &mut TcpStream,
         deadline: Instant,
-    ) -> Result<()> {
+    ) -> Result<(), RunError> {
         loop {
             self.fill(connection);
             self.flush(stream)?;
@@ -600,13 +599,13 @@ impl PendingTransmit {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(anyhow!("timed out draining SV2 connection output"));
+                return Err(RunError::PoolSv2DrainTimeout);
             }
             thread::sleep(ACCEPT_POLL_INTERVAL);
         }
     }
 
-    fn flush(&mut self, stream: &mut TcpStream) -> Result<()> {
+    fn flush(&mut self, stream: &mut TcpStream) -> Result<(), RunError> {
         while self.offset < self.bytes.len() {
             match stream.write(&self.bytes[self.offset..]) {
                 Ok(0) => {
@@ -640,10 +639,12 @@ fn wait_until_finished(
     handle: Option<&JoinHandle<()>>,
     deadline: Instant,
     name: &str,
-) -> Result<()> {
+) -> Result<(), RunError> {
     while handle.is_some_and(|handle| !handle.is_finished()) {
         if Instant::now() >= deadline {
-            return Err(anyhow!("timed out joining {name}"));
+            return Err(RunError::PoolSv2JoinTimeout {
+                name: name.to_owned(),
+            });
         }
         thread::sleep(ACCEPT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     }

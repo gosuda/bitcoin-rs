@@ -1,4 +1,6 @@
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_mining::{
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
     MiningControlError,
@@ -137,7 +139,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
     let before = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("missing tip"))?;
+        .ok_or_else(|| TestError::message("missing tip"))?;
     let mut raw = Tx {
         version: 2,
         lock_time: LockTime::ZERO,
@@ -164,7 +166,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
     let error = mining
         .generate(request(raw, 0))
         .err()
-        .ok_or_else(|| anyhow::anyhow!("over-budget raw transaction must fail before solve"))?;
+        .ok_or_else(|| TestError::message("over-budget raw transaction must fail before solve"))?;
     assert!(
         matches!(error, MiningControlError::Rejected(ref reason) if reason == "TestBlockValidity failed: bad-blk-sigops"),
         "unexpected refusal: {error:?}"
@@ -172,7 +174,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> Result<()> {
     let after = state
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("missing tip"))?;
+        .ok_or_else(|| TestError::message("missing tip"))?;
     assert_eq!(after.hash, before.hash);
     assert!(state.mempool().read().is_empty());
     Ok(())

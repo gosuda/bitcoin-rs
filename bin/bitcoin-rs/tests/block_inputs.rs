@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
 use bitcoin::consensus::serialize;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
@@ -13,8 +12,10 @@ use bitcoin_rs_e2e::helpers::{
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
+use crate::support::TestError;
+
 #[test]
-fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<()> {
+fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<(), TestError> {
     const OUTPUTS: usize = 12_500;
     const KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     let mut node = ProcessNode::spawn_with(
@@ -43,13 +44,23 @@ fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<
     );
     sign_p2pkh_inputs(&mut tx, std::slice::from_ref(&prevout))?;
     let mined = node.rpc("generateblock", &json!(["raw(51)", [tx_hex(&tx)]]))?;
-    let hash = mined["hash"].as_str().context("mined hash")?;
+    let hash = mined["hash"]
+        .as_str()
+        .ok_or(TestError::Missing("mined hash"))?;
 
     let verbose = node.rpc("getblock", &json!([hash, 3]))?;
     assert_eq!(verbose["hash"], hash);
-    assert!(verbose["weight"].as_u64().context("weight")? <= 4_000_000);
+    assert!(
+        verbose["weight"]
+            .as_u64()
+            .ok_or(TestError::Missing("weight"))?
+            <= 4_000_000
+    );
     assert_eq!(
-        verbose["tx"][1]["vout"].as_array().context("vout")?.len(),
+        verbose["tx"][1]["vout"]
+            .as_array()
+            .ok_or(TestError::Missing("vout"))?
+            .len(),
         OUTPUTS
     );
     let coin = &verbose["tx"][1]["vin"][0]["prevout"];
@@ -69,10 +80,14 @@ fn taproot_heavy_block_has_complete_certified_inputs_and_candidates() -> Result<
 
     let tweaks = node.rpc("getblocktweaks", &json!([hash]))?;
     assert_eq!(tweaks["hash"], hash);
-    let transactions = tweaks["transactions"].as_array().context("transactions")?;
+    let transactions = tweaks["transactions"]
+        .as_array()
+        .ok_or(TestError::Missing("transactions"))?;
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0]["txid"], tx.compute_txid().to_string());
-    let outputs = transactions[0]["outputs"].as_array().context("outputs")?;
+    let outputs = transactions[0]["outputs"]
+        .as_array()
+        .ok_or(TestError::Missing("outputs"))?;
     assert_eq!(outputs.len(), OUTPUTS);
     for (vout, output) in outputs.iter().enumerate() {
         assert_eq!(output, &json!({"vout":vout,"output_key":KEY}));

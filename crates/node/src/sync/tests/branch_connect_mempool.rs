@@ -1,9 +1,10 @@
 use super::*;
+use crate::test_support::TestError;
 use bitcoin_rs_consensus::ValidationEngine;
 
 #[test]
 fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let fork_root_hash = main[49].block_hash();
@@ -11,7 +12,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+        .ok_or(TestError::Missing("fork root node"))?;
     let mut fork_prev = fork_root_hash;
     let mut fork_blocks = Vec::new();
     for height in 51..=52_u32 {
@@ -34,14 +35,14 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
         .lookup(Hash256::from_le_bytes(
             fork_blocks[0].block_hash().as_bytes(),
         ))
-        .ok_or_else(|| std::io::Error::other("missing invalid fork node"))?;
+        .ok_or(TestError::Missing("invalid fork node"))?;
     let descendant_id = handles
         .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(
             fork_blocks[1].block_hash().as_bytes(),
         ))
-        .ok_or_else(|| std::io::Error::other("missing descendant fork node"))?;
+        .ok_or(TestError::Missing("descendant fork node"))?;
 
     let mut corrupt = fork_blocks[0].clone();
     corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
@@ -101,7 +102,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 #[test]
 #[expect(clippy::too_many_lines)]
 fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     use bitcoin::hashes::{Hash as _, hash160};
     use bitcoin_rs_mempool::{
         AdmissionOrigin, BodyInterest, Mempool, MempoolGateway, MempoolLimits, MempoolObserver,
@@ -272,7 +273,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         handles.apply_block(&BlockPayload::from_local(block.clone()))?;
     }
 
-    let parent = parent_tx.ok_or_else(|| std::io::Error::other("package not built"))?;
+    let parent = parent_tx.ok_or(TestError::Missing("built package transaction"))?;
     let tip = &blocks[100];
     let child_txid = tip.txs[2].txid();
 
@@ -315,9 +316,12 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         &followers,
         Hash256::from_le_bytes(tip.block_hash().as_bytes()),
     )
-    .map_err(|error| std::io::Error::other(format!("invalidate failed: {error:?}")))?;
+    .map_err(TestError::from)?;
     assert_eq!(
-        *invalidation.invalid.first().ok_or("nothing invalidated")?,
+        *invalidation
+            .invalid
+            .first()
+            .ok_or(TestError::Missing("invalidated block"))?,
         Hash256::from_le_bytes(tip.block_hash().as_bytes())
     );
     assert_eq!(
@@ -361,8 +365,8 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 }
 
 #[test]
-fn admit_headers_reports_the_tip_a_heavier_fork_displaced() -> Result<(), Box<dyn std::error::Error>>
-{
+fn admit_headers_reports_the_tip_a_heavier_fork_displaced()
+-> Result<(), crate::test_support::TestError> {
     use bitcoin_rs_p2p::sync::chain::HeaderAdmission;
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();

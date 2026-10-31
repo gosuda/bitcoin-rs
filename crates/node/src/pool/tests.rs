@@ -17,9 +17,11 @@ use bitcoin_rs_rpc::context::PoolOperator;
 use bitcoin_rs_storage::KvStore;
 
 use super::ledger::LedgerHost;
+use crate::run::RunError;
+use crate::test_support::TestError;
 
-type OpenStore = fn(&Path) -> Result<Arc<dyn KvStore>, Box<dyn std::error::Error>>;
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type OpenStore = fn(&Path) -> Result<Arc<dyn KvStore>, bitcoin_rs_storage::StorageError>;
+type TestResult = Result<(), TestError>;
 const EPOCH: u32 = 17;
 
 fn config() -> PoolConfig {
@@ -33,11 +35,7 @@ fn payout_policy() -> PayoutPolicy {
     }
 }
 
-fn registered_host(
-    open: OpenStore,
-    path: &Path,
-    epoch: u32,
-) -> Result<LedgerHost, Box<dyn std::error::Error>> {
+fn registered_host(open: OpenStore, path: &Path, epoch: u32) -> Result<LedgerHost, TestError> {
     let ledger = Arc::new(Ledger::create(open(path)?, config())?);
     ledger.set_payout_script(MinerId(42), &[0x51])?;
     Ok(LedgerHost::new(ledger, epoch, payout_policy()))
@@ -50,7 +48,7 @@ fn worker() -> WorkerIdentity {
     }
 }
 
-fn share() -> Result<AcceptedShare, Box<dyn std::error::Error>> {
+fn share() -> Result<AcceptedShare, TestError> {
     let header = Header {
         version: 4,
         nonce: 0x1234_5678,
@@ -85,7 +83,7 @@ fn expected_credit(share: &AcceptedShare, epoch: u32) -> ShareCredit {
     }
 }
 
-fn found_block() -> Result<FoundBlock, Box<dyn std::error::Error>> {
+fn found_block() -> Result<FoundBlock, TestError> {
     let mut share = share()?;
     share.class = ShareClass::Block;
     Ok(FoundBlock {
@@ -151,7 +149,7 @@ fn exact_share_survives_reopen(open: OpenStore) -> TestResult {
     assert_eq!(ledger.current_window()?, vec![(MinerId(42), 1)]);
     let (seq, work) = ledger
         .share_by_hash(&credit.header_hash)?
-        .ok_or("recorded share missing after reopen")?;
+        .ok_or(TestError::Missing("recorded share after reopen"))?;
     assert_eq!(work, credit.work);
     assert_eq!(
         ledger.record_share(&credit)?,
@@ -211,7 +209,7 @@ fn failed_block_receipt_stays_pending(open: OpenStore) -> TestResult {
     assert_eq!(
         ledger
             .round_for_block(&hash)?
-            .ok_or("failed submission round missing")?
+            .ok_or(TestError::Missing("failed submission round"))?
             .state,
         RoundState::Pending
     );
@@ -236,14 +234,14 @@ fn rejected_block_receipt_stays_pending(open: OpenStore) -> TestResult {
             result: BlockValidationResult::DuplicateInvalid,
         };
         host.record_block(&worker(), &found, &Ok(receipt))
-            .map_err(|_| "rejected-receipt block record unavailable")?;
+            .map_err(|_| TestError::ExpectationFailed("block record available"))?;
     }
     let ledger = Ledger::open(open(directory.path())?, config())?;
     let credit = expected_credit(&found.share, EPOCH);
     assert_eq!(
         ledger
             .round_for_block(&credit.header_hash)?
-            .ok_or("rejected receipt round missing")?
+            .ok_or(TestError::Missing("rejected receipt round"))?
             .state,
         RoundState::Pending
     );
@@ -307,25 +305,27 @@ fn block_record_reservations_are_bounded_and_released(open: OpenStore) -> TestRe
     for _ in 0..8 {
         permits.push(
             host.try_reserve_block_slot()
-                .ok_or("slot refused below capacity")?,
+                .ok_or(TestError::Missing("slot below capacity"))?,
         );
     }
     assert!(host.try_reserve_block_slot().is_none());
     drop(
         permits
             .pop()
-            .ok_or("permit vector exhausted below capacity")?,
+            .ok_or(TestError::Missing("permit below capacity"))?,
     );
     permits.push(
         host.try_reserve_block_slot()
-            .ok_or("released slot not re-reservable")?,
+            .ok_or(TestError::Missing("released slot"))?,
     );
     assert!(host.try_reserve_block_slot().is_none());
     drop(permits);
     let permits: Vec<_> = (0..8)
         .map(|_| {
             host.try_reserve_block_slot()
-                .ok_or_else(|| std::io::Error::other("full release did not restore capacity"))
+                .ok_or(TestError::ExpectationFailed(
+                    "full release restores capacity",
+                ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     assert!(host.try_reserve_block_slot().is_none());
@@ -363,13 +363,13 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
         );
         let permit = host
             .try_reserve_block_slot()
-            .ok_or("slot refused below capacity")?;
+            .ok_or(TestError::Missing("slot below capacity"))?;
         let (outcome, charge) = permit.record_or_enqueue(MinerId(42), &found, &Ok(receipt));
         assert!(
             matches!(outcome, BlockRecordOutcome::Durable),
             "good block must record durably"
         );
-        let charge = charge.ok_or("durable Undetermined must retain its charge")?;
+        let charge = charge.ok_or(TestError::Missing("deferred charge"))?;
         assert!(
             matches!(charge, DeferredCharge::Permit(_)),
             "durable waiter must transfer its permit"
@@ -386,7 +386,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
         host.try_reserve_block_slot().is_none(),
         "eight deferred charges must exhaust shared capacity"
     );
-    let dropped = charges.pop().ok_or("eight charges expected")?;
+    let dropped = charges.pop().ok_or(TestError::Missing("deferred charge"))?;
     drop(dropped);
     assert!(
         host.try_reserve_block_slot().is_some(),
@@ -403,16 +403,16 @@ fn protocol_admissions_share_total_capacity_and_release_it_on_drop() -> TestResu
     let sv2 = Arc::clone(&shared);
     let first = sv1
         .try_admit("192.0.2.1".parse()?)
-        .map_err(|reason| std::io::Error::other(format!("sv1 admission refused: {reason:?}")))?;
+        .map_err(|_| TestError::ExpectationFailed("sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit("192.0.2.2".parse()?),
         Err(bitcoin_rs_mining::pool::stratum::sv1::RefusalReason::ConnectionLimit)
     ));
     assert_eq!(shared.active(), 1);
     drop(first);
-    let second = sv2.try_admit("192.0.2.2".parse()?).map_err(|reason| {
-        std::io::Error::other(format!("sv2 admission after release refused: {reason:?}"))
-    })?;
+    let second = sv2
+        .try_admit("192.0.2.2".parse()?)
+        .map_err(|_| TestError::ExpectationFailed("sv2 admits after release"))?;
     assert_eq!(shared.active(), 1);
     drop(second);
     assert_eq!(shared.active(), 0);
@@ -425,23 +425,21 @@ fn protocol_admissions_share_per_ip_capacity_without_consuming_refused_slots() -
     let sv1 = Arc::clone(&shared);
     let sv2 = Arc::clone(&shared);
     let same_ip = "192.0.2.1".parse()?;
-    let first = sv1.try_admit(same_ip).map_err(|reason| {
-        std::io::Error::other(format!("per-IP sv1 admission refused: {reason:?}"))
-    })?;
+    let first = sv1
+        .try_admit(same_ip)
+        .map_err(|_| TestError::ExpectationFailed("per-IP sv1 admits"))?;
     assert!(matches!(
         sv2.try_admit(same_ip),
         Err(bitcoin_rs_mining::pool::stratum::sv1::RefusalReason::PerIpLimit)
     ));
-    let other = sv2.try_admit("192.0.2.2".parse()?).map_err(|reason| {
-        std::io::Error::other(format!("second-IP admission refused: {reason:?}"))
-    })?;
+    let other = sv2
+        .try_admit("192.0.2.2".parse()?)
+        .map_err(|_| TestError::ExpectationFailed("second-IP sv2 admits"))?;
     assert_eq!(shared.active(), 2);
     drop(first);
-    let replacement = sv2.try_admit(same_ip).map_err(|reason| {
-        std::io::Error::other(format!(
-            "released per-IP slot not re-admittable: {reason:?}"
-        ))
-    })?;
+    let replacement = sv2
+        .try_admit(same_ip)
+        .map_err(|_| TestError::ExpectationFailed("released per-IP slot re-admits"))?;
     assert_eq!(shared.active(), 2);
     drop((replacement, other));
     assert_eq!(shared.active(), 0);
@@ -453,7 +451,7 @@ macro_rules! backend_tests {
         mod $module {
             use super::*;
 
-            fn open(path: &Path) -> Result<Arc<dyn KvStore>, Box<dyn std::error::Error>> {
+            fn open(path: &Path) -> Result<Arc<dyn KvStore>, bitcoin_rs_storage::StorageError> {
                 Ok(Arc::new(<$store>::open(path)?))
             }
 
@@ -597,8 +595,10 @@ fn ledger_create_open_and_epoch_under_guard(
     let error = outcome.unwrap_err();
     assert!(
         matches!(
-            error.downcast_ref::<pool_ledger::LedgerError>(),
-            Some(pool_ledger::LedgerError::ConfigMismatch)
+            error.downcast_ref::<RunError>(),
+            Some(RunError::PoolLedger(
+                pool_ledger::LedgerError::ConfigMismatch
+            ))
         ),
         "a changed policy must fail rather than reinterpret history: {error:?}"
     );

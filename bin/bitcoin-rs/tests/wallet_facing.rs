@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::error::Error;
 use std::io::{BufRead as _, BufReader, Read};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -38,7 +37,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const INDEX_TIMEOUT: Duration = Duration::from_mins(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+use crate::support::TestError;
+
+type TestResult<T = ()> = Result<T, TestError>;
 
 trait BodyText {
     fn body_text(&self) -> String;
@@ -59,9 +60,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         conn: RefCell::new(Connection::new(node.addr)),
     };
     let p2wpkh = p2wpkh_script();
-    let address = Address::from_script(&p2wpkh, Network::Regtest)
-        .map_err(|error| format!("p2wpkh fixture must be a standard address: {error}"))?
-        .to_string();
+    let address = Address::from_script(&p2wpkh, Network::Regtest)?.to_string();
 
     assert_eq!(client.rpc("getblockcount", &json!([]))?, json!(0));
     assert_eq!(
@@ -213,13 +212,12 @@ fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
 
 #[cfg(unix)]
 fn spawn_held_child() -> TestResult<Child> {
-    Command::new("sleep")
+    let child = Command::new("sleep")
         .arg("30")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("failed to spawn sleep: {error}").into())
+        .spawn()?;
+    Ok(child)
 }
 
 #[cfg(unix)]
@@ -282,15 +280,13 @@ impl StartupChild {
     fn child_mut(&mut self) -> TestResult<&mut Child> {
         self.child
             .as_mut()
-            .ok_or("startup child already taken")
-            .map_err(Into::into)
+            .ok_or(TestError::Missing("startup child already taken"))
     }
 
     fn into_inner(mut self) -> TestResult<Child> {
         self.child
             .take()
-            .ok_or("startup child already taken")
-            .map_err(Into::into)
+            .ok_or(TestError::Missing("startup child already taken"))
     }
 }
 
@@ -330,15 +326,14 @@ impl NodeProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("failed to spawn bitcoin-rs: {error}"))?;
+            .spawn()?;
         let mut child = StartupChild::new(spawned);
 
         let stderr = child
             .child_mut()?
             .stderr
             .take()
-            .ok_or("bitcoin-rs stderr was not piped")?;
+            .ok_or(TestError::Missing("bitcoin-rs stderr was not piped"))?;
         let logs = Arc::new(Mutex::new(String::new()));
         let (addr_tx, addr_rx) = mpsc::channel();
         let log_buffer = Arc::clone(&logs);
@@ -346,12 +341,9 @@ impl NodeProcess {
             collect_startup_logs(stderr, &log_buffer, &addr_tx);
         });
 
-        let addr = addr_rx.recv_timeout(STARTUP_TIMEOUT).map_err(|_| {
-            format!(
-                "timed out waiting for rpc listener bind\n{}",
-                locked_string(&logs)
-            )
-        })?;
+        let addr = addr_rx
+            .recv_timeout(STARTUP_TIMEOUT)
+            .map_err(|_| TestError::StartupTimeout(locked_string(&logs)))?;
         Ok(Self {
             addr,
             logs,
@@ -418,7 +410,9 @@ impl Client {
         let hex = serialize_hex(&block);
         let result = self.rpc("submitblock", &json!([hex]))?;
         if !result.is_null() {
-            return Err(format!("submitblock rejected: {result}").into());
+            return Err(TestError::SubmitBlock(format!(
+                "submitblock rejected: {result}"
+            )));
         }
         Ok(())
     }
@@ -432,14 +426,13 @@ impl Client {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(format!(
+                return Err(TestError::IndexTimeout(format!(
                     "scriptindex did not answer {path} within {:?}: {} {}\n{}",
                     INDEX_TIMEOUT,
                     response.status,
                     response.body_text(),
                     locked_string(&self.logs)
-                )
-                .into());
+                )));
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -448,9 +441,10 @@ impl Client {
     fn esplora_text(&self, path: &str) -> TestResult<String> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(
-                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
-            );
+            return Err(TestError::HttpStatus {
+                status: response.status,
+                body: response.body_text(),
+            });
         }
         Ok(response.body_text())
     }
@@ -458,9 +452,10 @@ impl Client {
     fn esplora_json(&self, path: &str) -> TestResult<Value> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(
-                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
-            );
+            return Err(TestError::HttpStatus {
+                status: response.status,
+                body: response.body_text(),
+            });
         }
         Ok(response.json()?)
     }
@@ -493,7 +488,7 @@ impl Client {
             Instant::now() + REQUEST_TIMEOUT,
         )?;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
-            return Err(format!("{method} RPC error: {error}").into());
+            return Err(TestError::Rpc(format!("{method} RPC error: {error}")));
         }
         Ok(value
             .get("result")
@@ -618,9 +613,9 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
     );
 
     let address_utxos = client.esplora_json(&format!("/api/address/{address}/utxo"))?;
-    let utxos = address_utxos
-        .as_array()
-        .ok_or("address UTXO response must be a JSON array")?;
+    let utxos = address_utxos.as_array().ok_or(TestError::Missing(
+        "address UTXO response must be a JSON array",
+    ))?;
     assert!(
         !utxos.is_empty(),
         "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
@@ -691,7 +686,9 @@ fn wait_for_confirmation(client: &Client, txid: &str) -> TestResult<()> {
             }
         }
         if Instant::now() >= deadline {
-            return Err(format!("the mined block must confirm the broadcast spend {txid}").into());
+            return Err(TestError::ConfirmationTimeout(format!(
+                "the mined block must confirm the broadcast spend {txid}"
+            )));
         }
         thread::sleep(Duration::from_millis(100));
     }

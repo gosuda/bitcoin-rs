@@ -8,14 +8,19 @@ use bitcoin_rs_consensus::verify_block::verify_block_non_contextual;
 use bitcoin_rs_e2e::{Kind, ProcessNode, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};
 
+use crate::support::TestError;
+
+type Result<T = ()> = std::result::Result<T, TestError>;
+
 #[test]
-fn coinbase_input_sigop_growth_agrees_with_core() -> Result<(), Box<dyn std::error::Error>> {
+fn coinbase_input_sigop_growth_agrees_with_core() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
     let address = bitcoin_rs_e2e::helpers::funding_address()?;
     let hashes = core.rpc("generatetoaddress", &json!([1, address.to_string()]))?;
     let raw = core.rpc("getblock", &json!([hashes[0], 0]))?;
-    let original: bitcoin::Block =
-        bitcoin::consensus::encode::deserialize_hex(raw.as_str().ok_or("block hex")?)?;
+    let original: bitcoin::Block = bitcoin::consensus::encode::deserialize_hex(
+        raw.as_str().ok_or(TestError::Missing("block hex"))?,
+    )?;
     for opcode in [0xac, 0xae] {
         let mut block = original.clone();
         block.header.prev_blockhash = original.block_hash();
@@ -28,7 +33,9 @@ fn coinbase_input_sigop_growth_agrees_with_core() -> Result<(), Box<dyn std::err
             .into_bytes();
         script.push(opcode);
         block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(script);
-        block.header.merkle_root = block.compute_merkle_root().ok_or("merkle")?;
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .ok_or(TestError::Missing("merkle"))?;
         while block.header.validate_pow(block.header.target()).is_err() {
             block.header.nonce += 1;
         }
@@ -147,7 +154,7 @@ fn level_one_body_rules_agree_with_pinned_core_block_rejections() {
     core.stop().expect("stop reference process");
 }
 
-fn spawn_consensus_pair() -> Result<(ProcessNode, ProcessNode), Box<dyn std::error::Error>> {
+fn spawn_consensus_pair() -> Result<(ProcessNode, ProcessNode)> {
     let core = ProcessNode::spawn_with(Kind::Core, &SpawnOptions::default())?;
     let node = ProcessNode::spawn_with(
         Kind::BitcoinRs,
@@ -207,10 +214,7 @@ fn coinbase_tx(
     }
 }
 
-fn submit(
-    node: &mut ProcessNode,
-    block: &bitcoin::Block,
-) -> Result<sonic_rs::Value, Box<dyn std::error::Error>> {
+fn submit(node: &mut ProcessNode, block: &bitcoin::Block) -> Result<sonic_rs::Value> {
     Ok(node.rpc(
         "submitblock",
         &json!([bitcoin::consensus::encode::serialize_hex(block)]),
@@ -218,8 +222,7 @@ fn submit(
 }
 
 #[test]
-fn wrong_merkle_two_coinbase_body_is_a_merkle_failure_and_keeps_the_header()
--> Result<(), Box<dyn std::error::Error>> {
+fn wrong_merkle_two_coinbase_body_is_a_merkle_failure_and_keeps_the_header() -> Result<()> {
     let (mut core, mut node) = spawn_consensus_pair()?;
     let coinbase = coinbase_tx(
         vec![0x02, 0x00],
@@ -258,8 +261,7 @@ fn wrong_merkle_two_coinbase_body_is_a_merkle_failure_and_keeps_the_header()
 }
 
 #[test]
-fn over_weight_body_with_duplicate_inputs_names_the_transaction_failure()
--> Result<(), Box<dyn std::error::Error>> {
+fn over_weight_body_with_duplicate_inputs_names_the_transaction_failure() -> Result<()> {
     let (mut core, mut node) = spawn_consensus_pair()?;
     let reserved = [0_u8; 32];
     let placeholder = {
@@ -305,7 +307,7 @@ fn over_weight_body_with_duplicate_inputs_names_the_transaction_failure()
         txdata: txs.clone(),
     }
     .witness_root()
-    .ok_or("witness root")?;
+    .ok_or(TestError::Missing("witness root"))?;
     let commitment = bitcoin::block::Block::compute_witness_commitment(&witness_root, &reserved);
     let mut script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
     script.extend_from_slice(commitment.as_byte_array());
@@ -345,7 +347,7 @@ fn over_weight_body_with_duplicate_inputs_names_the_transaction_failure()
 }
 
 #[test]
-fn stripped_size_body_names_the_size_limit() -> Result<(), Box<dyn std::error::Error>> {
+fn stripped_size_body_names_the_size_limit() -> Result<()> {
     let (mut core, mut node) = spawn_consensus_pair()?;
     let coinbase = coinbase_tx(
         vec![0x02, 0x00],

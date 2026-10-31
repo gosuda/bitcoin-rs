@@ -5,6 +5,7 @@ mod dependency_graph;
 
 #[path = "../support/capability_compile.rs"]
 mod capability_compile;
+use crate::support::TestError;
 use dependency_graph::WorkspaceGraph;
 
 const READ_CONTROL: &str = r"
@@ -51,10 +52,12 @@ pub fn observe_sync(chain: &dyn SyncChain) -> Option<Arc<TipSnapshot>> {
 ";
 
 #[test]
-fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), Box<dyn std::error::Error>>
-{
+fn primitives_owns_block_payload_with_approved_bytes_edge() -> Result<(), TestError> {
     let manifest = dependency_graph::workspace_root_manifest();
-    let root = manifest.parent().ok_or("workspace root")?.canonicalize()?;
+    let root = manifest
+        .parent()
+        .ok_or(TestError::Missing("workspace root"))?
+        .canonicalize()?;
     let read_manifest = |relative: &str| {
         std::fs::read_to_string(root.join(relative))
             .unwrap_or_else(|error| panic!("read {relative}: {error}"))
@@ -124,11 +127,11 @@ fn workspace_dependency_direction_is_one_way() {
 /// EMB-03: a real production embedder must not inherit fixture visibility
 /// through Cargo's workspace dev-feature unification.
 #[test]
-fn node_composition_root_is_not_a_production_embedding_api() -> anyhow::Result<()> {
+fn node_composition_root_is_not_a_production_embedding_api() -> Result<(), TestError> {
     let manifest = dependency_graph::workspace_root_manifest();
     let root = manifest
         .parent()
-        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .ok_or(TestError::Missing("workspace root"))?
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::with_node(&root)?;
     let control = r"
@@ -153,11 +156,12 @@ pub fn observe(node: &Node) {
     Ok(())
 }
 #[test]
-fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> anyhow::Result<()> {
+fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> Result<(), TestError>
+{
     let manifest = dependency_graph::workspace_root_manifest();
     let root = manifest
         .parent()
-        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .ok_or(TestError::Missing("workspace root"))?
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
     consumer.allow_reads(&format!(
@@ -206,11 +210,11 @@ fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> 
 }
 
 #[test]
-fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Result<()> {
+fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> Result<(), TestError> {
     let manifest = dependency_graph::workspace_root_manifest();
     let root = manifest
         .parent()
-        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .ok_or(TestError::Missing("workspace root"))?
         .canonicalize()?;
     let consumer = capability_compile::ProductionConsumer::new(&root)?;
     consumer.allow_reads(READ_CONTROL)?;

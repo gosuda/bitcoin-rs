@@ -14,7 +14,8 @@ use std::thread::{self, JoinHandle};
 use super::*;
 use crate::config::{NodeConfig, RuntimeInputs};
 use crate::lifecycle::start_node;
-use crate::run::run;
+use crate::run::{RunError, run};
+use crate::test_support::TestError;
 
 fn isolated_config(data_dir: &Path) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
@@ -28,7 +29,7 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
 }
 
 #[test]
-fn split_rpc_listeners_start_and_join_through_node_services() -> anyhow::Result<()> {
+fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let management = std::net::TcpListener::bind("127.0.0.1:0")?;
     let public = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -42,7 +43,7 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> anyhow::Result<
     assert_eq!(
         node.services
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing node services"))?
+            .ok_or(TestError::Missing("node services"))?
             .rpc_threads
             .len(),
         2
@@ -73,7 +74,7 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> anyhow::Result<
 }
 
 #[test]
-fn public_bind_failure_rolls_back_management_binding_and_node_state() -> anyhow::Result<()> {
+fn public_bind_failure_rolls_back_management_binding_and_node_state() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let management = std::net::TcpListener::bind("127.0.0.1:0")?;
     let public = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -84,7 +85,9 @@ fn public_bind_failure_rolls_back_management_binding_and_node_state() -> anyhow:
     drop(management);
     let error = start_node(config.clone(), RuntimeInputs::default(), false)
         .err()
-        .ok_or_else(|| anyhow::anyhow!("occupied public bind must fail startup"))?;
+        .ok_or(TestError::UnexpectedSuccess(
+            "occupied public bind succeeded",
+        ))?;
     assert_eq!(
         error.to_string(),
         format!(
@@ -92,19 +95,17 @@ fn public_bind_failure_rolls_back_management_binding_and_node_state() -> anyhow:
             public.local_addr()?
         )
     );
-    assert_eq!(
-        error
-            .downcast_ref::<std::io::Error>()
-            .map(std::io::Error::kind),
-        Some(std::io::ErrorKind::AddrInUse)
-    );
+    let RunError::PublicRpcBind { source, .. } = &error else {
+        panic!("expected RunError::PublicRpcBind, got: {error:?}");
+    };
+    assert_eq!(source.kind(), std::io::ErrorKind::AddrInUse);
     let _management = std::net::TcpListener::bind(address)?;
     let _reopened = NodeState::open(config, None)?;
     Ok(())
 }
 
 #[test]
-fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> anyhow::Result<()> {
+fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> Result<(), TestError> {
     use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, snapshot};
     use bitcoin_rs_primitives::{Hash256, Network, Txid};
     use std::time::{Duration, Instant};
@@ -147,10 +148,8 @@ fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> anyhow
     )?;
     let file = dir.path().join("mempool-snapshot.dat");
     let newer = std::fs::read(&file)?;
-    release_tx.send(())?;
-    worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("snapshot worker panicked"))?;
+    let _ = release_tx.send(());
+    worker.join().map_err(|_| TestError::ThreadPanicked)?;
     assert!(
         prepared,
         "the delayed worker must hold a valid old snapshot"
@@ -161,7 +160,7 @@ fn timed_out_snapshot_worker_cannot_overwrite_the_next_runs_snapshot() -> anyhow
 }
 
 #[test]
-fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
+fn rpc_network_handles_borrow_p2p_service_state() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
     let p2p = state.p2p();
@@ -198,7 +197,8 @@ fn verifychain_arguments_select_the_check_core_asks_for() {
 }
 
 #[test]
-fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> anyhow::Result<()> {
+fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> Result<(), TestError>
+{
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
     let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
@@ -233,7 +233,7 @@ fn verify_chain_accepts_an_intact_applied_chain_at_every_level_and_depth() -> an
 }
 
 #[test]
-fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> anyhow::Result<()> {
+fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> Result<(), TestError> {
     use bitcoin_rs_rpc::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
@@ -273,7 +273,7 @@ fn verify_chain_over_applied_genesis_is_answered_by_the_real_verifier() -> anyho
 }
 
 #[test]
-fn verify_chain_reports_cancellation_and_recovery_closure() -> anyhow::Result<()> {
+fn verify_chain_reports_cancellation_and_recovery_closure() -> Result<(), TestError> {
     use bitcoin_rs_rpc::context::ChainControlError;
 
     let dir = tempfile::tempdir()?;
@@ -308,7 +308,7 @@ fn verify_chain_reports_cancellation_and_recovery_closure() -> anyhow::Result<()
     Ok(())
 }
 
-fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
+fn seed_checkpoint(state: &NodeState) -> Result<(PathBuf, Vec<u8>), TestError> {
     state.apply_block(&BlockPayload::from_local(
         bitcoin_rs_primitives::Network::Regtest.genesis_block(),
     ))?;
@@ -353,7 +353,7 @@ fn disabled_zmq_still_seals_the_observer_slot() {
 }
 
 #[test]
-fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<()> {
+fn clean_shutdown_publishes_checkpoint_and_returns_success() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-success"));
     let state = NodeState::open(config.clone(), None)?;
@@ -361,7 +361,7 @@ fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<(
     drop(state);
 
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
-    shutdown_tx.send(())?;
+    let _ = shutdown_tx.send(());
     run(
         config.clone(),
         RuntimeInputs::default().with_shutdown(shutdown_rx),
@@ -376,7 +376,7 @@ fn clean_shutdown_publishes_checkpoint_and_returns_success() -> anyhow::Result<(
 }
 
 #[test]
-fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow::Result<()> {
+fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let mut config = isolated_config(&temp.path().join("node-checkpoint-failure"));
     config.p2p.connect = vec!["127.0.0.1:1".to_owned()];
@@ -386,7 +386,7 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow:
 
     let checkpoint_root = current
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("checkpoint CURRENT has no parent"))?
+        .ok_or(TestError::Missing("checkpoint parent directory"))?
         .to_path_buf();
     let displaced = checkpoint_root.with_extension("checkpoint-failure-backup");
     let restore = RestoreCheckpointRoot {
@@ -407,7 +407,9 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow:
     });
 
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
-    shutdown_tx.send(())?;
+    shutdown_tx
+        .send(())
+        .map_err(|_| TestError::ExpectationFailed("shutdown receiver is live"))?;
     let result = run(config, RuntimeInputs::default().with_shutdown(shutdown_rx));
 
     assert!(result.is_err());
@@ -425,7 +427,7 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow:
 }
 
 #[test]
-fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow::Result<()> {
+fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-join-failure"));
     let mut state = NodeState::open(config.clone(), None)?;
@@ -455,7 +457,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
 }
 
 #[test]
-fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()> {
+fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-slow-bootstrap"));
     let mut state = NodeState::open(config, None)?;
@@ -487,7 +489,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
 }
 
 #[test]
-fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> anyhow::Result<()> {
+fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let mut state = NodeState::open(isolated_config(temp.path()), None)?;
     let (current, previous) = seed_checkpoint(&state)?;
@@ -498,7 +500,9 @@ fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> anyhow::
     services.metrics = Some(crate::metrics::MetricsServer::with_worker_for_test(worker));
 
     let Err(error) = services.teardown(Some(&mut state), TeardownMode::CleanShutdown) else {
-        anyhow::bail!("a metrics panic must fail teardown");
+        return Err(TestError::UnexpectedSuccess(
+            "teardown with panicked metrics succeeded",
+        ));
     };
     assert!(error.to_string().contains("metrics scrape thread panicked"));
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
@@ -512,11 +516,11 @@ fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> anyhow::
 }
 
 #[test]
-fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
+fn daemon_and_embedded_paths_share_one_teardown() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let daemon_config = isolated_config(&temp.path().join("daemon"));
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
-    shutdown_tx.send(())?;
+    let _ = shutdown_tx.send(());
     let stages_before = shutdown::take_shutdown_stages_reached();
     run(
         daemon_config,
@@ -539,7 +543,7 @@ fn daemon_and_embedded_paths_share_one_teardown() -> anyhow::Result<()> {
 }
 
 #[test]
-fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
+fn repeated_teardown_and_drop_join_workers_once() -> Result<(), TestError> {
     shutdown::take_shutdown_stages_reached();
     let joins = Arc::new(AtomicUsize::new(0));
     let worker_joins = Arc::clone(&joins);
@@ -556,7 +560,7 @@ fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
 }
 
 #[test]
-fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<()> {
+fn startup_rollback_joins_workers_and_preserves_checkpoint() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("startup-rollback"));
     let state = NodeState::open(config.clone(), None)?;
@@ -587,7 +591,7 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
 }
 
 #[test]
-fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Result<()> {
+fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let mut config = isolated_config(&temp.path().join("node-index-join"));
     config.indexes.txindex = true;
@@ -621,9 +625,9 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Res
 }
 
 #[test]
-fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
+fn a_queued_shutdown_wake_does_not_block_teardown() -> Result<(), TestError> {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    wake_tx.send(())?;
+    let _ = wake_tx.send(());
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let mut services = NodeServices::default();
@@ -633,10 +637,8 @@ fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     });
     let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));
     let _ = wake_rx.try_recv();
-    worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("teardown worker panicked"))?;
-    result.map_err(|_| anyhow::anyhow!("teardown blocked on an already queued wake"))??;
+    worker.join().map_err(|_| TestError::ThreadPanicked)?;
+    result.map_err(|_| TestError::Timeout("teardown blocked on queued wake"))??;
     Ok(())
 }
 const WITNESS_BOUND: Duration = Duration::from_secs(10);
@@ -861,7 +863,7 @@ impl<T: Send + 'static> BoundedThread<T> {
     fn spawn(
         name: &'static str,
         body: impl FnOnce() -> T + Send + 'static,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, TestError> {
         let (done_tx, done) = mpsc::channel();
         let handle = thread::Builder::new()
             .name(name.to_owned())
@@ -873,16 +875,13 @@ impl<T: Send + 'static> BoundedThread<T> {
         Ok(Self { name, handle, done })
     }
 
-    fn finish(self) -> anyhow::Result<T> {
+    fn finish(self) -> Result<T, TestError> {
         let name = self.name;
         match self.done.recv_timeout(WITNESS_BOUND) {
-            Err(RecvTimeoutError::Timeout) => {
-                anyhow::bail!("{name} did not stop within {WITNESS_BOUND:?}")
+            Err(RecvTimeoutError::Timeout) => Err(TestError::Timeout(name)),
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                self.handle.join().map_err(|_| TestError::ThreadPanicked)
             }
-            Ok(()) | Err(RecvTimeoutError::Disconnected) => self
-                .handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("{name} panicked")),
         }
     }
 }
@@ -891,7 +890,7 @@ struct ServedWitness {
     stop: Arc<AtomicBool>,
     gate: Option<Arc<BodyGate>>,
     server: Option<BoundedThread<std::io::Result<()>>>,
-    client: Option<BoundedThread<anyhow::Result<String>>>,
+    client: Option<BoundedThread<Result<String, TestError>>>,
     client_socket: Option<TcpStream>,
 }
 
@@ -910,14 +909,14 @@ impl ServedWitness {
         &mut self,
         server: RpcServer,
         shutdown: bitcoin_rs_chain::LatchReader,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), TestError> {
         self.server = Some(BoundedThread::spawn("verifychain-rpc-server", move || {
             server.serve_with_shutdown(shutdown)
         })?);
         Ok(())
     }
 
-    fn send(&mut self, addr: SocketAddr) -> anyhow::Result<()> {
+    fn send(&mut self, addr: SocketAddr) -> Result<(), TestError> {
         let socket = TcpStream::connect(addr)?;
         socket.set_read_timeout(Some(SOCKET_TIMEOUT))?;
         socket.set_write_timeout(Some(SOCKET_TIMEOUT))?;
@@ -928,17 +927,17 @@ impl ServedWitness {
         Ok(())
     }
 
-    fn finish_server(&mut self) -> anyhow::Result<()> {
+    fn finish_server(&mut self) -> Result<(), TestError> {
         let Some(server) = self.server.take() else {
-            anyhow::bail!("the RPC server was never started");
+            return Err(TestError::Missing("RPC server"));
         };
         server.finish()??;
         Ok(())
     }
 
-    fn finish_client(&mut self) -> anyhow::Result<String> {
+    fn finish_client(&mut self) -> Result<String, TestError> {
         let Some(client) = self.client.take() else {
-            anyhow::bail!("the verifychain request was never sent");
+            return Err(TestError::Missing("verifychain request"));
         };
         client.finish()?
     }
@@ -962,7 +961,7 @@ impl Drop for ServedWitness {
     }
 }
 
-fn send_verifychain(mut socket: TcpStream) -> anyhow::Result<String> {
+fn send_verifychain(mut socket: TcpStream) -> Result<String, TestError> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"verifychain","params":[0,1]}"#;
     write!(
         socket,
@@ -975,44 +974,46 @@ fn send_verifychain(mut socket: TcpStream) -> anyhow::Result<String> {
     Ok(response)
 }
 
-fn assert_socket_error(response: &str, message: &str) -> anyhow::Result<()> {
+fn assert_socket_error(response: &str, message: &str) -> Result<(), TestError> {
     use sonic_rs::JsonValueTrait;
 
-    anyhow::ensure!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "a JSON-RPC 2.0 error answers HTTP 200: {response}"
-    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(TestError::ExpectationFailed(
+            "a JSON-RPC 2.0 error answers HTTP 200",
+        ));
+    }
     let (_, payload) = response
         .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("the reply has no HTTP body: {response}"))?;
+        .ok_or(TestError::Missing("HTTP response body"))?;
     let value: sonic_rs::Value = sonic_rs::from_str(payload)?;
-    anyhow::ensure!(
-        value.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0"),
-        "the reply is not a JSON-RPC 2.0 envelope: {payload}"
-    );
-    anyhow::ensure!(
-        value.get("id").and_then(JsonValueTrait::as_i64) == Some(1),
-        "the reply does not echo id 1: {payload}"
-    );
-    anyhow::ensure!(
-        value.get("result").is_none(),
-        "the reply carries a result: {payload}"
-    );
+    if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Err(TestError::ExpectationFailed(
+            "the reply is not a JSON-RPC 2.0 envelope",
+        ));
+    }
+    if value.get("id").and_then(JsonValueTrait::as_i64) != Some(1) {
+        return Err(TestError::ExpectationFailed("the reply does not echo id 1"));
+    }
+    if value.get("result").is_some() {
+        return Err(TestError::ExpectationFailed("the reply carries a result"));
+    }
     let error = value
         .get("error")
-        .ok_or_else(|| anyhow::anyhow!("the reply carries no error: {payload}"))?;
-    anyhow::ensure!(
-        error.get("code").and_then(JsonValueTrait::as_i64) == Some(-1),
-        "the error is not Core's misc code -1: {payload}"
-    );
-    anyhow::ensure!(
-        error.get("message").and_then(|v| v.as_str()) == Some(message),
-        "the error message is not exactly '{message}': {payload}"
-    );
+        .ok_or(TestError::Missing("JSON-RPC error payload"))?;
+    if error.get("code").and_then(JsonValueTrait::as_i64) != Some(-1) {
+        return Err(TestError::ExpectationFailed(
+            "the error is not Core's misc code -1",
+        ));
+    }
+    if error.get("message").and_then(|v| v.as_str()) != Some(message) {
+        return Err(TestError::ExpectationFailed(
+            "the error message is not as expected",
+        ));
+    }
     Ok(())
 }
 
-fn apply_regtest_chain(state: &NodeState) -> anyhow::Result<()> {
+fn apply_regtest_chain(state: &NodeState) -> Result<(), TestError> {
     let genesis = BlockPayload::from_local(bitcoin_rs_primitives::Network::Regtest.genesis_block());
     state.apply_block(&genesis)?;
     let mut previous = genesis.block().block_hash();
@@ -1026,7 +1027,7 @@ fn apply_regtest_chain(state: &NodeState) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bind_test_rpc(state: &NodeState) -> anyhow::Result<RpcServer> {
+fn bind_test_rpc(state: &NodeState) -> Result<RpcServer, TestError> {
     let coordinator = Arc::new(crate::MiningCoordinator::new(
         state.mempool_reader(),
         state.chainstate(),
@@ -1073,7 +1074,7 @@ fn final_payout_script_prefers_pool_when_values_differ() {
 }
 
 #[test]
-fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Result<()> {
+fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let gate = Arc::new(BodyGate::new());
     let state = NodeState::open_with_body_store(isolated_config(dir.path()), None, {
@@ -1095,10 +1096,11 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Resul
     witness.serve(server, state.shutdown_reader())?;
     witness.send(addr)?;
 
-    anyhow::ensure!(
-        gate.wait_entered(WITNESS_BOUND),
-        "the verifier never reached the held body read"
-    );
+    if !gate.wait_entered(WITNESS_BOUND) {
+        return Err(TestError::Timeout(
+            "the verifier never reached the held body read",
+        ));
+    }
     state.request_shutdown();
     witness.finish_server()?;
     gate.release();
@@ -1107,7 +1109,7 @@ fn verifychain_socket_cancels_in_flight_walk_on_node_shutdown() -> anyhow::Resul
 }
 
 #[test]
-fn verifychain_socket_reports_recovery_closure() -> anyhow::Result<()> {
+fn verifychain_socket_reports_recovery_closure() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let state = NodeState::open(isolated_config(dir.path()), None)?;
     apply_regtest_chain(&state)?;

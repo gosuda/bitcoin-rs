@@ -1,14 +1,11 @@
-//! Explicit 10,000-record journal replay performance and memory gate.
-
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
-use anyhow::{Context as _, Result, bail, ensure};
 use bitcoin_rs_chain::regtest_fixture;
+use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::BlockPayload;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const RECORDS: u32 = 10_000;
 const MAX_REPLAY: Duration = Duration::from_mins(1);
@@ -27,16 +24,14 @@ struct ProbeResult {
     tip_height: u32,
     tip_hash: String,
 }
-
-fn main() -> Result<()> {
+fn main() -> Result<(), TestError> {
     if std::env::var_os(PROBE_ENV).is_some() {
         replay_10k_subprocess_probe()
     } else {
         replay_10k_records_with_bounded_time_and_memory()
     }
 }
-
-fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
+fn replay_10k_records_with_bounded_time_and_memory() -> Result<(), TestError> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join("node");
     let result_path = temp.path().join("probe.json");
@@ -45,10 +40,11 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     let state = NodeState::open(config, None)?;
     let genesis_payload = BlockPayload::from_local(genesis.clone());
     state.apply_block(&genesis_payload)?;
-    ensure!(
-        state.publish_checkpoint()?.is_some(),
-        "checkpoint must publish at genesis before the 10k replay"
-    );
+    if state.publish_checkpoint()?.is_none() {
+        return Err(TestError::message(
+            "checkpoint must publish at genesis before the 10k replay",
+        ));
+    }
 
     let mut previous = genesis.block_hash();
     for height in 1..=RECORDS {
@@ -64,10 +60,11 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
         .env(DATA_DIR_ENV, &data_dir)
         .env(RESULT_ENV, &result_path)
         .stdin(Stdio::null())
-        .status()
-        .context("run isolated 10k replay probe")?;
+        .status()?;
     if !status.success() {
-        bail!("10k replay probe exited with {status}");
+        return Err(TestError::message(format!(
+            "10k replay probe exited with {status}"
+        )));
     }
 
     let result: ProbeResult = sonic_rs::from_slice(&std::fs::read(&result_path)?)?;
@@ -89,9 +86,13 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     Ok(())
 }
 
-fn replay_10k_subprocess_probe() -> Result<()> {
-    let data_dir = PathBuf::from(std::env::var(DATA_DIR_ENV)?);
-    let result_path = PathBuf::from(std::env::var(RESULT_ENV)?);
+fn replay_10k_subprocess_probe() -> Result<(), TestError> {
+    let data_dir = PathBuf::from(
+        std::env::var(DATA_DIR_ENV).map_err(|error| TestError::message(error.to_string()))?,
+    );
+    let result_path = PathBuf::from(
+        std::env::var(RESULT_ENV).map_err(|error| TestError::message(error.to_string()))?,
+    );
     let rss_before_kib = peak_rss_kib()?;
     let started = Instant::now();
     let state = NodeState::open(test_config(data_dir), None)?;
@@ -113,21 +114,19 @@ fn replay_10k_subprocess_probe() -> Result<()> {
     std::fs::write(result_path, sonic_rs::to_vec_pretty(&result)?)?;
     Ok(())
 }
-
-fn peak_rss_kib() -> Result<u64> {
-    let status = std::fs::read_to_string("/proc/self/status")
-        .context("read Linux /proc/self/status for peak RSS")?;
+fn peak_rss_kib() -> Result<u64, TestError> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
     let line = status
         .lines()
         .find(|line| line.starts_with("VmHWM:"))
         .ok_or_else(|| std::io::Error::other("VmHWM is missing from /proc/self/status"))?;
-    line.split_ascii_whitespace()
+    let value = line
+        .split_ascii_whitespace()
         .nth(1)
         .ok_or_else(|| std::io::Error::other("VmHWM value is missing"))?
-        .parse()
-        .context("parse VmHWM KiB")
+        .parse()?;
+    Ok(value)
 }
-
 fn test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;

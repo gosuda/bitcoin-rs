@@ -7,7 +7,7 @@ mod pow_valid_hook;
 mod prune;
 mod recovery;
 
-use anyhow::Result;
+use crate::test_support::TestError;
 
 use bitcoin_rs_chain::{TipSnapshot, regtest_fixture};
 
@@ -70,7 +70,7 @@ fn dir_listing(data_dir: &std::path::Path) -> String {
 }
 
 #[test]
-fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
+fn process_epoch_allocation_is_unique_across_processes() -> Result<(), TestError> {
     const CHILD_DIR_ENV: &str = "BITCOIN_RS_TEST_EPOCH_CHILD_DIR";
     const CHILDREN: usize = 8;
     if let Ok(data_dir) = std::env::var(CHILD_DIR_ENV) {
@@ -81,7 +81,9 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
         while !go.exists() {
             if std::time::Instant::now() >= deadline {
-                anyhow::bail!("epoch child never saw the start barrier");
+                return Err(TestError::message(
+                    "epoch child never saw the start barrier",
+                ));
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -128,7 +130,9 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("epoch children never became ready: {ready}/{CHILDREN}");
+            return Err(TestError::message(format!(
+                "epoch children never became ready: {ready}/{CHILDREN}"
+            )));
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -137,12 +141,13 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
     let mut epochs = Vec::new();
     for (index, child) in children.into_iter().enumerate() {
         let output = child.wait_with_output()?;
-        anyhow::ensure!(
-            output.status.success(),
-            "epoch child {index} failed: data_dir={data_dir:?} listing={} stderr={}",
-            dir_listing(&data_dir),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            return Err(TestError::message(format!(
+                "epoch child {index} failed: data_dir={data_dir:?} listing={} stderr={}",
+                dir_listing(&data_dir),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
     }
     for entry in std::fs::read_dir(&data_dir)? {
         let entry = entry?;

@@ -1,4 +1,6 @@
-use anyhow::{Context as _, Result, bail};
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -104,10 +106,9 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
     let recovered = state
         .durable_head()
         .load()?
-        .context("the durable head must survive recovery")?;
+        .ok_or_else(|| TestError::message("the durable head must survive recovery"))?;
     drop(state);
-    let reopened =
-        NodeState::open(config, None).context("reopening after completed recovery must succeed")?;
+    let reopened = NodeState::open(config, None)?;
     assert_eq!(
         reopened
             .chainstate()
@@ -123,7 +124,7 @@ fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
     let after = reopened
         .durable_head()
         .load()?
-        .context("the durable head must survive the second restart")?;
+        .ok_or_else(|| TestError::message("the durable head must survive the second restart"))?;
     assert_eq!(
         after.commit_id, recovered.commit_id,
         "recovery rewinds the applied state; it must not re-commit the durable head"
@@ -152,20 +153,20 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     let before = state
         .durable_head()
         .load()?
-        .context("durable head must be committed")?;
+        .ok_or_else(|| TestError::message("durable head must be committed"))?;
     drop(state);
 
     let state = NodeState::open(config, None)?;
     let landed = state
         .chainstate()
         .applied_tip_snapshot()
-        .context("recovery must publish a tip")?;
+        .ok_or_else(|| TestError::message("recovery must publish a tip"))?;
     assert_eq!(landed.hash, Hash256::from(parent));
     assert_eq!(landed.height, GAP_BLOCKS);
     let after = state
         .durable_head()
         .load()?
-        .context("durable head must survive")?;
+        .ok_or_else(|| TestError::message("durable head must survive"))?;
     assert_eq!(
         after.commit_id, before.commit_id,
         "recovery replays the committed gap; it must not re-commit the head"
@@ -182,20 +183,22 @@ fn pruned_frontier_survives_sigkill_and_preserves_boundary() -> Result<()> {
 
     crash_child("prune", &data_dir, Duration::from_mins(2))?;
 
-    let resumed = NodeState::open(config, None).context("restart after SIGKILL in prune")?;
+    let resumed = NodeState::open(config, None)?;
     let tree = resumed.chainstate().block_tree_handle();
     let hash_at = |height: u32| -> Result<Hash256> {
         let tree = tree.read();
-        let tip = tree.tip().context("restarted node has no chain tip")?;
+        let tip = tree
+            .tip()
+            .ok_or_else(|| TestError::message("restarted node has no chain tip"))?;
         let id = tree
             .node_at_height_from(tip.tip_id, height)
-            .context("chain is shorter than the sample height")?;
+            .ok_or_else(|| TestError::message("chain is shorter than the sample height"))?;
         Ok(tree.node(id)?.hash)
     };
     let bodies = resumed
         .chainstate()
         .block_body_store_handle()
-        .context("pruned node has a body store")?;
+        .ok_or_else(|| TestError::message("pruned node has a body store"))?;
     let deleted_height = FRONTIER - 7;
     assert!(
         bodies
@@ -245,7 +248,9 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     let head_path = journal_dir.join("head.json");
     let mut head = std::fs::read(&head_path)?;
     if head.len() < 5 {
-        bail!("journal head is too short for a version byte");
+        return Err(TestError::message(
+            "journal head is too short for a version byte",
+        ));
     }
     head[4] = u8::MAX;
     std::fs::write(&head_path, head)?;
@@ -271,8 +276,11 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
     if std::env::var_os(CHILD_ENV).is_none() {
         return Ok(());
     }
-    let data_dir = PathBuf::from(std::env::var(DATA_DIR_ENV)?);
-    let scenario = std::env::var(SCENARIO_ENV)?;
+    let data_dir = PathBuf::from(
+        std::env::var(DATA_DIR_ENV).map_err(|error| TestError::message(error.to_string()))?,
+    );
+    let scenario =
+        std::env::var(SCENARIO_ENV).map_err(|error| TestError::message(error.to_string()))?;
     let config = if scenario == "prune" {
         prune_test_config(data_dir.clone())
     } else {
@@ -335,13 +343,15 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             }
             state.publish_checkpoint()?;
             let Some(service) = state.prune_service() else {
-                bail!("prune scenario needs the prune service");
+                return Err(TestError::message("prune scenario needs the prune service"));
             };
-            service
-                .prune_to_height(12)
-                .map_err(|error| anyhow::anyhow!("prune failed: {error}"))?;
+            service.prune_to_height(12)?;
         }
-        other => bail!("unknown crash scenario {other}"),
+        other => {
+            return Err(TestError::message(format!(
+                "unknown crash scenario {other}"
+            )));
+        }
     }
 
     std::fs::write(data_dir.join("crash-test-ready"), scenario.as_bytes())?;
@@ -366,8 +376,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
 
     spawn_and_kill_worker(scenario, &data_dir, Duration::from_secs(15))?;
 
-    let resumed = NodeState::open(config, None)
-        .with_context(|| format!("restart after SIGKILL in {scenario}"))?;
+    let resumed = NodeState::open(config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_hash = block1.block_hash().0;
     let tip = resumed
@@ -393,8 +402,7 @@ fn spawn_and_kill_worker(scenario: &str, data_dir: &Path, ready_after: Duration)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn crash worker for {scenario}"))?;
+        .spawn()?;
 
     let ready = data_dir.join("crash-test-ready");
     let deadline = Instant::now() + ready_after;
@@ -406,19 +414,25 @@ fn spawn_and_kill_worker(scenario: &str, data_dir: &Path, ready_after: Duration)
                 .map(read_stderr)
                 .transpose()?
                 .unwrap_or_default();
-            bail!("crash worker {scenario} died before ready: {status}: {stderr}");
+            return Err(TestError::message(format!(
+                "crash worker {scenario} died before ready: {status}: {stderr}"
+            )));
         }
         if Instant::now() > deadline {
             child.kill()?;
             let _ = child.wait();
-            bail!("crash worker for {scenario} did not become ready");
+            return Err(TestError::message(format!(
+                "crash worker for {scenario} did not become ready"
+            )));
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     child.kill()?;
     let status = child.wait()?;
     if status.success() {
-        bail!("crash worker for {scenario} exited successfully instead of being killed");
+        return Err(TestError::message(format!(
+            "crash worker for {scenario} exited successfully instead of being killed"
+        )));
     }
     Ok(())
 }
@@ -446,8 +460,7 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
 
     spawn_and_kill_worker(scenario, &data_dir, Duration::from_secs(30))?;
 
-    let resumed = NodeState::open(config.clone(), None)
-        .with_context(|| format!("reopening {scenario} after SIGKILL must complete recovery"))?;
+    let resumed = NodeState::open(config.clone(), None)?;
     Ok((temp, config, resumed))
 }
 
@@ -501,8 +514,7 @@ fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn crash worker for {scenario}"))?;
+        .spawn()?;
 
     let ready = data_dir.join("crash-test-ready");
     let deadline = Instant::now() + budget;
@@ -511,19 +523,25 @@ fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> 
             let stderr = child.stderr.take().map_or_else(String::new, |stderr| {
                 read_stderr(stderr).unwrap_or_default()
             });
-            bail!("crash worker for {scenario} exited early ({status}): {stderr}");
+            return Err(TestError::message(format!(
+                "crash worker for {scenario} exited early ({status}): {stderr}"
+            )));
         }
         if Instant::now() >= deadline {
             child.kill()?;
             let _ = child.wait();
-            bail!("crash worker for {scenario} did not become ready");
+            return Err(TestError::message(format!(
+                "crash worker for {scenario} did not become ready"
+            )));
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     child.kill()?;
     let status = child.wait()?;
     if status.success() {
-        bail!("crash worker for {scenario} exited successfully instead of being killed");
+        return Err(TestError::message(format!(
+            "crash worker for {scenario} exited successfully instead of being killed"
+        )));
     }
     Ok(())
 }

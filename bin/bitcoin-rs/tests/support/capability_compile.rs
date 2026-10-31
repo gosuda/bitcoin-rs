@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use anyhow::Result;
+use crate::support::TestError;
+type Result<T = ()> = std::result::Result<T, TestError>;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
 pub(super) struct ProductionConsumer {
@@ -115,7 +116,7 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         let messages = String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(sonic_rs::from_str::<Value>)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let errors: Vec<_> = messages
             .iter()
             .filter(|message| {

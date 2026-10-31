@@ -6,6 +6,7 @@ use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::Network;
+use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_primitives::{
     Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
@@ -17,8 +18,7 @@ use parking_lot::RwLock;
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
 #[test]
-fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn std::error::Error>>
-{
+fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestError> {
     let genesis = regtest_genesis_block()?;
     let block_one = child_coinbase_block(&genesis, 1)?;
     let block_two = child_coinbase_block(&block_one, 2)?;
@@ -46,13 +46,19 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         None,
     );
 
-    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
-        headers: vec![genesis.header, block_one.header, block_two.header],
-        source: None,
-        wire_response: true,
-    })?;
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_two.clone()))?;
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))?;
+    inbound_headers_tx
+        .send(bitcoin_rs_p2p::InboundHeaders {
+            headers: vec![genesis.header, block_one.header, block_two.header],
+            source: None,
+            wire_response: true,
+        })
+        .map_err(|_| TestError::message("send headers failed"))?;
+    inbound_blocks_tx
+        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_two.clone()))
+        .map_err(|_| TestError::message("send block failed"))?;
+    inbound_blocks_tx
+        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
+        .map_err(|_| TestError::message("send block failed"))?;
 
     sync.tick();
 
@@ -74,8 +80,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     clippy::too_many_lines,
     reason = "keep the rejection, unchanged consumer state and recovery in one scenario"
 )]
-fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Result<(), TestError> {
     let genesis = regtest_genesis_block()?;
     let block_one = child_coinbase_block(&genesis, 1)?;
     let block_two = child_coinbase_block(&block_one, 2)?;
@@ -114,21 +119,27 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
     );
     let genesis_stats = expected_coin_stats(&[&genesis])?;
 
-    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
-        headers: vec![block_one.header, block_two.header],
-        source: None,
-        wire_response: true,
-    })?;
+    inbound_headers_tx
+        .send(bitcoin_rs_p2p::InboundHeaders {
+            headers: vec![block_one.header, block_two.header],
+            source: None,
+            wire_response: true,
+        })
+        .map_err(|_| TestError::message("send headers failed"))?;
     for bodies in [vec![], vec![malformed, block_two.clone()]] {
         for block in bodies {
-            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block))?;
+            inbound_blocks_tx
+                .send(bitcoin_rs_p2p::InboundBlock::from_local(block))
+                .map_err(|_| TestError::message("send block failed"))?;
         }
         sync.tick();
-        let header = handles.header_tip().ok_or("missing header tip")?;
+        let header = handles
+            .header_tip()
+            .ok_or_else(|| TestError::message("missing header tip"))?;
         assert_eq!((header.height, header.hash), (2, block_two.block_hash().0));
         let applied = handles
             .applied_tip_snapshot()
-            .ok_or("missing applied tip")?;
+            .ok_or_else(|| TestError::message("missing applied tip"))?;
         assert_eq!((applied.height, applied.hash), (0, genesis.block_hash().0));
         assert_eq!(handles.chain_snapshot(), before);
         assert_eq!(coin_stats.snapshot(), genesis_stats);
@@ -141,12 +152,14 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
         for block in [&block_one, &block_two] {
             let id = tree
                 .lookup(block.block_hash().0)
-                .ok_or("missing admitted header")?;
+                .ok_or_else(|| TestError::message("missing admitted header"))?;
             assert_ne!(tree.node(id)?.status, bitcoin_rs_chain::NodeStatus::Invalid);
         }
     }
 
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))?;
+    inbound_blocks_tx
+        .send(bitcoin_rs_p2p::InboundBlock::from_local(block_one.clone()))
+        .map_err(|_| TestError::message("send block failed"))?;
     for _ in 0..16 {
         sync.tick();
         if handles
@@ -159,7 +172,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
 
     let applied = handles
         .applied_tip_snapshot()
-        .ok_or("missing applied tip")?;
+        .ok_or_else(|| TestError::message("missing applied tip"))?;
     assert_eq!(
         (applied.height, applied.hash),
         (2, block_two.block_hash().0)
@@ -197,8 +210,7 @@ fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
 }
 
 #[test]
-fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats() -> Result<(), TestError> {
     let fixture = non_coinbase_spend_chain()?;
 
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -224,13 +236,17 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         None,
     );
 
-    inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
-        headers: fixture.blocks.iter().map(|block| block.header).collect(),
-        source: None,
-        wire_response: true,
-    })?;
+    inbound_headers_tx
+        .send(bitcoin_rs_p2p::InboundHeaders {
+            headers: fixture.blocks.iter().map(|block| block.header).collect(),
+            source: None,
+            wire_response: true,
+        })
+        .map_err(|_| TestError::message("send headers failed"))?;
     for block in fixture.blocks.iter().skip(1) {
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))?;
+        inbound_blocks_tx
+            .send(bitcoin_rs_p2p::InboundBlock::from_local(block.clone()))
+            .map_err(|_| TestError::message("send block failed"))?;
     }
 
     sync.tick();
@@ -273,7 +289,7 @@ struct SpendChainFixture {
     spend_outpoint: OutPoint,
 }
 
-fn non_coinbase_spend_chain() -> Result<SpendChainFixture, Box<dyn std::error::Error>> {
+fn non_coinbase_spend_chain() -> Result<SpendChainFixture, TestError> {
     let mut blocks = vec![regtest_genesis_block()?];
     let spendable_script = op_true_script();
     for height in 1_u8..=100 {
@@ -321,7 +337,7 @@ fn non_coinbase_spend_chain() -> Result<SpendChainFixture, Box<dyn std::error::E
     })
 }
 
-fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, Box<dyn std::error::Error>> {
+fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, TestError> {
     let mut stats = CoinStats::default();
     let mut live_outputs = HashMap::<OutPoint, (TxOut, u32, bool)>::new();
     for (height, block) in blocks.iter().enumerate() {
@@ -390,12 +406,12 @@ fn apply_handles_with_coin_stats_and_utxo(
     (handles, coin_stats, utxo)
 }
 
-fn regtest_genesis_block() -> Result<Block, Box<dyn std::error::Error>> {
+fn regtest_genesis_block() -> Result<Block, TestError> {
     let bytes = Vec::<u8>::from_hex(REGTEST_GENESIS_HEX)?;
     Ok(deserialize::<Block>(&bytes)?)
 }
 
-fn child_coinbase_block(parent: &Block, height: u8) -> Result<Block, Box<dyn std::error::Error>> {
+fn child_coinbase_block(parent: &Block, height: u8) -> Result<Block, TestError> {
     child_coinbase_block_with_script(
         parent,
         height,
@@ -407,7 +423,7 @@ fn child_coinbase_block_with_script(
     parent: &Block,
     height: u8,
     script_pubkey: Script,
-) -> Result<Block, Box<dyn std::error::Error>> {
+) -> Result<Block, TestError> {
     let mut block = parent.clone();
     block.header.prev_blockhash = parent.block_hash();
     block.header.time = parent.header.time.saturating_add(1);
@@ -424,7 +440,7 @@ fn child_block_with_transactions(
     parent: &Block,
     height: u8,
     transactions: Vec<Tx>,
-) -> Result<Block, Box<dyn std::error::Error>> {
+) -> Result<Block, TestError> {
     let mut block = child_coinbase_block(parent, height)?;
     block.txs.extend(transactions);
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
@@ -437,7 +453,7 @@ fn spend_to_op_true(
     previous_output: OutPoint,
     previous_value: Amount,
     fee: u64,
-) -> Result<Tx, Box<dyn std::error::Error>> {
+) -> Result<Tx, TestError> {
     let value = previous_value
         .to_sat()
         .checked_sub(fee)

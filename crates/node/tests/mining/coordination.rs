@@ -6,7 +6,9 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin_rs_mining::{BlockTemplate, MempoolSequenceWake, MiningControl, MiningControlError};
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, UserConfig, resolve,
@@ -417,10 +419,10 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> Result<()> {
 
     tip_done_rx
         .recv_timeout(Duration::from_millis(500))
-        .map_err(|_| anyhow::anyhow!("tip publish_generation thread deadlocked"))?;
+        .map_err(|_| TestError::message("tip publish_generation thread deadlocked"))?;
     seq_done_rx
         .recv_timeout(Duration::from_millis(500))
-        .map_err(|_| anyhow::anyhow!("sequence publish_generation_from thread deadlocked"))?;
+        .map_err(|_| TestError::message("sequence publish_generation_from thread deadlocked"))?;
 
     tip_thread
         .join()
@@ -447,9 +449,9 @@ fn publish_generation_from_does_not_take_mempool_lock() -> Result<()> {
     done_rx
         .recv_timeout(Duration::from_millis(200))
         .map_err(|_| {
-            anyhow::anyhow!(
+            TestError::message(
                 "publish_generation_from deadlocked under the mempool write lock \
-                 — it must not take the mempool read lock"
+                 - it must not take the mempool read lock",
             )
         })?;
     handle
@@ -494,7 +496,11 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> Result<()> {
 
     let result = done_rx
         .recv_timeout(Duration::from_secs(2))
-        .map_err(|error| anyhow::anyhow!("mempool long-poll waiter did not complete: {error}"))?;
+        .map_err(|error| {
+            TestError::message(format!(
+                "mempool long-poll waiter did not complete: {error}"
+            ))
+        })?;
     let elapsed = wake_start.elapsed();
     waiter
         .join()
@@ -741,9 +747,9 @@ fn publish_fee_delta_generation_does_not_take_mempool_lock() -> Result<()> {
     done_rx
         .recv_timeout(Duration::from_millis(200))
         .map_err(|_| {
-            anyhow::anyhow!(
+            TestError::message(
                 "publish_fee_delta_generation deadlocked under the mempool write lock \
-                 — it must not take the mempool read lock"
+                 - it must not take the mempool read lock",
             )
         })?;
     handle
@@ -851,7 +857,7 @@ fn staged_preparation_does_not_publish_before_commit() -> Result<()> {
         gate.release();
         apply
             .join()
-            .map_err(|_| anyhow::anyhow!("barrier apply thread panicked"))??;
+            .map_err(|_| TestError::message("barrier apply thread panicked"))??;
         assert_eq!(
             current_tip(state)?.hash,
             new_hash,
@@ -885,15 +891,15 @@ fn prepared_candidate_installs_on_commit_with_arc_reuse() -> Result<()> {
         let prepared = mining
             .wait_for_prepared_candidate(new_hash, barrier_bound())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "the preparation worker never finished the staged tip while sync was held"
+                TestError::message(
+                    "the preparation worker never finished the staged tip while sync was held",
                 )
             })?;
 
         gate.release();
         apply
             .join()
-            .map_err(|_| anyhow::anyhow!("barrier apply thread panicked"))??;
+            .map_err(|_| TestError::message("barrier apply thread panicked"))??;
         assert_eq!(
             current_tip(state)?.hash,
             new_hash,
@@ -958,8 +964,8 @@ fn fee_priority_race_discards_stale_preparation() -> Result<()> {
         let prepared = mining
             .wait_for_prepared_candidate(new_hash, barrier_bound())
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "the preparation worker never finished the staged tip while sync was held"
+                TestError::message(
+                    "the preparation worker never finished the staged tip while sync was held",
                 )
             })?;
         let staged_order: Vec<String> = prepared
@@ -987,7 +993,7 @@ fn fee_priority_race_discards_stale_preparation() -> Result<()> {
         gate.release();
         apply
             .join()
-            .map_err(|_| anyhow::anyhow!("barrier apply thread panicked"))??;
+            .map_err(|_| TestError::message("barrier apply thread panicked"))??;
         assert_eq!(
             current_tip(state)?.hash,
             new_hash,
@@ -1043,7 +1049,7 @@ fn shutdown_with_staged_work_installs_nothing_and_answers_unavailable() -> Resul
         gate.release();
         let inner = apply
             .join()
-            .map_err(|_| anyhow::anyhow!("barrier apply thread panicked"))?;
+            .map_err(|_| TestError::message("barrier apply thread panicked"))?;
         let _ = inner;
 
         match mining.get_block_template(template_request(None)) {

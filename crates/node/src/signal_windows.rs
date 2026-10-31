@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use anyhow::Result;
 use crossbeam_channel::Sender;
+
+use crate::run::RunError;
 use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
 
 pub(crate) struct ShutdownHandler {
@@ -17,7 +18,7 @@ impl ShutdownHandler {
     pub(crate) fn install(
         request_shutdown: impl Fn() + Send + 'static,
         shutdown_tx: Sender<()>,
-    ) -> Result<Self> {
+    ) -> std::io::Result<Self> {
         let received = Arc::new(AtomicBool::new(false));
         let mut registrations = Vec::new();
         for signal in [SIGINT, SIGTERM, SIGBREAK] {
@@ -52,7 +53,7 @@ impl ShutdownHandler {
         })
     }
 
-    pub(crate) fn close_and_join(&mut self) -> Result<()> {
+    pub(crate) fn close_and_join(&mut self) -> Result<(), RunError> {
         for id in self.registrations.drain(..) {
             signal_hook::low_level::unregister(id);
         }
@@ -62,7 +63,7 @@ impl ShutdownHandler {
             testing::note_closed();
             thread
                 .join()
-                .map_err(|_| anyhow::anyhow!("signal forwarding thread panicked"))?;
+                .map_err(|_| RunError::SignalForwardingPanicked)?;
         }
         Ok(())
     }
@@ -81,8 +82,11 @@ pub(crate) mod testing;
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::TestError;
+    type TestResult<T> = core::result::Result<T, TestError>;
+
     #[test]
-    fn crt_signal_reaches_shutdown_receiver() -> anyhow::Result<()> {
+    fn crt_signal_reaches_shutdown_receiver() -> TestResult<()> {
         const CHILD: &str = "BITCOIN_RS_TEST_CRT_SIGNAL_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -107,7 +111,7 @@ mod tests {
             .args(["--exact", &test_name])
             .env(CHILD, "1")
             .output()?;
-        anyhow::ensure!(
+        assert!(
             output.status.success(),
             "CRT signal child failed: {output:?}"
         );
@@ -115,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn close_joins_once_and_allows_reinstallation() -> anyhow::Result<()> {
+    fn close_joins_once_and_allows_reinstallation() -> TestResult<()> {
         for _ in 0..2 {
             let (sender, _receiver) = crossbeam_channel::bounded(1);
             let mut handler = super::ShutdownHandler::install(|| {}, sender)?;

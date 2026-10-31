@@ -10,12 +10,13 @@ use bitcoin_rs_utxo::UtxoSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
+use crate::test_support::TestError;
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_p2p::sync::chain::{SyncChain, WindowApplyDisposition};
 
 #[test]
 fn window_failure_keeps_committed_followers_and_native_retry_policy()
--> Result<(), Box<dyn std::error::Error>> {
+-> Result<(), crate::test_support::TestError> {
     let genesis = Network::Regtest.genesis_block();
     let first = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
@@ -82,7 +83,9 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
         assert_eq!(error.disposition, disposition);
         assert_eq!(error.applied, applied);
         assert_eq!(error.invalidated.as_ref(), invalidated);
-        let tip = adapter.applied_tip().ok_or("committed tip missing")?;
+        let tip = adapter
+            .applied_tip()
+            .ok_or(TestError::Missing("committed tip"))?;
         assert_eq!(
             (tip.height, tip.hash),
             (1, Hash256::from(first.block_hash()))
@@ -91,7 +94,9 @@ fn window_failure_keeps_committed_followers_and_native_retry_policy()
         let log = log.read();
         assert_eq!(log.len(), 2);
         assert_eq!(
-            log.last().ok_or("committed follower missing")?.hash,
+            log.last()
+                .ok_or(TestError::Missing("committed follower"))?
+                .hash,
             first.block_hash()
         );
     }
@@ -140,7 +145,7 @@ fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Ve
 
 type MaturedChain = (Chainstate, Vec<Block>, HashMap<Hash256, BlockPayload>);
 
-fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>> {
+fn matured_chain(depth: u32) -> Result<MaturedChain, crate::test_support::TestError> {
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();

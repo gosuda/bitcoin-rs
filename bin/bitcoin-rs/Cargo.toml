@@ -18,7 +18,7 @@ workspace = true
 
 [dependencies]
 mimalloc.workspace = true
-anyhow.workspace = true
+thiserror.workspace = true
 clap.workspace = true
 toml.workspace = true
 bitcoin-rs-node.workspace = true
@@ -27,7 +27,6 @@ bitcoin-rs-storage.workspace = true
 bitcoin-rs-consensus.workspace = true
 
 [dev-dependencies]
-thiserror.workspace = true
 parking_lot.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true

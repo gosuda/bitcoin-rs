@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin_rs_e2e::helpers::{
     COINBASE_MATURITY, assemble_block_from_template, mature_funding, op_true_script, spend_anyone,
@@ -7,9 +5,11 @@ use bitcoin_rs_e2e::helpers::{
 use bitcoin_rs_e2e::{Kind, ProcessNode, ValueExt};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
+use crate::support::TestError;
+
 const FEE_SATS: u64 = 10_000;
 
-type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, TestError>;
 
 #[test]
 fn external_miner_assembles_template_and_submits_block() -> TestResult {
@@ -34,7 +34,9 @@ fn external_miner_assembles_template_and_submits_block() -> TestResult {
     let template_txs = template
         .get("transactions")
         .and_then(|value| value.as_array())
-        .ok_or("template must carry a transactions array")?;
+        .ok_or(TestError::Missing(
+            "template must carry a transactions array",
+        ))?;
     assert_eq!(
         template_txs.len(),
         1,

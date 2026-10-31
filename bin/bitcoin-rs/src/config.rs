@@ -2,7 +2,6 @@ use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::options::{
     PoolOverrides, parse_connect_endpoint, parse_network, parse_p2p_magic, parse_script_index,
@@ -15,6 +14,47 @@ use bitcoin_rs_node::{
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BinError {
+    #[error(transparent)]
+    Config(#[from] bitcoin_rs_node::ConfigError),
+    #[error(transparent)]
+    Run(#[from] bitcoin_rs_node::RunError),
+    #[error(transparent)]
+    OfflineImport(#[from] bitcoin_rs_node::OfflineImportError),
+    #[error(transparent)]
+    NodeOpen(#[from] bitcoin_rs_node::NodeOpenError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Toml(#[from] toml::de::Error),
+    #[error("failed to read TOML config {}", .path.display())]
+    ReadTomlConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse TOML config {}", .path.display())]
+    ParseTomlConfig {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to read bitcoin.conf {}", .path.display())]
+    ReadBitcoinConf {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid bitcoin.conf value{suffix}: {details}")]
+    InvalidBitcoinConf {
+        suffix: &'static str,
+        details: String,
+    },
+    #[error("--corpus, --manifest, and --state must be given together")]
+    IncompleteOfflineImportArguments,
+}
 
 macro_rules! emit_cli {
     (
@@ -96,7 +136,7 @@ bitcoin_rs_node::option_rows!(emit_cli);
 pub(crate) fn resolve(
     mut cli: CliArgs,
     vars: impl Iterator<Item = (OsString, OsString)>,
-) -> Result<bitcoin_rs_node::NodeConfig> {
+) -> Result<bitcoin_rs_node::NodeConfig, BinError> {
     let mut layers = Vec::new();
     if let Some(path) = &cli.config {
         layers.push(user_config_from_toml(path)?);
@@ -111,7 +151,7 @@ pub(crate) fn resolve(
     layers.push(env_layer);
     layers.push(cli_layer);
     let layer_refs: Vec<_> = layers.iter().collect();
-    bitcoin_rs_node::resolve(&layer_refs)
+    Ok(bitcoin_rs_node::resolve(&layer_refs)?)
 }
 
 fn network_from_layers<'a>(layers: impl IntoIterator<Item = &'a UserConfig>) -> Network {
@@ -124,7 +164,9 @@ fn network_from_layers<'a>(layers: impl IntoIterator<Item = &'a UserConfig>) -> 
     network
 }
 
-fn user_config_from_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Result<UserConfig> {
+fn user_config_from_env(
+    vars: impl Iterator<Item = (OsString, OsString)>,
+) -> Result<UserConfig, BinError> {
     let mut layer = UserConfig::default();
     for (key, value) in vars {
         let Some(key) = key.to_str() else {
@@ -135,19 +177,29 @@ fn user_config_from_env(vars: impl Iterator<Item = (OsString, OsString)>) -> Res
     Ok(layer)
 }
 
-fn user_config_from_toml(path: &Path) -> Result<UserConfig> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read TOML config {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("failed to parse TOML config {}", path.display()))
+fn user_config_from_toml(path: &Path) -> Result<UserConfig, BinError> {
+    let text = std::fs::read_to_string(path).map_err(|source| BinError::ReadTomlConfig {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    toml::from_str(&text).map_err(|source| BinError::ParseTomlConfig {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-fn user_config_from_bitcoin_conf(path: &Path, network: Network) -> Result<[UserConfig; 2]> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read bitcoin.conf {}", path.display()))?;
+fn user_config_from_bitcoin_conf(
+    path: &Path,
+    network: Network,
+) -> Result<[UserConfig; 2], BinError> {
+    let text = std::fs::read_to_string(path).map_err(|source| BinError::ReadBitcoinConf {
+        path: path.to_path_buf(),
+        source,
+    })?;
     parse_for_network(&text, network)
 }
 
-fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2]> {
+fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], BinError> {
     let mut global = UserConfig::default();
     let mut selected = UserConfig::default();
     let mut current_section_selected = None;
@@ -180,11 +232,10 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2]> {
     if errors.is_empty() {
         Ok([global, selected])
     } else {
-        Err(anyhow::anyhow!(
-            "invalid bitcoin.conf value{}: {}",
-            if errors.len() == 1 { "" } else { "s" },
-            errors.join("; ")
-        ))
+        Err(BinError::InvalidBitcoinConf {
+            suffix: if errors.len() == 1 { "" } else { "s" },
+            details: errors.join("; "),
+        })
     }
 }
 
@@ -439,22 +490,31 @@ listen=0
 #[cfg(test)]
 mod compat_tests {
     use super::user_config_from_bitcoin_conf;
-    use anyhow::Result;
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Bin(#[from] super::BinError),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Config(#[from] bitcoin_rs_node::ConfigError),
+    }
+
     use bitcoin_rs_node::{Auth, Network, NodeConfig, resolve};
     use std::fs;
     use std::net::SocketAddr;
 
-    fn load_conf(text: &str, network: Network) -> Result<NodeConfig> {
+    fn load_conf(text: &str, network: Network) -> Result<NodeConfig, TestError> {
         let temp = tempfile::tempdir()?;
         let conf_path = temp.path().join("bitcoin.conf");
         fs::write(&conf_path, text)?;
         let layers = user_config_from_bitcoin_conf(&conf_path, network)?;
         let layer_refs: Vec<_> = layers.iter().collect();
-        resolve(&layer_refs)
+        Ok(resolve(&layer_refs)?)
     }
 
     #[test]
-    fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
+    fn bitcoin_conf_core_keys_map_into_config() -> Result<(), TestError> {
         let config = load_conf(
             r"
 # Global Core options may carry a leading dash.
@@ -542,7 +602,8 @@ onlynet=onion,i2p
     }
 
     #[test]
-    fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Result<()> {
+    fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Result<(), TestError>
+    {
         let config = load_conf(
             r"
 -prune=550
@@ -560,7 +621,7 @@ onlynet=onion,i2p
     }
 
     #[test]
-    fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<()> {
+    fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<(), TestError> {
         let config = load_conf(
             r"
 -zmqpubhashblock=tcp://127.0.0.1:28332
@@ -580,7 +641,7 @@ onlynet=onion,i2p
     }
 
     #[test]
-    fn bitcoin_conf_assumevalid_is_not_mapped_to_height_only_setting() -> Result<()> {
+    fn bitcoin_conf_assumevalid_is_not_mapped_to_height_only_setting() -> Result<(), TestError> {
         let config = load_conf(
             r"
 assumevalid=0000000000000000000000000000000000000000000000000000000000000000
@@ -615,20 +676,27 @@ mod feature_option_tests {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use anyhow::Result;
+    #[derive(Debug, thiserror::Error)]
+    enum TestError {
+        #[error(transparent)]
+        Bin(#[from] super::BinError),
+        #[error(transparent)]
+        Clap(#[from] clap::error::Error),
+    }
+
     use bitcoin_rs_node::{Network, NodeConfig};
     use clap::Parser as _;
 
     use super::{CliArgs, parse_for_network, resolve};
 
-    fn load(args: &[&str], vars: &[(&str, &str)]) -> Result<NodeConfig> {
+    fn load(args: &[&str], vars: &[(&str, &str)]) -> Result<NodeConfig, TestError> {
         let argv = std::iter::once("bitcoin-rs").chain(args.iter().copied());
         let cli = CliArgs::try_parse_from(argv)?;
-        resolve(
+        Ok(resolve(
             cli,
             vars.iter()
                 .map(|(key, value)| (OsString::from(*key), OsString::from(*value))),
-        )
+        )?)
     }
 
     fn refusal(args: &[&str], vars: &[(&str, &str)]) -> String {
@@ -639,7 +707,8 @@ mod feature_option_tests {
     }
 
     #[test]
-    fn relay_switches_are_bare_cli_flags_and_the_command_line_beats_environment() -> Result<()> {
+    fn relay_switches_are_bare_cli_flags_and_the_command_line_beats_environment()
+    -> Result<(), TestError> {
         let off = load(&[], &[])?.p2p;
         assert!(
             !off.relay_offers.package_relay
@@ -677,7 +746,8 @@ mod feature_option_tests {
     }
 
     #[test]
-    fn index_bundle_directories_resolve_from_the_command_line_and_stay_exclusive() -> Result<()> {
+    fn index_bundle_directories_resolve_from_the_command_line_and_stay_exclusive()
+    -> Result<(), TestError> {
         let import = load(&["--txindex=true", "--index-bundle-import", "/srv/in"], &[])?.indexes;
         assert_eq!(import.bundle_import.as_deref(), Some(Path::new("/srv/in")));
         assert_eq!(import.bundle_export, None);

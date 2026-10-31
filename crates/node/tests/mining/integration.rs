@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_mempool::{BodyInterest, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_primitives::{
@@ -139,7 +141,7 @@ fn assert_template_witness_commitment(template: &sonic_rs::Value, mempool_tx: &T
         "default witness commitment carries BIP141 prefix"
     );
     let expected_root = compute_witness_merkle_root(std::slice::from_ref(mempool_tx))
-        .ok_or_else(|| anyhow::anyhow!("single-tx witness merkle root must exist"))?;
+        .ok_or_else(|| TestError::message("single-tx witness merkle root must exist"))?;
     let mut commitment_input = [0_u8; 64];
     commitment_input[..32].copy_from_slice(&expected_root.to_le_bytes());
     commitment_input[32..].copy_from_slice(&WITNESS_RESERVED);
@@ -190,7 +192,7 @@ fn template_orders_parent_then_child_with_dependency() -> Result<()> {
         template_txs[0]
             .get("txid")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("first template tx missing txid"))?,
+            .ok_or_else(|| TestError::message("first template tx missing txid"))?,
         parent_txid.to_string(),
         "parent must precede child in topological template order"
     );
@@ -198,7 +200,7 @@ fn template_orders_parent_then_child_with_dependency() -> Result<()> {
         template_txs[1]
             .get("txid")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("second template tx missing txid"))?,
+            .ok_or_else(|| TestError::message("second template tx missing txid"))?,
         child_txid.to_string(),
         "child must follow parent in topological template order"
     );
@@ -273,7 +275,7 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         &state.chain_followers(),
         mined_hash,
     )
-    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    .map_err(|error| TestError::message(format!("invalidateblock failed: {error}")))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");
@@ -349,7 +351,7 @@ fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Re
         &state.chain_followers(),
         mined_hash,
     )
-    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    .map_err(|error| TestError::message(format!("invalidateblock failed: {error}")))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");
@@ -396,7 +398,7 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
         &state.chain_followers(),
         mined_hash,
     )
-    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    .map_err(|error| TestError::message(format!("invalidateblock failed: {error}")))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");
@@ -470,7 +472,7 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
     let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
     let reason = reject
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("submitblock"))?;
+        .ok_or_else(|| TestError::message("submitblock"))?;
     assert!(
         reason.contains("inconclusive-not-best-prevblk"),
         "stale template must be rejected with PrevHashMismatch: {reason}"
@@ -575,7 +577,7 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
     let feerate = after
         .get("feerate")
         .and_then(sonic_rs::JsonValueTrait::as_f64)
-        .ok_or_else(|| anyhow::anyhow!("estimatesmartfee must report feerate"))?;
+        .ok_or_else(|| TestError::message("estimatesmartfee must report feerate"))?;
     assert!(feerate > 0.0, "confirmed fee rate must be positive");
     assert_eq!(
         required_u64(&after, "blocks")?,

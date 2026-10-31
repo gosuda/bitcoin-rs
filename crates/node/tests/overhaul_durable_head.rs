@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use bitcoin_rs_node::test_support::TestError;
+
+type Result<T, E = TestError> = core::result::Result<T, E>;
 
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -72,9 +74,11 @@ fn assert_whole_state(
     let stored = family
         .head
         .load()?
-        .ok_or_else(|| anyhow::anyhow!("{context}: head row vanished"))?;
+        .ok_or_else(|| TestError::message(format!("{context}: head row vanished")))?;
     if stored != *old_head && stored != *new_head {
-        bail!("{context}: head is neither the old nor the new state: {stored:?}");
+        return Err(TestError::message(format!(
+            "{context}: head is neither the old nor the new state: {stored:?}"
+        )));
     }
     let rolled_forward = stored == *new_head;
     for (cf, key) in batch_rows {
@@ -99,7 +103,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         let position_one = family
             .bodies
             .block_position(1, hash_of(1))?
-            .ok_or_else(|| anyhow::anyhow!("family lost its own locator"))?;
+            .ok_or_else(|| TestError::message("family lost its own locator"))?;
         let old_head = DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
@@ -125,7 +129,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         let position_two = family
             .bodies
             .block_position(2, hash_of(2))?
-            .ok_or_else(|| anyhow::anyhow!("family lost its own locator"))?;
+            .ok_or_else(|| TestError::message("family lost its own locator"))?;
         let new_head = DurableHead {
             assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 2,
@@ -170,7 +174,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             let head = family
                 .head
                 .load()?
-                .ok_or_else(|| anyhow::anyhow!("head vanished"))?;
+                .ok_or_else(|| TestError::message("head vanished"))?;
             assert!(
                 head == new_head || locator_present,
                 "a present locator with no batch must be an orphan, not a fresh head"
@@ -261,7 +265,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let head = family
         .head
         .load()?
-        .ok_or_else(|| anyhow::anyhow!("a committed chain must leave a durable head"))?;
+        .ok_or_else(|| TestError::message("a committed chain must leave a durable head"))?;
     assert_eq!(head.height, 3);
     assert_eq!(head.tip, tip.hash);
     assert_eq!(head.commit_id, 4, "genesis plus three blocks advance 1..=4");
@@ -289,7 +293,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let restored = resumed
         .chainstate()
         .applied_tip_snapshot()
-        .ok_or_else(|| anyhow::anyhow!("restart must restore an applied tip"))?;
+        .ok_or_else(|| TestError::message("restart must restore an applied tip"))?;
     assert_eq!(restored.hash, tip.hash);
     let block4 = regtest_fixture::mined_regtest_child_at(BlockHash(restored.hash), 4)?;
     let new_tip = resumed.apply_block(&bitcoin_rs_primitives::BlockPayload::from_local(block4))?;
@@ -300,7 +304,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let head = family
         .head
         .load()?
-        .ok_or_else(|| anyhow::anyhow!("head vanished"))?;
+        .ok_or_else(|| TestError::message("head vanished"))?;
     assert_eq!(head.commit_id, 5, "commit ids continue across restarts");
     assert_eq!(head.tip, new_tip.hash);
     Ok(())
@@ -321,7 +325,7 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         )?);
         let frame = raw
             .get(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY)?
-            .ok_or_else(|| anyhow::anyhow!("head row must exist"))?;
+            .ok_or_else(|| TestError::message("head row must exist"))?;
         let corrupted = match corruption {
             "truncate" => frame[..frame.len() - 1].to_vec(),
             "flip-payload-bit" => {
@@ -335,7 +339,7 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
                 frame[4] = DURABLE_HEAD_FORMAT_VERSION + 1;
                 frame
             }
-            other => bail!("unknown corruption {other}"),
+            other => return Err(TestError::message(format!("unknown corruption {other}"))),
         };
         raw.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &corrupted)?;
         drop(raw);

@@ -1,9 +1,10 @@
 use super::*;
 
+use crate::test_support::TestError;
 use bitcoin_rs_primitives::BlockPayload;
 
 #[test]
-fn process_epoch_is_strictly_monotonic_across_restart() -> anyhow::Result<()> {
+fn process_epoch_is_strictly_monotonic_across_restart() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -34,7 +35,7 @@ fn process_epoch_is_strictly_monotonic_across_restart() -> anyhow::Result<()> {
 }
 
 #[test]
-fn active_chain_snapshot_starts_at_genesis_on_fresh_node() -> anyhow::Result<()> {
+fn active_chain_snapshot_starts_at_genesis_on_fresh_node() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -56,7 +57,7 @@ fn active_chain_snapshot_starts_at_genesis_on_fresh_node() -> anyhow::Result<()>
 }
 
 #[test]
-fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Result<()> {
+fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -127,7 +128,7 @@ fn record_returns_hints_in_commit_order_and_advances_the_snapshot() {
 }
 
 #[test]
-fn corrupt_process_epoch_file_refuses_start() -> anyhow::Result<()> {
+fn corrupt_process_epoch_file_refuses_start() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
@@ -142,7 +143,9 @@ fn corrupt_process_epoch_file_refuses_start() -> anyhow::Result<()> {
     config.p2p.listen.clear();
 
     let Err(error) = NodeState::open(config, None) else {
-        anyhow::bail!("a corrupt process-epoch file must refuse startup");
+        return Err(TestError::message(
+            "a corrupt process-epoch file must refuse startup",
+        ));
     };
     assert!(
         error.to_string().contains("process-epoch"),
@@ -158,7 +161,7 @@ fn corrupt_process_epoch_file_refuses_start() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_epoch_lock_refuses_start() -> anyhow::Result<()> {
+fn symlinked_epoch_lock_refuses_start() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
@@ -174,7 +177,9 @@ fn symlinked_epoch_lock_refuses_start() -> anyhow::Result<()> {
     config.p2p.listen.clear();
 
     let Err(error) = NodeState::open(config, None) else {
-        anyhow::bail!("a symlinked epoch lock must refuse startup");
+        return Err(TestError::message(
+            "a symlinked epoch lock must refuse startup",
+        ));
     };
     assert!(
         error.to_string().contains("process epoch lock"),
@@ -191,7 +196,7 @@ fn symlinked_epoch_lock_refuses_start() -> anyhow::Result<()> {
 #[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
 #[cfg(not(target_vendor = "apple"))]
-fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
+fn non_regular_epoch_lock_refuses_start() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
@@ -205,14 +210,17 @@ fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
         &lock_dir,
         ".process-epoch.lock",
         rustix::fs::Mode::from_raw_mode(0o600),
-    )?;
+    )
+    .map_err(std::io::Error::from)?;
 
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.clone();
     config.p2p.listen.clear();
 
     let Err(error) = NodeState::open(config, None) else {
-        anyhow::bail!("a non-regular epoch lock must refuse startup");
+        return Err(TestError::message(
+            "a non-regular epoch lock must refuse startup",
+        ));
     };
     assert!(
         error.to_string().contains("not a regular file"),

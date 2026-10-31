@@ -1,6 +1,5 @@
 #![allow(dead_code, reason = "each consumer uses a different subset")]
 
-use anyhow::Result;
 use bitcoin_rs_node::metrics::EvidenceIdentity;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::TestError;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_primitives::{Block, BlockPayload, Network};
 use std::{
@@ -27,14 +28,14 @@ fn config(dir: &std::path::Path) -> crate::NodeConfig {
     config
 }
 
-fn block(parent: BlockHash, height: u32, tag: u32) -> anyhow::Result<Block> {
+fn block(parent: BlockHash, height: u32, tag: u32) -> Result<Block, TestError> {
     let txs = vec![regtest_fixture::coinbase(height)];
     let mut block = Block {
         header: Header {
             prev_blockhash: parent,
             version: 0x2000_0000,
             merkle_root: regtest_fixture::merkle_root(&txs)
-                .ok_or_else(|| anyhow::anyhow!("merkle"))?,
+                .ok_or(TestError::Missing("merkle root"))?,
             time: 1_296_688_603 + height * 600 + tag,
             bits: Network::Regtest.genesis_block().header.bits,
             nonce: 0,
@@ -46,7 +47,7 @@ fn block(parent: BlockHash, height: u32, tag: u32) -> anyhow::Result<Block> {
 }
 
 #[test]
-fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> anyhow::Result<()> {
+fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let node = run(Node::start(
         config(dir.path()),
@@ -59,7 +60,7 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> anyhow::Result<
     node.state.apply_block(&one)?;
     let update = node
         .poll_chain(&mut sub)?
-        .ok_or_else(|| anyhow::anyhow!("connect hint"))?;
+        .ok_or(TestError::Missing("connect hint"))?;
     assert!(!update.gap);
     let pinned_one = update.current;
     let two = BlockPayload::from_local(block(one.block().block_hash(), 2, 0)?);
@@ -68,7 +69,7 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> anyhow::Result<
     node.state.apply_block(&three)?;
     let update = node
         .poll_chain(&mut sub)?
-        .ok_or_else(|| anyhow::anyhow!("gap hint"))?;
+        .ok_or(TestError::Missing("gap hint"))?;
     assert!(update.gap);
     let first = node.replay_chain(genesis, &update.current, 1)?;
     assert_eq!(first.steps.len(), 1);
@@ -121,7 +122,7 @@ fn settled_poll_replays_gaps_disconnects_and_pinned_targets() -> anyhow::Result<
 }
 
 #[test]
-fn unsettled_or_failed_chain_fences_never_publish_a_stable_hint() -> anyhow::Result<()> {
+fn unsettled_or_failed_chain_fences_never_publish_a_stable_hint() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
     let node = run(Node::start(
         config(dir.path()),

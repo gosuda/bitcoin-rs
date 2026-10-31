@@ -5,7 +5,6 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
 use bitcoin_rs_mining::pool::ledger as pool_ledger;
 use bitcoin_rs_mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, Server, ServerConfig, ServerDeps,
@@ -14,8 +13,10 @@ use bitcoin_rs_mining::pool::{ExtranonceLayout, JobBookConfig, PoolCore};
 use bitcoin_rs_mining::{CoinbaseBudget, MiningControl};
 use bitcoin_rs_storage::KvStore;
 
+use crate::run::RunError;
+
 #[cfg(feature = "pool-sv2")]
-mod authority;
+pub(crate) mod authority;
 mod ledger;
 #[cfg(feature = "pool-sv2")]
 mod sv2;
@@ -41,8 +42,8 @@ struct LedgerComposer {
 }
 impl crate::storage_backend::StoreConsumer for LedgerComposer {
     type Output = (pool_ledger::Ledger, u32);
-    type Error = anyhow::Error;
-    fn consume<S: KvStore>(self, store: Arc<S>) -> Result<Self::Output> {
+    type Error = RunError;
+    fn consume<S: KvStore>(self, store: Arc<S>) -> Result<Self::Output, Self::Error> {
         let store: Arc<dyn KvStore> = store;
         let ledger = match pool_ledger::Ledger::create(Arc::clone(&store), self.config.clone()) {
             Ok(ledger) => ledger,
@@ -68,10 +69,10 @@ const MAX_SHARES_PER_JOB: usize = 65_536;
 const MAX_OUTBOX_RECORDS: usize = 1024;
 const MAX_OUTBOX_BYTES: usize = 8 * 1024 * 1024;
 
-fn composed_core_config(max_connections: u32) -> Result<ComposedCore> {
+fn composed_core_config(max_connections: u32) -> Result<ComposedCore, RunError> {
     let sessions = usize::try_from(max_connections)?
         .checked_mul(SESSION_SLOTS_PER_CONNECTION)
-        .context("pool session bound overflow")?;
+        .ok_or(RunError::PoolSessionBoundOverflow)?;
     Ok(ComposedCore {
         book: JobBookConfig {
             budget: CoinbaseBudget {
@@ -95,11 +96,12 @@ impl PoolService {
     pub(crate) fn prepare(
         state: &crate::state::NodeState,
         control: Arc<dyn MiningControl>,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Option<Self>, RunError> {
         let Some(config) = state.config().pool.as_ref() else {
             return Ok(None);
         };
-        std::fs::create_dir_all(&config.datadir).context("creating pool data directory")?;
+        std::fs::create_dir_all(&config.datadir)
+            .map_err(|source| RunError::PoolDataDirCreate { source })?;
         let guard = crate::state::lock_pool_directory(&config.datadir)?;
         let accounting = config.ledger_config();
         let (ledger, epoch) = crate::storage_backend::open_generic(
@@ -152,20 +154,25 @@ impl PoolService {
         }
     }
 
-    pub(crate) fn start(&mut self) -> Result<()> {
+    pub(crate) fn start(&mut self) -> Result<(), RunError> {
         self.core
             .refresh(None, Vec::new())
-            .context("initial pool template")?;
+            .map_err(|source| RunError::PoolInitialTemplate { source })?;
         let limiter = Arc::new(ConnectionLimiter::new(
             usize::try_from(self.config.max_connections)?,
             usize::try_from(self.config.max_connections_per_ip)?,
         )?);
         if let Some(bind) = self.config.v1_bind {
             let text = &self.config.share_difficulty;
-            let mut config = ServerConfig::new(
-                DifficultyPolicy::new(text, text, text)
-                    .map_err(|error| anyhow::anyhow!("invalid pool difficulty: {error:?}"))?,
-            );
+            let difficulty_debug = match DifficultyPolicy::new(text, text, text) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    return Err(RunError::PoolDifficulty {
+                        difficulty_debug: format!("{error:?}"),
+                    });
+                }
+            };
+            let mut config = ServerConfig::new(difficulty_debug);
             config.max_connections = usize::try_from(self.config.max_connections)?;
             config.max_connections_per_ip = usize::try_from(self.config.max_connections_per_ip)?;
             self.v1 = Some(Server::bind_with_limiter(
@@ -216,14 +223,14 @@ impl PoolService {
         Ok(())
     }
 
-    pub(crate) fn shutdown(&mut self, deadline: Instant) -> Result<()> {
+    pub(crate) fn shutdown(&mut self, deadline: Instant) -> Result<(), RunError> {
         self.cancel.store(true, Ordering::Release);
         let mut failure = None;
         if let Some(server) = self.v1.as_mut() {
             match server.shutdown_until(deadline) {
                 Ok(report) => {
                     if report.sessions_panicked != 0 {
-                        failure = Some(anyhow::anyhow!("pool SV1 session panicked"));
+                        failure = Some(RunError::PoolSv1SessionPanicked);
                     }
                     self.v1.take();
                 }
@@ -245,10 +252,10 @@ impl PoolService {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !worker.is_finished() {
-                failure = Some(anyhow::anyhow!("pool shutdown deadline exceeded"));
+                failure = Some(RunError::PoolShutdownDeadlineExceeded);
             } else if let Some(worker) = self.worker.take() {
                 if worker.join().is_err() {
-                    failure = Some(anyhow::anyhow!("pool reconciliation worker panicked"));
+                    failure = Some(RunError::PoolReconciliationPanicked);
                 }
             }
         }
@@ -266,14 +273,10 @@ impl PoolService {
             }
         }
         if self.host.pending_block_records() != 0 {
-            failure = Some(anyhow::anyhow!(
-                "pool shutdown left unrecorded found blocks"
-            ));
+            failure = Some(RunError::PoolUnrecordedFoundBlocks);
         }
         if self.core.pending_ledger_writes() != 0 {
-            failure = Some(anyhow::anyhow!(
-                "pool shutdown left unrecorded SV1 accounting work"
-            ));
+            failure = Some(RunError::PoolUnrecordedAccountingWork);
         }
         if let Some(error) = failure {
             return Err(error);

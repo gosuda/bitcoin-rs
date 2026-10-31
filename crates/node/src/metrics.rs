@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use bitcoin_rs_index::{CapabilityState, DerivedIndexCapabilitySource};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use parking_lot::Mutex;
+
+use crate::run::RunError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sha256Hex(pub [u8; 32]);
@@ -237,18 +238,17 @@ fn describe_node_metrics() {
 
 static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> = Mutex::new(None);
 
-fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
+fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle, RunError> {
     let mut slot = PROMETHEUS_HANDLE.lock();
     if let Some((installed, handle)) = slot.as_ref() {
-        anyhow::ensure!(
-            installed == identity,
-            "metrics recorder already serves a different evidence identity"
-        );
+        if installed != identity {
+            return Err(RunError::MetricsIdentityMismatch);
+        }
         return Ok(handle.clone());
     }
     let handle = PrometheusBuilder::new()
         .install_recorder()
-        .map_err(|error| anyhow::anyhow!("install prometheus recorder: {error}"))?;
+        .map_err(|error| RunError::MetricsInstall { error })?;
     *slot = Some((identity.clone(), handle.clone()));
     Ok(handle)
 }
@@ -265,7 +265,7 @@ impl MetricsServer {
         addr: SocketAddr,
         shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         identity: &EvidenceIdentity,
-    ) -> Result<Self> {
+    ) -> Result<Self, RunError> {
         let shutdown = shutdown.into();
         let listener = TcpListener::bind(addr)?;
         #[cfg(test)]
@@ -294,12 +294,12 @@ impl MetricsServer {
         self.local_addr
     }
 
-    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
+    pub(crate) fn stop_and_join(&mut self) -> Result<(), RunError> {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             thread
                 .join()
-                .map_err(|_| anyhow::anyhow!("metrics scrape thread panicked"))?;
+                .map_err(|_| RunError::MetricsScrapeThreadPanicked)?;
         }
         Ok(())
     }
@@ -317,7 +317,7 @@ pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     identity: &EvidenceIdentity,
-) -> Result<Option<MetricsServer>> {
+) -> Result<Option<MetricsServer>, RunError> {
     let shutdown = shutdown.into();
     bind.map(|addr| MetricsServer::bind(addr, shutdown, identity))
         .transpose()
@@ -378,7 +378,7 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
-) -> anyhow::Result<JoinHandle<()>> {
+) -> Result<JoinHandle<()>, RunError> {
     let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
@@ -391,7 +391,7 @@ pub(crate) fn spawn_readiness_sampler(
                 }
             }
         })
-        .map_err(|error| anyhow::anyhow!("spawn readiness sampler: {error}"))
+        .map_err(|error| RunError::SpawnReadinessSampler { error })
 }
 
 #[cfg(test)]

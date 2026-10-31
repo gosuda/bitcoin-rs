@@ -183,7 +183,7 @@ pub enum SnapshotImportError {
     Settlement(#[from] bitcoin_rs_mempool::ChainChangeError),
     #[error("snapshot activation failed: {activation}; consumer settlement failed: {settlement}")]
     ActivationAndSettlement {
-        activation: AssumeUtxoError,
+        activation: Box<AssumeUtxoError>,
         settlement: bitcoin_rs_mempool::ChainChangeError,
     },
 }
@@ -546,7 +546,7 @@ impl SnapshotControl {
             self.drop_activation_witness();
             return match result {
                 Err(activation) => Err(SnapshotImportError::ActivationAndSettlement {
-                    activation,
+                    activation: Box::new(activation),
                     settlement,
                 }),
                 Ok(()) => Err(SnapshotImportError::Settlement(settlement)),
