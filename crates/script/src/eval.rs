@@ -174,6 +174,10 @@ pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<
     Ok(false)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep byte and opcode cursors in the same interpreter loop"
+)]
 pub(crate) fn eval_script(
     stack: &mut Stack,
     script: &[u8],
@@ -197,6 +201,7 @@ pub(crate) fn eval_script(
     let mut op_count: usize = 0;
     let mut codeseparator_pos: u32 = CODESEPARATOR_POSITION;
     let mut instruction_start: usize = 0;
+    let mut opcode_pos: usize = 0;
     let mut iter = instructions(script);
 
     while let Some(parsed) = iter.next() {
@@ -269,6 +274,7 @@ pub(crate) fn eval_script(
                         validation_weight_left,
                         &mut codeseparator_pos,
                         instruction_start,
+                        opcode_pos,
                         tapleaf_hash,
                         script,
                     )?;
@@ -283,6 +289,9 @@ pub(crate) fn eval_script(
         }
 
         instruction_start = script.len() - iter.remaining.len();
+        // BIP342 counts every decoded instruction, including pushes and
+        // instructions in branches that were not executed.
+        opcode_pos += 1;
     }
 
     if !conditions.is_empty() {
@@ -354,6 +363,7 @@ fn dispatch(
     validation_weight_left: &mut Option<i64>,
     codeseparator_pos: &mut u32,
     instruction_start: usize,
+    opcode_pos: usize,
     tapleaf_hash: Option<&Hash256>,
     script: &[u8],
 ) -> Result<(), ScriptError> {
@@ -718,10 +728,14 @@ fn dispatch(
             push_bytes(stack, &digest)?;
         }
         OP_CODESEPARATOR => {
-            *codeseparator_pos =
-                u32::try_from(instruction_start + 1).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::ScriptSize,
-                })?;
+            let position = if sigversion == SigVersion::Tapscript {
+                opcode_pos
+            } else {
+                instruction_start + 1
+            };
+            *codeseparator_pos = u32::try_from(position).map_err(|_| ScriptError::Invalid {
+                code: ScriptErrCode::ScriptSize,
+            })?;
         }
         OP_CHECKSIG | OP_CHECKSIGVERIFY => {
             let pubkey = stack.pop().map_err(|_| invalid_stack())?;

@@ -4,7 +4,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::key::TapTweak as _;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Annex, Prevouts, SighashCache, TapSighashType};
-use bitcoin::taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo};
+use bitcoin::taproot::{LeafVersion, TapLeafHash, TaprootBuilder, TaprootSpendInfo};
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute, transaction,
 };
@@ -225,6 +225,145 @@ pub fn success_cases(outpoint: OutPoint, prevout: &TxOut) -> Vec<Case> {
             tx.input[0].witness = Witness::from_slice(&witness);
             cases.push(Case {
                 name: format!("{name}{}", if annex { "-annex" } else { "" }),
+                tx,
+                accepted,
+            });
+        }
+    }
+    cases
+}
+
+struct CodeSeparatorLeaf {
+    name: String,
+    script: ScriptBuf,
+    position: u32,
+    wrong_position: u32,
+}
+
+fn codeseparator_tree() -> (Keypair, TaprootSpendInfo, Vec<CodeSeparatorLeaf>) {
+    let secp = Secp256k1::new();
+    let key = Keypair::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&[39; 32]).expect("fixture key"),
+    );
+    // Push payloads deliberately contain 0xab: only decoded opcodes count.
+    let push76 = [vec![0x4c, 76], vec![0xab; 76]].concat();
+    let push256 = [vec![0x4d, 0, 1], vec![0xab; 256]].concat();
+    // Positions are specified from BIP342, independently of the native parser.
+    let prefixes = [
+        ("none", vec![], u32::MAX, 0),
+        ("first", vec![0xab], 0, 1),
+        ("after-nop", vec![0x61, 0xab], 1, 2),
+        (
+            "pushdata1",
+            [push76.clone(), vec![0x75, 0xab]].concat(),
+            2,
+            80,
+        ),
+        (
+            "pushdata2",
+            [push256.clone(), vec![0x75, 0xab]].concat(),
+            2,
+            261,
+        ),
+        (
+            "skipped-before",
+            [vec![0, 0x63], push76.clone(), vec![0x75, 0xab, 0x68, 0xab]].concat(),
+            6,
+            84,
+        ),
+        (
+            "skipped-after",
+            [vec![0xab, 0, 0x63], push76, vec![0x75, 0xab, 0x68]].concat(),
+            0,
+            1,
+        ),
+        (
+            "last-executed",
+            [vec![0xab], push256, vec![0x75, 0xab]].concat(),
+            3,
+            262,
+        ),
+    ];
+    let mut leaves = Vec::new();
+    for (name, prefix, position, wrong_position) in prefixes {
+        for (operation, opcode) in [
+            ("checksig", 0xac),
+            ("checksigverify", 0xad),
+            ("checksigadd", 0xba),
+        ] {
+            let mut bytes = prefix.clone();
+            if opcode == 0xba {
+                bytes.push(0);
+            }
+            bytes.push(32);
+            bytes.extend_from_slice(&key.x_only_public_key().0.serialize());
+            bytes.push(opcode);
+            if opcode == 0xad {
+                bytes.push(0x51);
+            }
+            if opcode == 0xba {
+                bytes.extend([0x51, 0x9c]);
+            }
+            leaves.push(CodeSeparatorLeaf {
+                name: format!("{name}-{operation}"),
+                script: ScriptBuf::from_bytes(bytes),
+                position,
+                wrong_position,
+            });
+        }
+    }
+    let mut builder = TaprootBuilder::new();
+    for (index, leaf) in leaves.iter().enumerate() {
+        // Complete 24-leaf tree: sixteen leaves at depth 5, eight at depth 4.
+        builder = builder
+            .add_leaf(if index < 16 { 5 } else { 4 }, leaf.script.clone())
+            .expect("balanced leaves");
+    }
+    let tree = builder
+        .finalize(&secp, key.x_only_public_key().0)
+        .expect("complete tree");
+    (key, tree, leaves)
+}
+
+pub fn codeseparator_funding_script() -> ScriptBuf {
+    ScriptBuf::new_p2tr_tweaked(codeseparator_tree().1.output_key())
+}
+
+/// Independent rust-bitcoin signatures over BIP342 opcode positions and wrong
+/// positions (including the former byte offsets). Only the former may pass.
+pub fn codeseparator_cases(outpoint: OutPoint, prevout: &TxOut) -> Vec<Case> {
+    let secp = Secp256k1::new();
+    let (key, tree, leaves) = codeseparator_tree();
+    let mut cases = Vec::new();
+    for leaf in leaves {
+        let control = tree
+            .control_block(&(leaf.script.clone(), LeafVersion::TapScript))
+            .expect("known leaf");
+        let hash = TapLeafHash::from_script(&leaf.script, LeafVersion::TapScript);
+        for (position, suffix, accepted) in [
+            (leaf.position, "opcode-index", true),
+            (leaf.wrong_position, "wrong-position", false),
+        ] {
+            let mut tx = template(outpoint, prevout);
+            let digest = SighashCache::new(&tx)
+                .taproot_signature_hash(
+                    0,
+                    &Prevouts::All(std::slice::from_ref(prevout)),
+                    None,
+                    Some((hash, position)),
+                    TapSighashType::Default,
+                )
+                .expect("independent BIP342 digest");
+            let signature =
+                secp.sign_schnorr_no_aux_rand(&Message::from_digest(digest.to_byte_array()), &key);
+            tx.input[0].witness = Witness::from_slice(&[
+                signature.serialize().to_vec(),
+                leaf.script.to_bytes(),
+                control.serialize(),
+            ]);
+            cases.push(Case {
+                name: format!("{}-{suffix}", leaf.name),
                 tx,
                 accepted,
             });
