@@ -75,8 +75,8 @@ outranks conf. Mapped Core flag -> bitcoin-rs flag (both `-flag=v` and
 | `-connect=host:port` | `--connect=host:port` (`-connect=0` dropped) |
 | `-v2transport=B` | `--v2transport=B` |
 | `-dnsseed=B` | `--dns-seeds-enabled=B` |
-| `rpcport=P` (conf/argv) | `--rpc-bind=127.0.0.1:P` |
-| `-rpcbind=IP[:PORT]` | `--rpc-bind=...` (literal sockets only) |
+| `rpcport=P` (conf/argv) | `--rpc-bind=127.0.0.1:P` (seeds the single rpc socket; an explicit `-rpcbind=` overrides it - see next row) |
+| `-rpcbind=IP[:PORT]` | `--rpc-bind=...` (literal sockets only; bitcoin-rs takes a single rpc bind and rejects repeats, so the conf `rpcport=` default and every `-rpcbind=` collapse to one last-occurrence-wins `--rpc-bind` emission) |
 | `-proxy` / `-onion` / `-i2psam` / `-torcontrol=IP:PORT` | `--proxy` / `--onion-proxy` / `--i2p-sam` / `--tor-control` |
 | `-onlynet=list` | `--onlynet=list` (validated) |
 | `-dbcache=N` / `-prune=N` | `--dbcache-mb=N` / `--prune-target-mb=N` |

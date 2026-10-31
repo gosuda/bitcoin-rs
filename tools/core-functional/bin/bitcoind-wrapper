@@ -235,7 +235,7 @@ class Translation:
         if key in ("h", "help", "?"):
             self.out.append("--help")
             return
-        if key in ("V", "version"):
+        if key in ("v", "version"):  # key arrives lowercased; -V matches as "v"
             self.out.append("--version")
             return
         if key == "datadir":
@@ -505,15 +505,21 @@ class Translation:
         for endpoint in self.connects:
             argv.append(f"--connect={endpoint}")
 
-        if self.rpcport:
-            argv.append(f"--rpc-bind=127.0.0.1:{self.rpcport}")
+        # bitcoin-rs's rpc_bind is a single-value option and rejects repeats
+        # ("cannot be used multiple times"), so the resolved socket is emitted
+        # exactly once: conf rpcport= seeds 127.0.0.1:<rpcport>, and each
+        # -rpcbind= overrides it, last occurrence winning (Core's rule for a
+        # repeated option, collapsed to the one socket the node accepts).
+        rpc_bind = f"127.0.0.1:{self.rpcport}" if self.rpcport else None
         for value, raw in self.rpc_bind_argv:
             if split_host_port(value):
-                argv.append(f"--rpc-bind={value}")  # last occurrence wins
+                rpc_bind = value
             elif self.rpcport and parse_ip(value):
-                argv.append(f"--rpc-bind={value}:{self.rpcport}")
+                rpc_bind = f"{value}:{self.rpcport}"
             else:
                 self.drop("argv", raw, "--rpc-bind requires a literal ip:port")
+        if rpc_bind:
+            argv.append(f"--rpc-bind={rpc_bind}")
 
         argv.extend(self.out)
 
@@ -563,11 +569,19 @@ class Translation:
         empty wallets/ dir after building the cache, and
         feature_posix_fs_permissions.py asserts both modes. The node's real
         data lives in NODE_DATA_DIR_NAME, so these are framework-facing
-        bookkeeping directories only."""
-        chain_path = os.path.join(self.datadir, self.chain_dir)
-        for directory in (chain_path, os.path.join(chain_path, "wallets")):
-            os.makedirs(directory, exist_ok=True)
-            os.chmod(directory, 0o700)
+        bookkeeping directories only. On mainnet (chain_dir "") Core keeps
+        chain data directly under a datadir it owns itself, so the wrapper
+        must not chmod the framework's pre-existing datadir root - only the
+        wallets/ subdir is created there."""
+        if self.chain_dir:
+            chain_path = os.path.join(self.datadir, self.chain_dir)
+            os.makedirs(chain_path, exist_ok=True)
+            os.chmod(chain_path, 0o700)
+        else:
+            chain_path = self.datadir
+        wallets = os.path.join(chain_path, "wallets")
+        os.makedirs(wallets, exist_ok=True)
+        os.chmod(wallets, 0o700)
 
     def emit_cookie(self, argv):
         """Create the cookie file where the framework reads it and point the

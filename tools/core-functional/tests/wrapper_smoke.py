@@ -229,13 +229,45 @@ check("bare bind translated with conf port", "--p2p-listen=127.0.0.1:11000" in a
 print("case 10: no chain marker anywhere defaults to mainnet, cookie at datadir root")
 datadir = fresh_datadir("node8")
 mainnet_conf = FRAMEWORK_CONF.replace("regtest=1\n[regtest]\n", "")
+os.chmod(datadir, 0o755)  # the framework's own datadir mode must be left alone
 argv = run_wrapper(datadir, ["-datadir=" + str(datadir)], mainnet_conf)
 check("mainnet default network", "--network=mainnet" in argv, argv)
 check("cookie at <datadir>/.cookie", (datadir / ".cookie").is_file())
 check("wallets dir at datadir root", (datadir / "wallets").is_dir())
+check("wallets dir 0700 on mainnet",
+      stat.S_IMODE(os.lstat(datadir / "wallets").st_mode) == 0o700)
+check("datadir root itself not chmodded (mainnet chain dir is \"\")",
+      stat.S_IMODE(os.lstat(datadir).st_mode) == 0o755,
+      oct(stat.S_IMODE(os.lstat(datadir).st_mode)))
 check("printtoconsole=0 -> warn console", "--log-level=warn" in argv, argv)
 check("node data dir still the fresh subdir",
       f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
+
+print("case 11: -V (short version flag) becomes --version like -version")
+datadir = fresh_datadir("node9")
+argv = run_wrapper(datadir, ["-datadir=" + str(datadir), "-V"], FRAMEWORK_CONF)
+check("-V becomes --version", "--version" in argv, argv)
+check("-V short-circuits without layout work", not (datadir / "regtest").exists())
+
+print("case 12: rpcport conf plus repeated -rpcbind emits exactly one --rpc-bind, last wins")
+datadir = fresh_datadir("node10")
+argv = run_wrapper(
+    datadir,
+    ["-datadir=" + str(datadir), "-regtest",
+     "-rpcbind=127.0.0.1:17000", "-rpcbind=127.0.0.1:18000"],
+    FRAMEWORK_CONF,
+)
+rpc_binds = [a for a in argv if a.startswith("--rpc-bind")]
+check("single --rpc-bind emitted", rpc_binds == ["--rpc-bind=127.0.0.1:18000"], rpc_binds)
+datadir = fresh_datadir("node10b")
+argv = run_wrapper(
+    datadir,
+    ["-datadir=" + str(datadir), "-regtest", "-rpcbind=127.0.0.1"],
+    FRAMEWORK_CONF,
+)
+rpc_binds = [a for a in argv if a.startswith("--rpc-bind")]
+check("bare-IP -rpcbind gains conf rpcport, emitted once",
+      rpc_binds == ["--rpc-bind=127.0.0.1:16000"], rpc_binds)
 
 print()
 if failures:
