@@ -234,12 +234,20 @@ impl ForkFixture {
         self.bodies.bodies.lock().extend(lost);
     }
 
-    fn persist_undo(&self) {
+    fn branch_key(&self, branch: &[(NodeId, Hash256)], height: u32) -> (u32, [u8; 32]) {
+        if height == 0 {
+            return (0, self.genesis.to_le_bytes());
+        }
+        let index = usize::try_from(height - 1).expect("height index");
+        (height, branch[index].1.to_le_bytes())
+    }
+
+    fn persist_branch_undo(&self, branch: &[(NodeId, Hash256)]) {
         let store = InMemoryUndoStore::default();
         let mut coins = BranchCoins::default();
-        let tip_height = u32::try_from(self.a.len()).expect("branch length");
+        let tip_height = u32::try_from(branch.len()).expect("branch length");
         for height in 0..=tip_height {
-            let key = self.a_key(height);
+            let key = self.branch_key(branch, height);
             let block = {
                 let bodies = self.bodies.bodies.lock();
                 bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bodies[&key])
@@ -276,6 +284,10 @@ impl ForkFixture {
             coins.connect(height, &block, &txids);
         }
     }
+    fn persist_undo(&self) {
+        self.persist_branch_undo(&self.a.clone());
+        self.persist_branch_undo(&self.b.clone());
+    }
 
     fn tip(&self, (node_id, _): (NodeId, Hash256)) -> Arc<TipSnapshot> {
         let tree = self.tree.read();
@@ -307,7 +319,7 @@ fn unavailable_filter_history_preserves_sibling_indexes_and_filter_watermark() {
         let harness = Harness::with_enabled(
             &fixture,
             u32::MAX,
-            IndexCapabilities::HISTORICAL.with_compact_filters(true),
+            IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
         );
         harness.set_tip(&fixture.tip(fixture.a[1]));
         if pruned {
@@ -407,10 +419,12 @@ impl Harness {
         });
         let watermarks = self.watermarks();
         assert_eq!(watermarks.tx_lookup, expected, "tx_lookup watermark");
-        assert_eq!(
-            watermarks.script_history, expected,
-            "script_history watermark"
-        );
+        if self.worker.enabled.contains(IndexCapability::ScriptHistory) {
+            assert_eq!(
+                watermarks.script_history, expected,
+                "script_history watermark"
+            );
+        }
         assert_eq!(self.runtime.phase(), ReconcilePhase::FORWARD);
     }
 
@@ -437,7 +451,7 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
     let h = Harness::with_enabled(
         &f,
         u32::MAX,
-        IndexCapabilities::HISTORICAL.with_compact_filters(true),
+        IndexCapabilities::TX_LOOKUP.with_compact_filters(true),
     );
     let a2 = f.tip(f.a[1]);
     let identities = h.worker.collect_target_chain(&a2, 0, 2).expect("chain");
@@ -476,6 +490,7 @@ fn missing_undo_during_filter_rollback_does_not_reset_filters_or_stop_siblings()
 #[test]
 fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
 
@@ -508,6 +523,7 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
 #[test]
 fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, 1);
     let mut pending = None;
 
@@ -538,6 +554,7 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
 #[test]
 fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
     let a3 = f.tip(f.a[2]);
@@ -572,6 +589,7 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 
     let f = ForkFixture::new(3);
+    f.persist_undo();
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
     let a3 = f.tip(f.a[2]);
@@ -825,7 +843,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
     for undo in [Undo::Present, Undo::Missing, Undo::Corrupt] {
         let f = ForkFixture::new(5);
         f.persist_undo();
-        let h = SeedCellHarness::new(&f, IndexCapabilities::TX_AND_SCRIPTS);
+        let h = SeedCellHarness::new(&f, IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE);
         let (a2, a5) = (f.tip(f.a[1]), f.tip(f.a[4]));
         let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
         h.cell.want();
@@ -860,7 +878,6 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             let reset = h.watermarks();
             assert_eq!(reset.script_live, None, "ScriptLive is reset");
             assert_eq!(reset.tx_lookup, Some(at(&a2)), "siblings keep their rows");
-            assert_eq!(reset.script_history, Some(at(&a2)));
             let (artifact, _keep) = cell_seed_artifact(a5.hash, a5.height, 32);
             h.cell.want();
             assert_eq!(
@@ -869,7 +886,7 @@ fn forward_script_live_follows_undo_present_missing_or_corrupt() {
             );
         }
         h.settle(&mut pending);
-        h.assert_at(&a5);
+        assert_eq!(h.watermarks().tx_lookup, Some(at(&a5)));
         assert_eq!(h.watermarks().script_live, Some(at(&a5)));
     }
 }

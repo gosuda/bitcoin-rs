@@ -1292,7 +1292,7 @@ fn seed_reorg_below_h_rolls_back_through_pinned_undo() {
     control.bodies.undo.lock().remove(&control.a_key(2));
     let denied = SeedHarness::new(
         &control,
-        IndexCapabilities::TX_AND_SCRIPTS,
+        IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE,
         Arc::new(UtxoSet::new()),
     );
     let control_tip = control.tip(control.a[1]);
