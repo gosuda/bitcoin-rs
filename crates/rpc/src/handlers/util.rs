@@ -612,10 +612,6 @@ pub(crate) fn scan_descriptor_range(
     scan_descriptor_range_budgeted(text, network, range, 1024_u64, 1_048_576_u64, cancelled)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "descriptor range expansion and budget validation"
-)]
 pub(crate) fn scan_descriptor_range_budgeted(
     text: &str,
     network: Network,
@@ -627,30 +623,77 @@ pub(crate) fn scan_descriptor_range_budgeted(
     let (payload, _) = checked_checksum(text, ChecksumRequirement::Optional)?;
     let chain = convert::bitcoin_network(network);
     if let Some(raw) = parse_unspendable(payload) {
-        if remaining_scripts < 1 {
-            return Err(RpcError::InvalidParameter(
-                "At most 1024 scan descriptors are supported".into(),
-            ));
-        }
-        let script = match raw.map_err(descriptor_error)? {
-            Unspendable::Address(address) => address
-                .require_network(chain)
-                .map_err(|_| RpcError::InvalidAddressOrKey("Address is not valid".into()))?
-                .script_pubkey(),
-            Unspendable::Raw(script) => script,
-        };
-        let script_len = u64::try_from(script.len())
-            .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
-        if script_len > remaining_bytes {
-            return Err(RpcError::InvalidParameter(
-                "Scan script byte limit exceeded".into(),
-            ));
-        }
-        return Ok(vec![ScanScript {
-            desc: crate::tx_render::script_descriptor(script.as_bytes(), network),
-            script_pubkey: script.into_bytes(),
-        }]);
+        return scan_unspendable_script(raw, chain, network, remaining_scripts, remaining_bytes);
     }
+    let scan = validate_and_budget_scan(payload, chain, range, remaining_scripts, remaining_bytes)?;
+    let begin = scan.begin;
+    let end = scan.end;
+    let paths = scan.paths;
+    let kind = scan.kind;
+    let count_usize = scan.count_usize;
+    let mut scripts = Vec::with_capacity(count_usize);
+    'outer: for index in begin..=end {
+        for path in &paths {
+            if cancelled()? {
+                break 'outer;
+            }
+            let derived = path
+                .at_derivation_index(index)
+                .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
+            let script = scan_key_script(&derived, kind)?;
+            scripts.push(script);
+        }
+    }
+    Ok(scripts)
+}
+
+fn scan_unspendable_script(
+    raw: Result<Unspendable, DescriptorError>,
+    chain: bitcoin::Network,
+    network: Network,
+    remaining_scripts: u64,
+    remaining_bytes: u64,
+) -> Result<Vec<ScanScript>, RpcError> {
+    if remaining_scripts < 1 {
+        return Err(RpcError::InvalidParameter(
+            "At most 1024 scan descriptors are supported".into(),
+        ));
+    }
+    let script = match raw.map_err(descriptor_error)? {
+        Unspendable::Address(address) => address
+            .require_network(chain)
+            .map_err(|_| RpcError::InvalidAddressOrKey("Address is not valid".into()))?
+            .script_pubkey(),
+        Unspendable::Raw(script) => script,
+    };
+    let script_len = u64::try_from(script.len())
+        .map_err(|_| RpcError::InvalidParameter("Scan script byte limit exceeded".into()))?;
+    if script_len > remaining_bytes {
+        return Err(RpcError::InvalidParameter(
+            "Scan script byte limit exceeded".into(),
+        ));
+    }
+    Ok(vec![ScanScript {
+        desc: crate::tx_render::script_descriptor(script.as_bytes(), network),
+        script_pubkey: script.into_bytes(),
+    }])
+}
+
+struct ValidatedDescriptorScan {
+    paths: Vec<MiniscriptDescriptor<DescriptorPublicKey>>,
+    kind: &'static str,
+    begin: u32,
+    end: u32,
+    count_usize: usize,
+}
+
+fn validate_and_budget_scan(
+    payload: &str,
+    chain: bitcoin::Network,
+    range: Option<(u32, u32)>,
+    remaining_scripts: u64,
+    remaining_bytes: u64,
+) -> Result<ValidatedDescriptorScan, RpcError> {
     let descriptor = MiniscriptDescriptor::<DescriptorPublicKey>::from_str(payload)
         .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
     ensure_keys_match_network(&descriptor, chain).map_err(descriptor_error)?;
@@ -659,22 +702,7 @@ pub(crate) fn scan_descriptor_range_budgeted(
             GENERATEBLOCK_NEEDS_PRIVATE_KEYS.into(),
         ));
     }
-    let kind = match &descriptor {
-        MiniscriptDescriptor::Pkh(_) => "pkh",
-        MiniscriptDescriptor::Wpkh(_) => "wpkh",
-        MiniscriptDescriptor::Sh(sh)
-            if matches!(sh.as_inner(), miniscript::descriptor::ShInner::Wpkh(_)) =>
-        {
-            "sh(wpkh"
-        }
-        MiniscriptDescriptor::Tr(tr) if tr.tap_tree().is_none() => "tr",
-        _ => {
-            return Err(RpcError::InvalidParameter(
-                "Supported scan descriptors are addr, raw, pkh, wpkh, sh(wpkh), and key-only tr"
-                    .into(),
-            ));
-        }
-    };
+    let kind = classify_scan_descriptor_kind(&descriptor)?;
     let is_range = descriptor.has_wildcard();
     let (begin, end) = if is_range {
         range.unwrap_or((0, 1000))
@@ -682,12 +710,7 @@ pub(crate) fn scan_descriptor_range_budgeted(
         (0, 0)
     };
     let paths = if descriptor.is_multipath() {
-        #[expect(
-            clippy::redundant_clone,
-            reason = "explicit clone before into_single_descriptors"
-        )]
         descriptor
-            .clone()
             .into_single_descriptors()
             .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?
     } else {
@@ -721,20 +744,31 @@ pub(crate) fn scan_descriptor_range_budgeted(
     let count_usize = usize::try_from(count).map_err(|_| {
         RpcError::InvalidParameter("At most 1024 scan descriptors are supported".into())
     })?;
-    let mut scripts = Vec::with_capacity(count_usize);
-    'outer: for index in begin..=end {
-        for path in &paths {
-            if cancelled()? {
-                break 'outer;
-            }
-            let derived = path
-                .at_derivation_index(index)
-                .map_err(|error| RpcError::InvalidAddressOrKey(error.to_string()))?;
-            let script = scan_key_script(&derived, kind)?;
-            scripts.push(script);
+    Ok(ValidatedDescriptorScan {
+        paths,
+        kind,
+        begin,
+        end,
+        count_usize,
+    })
+}
+
+fn classify_scan_descriptor_kind(
+    descriptor: &MiniscriptDescriptor<DescriptorPublicKey>,
+) -> Result<&'static str, RpcError> {
+    match descriptor {
+        MiniscriptDescriptor::Pkh(_) => Ok("pkh"),
+        MiniscriptDescriptor::Wpkh(_) => Ok("wpkh"),
+        MiniscriptDescriptor::Sh(sh)
+            if matches!(sh.as_inner(), miniscript::descriptor::ShInner::Wpkh(_)) =>
+        {
+            Ok("sh(wpkh")
         }
+        MiniscriptDescriptor::Tr(tr) if tr.tap_tree().is_none() => Ok("tr"),
+        _ => Err(RpcError::InvalidParameter(
+            "Supported scan descriptors are addr, raw, pkh, wpkh, sh(wpkh), and key-only tr".into(),
+        )),
     }
-    Ok(scripts)
 }
 
 #[derive(Debug)]

@@ -356,32 +356,14 @@ fn serve_connection(
         let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
-            Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled && surface != RpcSurface::Management {
-                    crate::rest::getutxos_body_too_large()
-                } else {
-                    crate::rest::not_found()
-                };
-                write_response(
+            Err(error) => {
+                return handle_read_error(
                     reader.get_mut().socket_mut(),
-                    &response,
-                    false,
-                    CorsPolicy::Disabled,
-                )?;
-                return Ok(());
-            }
-            Err(RequestReadError::Io(error)) => {
-                let rpc_error = RpcError::InvalidRequest("invalid request: malformed http request");
-                let response =
-                    JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
-                write_json(
-                    reader.get_mut().socket_mut(),
-                    400,
-                    "Bad Request",
-                    &response,
-                    false,
-                )?;
-                return Err(error);
+                    error,
+                    rest_enabled,
+                    surface,
+                    "invalid request: malformed http request",
+                );
             }
         };
         let route = classify(&head.method, &head.path);
@@ -399,32 +381,14 @@ fn serve_connection(
         }
         let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
             Ok(request) => request,
-            Err(RequestReadError::RestBodyTooLarge) => {
-                let response = if rest_enabled && surface != RpcSurface::Management {
-                    crate::rest::getutxos_body_too_large()
-                } else {
-                    crate::rest::not_found()
-                };
-                write_response(
+            Err(error) => {
+                return handle_read_error(
                     reader.get_mut().socket_mut(),
-                    &response,
-                    false,
-                    CorsPolicy::Disabled,
-                )?;
-                return Ok(());
-            }
-            Err(RequestReadError::Io(error)) => {
-                let rpc_error = RpcError::InvalidRequest("malformed http request");
-                let response =
-                    JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
-                write_json(
-                    reader.get_mut().socket_mut(),
-                    400,
-                    "Bad Request",
-                    &response,
-                    false,
-                )?;
-                return Err(error);
+                    error,
+                    rest_enabled,
+                    surface,
+                    "malformed http request",
+                );
             }
         };
         if handler.is_stopping() {
@@ -441,6 +405,32 @@ fn serve_connection(
         }
         if !keep_alive {
             return Ok(());
+        }
+    }
+}
+
+fn handle_read_error(
+    stream: &mut TcpStream,
+    error: RequestReadError,
+    rest_enabled: bool,
+    surface: RpcSurface,
+    malformed_msg: &'static str,
+) -> io::Result<()> {
+    match error {
+        RequestReadError::RestBodyTooLarge => {
+            let response = if rest_enabled && surface != RpcSurface::Management {
+                crate::rest::getutxos_body_too_large()
+            } else {
+                crate::rest::not_found()
+            };
+            write_response(stream, &response, false, CorsPolicy::Disabled)?;
+            Ok(())
+        }
+        RequestReadError::Io(err) => {
+            let rpc_error = RpcError::InvalidRequest(malformed_msg);
+            let response = JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
+            write_json(stream, 400, "Bad Request", &response, false)?;
+            Err(err)
         }
     }
 }

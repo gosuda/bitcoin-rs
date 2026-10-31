@@ -721,6 +721,21 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         0xFFFF_FFFF
     };
 
+    let tx_inputs = parse_create_tx_inputs(inputs, default_sequence)?;
+    let network = convert::bitcoin_network(ctx.chain.chain_network);
+    let tx_outputs = parse_create_tx_outputs(outputs, network)?;
+    let tx = Tx {
+        version: 2,
+        lock_time: LockTime::from_consensus(locktime),
+        inputs: tx_inputs,
+        outputs: tx_outputs,
+    };
+    typed_to_sonic(&v31::CreateRawTransaction(
+        consensus_bytes(&tx).to_lower_hex_string(),
+    ))
+}
+
+fn parse_create_tx_inputs(inputs: &[Value], default_sequence: u32) -> Result<Vec<TxIn>, RpcError> {
     let mut tx_inputs = Vec::with_capacity(inputs.len());
     let mut seen = HashSet::new();
     for input in inputs {
@@ -759,8 +774,13 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             witness: Witness::new(),
         });
     }
+    Ok(tx_inputs)
+}
 
-    let network = convert::bitcoin_network(ctx.chain.chain_network);
+fn parse_create_tx_outputs(
+    outputs: &sonic_rs::Object,
+    network: bitcoin::Network,
+) -> Result<Vec<TxOut>, RpcError> {
     let mut tx_outputs = Vec::with_capacity(outputs.len());
     for (key, value) in outputs {
         if key == "data" {
@@ -786,16 +806,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             script_pubkey: Script::from_bytes(address.script_pubkey().as_bytes().to_vec()),
         });
     }
-
-    let tx = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(locktime),
-        inputs: tx_inputs,
-        outputs: tx_outputs,
-    };
-    typed_to_sonic(&v31::CreateRawTransaction(
-        consensus_bytes(&tx).to_lower_hex_string(),
-    ))
+    Ok(tx_outputs)
 }
 
 /// Deserialize a raw transaction hex string, reporting failures as Core's

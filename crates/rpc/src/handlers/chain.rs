@@ -5,8 +5,8 @@ use core::str::FromStr as _;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
-    u64_to_f64,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, TxOut, consensus_bytes,
+    deserialize, u64_to_f64,
 };
 
 #[cfg(test)]
@@ -569,7 +569,62 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let fee_fields = compute_fee_fields(ctx, &block).map_err(crate::error::RpcError::from)?;
     let utxo_size_inc =
         utxo_size_inc_for_block(ctx, &block).map_err(crate::error::RpcError::from)?;
+    let stats = aggregate_block_tx_stats(&block.txs);
     let txs = u64::try_from(block.txs.len()).unwrap_or(u64::MAX);
+    let utxo_increase = i64::try_from(stats.outs)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(stats.ins).unwrap_or(i64::MAX));
+    typed_to_sonic(&v31::GetBlockStats {
+        average_fee: Some(fee_fields.avgfee),
+        average_fee_rate: Some(fee_fields.avgfeerate),
+        average_tx_size: Some(i64_saturated(stats.avgtxsize)),
+        block_hash: Some(block_hash.to_string()),
+        fee_rate_percentiles: Some(fee_fields.feerate_percentiles),
+        height: Some(i64::from(height)),
+        inputs: Some(i64_saturated(stats.ins)),
+        max_fee: Some(fee_fields.maxfee),
+        max_fee_rate: Some(fee_fields.maxfeerate),
+        max_tx_size: Some(i64_saturated(stats.maxtxsize)),
+        median_fee: Some(fee_fields.medianfee),
+        median_time: Some(i64_saturated(u64::from(mediantime))),
+        median_tx_size: Some(i64_saturated(stats.mediantxsize)),
+        minimum_fee: Some(fee_fields.minfee),
+        minimum_fee_rate: Some(fee_fields.minfeerate),
+        minimum_tx_size: Some(i64_saturated(stats.mintxsize)),
+        outputs: Some(i64_saturated(stats.outs)),
+        subsidy: Some(subsidy_sat),
+        segwit_total_size: Some(i64_saturated(stats.swtotal_size)),
+        segwit_total_weight: Some(stats.swtotal_weight),
+        segwit_txs: Some(i64_saturated(stats.swtxs)),
+        time: Some(i64_saturated(u64::from(record.time))),
+        total_out: Some(stats.total_out),
+        total_size: Some(i64_saturated(stats.total_size)),
+        total_weight: Some(stats.total_weight),
+        total_fee: Some(fee_fields.totalfee),
+        txs: Some(i64_saturated(txs)),
+        utxo_increase: Some(i32_saturated(utxo_increase)),
+        utxo_size_increase: Some(i32_saturated(utxo_size_inc)),
+        utxo_increase_actual: None,
+        utxo_size_increase_actual: None,
+    })
+}
+
+struct BlockTxAggregate {
+    ins: u64,
+    outs: u64,
+    total_out: u64,
+    total_size: u64,
+    total_weight: u64,
+    swtxs: u64,
+    swtotal_size: u64,
+    swtotal_weight: u64,
+    avgtxsize: u64,
+    maxtxsize: u64,
+    mintxsize: u64,
+    mediantxsize: u64,
+}
+
+fn aggregate_block_tx_stats(txs: &[Tx]) -> BlockTxAggregate {
     let mut total_out = 0_u64;
     let mut total_size = 0_u64;
     let mut total_weight = 0_u64;
@@ -579,7 +634,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtotal_size = 0_u64;
     let mut swtotal_weight = 0_u64;
     let mut tx_sizes = Vec::new();
-    for (index, tx) in block.txs.iter().enumerate() {
+    for (index, tx) in txs.iter().enumerate() {
         outs = outs.saturating_add(u64::try_from(tx.outputs.len()).unwrap_or(u64::MAX));
         if index == 0 {
             continue;
@@ -610,43 +665,21 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         let median = truncated_median(&mut tx_sizes);
         (avg, max, min, median)
     };
-    let utxo_increase = i64::try_from(outs)
-        .unwrap_or(i64::MAX)
-        .saturating_sub(i64::try_from(ins).unwrap_or(i64::MAX));
 
-    typed_to_sonic(&v31::GetBlockStats {
-        average_fee: Some(fee_fields.avgfee),
-        average_fee_rate: Some(fee_fields.avgfeerate),
-        average_tx_size: Some(i64_saturated(avgtxsize)),
-        block_hash: Some(block_hash.to_string()),
-        fee_rate_percentiles: Some(fee_fields.feerate_percentiles),
-        height: Some(i64::from(height)),
-        inputs: Some(i64_saturated(ins)),
-        max_fee: Some(fee_fields.maxfee),
-        max_fee_rate: Some(fee_fields.maxfeerate),
-        max_tx_size: Some(i64_saturated(maxtxsize)),
-        median_fee: Some(fee_fields.medianfee),
-        median_time: Some(i64_saturated(u64::from(mediantime))),
-        median_tx_size: Some(i64_saturated(mediantxsize)),
-        minimum_fee: Some(fee_fields.minfee),
-        minimum_fee_rate: Some(fee_fields.minfeerate),
-        minimum_tx_size: Some(i64_saturated(mintxsize)),
-        outputs: Some(i64_saturated(outs)),
-        subsidy: Some(subsidy_sat),
-        segwit_total_size: Some(i64_saturated(swtotal_size)),
-        segwit_total_weight: Some(swtotal_weight),
-        segwit_txs: Some(i64_saturated(swtxs)),
-        time: Some(i64_saturated(u64::from(record.time))),
-        total_out: Some(total_out),
-        total_size: Some(i64_saturated(total_size)),
-        total_weight: Some(total_weight),
-        total_fee: Some(fee_fields.totalfee),
-        txs: Some(i64_saturated(txs)),
-        utxo_increase: Some(i32_saturated(utxo_increase)),
-        utxo_size_increase: Some(i32_saturated(utxo_size_inc)),
-        utxo_increase_actual: None,
-        utxo_size_increase_actual: None,
-    })
+    BlockTxAggregate {
+        ins,
+        outs,
+        total_out,
+        total_size,
+        total_weight,
+        swtxs,
+        swtotal_size,
+        swtotal_weight,
+        avgtxsize,
+        maxtxsize,
+        mintxsize,
+        mediantxsize,
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -1614,42 +1647,45 @@ fn block_verbose_typed(
     let header = decode_header(record)?;
     let hash = Hash256::from(record.hash);
     let view = ctx.chain.applied_view();
-    let block_confirmations = confirmations(ctx, &view, hash, record.height);
-    let mediantime = ctx.chain.median_time_past_for_hash(hash).unwrap_or(0);
-    let chainwork_hex = ctx
-        .chain
-        .chain_work_hex_for_hash(hash)
-        .unwrap_or_else(|| "00".to_owned());
-    let next_block_hash = (block_confirmations > 0)
-        .then(|| {
-            record
-                .height
-                .checked_add(1)
-                .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
-        })
-        .flatten()
-        .map(BlockHash::from);
+    let facts = BlockHeaderRenderFacts {
+        confirmations: confirmations(ctx, &view, hash, record.height),
+        mediantime: ctx.chain.median_time_past_for_hash(hash).unwrap_or(0),
+        chainwork_hex: ctx
+            .chain
+            .chain_work_hex_for_hash(hash)
+            .unwrap_or_else(|| "00".to_owned()),
+        next_block_hash: (confirmations(ctx, &view, hash, record.height) > 0)
+            .then(|| {
+                record
+                    .height
+                    .checked_add(1)
+                    .and_then(|next| ctx.chain.active_hash_in_view(&view, next))
+            })
+            .flatten()
+            .map(BlockHash::from),
+    };
     if !include_block_fields {
-        return render_block_header_verbose(
-            ctx,
-            record,
-            &header,
-            BlockHeaderRenderFacts {
-                confirmations: block_confirmations,
-                mediantime,
-                chainwork_hex,
-                next_block_hash,
-            },
-        );
+        return render_block_header_verbose(ctx, record, &header, facts);
     }
-    let (block, spent) = block_with_spends(ctx, record, &view, verbosity)?;
+    render_block_body_verbose(ctx, record, &header, &view, facts, verbosity)
+}
+
+fn render_block_body_verbose(
+    ctx: &Context,
+    record: &BlockRecord,
+    header: &Header,
+    view: &AppliedView,
+    facts: BlockHeaderRenderFacts,
+    verbosity: u64,
+) -> Result<Value, RpcError> {
+    let (block, spent) = block_with_spends(ctx, record, view, verbosity)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
     let coinbase_version = u32::from_le_bytes(coinbase_tx.version.to_le_bytes());
     let mut value = if verbosity < 2 {
         typed_to_sonic(&v31::GetBlockVerboseOne {
             hash: record.hash.to_string(),
-            confirmations: block_confirmations,
+            confirmations: facts.confirmations,
             size: i64_saturated(block.total_size()),
             stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
@@ -1660,20 +1696,20 @@ fn block_verbose_typed(
             merkle_root: header.merkle_root.to_string_be(),
             tx: block.txs.iter().map(|tx| tx.txid().to_string()).collect(),
             time: i64::from(header.time),
-            median_time: Some(i64_saturated(u64::from(mediantime))),
+            median_time: Some(i64_saturated(u64::from(facts.mediantime))),
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
+            chain_work: facts.chainwork_hex,
             n_tx: i64_saturated(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
+            next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
         })?
     } else {
         let base = v31::GetBlockVerboseTwo {
             hash: record.hash.to_string(),
-            confirmations: block_confirmations,
+            confirmations: facts.confirmations,
             size: i64_saturated(block.total_size()),
             stripped_size: Some(i64_saturated(block.stripped_size())),
             weight: block.weight(),
@@ -1684,15 +1720,15 @@ fn block_verbose_typed(
             merkle_root: header.merkle_root.to_string_be(),
             tx: Vec::new(),
             time: i64::from(header.time),
-            median_time: Some(i64_saturated(u64::from(mediantime))),
+            median_time: Some(i64_saturated(u64::from(facts.mediantime))),
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
-            chain_work: chainwork_hex,
+            chain_work: facts.chainwork_hex,
             n_tx: i64_saturated(block.txs.len()),
             previous_block_hash: (record.height > 0).then(|| header.prev_blockhash.to_string()),
-            next_block_hash: next_block_hash.map(|hash| hash.to_string()),
+            next_block_hash: facts.next_block_hash.map(|hash| hash.to_string()),
         };
         render_detailed_block(
             &base,
