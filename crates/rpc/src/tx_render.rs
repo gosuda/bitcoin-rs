@@ -53,11 +53,11 @@ pub(crate) fn transaction_json(
     let weight = tx.weight();
     let vsize = tx.vsize();
     let coinbase = tx.is_coinbase();
-    let vin: Vec<Value> = tx
-        .inputs
-        .iter()
-        .map(|input| input_json(input, coinbase))
-        .collect();
+    let vin: Vec<Value> = if coinbase {
+        tx.inputs.iter().map(coinbase_input_json).collect()
+    } else {
+        tx.inputs.iter().map(regular_input_json).collect()
+    };
     let vout: Vec<Value> = tx
         .outputs
         .iter()
@@ -168,7 +168,7 @@ fn script_json_with_redeem(
 ) -> Value {
     let shape = convert::classify(script);
     let mut value = json!({
-        "asm": script_asm(script, false),
+        "asm": script_asm(script),
         "type": convert::core_type_name(shape)
     });
     if include_hex {
@@ -191,29 +191,30 @@ fn script_json_with_redeem(
     value
 }
 
-fn input_json(input: &TxIn, coinbase: bool) -> Value {
-    if coinbase {
-        let mut value = json!({
-            "coinbase": input.script_sig.to_lower_hex_string(),
-            "sequence": input.sequence.to_consensus()
-        });
-        if !input.witness.is_empty() {
-            let witness: Vec<String> = input
-                .witness
-                .iter()
-                .map(DisplayHex::to_lower_hex_string)
-                .collect();
-            let _ = value.insert("txinwitness", json!(witness));
-        }
-        return value;
+fn coinbase_input_json(input: &TxIn) -> Value {
+    let mut value = json!({
+        "coinbase": input.script_sig.to_lower_hex_string(),
+        "sequence": input.sequence.to_consensus()
+    });
+    if !input.witness.is_empty() {
+        let witness: Vec<String> = input
+            .witness
+            .iter()
+            .map(DisplayHex::to_lower_hex_string)
+            .collect();
+        let _ = value.insert("txinwitness", json!(witness));
     }
+    value
+}
+
+fn regular_input_json(input: &TxIn) -> Value {
     let previous_output = input.previous_output;
     let (prev_txid, prev_vout) = (previous_output.txid, previous_output.vout);
     let mut value = json!({
         "txid": prev_txid.to_string(),
         "vout": prev_vout,
         "scriptSig": {
-            "asm": script_asm(&input.script_sig, true),
+            "asm": script_asm_with_sighash(&input.script_sig),
             "hex": input.script_sig.to_lower_hex_string()
         },
         "sequence": input.sequence.to_consensus()
@@ -229,6 +230,22 @@ fn input_json(input: &TxIn, coinbase: bool) -> Value {
     value
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SighashDecode {
+    Attempt,
+    Plain,
+}
+
+#[must_use]
+pub(crate) fn script_asm(script: &[u8]) -> String {
+    format_script_asm(script, SighashDecode::Plain)
+}
+
+#[must_use]
+pub(crate) fn script_asm_with_sighash(script: &[u8]) -> String {
+    format_script_asm(script, SighashDecode::Attempt)
+}
+
 fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
     json!({
         "value": signed_btc_amount_json(i64::from_le_bytes(output.value.to_sat().to_le_bytes())),
@@ -237,8 +254,7 @@ fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
     })
 }
 
-#[must_use]
-pub(crate) fn script_asm(script: &[u8], attempt_sighash_decode: bool) -> String {
+fn format_script_asm(script: &[u8], decode: SighashDecode) -> String {
     let mut words = String::new();
     for instruction in instructions(script) {
         let word = match instruction {
@@ -260,7 +276,7 @@ pub(crate) fn script_asm(script: &[u8], attempt_sighash_decode: bool) -> String 
                 value.to_string()
             }
             Ok(Instruction::PushBytes(data)) => {
-                if attempt_sighash_decode
+                if decode == SighashDecode::Attempt
                     && !unspendable(script)
                     && bitcoin_rs_script::check_signature_encoding(
                         data,
@@ -619,25 +635,28 @@ mod script_projection_tests {
     #[test]
     fn core_and_esplora_disassembly_remain_distinct() {
         let script = [0, 0x51, 1, 1];
-        assert_eq!(script_asm(&script, false), "0 1 1");
+        assert_eq!(script_asm(&script), "0 1 1");
         assert_eq!(
             convert::script_asm(&script),
             "OP_0 OP_PUSHNUM_1 OP_PUSHBYTES_1 01"
         );
-        assert_eq!(script_asm(&[0x51, 0x4c], false), "1 [error]");
+        assert_eq!(script_asm(&[0x51, 0x4c]), "1 [error]");
     }
 
     #[test]
     fn input_signature_annotation_is_not_an_output_script_annotation() {
         let script = [9, 0x30, 6, 2, 1, 1, 2, 1, 1, 0x81];
         assert_eq!(
-            script_asm(&script, true),
+            script_asm_with_sighash(&script),
             "3006020101020101[ALL|ANYONECANPAY]"
         );
-        assert_eq!(script_asm(&script, false), "300602010102010181");
+        assert_eq!(script_asm(&script), "300602010102010181");
         let mut data = vec![0x6a];
         data.extend_from_slice(&script);
-        assert_eq!(script_asm(&data, true), "OP_RETURN 300602010102010181");
+        assert_eq!(
+            script_asm_with_sighash(&data),
+            "OP_RETURN 300602010102010181"
+        );
     }
 
     #[test]

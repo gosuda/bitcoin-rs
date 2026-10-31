@@ -51,23 +51,26 @@ fn epoch_seconds(time: SystemTime) -> u64 {
 /// SETBAN-EXPIRY-01: zero relative bantime uses `DEFAULT_BAN_TIME_SECS`; absolute
 /// bantime is measured from `UNIX_EPOCH`. An unrepresentable expiry returns
 /// `RpcError::InvalidParameter` (-8) before any ban-list mutation.
-fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Result<SystemTime, RpcError> {
-    if absolute && bantime < epoch_seconds(now) {
+fn ban_until_absolute(now: SystemTime, bantime: u64) -> Result<SystemTime, RpcError> {
+    if bantime < epoch_seconds(now) {
         return Err(RpcError::InvalidParameter(
             "Error: Absolute timestamp is in the past".to_owned(),
         ));
     }
-    let until = if absolute {
-        UNIX_EPOCH.checked_add(Duration::from_secs(bantime))
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(bantime))
+        .ok_or_else(|| {
+            RpcError::InvalidParameter("bantime exceeds supported timestamp range".to_owned())
+        })
+}
+
+fn ban_until_relative(now: SystemTime, bantime: u64) -> Result<SystemTime, RpcError> {
+    let duration = if bantime == 0 {
+        Duration::from_secs(DEFAULT_BAN_TIME_SECS)
     } else {
-        let duration = if bantime == 0 {
-            Duration::from_secs(DEFAULT_BAN_TIME_SECS)
-        } else {
-            Duration::from_secs(bantime)
-        };
-        now.checked_add(duration)
+        Duration::from_secs(bantime)
     };
-    until.ok_or_else(|| {
+    now.checked_add(duration).ok_or_else(|| {
         RpcError::InvalidParameter("bantime exceeds supported timestamp range".to_owned())
     })
 }
@@ -423,7 +426,11 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             let now = SystemTime::now();
             let bantime = optional_u64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
-            let banned_until = ban_until(now, bantime, absolute)?;
+            let banned_until = if absolute {
+                ban_until_absolute(now, bantime)?
+            } else {
+                ban_until_relative(now, bantime)?
+            };
             ctx.network.p2p.set_ban(BannedSubnet {
                 subnet,
                 banned_until: Some(banned_until),
@@ -1153,7 +1160,7 @@ mod getnodeaddresses_tests {
 mod setban_absolute_time_tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::ban_until;
+    use super::ban_until_absolute;
     use crate::error::RpcError;
 
     #[test]
@@ -1162,7 +1169,7 @@ mod setban_absolute_time_tests {
         for nanos in [0, 1, 999_999_999] {
             let now = UNIX_EPOCH + Duration::new(now_seconds, nanos);
             for seconds in [0, now_seconds - 1] {
-                let Err(error) = ban_until(now, seconds, true) else {
+                let Err(error) = ban_until_absolute(now, seconds) else {
                     panic!("past absolute timestamp must be rejected");
                 };
                 assert_eq!(error.code(), -8);
@@ -1174,7 +1181,7 @@ mod setban_absolute_time_tests {
             }
             for seconds in [now_seconds, now_seconds + 1] {
                 assert_eq!(
-                    ban_until(now, seconds, true)?,
+                    ban_until_absolute(now, seconds)?,
                     UNIX_EPOCH + Duration::from_secs(seconds),
                     "current whole second and future timestamps are accepted"
                 );

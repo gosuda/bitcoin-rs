@@ -29,8 +29,16 @@ fn assert_overflow_fixture() {
     );
 }
 
-fn assert_invalid_expiry(handler: &Handler, target: &str, absolute: bool) {
-    let Err(error) = handler.dispatch("setban", &json!([target, "add", u64::MAX, absolute])) else {
+fn assert_invalid_relative_expiry(handler: &Handler, target: &str) {
+    let Err(error) = handler.dispatch("setban", &json!([target, "add", u64::MAX, false])) else {
+        panic!("unrepresentable expiry must not succeed");
+    };
+    assert!(matches!(&error, RpcError::InvalidParameter(_)));
+    assert_eq!(error.code(), -8, "SETBAN-EXPIRY-01 invalid-value error");
+}
+
+fn assert_invalid_absolute_expiry(handler: &Handler, target: &str) {
+    let Err(error) = handler.dispatch("setban", &json!([target, "add", u64::MAX, true])) else {
         panic!("unrepresentable expiry must not succeed");
     };
     assert!(matches!(&error, RpcError::InvalidParameter(_)));
@@ -40,30 +48,39 @@ fn assert_invalid_expiry(handler: &Handler, target: &str, absolute: bool) {
 #[test]
 fn overflow_does_not_create_a_permanent_ban() {
     assert_overflow_fixture();
-    for absolute in [false, true] {
-        let handler = handler();
-        assert_invalid_expiry(&handler, "192.0.2.1", absolute);
-        assert_eq!(handler.context().network.p2p.banned().as_slice(), &[]);
-    }
+    let rel_handler = handler();
+    assert_invalid_relative_expiry(&rel_handler, "192.0.2.1");
+    assert_eq!(rel_handler.context().network.p2p.banned().as_slice(), &[]);
+
+    let abs_handler = handler();
+    assert_invalid_absolute_expiry(&abs_handler, "192.0.2.1");
+    assert_eq!(abs_handler.context().network.p2p.banned().as_slice(), &[]);
 }
 
 #[test]
 fn overflow_preserves_existing_entries_and_order() -> Result<(), RpcError> {
     assert_overflow_fixture();
-    for absolute in [false, true] {
-        for target in ["192.0.2.1", "203.0.113.99"] {
-            let handler = handler();
-            handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
-            handler.dispatch("setban", &json!(["198.51.100.0/24", "add", 120]))?;
-            let before = handler.context().network.p2p.banned();
+    for target in ["192.0.2.1", "203.0.113.99"] {
+        let rel_handler = handler();
+        rel_handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
+        rel_handler.dispatch("setban", &json!(["198.51.100.0/24", "add", 120]))?;
+        let before = rel_handler.context().network.p2p.banned();
 
-            assert_invalid_expiry(&handler, target, absolute);
+        assert_invalid_relative_expiry(&rel_handler, target);
+        assert_eq!(
+            rel_handler.context().network.p2p.banned().as_slice(),
+            before.as_slice()
+        );
 
-            assert_eq!(
-                handler.context().network.p2p.banned().as_slice(),
-                before.as_slice()
-            );
-        }
+        let abs_handler = handler();
+        abs_handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
+        abs_handler.dispatch("setban", &json!(["198.51.100.0/24", "add", 120]))?;
+        let abs_before = abs_handler.context().network.p2p.banned();
+        assert_invalid_absolute_expiry(&abs_handler, target);
+        assert_eq!(
+            abs_handler.context().network.p2p.banned().as_slice(),
+            abs_before.as_slice()
+        );
     }
     Ok(())
 }

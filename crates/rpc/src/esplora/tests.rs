@@ -16,16 +16,16 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use super::projection::Projection;
-use crate::test_error::TestError;
 use super::public::{
-    CHAIN_PAGE, address_transaction_summary, block_txs, fee_rate_sat_per_vbyte, history, outspend,
-    summary,
+    CHAIN_PAGE, address_transaction_summary, block_txs, chain_history, fee_rate_sat_per_vbyte,
+    full_history, mempool_history, outspend, summary,
 };
 use crate::context::{
     Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError, TxUnavailableCause,
 };
 use crate::handlers::Handler;
 use crate::rest::Response;
+use crate::test_error::TestError;
 
 fn route(handler: &Handler, path: &str, query: &str) -> Response {
     dispatch(handler, &api(path), query)
@@ -1451,7 +1451,7 @@ fn history_mempool_sentinel_keeps_the_fifty_transaction_bound() {
             .insert_entry(MempoolEntry::new(tx, 100, 100, 0, 0, 0))
             .expect("insert mempool fixture");
     }
-    let mempool = history(&ctx, ScriptHash::new(&target), Some(""), false);
+    let mempool = mempool_history(&ctx, ScriptHash::new(&target));
     assert_eq!(mempool.status, 200);
     let values: Value = sonic_rs::from_slice(&mempool.body).expect("mempool page json");
     assert_eq!(values.as_array().map(|array| array.len()), Some(50));
@@ -1462,7 +1462,7 @@ fn history_mempool_sentinel_keeps_the_fifty_transaction_bound() {
             .iter()
             .all(|tx| tx["status"]["confirmed"] == false)
     );
-    let chain = history(&ctx, ScriptHash::new(&target), Some("not-a-txid"), false);
+    let chain = chain_history(&ctx, ScriptHash::new(&target), Some("not-a-txid"));
     assert_eq!(chain.status, 200);
     assert_eq!(chain.body, b"[]");
 }
@@ -1508,25 +1508,24 @@ fn history_hydrates_only_the_requested_chain_page() {
         calls: Arc::clone(&calls),
     }));
 
-    let response = history(&ctx, ScriptHash::new(&target), None, false);
+    let response = chain_history(&ctx, ScriptHash::new(&target), None);
     assert_eq!(response.status, 200);
     let values: Value = sonic_rs::from_slice(&response.body).expect("history response json");
     assert_eq!(values.as_array().map(|array| array.len()), Some(CHAIN_PAGE));
     assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
 
     let cursor = records[5].txid.to_string();
-    let second = history(&ctx, ScriptHash::new(&target), Some(&cursor), false);
+    let second = chain_history(&ctx, ScriptHash::new(&target), Some(&cursor));
     assert_eq!(second.status, 200);
     let second: Value = sonic_rs::from_slice(&second.body).expect("second page json");
     assert_eq!(second.as_array().map(|array| array.len()), Some(5));
     assert_eq!(second[0]["txid"], records[4].txid.to_string());
     assert_eq!(second[4]["txid"], records[0].txid.to_string());
     assert_eq!(calls.load(Ordering::Relaxed), 30);
-    let end = history(
+    let end = chain_history(
         &ctx,
         ScriptHash::new(&target),
         Some(&records[0].txid.to_string()),
-        false,
     );
     assert_eq!(end.status, 200);
     assert_eq!(end.body, b"[]");
@@ -1540,9 +1539,9 @@ fn history_hydrates_only_the_requested_chain_page() {
         funding: Vec::new(),
         unspent: Vec::new(),
     }));
-    let first = history(&ctx, ScriptHash::new(&target), None, false);
+    let first = chain_history(&ctx, ScriptHash::new(&target), None);
     calls.store(0, Ordering::Relaxed);
-    let restarted = history(&ctx, ScriptHash::new(&target), Some(&cursor), false);
+    let restarted = chain_history(&ctx, ScriptHash::new(&target), Some(&cursor));
     assert_eq!(restarted.status, 200);
     assert_eq!(restarted.body, first.body);
     assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
@@ -1617,7 +1616,7 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
         .insert_entry(MempoolEntry::new(mempool_tx, 100, 100, 0, 0, 0))
         .expect("insert mempool entry");
 
-    let chain_resp = history(&ctx, script_hash, None, false);
+    let chain_resp = chain_history(&ctx, script_hash, None);
     assert_eq!(chain_resp.status, 200);
     let chain_val: Value = sonic_rs::from_slice(&chain_resp.body).expect("chain json");
     assert_eq!(
@@ -1640,7 +1639,7 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
     );
 
     let cursor = history_records[5].txid.to_string();
-    let chain_page2 = history(&ctx, script_hash, Some(&cursor), false);
+    let chain_page2 = chain_history(&ctx, script_hash, Some(&cursor));
     assert_eq!(chain_page2.status, 200);
     assert_eq!(
         unspent_calls.load(Ordering::Relaxed),
@@ -1648,7 +1647,7 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
         "chain page 2 must not enumerate ScriptLive"
     );
 
-    let mempool_resp = history(&ctx, script_hash, Some(""), false);
+    let mempool_resp = mempool_history(&ctx, script_hash);
     assert_eq!(mempool_resp.status, 200);
     let mempool_val: Value = sonic_rs::from_slice(&mempool_resp.body).expect("mempool json");
     assert_eq!(mempool_val.as_array().map(|array| array.len()), Some(1));
@@ -1714,7 +1713,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         calls: Arc::clone(&calls),
     }));
 
-    let page1 = history(&ctx, script_hash, None, false);
+    let page1 = chain_history(&ctx, script_hash, None);
     assert_eq!(
         page1.status, 200,
         "Page 1 must succeed even when unselected past blocks are pruned"
@@ -1743,7 +1742,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         .collect();
     let cursor1 = page1_txids.last().expect("page1 last txid").clone();
 
-    let page2 = history(&ctx, script_hash, Some(&cursor1), false);
+    let page2 = chain_history(&ctx, script_hash, Some(&cursor1));
     assert_eq!(page2.status, 200);
     let page2_vals: Value = sonic_rs::from_slice(&page2.body).expect("page2 json");
     assert_eq!(
@@ -1758,7 +1757,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         .collect();
     let cursor2 = page2_txids.last().expect("page2 last txid").clone();
 
-    let page3 = history(&ctx, script_hash, Some(&cursor2), false);
+    let page3 = chain_history(&ctx, script_hash, Some(&cursor2));
     assert_eq!(page3.status, 200);
     let page3_vals: Value = sonic_rs::from_slice(&page3.body).expect("page3 json");
     assert_eq!(page3_vals.as_array().map(|array| array.len()), Some(10));
@@ -1770,7 +1769,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         .collect();
     let cursor3 = page3_txids.last().expect("page3 last txid").clone();
 
-    let page4 = history(&ctx, script_hash, Some(&cursor3), false);
+    let page4 = chain_history(&ctx, script_hash, Some(&cursor3));
     assert_eq!(page4.status, 200);
     assert_eq!(page4.body, b"[]");
 
@@ -1795,7 +1794,7 @@ fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
         cursor1.to_uppercase(),
         format!("0x{cursor1}"),
     ] {
-        let restarted = history(&ctx, script_hash, Some(&invalid_cursor), false);
+        let restarted = chain_history(&ctx, script_hash, Some(&invalid_cursor));
         assert_eq!(restarted.status, 200, "cursor: {invalid_cursor}");
         assert_eq!(
             restarted.body, page1.body,
@@ -1854,7 +1853,7 @@ fn chain_history_deduplicates_multiple_outputs_in_same_transaction() {
         calls: Arc::new(AtomicUsize::new(0)),
     }));
 
-    let response = history(&ctx, script_hash, None, false);
+    let response = chain_history(&ctx, script_hash, None);
     assert_eq!(response.status, 200);
     let val: Value = sonic_rs::from_slice(&response.body).expect("json");
     assert_eq!(val.as_array().map(|array| array.len()), Some(1));
@@ -2179,7 +2178,7 @@ fn history_resolves_shared_parents_once_per_page() {
         (Some(records[5].txid.to_string()), &transactions[..5]),
     ] {
         calls.store(0, Ordering::Relaxed);
-        let response = history(&ctx, ScriptHash::new(&[0x51]), cursor.as_deref(), false);
+        let response = chain_history(&ctx, ScriptHash::new(&[0x51]), cursor.as_deref());
         assert_eq!(response.status, 200);
         let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("page");
         assert_eq!(calls.load(Ordering::Relaxed), expected.len() + 1);
@@ -2222,7 +2221,7 @@ fn history_resolves_shared_parents_once_per_page() {
         ))
         .expect("mixed page");
     calls.store(0, Ordering::Relaxed);
-    let mixed = history(&ctx, ScriptHash::new(&[0x51]), None, true);
+    let mixed = full_history(&ctx, ScriptHash::new(&[0x51]));
     assert_eq!(mixed.status, 200);
     let mixed: Vec<Value> = sonic_rs::from_slice(&mixed.body).expect("mixed page");
     assert_eq!(mixed.len(), CHAIN_PAGE + 1);
@@ -2235,7 +2234,7 @@ fn history_resolves_shared_parents_once_per_page() {
         calls,
     }));
     assert_eq!(
-        history(&ctx, ScriptHash::new(&[0x51]), None, false).status,
+        chain_history(&ctx, ScriptHash::new(&[0x51]), None).status,
         503
     );
 }

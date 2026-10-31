@@ -33,8 +33,8 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> 
 pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
     let ctx = handler.context();
     match path {
-        "/internal/txs" => Some(internal_transactions(ctx.as_ref(), body, false)),
-        "/internal/mempool/txs" => Some(internal_transactions(ctx.as_ref(), body, true)),
+        "/internal/txs" => Some(internal_transactions(ctx.as_ref(), body)),
+        "/internal/mempool/txs" => Some(internal_mempool_transactions(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-outpoint" => {
             Some(internal_outspends_by_outpoint(ctx.as_ref(), body))
@@ -126,7 +126,21 @@ fn select_mempool_page<'a>(
     selected
 }
 
-fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransactionScope {
+    All,
+    MempoolOnly,
+}
+
+fn internal_transactions(ctx: &Context, body: &[u8]) -> Response {
+    internal_transactions_scoped(ctx, body, TransactionScope::All)
+}
+
+fn internal_mempool_transactions(ctx: &Context, body: &[u8]) -> Response {
+    internal_transactions_scoped(ctx, body, TransactionScope::MempoolOnly)
+}
+
+fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionScope) -> Response {
     let Ok(text_ids) = sonic_rs::from_slice::<Vec<String>>(body) else {
         return bad_request("transaction request body must be a JSON array of txids");
     };
@@ -146,7 +160,7 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
             if transactions.contains_key(id) {
                 continue;
             }
-            let transaction = if mempool_only {
+            let transaction = if scope == TransactionScope::MempoolOnly {
                 ctx.mempool
                     .gateway
                     .read()

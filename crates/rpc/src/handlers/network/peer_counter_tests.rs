@@ -10,16 +10,10 @@ use super::{getnetworkinfo, getpeerinfo};
 use crate::context::Context;
 
 fn peer(addr: &str, bind: &str, time_offset: i64, counters: Arc<PeerCounters>) -> PeerInfo {
-    directed_peer(addr, bind, time_offset, counters, true)
+    inbound_peer(addr, bind, time_offset, counters)
 }
 
-fn directed_peer(
-    addr: &str,
-    bind: &str,
-    time_offset: i64,
-    counters: Arc<PeerCounters>,
-    inbound: bool,
-) -> PeerInfo {
+fn inbound_peer(addr: &str, bind: &str, time_offset: i64, counters: Arc<PeerCounters>) -> PeerInfo {
     let parse = |text: &str| -> SocketAddr {
         text.parse()
             .unwrap_or_else(|_| panic!("test address {text} must parse"))
@@ -38,7 +32,7 @@ fn directed_peer(
         start_height: 0,
         best_known_height: 0,
         conn_time: 0,
-        inbound,
+        inbound: true,
         addr_bind: bitcoin_rs_p2p::TransportRemote::new(parse(bind)),
         time_offset,
         counters,
@@ -46,17 +40,27 @@ fn directed_peer(
     }
 }
 
+fn outbound_peer(
+    addr: &str,
+    bind: &str,
+    time_offset: i64,
+    counters: Arc<PeerCounters>,
+) -> PeerInfo {
+    let mut info = inbound_peer(addr, bind, time_offset, counters);
+    info.inbound = false;
+    info
+}
+
 fn outbound_peers(offsets: &[i64]) -> Vec<PeerInfo> {
     offsets
         .iter()
         .enumerate()
         .map(|(index, offset)| {
-            directed_peer(
+            outbound_peer(
                 &format!("127.0.0.1:{}", index + 1),
                 &format!("127.0.0.1:{}", 1000 + index),
                 *offset,
                 Arc::new(PeerCounters::default()),
-                false,
             )
         })
         .collect()
@@ -220,12 +224,11 @@ fn getnetworkinfo_timeoffset_is_the_median_of_its_peers() {
 fn getnetworkinfo_timeoffset_ignores_inbound_peers() {
     let mut peers = outbound_peers(&[10, 10, 10, 10, 10]);
     for index in 0..9 {
-        peers.push(directed_peer(
+        peers.push(inbound_peer(
             &format!("127.0.0.2:{}", index + 1),
             &format!("127.0.0.1:{}", 2000 + index),
             3_600,
             Arc::new(PeerCounters::default()),
-            true,
         ));
     }
     let ctx = context_with(peers);

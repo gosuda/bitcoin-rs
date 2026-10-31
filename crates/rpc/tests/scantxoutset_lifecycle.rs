@@ -4,10 +4,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use crate::support::TestError;
 use bitcoin_rs_e2e::rpc::Connection;
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer, context::Context};
 use sonic_rs::{Value, json};
-use crate::support::TestError;
 
 type TestResult<T = ()> = Result<T, TestError>;
 
@@ -31,13 +31,18 @@ fn reserved(context: &Context) {
 
 #[test]
 fn scan_preserves_control_capacity_and_observes_server_shutdown() -> TestResult {
-    for stop in [false, true] {
-        check_scan_cancellation(stop)?;
-    }
+    check_scan_cancellation(CancellationMode::Abort)?;
+    check_scan_cancellation(CancellationMode::Shutdown)?;
     Ok(())
 }
 
-fn check_scan_cancellation(stop: bool) -> TestResult {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancellationMode {
+    Abort,
+    Shutdown,
+}
+
+fn check_scan_cancellation(mode: CancellationMode) -> TestResult {
     let transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
     let context = Arc::new(Context::new().with_chain_transition(transition.clone()));
     let handler = Arc::new(Handler::new(Arc::clone(&context)));
@@ -77,17 +82,20 @@ fn check_scan_cancellation(stop: bool) -> TestResult {
                 call(&mut control, "getblockcount", json!([]))?["result"],
                 json!(0)
             );
-            if stop {
-                assert_eq!(
-                    call(&mut control, "scantxoutset", json!(["start", []]))?["error"]["code"],
-                    json!(-8)
-                );
-                shutdown.store(true, Ordering::Release);
-            } else {
-                assert_eq!(
-                    call(&mut control, "scantxoutset", json!(["abort"]))?["result"],
-                    json!(true)
-                );
+            match mode {
+                CancellationMode::Shutdown => {
+                    assert_eq!(
+                        call(&mut control, "scantxoutset", json!(["start", []]))?["error"]["code"],
+                        json!(-8)
+                    );
+                    shutdown.store(true, Ordering::Release);
+                }
+                CancellationMode::Abort => {
+                    assert_eq!(
+                        call(&mut control, "scantxoutset", json!(["abort"]))?["result"],
+                        json!(true)
+                    );
+                }
             }
 
             let response = scan.join().map_err(|_| "scan worker panicked")??;

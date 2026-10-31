@@ -101,10 +101,10 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             address_hash(&ctx, address).map_or_else(|r| r, |h| utxos(&ctx, h))
         }
         ["scripthash", hash, "txs"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, true))
+            parse_script(hash).map_or_else(|r| r, |h| full_history(&ctx, h))
         }
         ["address", address, "txs"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, true))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| full_history(&ctx, h))
         }
         ["scripthash", hash, "txs", "summary"] => {
             parse_script(hash).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
@@ -113,22 +113,22 @@ pub(super) fn get(ctx: &Context, path: &str) -> Response {
             address_hash(&ctx, address).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
         }
         ["scripthash", hash, "txs", "mempool"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
+            parse_script(hash).map_or_else(|r| r, |h| mempool_history(&ctx, h))
         }
         ["address", address, "txs", "mempool"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| mempool_history(&ctx, h))
         }
         ["scripthash", hash, "txs", "chain"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, false))
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
         }
         ["address", address, "txs", "chain"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, false))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, None))
         }
         ["scripthash", hash, "txs", "chain", last] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
+            parse_script(hash).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
         }
         ["address", address, "txs", "chain", last] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
+            address_hash(&ctx, address).map_or_else(|r| r, |h| chain_history(&ctx, h, Some(last)))
         }
         ["address-prefix", _] => {
             service_unavailable("address prefix search requires an address index")
@@ -624,30 +624,45 @@ fn utxos(ctx: &Context, h: ScriptHash) -> Response {
         .script_utxos(h)
         .map_or_else(|response| response, json_ok)
 }
-pub(super) fn history(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryScope {
+    Full,
+    Chain,
+}
+
+pub(super) fn full_history(ctx: &Context, h: ScriptHash) -> Response {
+    history_scoped(ctx, h, None, HistoryScope::Full)
+}
+
+pub(super) fn chain_history(ctx: &Context, h: ScriptHash, last: Option<&str>) -> Response {
+    history_scoped(ctx, h, last, HistoryScope::Chain)
+}
+
+pub(super) fn mempool_history(ctx: &Context, h: ScriptHash) -> Response {
+    let projection = Projection::new(ctx);
+    let mempool = match projection.mempool_activity_for(h) {
+        Ok(mempool) => mempool,
+        Err(response) => return response,
+    };
+    projection
+        .transaction_values(
+            mempool
+                .iter()
+                .take(MEMPOOL_PAGE)
+                .map(|tx| (tx.as_ref(), None)),
+            None,
+        )
+        .map_or_else(|r| r, json_ok)
+}
+
+fn history_scoped(
     ctx: &Context,
     h: ScriptHash,
     last: Option<&str>,
-    include_mempool: bool,
+    scope: HistoryScope,
 ) -> Response {
     let projection = Projection::new(ctx);
-    if last == Some("") {
-        let mempool = match projection.mempool_activity_for(h) {
-            Ok(mempool) => mempool,
-            Err(response) => return response,
-        };
-        return projection
-            .transaction_values(
-                mempool
-                    .iter()
-                    .take(MEMPOOL_PAGE)
-                    .map(|tx| (tx.as_ref(), None)),
-                None,
-            )
-            .map_or_else(|r| r, json_ok);
-    }
-
-    let mempool = if include_mempool {
+    let mempool = if scope == HistoryScope::Full {
         let mempool = match projection.mempool_activity_for(h) {
             Ok(mempool) => mempool,
             Err(response) => return response,

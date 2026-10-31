@@ -226,7 +226,7 @@ fn omit_json_nulls(value: &mut Value) {
 pub(crate) fn script_pub_key_typed(script: &[u8], network: Network) -> corepc_types::ScriptPubKey {
     let shape = classify(script);
     corepc_types::ScriptPubKey {
-        asm: tx_render::script_asm(script, false),
+        asm: tx_render::script_asm(script),
         descriptor: Some(tx_render::script_descriptor(script, network)),
         hex: script.to_lower_hex_string(),
         required_signatures: None,

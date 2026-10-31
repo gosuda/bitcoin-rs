@@ -65,13 +65,13 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
         return route_tx(ctx, suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/notxdetails/") {
-        return route_block(ctx, suffix, false);
+        return route_block(ctx, suffix, BlockTxVerbosity::Ids);
     }
     if let Some(suffix) = path.strip_prefix("/rest/blockpart/") {
         return route_block_part(ctx, suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/") {
-        return route_block(ctx, suffix, true);
+        return route_block(ctx, suffix, BlockTxVerbosity::Full);
     }
     if path.starts_with("/rest/chaininfo") {
         return route_chaininfo(ctx, path);
@@ -154,7 +154,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
     }
 }
 
-fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response {
+fn route_block(ctx: &Arc<Context>, suffix: &str, verbosity: BlockTxVerbosity) -> Response {
     let (hash_text, format) = split_format(suffix);
     let Ok(hash) = Hash256::from_str(hash_text) else {
         return bad_request(format!("Invalid hash: {hash_text}"));
@@ -185,11 +185,6 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
             };
             let view = ctx.chain.applied_view();
             let context = build_chain_context(ctx, &view, &record, &block.header);
-            let verbosity = if with_details {
-                BlockTxVerbosity::Full
-            } else {
-                BlockTxVerbosity::Ids
-            };
             let value =
                 crate::render::block_json(&block, &context, verbosity, ctx.chain.chain_network);
             text_response("application/json", sonic_bytes(&value))
