@@ -186,6 +186,19 @@ pub struct ScriptHistoryRecord {
     pub height: u32,
 }
 
+/// Largest page the index returns, independent of the caller's request.
+pub const SCRIPT_HISTORY_PAGE_MAX: usize = 100;
+
+/// One bounded newest-first confirmed-history page.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ScriptHistoryPage {
+    /// At most the caller-requested number of records, newest first.
+    pub records: Vec<ScriptHistoryRecord>,
+    /// Whether the supplied cursor named an exact occurrence of this script.
+    /// A false value preserves API-09 by returning the first page.
+    pub cursor_found: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SpendingRecord {
     pub txid: Txid,
@@ -217,6 +230,36 @@ pub trait ScriptIndexQuery: Send + Sync {
         script_hash: ScriptHash,
     ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
         Ok(self.history_snapshot(script_hash)?.history)
+    }
+    /// Returns one bounded newest-first page strictly after `cursor`.
+    ///
+    /// `cursor` is an API-09 transaction id. The default implementation orders
+    /// complete history by `(height, txid)` descending and skips the cursor's
+    /// first occurrence, so a page never repeats the cursor itself.
+    fn confirmed_history_page(
+        &self,
+        script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        let mut history = self.confirmed_history(script_hash)?;
+        history.sort_by(|left, right| {
+            right
+                .height
+                .cmp(&left.height)
+                .then_with(|| right.txid.cmp(&left.txid))
+        });
+        history.dedup_by(|left, right| left.txid == right.txid && left.height == right.height);
+        let start = cursor.and_then(|txid| history.iter().position(|record| record.txid == txid));
+        let cursor_found = cursor.is_none() || start.is_some();
+        Ok(ScriptHistoryPage {
+            records: history
+                .into_iter()
+                .skip(start.map_or(0, |index| index + 1))
+                .take(limit)
+                .collect(),
+            cursor_found,
+        })
     }
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError>;
 }

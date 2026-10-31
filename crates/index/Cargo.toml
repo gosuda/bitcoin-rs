@@ -60,6 +60,10 @@ proptest.workspace = true
 sonic-rs.workspace = true
 tempfile.workspace = true
 
+[[bench]]
+name = "write_amplification"
+harness = false
+
 [[test]]
 name = "suite"
 path = "tests/suite.rs"

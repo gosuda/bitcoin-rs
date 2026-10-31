@@ -336,7 +336,8 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let needs_anchor = capabilities.contains(IndexCapability::ScriptLive)
+        let needs_anchor = capabilities.contains(IndexCapability::ScriptHistory)
+            || capabilities.contains(IndexCapability::ScriptLive)
             || capabilities.contains(IndexCapability::CompactFilters);
 
         let outcomes: Vec<AnchoredPreparation> = sub_chunk

@@ -31,6 +31,18 @@ const fn decode_u24_le(bytes: [u8; 3]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
 }
 
+/// Encodes a script-history height so lexicographic order is newest first.
+#[must_use]
+pub(crate) const fn encode_history_height(height: u32) -> [u8; HEIGHT_SIZE] {
+    (!height).to_be_bytes()
+}
+
+/// Decodes a newest-first script-history height.
+#[must_use]
+pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+    !u32::from_be_bytes(bytes)
+}
+
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
 /// A stable electrs hash-prefix row: eight prefix bytes followed by a big-endian height.
@@ -350,6 +362,68 @@ fn spending_prefix(txid_bytes: &[u8], vout: u32) -> HashPrefix {
     value.to_be_bytes()
 }
 
+/// One exact transaction occurrence in a script-history height row.
+///
+/// Funding and spending references made by one transaction to one script merge
+/// into a single occurrence with both flag bits set. The full script identity
+/// is stored so a shared eight-byte scan prefix never serves another script.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScriptHistoryOccurrence {
+    /// Full 32-byte script identity the occurrence belongs to.
+    pub scripthash: ScriptHash,
+    /// Transaction id in little-endian byte order.
+    pub txid: [u8; 32],
+    /// Serialized position of the transaction in its block.
+    pub position: TxPosition,
+    /// Any combination of [`Self::FUNDING`] and [`Self::SPENDING`].
+    pub flags: u8,
+}
+
+impl ScriptHistoryOccurrence {
+    pub const FUNDING: u8 = 0b01;
+    pub const SPENDING: u8 = 0b10;
+    /// One encoded occurrence: `scripthash || txid || position || flags`.
+    /// Encoded width of one occurrence.
+    pub const SIZE: usize = 32 + 32 + TX_POSITION_SIZE + 1;
+
+    /// Encodes a nonempty occurrence sequence.
+    #[must_use]
+    pub fn encode_all(entries: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(entries.len().saturating_mul(Self::SIZE));
+        for entry in entries {
+            out.extend_from_slice(&entry.scripthash.to_byte_array());
+            out.extend_from_slice(&entry.txid);
+            out.extend_from_slice(entry.position.as_bytes());
+            out.push(entry.flags);
+        }
+        out
+    }
+
+    /// Decodes one stored value, or `None` when it is empty or malformed.
+    #[must_use]
+    pub fn decode_all(value: &[u8]) -> Option<Vec<Self>> {
+        let (chunks, remainder) = value.as_chunks::<{ Self::SIZE }>();
+        if chunks.is_empty() || !remainder.is_empty() {
+            return None;
+        }
+        chunks
+            .iter()
+            .map(|chunk| {
+                let scripthash = ScriptHash::from_byte_array(chunk[..32].try_into().ok()?);
+                let txid = chunk[32..64].try_into().ok()?;
+                let position = TxPosition::read_from_bytes(&chunk[64..70]).ok()?;
+                let flags = chunk[70];
+                (flags != 0 && flags & !(Self::FUNDING | Self::SPENDING) == 0).then_some(Self {
+                    scripthash,
+                    txid,
+                    position,
+                    flags,
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
@@ -381,7 +455,6 @@ mod tests {
             [31, 30, 29, 28, 27, 26, 26, 23]
         );
     }
-
     #[test]
     fn script_live_row_roundtrips_outpoint() {
         let scripthash = ScriptHash::from_byte_array([7_u8; 32]);

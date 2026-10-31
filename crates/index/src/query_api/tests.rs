@@ -372,3 +372,67 @@ mod script_live_outage_engine_tests {
         Ok(())
     }
 }
+
+struct CompleteHistory(Vec<ScriptHistoryRecord>);
+
+impl ScriptIndexQuery for CompleteHistory {
+    fn unspent_outputs(&self, _script: ScriptHash) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+        Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+            "unexpected live query".into(),
+        )))
+    }
+
+    fn history_snapshot(&self, _script: ScriptHash) -> Result<ScriptIndexSnapshot, TxQueryError> {
+        Ok(ScriptIndexSnapshot {
+            history: self.0.clone(),
+            funding: Vec::new(),
+        })
+    }
+
+    fn spender(&self, _outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
+        Err(TxQueryError::Unavailable(TxUnavailableCause::Other(
+            "unexpected spender query".into(),
+        )))
+    }
+}
+
+// IDX-02
+#[test]
+fn default_history_page_skips_the_cursor_and_restarts_when_unknown()
+-> Result<(), Box<dyn std::error::Error>> {
+    let record = |id: u8, height| ScriptHistoryRecord {
+        txid: Txid(Hash256::from_le_bytes(&[id; 32])),
+        height,
+    };
+    let source = CompleteHistory(vec![
+        record(1, 7),
+        record(2, 6),
+        record(3, 4),
+        record(4, 3),
+        record(5, 1),
+    ]);
+    let script = ScriptHash::from_byte_array([0; 32]);
+
+    let first = source.confirmed_history_page(script, None, 3)?;
+    assert!(first.cursor_found);
+    assert_eq!(
+        first.records,
+        vec![record(1, 7), record(2, 6), record(3, 4)]
+    );
+
+    let second = source.confirmed_history_page(script, Some(record(2, 6).txid), 3)?;
+    assert!(second.cursor_found);
+    assert_eq!(
+        second.records,
+        vec![record(3, 4), record(4, 3), record(5, 1)]
+    );
+
+    let unknown = source.confirmed_history_page(script, Some(record(9, 0).txid), 3)?;
+    assert!(!unknown.cursor_found, "an absent transaction is reported");
+    assert_eq!(unknown.records, first.records);
+
+    let empty = source.confirmed_history_page(script, Some(record(2, 6).txid), 0)?;
+    assert!(empty.cursor_found);
+    assert_eq!(empty.records, Vec::new());
+    Ok(())
+}

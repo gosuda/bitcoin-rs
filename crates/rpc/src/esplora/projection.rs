@@ -479,7 +479,6 @@ impl<'a> Projection<'a> {
                 .cmp(&left.record.height)
                 .then_with(|| right.record.txid.cmp(&left.record.txid))
         });
-        confirmed.dedup_by_key(|activity| activity.record.txid);
 
         let confirmed_unspent = index.unspent_outputs(script_hash).map_err(query_error)?;
         let mempool = self.mempool_activity(script_hash, &confirmed_unspent)?;
@@ -491,9 +490,16 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn confirmed_history(
+    /// One bounded newest-first confirmed-history page after `cursor`.
+    ///
+    /// Each call reads one index snapshot; anything that moves during the read
+    /// answers `Retry`, so a page never mixes two tips. An unknown, stale or
+    /// reorged cursor restarts at the first page, as API-09 requires.
+    pub(super) fn confirmed_history_page(
         &self,
         script_hash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, Response> {
         let index = self
             .ctx
@@ -501,15 +507,16 @@ impl<'a> Projection<'a> {
             .script_index
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
-        let mut history = index.confirmed_history(script_hash).map_err(query_error)?;
-        history.sort_by(|left, right| {
-            right
-                .height
-                .cmp(&left.height)
-                .then_with(|| right.txid.cmp(&left.txid))
-        });
-        history.dedup_by_key(|record| record.txid);
-        Ok(history)
+        let page = index
+            .confirmed_history_page(script_hash, cursor, limit)
+            .map_err(query_error)?;
+        if cursor.is_some() && !page.cursor_found {
+            return Ok(index
+                .confirmed_history_page(script_hash, None, limit)
+                .map_err(query_error)?
+                .records);
+        }
+        Ok(page.records)
     }
 
     pub(super) fn mempool_activity_for(
@@ -550,13 +557,21 @@ impl<'a> Projection<'a> {
                 })
                 .collect::<Vec<_>>()
         };
+        let mut confirmations: std::collections::HashMap<u32, Confirmation> =
+            std::collections::HashMap::new();
         let mut outputs = confirmed
             .into_iter()
             .map(|record| {
-                let status = self
-                    .confirmation_at_height(record.height)
-                    .map(TransactionStatus::from)
-                    .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                let status = match confirmations.get(&record.height) {
+                    Some(confirmation) => TransactionStatus::from(*confirmation),
+                    None => {
+                        let confirmation = self
+                            .confirmation_at_height(record.height)
+                            .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                        confirmations.insert(record.height, confirmation);
+                        TransactionStatus::from(confirmation)
+                    }
+                };
                 Ok(UtxoValue {
                     txid: record.txid.to_string(),
                     vout: record.vout,

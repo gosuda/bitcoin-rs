@@ -42,14 +42,20 @@ impl<S: KvStore> Indexer<S> {
         })
     }
 
-    /// big-endian (format 5), so that order is chronological within a prefix.
+    /// Returns every row whose eight-byte script prefix matches, newest height
+    /// first: format 6 stores an inverted big-endian history height.
     pub fn iter_funding_rows(
         &self,
         scripthash: crate::ScriptHash,
     ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = ScriptHashRow::scan_prefix(scripthash);
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
-        collect_prefix_rows(iter)
+        let mut rows = collect_prefix_rows(iter)?;
+        for row in &mut rows {
+            row.height =
+                crate::types::encode_height(crate::types::decode_history_height(row.height));
+        }
+        Ok(rows)
     }
 
     pub fn iter_live_outpoints(
@@ -78,7 +84,7 @@ impl<S: KvStore> Indexer<S> {
         Ok(outpoints)
     }
 
-    /// height suffix is big-endian (format 5), so prefix-range scans arrive
+    /// Spender rows keep chronological big-endian heights, so prefix-range scans arrive
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,

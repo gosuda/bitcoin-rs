@@ -6,7 +6,10 @@ use crate::support::common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
-use bitcoin_rs_index::{IndexWriter, ScriptHash};
+use bitcoin_rs_index::{
+    IndexCapabilities, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash,
+    SpentCoinScripts,
+};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
@@ -15,6 +18,39 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
 
 use common::MemoryStore;
+
+/// Answers every spent outpoint, so the v6 history rows prepare without a
+/// real UTXO set.
+struct FixtureScripts;
+
+static FIXTURE_SPENT_SCRIPT: [u8; 2] = [0x51, 0x01];
+
+impl SpentCoinScripts for FixtureScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        Some(FIXTURE_SPENT_SCRIPT.as_slice())
+    }
+}
+
+fn commit_block(store: &Arc<MemoryStore>, height: u32, body: &[u8]) {
+    let mut writer = IndexWriter::open(Arc::clone(store), 1).expect("open");
+    let header = body.get(..80).expect("header present");
+    let hash = bitcoin_rs_primitives::encode::double_sha256(header).to_le_bytes();
+    let prepared = writer
+        .prepare_block_with_spent_scripts(
+            IndexCapabilities::HISTORICAL,
+            height,
+            hash,
+            body,
+            &FixtureScripts,
+        )
+        .expect("prepare");
+    let mut batch = PreparedBatch::new(PreparedBatchLimits {
+        max_rows: usize::MAX,
+        max_bytes: usize::MAX,
+    });
+    assert!(batch.try_push(prepared).is_ok(), "one block is admitted");
+    writer.commit_forward(batch).expect("commit");
+}
 
 fn header() -> Header {
     Header {
@@ -97,10 +133,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)
-        .expect("open")
-        .commit_block(0, &bytes)
-        .expect("commit");
+    commit_block(&store, 0, &bytes);
 
     let target = ScriptHash::from_script_bytes(&script(0x11));
 
@@ -110,14 +143,23 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
         .find(|(key, _)| key.starts_with(&target.prefix()))
         .expect("funding row for the target script");
 
-    let positions = TxPositionValue::decode(value).expect("row value decodes");
-    assert_eq!(positions.len(), 2, "two transactions funded this script");
+    let occurrences = bitcoin_rs_index::types::ScriptHistoryOccurrence::decode_all(value)
+        .expect("row value decodes");
+    let funded: Vec<_> = occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.flags & bitcoin_rs_index::types::ScriptHistoryOccurrence::FUNDING != 0
+        })
+        .collect();
+    assert_eq!(funded.len(), 2, "two transactions funded this script");
 
-    for position in positions {
+    for occurrence in funded {
+        let position = occurrence.position;
         let start = usize::try_from(position.offset()).expect("offset fits usize");
         let end = usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
         let decoded: Tx =
             deserialize(&bytes[start..end]).expect("position slices a whole transaction");
+        assert_eq!(decoded.txid().as_bytes(), &occurrence.txid);
         assert!(
             decoded
                 .outputs
@@ -134,10 +176,7 @@ fn txid_positions_address_their_own_transaction() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    IndexWriter::open(Arc::clone(&store), 1)
-        .expect("open")
-        .commit_block(0, &bytes)
-        .expect("commit");
+    commit_block(&store, 0, &bytes);
 
     let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);
     assert_eq!(rows.len(), block.txs.len());

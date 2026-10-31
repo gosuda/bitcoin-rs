@@ -657,24 +657,30 @@ pub(super) fn history(
         Vec::new()
     };
 
-    let records = match projection.confirmed_history(h) {
+    let cursor = last.and_then(|text| {
+        Txid::from_str(text)
+            .ok()
+            .filter(|txid| txid.to_string() == text)
+    });
+    let records = match projection.confirmed_history_page(h, cursor, CHAIN_PAGE) {
         Ok(records) => records,
         Err(response) => return response,
     };
-    let start = last.and_then(|x| {
-        records
-            .iter()
-            .position(|entry| entry.txid.to_string() == x)
-            .map(|n| n + 1)
-    });
+    let mut confirmations: std::collections::HashMap<u32, Confirmation> =
+        std::collections::HashMap::new();
     let chain = match records
         .into_iter()
-        .skip(start.unwrap_or(0))
-        .take(CHAIN_PAGE)
         .map(|record| {
-            let confirmation = projection
-                .confirmation_at_height(record.height)
-                .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+            let confirmation = match confirmations.get(&record.height) {
+                Some(confirmation) => *confirmation,
+                None => {
+                    let confirmation = projection
+                        .confirmation_at_height(record.height)
+                        .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                    confirmations.insert(record.height, confirmation);
+                    confirmation
+                }
+            };
             let transaction = projection.confirmed_transaction(&record.txid)?;
             Ok((transaction, Some(confirmation)))
         })

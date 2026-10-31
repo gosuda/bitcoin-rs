@@ -83,9 +83,17 @@ pub trait TxIndexSnapshot: Send + Sync {
         txid: &Txid,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
+    /// Scans one script's history rows, newest height first.
     fn funding_rows(
         &self,
         scripthash: ScriptHash,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError>;
+    /// Scans history rows at or below `start_height`, newest height first.
+    fn funding_rows_from(
+        &self,
+        scripthash: ScriptHash,
+        start_height: u32,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
     fn spending_rows(
@@ -112,24 +120,64 @@ impl StoreTxIndexSnapshot<'_> {
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
         let scan = self.snapshot.scan_prefix_bounded(cf, prefix, limit)?;
-        let encoded_bytes = scan.rows.iter().fold(0_usize, |total, (key, value)| {
-            total.saturating_add(key.len()).saturating_add(value.len())
-        });
-        let mut rows = Vec::with_capacity(scan.rows.len());
-        for (key, value) in scan.rows {
-            if key.len() != crate::HASH_PREFIX_ROW_SIZE {
-                return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
-            }
-            let row = zerocopy::FromBytes::read_from_bytes(&key)
-                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
-            rows.push(TxIndexScanRow { row, value });
-        }
-        Ok(TxIndexScan {
-            rows,
-            encoded_bytes,
-            complete: scan.complete,
-        })
+        decode_scan(scan)
     }
+
+    /// Scans script-history rows, decoding the newest-first height suffix.
+    fn scan_history_from(
+        &self,
+        prefix: &[u8],
+        start: &[u8],
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let scan =
+            self.snapshot
+                .scan_prefix_from_bounded(ColumnFamily::Funding, prefix, start, limit)?;
+        decode_history_scan(scan)
+    }
+}
+
+fn decode_scan(scan: bitcoin_rs_storage::PrefixScan) -> Result<TxIndexScan, IndexError> {
+    let encoded_bytes = encoded_bytes(&scan);
+    let mut rows = Vec::with_capacity(scan.rows.len());
+    for (key, value) in scan.rows {
+        let row = decode_row(&key)?;
+        rows.push(TxIndexScanRow { row, value });
+    }
+    Ok(TxIndexScan {
+        rows,
+        encoded_bytes,
+        complete: scan.complete,
+    })
+}
+
+fn decode_history_scan(scan: bitcoin_rs_storage::PrefixScan) -> Result<TxIndexScan, IndexError> {
+    let encoded_bytes = encoded_bytes(&scan);
+    let mut rows = Vec::with_capacity(scan.rows.len());
+    for (key, value) in scan.rows {
+        let mut row = decode_row(&key)?;
+        row.height = crate::types::encode_height(crate::types::decode_history_height(row.height));
+        rows.push(TxIndexScanRow { row, value });
+    }
+    Ok(TxIndexScan {
+        rows,
+        encoded_bytes,
+        complete: scan.complete,
+    })
+}
+
+fn encoded_bytes(scan: &bitcoin_rs_storage::PrefixScan) -> usize {
+    scan.rows.iter().fold(0_usize, |total, (key, value)| {
+        total.saturating_add(key.len()).saturating_add(value.len())
+    })
+}
+
+fn decode_row(key: &[u8]) -> Result<HashPrefixRow, IndexError> {
+    if key.len() != crate::HASH_PREFIX_ROW_SIZE {
+        return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
+    }
+    zerocopy::FromBytes::read_from_bytes(key)
+        .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })
 }
 
 impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
@@ -169,11 +217,7 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
                 .scan_prefix_from_bounded(family.column_family(), &[], &start, limit)?;
         let mut rows = Vec::with_capacity(scan.rows.len());
         for (key, value) in scan.rows {
-            if key.len() != crate::HASH_PREFIX_ROW_SIZE {
-                return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
-            }
-            let row = zerocopy::FromBytes::read_from_bytes(&key)
-                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?;
+            let row = decode_row(&key)?;
             rows.push(TxIndexScanRow { row, value });
         }
         Ok(TxIndexPage {
@@ -199,11 +243,22 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         scripthash: ScriptHash,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError> {
-        self.scan(
-            ColumnFamily::Funding,
-            &ScriptHashRow::scan_prefix(scripthash),
-            limit,
-        )
+        let prefix = ScriptHashRow::scan_prefix(scripthash);
+        self.scan_history_from(&prefix, &prefix, limit)
+    }
+
+    fn funding_rows_from(
+        &self,
+        scripthash: ScriptHash,
+        start_height: u32,
+        limit: PrefixScanLimit,
+    ) -> Result<TxIndexScan, IndexError> {
+        let prefix = ScriptHashRow::scan_prefix(scripthash);
+        let mut start = [0_u8; crate::HASH_PREFIX_ROW_SIZE];
+        start[..crate::types::HASH_PREFIX_LEN].copy_from_slice(&prefix);
+        start[crate::types::HASH_PREFIX_LEN..]
+            .copy_from_slice(&crate::types::encode_history_height(start_height));
+        self.scan_history_from(&prefix, &start, limit)
     }
 
     fn spending_rows(
@@ -228,9 +283,7 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
             &ScriptHashRow::scan_prefix(scripthash),
             limit,
         )?;
-        let encoded_bytes = scan.rows.iter().fold(0_usize, |total, (key, value)| {
-            total.saturating_add(key.len()).saturating_add(value.len())
-        });
+        let encoded_bytes = encoded_bytes(&scan);
         let mut rows = Vec::with_capacity(scan.rows.len());
         for (key, value) in scan.rows {
             if !value.is_empty() {

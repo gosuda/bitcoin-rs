@@ -4,6 +4,7 @@ mod be_order;
 mod compact_filters;
 mod index_roundtrip;
 mod portable_bundle;
+mod script_history_occurrences;
 mod script_live;
 mod silent_payments;
 mod tx_positions;

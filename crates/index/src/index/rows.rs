@@ -1,7 +1,7 @@
 //! Canonical row accounting, grouping, and ordered live-view mutations.
 
 use super::error::IndexError;
-use crate::types::HashPrefixRow;
+use crate::types::{HashPrefixRow, ScriptHistoryOccurrence};
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily};
 use zerocopy::IntoBytes;
 
@@ -80,10 +80,33 @@ pub(super) struct PositionedRow {
     pub(super) position: crate::types::TxPosition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PositionedHistory {
+    pub(super) row: HashPrefixRow,
+    pub(super) occurrence: crate::types::ScriptHistoryOccurrence,
+}
+
+impl Ord for PositionedHistory {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.row
+            .cmp(&other.row)
+            .then_with(|| self.occurrence.position.cmp(&other.occurrence.position))
+            .then_with(|| self.occurrence.txid.cmp(&other.occurrence.txid))
+            .then_with(|| self.occurrence.scripthash.cmp(&other.occurrence.scripthash))
+            .then_with(|| self.occurrence.flags.cmp(&other.occurrence.flags))
+    }
+}
+
+impl PartialOrd for PositionedHistory {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PendingRows {
     pub(super) txid_rows: Vec<PositionedRow>,
-    pub(super) funding_rows: Vec<PositionedRow>,
+    pub(super) funding_rows: Vec<PositionedHistory>,
     pub(super) spending_rows: Vec<PositionedRow>,
     pub(super) header_rows: Vec<[u8; crate::types::HEADER_ROW_SIZE]>,
     pub(super) live_ops: Vec<LiveOp>,
@@ -91,6 +114,10 @@ pub(super) struct PendingRows {
 }
 
 fn distinct_row_count(rows: &[PositionedRow]) -> usize {
+    rows.chunk_by(|left, right| left.row == right.row).count()
+}
+
+fn distinct_history_row_count(rows: &[PositionedHistory]) -> usize {
     rows.chunk_by(|left, right| left.row == right.row).count()
 }
 
@@ -107,6 +134,18 @@ where
     }
 }
 
+fn for_each_history_row<F>(rows: &[PositionedHistory], mut emit: F)
+where
+    F: FnMut(HashPrefixRow, &[ScriptHistoryOccurrence]),
+{
+    let mut occurrences = Vec::new();
+    for group in rows.chunk_by(|left, right| left.row == right.row) {
+        occurrences.clear();
+        occurrences.extend(group.iter().map(|entry| entry.occurrence));
+        emit(group[0].row, &occurrences);
+    }
+}
+
 impl PendingRows {
     pub(super) fn sort(&mut self) {
         self.txid_rows.sort_unstable();
@@ -114,7 +153,20 @@ impl PendingRows {
         self.spending_rows.sort_unstable();
         self.header_rows.sort_unstable();
         self.txid_rows.dedup();
-        self.funding_rows.dedup();
+        let mut merged: Vec<PositionedHistory> = Vec::with_capacity(self.funding_rows.len());
+        for entry in self.funding_rows.drain(..) {
+            if let Some(previous) = merged.last_mut()
+                && previous.row == entry.row
+                && previous.occurrence.position == entry.occurrence.position
+                && previous.occurrence.txid == entry.occurrence.txid
+                && previous.occurrence.scripthash == entry.occurrence.scripthash
+            {
+                previous.occurrence.flags |= entry.occurrence.flags;
+            } else {
+                merged.push(entry);
+            }
+        }
+        self.funding_rows = merged;
         self.spending_rows.dedup();
         self.header_rows.dedup();
     }
@@ -122,13 +174,14 @@ impl PendingRows {
     pub(super) fn counts(&self) -> IndexRowCounts {
         IndexRowCounts {
             txids: distinct_row_count(&self.txid_rows),
-            funding: distinct_row_count(&self.funding_rows),
+            funding: distinct_history_row_count(&self.funding_rows),
             spending: distinct_row_count(&self.spending_rows),
             headers: self.header_rows.len(),
             live: self.live_ops.len(),
             filters: self.filter_rows.len(),
         }
     }
+
     pub(super) fn append(&mut self, other: Self) {
         self.txid_rows.extend(other.txid_rows);
         self.funding_rows.extend(other.funding_rows);
@@ -161,30 +214,26 @@ impl PendingRows {
             .checked_add(tx_pos_bytes)
             .ok_or(IndexError::MutationSizeOverflow)?;
 
-        let funding_prefix_bytes = distinct_row_count(&self.funding_rows)
+        let funding_prefix_bytes = distinct_history_row_count(&self.funding_rows)
             .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
         let spending_prefix_bytes = distinct_row_count(&self.spending_rows)
             .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let history_prefix_bytes = funding_prefix_bytes
-            .checked_add(spending_prefix_bytes)
-            .ok_or(IndexError::MutationSizeOverflow)?;
-        let funding_pos_bytes = self
+        let funding_value_bytes = self
             .funding_rows
             .len()
-            .checked_mul(crate::types::TX_POSITION_SIZE)
+            .checked_mul(ScriptHistoryOccurrence::SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let spending_pos_bytes = self
+        let spending_value_bytes = self
             .spending_rows
             .len()
             .checked_mul(crate::types::TX_POSITION_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
-        let history_pos_bytes = funding_pos_bytes
-            .checked_add(spending_pos_bytes)
-            .ok_or(IndexError::MutationSizeOverflow)?;
-        let script_history = history_prefix_bytes
-            .checked_add(history_pos_bytes)
+        let script_history = funding_prefix_bytes
+            .checked_add(funding_value_bytes)
+            .and_then(|s| s.checked_add(spending_prefix_bytes))
+            .and_then(|s| s.checked_add(spending_value_bytes))
             .ok_or(IndexError::MutationSizeOverflow)?;
 
         let headers = self
@@ -250,7 +299,6 @@ fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp], invert: bool) 
 pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
-        (ColumnFamily::Funding, &rows.funding_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
     ] {
         for_each_row_group(positioned, |row, positions| {
@@ -261,6 +309,13 @@ pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
             );
         });
     }
+    for_each_history_row(&rows.funding_rows, |row, occurrences| {
+        batch.put(
+            ColumnFamily::Funding,
+            row.as_bytes(),
+            &ScriptHistoryOccurrence::encode_all(occurrences),
+        );
+    });
     for row in &rows.header_rows {
         batch.put(ColumnFamily::BlockHeaders, row, &[]);
     }
@@ -281,12 +336,17 @@ pub(super) fn delete_rows(
 ) {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
-        (ColumnFamily::Funding, &rows.funding_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
     ] {
         for group in positioned.chunk_by(|left, right| left.row == right.row) {
             batch.delete(cf, group[0].row.as_bytes());
         }
+    }
+    for group in rows
+        .funding_rows
+        .chunk_by(|left, right| left.row == right.row)
+    {
+        batch.delete(ColumnFamily::Funding, group[0].row.as_bytes());
     }
     for (hash, _) in &rows.filter_rows {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));

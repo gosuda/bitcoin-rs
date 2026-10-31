@@ -26,6 +26,12 @@ impl MemoryStore {
         self.cfs.read()[cf.index()].len()
     }
 
+    /// Fails the next fenced write before it applies, modelling a durability
+    /// boundary that published neither rows nor a watermark.
+    pub(crate) fn arm_fenced_write_failure(&self) {
+        self.fail_next_fenced_write.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
         self.cfs.read()[cf.index()]
             .iter()
@@ -213,11 +219,10 @@ pub(crate) fn put_funding_row(
     scripthash: ScriptHash,
     height: u32,
 ) -> Result<(), StorageError> {
-    store.put(
-        ColumnFamily::Funding,
-        &ScriptHashRow::row(scripthash, height).to_db_row(),
-        &[],
-    )
+    let mut row = ScriptHashRow::row(scripthash, height).to_db_row();
+    let offset = bitcoin_rs_index::types::HASH_PREFIX_ROW_SIZE - 4;
+    row[offset..].copy_from_slice(&(!height).to_be_bytes());
+    store.put(ColumnFamily::Funding, &row, &[])
 }
 
 pub(crate) fn put_spending_row(

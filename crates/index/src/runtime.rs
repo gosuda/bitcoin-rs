@@ -242,6 +242,16 @@ impl ScriptIndexQuery for DerivedIndexQueryAdapter {
         let engine = self.load_engine()?;
         engine.spender(outpoint)
     }
+
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<crate::ScriptHistoryPage, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.confirmed_history_page(scripthash, cursor, limit)
+    }
 }
 
 /// These are query-side safety limits, not the writer batch limits.

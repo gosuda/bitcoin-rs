@@ -9,7 +9,7 @@ use super::{
     ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     TxPosition, TxPositionValue, TxQueryError, TxUnavailableCause, Txid, deserialize,
 };
-use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause};
+use crate::query_api::{CoveredPrefix, HistoricalUnavailableCause, ScriptHistoryPage};
 use bitcoin_rs_chain::{AncestryBudgetExceeded, NodeId};
 
 mod filters;
@@ -46,6 +46,30 @@ impl QueryBudget {
             max_rows: self.remaining_rows,
             max_bytes: self.remaining_bytes,
         })
+    }
+
+    pub(super) fn next_page_scan_limit(
+        &mut self,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<PrefixScanLimit, TxQueryError> {
+        let limit = self.next_scan_limit()?;
+        Ok(PrefixScanLimit {
+            max_rows: limit.max_rows.min(max_rows),
+            max_bytes: limit.max_bytes.min(max_bytes),
+        })
+    }
+
+    /// Charges one page scan without refusing an incomplete page.
+    ///
+    /// Pagination continues from the last returned row, so a truncated scan is
+    /// progress, not an unprovable answer.
+    pub(super) fn accept_page_scan(
+        &mut self,
+        scan: TxIndexScan,
+    ) -> Result<(Vec<TxIndexScanRow>, bool), TxQueryError> {
+        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        Ok((scan.rows, scan.complete))
     }
 
     pub(super) fn accept_scan(
@@ -743,7 +767,30 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
                     floor: floors.script_history,
                     bound: PrefixBound::ExactTip,
                 };
-                self.confirmed_history_for(snapshot, &prefix, budget, scripthash)
+                Self::confirmed_history_for(snapshot, &prefix, budget, scripthash)
+            },
+        )
+    }
+
+    fn confirmed_history_page(
+        &self,
+        scripthash: ScriptHash,
+        cursor: Option<Txid>,
+        limit: usize,
+    ) -> Result<ScriptHistoryPage, TxQueryError> {
+        self.with_snapshot(
+            IndexCapabilities::SCRIPT_HISTORY,
+            |snapshot, tip, budget, floors| {
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.script_history,
+                    bound: PrefixBound::ExactTip,
+                };
+                Self::confirmed_history_page_for(
+                    snapshot, &prefix, budget, scripthash, cursor, limit,
+                )
             },
         )
     }
