@@ -273,7 +273,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
         .spawn(move || {
             let mut next_initial = std::time::Instant::now() + INITIAL_BROADCAST_RETRY;
             let mut initial_cursor = None;
-            while !shutdown.load() {
+            while !shutdown.is_triggered() {
                 {
                     let Some(gateway) = gateway.upgrade() else {
                         break;
@@ -284,22 +284,25 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
                         next_initial = std::time::Instant::now() + INITIAL_BROADCAST_RETRY;
                     }
                 }
-                match rx.recv_timeout(RELAY_POLL) {
-                    Ok(request) => {
-                        let Some(gateway) = gateway.upgrade() else {
-                            break;
-                        };
-                        if transaction_is_live(&gateway, &request) {
-                            sink.announce_inv(
-                                request.txid,
-                                request.wtxid,
-                                request.source,
-                                request.sequence,
-                            );
+                crossbeam_channel::select! {
+                    recv(shutdown.closed()) -> _ => break,
+                    recv(rx) -> request => match request {
+                        Ok(request) => {
+                            let Some(gateway) = gateway.upgrade() else {
+                                break;
+                            };
+                            if transaction_is_live(&gateway, &request) {
+                                sink.announce_inv(
+                                    request.txid,
+                                    request.wtxid,
+                                    request.source,
+                                    request.sequence,
+                                );
+                            }
                         }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                        Err(_) => break,
+                    },
+                    recv(crossbeam_channel::after(RELAY_POLL)) -> _ => {}
                 }
             }
         })

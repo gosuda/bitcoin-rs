@@ -801,3 +801,29 @@ fn local_replacement_relay_uses_the_accepted_change_sequence() {
     );
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn tx_relay_worker_promptly_exits_on_latch_trigger_while_idle() {
+    let gateway = relay_identity_gateway();
+    let (_queue, rx) = TxRelayQueue::new(8);
+    let sink = FakeSink::new(Vec::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let worker = spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), latch.reader())
+        .expect("relay worker spawns");
+
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    let started = std::time::Instant::now();
+    latch.trigger();
+
+    let (joined_tx, joined_rx) = bounded(1);
+    std::thread::spawn(move || {
+        let _ = worker.join();
+        let _ = joined_tx.send(());
+    });
+
+    joined_rx
+        .recv_timeout(std::time::Duration::from_millis(45))
+        .expect("relay worker must exit promptly on latch trigger within 45ms");
+    assert!(started.elapsed() < std::time::Duration::from_millis(45));
+}
