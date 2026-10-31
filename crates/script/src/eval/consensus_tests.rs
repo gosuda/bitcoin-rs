@@ -14,6 +14,8 @@ use bitcoin::{
 };
 use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
 
+use crate::eval::{SigVersion, TxSignatureChecker};
+use crate::stack::Stack;
 use crate::{Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, VerifyFlags};
 
 fn template() -> Transaction {
@@ -150,4 +152,37 @@ fn tapscript_codeseparator_sighash_hashes_the_opcode_index() {
          (0 here); the interpreter instead committed to the byte offset after the separator (1), \
          so a spend signed from the independent BIP342 digest was rejected"
     );
+}
+
+#[test]
+fn eval_script_never_panics_on_truncated_push_or_boundary_offsets() {
+    let cases = [
+        vec![0x01],
+        vec![0x4c],
+        vec![0x4c, 0x05],
+        vec![0x4d],
+        vec![0x4e],
+        vec![0x80],
+        vec![0x00, 0x80],
+    ];
+    for case in cases {
+        let mut stack = Stack::new();
+        let tx = Tx::default();
+        let cache = bitcoin_rs_primitives::SighashCache::new(&tx);
+        let checker = TxSignatureChecker::new(&tx, 0, Amount::ZERO, &[], &cache, None);
+        let mut weight = None;
+        let result = crate::eval::eval_script(
+            &mut stack,
+            &case,
+            VerifyFlags::MANDATORY,
+            &checker,
+            SigVersion::Base,
+            &mut weight,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "malformed script must fail with typed error, not panic"
+        );
+    }
 }

@@ -86,7 +86,8 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
     if require_minimal && !bytes.is_empty() {
         let last = bytes.last().copied().unwrap_or(0);
         if last.trailing_zeros() >= 7 {
-            let second_to_last_significant = bytes.len() > 1 && bytes[bytes.len() - 2] & 0x80 != 0;
+            let second_to_last_significant =
+                bytes.len() > 1 && bytes.get(bytes.len() - 2).copied().unwrap_or(0) & 0x80 != 0;
             if bytes.len() == 1 || !second_to_last_significant {
                 return Err(ScriptError::Invalid {
                     code: ScriptErrCode::ScriptNum,
@@ -101,7 +102,7 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
     for (index, byte) in bytes.iter().enumerate() {
         value |= u64::from(*byte) << (8 * index);
     }
-    if bytes[bytes.len() - 1] & 0x80 != 0 {
+    if bytes.last().copied().unwrap_or(0) & 0x80 != 0 {
         let mask = !(0x80_u64 << (8 * (bytes.len() - 1)));
         let magnitude = value & mask;
         let magnitude = i64::try_from(magnitude).map_err(|_| ScriptError::Invalid {
@@ -180,11 +181,6 @@ pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<
     Ok(false)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one dispatch arm per opcode family mirrors Core's EvalScript switch; \
-              splitting arms into helpers would obscure the shared state flow"
-)]
 pub(crate) fn eval_script(
     stack: &mut Stack,
     script: &[u8],
@@ -225,21 +221,10 @@ pub(crate) fn eval_script(
         };
         let opcode_byte = match instruction {
             Instruction::PushBytes(data) => {
-                let opcode_byte = script[instruction_start];
-                if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::PushSize,
-                    });
-                }
-                if conditions.all_true() {
-                    if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte)
-                    {
-                        return Err(ScriptError::Invalid {
-                            code: ScriptErrCode::MinimalData,
-                        });
-                    }
-                    push_bytes(stack, data)?;
-                }
+                let opcode_byte = *script.get(instruction_start).ok_or(ScriptError::Invalid {
+                    code: ScriptErrCode::BadOpcode,
+                })?;
+                handle_push_bytes(data, opcode_byte, conditions.all_true(), flags, stack)?;
                 check_stack_depth(stack, &altstack)?;
                 opcode_pos = opcode_pos.saturating_add(1);
                 instruction_start = script.len() - iter.remaining.len();
@@ -247,32 +232,7 @@ pub(crate) fn eval_script(
             }
             Instruction::Op(op) => op,
         };
-
-        if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
-            if opcode_byte > opcode::OP_PUSHNUM_16 {
-                op_count += 1;
-                if op_count > MAX_OPS_PER_SCRIPT {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::OpCount,
-                    });
-                }
-            }
-        }
-
-        if is_disabled(opcode_byte) {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::DisabledOpcode,
-            });
-        }
-
-        if opcode_byte == OP_CODESEPARATOR
-            && sigversion == SigVersion::Base
-            && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
-        {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::OpCodeSeparator,
-            });
-        }
+        check_opcode_rules(opcode_byte, sigversion, flags, &mut op_count)?;
 
         let f_exec = conditions.all_true();
         if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
@@ -304,6 +264,61 @@ pub(crate) fn eval_script(
     if !conditions.is_empty() {
         return Err(ScriptError::Invalid {
             code: ScriptErrCode::UnbalancedConditional,
+        });
+    }
+    Ok(())
+}
+
+fn handle_push_bytes(
+    data: &[u8],
+    opcode_byte: u8,
+    conditions_true: bool,
+    flags: VerifyFlags,
+    stack: &mut Stack,
+) -> Result<(), ScriptError> {
+    if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::PushSize,
+        });
+    }
+    if conditions_true {
+        if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte) {
+            return Err(ScriptError::Invalid {
+                code: ScriptErrCode::MinimalData,
+            });
+        }
+        push_bytes(stack, data)?;
+    }
+    Ok(())
+}
+
+fn check_opcode_rules(
+    opcode_byte: u8,
+    sigversion: SigVersion,
+    flags: VerifyFlags,
+    op_count: &mut usize,
+) -> Result<(), ScriptError> {
+    if (sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0)
+        && opcode_byte > opcode::OP_PUSHNUM_16
+    {
+        *op_count += 1;
+        if *op_count > MAX_OPS_PER_SCRIPT {
+            return Err(ScriptError::Invalid {
+                code: ScriptErrCode::OpCount,
+            });
+        }
+    }
+    if is_disabled(opcode_byte) {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::DisabledOpcode,
+        });
+    }
+    if opcode_byte == OP_CODESEPARATOR
+        && sigversion == SigVersion::Base
+        && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
+    {
+        return Err(ScriptError::Invalid {
+            code: ScriptErrCode::OpCodeSeparator,
         });
     }
     Ok(())
