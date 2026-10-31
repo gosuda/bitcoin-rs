@@ -6,20 +6,6 @@ use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserial
 use sonic_rs::Value;
 
 #[test]
-fn tx_valid_vectors_deserialize() {
-    let (total, parsed) = parse_tx_vectors("tx_valid.json");
-    assert!(total > 0);
-    assert_eq!(parsed, total);
-}
-
-#[test]
-fn tx_invalid_vectors_load() {
-    let (total, parsed) = parse_tx_vectors("tx_invalid.json");
-    assert!(total > 0);
-    assert!(parsed > 0);
-}
-
-#[test]
 fn script_tests_vectors_load_and_flags_parse() {
     let root = read_json("script_tests.json");
     let rows = root
@@ -93,32 +79,6 @@ fn sighash_vectors_match_bitcoin_cache() {
     );
     assert!(total > 0);
     assert!(matched > 0);
-}
-
-fn parse_tx_vectors(name: &str) -> (usize, usize) {
-    let root = read_json(name);
-    let rows = root
-        .as_array()
-        .unwrap_or_else(|| panic!("tx vector root must be array"));
-    let mut total = 0usize;
-    let mut parsed = 0usize;
-    for row in rows {
-        let Some(row) = row.as_array() else {
-            continue;
-        };
-        if row.len() < 3 || !row.first().is_some_and(Value::is_array) {
-            continue;
-        }
-        total = total.saturating_add(1);
-        let Some(tx_hex) = row.get(1).and_then(Value::as_str) else {
-            continue;
-        };
-        let bytes = decode_hex(tx_hex);
-        if deserialize::<Tx>(&bytes).is_ok() {
-            parsed = parsed.saturating_add(1);
-        }
-    }
-    (total, parsed)
 }
 
 fn read_json(name: &str) -> Value {

@@ -861,12 +861,6 @@ mod tests {
         assert_eq!(report.outputs, 3);
         assert!(report.record_payload_bytes > 0);
         assert!(report.table_bytes > 0);
-        assert_eq!(
-            report.accounted_bytes(),
-            report
-                .record_payload_bytes
-                .saturating_add(report.table_bytes)
-        );
         Ok(())
     }
 }

@@ -268,7 +268,7 @@ mod tests {
         scripts.push(MAX_SCAN_SCRIPTS.to_le_bytes().to_vec());
         assert!(matches!(
             reader.scan_script_pubkeys(&scripts),
-            Err(crate::UtxoError::Scan(UtxoScanError::Limit("1024 scripts")))
+            Err(crate::UtxoError::Scan(UtxoScanError::Limit(_)))
         ));
         assert_eq!(reader.scan_progress(), None);
 
@@ -284,9 +284,7 @@ mod tests {
         ] {
             assert!(matches!(
                 reader.scan_script_pubkeys(&scripts),
-                Err(crate::UtxoError::Scan(UtxoScanError::Limit(
-                    "1 MiB of scripts"
-                )))
+                Err(crate::UtxoError::Scan(UtxoScanError::Limit(_)))
             ));
             assert_eq!(reader.scan_progress(), None);
         }

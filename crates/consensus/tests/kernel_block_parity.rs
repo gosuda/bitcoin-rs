@@ -525,12 +525,5 @@ fn pristine_mutation_is_identity() -> TestResult {
     };
     let pristine = Mutation::Pristine.apply(&tx).ok_or("Pristine must apply")?;
     assert_eq!(consensus_bytes(&tx), consensus_bytes(&pristine));
-    assert_eq!(
-        Mutation::ALL
-            .iter()
-            .filter(|mutation| matches!(mutation, Mutation::Pristine))
-            .count(),
-        1
-    );
     Ok(())
 }

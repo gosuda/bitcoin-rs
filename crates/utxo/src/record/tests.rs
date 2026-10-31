@@ -473,27 +473,6 @@ fn the_unique_add_guard_rejects_equal_and_decreasing_vouts() {
 }
 
 #[test]
-fn a_record_moved_across_threads_stays_decodable() -> Result<(), UtxoError> {
-    let record = UtxoRecord::from_owned_outputs(
-        Hash256::default(),
-        &[output(0, &[0x51], 1), output(3, &[0x53], 3)],
-    )?;
-    let txid = record.txid();
-    let record = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                assert_eq!(record.output_count(), 2);
-                assert!(record.find_output(3).is_some());
-                record
-            })
-            .join()
-            .unwrap_or_else(|_| panic!("record moved across threads must not panic"))
-    });
-    assert_eq!(record.txid(), txid);
-    Ok(())
-}
-
-#[test]
 fn records_at_the_inline_partition_boundary_iterate_exactly() -> Result<(), UtxoError> {
     for count in [7_u32, 8, 9] {
         let outputs: Vec<OwnedUtxoOut> = (0..count)

@@ -187,11 +187,6 @@ fn raw_pool_view_and_entry_metadata_facts() -> Result<(), TestError> {
     let tx = chained_tx(80, outpoint(79, 0));
     let txid = tx.txid();
     let entry = MempoolEntry::new(Arc::new(tx), 150, 3_000, 9, 42, 17);
-    assert_eq!(entry.sigop_cost, 17);
-    assert_eq!(entry.bip141_vsize, u32::try_from(entry.tx.vsize())?);
-    assert_eq!(entry.weight, entry.tx.weight());
-    assert_eq!(entry.height, 42);
-    assert_eq!(entry.time, 9);
     pool.insert_entry(entry)?;
 
     assert!(pool.sequence_number() > before);

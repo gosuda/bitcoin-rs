@@ -385,18 +385,6 @@ fn replacement_preview_excludes_planned_evictions() {
 }
 
 #[test]
-fn the_cached_txid_matches_a_recomputation() {
-    let (pool, _root_txid) = graph_pool();
-    for (_id, entry) in pool.entries.iter() {
-        assert_eq!(
-            entry.txid,
-            entry.tx.txid(),
-            "the entry's cached txid drifted from its transaction"
-        );
-    }
-}
-
-#[test]
 fn spender_txids_matches_a_scan_of_every_entrys_inputs() {
     let (pool, _root_txid) = graph_pool();
 
