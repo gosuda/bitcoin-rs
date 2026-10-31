@@ -114,7 +114,6 @@ pub(crate) fn checked_frame_len(payload_len: u32) -> Result<usize, JournalReplay
         })
 }
 
-/// Height and previous hash the next retained record must carry.
 pub(crate) struct ReplayCursor {
     height: u32,
     prev_hash: [u8; 32],

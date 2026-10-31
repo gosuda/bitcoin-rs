@@ -1,5 +1,3 @@
-//! Append-only framed block-body files and compact position records.
-
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufReader, Seek as _, SeekFrom, Write as _},
@@ -12,12 +10,9 @@ use parking_lot::Mutex;
 
 use crate::{BodyExtent, StorageError};
 
-/// Fixed magic at the start of every flat-file block record.
 pub(crate) const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
-/// Maximum size of a normal block-body file: 128 MiB.
 pub(crate) const BLOCK_FILE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Directory name for append-only block-body files under a data directory.
 pub(crate) const BLOCK_FILE_DIRECTORY: &str = "blocks";
 const BLOCK_FILE_PREFIX: &str = "blk";
 const BLOCK_FILE_SUFFIX: &str = ".dat";
@@ -30,22 +25,17 @@ const RECORD_HEADER_LEN: usize = 44;
 const RECORD_HEADER_LEN_U64: u64 = RECORD_HEADER_LEN as u64;
 const BLOCK_READER_BUFFER_BYTES: usize = 256 << 10;
 
-/// A fixed-width pointer to a framed block body in a flat file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockFilePosition {
-    /// Number of the `blkNNNNN.dat` file.
     pub file_no: u32,
     /// Byte offset of the record header, not its body.
     pub offset: u64,
-    /// Byte length of the body.
     pub len: u32,
 }
 
 impl BlockFilePosition {
-    /// Exact byte width of an encoded block-file position.
     pub(crate) const ENCODED_LEN: usize = 16;
 
-    /// Encodes this position into the 16-byte little-endian index value.
     #[must_use]
     pub fn encode(self) -> [u8; Self::ENCODED_LEN] {
         let mut bytes = [0_u8; Self::ENCODED_LEN];
@@ -55,7 +45,6 @@ impl BlockFilePosition {
         bytes
     }
 
-    /// Decodes an exact 16-byte little-endian index value.
     #[must_use]
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != Self::ENCODED_LEN {
@@ -69,7 +58,6 @@ impl BlockFilePosition {
     }
 }
 
-/// Builds the per-file maximum-height key stored alongside block positions.
 #[must_use]
 pub fn block_file_max_height_key(file_no: u32) -> [u8; 11] {
     let mut key = [0_u8; 11];
@@ -91,13 +79,11 @@ pub fn decode_block_file_max_height(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
-/// Append-only store for block bodies kept outside the key-value store.
 pub struct FlatFileBlockStore {
     blocks_dir: PathBuf,
     max_file_bytes: u64,
     writer: Mutex<WriterState>,
     usage: AtomicU64,
-    /// Set only when a failed append could not restore the old file length.
     usage_dirty: AtomicBool,
     /// Last field: drops after the writer's file handle above has closed.
     guard: Option<crate::StoreGuard>,
@@ -139,7 +125,6 @@ impl FlatFileBlockStore {
         }
     }
 
-    /// Opens a store with no committed body extent, recovering an incomplete tail.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES, None)
     }
@@ -179,7 +164,6 @@ impl FlatFileBlockStore {
         self.append(height, hash, body)
     }
 
-    /// Appends one framed block body and flushes it to the operating system.
     pub fn append(
         &self,
         height: u32,
@@ -255,7 +239,6 @@ impl FlatFileBlockStore {
         Ok(position)
     }
 
-    /// Bytes this store's block files currently occupy on disk.
     #[must_use]
     pub(crate) fn disk_usage(&self) -> u64 {
         if self.usage_dirty.load(Ordering::Acquire) {
@@ -287,7 +270,6 @@ impl FlatFileBlockStore {
         }
     }
 
-    /// Flushes the current append file to stable storage.
     pub(crate) fn sync(&self) -> Result<(), StorageError> {
         let mut writer = self.writer.lock();
         self.recover_failed_append(&mut writer)?;
@@ -308,8 +290,6 @@ impl FlatFileBlockStore {
         }
     }
 
-    /// Loads a body only when its frame completely matches the requested height and hash.
-    /// Missing files, malformed frames, mismatched targets, and short reads return `Ok(None)`.
     pub fn load(
         &self,
         position: BlockFilePosition,
@@ -330,9 +310,6 @@ impl FlatFileBlockStore {
             .load_frame_bytes(position, height, hash, 0, None)
     }
 
-    /// Loads at most `limit` body bytes after validating the complete frame header.
-    /// The returned prefix is bound to `height` and `hash`; malformed, missing,
-    /// mismatched, or short records return `Ok(None)`.
     pub(crate) fn load_prefix(
         &self,
         position: BlockFilePosition,

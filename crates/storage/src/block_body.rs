@@ -1,5 +1,3 @@
-//! Indexed authoritative block bodies, read sessions, and durability.
-
 use crate::durable_head::BodyExtent;
 use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256, varint};
 
@@ -19,10 +17,7 @@ fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
     usize::try_from(count).ok()
 }
 
-/// A body-read session supporting batched position lookups.
 pub trait BlockBodyReader {
-    /// Prefetches body positions in the order that they will be loaded.
-    /// Implementations must not prefetch body bytes.
     fn prefetch_positions(
         &mut self,
         requests: &[(u32, bitcoin_rs_primitives::Hash256)],
@@ -31,7 +26,6 @@ pub trait BlockBodyReader {
         Ok(())
     }
 
-    /// Loads a complete body, or `None` when unavailable.
     fn load_block_body(
         &mut self,
         height: u32,
@@ -53,9 +47,7 @@ impl<S: BlockBodyStore + ?Sized> BlockBodyReader for DirectBlockBodyReader<'_, S
     }
 }
 
-/// Authoritative body bytes and the storage durability boundary.
 pub trait BlockBodyStore: Send + Sync {
-    /// Reads a root-owned pending validation body without publishing its locator.
     fn load_staged_body(
         &self,
         height: u32,
@@ -64,8 +56,6 @@ pub trait BlockBodyStore: Send + Sync {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.load_block_body(height, hash)
     }
-    /// Stages bytes without publishing a new locator. The caller must sync
-    /// and commit the returned row. Stores without isolated staging refuse.
     fn stage_block_body(
         &self,
         _height: u32,
@@ -118,10 +108,6 @@ pub trait BlockBodyStore: Send + Sync {
     ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
         self.load_block_body_bounded(height, hash, max_bytes)
     }
-    /// Reads a body only after its stored length fits the owned-copy bound.
-    ///
-    /// Unsupported implementations refuse without calling metadata or the unbounded
-    /// body reader. Backend-internal reads are not an owned-copy bound.
     fn load_block_body_bounded(
         &self,
         _height: u32,
@@ -135,8 +121,6 @@ pub trait BlockBodyStore: Send + Sync {
         Ok(Box::new(DirectBlockBodyReader { store: self }))
     }
 
-    /// The persisted undo record for `height`/`hash`, when this store can
-    /// reach one.
     fn undo_record(
         &self,
         height: u32,
@@ -146,10 +130,6 @@ pub trait BlockBodyStore: Send + Sync {
         Ok(None)
     }
 
-    /// Loads `len` body bytes starting `offset` bytes into the serialized block.
-    ///
-    /// Defaults to `Ok(None)`, meaning "this store cannot slice"; callers fall
-    /// back to [`Self::load_block_body`]. Never a short read.
     fn load_block_body_range(
         &self,
         _height: u32,
@@ -177,19 +157,10 @@ pub trait BlockBodyStore: Send + Sync {
         }))
     }
 
-    /// The append cursor of the backing block files, when the store is file-backed:
-    /// block files up to `file_no` hold every frame written so far, and `offset` is the
-    /// first byte not yet written in that file.
-    ///
-    /// A durable head names this cursor as its `body_extent`; `None` means the store
-    /// cannot address ranges, so the head names no extent.
     fn append_cursor(&self) -> Option<BodyExtent> {
         None
     }
 
-    /// Resolves the stored flat-file position of one block body: the locator
-    /// row a durable head lands atomically with its advance. `None` when the
-    /// store does not address positions.
     fn block_position(
         &self,
         _height: u32,
@@ -198,25 +169,17 @@ pub trait BlockBodyStore: Send + Sync {
         Ok(None)
     }
 
-    /// Bytes this store's block files occupy on disk, when it keeps files.
-    ///
-    /// `None` from a store with nothing on disk to measure; the caller then
-    /// falls back to the block-record sum.
     fn disk_usage(&self) -> Option<u64> {
         None
     }
 
-    /// Syncs flat-file body bytes only; index rows need `flush_index`
-    /// or a following same-store durable batch.
     fn sync(&self) -> Result<(), StorageError>;
 
-    /// Makes deferred index rows durable; the default no-op suits indexless stores only.
     fn flush_index(&self) -> Result<(), StorageError> {
         Ok(())
     }
 }
 
-/// Flat-file bodies addressed by indexed, typed positions.
 pub struct IndexedBlockBodyStore<S: KvStore> {
     index: Arc<S>,
     files: Arc<FlatFileBlockStore>,
@@ -321,7 +284,6 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
 }
 
 impl<S: KvStore> IndexedBlockBodyStore<S> {
-    /// Binds the position index to its authoritative block files.
     #[must_use]
     pub fn new(index: Arc<S>, files: Arc<FlatFileBlockStore>) -> Self {
         Self { index, files }

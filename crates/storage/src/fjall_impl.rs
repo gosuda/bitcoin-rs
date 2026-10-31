@@ -9,7 +9,6 @@ use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, PersistM
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
 
-/// Fjall's default block-cache capacity for unbudgeted opens.
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct FjallStore {
@@ -42,11 +41,6 @@ impl FjallStore {
         Self::open_with_cache(path, FJALL_DEFAULT_CACHE_BYTES)
     }
 
-    /// Opens or creates a Fjall store with an explicit block-cache capacity.
-    ///
-    /// `cache_bytes` sizes fjall's shared block cache and is configured exactly: a
-    /// budgeted share is never raised above its allocation. Zero selects the engine
-    /// default for unbudgeted opens.
     pub fn open_with_cache(path: impl AsRef<Path>, cache_bytes: u64) -> Result<Self, StorageError> {
         let cache_bytes = if cache_bytes == 0 {
             FJALL_DEFAULT_CACHE_BYTES
@@ -136,7 +130,6 @@ impl FjallStore {
         fjall_batch.commit().map_err(StorageError::backend)
     }
 
-    /// Stages `ops` into `fjall_batch` without committing.
     fn stage_ops(
         &self,
         fjall_batch: &mut fjall::OwnedWriteBatch,
@@ -389,7 +382,6 @@ impl KvSnapshot for FjallSnapshot<'_> {
     }
 }
 
-/// Exclusive upper bound of a prefix range, if the prefix is not all `0xFF`.
 fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut end = prefix.to_vec();
     while let Some(byte) = end.last_mut() {

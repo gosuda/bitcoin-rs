@@ -12,8 +12,6 @@ const RANGE_END_INDEX: usize = 1_500;
 const PREFIX: &[u8] = &[0];
 const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
-/// `ScriptLive` rows are a 43-byte empty-value locator. Other families stay
-/// generic byte stores in this suite.
 fn cf_key(cf: ColumnFamily, counter: u32) -> Vec<u8> {
     if cf == ColumnFamily::ScriptLive {
         let mut key = vec![0_u8; SCRIPT_LIVE_KEY_LEN];

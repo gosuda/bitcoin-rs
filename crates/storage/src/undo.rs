@@ -1,5 +1,3 @@
-//! Durable per-block UTXO undo records and the in-flight disconnect marker.
-
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -13,7 +11,6 @@ const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
 const KEY_LEN: usize = 37;
 
-/// Builds the canonical pruning key for stored undo data for one block.
 #[must_use]
 pub fn block_undo_key(height: u32, hash: Hash256) -> [u8; KEY_LEN] {
     let mut key = [0_u8; KEY_LEN];
@@ -35,10 +32,6 @@ pub trait UndoStore: Send + Sync {
 
     fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError>;
 
-    /// Reads undo only when its borrowed/pinned value fits the owned-copy bound.
-    ///
-    /// Engine-internal allocation is outside this bound; unsupported stores refuse
-    /// rather than falling back to the unbounded consensus read.
     fn load_undo_bounded(
         &self,
         _height: u32,
@@ -48,7 +41,6 @@ pub trait UndoStore: Send + Sync {
         Err(crate::BoundedReadError::Unsupported)
     }
 
-    /// Records that a disconnect is about to mutate state, durably.
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Records that the rollback finished, in memory, and is owed a checkpoint.
@@ -57,35 +49,20 @@ pub trait UndoStore: Send + Sync {
     /// or the armed marker names another block.
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
-    /// Clears the marker once a disconnect has finished cleanly.
-    /// The marker covers authoritative UTXO and tip state between checkpoints.
-    /// Refuses a marker that is `InFlight`, or that changed after this call
-    /// observed it.
     fn disarm_disconnect(&self) -> Result<(), StorageError>;
 
-    /// Clears the marker unconditionally after disconnect recovery.
-    ///
-    /// The recovery transaction has reconstructed a coherent chainstate to the durable
-    /// head and published the clean checkpoint that makes it durable, so the marker's
-    /// evidence is spent even when its phase is `InFlight`.
     fn retire_disconnect_marker(&self) -> Result<(), StorageError>;
 
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError>;
 }
 
-/// A disconnect that started and never reported finishing through a clean
-/// checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisconnectMarker {
-    /// Block being disconnected.
     pub hash: Hash256,
-    /// Height it was applied at.
     pub height: u32,
-    /// How far the disconnect got.
     pub phase: DisconnectPhase,
 }
 
-/// How far a disconnect got before the marker was last written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisconnectPhase {
     InFlight,
@@ -94,7 +71,6 @@ pub enum DisconnectPhase {
     RolledBack,
 }
 
-/// Key for the in-flight disconnect marker.
 const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
 
 impl DisconnectMarker {
@@ -137,7 +113,6 @@ impl DisconnectMarker {
     }
 }
 
-/// Process-local undo storage.
 #[derive(Debug, Default)]
 pub struct InMemoryUndoStore {
     records: parking_lot::RwLock<HashMap<(u32, Hash256), Vec<u8>>>,
@@ -145,8 +120,6 @@ pub struct InMemoryUndoStore {
 }
 
 impl InMemoryUndoStore {
-    /// Retires a transient record after its owner durably archives it. Used by
-    /// forward-only historical validation, which cannot roll back this store.
     pub fn remove_archived(&self, height: u32, hash: Hash256) {
         self.records.write().remove(&(height, hash));
     }
@@ -228,7 +201,6 @@ impl UndoStore for InMemoryUndoStore {
     }
 }
 
-/// Undo storage backed by a [`KvStore`] column family.
 pub struct KvUndoStore<S: KvStore> {
     store: Arc<S>,
 }
@@ -244,7 +216,6 @@ impl<S: KvStore> KvUndoStore<S> {
             .get(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY)
     }
 
-    /// Applies a marker mutation only while the row it was derived from is unchanged.
     fn commit_marker_change(
         &self,
         observed: &[u8],
@@ -304,7 +275,6 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
             .get(ColumnFamily::UndoData, &block_undo_key(height, hash))
     }
 
-    /// Durable before the disconnect mutates authoritative state.
     fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
         self.store.put(
             ColumnFamily::UtxoMeta,
