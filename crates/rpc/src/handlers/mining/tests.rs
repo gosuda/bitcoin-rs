@@ -1057,8 +1057,11 @@ fn generatetoaddress_projects_solved_hashes() {
     let hashes = result
         .as_array()
         .unwrap_or_else(|| panic!("generatetoaddress returns a hash array"));
-    assert_eq!(hashes.len(), 2);
-    assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
+    let expected_hash = BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])).to_string();
+    assert_eq!(
+        hashes,
+        &[json!(expected_hash.as_str()), json!(expected_hash.as_str())]
+    );
 }
 
 // API-29

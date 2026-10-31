@@ -24,10 +24,7 @@ fn eight_threads_share_one_context_for_getblockcount() {
         .collect();
     for worker in workers {
         let outcome = worker.join().expect("a worker answers");
-        assert!(
-            outcome.is_ok(),
-            "shared dispatch must answer every worker: {outcome:?}"
-        );
+        assert_eq!(outcome.expect("a worker answers"), json!(0));
     }
 }
 

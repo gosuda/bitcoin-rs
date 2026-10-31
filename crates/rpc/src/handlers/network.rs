@@ -928,6 +928,14 @@ mod ban_state_tests {
             panic!("expected array: {result:?}");
         };
         assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("addednode").and_then(JsonValueTrait::as_str),
+            Some("127.0.0.1:8333")
+        );
+        assert_eq!(
+            arr[0].get("connected").and_then(JsonValueTrait::as_bool),
+            Some(false)
+        );
     }
 }
 

@@ -195,26 +195,10 @@ fn combo_compressed_derives_the_bip384_address_set() {
     let key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     let combo = deriveaddresses(&ctx, &json!([checksummed(&format!("combo({key})"))]))
         .unwrap_or_else(|err| panic!("compressed combo must derive: {err}"));
-    let pkh = deriveaddresses(&ctx, &json!([checksummed(&format!("pkh({key})"))]))
-        .unwrap_or_else(|err| panic!("pkh: {err}"));
-    let wpkh = deriveaddresses(&ctx, &json!([checksummed(&format!("wpkh({key})"))]))
-        .unwrap_or_else(|err| panic!("wpkh: {err}"));
-    let sh_wpkh = deriveaddresses(&ctx, &json!([checksummed(&format!("sh(wpkh({key}))"))]))
-        .unwrap_or_else(|err| panic!("sh(wpkh): {err}"));
     let expected = json!([
-        pkh.as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("pkh address")),
-        wpkh.as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("wpkh address")),
-        sh_wpkh
-            .as_array()
-            .and_then(|arr| arr.first())
-            .cloned()
-            .unwrap_or_else(|| panic!("sh(wpkh) address")),
+        "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+        "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+        "3JvL6Ymt8MVWiCNHC7oWU6nLeHNJKLZGLN",
     ]);
     assert_eq!(combo, expected);
 }

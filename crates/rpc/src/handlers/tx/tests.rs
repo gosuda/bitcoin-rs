@@ -876,12 +876,20 @@ fn gettxoutproof_index_path_answers_for_several_txids_in_one_block() {
     ctx.chain.add_block(indexed);
     let ctx = Arc::new(ctx);
 
-    let result = proof_for(&ctx, &wanted);
-
-    assert!(
-        result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "several txids in one block should resolve through the index: {result:?}"
-    );
+    let proof = proof_for(&ctx, &wanted).expect("proof generation must succeed");
+    let proof_hex = proof.as_str().expect("proof hex string");
+    let verified = super::verifytxoutproof(&ctx, &json!([proof_hex]))
+        .unwrap_or_else(|err| panic!("verifytxoutproof failed: {err}"));
+    let mut verified_txids: Vec<_> = verified
+        .as_array()
+        .expect("array of txids")
+        .iter()
+        .map(|v| v.as_str().expect("txid string").to_owned())
+        .collect();
+    let mut expected_txids: Vec<_> = wanted.iter().map(ToString::to_string).collect();
+    verified_txids.sort();
+    expected_txids.sort();
+    assert_eq!(verified_txids, expected_txids);
 }
 
 #[test]
