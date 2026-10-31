@@ -1055,8 +1055,10 @@ fn defer_rejected_dial(
     }
     if dial.purpose == DialPurpose::Anchor {
         book.defer_anchor(dial.addr);
+    } else if dial.purpose == DialPurpose::Feeler {
+        book.reject_queued_feeler(dial.addr);
     } else {
-        book.reject_queued(dial.addr, dial.purpose == DialPurpose::Feeler);
+        book.reject_queued(dial.addr);
     }
 }
 
@@ -1937,7 +1939,7 @@ fn queue_address_candidates(
             .try_send(OutboundDial::auto(addr))
             .is_err()
         {
-            maintenance.address_book.reject_queued(addr, false);
+            maintenance.address_book.reject_queued(addr);
             break;
         }
         active.push(addr);

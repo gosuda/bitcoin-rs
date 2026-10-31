@@ -265,9 +265,22 @@ fn tried_bucket(secret: &[u8; 32], addr: PeerEndpoint, groups: &NetGroups) -> us
     bytes.extend_from_slice(&first.to_le_bytes());
     usize::try_from(cheap_hash(&bytes) % 256).unwrap_or_default()
 }
-fn bucket_position(secret: &[u8; 32], addr: PeerEndpoint, new: bool, bucket: usize) -> usize {
+pub(crate) fn new_bucket_position(secret: &[u8; 32], addr: PeerEndpoint, bucket: usize) -> usize {
+    bucket_position_with_tag(secret, addr, b'N', bucket)
+}
+
+pub(crate) fn tried_bucket_position(secret: &[u8; 32], addr: PeerEndpoint, bucket: usize) -> usize {
+    bucket_position_with_tag(secret, addr, b'K', bucket)
+}
+
+fn bucket_position_with_tag(
+    secret: &[u8; 32],
+    addr: PeerEndpoint,
+    tag: u8,
+    bucket: usize,
+) -> usize {
     let mut bytes = secret.to_vec();
-    bytes.push(if new { b'N' } else { b'K' });
+    bytes.push(tag);
     bytes.extend_from_slice(&i32::try_from(bucket).unwrap_or_default().to_le_bytes());
     vector(&endpoint_key(addr), &mut bytes);
     usize::try_from(cheap_hash(&bytes) % 64).unwrap_or_default()
@@ -314,11 +327,11 @@ impl Manager {
         }
     }
     fn new_slot(&self, addr: PeerEndpoint, bucket: usize) -> usize {
-        bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, true, bucket)
+        bucket * BUCKET_SIZE + new_bucket_position(&self.stored.secret, addr, bucket)
     }
     fn tried_slot(&self, addr: PeerEndpoint) -> usize {
         let bucket = tried_bucket(&self.stored.secret, addr, &self.groups);
-        bucket * BUCKET_SIZE + bucket_position(&self.stored.secret, addr, false, bucket)
+        bucket * BUCKET_SIZE + tried_bucket_position(&self.stored.secret, addr, bucket)
     }
     fn install_indexes(&mut self) {
         self.by_addr.clear();
@@ -480,7 +493,13 @@ impl Manager {
             self.revision = self.revision.wrapping_add(1);
         }
     }
-    fn good(&mut self, addr: PeerEndpoint, test_before_evict: bool, now: u64) -> bool {
+    fn good(&mut self, addr: PeerEndpoint, now: u64) -> bool {
+        self.good_internal(addr, true, now)
+    }
+    fn good_replace(&mut self, addr: PeerEndpoint, now: u64) -> bool {
+        self.good_internal(addr, false, now)
+    }
+    fn good_internal(&mut self, addr: PeerEndpoint, test_before_evict: bool, now: u64) -> bool {
         self.last_good = now;
         let Some(index) = self.by_addr.get(&addr).copied() else {
             return false;
@@ -551,7 +570,7 @@ impl Manager {
                 }
             };
             if replace && allowed.contains(&addr) && !self.promotion_blocked(addr) {
-                if self.good(addr, false, now) {
+                if self.good_replace(addr, now) {
                     self.collisions.retain(|candidate| *candidate != addr);
                 }
             }
@@ -1132,15 +1151,16 @@ impl AddressBook {
                 })
         })
     }
-    pub(crate) fn reject_queued(&self, addr: PeerEndpoint, feeler: bool) {
+    pub(crate) fn reject_queued(&self, addr: PeerEndpoint) {
+        self.reject_queued_claim(addr, &PendingClaim::Dial);
+    }
+    pub(crate) fn reject_queued_feeler(&self, addr: PeerEndpoint) {
+        self.reject_queued_claim(addr, &PendingClaim::Feeler);
+    }
+    fn reject_queued_claim(&self, addr: PeerEndpoint, expected: &PendingClaim) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
-        let expected = if feeler {
-            PendingClaim::Feeler
-        } else {
-            PendingClaim::Dial
-        };
-        if manager.pending.get(&addr) == Some(&expected) {
+        if manager.pending.get(&addr) == Some(expected) {
             manager.pending.remove(&addr);
         }
     }
@@ -1159,7 +1179,13 @@ impl AddressBook {
             })
             .count()
     }
-    pub(crate) fn attempted(&self, addr: PeerEndpoint, count_failure: bool, now: u64) {
+    pub(crate) fn attempted(&self, addr: PeerEndpoint, now: u64) {
+        self.record_attempt(addr, false, now);
+    }
+    pub(crate) fn attempt_failed(&self, addr: PeerEndpoint, now: u64) {
+        self.record_attempt(addr, true, now);
+    }
+    fn record_attempt(&self, addr: PeerEndpoint, count_failure: bool, now: u64) {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
         let last_good = manager.last_good;
@@ -1183,7 +1209,7 @@ impl AddressBook {
         let addr = canonical(addr);
         let mut manager = self.state.lock();
         manager.set_services(addr, services);
-        manager.good(addr, true, now);
+        manager.good(addr, now);
     }
     pub(crate) fn resolve_collisions(
         &self,
@@ -1261,7 +1287,7 @@ impl AddressBook {
                 let addr =
                     manager.stored.records[usize::try_from(incumbent).unwrap_or_default()].endpoint;
                 if connected.contains(&addr.address()) {
-                    manager.good(addr, true, now);
+                    manager.good(addr, now);
                 } else if manager.stored.records[usize::try_from(incumbent).unwrap_or_default()]
                     .services
                     .unwrap_or(0)
@@ -1662,7 +1688,7 @@ fn validate_current(
             }
             if let Some(groups) = groups {
                 let bucket = tried_bucket(&stored.secret, entry.endpoint, groups);
-                let position = bucket_position(&stored.secret, entry.endpoint, false, bucket);
+                let position = tried_bucket_position(&stored.secret, entry.endpoint, bucket);
                 if !slots.insert((false, bucket, position)) {
                     return Err(invalid("Tried bucket collision"));
                 }
@@ -1676,7 +1702,7 @@ fn validate_current(
                     || !slots.insert((
                         true,
                         bucket,
-                        bucket_position(&stored.secret, entry.endpoint, true, bucket),
+                        new_bucket_position(&stored.secret, entry.endpoint, bucket),
                     ))
                 {
                     return Err(invalid("invalid/colliding New reference"));

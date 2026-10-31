@@ -56,7 +56,7 @@ fn unknown_dns_zero_version_is_durable_metadata_without_good() {
     let path = network_path(&base, [1; 4]);
     let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
     book.learn_dns("seed", &[target()], EPOCH);
-    book.attempted(target(), true, EPOCH + 1);
+    book.attempt_failed(target(), EPOCH + 1);
     book.save();
     assert_eq!(
         stored_value(&path)["records"][0]["services"],

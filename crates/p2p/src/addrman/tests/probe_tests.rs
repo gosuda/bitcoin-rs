@@ -8,9 +8,9 @@ fn collision_book() -> Arc<AddressBook> {
     {
         let mut manager = book.state.lock();
         assert!(manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0));
-        assert!(manager.good(target(), true, EPOCH - 20_000));
+        assert!(manager.good(target(), EPOCH - 20_000));
         assert!(manager.learn(challenger(), Some(9), source(1), EPOCH - 1000, EPOCH, 0));
-        assert!(!manager.good(challenger(), true, EPOCH - 2401));
+        assert!(!manager.good(challenger(), EPOCH - 2401));
         assert_eq!(manager.tried_slot(target()), 82 * 64 + 29);
         assert_eq!(
             manager.tried_slot(challenger()),
@@ -29,7 +29,7 @@ fn state(book: &AddressBook, addr: PeerEndpoint) -> Candidate {
 fn collision_pending_active_policy_and_callback_bounds_recheck_current_state() {
     for protection in 0..4 {
         let book = collision_book();
-        book.attempted(target(), false, EPOCH - 61);
+        book.attempted(target(), EPOCH - 61);
         if protection == 0 {
             book.queued(target());
         }
@@ -76,7 +76,7 @@ fn make_tried_clears_all_refs_demotes_and_removes_only_colliding_new_reference()
                 confirmed_at: EPOCH - 10,
             });
         }
-        book.attempted(target(), false, EPOCH - 61);
+        book.attempted(target(), EPOCH - 61);
         book.resolve_collisions(&[], EPOCH, |_| true);
         let manager = book.state.lock();
         assert!(manager.stored.records[manager.by_addr[&challenger()]].tried);
@@ -101,7 +101,7 @@ fn pending_final_demotion_victim_defers_all_membership_and_good_health() {
         manager.learn(victim, Some(9), source(1), EPOCH - 1000, EPOCH, 0);
     }
     book.queued(victim);
-    book.attempted(target(), false, EPOCH - 61);
+    book.attempted(target(), EPOCH - 61);
     let before = state(&book, challenger());
     let global_good = book.state.lock().last_good;
     book.resolve_collisions(&[], EPOCH, |_| true);
@@ -438,7 +438,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
     let book = oracle_book();
     let mut manager = book.state.lock();
     manager.learn(target(), Some(9), source(1), EPOCH - 100_000, EPOCH, 0);
-    manager.good(target(), false, EPOCH - 20_000);
+    manager.good_replace(target(), EPOCH - 20_000);
     for (index, endpoint) in rows[0]["colliders"]
         .as_array()
         .expect("colliders")
@@ -455,7 +455,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
             EPOCH,
             0
         ));
-        assert!(!manager.good(endpoint, true, EPOCH - 30));
+        assert!(!manager.good(endpoint, EPOCH - 30));
         let expected = rows
             .iter()
             .find(|row| row["case"] == format!("queue-add-{}", index + 1))
@@ -471,7 +471,7 @@ fn collision_queue_counts_challengers_and_caps_ten_even_for_one_incumbent() {
         assert_eq!(manager.last_good, expected["last_good"]);
         assert_indexes(&manager);
     }
-    manager.good(challenger(), true, EPOCH);
+    manager.good(challenger(), EPOCH);
     assert_eq!(manager.collisions.len(), 10);
     assert_eq!(
         manager.stored.records[manager.by_addr[&challenger()]].last_success,
@@ -517,7 +517,7 @@ fn connected_collision_good_and_new_selection_match_actual_core() {
 fn successful_connected_challenger_can_promote_without_losing_pending_identity() {
     let book = collision_book();
     book.queued(challenger());
-    book.attempted(target(), false, EPOCH - 61);
+    book.attempted(target(), EPOCH - 61);
     book.resolve_collisions(&[challenger()], EPOCH, |_| true);
     assert!(state(&book, challenger()).tried);
     assert!(book.is_pending(challenger()));
@@ -633,11 +633,11 @@ fn collision_resolution_uses_creation_order_not_reversed_good_order() {
     let second: PeerEndpoint = "8.8.8.8:1343".parse().expect("second actual Core collider");
     let mut manager = book.state.lock();
     manager.learn(target(), Some(9), source(1), EPOCH - 1000, EPOCH, 0);
-    manager.good(target(), true, EPOCH - 20_000);
+    manager.good(target(), EPOCH - 20_000);
     manager.learn(challenger(), Some(9), source(2), EPOCH - 1000, EPOCH, 0);
     manager.learn(second, Some(9), source(3), EPOCH - 1000, EPOCH, 0);
-    manager.good(second, true, EPOCH - 30);
-    manager.good(challenger(), true, EPOCH - 30);
+    manager.good(second, EPOCH - 30);
+    manager.good(challenger(), EPOCH - 30);
     assert_eq!(manager.collisions, [challenger(), second]);
     let old = manager.by_addr[&target()];
     manager.stored.records[old].last_attempt = EPOCH - 61;
@@ -721,7 +721,7 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
     book.succeeded(anchor, 9, EPOCH);
     book.remember_anchors(&[anchor], EPOCH);
     assert_eq!(book.take_restart_anchors(EPOCH + 1), [anchor]);
-    book.reject_queued(anchor, false);
+    book.reject_queued(anchor);
     assert!(book.is_pending(anchor));
     assert_eq!(
         book.select(&[], &[], EPOCH + 2, u64::MAX, |addr| addr == other),
@@ -741,8 +741,8 @@ fn returned_anchor_releases_same_as_group_and_rejection_preserves_other_purposes
         }]
     );
     assert!(book.queued_feeler(other));
-    book.reject_queued(other, false);
+    book.reject_queued(other);
     assert!(book.is_feeler(other));
-    book.reject_queued(other, true);
+    book.reject_queued_feeler(other);
     assert!(!book.is_pending(other));
 }

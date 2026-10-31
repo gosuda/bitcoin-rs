@@ -358,7 +358,9 @@ fn receive_inv<S>(
         let witness = peer.remote_version.as_ref().is_some_and(|version| {
             version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
         });
-        request_witness(&mut requested, witness);
+        if witness {
+            request_witness(&mut requested);
+        }
         announce_tx(requested);
     }
     Ok(())

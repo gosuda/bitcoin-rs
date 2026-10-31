@@ -139,7 +139,7 @@ impl ActiveChainQuery {
         &self,
         height: u32,
         hash: BlockHash,
-        include_witness: bool,
+        witness: WitnessInclusion,
         policy: ServingPolicy,
     ) -> Option<(bytes::Bytes, u32)> {
         let bytes = self
@@ -154,7 +154,7 @@ impl ActiveChainQuery {
             return None;
         }
         let block = ParsedBlock::parse_exact(&bytes).ok()?;
-        let stripped = if !include_witness
+        let stripped = if witness == WitnessInclusion::Strip
             && block
                 .transactions()
                 .iter()
@@ -182,9 +182,9 @@ impl ActiveChainQuery {
         &self,
         height: u32,
         hash: BlockHash,
-        include_witness: bool,
+        witness: WitnessInclusion,
     ) -> Option<Message> {
-        self.load_block(height, hash, include_witness, ServingPolicy::Inventory)
+        self.load_block(height, hash, witness, ServingPolicy::Inventory)
             .map(|(body, _)| Message::BlockPayload(body))
     }
 
@@ -556,7 +556,9 @@ impl ChainQuery for ActiveChainQuery {
         } else {
             ServingPolicy::BlockTransactions
         };
-        let Some((payload, tip_height)) = self.load_block(height, hash, true, policy) else {
+        let Some((payload, tip_height)) =
+            self.load_block(height, hash, WitnessInclusion::Include, policy)
+        else {
             return Ok(None);
         };
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
@@ -672,7 +674,8 @@ impl ActiveChainQuery {
         if version != 1 && version != 2 {
             return None;
         }
-        let (payload, tip_height) = self.load_block(height, hash, true, policy)?;
+        let (payload, tip_height) =
+            self.load_block(height, hash, WitnessInclusion::Include, policy)?;
         if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
             return Some(Message::BlockPayload(payload));
         }
@@ -692,14 +695,16 @@ impl ActiveChainQuery {
         compact_version: Option<u64>,
     ) -> Option<Message> {
         match request {
-            BlockRequest::Full {
-                hash,
-                include_witness,
-            } => self.full_block_response(height, hash, include_witness),
+            BlockRequest::Witness(hash) => {
+                self.full_block_response(height, hash, WitnessInclusion::Include)
+            }
+            BlockRequest::Legacy(hash) => {
+                self.full_block_response(height, hash, WitnessInclusion::Strip)
+            }
             BlockRequest::Compact(hash)
                 if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) =>
             {
-                self.full_block_response(height, hash, true)
+                self.full_block_response(height, hash, WitnessInclusion::Include)
             }
             BlockRequest::Compact(hash) => {
                 self.compact_block_for(height, hash, compact_version, ServingPolicy::Inventory)
@@ -735,30 +740,31 @@ fn stale_block_is_recent(
 const fn beyond_depth(tip_height: u32, height: u32, limit: u32) -> bool {
     tip_height.saturating_sub(height) > limit
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WitnessInclusion {
+    Include,
+    Strip,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum BlockRequest {
-    Full {
-        hash: BlockHash,
-        include_witness: bool,
-    },
+    Witness(BlockHash),
+    Legacy(BlockHash),
     Compact(BlockHash),
 }
 
 impl BlockRequest {
     const fn hash(self) -> BlockHash {
         match self {
-            Self::Full { hash, .. } | Self::Compact(hash) => hash,
+            Self::Witness(hash) | Self::Legacy(hash) | Self::Compact(hash) => hash,
         }
     }
 }
 
 fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
     match *item {
-        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => Some(BlockRequest::Full {
-            hash: native_block_hash(hash),
-            include_witness: matches!(item, Inventory::WitnessBlock(_)),
-        }),
+        Inventory::WitnessBlock(hash) => Some(BlockRequest::Witness(native_block_hash(hash))),
+        Inventory::Block(hash) => Some(BlockRequest::Legacy(native_block_hash(hash))),
         Inventory::CompactBlock(hash) => Some(BlockRequest::Compact(native_block_hash(hash))),
         Inventory::Error
         | Inventory::Transaction(_)
@@ -767,7 +773,6 @@ fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
         | Inventory::Unknown { .. } => None,
     }
 }
-
 /// Fresh BIP152 serving nonce. `RandomState` draws fresh keys per call, so
 /// two responses never share one (BIP152: SHOULD NOT reuse across blocks).
 fn fresh_nonce() -> u64 {

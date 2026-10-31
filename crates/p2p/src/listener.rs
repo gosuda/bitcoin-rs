@@ -800,7 +800,11 @@ fn dial(
                 .as_ref()
                 .is_err_and(crate::overlay::remote_connect_failed)
         {
-            book.attempted(addr, count_failure && !manual, crate::addrman::now());
+            if count_failure && !manual {
+                book.attempt_failed(addr, crate::addrman::now());
+            } else {
+                book.attempted(addr, crate::addrman::now());
+            }
         }
     }
     let connected = connection.map_err(crate::wire::PeerError::Io)?;
@@ -890,12 +894,12 @@ fn dial(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::with_transport(stream, shared.magic, negotiated);
-    peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
-        lease.node_id(),
-        addr.into(),
-        role,
-        manual,
-    ));
+    let trace = if manual {
+        crate::net_trace::NetTrace::manual_outbound(lease.node_id(), addr.into())
+    } else {
+        crate::net_trace::NetTrace::outbound(lease.node_id(), addr.into(), role)
+    };
+    peer.attach_net_trace(trace);
     shared.offer_relay_capabilities(&mut peer, role);
     if let Err(error) = run_outbound_handshake(
         &mut peer,

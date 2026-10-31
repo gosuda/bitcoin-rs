@@ -21,19 +21,23 @@ impl NetTrace {
         }
     }
 
-    pub(crate) fn outbound(node_id: u64, peer: PeerRemote, role: PeerRole, manual: bool) -> Self {
-        let connection_type = if manual {
-            "manual"
-        } else {
-            match role {
-                PeerRole::FullRelay => "outbound-full-relay",
-                PeerRole::BlockRelayOnly => "block-relay-only",
-            }
+    pub(crate) fn outbound(node_id: u64, peer: PeerRemote, role: PeerRole) -> Self {
+        let connection_type = match role {
+            PeerRole::FullRelay => "outbound-full-relay",
+            PeerRole::BlockRelayOnly => "block-relay-only",
         };
         Self {
             node_id,
             peer,
             connection_type,
+        }
+    }
+
+    pub(crate) fn manual_outbound(node_id: u64, peer: PeerRemote) -> Self {
+        Self {
+            node_id,
+            peer,
+            connection_type: "manual",
         }
     }
 }
@@ -143,16 +147,13 @@ mod tests {
 
         assert_eq!(NetTrace::inbound(1, addr).connection_type, "inbound");
         assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::FullRelay, false).connection_type,
+            NetTrace::outbound(1, addr, PeerRole::FullRelay).connection_type,
             "outbound-full-relay"
         );
         assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::BlockRelayOnly, false).connection_type,
+            NetTrace::outbound(1, addr, PeerRole::BlockRelayOnly).connection_type,
             "block-relay-only"
         );
-        assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::FullRelay, true).connection_type,
-            "manual"
-        );
+        assert_eq!(NetTrace::manual_outbound(1, addr).connection_type, "manual");
     }
 }

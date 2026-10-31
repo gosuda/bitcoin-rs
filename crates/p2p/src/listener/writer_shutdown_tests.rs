@@ -585,7 +585,6 @@ fn writer_mid_write_exits_on_unblock_deterministically() {
         9,
         "127.0.0.1:18444".parse().expect("valid socket address"),
         crate::peer_info::PeerRole::BlockRelayOnly,
-        false,
     );
     let worker = std::thread::spawn(move || {
         run_writer_loop(

@@ -757,7 +757,7 @@ fn block_relay_readiness_counts_for_dns_without_refreshing_gossip_time() {
         1,
         "exclude ready feelers"
     );
-    book.reject_queued(block, true);
+    book.reject_queued_feeler(block);
     assert_eq!(ready_address_count(&table, &book), 2);
     let response = book.gossip(10_000);
     for (addr, expected) in [(full, 5000), (block, 5000)] {
@@ -1039,9 +1039,7 @@ fn maintenance_counts_queued_parked_and_inflight_automatic_claims_once() {
     let parked = rx.try_recv().expect("queued");
     queue_address_candidates(&maintenance, 10_000, tick, 0);
     assert_eq!(rx.len(), 2, "parking keeps the claim occupied");
-    maintenance
-        .address_book
-        .attempted(parked.addr, true, 10_001);
+    maintenance.address_book.attempt_failed(parked.addr, 10_001);
     queue_address_candidates(&maintenance, 10_100, tick + Duration::from_secs(100), 0);
     assert_eq!(
         rx.len(),
@@ -1407,7 +1405,7 @@ fn a_queued_or_registered_probe_never_occupies_a_steady_outbound_slot() {
             .select(&[], &[], 10_000, u64::MAX, |_| true)
             .expect("probe candidate");
         assert!(book.queued_feeler(probe));
-        book.attempted(probe, true, 10_000);
+        book.attempt_failed(probe, 10_000);
         assert_eq!(book.pending_count_excluding(&[]), 0);
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_block_relay(sender);
@@ -1632,7 +1630,7 @@ fn failed_first_anchor_retains_the_second_for_a_single_block_slot() {
             "only the queued first attempt consumes a slot"
         );
         assert!(book.anchor_dispatched(first));
-        book.attempted(first, true, 10_002);
+        book.attempt_failed(first, 10_002);
         queue_address_candidates(
             &maintenance,
             10_002,

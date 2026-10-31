@@ -680,7 +680,6 @@ mod tests {
             4,
             crate::PeerRemote::Endpoint(PeerEndpoint::from(([127, 0, 0, 1], 8333))),
             crate::peer_info::PeerRole::FullRelay,
-            false,
         ));
 
         let written = peer.send(&Message::Ping(9))?;
