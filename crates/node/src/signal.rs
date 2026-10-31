@@ -1,6 +1,5 @@
 use std::thread::{self, JoinHandle};
 
-use crossbeam_channel::Sender;
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     iterator::Signals,
@@ -14,18 +13,12 @@ pub(crate) struct ShutdownHandler {
 }
 
 impl ShutdownHandler {
-    pub(crate) fn install(
-        request_shutdown: impl Fn() + Send + 'static,
-        shutdown_tx: Sender<()>,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn install(request_shutdown: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let mut signals = Signals::new([SIGTERM, SIGINT])?;
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
                 request_shutdown();
-                if shutdown_tx.try_send(()).is_err() {
-                    break;
-                }
             }
         });
         #[cfg(test)]
@@ -68,8 +61,7 @@ mod tests {
 
     #[test]
     fn close_and_join_releases_the_forwarding_thread() -> TestResult<()> {
-        let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-        let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
+        let mut handler = ShutdownHandler::install(|| {})?;
         assert!(handler.thread.is_some(), "the forwarding thread is running");
 
         handler.close_and_join()?;
@@ -87,8 +79,7 @@ mod tests {
         let closed_before = testing::closed_total();
 
         for _ in 0..2 {
-            let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-            let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
+            let mut handler = ShutdownHandler::install(|| {})?;
             handler.close_and_join()?;
         }
 

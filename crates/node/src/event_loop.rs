@@ -9,7 +9,6 @@ const SYNC_TICK: Duration = Duration::from_secs(1);
 const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_mins(1);
 
 pub(crate) struct EventLoop {
-    shutdown_signal: Receiver<()>,
     sync_tick: Receiver<Instant>,
     sync_wake: Receiver<()>,
     sync: Arc<crate::BlockSync>,
@@ -17,13 +16,8 @@ pub(crate) struct EventLoop {
 
 impl EventLoop {
     #[must_use]
-    pub(crate) fn with_sync_wake(
-        shutdown_signal: Receiver<()>,
-        sync: Arc<crate::BlockSync>,
-        sync_wake: Receiver<()>,
-    ) -> Self {
+    pub(crate) fn with_sync_wake(sync: Arc<crate::BlockSync>, sync_wake: Receiver<()>) -> Self {
         Self {
-            shutdown_signal,
             sync_tick: tick(SYNC_TICK),
             sync_wake,
             sync,
@@ -44,11 +38,6 @@ impl EventLoop {
                 tracing::debug!(iterations, sync_ticks, "event loop heartbeat");
             }
             select! {
-                recv(self.shutdown_signal) -> _ => {
-                    request_shutdown();
-                    metrics::gauge!("node.shutdown.requested").set(1.0);
-                    break;
-                }
                 recv(shutdown.closed()) -> _ => {
                     request_shutdown();
                     metrics::gauge!("node.shutdown.requested").set(1.0);

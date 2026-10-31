@@ -15,10 +15,7 @@ pub(crate) struct ShutdownHandler {
 }
 
 impl ShutdownHandler {
-    pub(crate) fn install(
-        request_shutdown: impl Fn() + Send + 'static,
-        shutdown_tx: Sender<()>,
-    ) -> std::io::Result<Self> {
+    pub(crate) fn install(request_shutdown: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let received = Arc::new(AtomicBool::new(false));
         let mut registrations = Vec::new();
         for signal in [SIGINT, SIGTERM, SIGBREAK] {
@@ -40,7 +37,6 @@ impl ShutdownHandler {
             ) {
                 if received.swap(false, Ordering::Acquire) {
                     request_shutdown();
-                    let _receiver_gone = shutdown_tx.try_send(());
                 }
             }
         });
@@ -90,14 +86,17 @@ mod tests {
         if std::env::var_os(CHILD).is_some() {
             let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let shutdown_clone = std::sync::Arc::clone(&shutdown);
-            let (sender, receiver) = crossbeam_channel::bounded(1);
-            let mut handler = super::ShutdownHandler::install(
-                move || shutdown_clone.store(true, std::sync::atomic::Ordering::Release),
-                sender,
-            )?;
+            let mut handler = super::ShutdownHandler::install(move || {
+                shutdown_clone.store(true, std::sync::atomic::Ordering::Release);
+            })?;
             signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
-            receiver.recv_timeout(std::time::Duration::from_secs(2))?;
-            assert!(shutdown.load(std::sync::atomic::Ordering::Acquire));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    return Err(TestError::Timeout("CRT signal child"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             handler.close_and_join()?;
             return Ok(());
         }
@@ -120,8 +119,7 @@ mod tests {
     #[test]
     fn close_joins_once_and_allows_reinstallation() -> TestResult<()> {
         for _ in 0..2 {
-            let (sender, _receiver) = crossbeam_channel::bounded(1);
-            let mut handler = super::ShutdownHandler::install(|| {}, sender)?;
+            let mut handler = super::ShutdownHandler::install(|| {})?;
             handler.close_and_join()?;
             handler.close_and_join()?;
             assert!(handler.thread.is_none());

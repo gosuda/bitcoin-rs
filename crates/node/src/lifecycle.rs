@@ -324,7 +324,7 @@ pub(crate) struct NodeServices {
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
-    event_loop_signal: Option<crossbeam_channel::Sender<()>>,
+    shutdown_forwarder: Option<std::thread::JoinHandle<()>>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
@@ -363,9 +363,6 @@ impl NodeServices {
         if let Some(state) = state {
             state.request_shutdown();
             state.p2p().shutdown();
-        }
-        if let Some(tx) = self.event_loop_signal.take() {
-            let _ = tx.try_send(());
         }
 
         self.join_core_services(state, &mut first_error);
@@ -631,24 +628,31 @@ pub(crate) fn start_node(
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
     init_metrics_services(state, &mut guard.services)?;
 
-    let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
-        (rx, None)
+    let injected_shutdown_forwarder = if let Some(rx) = injected_shutdown {
+        let state_shutdown = state.shutdown_writer();
+        let chainstate_for_signal = state.chainstate();
+        Some(
+            std::thread::Builder::new()
+                .name("bitcoin-rs-shutdown-forwarder".into())
+                .spawn(move || {
+                    let _ = rx.recv();
+                    state_shutdown.trigger();
+                    chainstate_for_signal.request_shutdown();
+                })?,
+        )
     } else {
-        let (tx, rx) = bounded(1);
         if install_signals {
             let chainstate_for_signal = state.chainstate();
             let state_shutdown = state.shutdown_writer();
-            guard.services.signal_handler = Some(crate::signal::ShutdownHandler::install(
-                move || {
+            guard.services.signal_handler =
+                Some(crate::signal::ShutdownHandler::install(move || {
                     state_shutdown.trigger();
                     chainstate_for_signal.request_shutdown();
-                },
-                tx.clone(),
-            )?);
+                })?);
         }
-        (rx, Some(tx))
+        None
     };
-    guard.services.event_loop_signal = event_loop_signal;
+    guard.services.shutdown_forwarder = injected_shutdown_forwarder;
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
     let recent_block = bitcoin_rs_p2p::RecentBlockSlot::default();
@@ -662,10 +666,11 @@ pub(crate) fn start_node(
         .with_compact_filters(state.compact_filter_query())
         .with_recent_block(recent_block.clone()),
     );
+
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
     let peer_ready_sync = Arc::clone(&sync);
-    let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
+    let loop_handle = EventLoop::with_sync_wake(sync, sync_wake_rx);
     let coordinator = Arc::new(crate::MiningCoordinator::new(
         state.mempool_reader(),
         Arc::clone(&chainstate),

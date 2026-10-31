@@ -629,17 +629,19 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
 // EMB-09
 #[test]
 fn a_queued_shutdown_wake_does_not_block_teardown() -> Result<(), TestError> {
-    let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let _ = wake_tx.send(());
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let reader = latch.reader();
+    let forwarder = std::thread::spawn(move || {
+        let _ = reader.closed().recv();
+    });
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let mut services = NodeServices::default();
-        services.event_loop_signal = Some(wake_tx);
+        services.shutdown_forwarder = Some(forwarder);
         let result = services.teardown(None, TeardownMode::StartupAbort);
         let _ = done_tx.send(result);
     });
     let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));
-    let _ = wake_rx.try_recv();
     worker.join().map_err(|_| TestError::ThreadPanicked)?;
     result.map_err(|_| TestError::Timeout("teardown blocked on queued wake"))??;
     Ok(())
