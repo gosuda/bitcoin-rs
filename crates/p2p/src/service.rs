@@ -1340,20 +1340,7 @@ fn count_address_failure(
     book.count_failure(&outbound, maximum)
 }
 
-fn spawn_outbound_dial(
-    dial: &OutboundDial,
-    shared: &crate::listener::ConnectionShared,
-    active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
-    handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
-    full_relay_slots: usize,
-    block_relay_slots: usize,
-    extra_dial: bool,
-    max_peer_connections: usize,
-) {
-    let dial = OutboundDial {
-        addr: crate::addrman::canonical(dial.addr),
-        ..*dial
-    };
+fn dial_is_admissible(dial: &OutboundDial, shared: &crate::listener::ConnectionShared) -> bool {
     let services_allowed = dial.manual
         || dial.purpose == DialPurpose::Feeler
         || shared.address_book.as_ref().is_none_or(|book| {
@@ -1371,22 +1358,62 @@ fn spawn_outbound_dial(
             .automatic_snapshot(SystemTime::now())
             .allows(dial.addr.address())
     };
-    if !shared.activity.is_active() || shared.session_cancel.load() || !services_allowed || !allowed
-    {
-        if let Some(book) = &shared.address_book {
-            defer_rejected_dial(&dial, book, active);
-        }
-        return;
-    }
-    let peer_table = shared.peer_table.as_ref();
-    if active
+    shared.activity.is_active() && !shared.session_cancel.load() && services_allowed && allowed
+}
+
+fn dial_is_already_active(
+    dial: &OutboundDial,
+    active: &HashMap<PeerEndpoint, ActiveOutbound>,
+    peer_table: &crate::PeerTable,
+) -> bool {
+    active
         .keys()
         .any(|addr| crate::addrman::canonical(*addr) == dial.addr)
         || peer_table.sessions().iter().any(|session| {
             !session.lease.is_cancelled()
                 && session.addr.endpoint().map(crate::addrman::canonical) == Some(dial.addr)
         })
-    {
+}
+
+fn address_book_allows_dispatch(
+    dial: &OutboundDial,
+    book: Option<&crate::addrman::AddressBook>,
+) -> bool {
+    if dial.manual {
+        return true;
+    }
+    let Some(book) = book else {
+        return dial.purpose != DialPurpose::Anchor;
+    };
+    match dial.purpose {
+        DialPurpose::Regular => book.queued(dial.addr),
+        DialPurpose::Feeler => true,
+        DialPurpose::Anchor => book.anchor_dispatched(dial.addr),
+    }
+}
+
+fn spawn_outbound_dial(
+    dial: &OutboundDial,
+    shared: &crate::listener::ConnectionShared,
+    active: &mut HashMap<PeerEndpoint, ActiveOutbound>,
+    handles: &mut Vec<(PeerEndpoint, JoinHandle<Result<(), crate::PeerError>>)>,
+    full_relay_slots: usize,
+    block_relay_slots: usize,
+    extra_dial: bool,
+    max_peer_connections: usize,
+) {
+    let dial = OutboundDial {
+        addr: crate::addrman::canonical(dial.addr),
+        ..*dial
+    };
+    if !dial_is_admissible(&dial, shared) {
+        if let Some(book) = &shared.address_book {
+            defer_rejected_dial(&dial, book, active);
+        }
+        return;
+    }
+    let peer_table = shared.peer_table.as_ref();
+    if dial_is_already_active(&dial, active, peer_table) {
         if !dial.manual && active.get(&dial.addr).is_none_or(|running| running.manual) {
             if let Some(book) = &shared.address_book {
                 defer_rejected_dial(&dial, book, active);
@@ -1396,6 +1423,9 @@ fn spawn_outbound_dial(
             addr = %dial.addr,
             "p2p outbound request skipped: already active"
         );
+        return;
+    }
+    if !address_book_allows_dispatch(&dial, shared.address_book.as_deref()) {
         return;
     }
     let role = dial_outbound_role(
@@ -1411,25 +1441,6 @@ fn spawn_outbound_dial(
             .address_book
             .as_ref()
             .is_some_and(|book| count_address_failure(peer_table, max_peer_connections, book));
-    if !dial.manual {
-        if let Some(book) = &shared.address_book {
-            match dial.purpose {
-                DialPurpose::Regular => {
-                    if !book.queued(dial.addr) {
-                        return;
-                    }
-                }
-                DialPurpose::Feeler => {}
-                DialPurpose::Anchor => {
-                    if !book.anchor_dispatched(dial.addr) {
-                        return;
-                    }
-                }
-            }
-        } else if dial.purpose == DialPurpose::Anchor {
-            return;
-        }
-    }
     let mut shared = shared.clone();
     shared.feeler = dial.purpose == DialPurpose::Feeler;
     let handle = if dial.manual {
