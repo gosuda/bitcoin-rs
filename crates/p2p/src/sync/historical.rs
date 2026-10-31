@@ -152,10 +152,9 @@ impl BlockSync {
                 }
                 let is_refused = |hash| refused.contains(&hash);
                 let mut refusals = RefusalFilter::new(&is_refused);
-                window.next_peer_request(
+                window.next_peer_request_allowing_retry(
                     stager,
                     *source,
-                    true,
                     &tip,
                     height,
                     u32::try_from(info.best_known_height).unwrap_or(0),

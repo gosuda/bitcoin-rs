@@ -1081,7 +1081,36 @@ impl DownloadWindow {
         &mut self,
         stager: &mut BlockStager,
         source: PeerSource,
-        allow_expired_retry_from_peer: bool,
+        chain_tip: &TipSnapshot,
+        request_start_height: u32,
+        peer_best_height: u32,
+        servable_floor: u32,
+        tree: &BlockTree,
+        now: Instant,
+        refusals: &mut RefusalFilter,
+    ) -> Option<PeerRequest> {
+        if self.peer_has_expired_pending(source, now) || self.peer_in_staller_cooldown(source, now)
+        {
+            return None;
+        }
+        self.next_peer_request_allowing_retry(
+            stager,
+            source,
+            chain_tip,
+            request_start_height,
+            peer_best_height,
+            servable_floor,
+            tree,
+            now,
+            refusals,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn next_peer_request_allowing_retry(
+        &mut self,
+        stager: &mut BlockStager,
+        source: PeerSource,
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         peer_best_height: u32,
@@ -1092,12 +1121,6 @@ impl DownloadWindow {
     ) -> Option<PeerRequest> {
         self.retarget_request_branch(stager, chain_tip, request_start_height, tree, now);
         if self.staged_bytes_exhausted(stager) {
-            return None;
-        }
-        if !allow_expired_retry_from_peer
-            && (self.peer_has_expired_pending(source, now)
-                || self.peer_in_staller_cooldown(source, now))
-        {
             return None;
         }
         let mut expired = self.expire_pending(now);

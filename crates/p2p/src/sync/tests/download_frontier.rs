@@ -121,9 +121,8 @@ fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     assert!(
         sync.send_getdata_for_pending_blocks(
             current_source(&sync.peer_table, peer),
-            false,
             100,
-            &test_frontier(&sync)
+            &test_frontier(&sync),
         )
         .sent
     );

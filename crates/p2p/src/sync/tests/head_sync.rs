@@ -452,7 +452,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted() -> TestResult 
     let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent,
         "the fixture must put requested bodies in flight"
     );

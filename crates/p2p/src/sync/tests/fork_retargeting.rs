@@ -93,7 +93,7 @@ fn two_branches() -> Result<TwoBranches, TestError> {
     let source = current_source(&sync.peer_table, peer);
 
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
@@ -124,7 +124,7 @@ fn retargeting_pending_requests_drops_losing_branch_hashes() -> TestResult {
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent
     );
     let requested = witness_block_inventory(next_getdata(&rx)?)?;
@@ -162,7 +162,7 @@ fn retarget_purges_staged_off_branch_bodies() -> TestResult {
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, winning_hashes);
@@ -301,7 +301,7 @@ fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
     let _rx = connect_peer(&peers, synthetic_peer(peer, 100));
     let source = current_source(&sync.peer_table, peer);
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+        sync.send_getdata_for_pending_blocks(source, 100, &test_frontier(&sync))
             .sent
     );
     assert_eq!(sync.scheduler.lock().window.pending_len(), LOSING_LEN);

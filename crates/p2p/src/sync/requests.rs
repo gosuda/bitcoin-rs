@@ -258,18 +258,20 @@ impl BlockSync {
         );
     }
 
-    fn build_inventory(
-        request: &crate::download_window::PeerRequest,
-        compact_fetch: bool,
-    ) -> Vec<Inventory> {
+    fn build_compact_inventory(request: &crate::download_window::PeerRequest) -> Vec<Inventory> {
         let mut inventory = Vec::with_capacity(request.len());
         for (_, hash) in request.entries() {
             let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-            inventory.push(if compact_fetch {
-                Inventory::CompactBlock(block_hash)
-            } else {
-                Inventory::WitnessBlock(block_hash)
-            });
+            inventory.push(Inventory::CompactBlock(block_hash));
+        }
+        inventory
+    }
+
+    fn build_witness_inventory(request: &crate::download_window::PeerRequest) -> Vec<Inventory> {
+        let mut inventory = Vec::with_capacity(request.len());
+        for (_, hash) in request.entries() {
+            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+            inventory.push(Inventory::WitnessBlock(block_hash));
         }
         inventory
     }
@@ -290,6 +292,24 @@ impl BlockSync {
     }
 
     pub(super) fn send_getdata_for_pending_blocks(
+        &self,
+        source: PeerSource,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+    ) -> GetdataRequestOutcome {
+        self.send_getdata_for_pending_blocks_internal(source, false, peer_best_height, frontier)
+    }
+
+    pub(super) fn send_getdata_for_pending_blocks_allowing_retry(
+        &self,
+        source: PeerSource,
+        peer_best_height: u32,
+        frontier: &ChainFrontier,
+    ) -> GetdataRequestOutcome {
+        self.send_getdata_for_pending_blocks_internal(source, true, peer_best_height, frontier)
+    }
+
+    fn send_getdata_for_pending_blocks_internal(
         &self,
         source: PeerSource,
         allow_expired_retry_from_peer: bool,
@@ -328,18 +348,31 @@ impl BlockSync {
             } = &mut *scheduler;
             let is_refused = |hash| body_unavailable.refuses(source, hash, now);
             let mut refusals = RefusalFilter::new(&is_refused);
-            window.next_peer_request(
-                stager,
-                source,
-                allow_expired_retry_from_peer,
-                chain_tip,
-                required.height,
-                peer_best_height,
-                servable_floor,
-                &tree,
-                now,
-                &mut refusals,
-            )
+            if allow_expired_retry_from_peer {
+                window.next_peer_request_allowing_retry(
+                    stager,
+                    source,
+                    chain_tip,
+                    required.height,
+                    peer_best_height,
+                    servable_floor,
+                    &tree,
+                    now,
+                    &mut refusals,
+                )
+            } else {
+                window.next_peer_request(
+                    stager,
+                    source,
+                    chain_tip,
+                    required.height,
+                    peer_best_height,
+                    servable_floor,
+                    &tree,
+                    now,
+                    &mut refusals,
+                )
+            }
         };
         drop(tree);
         let Some(request) = request else {
@@ -347,7 +380,11 @@ impl BlockSync {
         };
 
         let compact_fetch = self.compact_fetch_eligible(&request, frontier);
-        let inventory = Self::build_inventory(&request, compact_fetch);
+        let inventory = if compact_fetch {
+            Self::build_compact_inventory(&request)
+        } else {
+            Self::build_witness_inventory(&request)
+        };
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
@@ -543,7 +580,6 @@ mod tests {
             .next_peer_request(
                 &mut stager,
                 owner,
-                false,
                 &chain_tip,
                 1,
                 10,

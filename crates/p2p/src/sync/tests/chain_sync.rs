@@ -992,10 +992,7 @@ fn failed_sweep_probe_reassigns_fresh_inflight_body_in_same_tick() -> TestResult
     peers.publish_info(dead, &lease, synthetic_peer(dead, 5));
     let source = current_source(&peers, dead);
     let chain = sync.observe_chain_frontier();
-    assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 5, &chain)
-            .sent
-    );
+    assert!(sync.send_getdata_for_pending_blocks(source, 5, &chain).sent);
     assert_eq!(
         witness_block_inventory(next_getdata(&dead_rx)?)?,
         vec![blocks[0].block_hash()]

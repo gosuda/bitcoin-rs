@@ -474,12 +474,19 @@ impl BlockSync {
                 let request_peer_count = selection.request_peers.len();
                 for (peer_idx, peer) in selection.request_peers.iter().enumerate() {
                     let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
-                    let request_outcome = self.send_getdata_for_pending_blocks(
-                        peer.source,
-                        peer_idx + 1 == request_peer_count,
-                        peer_best_height,
-                        &frontier.chain,
-                    );
+                    let request_outcome = if peer_idx + 1 == request_peer_count {
+                        self.send_getdata_for_pending_blocks_allowing_retry(
+                            peer.source,
+                            peer_best_height,
+                            &frontier.chain,
+                        )
+                    } else {
+                        self.send_getdata_for_pending_blocks(
+                            peer.source,
+                            peer_best_height,
+                            &frontier.chain,
+                        )
+                    };
                     sent_getdata |= request_outcome.sent;
                     if request_outcome.sent && !request_outcome.has_request_capacity {
                         break;

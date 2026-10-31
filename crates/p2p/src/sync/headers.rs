@@ -284,7 +284,7 @@ impl BlockSync {
         {
             return GetdataRequestOutcome::default();
         }
-        self.send_getdata_for_pending_blocks(source, false, height, chain)
+        self.send_getdata_for_pending_blocks(source, height, chain)
     }
 
     fn tip_height_on_active_branch(&self, tip: NodeId, hash: Hash256) -> Option<u32> {

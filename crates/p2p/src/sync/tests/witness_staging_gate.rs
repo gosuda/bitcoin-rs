@@ -9,7 +9,7 @@ const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
     0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e, 0x8c, 0xf9,
 ];
 
-fn segwit_coinbase(height: u32, witness: bool) -> Tx {
+fn segwit_coinbase(height: u32, witness: Witness) -> Tx {
     let mut script_sig = regtest_fixture::script_num_push(i64::from(height));
     script_sig.extend_from_slice(&regtest_fixture::script_num_push(1));
     let mut commitment_script = WITNESS_PREFIX.to_vec();
@@ -20,11 +20,7 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
             previous_output: OutPoint::null(),
             script_sig: Script::from_bytes(script_sig),
             sequence: Sequence::MAX,
-            witness: if witness {
-                Witness::from_stack(vec![vec![0; 32]])
-            } else {
-                Witness::new()
-            },
+            witness,
         }],
         outputs: vec![
             TxOut {
@@ -40,11 +36,28 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
     }
 }
 
-fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block {
+fn segwit_coinbase_with_witness(height: u32) -> Tx {
+    segwit_coinbase(height, Witness::from_stack(vec![vec![0; 32]]))
+}
+
+fn segwit_coinbase_without_witness(height: u32) -> Tx {
+    segwit_coinbase(height, Witness::new())
+}
+
+fn segwit_block_with_witness(prev_blockhash: BlockHash, height: u32) -> Block {
     regtest_fixture::mined_block_with_prev_hash(
         prev_blockhash,
         height,
-        vec![segwit_coinbase(height, witness)],
+        vec![segwit_coinbase_with_witness(height)],
+    )
+    .or_fail("regtest fixture block")
+}
+
+fn segwit_block_without_witness(prev_blockhash: BlockHash, height: u32) -> Block {
+    regtest_fixture::mined_block_with_prev_hash(
+        prev_blockhash,
+        height,
+        vec![segwit_coinbase_without_witness(height)],
     )
     .or_fail("regtest fixture block")
 }
@@ -68,7 +81,7 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, TestError> {
     let genesis = Network::Regtest.genesis_block();
     let prev_hash = genesis.block_hash();
 
-    let correct_block = segwit_block(prev_hash, 1, true);
+    let correct_block = segwit_block_with_witness(prev_hash, 1);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
     assert!(matches!(
@@ -76,7 +89,7 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, TestError> {
         HeaderAdmission::Accepted { .. }
     ));
 
-    let stripped_block = segwit_block(prev_hash, 1, false);
+    let stripped_block = segwit_block_without_witness(prev_hash, 1);
     assert_eq!(
         stripped_block.block_hash(),
         correct_block.block_hash(),
