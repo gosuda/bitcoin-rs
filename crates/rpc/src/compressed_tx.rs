@@ -5,6 +5,7 @@ use bitcoin_rs_primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid, Witness,
     consensus_bytes, varint,
 };
+use bitcoin_rs_script::push_data;
 use hashbrown::HashMap;
 
 use crate::error::RpcError;
@@ -498,29 +499,6 @@ fn prevout_kind(script: &[u8]) -> PrevoutKind {
 
 fn hash160_20(data: &[u8]) -> [u8; 20] {
     *hash160::Hash::hash(data).as_byte_array()
-}
-
-fn push_data(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 3);
-    match data.len() {
-        len if len < 76 => {
-            #[expect(clippy::expect_used, reason = "len < 76 fits in u8")]
-            out.push(u8::try_from(len).expect("len < 76 fits in u8"));
-        }
-        len if len <= 0xff => {
-            out.push(0x4c);
-            #[expect(clippy::expect_used, reason = "len <= 0xff fits in u8")]
-            out.push(u8::try_from(len).expect("len <= 0xff fits in u8"));
-        }
-        len => {
-            out.push(0x4d);
-            #[expect(clippy::expect_used, reason = "push data length fits in u16")]
-            let len = u16::try_from(len).expect("push data length fits in u16");
-            out.extend_from_slice(&len.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(data);
-    out
 }
 
 fn read_push(script: &[u8], pos: usize) -> Option<(&[u8], usize)> {

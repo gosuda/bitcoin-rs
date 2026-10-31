@@ -644,6 +644,23 @@ fn nonminimal_p2pkh_pushes_fall_back_to_uncompressed_envelope() {
         roundtrip(&tx, &mut resolver, true);
     }
 }
+#[test]
+fn p2pkh_push_exceeding_u16_does_not_panic() {
+    let signer = Signer::new(42);
+    let prevout = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: p2pkh_script(signer.pubkey_hash()),
+    };
+    let prev_tx = funding_tx(prevout.clone());
+    let mut oversized_sig = vec![0x4e];
+    oversized_sig.extend_from_slice(&70_000_u32.to_le_bytes());
+    oversized_sig.extend(std::iter::repeat_n(0x01_u8, 70_000));
+    oversized_sig.push(0x00);
+    let tx = spend_of(&prev_tx, Script::from_bytes(oversized_sig), Witness::new());
+    let kind = super::prevout_kind(prevout.script_pubkey.as_bytes());
+    let sig = super::compressed_signature(&tx.inputs[0], &kind);
+    assert!(sig.is_none());
+}
 
 #[test]
 fn decompress_prepare_finalize_matches_single_pass() {
