@@ -753,3 +753,112 @@ fn conditional_local_wait_expires_after_timeout_interval() -> TestResult {
     ));
     Ok(())
 }
+
+// P2P-02
+#[test]
+fn holding_maximum_share_leaves_room_for_second_connection() -> TestResult {
+    let aggregate = Arc::new(SharedOutboundBudget::new());
+    let (tx1, _rx1) = crate::test_support::message_channel();
+    let lease1 = PeerLease::new(tx1).with_shared_budget(&aggregate);
+    let (tx2, _rx2) = crate::test_support::message_channel();
+    let lease2 = PeerLease::new(tx2).with_shared_budget(&aggregate);
+
+    let budget1 = lease1.budget_handle();
+    let max_share = budget1.max_bytes();
+    let hold = budget1
+        .try_charge(max_share)
+        .map_err(|_| "independent oracle requires connection to hold its full share")?;
+    assert!(
+        matches!(budget1.try_charge(1), Err(Refusal::Local)),
+        "independent oracle: exceeding connection share must yield Local refusal"
+    );
+
+    let ping = Message::Ping(1);
+    lease2.send(ping).map_err(|refusal| {
+        format!("independent oracle violated: second connection starved by peer holding share: {refusal:?}")
+    })?;
+    assert!(
+        lease2.try_reserve_production().is_ok(),
+        "independent oracle: aggregate bulk headroom must remain open for other peers"
+    );
+
+    drop(hold);
+    Ok(())
+}
+
+// P2P-02
+#[test]
+fn aggregate_never_exceeds_cap_with_concurrent_reservers() {
+    let aggregate = Arc::new(SharedOutboundBudget::new());
+    let cap = aggregate.max_bytes();
+    let threads = 8;
+    let iterations = 200;
+    let barrier = Arc::new(std::sync::Barrier::new(threads));
+    let handles: Vec<_> = (0..threads)
+        .map(|i| {
+            let agg = Arc::clone(&aggregate);
+            let bar = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let (tx, _rx) = crate::test_support::message_channel();
+                let lease = PeerLease::new(tx).with_shared_budget(&agg);
+                let budget = lease.budget_handle();
+                bar.wait();
+                let mut held = Vec::new();
+                for step in 0..iterations {
+                    let size = ((i + step) % 5 + 1) * 1024 * 1024;
+                    if let Ok(credit) = budget.try_charge(size) {
+                        let used = agg.pending();
+                        assert!(
+                            used <= cap,
+                            "independent oracle violated: aggregate pending {used} exceeded cap {cap}"
+                        );
+                        held.push(credit);
+                    }
+                    if held.len() > 2 {
+                        let _ = held.remove(0);
+                    }
+                    let used = agg.pending();
+                    assert!(
+                        used <= cap,
+                        "independent oracle violated: aggregate pending {used} exceeded cap {cap}"
+                    );
+                }
+                drop(held);
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("reserver thread joined cleanly");
+    }
+
+    assert_eq!(
+        aggregate.pending(),
+        0,
+        "independent oracle: releasing all credits must return aggregate used bytes to 0"
+    );
+}
+
+// P2P-02
+#[test]
+fn releasing_credits_returns_used_to_zero() {
+    let aggregate = Arc::new(SharedOutboundBudget::new());
+    let (tx, _rx) = crate::test_support::message_channel();
+    let lease = PeerLease::new(tx).with_shared_budget(&aggregate);
+    let budget = lease.budget_handle();
+
+    let credit = budget
+        .try_charge(1_000_000)
+        .expect("independent oracle: fresh budget admits reservation");
+    assert_eq!(
+        aggregate.pending(),
+        1_000_000,
+        "independent oracle: aggregate pending equals charged credit"
+    );
+    drop(credit);
+    assert_eq!(
+        aggregate.pending(),
+        0,
+        "independent oracle: dropping credit returns aggregate pending bytes to 0"
+    );
+}

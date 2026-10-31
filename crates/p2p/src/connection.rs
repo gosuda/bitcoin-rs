@@ -208,9 +208,9 @@ impl From<bitcoin_rs_mempool::PeerToken> for PeerSource {
 
 const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 
-const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const SHARED_OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-pub(crate) const SHARED_OUTBOUND_QUEUE_MAX_BYTES: usize = OUTBOUND_QUEUE_MAX_BYTES;
+pub(crate) const OUTBOUND_QUEUE_MAX_BYTES: usize = SHARED_OUTBOUND_QUEUE_MAX_BYTES / 4;
 
 const SHARED_BULK_MARGIN_BYTES: usize = BLOCK_PRODUCTION_RESERVE_BYTES;
 
@@ -287,6 +287,12 @@ impl SharedOutboundBudget {
     #[must_use]
     pub(crate) fn pending(&self) -> usize {
         self.pending_bytes.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 }
 
@@ -374,7 +380,9 @@ const BLOCK_SERIALIZED_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZ
 
 const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
 
-const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
+const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES >= BLOCK_PRODUCTION_RESERVE_BYTES);
+
+const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES * 4 == SHARED_OUTBOUND_QUEUE_MAX_BYTES);
 
 pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
 
@@ -593,6 +601,12 @@ impl OutboundBudget {
     #[must_use]
     pub(crate) fn refusals(&self) -> usize {
         self.refusals.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 
     #[must_use]
