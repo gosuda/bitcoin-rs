@@ -99,18 +99,24 @@ fn check_via_script(
     )
 }
 
-fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
+fn negative_checksig_script(pubkey: &[u8]) -> Vec<u8> {
     assert!(pubkey.len() <= 75);
     let mut script = Vec::new();
-    if multisig {
-        script.push(0x51);
-    }
     script.push(u8::try_from(pubkey.len()).expect("short test pubkey"));
     script.extend_from_slice(pubkey);
-    if multisig {
-        script.push(0x51);
-    }
-    script.push(if multisig { 0xae } else { 0xac });
+    script.push(0xac);
+    script.push(0x91);
+    script
+}
+
+fn negative_multisig_script(pubkey: &[u8]) -> Vec<u8> {
+    assert!(pubkey.len() <= 75);
+    let mut script = Vec::new();
+    script.push(0x51);
+    script.push(u8::try_from(pubkey.len()).expect("short test pubkey"));
+    script.extend_from_slice(pubkey);
+    script.push(0x51);
+    script.push(0xae);
     script.push(0x91);
     script
 }
@@ -134,8 +140,10 @@ fn empty_signature_cannot_bypass_key_encoding_policy() {
         ),
     ];
     for (key, policy, code, witness) in cases {
-        for multisig in [false, true] {
-            let script = negative_check_script(&key, multisig);
+        for (multisig, script) in [
+            (false, negative_checksig_script(&key)),
+            (true, negative_multisig_script(&key)),
+        ] {
             let mut witness_stack = vec![Vec::new()];
             if multisig {
                 witness_stack.push(Vec::new());

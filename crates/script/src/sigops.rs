@@ -5,11 +5,47 @@ use bitcoin_rs_primitives::{Tx, Witness};
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
 fn count_legacy(script: &[u8]) -> u32 {
-    count_script(script, false)
+    let mut count = 0_u32;
+    for instruction in instructions(script) {
+        match instruction {
+            Ok(Instruction::Op(op)) => match op {
+                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
+                    count = count.saturating_add(1);
+                }
+                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
+                    count = count.saturating_add(20);
+                }
+                _ => {}
+            },
+            Ok(Instruction::PushBytes(_)) => {}
+            Err(EarlyEndOfScript) => break,
+        }
+    }
+    count
 }
 
 pub fn count_accurate(script: &[u8]) -> u32 {
-    count_script(script, true)
+    let mut count = 0_u32;
+    let mut pushnum_cache = None;
+    for instruction in instructions(script) {
+        match instruction {
+            Ok(Instruction::Op(op)) => match op {
+                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
+                    count = count.saturating_add(1);
+                    pushnum_cache = None;
+                }
+                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
+                    let keys = pushnum_cache.map_or(20, u32::from);
+                    count = count.saturating_add(keys);
+                    pushnum_cache = None;
+                }
+                other => pushnum_cache = opcode::decode_pushnum(other),
+            },
+            Ok(Instruction::PushBytes(_)) => pushnum_cache = None,
+            Err(EarlyEndOfScript) => break,
+        }
+    }
+    count
 }
 
 pub fn count_segwit(script: &[u8], witness: &Witness) -> u32 {
@@ -29,32 +65,6 @@ pub fn count_tx_legacy(tx: &Tx) -> u32 {
     }
     for output in &tx.outputs {
         count = count.saturating_add(count_legacy(&output.script_pubkey));
-    }
-    count
-}
-
-fn count_script(script: &[u8], accurate: bool) -> u32 {
-    let mut count = 0_u32;
-    let mut pushnum_cache = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(op)) => match op {
-                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
-                    count = count.saturating_add(1);
-                    pushnum_cache = None;
-                }
-                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    match (accurate, pushnum_cache) {
-                        (true, Some(keys)) => count = count.saturating_add(u32::from(keys)),
-                        _ => count = count.saturating_add(20),
-                    }
-                    pushnum_cache = None;
-                }
-                other => pushnum_cache = opcode::decode_pushnum(other),
-            },
-            Ok(Instruction::PushBytes(_)) => pushnum_cache = None,
-            Err(EarlyEndOfScript) => break,
-        }
     }
     count
 }
