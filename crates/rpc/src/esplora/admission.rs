@@ -42,6 +42,7 @@ pub(crate) struct Permit<'a> {
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         let mut active = self.admission.active.lock();
+        debug_assert!(*active > 0, "Esplora query permit count underflowed");
         *active -= 1;
         metrics::gauge!("rpc.esplora.expensive.active").decrement(1.0);
         drop(active);
