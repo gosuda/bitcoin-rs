@@ -635,7 +635,7 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
             .is_empty(),
         "reaped handle leaves no join for stop_join"
     );
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -671,7 +671,7 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
             std::thread::sleep(Duration::from_millis(50));
         }));
     }
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
     let mut service = super::Sv2Service {
         cancel,
         listener: None,
@@ -696,5 +696,48 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
             .is_empty(),
         "stop_join joins every remaining worker"
     );
+    Ok(())
+}
+
+#[test]
+fn sv2_listener_stops_promptly_on_cancellation() -> TestResult {
+    let cancel = bitcoin_rs_chain::LatchWriter::new();
+    let cancel_reader = cancel.reader();
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| FixtureError::Sv2 {
+            stage: "bind",
+            detail: error.to_string(),
+        })?;
+    let local_addr = listener.local_addr().map_err(|error| FixtureError::Sv2 {
+        stage: "local_addr",
+        detail: error.to_string(),
+    })?;
+    let _hook = cancel_reader.on_cancel(move || {
+        let _ = std::net::TcpStream::connect(local_addr);
+    });
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let handle = std::thread::spawn(move || {
+        let _guard = _hook;
+        while !cancel_reader.is_triggered() {
+            match listener.accept() {
+                Ok((_stream, _peer)) => {
+                    if cancel_reader.is_triggered() {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(());
+    });
+    std::thread::sleep(Duration::from_millis(5));
+    cancel.trigger();
+    let res = rx.recv_timeout(Duration::from_secs(5));
+    assert!(
+        res.is_ok(),
+        "join deadline exceeded: sv2 listener did not exit within 5 seconds"
+    );
+    assert!(handle.join().is_ok(), "thread panicked");
     Ok(())
 }

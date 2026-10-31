@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -84,7 +84,7 @@ fn settle_one_deferred(
 }
 
 pub(crate) struct Sv2Service {
-    cancel: Arc<AtomicBool>,
+    cancel: bitcoin_rs_chain::LatchWriter,
     listener: Option<JoinHandle<()>>,
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
     worker_panicked: Arc<AtomicBool>,
@@ -92,9 +92,8 @@ pub(crate) struct Sv2Service {
 
 impl Sv2Service {
     pub(crate) fn stop(&self) {
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.trigger();
     }
-
     pub(crate) fn stop_join(&mut self, deadline: Instant) -> Result<(), RunError> {
         self.stop();
         wait_until_finished(self.listener.as_ref(), deadline, "SV2 listener")?;
@@ -163,7 +162,7 @@ pub(crate) fn start(
     core: Arc<PoolCore>,
     ledger: Arc<LedgerHost>,
     control: Arc<dyn MiningControl>,
-    cancel: Arc<AtomicBool>,
+    cancel: impl Into<bitcoin_rs_chain::LatchReader>,
     limiter: Arc<ConnectionLimiter>,
 ) -> Result<Sv2Service, RunError> {
     let bind = config.sv2_bind.ok_or(RunError::PoolSv2BindMissing)?;
@@ -176,13 +175,29 @@ pub(crate) fn start(
     );
     let listener =
         TcpListener::bind(bind).map_err(|source| RunError::PoolSv2Bind { bind, source })?;
-    listener
-        .set_nonblocking(true)
+    let local_addr = listener
+        .local_addr()
         .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
+    let connect_addr = match local_addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        ),
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            addr.port(),
+        ),
+        addr => addr,
+    };
+    let parent_cancel = cancel.into();
+    let service_cancel = parent_cancel.child();
+    let thread_cancel = service_cancel.reader();
+    let _hook = thread_cancel.on_cancel(move || {
+        let _ = TcpStream::connect(connect_addr);
+    });
 
     let connections = Arc::new(Mutex::new(Vec::new()));
     let thread_connections = Arc::clone(&connections);
-    let thread_cancel = Arc::clone(&cancel);
     let worker_panicked = Arc::new(AtomicBool::new(false));
     let thread_panicked = Arc::clone(&worker_panicked);
     let initial_target = config.share_target;
@@ -190,9 +205,13 @@ pub(crate) fn start(
     let listener_thread = thread::Builder::new()
         .name("pool-sv2-listener".to_owned())
         .spawn(move || {
-            while !thread_cancel.load(Ordering::Acquire) {
+            let _guard = _hook;
+            while !thread_cancel.is_triggered() {
                 match listener.accept() {
                     Ok((stream, peer)) => {
+                        if thread_cancel.is_triggered() {
+                            break;
+                        }
                         reap_finished(&thread_connections, &thread_panicked);
                         let Ok(permit) = limiter.try_admit(peer.ip()) else {
                             drop(stream);
@@ -202,7 +221,8 @@ pub(crate) fn start(
                         let ledger = Arc::clone(&ledger);
                         let control = Arc::clone(&control);
                         let authority = Arc::clone(&authority);
-                        let cancel = Arc::clone(&thread_cancel);
+                        let conn_writer = thread_cancel.child();
+                        let cancel = conn_writer.reader();
                         let connection_ledger = Arc::clone(&ledger);
                         let admit_user = Arc::new(move |identity: &[u8]| {
                             let login = std::str::from_utf8(identity)
@@ -248,11 +268,11 @@ pub(crate) fn start(
                             Err(error) => tracing::warn!(peer = %peer, %error, "could not spawn SV2 connection worker"),
                         }
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(ACCEPT_POLL_INTERVAL);
-                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => {
-                        tracing::error!(%error, "SV2 listener failed");
+                        if !thread_cancel.is_triggered() {
+                            tracing::error!(%error, "SV2 listener failed");
+                        }
                         break;
                     }
                 }
@@ -261,7 +281,7 @@ pub(crate) fn start(
         .map_err(|source| RunError::PoolSv2ListenerSpawn { source })?;
 
     Ok(Sv2Service {
-        cancel,
+        cancel: service_cancel,
         listener: Some(listener_thread),
         connections,
         worker_panicked,
@@ -275,10 +295,19 @@ fn serve_connection(
     core: &PoolCore,
     ledger: &Arc<LedgerHost>,
     control: &dyn MiningControl,
-    cancel: &AtomicBool,
+    cancel: &bitcoin_rs_chain::LatchReader,
 ) -> Result<(), RunError> {
-    stream.set_nonblocking(true)?;
     stream.set_nodelay(true)?;
+    stream
+        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))
+        .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
+    stream
+        .set_write_timeout(Some(SOCKET_POLL_INTERVAL))
+        .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
+    let stream_clone = stream.try_clone()?;
+    let _guard = cancel.on_cancel(move || {
+        let _ = stream_clone.shutdown(std::net::Shutdown::Both);
+    });
     let mut connection = core
         .with_job_book(|book| Connection::accept(authority, CERTIFICATE_VALIDITY, config, book))
         .map_err(|source| RunError::PoolSv2ConnectionAccept { source })?;
@@ -290,7 +319,7 @@ fn serve_connection(
     let start = Instant::now();
     let mut last_progress = start;
     let result = (|| -> Result<(), RunError> {
-        while !cancel.load(Ordering::Acquire) && !connection.is_closing() {
+        while !cancel.is_triggered() && !connection.is_closing() {
             if !connection.session().is_open() && start.elapsed() >= HANDSHAKE_TIMEOUT {
                 return Err(RunError::PoolSv2HandshakeTimeout);
             }
@@ -334,7 +363,6 @@ fn serve_connection(
                                 | io::ErrorKind::Interrupted
                         ) =>
                     {
-                        thread::sleep(SOCKET_POLL_INTERVAL);
                         continue;
                     }
                     Err(error) => return Err(error.into()),
@@ -342,8 +370,10 @@ fn serve_connection(
             }
 
             let Some(block_permit) = ledger.try_reserve_block_slot() else {
-                thread::sleep(SOCKET_POLL_INTERVAL);
-                continue;
+                crossbeam_channel::select! {
+                    recv(cancel.closed()) -> _ => break,
+                    recv(crossbeam_channel::after(SOCKET_POLL_INTERVAL)) -> _ => continue,
+                }
             };
             let mut block_permit = Some(block_permit);
             let length = buffered_input

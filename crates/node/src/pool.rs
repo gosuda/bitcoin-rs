@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -30,7 +27,7 @@ pub(crate) struct PoolService {
     #[cfg(feature = "pool-sv2")]
     control: Arc<dyn MiningControl>,
     chain: Arc<ledger::NodeChainView>,
-    cancel: Arc<AtomicBool>,
+    cancel: bitcoin_rs_chain::LatchWriter,
     worker: Option<JoinHandle<()>>,
     v1: Option<Server>,
     #[cfg(feature = "pool-sv2")]
@@ -140,7 +137,7 @@ impl PoolService {
             #[cfg(feature = "pool-sv2")]
             control,
             chain,
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: bitcoin_rs_chain::LatchWriter::new(),
             worker: None,
             v1: None,
             #[cfg(feature = "pool-sv2")]
@@ -193,19 +190,21 @@ impl PoolService {
                 Arc::clone(&self.core),
                 Arc::clone(&self.host),
                 Arc::clone(&self.control),
-                Arc::clone(&self.cancel),
+                self.cancel.reader(),
                 Arc::clone(&limiter),
             )?);
         }
         let core = Arc::clone(&self.core);
         let host = Arc::clone(&self.host);
         let chain = Arc::clone(&self.chain);
-        let cancel = Arc::clone(&self.cancel);
+        let cancel = self.cancel.reader();
         self.worker = Some(
             std::thread::Builder::new()
                 .name("pool-reconcile".into())
                 .spawn(move || {
-                    while !cancel.load(Ordering::Acquire) {
+                    let current = std::thread::current();
+                    let _guard = cancel.on_cancel(move || current.unpark());
+                    while !cancel.is_triggered() {
                         if let Err(error) = core.refresh(None, Vec::new()) {
                             core.invalidate_active();
                             tracing::warn!(%error, "pool template refresh unavailable");
@@ -224,7 +223,7 @@ impl PoolService {
     }
 
     pub(crate) fn shutdown(&mut self, deadline: Instant) -> Result<(), RunError> {
-        self.cancel.store(true, Ordering::Release);
+        self.cancel.trigger();
         let mut failure = None;
         if let Some(server) = self.v1.as_mut() {
             match server.shutdown_until(deadline) {
