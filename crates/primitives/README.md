@@ -1,26 +1,26 @@
 # bitcoin-rs-primitives
 
-The fixed-layout consensus primitives the rest of the workspace speaks in: the
-256-bit hash type, transaction outpoints, the compact-size varint codec, native
-amount/sequence/locktime/compact-target newtypes, script and witness stacks, and
-the transaction, block, and header types with their txid/wtxid and header-hash
+This crate defines the fixed-layout consensus primitives for the workspace.
+It provides the 256-bit hash type, transaction outpoints, the compact-size varint codec,
+native amount/sequence/locktime/compact-target newtypes, and script and witness stacks.
+It also provides transaction, block, and header types with their txid/wtxid and header-hash
 computation.
 
 This crate is self-contained with respect to Bitcoin protocol primitives.
 Codec, hashing, sighash, network, and identifier contracts are pinned by Core
-vectors, published genesis hashes, and golden block fixtures — not by a parallel
+vectors, published genesis hashes, and golden block fixtures, not by a parallel
 type vocabulary.
 
-`Tx`, `TxIn`, and `TxOut` wrap transactions and compute txid/wtxid; `Block` and
-`Header` do the same at block level with block-level hashing helpers; `OutPoint` is
-the fixed-layout transaction outpoint; and `Hash256` is the fixed-width 256-bit hash
+`Tx`, `TxIn`, and `TxOut` wrap transactions and compute txid/wtxid. `Block` and
+`Header` do the same at block level with block-level hashing helpers. `OutPoint` is
+the fixed-layout transaction outpoint, and `Hash256` is the fixed-width 256-bit hash
 type the wrappers hash into. Output values are `Amount`, input sequences
 `Sequence`, locktime `LockTime`, nBits `CompactTarget`, and script/witness
 bytes `Script` / `Witness`. `encode` holds the consensus encoding and hashing helpers
-shared by the primitive wrappers (`Sink`, `ConsensusEncode`, analytic `consensus_size`),
-`varint` the Bitcoin compact-size integer codec,
-`sighash` the signature-hash mode wrappers (`Sighash`, `SighashError`), and `network`
-the Bitcoin network constants re-exported as `Network`. The `version` module publishes
+shared by the primitive wrappers (`Sink`, `ConsensusEncode`, analytic `consensus_size`).
+`varint` holds the Bitcoin compact-size integer codec.
+`sighash` holds the signature-hash mode wrappers (`Sighash`, `SighashError`), and `network`
+holds the Bitcoin network constants re-exported as `Network`. The `version` module publishes
 `PKG_VERSION` and `USER_AGENT`, the workspace release constants carried in wire and
 RPC user-agent strings.
 

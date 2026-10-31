@@ -6,7 +6,7 @@ rows to an exact active-chain prefix. `ScriptLive` is the compact reverse view
 of the authoritative UTXO set: each row stores an empty value and a complete
 outpoint after an eight-byte script-hash prefix.
 
-`IndexWriter` is the sole mutation owner: it walks a serialized block once
+`IndexWriter` is the sole mutation owner. It walks a serialized block once
 (`prepare_block` / `prepare_block_with_spent_scripts`) and commits bounded
 `PreparedBatch` writes of txid, script-funding, previous-outpoint spending,
 and live-outpoint rows (counted by `IndexRowCounts`). `Indexer<S: KvStore>`
@@ -18,10 +18,10 @@ engine, which reads row-scoped block ranges by height.
 `PreparedBlock`/`PreparedBatch` under `PreparedBatchLimits` bound one atomic
 forward write by row count and encoded bytes, and `IndexWriter` is the mutation-only
 handle for durable prepared writes. `IndexWatermark` is the durable
-`(height, full block hash)` cursor — encoded as `height || hash`, readable from a snapshot —
-while the `IndexReader` trait captures a point-in-time `TxIndexSnapshot` for bounded
+`(height, full block hash)` cursor, encoded as `height || hash` and readable from a snapshot.
+The `IndexReader` trait captures a point-in-time `TxIndexSnapshot` for bounded
 typed scans (`TxIndexScan`). The index durability marker (`[0x00, b'V']`, currently row-format 6) owns the
-compatibility boundary for these rows; a mismatch refuses open and recovery full-resets for rebuild, while the datadir-wide `CURRENT_SCHEMA` covers only authoritative chainstate bytes. The stable types are `ScriptHash`, `HashPrefixRow`,
+compatibility boundary for these rows. A mismatch refuses open, and recovery full-resets for rebuild. The datadir-wide `CURRENT_SCHEMA` covers only authoritative chainstate bytes. The stable types are `ScriptHash`, `HashPrefixRow`,
 `ScriptHashRow`, `ScriptHistoryOccurrence`, `ScriptLiveRow`, `SpendingPrefixRow`, `TxPosition`.
 
 ## Implementation boundaries

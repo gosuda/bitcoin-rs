@@ -2,15 +2,15 @@
 
 Owns consensus validation: transaction and block rule checks for every active soft fork.
 Script verification has two backends. The native Rust interpreter executes every
-consensus spend class; the `kernel` feature compiles bitcoinkernel — Bitcoin
-Core's C++ consensus engine — in alongside it. `kernel` is a capability, not a
+consensus spend class. The `kernel` feature compiles bitcoinkernel (Bitcoin
+Core's C++ consensus engine) in alongside it. `kernel` is a capability, not a
 selection: which backend runs is the runtime `validation.engine` setting
 (`ValidationEngine`, default `Native`, `VAL-01`). Every crate is kernel-free by
 default, so `cargo build -p bitcoin-rs` needs no C++ toolchain and uses the
 native interpreter; see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
 
 Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
-(`bip9`, `bip30`, `bip34`, `bip68`, `bip113`), surfaced through the
+(`bip9`, `bip30`, `bip34`, `bip68`, `bip113`). These are surfaced through the
 `verify_transaction` family (with median-time-past and borrowed variants),
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
 `verify_block` enforces shared transaction structure and the legacy block sigop
@@ -22,13 +22,13 @@ block rules, witness-commitment checks, and mining candidate assembly.
 not part of `verify_block_rules`, so the caller that commits a block runs it
 and a proposal does not.
 `is_sixty_four_byte_mutation` names a body without a coinbase that holds a
-64-byte witness-stripped transaction, which `verify_block_rules` and `check_block_body_binding`
-report as `SixtyFourByteMutation`: the delivered body is mutated, the header is
+64-byte witness-stripped transaction. `verify_block_rules` and `check_block_body_binding`
+report this as `SixtyFourByteMutation`: the delivered body is mutated, the header is
 not proven invalid, and compact-block reconstruction takes its full-block
 fallback for it.
-`kernel::BlockParse` parses a serialized block exactly once — through the Rust
+`kernel::BlockParse` parses a serialized block exactly once, through the Rust
 layout parse under `validation.engine = "native"`, or `bitcoinkernel::Block::new`
-under `validation.engine = "kernel"` on `kernel`-feature builds — yielding the
+under `validation.engine = "kernel"` on `kernel`-feature builds. It yields the
 txids and (on the kernel arm) the borrowed transaction objects that script
 preparation reuses. `kernel::verify_tx_scripts` dispatches per-input script
 checks to the selected backend over its resolved `(OutPoint, TxOut)`

@@ -5,11 +5,11 @@ package preview, TRUC and ephemeral dust, orphan parking, relay standardness,
 and the history-based fee-rate estimator.
 
 `Mempool` owns the entry arena plus the txid, funding (keyed by `ScriptHash`, the
-single SHA256 of a script), spending, and fee-priority indexes; every accepted
+single SHA256 of a script), spending, and fee-priority indexes. Every accepted
 transaction becomes a `MempoolEntry` addressed by its slab-index `EntryId`.
 Production admission runs through `MempoolGateway::submit_transaction`, which
 enforces the `MempoolLimits` (including min-relay fee) and returns
-`SubmitError` on admission failure; `enforce_size_limit` delegates to
+`SubmitError` on admission failure. `enforce_size_limit` delegates to
 `evict_lowest_fee_packages` over the same dependency-closed chunks that mining and replacement consume;
 `prioritise` adjusts an entry's effective fee, and `remove_for_block` /
 `remove_for_reorg` handle chain-driven removal. The trusted-facts doors
@@ -28,8 +28,8 @@ Script-execution cache: the node shares one native-only, ephemeral
 `ScriptExecutionCache` between the mempool gateway and block connect, keyed by
 the exact `(wtxid, script-flag bits)` pair with take-once semantics. Admission
 re-verifies a transaction under the next block's flags outside the pool write
-lock; only a committed (accepted) mutation inserts the key, so rejected
-admissions and failed packages never fill — peer, local, and package
+lock. Only a committed (accepted) mutation inserts the key, so rejected
+admissions and failed packages never populate the cache. Peer, local, and package
 submissions share this rule, and block connect consults it. A hit skips script
 re-execution only; finality, amounts, BIP68 locks, and sigop limits always run,
 and any flag divergence is a miss that re-verifies. No throughput claim is made

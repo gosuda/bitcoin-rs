@@ -41,8 +41,8 @@ refuses a lease over deleted history.
 ## Cache budget
 
 `dbcache` is one process-wide budget. `cache_budget::split_cache_budget` divides
-it across the persistent namespaces — chainstate 80% and txindex 20% when
-enabled — flooring each share and handing the remainder (plus every disabled
+it across the persistent namespaces: chainstate 80% and txindex 20% when
+enabled. It floors each share and hands the remainder (plus every disabled
 namespace's share) to chainstate, so the shares always sum to at most the
 budget. Each backend accepts its namespace's share through `open_with_cache`
 (`open_redb_tx_index_store_with_cache` for the redb transaction index); fjall
@@ -55,7 +55,7 @@ startup.
 
 Every file-owning store (`FjallStore`, `RocksDbStore`, `RedbStore`, the redb
 transaction index, and `FlatFileBlockStore`) can keep one opaque `StoreGuard`
-through `guarded_by` (a builder method; the redb transaction index takes it
+through `guarded_by`. This is a builder method; the redb transaction index takes it
 as the `guard` argument of `open_redb_tx_index_store_with_cache`).
 The guard is the store's last field, so it drops only after the engine or file
 handle has closed. The node passes its data-directory lock this way: the lock
