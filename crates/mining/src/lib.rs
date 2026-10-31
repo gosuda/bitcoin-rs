@@ -11,7 +11,6 @@ mod coinbase;
 mod context;
 mod control;
 mod coordinator;
-/// Authoritative-mutation wake seam for long-poll mining.
 mod generation_signal;
 mod network_hashps;
 mod policy;
@@ -46,6 +45,5 @@ pub use template::{
     select_template_body_after, solve_block,
 };
 
-/// Optional native mining pool protocols and accounting.
 #[cfg(feature = "pool")]
 pub mod pool;

@@ -1,6 +1,3 @@
-//! Per-connection SV1 session state machine, the shared pool core, and the
-//! bounded TCP server.
-
 use bitcoin_rs_chain::{LatchReader, LatchWriter};
 use std::collections::HashMap;
 use std::error::Error;
@@ -29,7 +26,6 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Observer callback. Events never carry passwords.
 pub type Observer = Arc<dyn Fn(&ServerEvent) + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +35,6 @@ pub enum RefusalReason {
     SpawnFailed,
 }
 
-/// How a connection ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEnd {
     ClientClosed,
@@ -71,15 +66,12 @@ pub enum ServerEvent {
         session: SessionId,
         user_agent: Option<String>,
     },
-    /// The share passed validation and was credited to the ledger or queued
-    /// in the outbox.
     ShareAccepted {
         session: SessionId,
         hash: BlockHash,
         class: ShareClass,
         delivered: bool,
     },
-    /// A found block was handed to the node.
     BlockSubmitted {
         hash: BlockHash,
         outcome: BlockOutcome,
@@ -112,7 +104,6 @@ fn require(ok: bool, field: &'static str, reason: &'static str) -> Result<(), Co
     }
 }
 
-/// Bounds and deadlines of one [`Server`].
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub max_connections: usize,
@@ -128,8 +119,6 @@ pub struct ServerConfig {
     pub max_auth_failures: u32,
     pub max_consecutive_violations: u32,
     pub max_consecutive_share_rejects: u32,
-    /// After a difficulty change, how long the easier of old and new target
-    /// still judges shares (in-flight work).
     pub retarget_grace: Duration,
     pub thread_stack_bytes: usize,
     pub difficulty: DifficultyPolicy,
@@ -408,7 +397,6 @@ fn emit_line(out: &mut Vec<u8>, line: &str) {
     out.extend_from_slice(line.as_bytes());
 }
 
-/// Emits `line` unless `request` is a notification without an `"id"` member.
 fn emit_reply(request: &Request, out: &mut Vec<u8>, line: &str) {
     if request.has_id {
         emit_line(out, line);

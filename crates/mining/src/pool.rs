@@ -1,4 +1,3 @@
-//! Native mining pool jobs, protocols, and durable accounting.
 #![forbid(unsafe_code)]
 
 mod core;

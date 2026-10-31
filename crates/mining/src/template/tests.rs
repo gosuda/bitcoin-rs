@@ -1,9 +1,3 @@
-//! Coinbase-budget rule: what selection holds back, what `admits` checks, and the
-//! identity qualifier.
-//!
-//! Pools hold real transactions; the size and weight of a finished block are measured
-//! from its serialization, and a pool-shaped coinbase is parsed back by rust-bitcoin,
-//! rather than read from the candidate's own bookkeeping.
 use super::*;
 use bitcoin_rs_mempool::{MempoolEntry, MempoolLimits};
 use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut};

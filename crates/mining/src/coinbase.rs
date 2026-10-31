@@ -11,7 +11,6 @@ const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
-/// Candidate assembly failure.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum MiningError {
     #[error("coinbase value overflows satoshi range")]

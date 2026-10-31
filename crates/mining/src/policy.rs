@@ -79,8 +79,6 @@ impl PackageTotals {
     }
 }
 
-/// Whether a chunk or chunk prefix pays the block minimum fee.
-/// Core `ToFeePerVSize` rounds the summed charged weight up to whole vbytes
 fn meets_block_min_fee_rate(modified_fee: i128, charged_weight: u64) -> Result<bool, MiningError> {
     let rate = modified_fee
         .checked_mul(1_000)
@@ -276,7 +274,6 @@ impl Selection {
     }
 }
 
-/// Selects dependency-closed packages under the candidate's resource limits.
 pub(crate) fn select_packages<'a>(
     context: &CandidateContext,
     pool: &Mempool,

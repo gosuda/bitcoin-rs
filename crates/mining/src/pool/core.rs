@@ -24,7 +24,6 @@ pub struct WorkerIdentity {
     pub worker: String,
 }
 
-/// The ledger could not take the record right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedgerUnavailable;
 
@@ -35,9 +34,6 @@ pub enum RecordOutcome {
     Rejected,
 }
 
-/// Implementations must be idempotent on `share.hash`: the adapter retries a
-/// failed call, and the common owner's duplicate set makes every first delivery
-/// unique.
 pub trait ShareLedger: Send + Sync {
     fn record_share(
         &self,

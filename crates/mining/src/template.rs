@@ -16,7 +16,6 @@ use crate::MiningError;
 use crate::coinbase::{WITNESS_RESERVED_VALUE, build_coinbase};
 use crate::policy::select_packages;
 
-/// Chain and limit facts required to assemble one candidate.
 #[derive(Clone, Debug)]
 pub struct CandidateContext {
     pub previous_block_hash: Hash256,
@@ -42,7 +41,6 @@ pub struct CoinbaseBudget {
 }
 
 impl CoinbaseBudget {
-    /// Consensus limit on a coinbase scriptSig length (`bad-cb-length`).
     pub const MAX_SCRIPT_SIG_LEN: usize = 100;
     pub const MIN_SCRIPT_SIG_LEN: usize = 2;
     pub(crate) fn split_qualifier(id: &str) -> Option<(&str, Option<Self>)> {
@@ -67,7 +65,6 @@ fn canonical_decimal<T: std::str::FromStr>(text: &str) -> Option<T> {
     if canonical { text.parse().ok() } else { None }
 }
 
-/// Deterministic generation identity for a tip, membership and fee revision.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TemplateId(String);
 
@@ -197,7 +194,6 @@ impl Candidate {
     }
 }
 
-/// Searches `block.header.nonce` until the compact target is met.
 pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError> {
     for _ in 0..max_tries {
         let hash = Hash256::from(block.header.compute_hash());
@@ -218,9 +214,6 @@ pub fn assemble_candidate(
     finish_candidate(context, &body, payout)
 }
 
-/// [`MiningError::CapacityExhausted`] names the dimension in which the header,
-/// coinbase, and any budgeted growth already exceed the context's limit, before
-/// any transaction is considered.
 pub fn select_template_body(
     pool: &Mempool,
     context: &CandidateContext,
@@ -239,7 +232,6 @@ pub fn select_template_body(
     Ok(body)
 }
 
-/// Selects the template body as if `plan` had applied, without mutating the pool.
 pub fn select_template_body_after(
     pool: &Mempool,
     plan: &BlockRemovalPlan,
@@ -260,7 +252,6 @@ pub fn select_template_body_after(
     select_packages(context, pool, projected.iter(), sequences, reservation)
 }
 
-/// Assembles a candidate whose non-coinbase body is `snapshot.entries` in order.
 pub fn assemble_ordered_candidate(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
@@ -271,8 +262,6 @@ pub fn assemble_ordered_candidate(
     finish_candidate(context, &body, payout)
 }
 
-/// Weight, serialized size, and sigop cost of one part of a block. The fixed
-/// block header and coinbase are reserved before selecting the body.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FixedReservation {
     pub(crate) weight: u64,
@@ -331,7 +320,6 @@ pub struct SelectedTx {
     pub weight: u64,
 }
 
-/// Dependency-closed body selected under the pool read guard.
 #[derive(Debug)]
 pub struct SelectedBody {
     pub sequence: u64,
@@ -603,7 +591,6 @@ fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
     depends
 }
 
-/// BIP141 witness merkle root. The coinbase contributes the all-zero wtxid leaf.
 fn witness_merkle_root(selected: &[SelectedTx]) -> Result<Hash256, MiningError> {
     let mut leaves = Vec::with_capacity(selected.len().saturating_add(1));
     leaves.push([0_u8; 32]);

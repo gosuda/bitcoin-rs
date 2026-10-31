@@ -1,5 +1,3 @@
-//! The authoritative backend-neutral ledger.
-
 use super::kv::{Database, Table, TableDefinition, WriteTransaction};
 use bitcoin_rs_storage::KvStore;
 use sha2::{Digest, Sha256};
@@ -310,7 +308,6 @@ impl Ledger {
         Ok(())
     }
 
-    /// Credit one accepted share. Idempotent on the header hash.
     pub fn record_share(&self, share: &ShareCredit) -> Result<ShareReceipt, LedgerError> {
         share.validate()?;
         let txn = self.db.begin_write()?;
@@ -364,12 +361,6 @@ impl Ledger {
 
     const PRUNE_BATCH_SIZE: usize = 1024;
 
-    /// Delete the oldest shares, keeping the newest shares that hold at least
-    /// `keep_work` work.
-    ///
-    /// `keep_work` must cover the PPLNS window. A block found later for an older
-    /// solving share fails with [`LedgerError::WindowPruned`] instead of using a short
-    /// window.
     pub fn prune_shares(&self, keep_work: u128) -> Result<u64, LedgerError> {
         if keep_work < self.config.window_work {
             return Err(LedgerError::InvalidInput(
@@ -496,8 +487,6 @@ impl Ledger {
         })
     }
 
-    /// The round starts Pending; no money exists until [`Ledger::reconcile_rounds`] observes the
-    /// block on the active chain. Idempotent on the block hash.
     pub fn record_found_block(&self, found: &BlockFound) -> Result<BlockRecorded, LedgerError> {
         found.share.validate()?;
         let block_hash = found.share.header_hash;

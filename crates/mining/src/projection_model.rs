@@ -1,10 +1,3 @@
-//! Executable reference model for the mining half of the projection machine.
-//!
-//! `Action` names come from `docs/models/ProjectionMining/Mining.tla`.
-//! [`step`] is the mining half of the machine in
-//! `docs/lean/ProjectionMining/Safety.lean`, where `safety` is proved
-//! inductive; the conformance test drives the real generation wake.
-
 pub(crate) const SHARE_CAP: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,7 +29,6 @@ impl State {
     }
 }
 
-/// Returns the successor state, or `None` when the action is blocked.
 #[must_use]
 pub(crate) const fn step(state: &State, action: Action) -> Option<State> {
     match action {

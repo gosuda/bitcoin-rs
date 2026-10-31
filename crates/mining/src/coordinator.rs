@@ -1,5 +1,3 @@
-//! Candidate lifecycle state and pure mining-domain projections.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -189,8 +187,6 @@ pub trait AppliedTipSource: Send + Sync {
 
 pub trait MempoolSnapshotSource: Send + Sync {
     fn current_revisions(&self) -> (u64, u64);
-    /// Returns [`MiningControlError::Failed`] when selection refuses the
-    /// context's limits, including an unsatisfiable `budget`.
     fn select_template(
         &self,
         expected_sequences: Option<(u64, u64)>,
@@ -204,10 +200,6 @@ pub trait MempoolSnapshotSource: Send + Sync {
         context: &CandidateContext,
         payout: &[u8],
     ) -> Result<PreparedTemplateBody, MiningControlError>;
-    /// Returns [`MiningControlError::InvalidRequest`] when an `Ordered`
-    /// selection names a transaction that is not in the mempool, or
-    /// [`MiningControlError::Unavailable`] when the candidate tip changed
-    /// before copying raw transaction prevouts.
     fn selection_snapshot(
         &self,
         selection: &GenerateSelection,
@@ -451,8 +443,6 @@ impl MiningService {
         }
     }
 
-    /// [`MiningControlError::Failed`] when the budget cannot fit even an empty
-    /// block.
     pub fn get_block_template(
         &self,
         long_poll_id: Option<&str>,

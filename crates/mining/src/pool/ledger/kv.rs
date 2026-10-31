@@ -1,4 +1,3 @@
-//! Snapshot-backed logical tables and a single revision-guarded durable commit.
 use super::LedgerError;
 use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, WriteCondition};
 use std::cell::RefCell;

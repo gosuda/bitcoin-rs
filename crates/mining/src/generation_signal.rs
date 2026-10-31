@@ -11,7 +11,6 @@ use parking_lot::RwLock;
 use crate::MempoolSequenceWake;
 use crate::MiningControl;
 
-/// Wake seam from authoritative mutations to the template coordinator.
 #[derive(Default)]
 pub struct MiningGenerationSignal {
     coordinator: RwLock<Option<Weak<dyn MiningControl>>>,

@@ -1152,10 +1152,6 @@ fn applied_block_retires_job_and_second_submit_is_stale() {
     miner.server.shutdown();
 }
 
-/// Journal backpressure (`Inconclusive`) retains bounded submission-recovery
-/// work instead of dropping the block: the node is re-queried a bounded
-/// number of times, the share stays acknowledged, and the block record stays
-/// durable for chain reconciliation.
 #[test]
 fn inconclusive_block_submission_retries_with_bounded_recovery() {
     let mut miner = MinerFixture::start(0x22);
@@ -1191,9 +1187,6 @@ fn inconclusive_block_submission_retries_with_bounded_recovery() {
     miner.server.shutdown();
 }
 
-/// An already-validated share whose block the node rejects as a stale parent
-/// is a `STALE_SHARE` protocol error, not success: the ledger record stays
-/// durable, nothing else is submitted, and the connection remains usable.
 // POOL-05
 #[test]
 fn stale_parent_backend_verdict_is_stale_error() {

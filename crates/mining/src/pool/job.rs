@@ -1,8 +1,3 @@
-//! Job projection, extranonce allocation, and the single share predicate.
-//! - `coinbase_prefix || session || rolled || coinbase_suffix` is the exact
-//!   non-witness (txid) serialization of the coinbase the block will carry.
-//! - A stale job is never revived.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -60,11 +55,6 @@ impl SessionId {
     }
 }
 
-/// Split of the coinbase extranonce between the pool and the miner.
-///
-/// `session_len` bytes are assigned by the pool and unique per open session (SV1
-/// `extranonce1`, SV2 extended-channel prefix). `rolled_len` bytes are chosen by the
-/// miner (SV1 `extranonce2`, SV2 remaining extranonce).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ExtranonceLayout {
     session_len: u8,
@@ -278,7 +268,6 @@ pub enum ShareError {
     JobShareCapacity { job: JobId, capacity: usize },
 }
 
-/// A nonzero 256-bit share target. A hash meets it when it is less than or equal.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShareTarget(ChainWork);
 
@@ -370,7 +359,6 @@ impl ShareTarget {
     }
 }
 
-/// Exact integer work of a share target, the unit PPLNS-style accounting sums.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ShareWork(ChainWork);
 
@@ -748,8 +736,6 @@ impl Job {
         &self.extra_outputs
     }
 
-    /// Maps SV1 `version_bits` onto the full header version (BIP310): rolled
-    /// bits must lie inside the job mask.
     pub fn version_from_rolled_bits(&self, rolled: u32) -> Result<u32, ShareError> {
         let version = (self.version & !self.version_mask) | rolled;
         if rolled & !self.version_mask != 0 {
@@ -991,7 +977,6 @@ impl JobBookConfig {
 pub struct Installed {
     pub job: Arc<Job>,
     pub fresh: bool,
-    /// Miners must drop all earlier work (SV1 `clean_jobs`, SV2 `SetNewPrevHash`).
     pub clean_jobs: bool,
     pub parent_changed: bool,
     pub invalidated: Vec<JobId>,
@@ -1205,7 +1190,6 @@ impl JobBook {
         true
     }
 
-    /// The single share predicate.
     pub fn validate(
         &mut self,
         share: &ShareSubmission<'_>,

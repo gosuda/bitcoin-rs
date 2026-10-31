@@ -1,5 +1,3 @@
-//! Native Stratum V2 mining-pool adapter.
-
 #![forbid(unsafe_code)]
 
 mod session;
@@ -36,7 +34,6 @@ pub const U24_MAX: usize = 0x00ff_ffff;
 pub const MAX_EXTRANONCE_WIRE_LEN: usize = 32;
 pub const MAX_FEED_LEN: usize = 1 << 17;
 
-/// One plaintext SV2 frame, decrypted (or about to be encrypted).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     pub extension_type: u16,
@@ -147,7 +144,6 @@ pub const ROLES: &[Role] = &[
     },
 ];
 
-/// Configuration refused before any connection state exists.
 #[derive(Debug, Eq, Error, PartialEq)]
 pub enum ConfigError {
     #[error("invalid limits: {0}")]
@@ -184,7 +180,6 @@ pub enum TransportError {
     Failed,
 }
 
-/// Any failure of a [`Connection`] call.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error(transparent)]
@@ -205,7 +200,6 @@ impl Error {
     }
 }
 
-/// The pool authority key pair, as raw 32-byte x-only keys.
 pub struct AuthorityKeypair {
     public: [u8; 32],
     secret: Zeroizing<[u8; 32]>,
@@ -241,8 +235,6 @@ enum Stage {
     Failed,
 }
 
-/// Encrypted length of a frame whose plaintext payload is `payload` bytes:
-/// the encrypted header, the payload, and one MAC per plaintext chunk.
 fn encrypted_frame_len(payload: usize) -> usize {
     ENCRYPTED_SV2_FRAME_HEADER_SIZE
         + payload
@@ -473,7 +465,6 @@ impl Transport {
     }
 }
 
-/// One authenticated pool connection: Noise transport plus protocol session.
 pub struct Connection {
     transport: Transport,
     session: ProtocolSession,

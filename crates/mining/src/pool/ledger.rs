@@ -1,5 +1,3 @@
-//! Durable PPLNS accounting with an external wallet signer boundary.
-
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -269,7 +267,6 @@ pub struct BlockRecorded {
     pub newly_recorded: bool,
 }
 
-/// Account balance. Invariant: `available + reserved + paid - deficit == credited allocations`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Balance {
     pub available_sat: u64,
@@ -288,7 +285,6 @@ pub struct RoundTransition {
     pub deficit_created_sat: u64,
 }
 
-/// Split a gross reward into `(pool_fee, net)`; the fee rounds down so miners get the remainder.
 pub fn split_pool_fee(gross_sat: u64, fee_bps: u16) -> Result<(u64, u64), LedgerError> {
     if fee_bps > 10_000 {
         return Err(LedgerError::InvalidInput("fee bps exceeds 10000"));
@@ -1076,8 +1072,6 @@ pub struct ConfirmedSpend {
     pub height: u32,
 }
 
-/// Authoritative observations of the ACTIVE chain. The ledger decides block, maturity, reorg and
-/// confirmation state only from these answers, never from job flags or submission receipts.
 pub trait ChainView {
     fn tip_height(&self) -> Result<u32, ChainViewError>;
 
@@ -1292,11 +1286,6 @@ impl From<bitcoin_rs_storage::StorageError> for LedgerError {
 }
 
 impl LedgerError {
-    /// True for share-crediting failures no retry can cure: the job is retired, the
-    /// header hash or secondary identity is already taken, or the block is already
-    /// recorded with a different claim.
-    ///
-    /// Protocol adapters must report these as rejected shares, never as a
     #[must_use]
     pub fn is_permanent_share_conflict(&self) -> bool {
         matches!(

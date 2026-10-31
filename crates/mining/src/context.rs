@@ -1,5 +1,3 @@
-//! Candidate chain context: version, work, and time.
-
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
@@ -20,9 +18,6 @@ pub struct MiningChainContext {
 }
 
 impl MiningChainContext {
-    /// # Errors
-    /// Returns [`ChainError::UnknownNode`] when `previous_tip_id` is not in
-    /// the tree and [`ChainError::HeightOverflow`] at the last height.
     pub fn resolve(
         tree: &BlockTree,
         network: Network,

@@ -1,5 +1,3 @@
-//! BIP22 reject-reason vocabulary for submission and header admission.
-
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::ConsensusError;
 use compact_str::CompactString;
@@ -10,7 +8,6 @@ const SIGOPS_LIMIT_REASON: &str = "bad-blk-sigops";
 
 pub const STALE_PARENT_REASON: &str = "inconclusive-not-best-prevblk";
 
-/// Core `GetRejectReason` strings for consensus failures (API-19).
 pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
     CompactString::from(match error {
         ConsensusError::EmptyInputs => "bad-txns-vin-empty",
@@ -84,7 +81,6 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
     })
 }
 
-/// `submitheader` rejection projection (API-13).
 pub fn header_reject_reason(error: ChainError) -> MiningControlError {
     MiningControlError::Rejected(match error {
         ChainError::MissingParent { prev_hash } => {
@@ -94,7 +90,6 @@ pub fn header_reject_reason(error: ChainError) -> MiningControlError {
     })
 }
 
-/// Keeps ordered-generate sigop preflight refusals in the API-30 error vocabulary.
 pub(crate) fn ordered_assembly_error(error: &MiningError) -> MiningControlError {
     if matches!(error, MiningError::CapacityExhausted { field: "sigops" }) {
         MiningControlError::Rejected(CompactString::from(format!(
