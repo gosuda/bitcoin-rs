@@ -239,18 +239,21 @@ pub(super) fn open_and_run(
 }
 
 fn publish_serving_query_engine(open: &OpenDerivedIndex, setup: &WorkerSetup<'_>) {
-    let query_engine = Arc::new(DerivedIndexQueryEngine::new(
-        Arc::clone(setup.runtime),
-        Arc::clone(&open.reader),
-        setup.block_tree.clone(),
-        setup.applied_tip.clone(),
-        setup.body_source.clone(),
-        QueryEngineLive {
-            utxo: setup.spec.utxo.clone(),
-            chain_transition: setup.spec.chain_transition.clone(),
-            enabled: setup.spec.enabled,
-        },
-    ));
+    let query_engine = Arc::new(
+        DerivedIndexQueryEngine::new(
+            Arc::clone(setup.runtime),
+            Arc::clone(&open.reader),
+            setup.block_tree.clone(),
+            setup.applied_tip.clone(),
+            setup.body_source.clone(),
+            QueryEngineLive {
+                utxo: setup.spec.utxo.clone(),
+                chain_transition: setup.spec.chain_transition.clone(),
+                enabled: setup.spec.enabled,
+            },
+        )
+        .with_scripthash_limit(setup.spec.scripthash_limit),
+    );
     publish_lifecycle(
         setup.lifecycle,
         setup.generation,
@@ -635,6 +638,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("must-not-be-created");
         let spec = DerivedIndexOpenSpec {
+            scripthash_limit: crate::runtime::DEFAULT_SCRIPTHASH_LIMIT,
             data_dir: dir.path().to_path_buf(),
             namespace: "txindex",
             storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,

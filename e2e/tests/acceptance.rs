@@ -7,7 +7,7 @@ use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain
 use bitcoin_rs_e2e::helpers::{
     bip34_coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
 };
-use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 #[derive(Clone, Copy)]
@@ -290,11 +290,88 @@ fn transaction_cases(
     Ok(valid)
 }
 
+fn spawn_isolated_core() -> Result<ProcessNode> {
+    ProcessNode::spawn_with(
+        Kind::Core,
+        &SpawnOptions {
+            extra_args: &["-maxconnections=0"],
+            ..Default::default()
+        },
+    )
+}
+
+fn spawn_isolated_node() -> Result<ProcessNode> {
+    ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            toml_override: Some(
+                "network = \"regtest\"\np2p_listen = []\ndns_seeds_enabled = false\n",
+            ),
+            ..Default::default()
+        },
+    )
+}
+
+#[test]
+fn coinbase_structure_finality_and_legacy_sigops_match_core() -> Result<()> {
+    let mut core = spawn_isolated_core()?;
+    let mut node = spawn_isolated_node()?;
+    let template = core_candidate(&mut core, &[])?;
+    let mut empty_outputs = template.clone();
+    empty_outputs.txdata[0].output.clear();
+    empty_outputs.txdata[0].input[0].witness = bitcoin::Witness::new();
+    update_merkle_and_pow(&mut empty_outputs)?;
+    let mut non_final = template.clone();
+    non_final.txdata[0].lock_time = bitcoin::absolute::LockTime::from_consensus(2);
+    non_final.txdata[0].input[0].sequence = Sequence::ZERO;
+    update_merkle_and_pow(&mut non_final)?;
+    let mut excess_sigops = template.clone();
+    excess_sigops.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0xae; 1_001]);
+    update_merkle_and_pow(&mut excess_sigops)?;
+    let mut at_sigop_limit = template;
+    at_sigop_limit.txdata[0].output[0].script_pubkey = ScriptBuf::from_bytes(vec![0xae; 1_000]);
+    update_merkle_and_pow(&mut at_sigop_limit)?;
+    for (name, block, allowed) in [
+        ("coinbase-empty-outputs", empty_outputs, false),
+        ("coinbase-non-final", non_final, false),
+        ("coinbase-excess-legacy-sigops", excess_sigops, false),
+        ("coinbase-inclusive-legacy-sigops", at_sigop_limit, true),
+    ] {
+        let before = shared_state(&mut core, &mut node)?;
+        let params = json!([{"mode": "proposal", "data": serialize_hex(&block)}]);
+        let reference = core.rpc("getblocktemplate", &params)?;
+        let candidate = node.rpc("getblocktemplate", &params)?;
+        assert_eq!(
+            reference.is_null(),
+            allowed,
+            "Core proposal {name}: {reference}"
+        );
+        assert_eq!(
+            candidate.is_null(),
+            allowed,
+            "native proposal {name}: {candidate}"
+        );
+        let after = shared_state(&mut core, &mut node)?;
+        assert_eq!(before, after, "proposal {name} must not mutate state");
+        fs::write(
+            node.evidence
+                .join(format!("acceptance-{name}-proposal.json")),
+            sonic_rs::to_vec_pretty(&json!({
+                "case": name, "block_hash": block.block_hash().to_string(),
+                "reference_reply": reference, "candidate_reply": candidate,
+                "before": before, "after": after,
+            }))?,
+        )?;
+        compare_case(&mut core, &mut node, name, Input::Block(&block), allowed)?;
+    }
+    Ok(())
+}
+
 // CORE-04
 #[test]
 fn curated_live_acceptance() -> Result<()> {
-    let mut core = ProcessNode::spawn(Kind::Core)?;
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    let mut core = spawn_isolated_core()?;
+    let mut node = spawn_isolated_node()?;
     let funds = common_active_chain(&mut core, &mut node)?;
     let valid = transaction_cases(&mut core, &mut node, &funds)?;
     let valid_block = core_candidate(&mut core, &[])?;

@@ -1,3 +1,4 @@
+use super::serve_getpkgtxns;
 use bitcoin_rs_consensus::ValidationEngine;
 use std::cell::RefCell;
 use std::io::Cursor;
@@ -975,12 +976,33 @@ fn oversized_getdata_inventory_is_protocol_error() {
     assert_eq!(peer_snapshot(&peer), before);
 }
 
+#[test]
+fn panicking_package_send_reverts_every_broadcast_mark() {
+    let tx = dummy_tx(0x51);
+    let inventory = FakeTxInventory::empty().with_resident_tx(tx.clone());
+    let request = GetPkgTxns {
+        wtxids: vec![tx.wtxid()],
+    };
+    let headroom = || true;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut send = |_message: Message| -> Result<(), PeerError> { panic!("writer died") };
+        serve_getpkgtxns(Some(&inventory), &request, &headroom, &mut send)
+    }));
+    assert!(result.is_err(), "the panic must propagate");
+    assert_eq!(
+        *inventory.marks.lock(),
+        vec!["sent", "reverted"],
+        "an unwinding serve must revert the mark it took"
+    );
+}
+
 struct FakeTxInventory {
     txs_by_txid: hashbrown::HashMap<bitcoin::Txid, Tx>,
     txs_by_wtxid: hashbrown::HashMap<bitcoin::Wtxid, Tx>,
     have_hashes: hashbrown::HashSet<[u8; 32]>,
     resident: Vec<Arc<Tx>>,
     ancestor_packages: hashbrown::HashMap<Wtxid, Vec<Wtxid>>,
+    marks: parking_lot::Mutex<Vec<&'static str>>,
 }
 
 impl FakeTxInventory {
@@ -991,6 +1013,7 @@ impl FakeTxInventory {
             have_hashes: hashbrown::HashSet::new(),
             resident: Vec::new(),
             ancestor_packages: hashbrown::HashMap::new(),
+            marks: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -1019,6 +1042,18 @@ impl FakeTxInventory {
 }
 
 impl TxInventory for FakeTxInventory {
+    fn transaction_sent(&self, _wtxid: Wtxid) {
+        self.marks.lock().push("sent");
+    }
+
+    fn transaction_send_committed(&self, _wtxid: Wtxid) {
+        self.marks.lock().push("committed");
+    }
+
+    fn transaction_send_failed(&self, _wtxid: Wtxid) {
+        self.marks.lock().push("reverted");
+    }
+
     fn have_tx(&self, hash: Hash256, _hash_is_wtxid: bool) -> bool {
         self.have_hashes.contains(hash.as_byte_array())
     }

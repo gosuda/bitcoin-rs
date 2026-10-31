@@ -252,6 +252,7 @@ pub(super) struct SingleBlockBody {
     pub(super) hash: BlockHash,
     pub(super) body: Vec<u8>,
     pub(super) full_reads: AtomicUsize,
+    range_reads: AtomicUsize,
 }
 
 impl BlockBodySource for SingleBlockBody {
@@ -276,6 +277,7 @@ impl BlockBodySource for SingleBlockBody {
         if height != self.height || hash != self.hash {
             return None;
         }
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         self.body.get(start..end).map(<[u8]>::to_vec)
@@ -322,6 +324,7 @@ impl QueryFixture {
         });
         let body = if config.retain_body && blocks.len() == 1 {
             Some(Arc::new(SingleBlockBody {
+                range_reads: AtomicUsize::new(0),
                 height: heights[0],
                 hash: blocks[0].block_hash(),
                 body: consensus_bytes(&blocks[0]),
@@ -332,6 +335,7 @@ impl QueryFixture {
         };
         let multi_body = if config.retain_body && blocks.len() > 1 {
             Some(Arc::new(MultiBlockBody {
+                range_reads: AtomicUsize::new(0),
                 bodies: heights
                     .iter()
                     .zip(blocks.iter())
@@ -1014,6 +1018,7 @@ fn confirmed_history_serves_stored_occurrences_without_block_bodies()
 }
 
 struct MultiBlockBody {
+    range_reads: AtomicUsize,
     bodies: Vec<(u32, BlockHash, Vec<u8>)>,
     full_reads: AtomicUsize,
 }
@@ -1045,6 +1050,7 @@ impl BlockBodySource for MultiBlockBody {
             .bodies
             .iter()
             .find(|(block_height, block_hash, _)| *block_height == height && *block_hash == hash)?;
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         body.get(start..end).map(<[u8]>::to_vec)
@@ -1464,6 +1470,15 @@ fn unspent_outputs_orders_live_rows_by_height_then_txid() -> Result<(), crate::p
     })?;
 
     let unspent = fixture.engine.unspent_outputs(scripthash)?;
+    assert_eq!(
+        fixture
+            .engine
+            .with_scripthash_limit(0)
+            .unspent_outputs(scripthash),
+        Err(TxQueryError::Unavailable(
+            TxUnavailableCause::ScriptHashLimitExceeded { limit: 0 }
+        ))
+    );
     assert_eq!(unspent.len(), expected.len());
     for (record, (height, txid, vout)) in unspent.iter().zip(expected.iter()) {
         assert_eq!(record.height, *height);

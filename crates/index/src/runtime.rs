@@ -66,8 +66,8 @@ mod startup;
 pub use startup::open_derived_index_store_on_worker;
 
 pub use capability::DerivedIndexCapability;
-pub use query::DerivedIndexQueryEngine;
 pub(crate) use query::QueryEngineLive;
+pub use query::{DEFAULT_SCRIPTHASH_LIMIT, DerivedIndexQueryEngine};
 use query::{IndexProgress, map_historical_error};
 
 #[derive(Debug)]
@@ -226,6 +226,14 @@ impl DerivedIndexQuery for DerivedIndexQueryAdapter {
 }
 
 impl ScriptIndexQuery for DerivedIndexQueryAdapter {
+    fn history_page(
+        &self,
+        script: ScriptHash,
+        last: Option<Txid>,
+        limit: usize,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        self.load_engine()?.history_page(script, last, limit)
+    }
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,
@@ -395,6 +403,7 @@ impl DerivedIndexQueryAdapter {
 }
 
 pub struct DerivedIndexOpenSpec {
+    pub scripthash_limit: usize,
     pub data_dir: PathBuf,
     pub namespace: &'static str,
     pub storage_backend: bitcoin_rs_storage::StorageBackend,

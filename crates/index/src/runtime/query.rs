@@ -14,6 +14,8 @@ mod filters;
 mod scripts;
 mod transactions;
 
+pub const DEFAULT_SCRIPTHASH_LIMIT: usize = 25_000;
+
 pub(super) struct QueryBudget {
     remaining_rows: usize,
     remaining_bytes: usize,
@@ -217,6 +219,7 @@ pub(super) fn map_historical_error(error: TxQueryError) -> HistoricalQueryError 
 
 #[derive(Clone)]
 pub struct DerivedIndexQueryEngine {
+    scripthash_limit: usize,
     runtime: Arc<DerivedIndexRuntime>,
     reader: Arc<dyn IndexReader>,
     block_tree: bitcoin_rs_chain::BlockTreeReader,
@@ -245,6 +248,7 @@ impl DerivedIndexQueryEngine {
         live: QueryEngineLive,
     ) -> Self {
         Self {
+            scripthash_limit: DEFAULT_SCRIPTHASH_LIMIT,
             runtime,
             reader,
             block_tree,
@@ -254,6 +258,18 @@ impl DerivedIndexQueryEngine {
             chain_transition: live.chain_transition,
             enabled: live.enabled,
         }
+    }
+
+    pub(crate) fn with_scripthash_limit(mut self, limit: usize) -> Self {
+        self.scripthash_limit = limit;
+        self
+    }
+
+    fn script_budget(&self, budget: &mut QueryBudget) {
+        // One funding read, one spender read and their fallbacks per entry.
+        // The shared row/byte bounds still apply to the entire request.
+        budget.remaining_body_reads = self.scripthash_limit.saturating_mul(4).saturating_add(1);
+        budget.remaining_scans = self.scripthash_limit.saturating_mul(2).saturating_add(2);
     }
 
     fn query_health(&self) -> Result<(), TxQueryError> {
@@ -659,6 +675,27 @@ impl DerivedIndexQuery for DerivedIndexQueryEngine {
 }
 
 impl ScriptIndexQuery for DerivedIndexQueryEngine {
+    fn history_page(
+        &self,
+        script: ScriptHash,
+        last: Option<Txid>,
+        limit: usize,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        self.with_snapshot(
+            IndexCapabilities::SCRIPT_HISTORY,
+            |snapshot, tip, budget, floors| {
+                self.script_budget(budget);
+                let prefix = ReadPrefix {
+                    anchor_id: tip.tip_id,
+                    height: tip.height,
+                    hash: tip.hash,
+                    floor: floors.script_history,
+                    bound: PrefixBound::ExactTip,
+                };
+                Self::history_page_for(snapshot, &prefix, budget, script, last, limit)
+            },
+        )
+    }
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,
@@ -666,6 +703,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
+                self.script_budget(budget);
                 let prefix = ReadPrefix {
                     anchor_id: tip.tip_id,
                     height: tip.height,
@@ -685,6 +723,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget, floors| {
+                self.script_budget(budget);
                 let prefix = ReadPrefix {
                     anchor_id: tip.tip_id,
                     height: tip.height,
@@ -692,7 +731,7 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
                     floor: floors.script_history,
                     bound: PrefixBound::ExactTip,
                 };
-                Self::confirmed_history_for(snapshot, &prefix, budget, scripthash)
+                self.confirmed_history_for(snapshot, &prefix, budget, scripthash)
             },
         )
     }

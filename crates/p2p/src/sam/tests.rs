@@ -1597,8 +1597,9 @@ fn bridge_side_root_loss_recovers_the_same_identity_once() -> TestResult {
     )?;
     let session = SamSession::establish(fake.addr, &priv_b64(), Duration::from_secs(5))?;
     fake.root_closed
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(LIVENESS)
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e))?;
+    wait_until_root_is_dead(&session)?;
 
     for _ in 0..2 {
         let mut stream = session
@@ -1610,7 +1611,7 @@ fn bridge_side_root_loss_recovers_the_same_identity_once() -> TestResult {
         assert_eq!(byte, *b"x");
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + LIVENESS;
     let mut commands = Vec::new();
     let mut creates = 0_usize;
     while creates < 2 && std::time::Instant::now() < deadline {

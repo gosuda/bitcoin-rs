@@ -181,6 +181,77 @@ fn pow_valid_hook_skips_non_final_commit_intent_block() -> TestResult {
 }
 
 #[test]
+fn pow_valid_hook_requires_transaction_structure_and_legacy_sigop_budget() -> TestResult {
+    for (sigops, empty_outputs) in [(1_000, false), (1_001, false), (0, true)] {
+        let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        seed_genesis(&handles)?;
+        let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
+        handles
+            .set_pow_valid_block(recording_hook(&calls))
+            .map_err(|_| TestError::HookAlreadyInstalled("hook installs once"))?;
+        let mut block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
+        if empty_outputs {
+            block.txs[0].outputs.clear();
+        } else {
+            block.txs[0].outputs[0].script_pubkey =
+                vec![bitcoin_rs_script::opcode::OP_CHECKMULTISIG; sigops].into();
+        }
+        block.header.merkle_root =
+            merkle_root(&block.txs).ok_or(TestError::Missing("merkle root"))?;
+        mine_block_to_declared_target(&mut block)?;
+        let snapshot = handles.chain_snapshot();
+        let tip = handles
+            .applied_tip_snapshot()
+            .ok_or(TestError::Missing("tip"))?;
+        let head = handles.durable_head.load()?;
+        let stats = handles.coin_stats.snapshot().to_bytes();
+        let result = handles.apply_block(&BlockPayload::from_local(block));
+        if sigops == 1_000 {
+            result?;
+            assert_eq!(calls.lock().expect("hook calls").len(), 1);
+            continue;
+        }
+        if empty_outputs {
+            assert!(
+                matches!(
+                    result,
+                    Err(ApplyError::Consensus(
+                        bitcoin_rs_consensus::ConsensusError::EmptyOutputs
+                    ))
+                ),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(ApplyError::Consensus(
+                        bitcoin_rs_consensus::ConsensusError::SigopsLimit {
+                            cost: 80_080,
+                            max: 80_000
+                        }
+                    ))
+                ),
+                "{result:?}"
+            );
+        }
+        assert!(calls.lock().expect("hook calls").is_empty());
+        assert_eq!(handles.chain_snapshot(), snapshot);
+        assert_eq!(
+            handles
+                .applied_tip_snapshot()
+                .ok_or(TestError::Missing("tip"))?
+                .hash,
+            tip.hash
+        );
+        assert_eq!(handles.durable_head.load()?, head);
+        assert_eq!(handles.coin_stats.snapshot().to_bytes(), stats);
+        assert_eq!(handles.utxo.len(), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn pow_valid_hook_skips_bip34_violating_commit_intent_block() -> TestResult {
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let calls: HookCalls = Arc::new(Mutex::new(Vec::new()));
@@ -209,7 +280,7 @@ fn pow_valid_hook_skips_bip34_violating_commit_intent_block() -> TestResult {
         .inputs
         .first_mut()
         .ok_or(TestError::Missing("coinbase input"))?
-        .script_sig = vec![0x51, 0x51].into();
+        .script_sig = vec![0x51, 0x00].into();
     violating.header.merkle_root =
         merkle_root(&violating.txs).ok_or(TestError::Missing("merkle root of non-empty block"))?;
     mine_block_to_declared_target(&mut violating).map_err(|source| TestError::Regrind {

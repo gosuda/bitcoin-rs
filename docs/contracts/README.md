@@ -7,7 +7,7 @@
 - [architecture.md](architecture.md): `ARCH-01`–`ARCH-07`, `ARCH-07a`, `ARCH-07b`, `ARCH-08`–`ARCH-09`.
 - [campaign-corpora.md](campaign-corpora.md): `CORP-00`–`CORP-06`.
 - [chain-events.md](chain-events.md): `EVT-01`–`EVT-06`.
-- [core-differential.md](core-differential.md): `CORE-01`–`CORE-06`.
+- [core-differential.md](core-differential.md): `CORE-01`–`CORE-07`.
 - [dependency-range.md](dependency-range.md): `DEP-01`–`DEP-03`, `FEAT-01`–`FEAT-02`.
 - [ecosystem-compatibility.md](ecosystem-compatibility.md): `ECO-01`–`ECO-09`.
 - [embedding.md](embedding.md): `EMB-01`–`EMB-10`.

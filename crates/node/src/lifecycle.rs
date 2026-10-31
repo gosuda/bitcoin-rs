@@ -17,7 +17,7 @@ use bitcoin_rs_rpc::{
 
 use crossbeam_channel::bounded;
 
-use crate::config::{NodeConfig, RuntimeInputs};
+use crate::config::{ConfigError, NodeConfig, RuntimeInputs};
 use crate::embed::Node;
 use crate::event_loop::EventLoop;
 use crate::run::RunError;
@@ -226,6 +226,7 @@ fn rpc_context_handles(
         debug_log_path: Some(state.data_dir().join("debug.log")),
     }
 }
+
 fn bind_rpc_with_pool(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
@@ -236,7 +237,11 @@ fn bind_rpc_with_pool(
     let rpc_auth = Arc::new(config.rpc.auth.to_rpc_auth(&config.data_dir)?);
     let handles = rpc_context_handles(state, mining_control, block_body_source, pool);
     let context = Context::from_handles(handles)
-        .with_esplora_derived_index(state.esplora_derived_index_query());
+        .with_esplora_derived_index(state.esplora_derived_index_query())
+        .with_esplora_query_limit(
+            std::num::NonZeroUsize::new(config.rpc.esplora_max_queries)
+                .ok_or(ConfigError::EsploraMaxQueries)?,
+        );
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(

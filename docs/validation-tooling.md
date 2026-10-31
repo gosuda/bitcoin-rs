@@ -17,6 +17,7 @@ Per [ecosystem-compatibility](contracts/ecosystem-compatibility.md) (`ECO-02`, `
 | [Ecosystem compatibility](#10-external-ecosystem-compatibility-matrix) | Per-surface evidence |
 | [USDT observability](#11-usdt--bpftrace-observability-validation) | ABI tested; live tracing planned |
 | [Measured campaign runner & analyzer](#12-measured-campaign-runner-and-analyzer) | Harness tested; campaign pending |
+| [Core functional suite](#13-core-functional-suite-against-the-node-binary) | Harness tested; campaign pending |
 ## 1. Live Bitcoin Core P2P and chain-identity differential
 Tier: externally verified. Contract: [core-differential](contracts/core-differential.md) (`CORE-01`, `CORE-02`, `CORE-03`, `CORE-05`, `CORE-06`). Owners: `scripts/install-bitcoind.sh` (`scripts/install-bitcoind.ps1` on Windows), `scripts/run-p2p-core-interop.sh`, `crates/p2p/tests/core_interop_live.rs`. Fixtures: BIP324 vectors `crates/p2p/tests/data/bip324/README.md`; AddrMan/ASMap `crates/p2p/tests/support/README.md`, `crates/p2p/tests/data/asmap-core-v31.1.README.md`, `crates/p2p/tests/data/asmap-linked-ipv4-core-v31.1.README.md`, `crates/p2p/tests/data/addrman-canonical-v1-shared.json`; no historical-schema migration fixtures; pre-release AddrMan freeze: [p2p-compatibility](policies/p2p-compatibility.md) section 7. Verifies pinned Core 31.1 (SHA-256 in `crates/rpc/core-compat.toml`) regtest handshake, IBD, BIP152 A-C, and tip agreement (`getblockcount`, `getbestblockhash`, `getblockchaininfo.{chain,blocks}`). Also verifies direct `inv`/`headers`/`cmpctblock` wire comparison across a reorg and bidirectional BIP324 v2 (main node stays v1) with Core ping replies. Compact-block relay counts are diagnostic per `ECO-09`.
 ```sh
@@ -100,4 +101,9 @@ Tier: in-tree benchmark campaign harness (diagnostic, not product-cell qualifica
 ```sh
 python3 tools/benchmark-campaign/filesystem.py identify --path /srv/scratch
 python3 tools/benchmark-campaign/filesystem.py sample --path /srv/scratch
+```
+## 13. Core functional suite against the node binary
+Tier: in-tree harness. Contract: [core-differential](contracts/core-differential.md) (`CORE-07`). Owners: `tools/core-functional/` (extraction `fetch-core-tests.sh`, runner `run.sh` + `tools/core-functional/bin/runner.py`, adapter `bin/bitcoind-wrapper`, client shims `shim/sitecustomize.py`); measured record [tools/core-functional/README.md](../tools/core-functional/README.md). Runs Bitcoin Core v31.1's `test/functional` suite — extracted from a local checkout at a verified tag with a `PROVENANCE` stamp, no Core code vendored or modified — against a built bitcoin-rs binary through an argv/conf/cookie adapter with disclosed, env-disable-able client shims. Status: harness tested; measured campaign pending — this tree contains no measured pass/skip/fail counts (the lane's README records "no measured results yet"); the campaign's runs, per-test tables, and gap ledger land with the lane's evidence PR (issue #1757), and no claim extrapolates beyond the selected candidates. Host prerequisite: a local Core checkout; CI does not run the lane.
+```sh
+python3 tools/core-functional/tests/wrapper_smoke.py
 ```

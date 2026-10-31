@@ -230,3 +230,8 @@ impl From<crate::WindowApplyError> for TestError {
         Self::WindowApply(Box::new(error))
     }
 }
+impl From<&'static str> for TestError {
+    fn from(error: &'static str) -> Self {
+        Self::Missing(error)
+    }
+}

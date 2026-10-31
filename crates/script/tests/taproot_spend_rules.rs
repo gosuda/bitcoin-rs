@@ -69,6 +69,72 @@ fn native_complete_spends_match_independent_bip341_cases() {
 }
 
 #[test]
+fn tapscript_codeseparator_uses_decoded_opcode_positions() {
+    let prevout = bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(100_000),
+        script_pubkey: fixture::codeseparator_funding_script(),
+    };
+    for case in fixture::codeseparator_cases(outpoint(), &prevout) {
+        for flags in [VerifyFlags::MANDATORY, VerifyFlags::STANDARD] {
+            let result = prepared(&case.tx, &prevout, flags);
+            if case.accepted {
+                assert_eq!(result, Ok(true), "{} {flags:?}", case.name);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::SchnorrSig
+                    }),
+                    "{} {flags:?}",
+                    case.name
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "kernel")]
+fn tapscript_codeseparator_positions_match_kernel() {
+    let prevout = bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(100_000),
+        script_pubkey: fixture::codeseparator_funding_script(),
+    };
+    for case in fixture::codeseparator_cases(outpoint(), &prevout) {
+        let tx: Tx = bitcoin_rs_primitives::deserialize(&bitcoin::consensus::serialize(&case.tx))
+            .expect("native decode");
+        let output = TxOut {
+            value: bitcoin_rs_primitives::Amount::from_sat(prevout.value.to_sat()),
+            script_pubkey: Script::from_bytes(prevout.script_pubkey.to_bytes()),
+        };
+        let rows = [(tx.inputs[0].previous_output, output)];
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &tx,
+            &rows,
+            VerifyFlags::MANDATORY,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+            None,
+        );
+        assert_eq!(result.is_ok(), case.accepted, "{}: {result:?}", case.name);
+        if !case.accepted {
+            assert!(
+                matches!(
+                    result,
+                    Err(bitcoin_rs_consensus::ConsensusError::Script { .. })
+                ),
+                "kernel infrastructure error is not a rejection: {result:?}"
+            );
+        }
+        assert_eq!(
+            prepared(&case.tx, &prevout, VerifyFlags::MANDATORY).is_ok(),
+            result.is_ok(),
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[test]
 fn appended_default_and_malformed_sighash_bytes_are_explicit_errors() {
     let prevout = output();
     for case in fixture::cases(outpoint(), &prevout) {

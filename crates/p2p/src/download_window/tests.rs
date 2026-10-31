@@ -3226,7 +3226,7 @@ fn owned_fetch_preserves_prefix_probe_attempted_owner() {
 }
 
 #[test]
-fn owned_fetch_respects_window_capacity_and_frontier() {
+fn owned_fetch_installs_active_height_below_cursor() {
     let mut window = DownloadWindow::new(SyncBudget {
         max_pending_blocks: 1,
         ..test_budget()
@@ -3251,8 +3251,75 @@ fn owned_fetch_respects_window_capacity_and_frontier() {
     .unwrap_or_else(|| panic!("non-empty request"));
     window.mark_requested(&test_stager(&window), &request, owner, now);
     window.mark_owned_fetch(&mut test_stager(&window), owner, hash(0xb1), 3, now);
-    assert!(!window.contains_pending(&hash(0xb1)));
+    assert!(window.contains_pending(&hash(0xb1)));
     assert_eq!(window.next_request_height, 11);
+}
+
+#[test]
+fn skipped_item_reissued_after_later_delivery() {
+    let mut window = DownloadWindow::new(test_budget());
+    let now = Instant::now();
+    let owner = test_source(healthy_addr());
+    let request = super::non_empty_request(
+        owner,
+        vec![
+            super::PeerRequestEntry {
+                hash: hash(0xd3),
+                height: 3,
+            },
+            super::PeerRequestEntry {
+                hash: hash(0xd4),
+                height: 4,
+            },
+            super::PeerRequestEntry {
+                hash: hash(0xd5),
+                height: 5,
+            },
+        ],
+        6,
+    )
+    .unwrap_or_else(|| panic!("non-empty request"));
+    window.mark_requested(&test_stager(&window), &request, owner, now);
+    let delivered_at = now + Duration::from_secs(1);
+    window.mark_received_from(hash(0xd4), 80, Some(owner), delivered_at);
+    window.mark_received_from(hash(0xd5), 80, Some(owner), delivered_at);
+    assert!(
+        window.expire_pending(delivered_at).is_empty(),
+        "the earlier item must stay pending before the backoff elapses"
+    );
+    assert!(window.contains_pending(&hash(0xd3)));
+    let past_backoff = now + Duration::from_secs(3);
+    assert!(
+        !window.owner_download_expired(owner, window.active_downloading_peers(), past_backoff),
+        "the 30 s owner override must still hold the owner live"
+    );
+    let expired = window.expire_pending(past_backoff);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].hash, hash(0xd3));
+    assert!(!window.contains_pending(&hash(0xd3)));
+}
+
+#[test]
+fn silent_item_without_later_delivery_never_expires() {
+    let mut window = DownloadWindow::new(test_budget());
+    let now = Instant::now();
+    let owner = test_source(healthy_addr());
+    let request = super::non_empty_request(
+        owner,
+        vec![super::PeerRequestEntry {
+            hash: hash(0xd3),
+            height: 3,
+        }],
+        4,
+    )
+    .unwrap_or_else(|| panic!("non-empty request"));
+    window.mark_requested(&test_stager(&window), &request, owner, now);
+    let past_backoff = now + Duration::from_secs(3);
+    assert!(
+        window.expire_pending(past_backoff).is_empty(),
+        "a peer busy sending this very block has no later delivery, so the item stays"
+    );
+    assert!(window.contains_pending(&hash(0xd3)));
 }
 
 #[test]

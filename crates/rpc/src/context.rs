@@ -434,6 +434,7 @@ pub struct Context {
     pub debug_log_path: Option<PathBuf>,
     server_bound_at: Mutex<Option<Instant>>,
     block_render_budget: Arc<BlockRenderBudget>,
+    pub(crate) esplora_admission: crate::esplora::admission::Admission,
     pub(crate) active_calls: ActiveCalls,
 }
 
@@ -657,6 +658,9 @@ impl Context {
             debug_log_path,
             server_bound_at: Mutex::new(None),
             block_render_budget: Arc::new(BlockRenderBudget::new()),
+            esplora_admission: crate::esplora::admission::Admission::new(
+                crate::esplora::DEFAULT_MAX_QUERIES,
+            ),
             active_calls: ActiveCalls::new(),
         }
     }
@@ -675,6 +679,13 @@ impl Context {
         derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     ) -> Self {
         self.indexes.esplora_tx_index = derived_index;
+        self
+    }
+
+    /// Sets the aggregate script-query allowance shared by all HTTP listeners.
+    #[must_use]
+    pub fn with_esplora_query_limit(mut self, limit: std::num::NonZeroUsize) -> Self {
+        self.esplora_admission = crate::esplora::admission::Admission::new(limit);
         self
     }
 

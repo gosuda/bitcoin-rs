@@ -27,6 +27,9 @@ pub struct MempoolEntry {
     pub descendant_fee_delta: i128,
     pub time: u64,
     pub unbroadcast: bool,
+    pub broadcast_pending: bool,
+    pub broadcast_done: bool,
+    pub broadcast_marks: u32,
     pub height: u32,
     pub sigop_cost: u32,
 }
@@ -69,6 +72,9 @@ impl MempoolEntry {
             descendant_fee_delta: 0,
             time,
             unbroadcast: false,
+            broadcast_pending: false,
+            broadcast_done: false,
+            broadcast_marks: 0,
             height,
         }
     }

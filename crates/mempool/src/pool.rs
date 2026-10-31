@@ -759,6 +759,9 @@ impl Mempool {
         if unbroadcast {
             self.derived.unbroadcast.insert(wtxid);
         }
+        if unbroadcast && let Some(entry) = self.entry_mut(id) {
+            entry.broadcast_pending = true;
+        }
         for output in &tx.outputs {
             self.derived
                 .funding
@@ -942,15 +945,69 @@ impl Mempool {
     }
 
     pub(crate) fn set_unbroadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid, pending: bool) {
-        if let Some(&id) = self.derived.by_wtxid.get(&wtxid)
-            && let Some(entry) = self.entry_mut(id)
-        {
-            entry.unbroadcast = pending;
-            if pending {
-                self.derived.unbroadcast.insert(wtxid);
-            } else {
-                self.derived.unbroadcast.remove(&wtxid);
+        self.broadcast_transition(wtxid, |entry| entry.broadcast_pending = pending);
+    }
+
+    /// Records a serve attempt's mark, taken before its bytes are sent.
+    pub(crate) fn mark_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.broadcast_transition(wtxid, |entry| {
+            entry.broadcast_marks = entry.broadcast_marks.saturating_add(1);
+        });
+    }
+
+    /// A marked serve attempt committed: initial broadcast completed. A
+    /// commit without a live mark belongs to a replaced entry and is
+    /// ignored.
+    pub(crate) fn commit_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.broadcast_transition(wtxid, |entry| {
+            if entry.broadcast_marks > 0 {
+                entry.broadcast_marks -= 1;
+                entry.broadcast_done = true;
             }
+        });
+    }
+
+    /// A marked serve attempt failed. The flag returns only when the entry
+    /// is still pending and no send ever committed or remains in flight, so
+    /// an earlier failure cannot overwrite a peer's successful send or
+    /// revive a replaced entry.
+    pub(crate) fn restore_broadcast(&mut self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.broadcast_transition(wtxid, |entry| {
+            entry.broadcast_marks = entry.broadcast_marks.saturating_sub(1);
+        });
+    }
+
+    /// Runs a broadcast-state transition on the live entry for `wtxid`,
+    /// then recomputes the effective `unbroadcast` flag. A missing entry —
+    /// evicted or replaced — is left alone.
+    fn broadcast_transition(
+        &mut self,
+        wtxid: bitcoin_rs_primitives::Wtxid,
+        transition: impl FnOnce(&mut MempoolEntry),
+    ) {
+        let Some(&id) = self.derived.by_wtxid.get(&wtxid) else {
+            return;
+        };
+        if let Some(entry) = self.entry_mut(id) {
+            transition(entry);
+        }
+        self.sync_unbroadcast(id, wtxid);
+    }
+
+    /// Recomputes `entry.unbroadcast` from pending intent, in-flight marks,
+    /// and the done latch, keeping the derived index in step.
+    fn sync_unbroadcast(&mut self, id: EntryId, wtxid: bitcoin_rs_primitives::Wtxid) {
+        let Some(unbroadcast) = self.entry_mut(id).map(|entry| {
+            entry.unbroadcast =
+                entry.broadcast_pending && !entry.broadcast_done && entry.broadcast_marks == 0;
+            entry.unbroadcast
+        }) else {
+            return;
+        };
+        if unbroadcast {
+            self.derived.unbroadcast.insert(wtxid);
+        } else {
+            self.derived.unbroadcast.remove(&wtxid);
         }
     }
 

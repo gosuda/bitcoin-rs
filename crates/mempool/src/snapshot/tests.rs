@@ -122,6 +122,7 @@ fn restores_dependencies_priorities_and_gateway_publication() -> TestResult {
     admit(&source, &parent, &chain)?;
     admit(&source, &child, &chain)?;
     source.mark_broadcast(parent.wtxid());
+    source.commit_broadcast(parent.wtxid());
     source.prioritise(parent.txid(), 500)?;
     let absent = Txid(Hash256::from_le_bytes(&[8; 32]));
     source.prioritise(absent, i64::MIN)?;

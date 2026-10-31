@@ -22,6 +22,15 @@ fn native_taproot_op_success_matches_pinned_core() {
     );
 }
 
+#[test]
+fn native_taproot_codeseparator_matches_pinned_core() {
+    compare_cases(
+        &fixture::codeseparator_funding_script(),
+        fixture::codeseparator_cases,
+        "taproot-codeseparator.json",
+    );
+}
+
 fn compare_cases(
     script: &bitcoin::Script,
     cases: fn(bitcoin::OutPoint, &bitcoin::TxOut) -> Vec<fixture::Case>,

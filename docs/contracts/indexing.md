@@ -105,6 +105,21 @@ Owners:
 
 ### `IDX-03`: Query gating and snapshot consistency
 
+- Script history and live queries have a configurable `scripthash-limit` (default 25,000 candidate funding positions, matching outputs, or live locators).
+- Query scan and read counts scale with this allowance.
+- The shared row and byte budgets stay in force.
+- Esplora maps the explicit script-limit refusal to HTTP 422.
+- Statistics remain exact or fail.
+- Limits never produce capped successful statistics.
+- History pages retain the full funding and outpoint scan because an old output can have a recent spender.
+- Spender candidates are grouped by height and position.
+- Bodies strictly below a proven page boundary need not be resolved.
+- Same-height ties, exclusive cursors, compact-prefix verification, and fallback reads retain their existing semantics.
+- This is not an O(page-size) history index.
+- Proof:
+  - `crates/index/src/runtime/query_tests.rs`:
+    - `high_activity_history_is_exact_and_shared_spenders_are_read_once`
+    - `history_pages_include_recent_spends_of_old_funding_and_skip_old_spender_bodies`
 - Ready invariant: `ready` holds if and only if `cursor == applied_tip` on the active chain.
 - `DerivedIndexQueryEngine::with_snapshot` and `index_info` MUST gate every read with three conditions:
   - 1: The worker runtime MUST be healthy (neither `failed` nor `shutdown`).

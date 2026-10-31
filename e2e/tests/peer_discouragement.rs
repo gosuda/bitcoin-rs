@@ -45,11 +45,12 @@ fn compare(kind: Kind, protected: bool) -> Result<()> {
         peer.ping_barrier(0x1388_0002, Instant::now() + Duration::from_secs(5))?;
         assert_eq!(node.rpc("getconnectioncount", &json!([]))?, json!(1));
     } else {
-        node.wait_for(
+        node.wait_for_detail(
             "local invalid peer disconnect",
             Duration::from_secs(5),
-            |node| {
+            |node, detail| {
                 let count = node.rpc("getconnectioncount", &json!([]))?;
+                *detail = format!("last connection count {count}");
                 Ok((count == 0).then_some(()))
             },
         )?;

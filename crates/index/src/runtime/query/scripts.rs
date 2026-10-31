@@ -14,15 +14,28 @@ fn storage_error(error: impl core::fmt::Display) -> TxQueryError {
 }
 
 impl DerivedIndexQueryEngine {
+    fn check_script_limit(&self, entries: usize) -> Result<(), TxQueryError> {
+        if entries > self.scripthash_limit {
+            return Err(TxQueryError::Unavailable(
+                TxUnavailableCause::ScriptHashLimitExceeded {
+                    limit: self.scripthash_limit,
+                },
+            ));
+        }
+        Ok(())
+    }
     fn scan_funding_rows(
+        &self,
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
-        let limit = budget.next_scan_limit()?;
+        let mut limit = budget.next_scan_limit()?;
+        limit.max_rows = limit.max_rows.min(self.scripthash_limit.saturating_add(1));
         let scan = snapshot
             .funding_rows(scripthash, limit)
             .map_err(storage_error)?;
+        self.check_script_limit(scan.rows.len())?;
         budget.accept_scan(scan)
     }
 
@@ -39,14 +52,17 @@ impl DerivedIndexQueryEngine {
     }
 
     fn scan_live_rows(
+        &self,
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
     ) -> Result<Vec<crate::ScriptLiveRow>, TxQueryError> {
-        let limit = budget.next_scan_limit()?;
+        let mut limit = budget.next_scan_limit()?;
+        limit.max_rows = limit.max_rows.min(self.scripthash_limit.saturating_add(1));
         let scan: ScriptLiveScan = snapshot
             .live_rows(scripthash, limit)
             .map_err(storage_error)?;
+        self.check_script_limit(scan.rows.len())?;
         budget.accept_live_scan(scan)
     }
 
@@ -148,7 +164,7 @@ impl DerivedIndexQueryEngine {
                 },
             ));
         }
-        let rows = Self::scan_funding_rows(snapshot, budget, scripthash)?;
+        let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
         let mut funding_outputs = Vec::new();
         for row in rows {
@@ -216,8 +232,6 @@ impl DerivedIndexQueryEngine {
             });
         }
 
-        history.sort_by(|a, b| a.height.cmp(&b.height).then_with(|| a.txid.cmp(&b.txid)));
-        history.dedup_by(|a, b| a.txid == b.txid && a.height == b.height);
         funding.sort_by(|a, b| {
             a.height
                 .cmp(&b.height)
@@ -230,6 +244,7 @@ impl DerivedIndexQueryEngine {
     }
 
     pub(super) fn confirmed_history_for(
+        &self,
         snapshot: &dyn TxIndexSnapshot,
         prefix: &ReadPrefix,
         budget: &mut QueryBudget,
@@ -242,7 +257,7 @@ impl DerivedIndexQueryEngine {
                 },
             ));
         }
-        let rows = Self::scan_funding_rows(snapshot, budget, scripthash)?;
+        let rows = self.scan_funding_rows(snapshot, budget, scripthash)?;
         let mut history = Vec::new();
         for row in rows {
             let height = row.row.height();
@@ -265,6 +280,24 @@ impl DerivedIndexQueryEngine {
         history.sort_by(|a, b| a.height.cmp(&b.height).then_with(|| a.txid.cmp(&b.txid)));
         history.dedup_by(|a, b| a.txid == b.txid && a.height == b.height);
         Ok(history)
+    }
+
+    pub(super) fn history_page_for(
+        snapshot: &dyn TxIndexSnapshot,
+        prefix: &ReadPrefix,
+        budget: &mut QueryBudget,
+        script: ScriptHash,
+        last: Option<Txid>,
+        limit: usize,
+    ) -> Result<Vec<ScriptHistoryRecord>, TxQueryError> {
+        let page = Self::confirmed_history_page_for(snapshot, prefix, budget, script, last, limit)?;
+        if last.is_some() && !page.cursor_found {
+            return Ok(Self::confirmed_history_page_for(
+                snapshot, prefix, budget, script, None, limit,
+            )?
+            .records);
+        }
+        Ok(page.records)
     }
 
     pub(super) fn history_cursor_for(
@@ -418,7 +451,7 @@ impl DerivedIndexQueryEngine {
                 ),
             ));
         };
-        let rows = Self::scan_live_rows(snapshot, budget, scripthash)?;
+        let rows = self.scan_live_rows(snapshot, budget, scripthash)?;
         utxo.with_stable_view(|view| {
             let mut records = Vec::with_capacity(rows.len());
             for row in rows {

@@ -1605,9 +1605,54 @@ fn catch_up_poll_stays_inside_the_documented_outcomes() {
     assert_reaped(pid);
 }
 
+/// Whole-workspace load relinks the shared node binary while tests run, so
+/// executing it directly can fail with `ExecutableFileBusy` when a link lands
+/// mid-spawn. Spawning a private staged copy keeps the executed inode stable.
+fn staged_node_binary() -> (tempfile::TempDir, std::path::PathBuf) {
+    let source = self_binary();
+    let stage = tempfile::tempdir().expect("stage dir for the node binary");
+    let staged = stage
+        .path()
+        .join(source.file_name().expect("node binary file name"));
+    let copied_at = Instant::now();
+    let limit = Duration::from_mins(1);
+    loop {
+        let before = std::fs::metadata(source).map(|found| (found.len(), found.modified().ok()));
+        let copied = std::fs::copy(source, &staged);
+        let after = std::fs::metadata(source).map(|found| (found.len(), found.modified().ok()));
+        if let (Ok(before), Ok(_), Ok(after)) = (&before, &copied, &after)
+            && before == after
+        {
+            break;
+        }
+        assert!(
+            copied_at.elapsed() < limit,
+            "the shared node binary never settled for staging: before={before:?} copy={copied:?} after={after:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .expect("staged node binary must stay executable");
+    }
+    (stage, staged)
+}
+
 #[test]
 fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
-    let mut node = start_txindex_node();
+    let (_stage, staged) = staged_node_binary();
+    let mut node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(staged.as_path()),
+            extra_args: &["--txindex=true"],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
+    )
+    .expect("txindex node must start");
     let deadline = readiness_deadline();
 
     mine_on_node(&mut node, COMMON_BLOCKS).expect("chain");
@@ -1638,7 +1683,7 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     let mut rebuilt = ProcessNode::spawn_in_datadir(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(self_binary()),
+            binary: Some(staged.as_path()),
             extra_args: &["--txindex=true"],
             timeout: Some(START_TIMEOUT),
             ..Default::default()
@@ -1646,32 +1691,33 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
         datadir,
     )
     .expect("restart over the retained chainstate");
-    let observed = wait_until_ready(&mut rebuilt, deadline).expect("rebuilt readiness");
+    let rebuild_deadline = readiness_deadline();
+    let observed = wait_until_ready(&mut rebuilt, rebuild_deadline).expect("rebuilt readiness");
     for outcome in &observed {
         assert!(
             READINESS_OUTCOMES.contains(&outcome.as_str()),
             "undocumented rebuild outcome: {outcome}"
         );
     }
-    wait_txindex_synced(&mut rebuilt, deadline).expect("rebuilt sync");
-    let mut restored = None;
+    wait_txindex_synced(&mut rebuilt, rebuild_deadline).expect("rebuilt sync");
     let row_deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < row_deadline {
-        if let Ok(back) = rebuilt.rpc("getrawtransaction", &json!([txid])) {
-            restored = Some(back);
-            break;
+    let restored = loop {
+        match rebuilt.rpc("getrawtransaction", &json!([txid])) {
+            Ok(back) => break back,
+            Err(error) => {
+                if Instant::now() >= row_deadline {
+                    let block5 = rebuilt.rpc("getblockhash", &json!([5])).expect("block 5");
+                    let via_chain = rebuilt.rpc("getrawtransaction", &json!([txid, false, block5]));
+                    panic!(
+                        "the rebuilt index never restored the historical row; last lookup: {error:?}; index info: {:?}; chain-side lookup: {:?}",
+                        rebuilt.rpc("getindexinfo", &json!(["txindex"])),
+                        via_chain
+                    );
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(200));
-    }
-    let restored = restored.unwrap_or_else(|| {
-        let block5 = rebuilt.rpc("getblockhash", &json!([5])).expect("block 5");
-        let via_chain = rebuilt.rpc("getrawtransaction", &json!([txid, false, block5]));
-        panic!(
-            "the rebuilt index never restored the historical row; index info: {:?}; chain-side lookup: {:?}",
-            rebuilt.rpc("getindexinfo", &json!(["txindex"])),
-            via_chain
-        );
-    });
+    };
     assert_eq!(
         restored, raw,
         "the rebuilt index must restore the row verbatim"

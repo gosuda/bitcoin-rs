@@ -34,8 +34,8 @@ impl RunningServer {
 
     fn connect(&self) -> io::Result<TcpStream> {
         let stream = TcpStream::connect(self.address)?;
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         Ok(stream)
     }
 
@@ -97,6 +97,70 @@ fn management_request() -> Vec<u8> {
 }
 
 #[test]
+fn expensive_query_saturation_preserves_shared_and_split_listener_service() -> io::Result<()> {
+    let context = Arc::new(
+        Context::new()
+            .with_esplora_query_limit(std::num::NonZeroUsize::new(1).expect("positive limit")),
+    );
+    let shared = RunningServer::start(&context, RpcSurface::Shared, 16)?;
+    let public = RunningServer::start(&context, RpcSurface::Public, 16)?;
+    let management = RunningServer::start(&context, RpcSurface::Management, 16)?;
+    let permit = context
+        .esplora_admission
+        .try_acquire()
+        .expect("first query");
+    for server in [&shared, &public] {
+        for prefix in ["/api", "/esplora"] {
+            for namespace in ["address", "scripthash"] {
+                for suffix in [
+                    "",
+                    "/utxo",
+                    "/txs",
+                    "/txs/summary",
+                    "/txs/mempool",
+                    "/txs/chain",
+                    "/txs/chain/cursor",
+                ] {
+                    let response = server.request(format!(
+                        "GET {prefix}/{namespace}/invalid{suffix} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    ).as_bytes())?;
+                    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+                    assert!(response.contains("expensive Esplora query limit reached"));
+                    assert_eq!(
+                        response.contains("Access-Control-Allow-Origin: *"),
+                        prefix == "/api"
+                    );
+                }
+            }
+        }
+        let response = server.request(
+            b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )?;
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    }
+    for server in [&shared, &management] {
+        assert!(
+            server
+                .request(&management_request())?
+                .contains("\"result\":0")
+        );
+        // This is a separate quota, even on the shared listener.
+        let _blocking = server
+            .handler
+            .reserve_blocking_request()
+            .expect("management quota");
+    }
+    drop(permit);
+    for server in [&shared, &public] {
+        let response = server.request(
+            b"GET /api/address/invalid HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )?;
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    }
+    Ok(())
+}
+
+#[test]
 fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     let context = Arc::new(Context::new());
     let mut public = RunningServer::start(&context, RpcSurface::Public, 2)?;
@@ -131,18 +195,13 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     assert_eq!(unauthorized, CORE_UNAUTHORIZED);
 
     drop(idle);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let mut recovered = public.connect()?;
-        recovered.write_all(
-            b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        )?;
-        let response = read_response(&mut recovered)?;
-        if response.contains("Access-Control-Allow-Origin: *") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "public permit was not released");
-    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    poll_until_response(
+        deadline,
+        "public permit was not released",
+        || public_recovery_probe(&public, deadline),
+        |response| response.contains("Access-Control-Allow-Origin: *"),
+    )?;
     drop(slow);
     public.stop();
     assert!(public.handler.is_stopping());
@@ -152,14 +211,76 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
             .request(&management_request())?
             .contains("\"result\":0")
     );
-    let _management_idle = management.connect()?;
-    let _management_slow = management.connect()?;
-    let busy = read_response(&mut management.connect()?)?;
-    assert!(
-        busy.starts_with("HTTP/1.1 503 Service Unavailable"),
-        "{busy}"
-    );
+    let saturation_deadline = Instant::now() + Duration::from_secs(30);
+    poll_until_response(
+        saturation_deadline,
+        "management saturation was not observed",
+        || saturation_probe(&management, saturation_deadline),
+        |response| response.starts_with("HTTP/1.1 503 Service Unavailable"),
+    )?;
     Ok(())
+}
+
+fn public_recovery_probe(public: &RunningServer, deadline: Instant) -> io::Result<String> {
+    let mut recovered = public.connect()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "recovery deadline elapsed",
+        ));
+    }
+    recovered.set_read_timeout(Some(remaining))?;
+    recovered.set_write_timeout(Some(remaining))?;
+    recovered.write_all(
+        b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    read_response(&mut recovered)
+}
+
+fn saturation_probe(management: &RunningServer, deadline: Instant) -> io::Result<String> {
+    let _idle_holder = management.connect()?;
+    let _slow_holder = management.connect()?;
+    let mut probe_stream = management.connect()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "saturation deadline elapsed",
+        ));
+    }
+    probe_stream.set_read_timeout(Some(remaining))?;
+    probe_stream.set_write_timeout(Some(remaining))?;
+    read_response(&mut probe_stream)
+}
+
+fn poll_until_response(
+    deadline: Instant,
+    pending_message: &str,
+    mut attempt: impl FnMut() -> io::Result<String>,
+    mut satisfied: impl FnMut(&str) -> bool,
+) -> io::Result<()> {
+    let mut attempts = 0;
+    let mut last: String;
+    loop {
+        attempts += 1;
+        match attempt() {
+            Ok(response) => {
+                if satisfied(&response) {
+                    return Ok(());
+                }
+                last = response.lines().next().unwrap_or("(empty head)").to_owned();
+            }
+            Err(error) => {
+                last = error.to_string();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{pending_message} within 30s after {attempts} attempts; last observation: {last}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 // WF-02

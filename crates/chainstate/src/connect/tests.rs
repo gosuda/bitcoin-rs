@@ -20,6 +20,7 @@ use super::ApplyError;
 use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
 
 mod sigops;
+mod transaction_structure;
 
 fn empty_handles() -> Arc<crate::Chainstate> {
     Arc::new(handles(

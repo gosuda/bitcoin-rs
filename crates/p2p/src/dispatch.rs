@@ -17,6 +17,7 @@ use crate::packages::{
 };
 use crate::peer::{PackageRequest, Peer, PeerState};
 use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, MAX_MESSAGE_PAYLOAD, Message, PeerError};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedTip {
@@ -133,6 +134,10 @@ pub trait TxInventory: Send + Sync {
 
     fn transaction_sent(&self, _wtxid: Wtxid) {}
 
+    fn transaction_send_committed(&self, _wtxid: Wtxid) {}
+
+    fn transaction_send_failed(&self, _wtxid: Wtxid) {}
+
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>>;
 
     fn resident_package(&self, wtxids: &[Wtxid]) -> Option<Vec<Arc<Tx>>>;
@@ -141,6 +146,14 @@ pub trait TxInventory: Send + Sync {
 impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
     fn transaction_sent(&self, wtxid: Wtxid) {
         self.mark_broadcast(wtxid);
+    }
+
+    fn transaction_send_committed(&self, wtxid: Wtxid) {
+        self.commit_broadcast(wtxid);
+    }
+
+    fn transaction_send_failed(&self, wtxid: Wtxid) {
+        self.restore_unbroadcast(wtxid);
     }
 
     fn resident_ancestor_package(&self, wtxid: Wtxid) -> Option<Vec<Wtxid>> {
@@ -463,6 +476,40 @@ fn package_request(
     Some(PackageRequest { subject, wtxids })
 }
 
+struct BroadcastMarks<'a> {
+    inventory: &'a dyn TxInventory,
+    wtxids: SmallVec<[Wtxid; 1]>,
+}
+
+impl<'a> BroadcastMarks<'a> {
+    fn mark(inventory: &'a dyn TxInventory, wtxids: &[Wtxid]) -> Self {
+        let mut guard = Self {
+            inventory,
+            wtxids: SmallVec::with_capacity(wtxids.len()),
+        };
+        for wtxid in wtxids {
+            inventory.transaction_sent(*wtxid);
+            guard.wtxids.push(*wtxid);
+        }
+        guard
+    }
+
+    fn commit(mut self) {
+        for wtxid in &self.wtxids {
+            self.inventory.transaction_send_committed(*wtxid);
+        }
+        self.wtxids.clear();
+    }
+}
+
+impl Drop for BroadcastMarks<'_> {
+    fn drop(&mut self) {
+        for wtxid in &self.wtxids {
+            self.inventory.transaction_send_failed(*wtxid);
+        }
+    }
+}
+
 fn serve_getpkgtxns(
     tx_inventory: Option<&dyn TxInventory>,
     request: &GetPkgTxns,
@@ -484,12 +531,11 @@ fn serve_getpkgtxns(
             hash: combined_package_hash(&request.wtxids),
         }]));
     };
+    let marks = BroadcastMarks::mark(inventory, &request.wtxids);
     send(Message::PkgTxns(PkgTxns {
         txs: bodies.iter().map(|tx| Tx::clone(tx)).collect(),
     }))?;
-    for wtxid in &request.wtxids {
-        inventory.transaction_sent(*wtxid);
-    }
+    marks.commit();
     Ok(())
 }
 
@@ -645,8 +691,9 @@ fn serve_tx_item(
     };
     match found {
         Some((wtxid, tx)) => {
+            let marks = BroadcastMarks::mark(inv, &[wtxid]);
             send(Message::Tx(tx))?;
-            inv.transaction_sent(wtxid);
+            marks.commit();
         }
         None => not_found.push(*item),
     }

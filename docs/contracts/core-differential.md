@@ -99,6 +99,33 @@ libbitcoinkernel oracle tests prove consensus-script parity. This page owns live
 - Existing process evidence contains pinned binary identities, launch arguments, RPC transcripts, and output logs.
 - This is a bounded curated suite. Coverage-guided live Core fuzzing and broader rule-family coverage remain follow-up work under #1323.
 
+### `CORE-07`: Core functional suite lane
+
+- **Owner**: `tools/core-functional/` — `fetch-core-tests.sh`, `run.sh` +
+  `tools/core-functional/bin/runner.py`, `bin/bitcoind-wrapper`, `shim/sitecustomize.py`;
+  `tools/core-functional/README.md` owns the measured-results record.
+- `fetch-core-tests.sh` extracts the v31.1 functional suite only from a tag
+  that resolves in a local Core checkout and stamps `PROVENANCE` (tag,
+  commit, UTC date, source repo, paths) into the extraction directory; the
+  runner copies tag and commit into every report.
+- Adapter, not modification: no Core code is vendored or modified. The
+  framework spawns `bin/bitcoind-wrapper`, which translates Core-style
+  argv/conf into bitcoin-rs flags and drops unmappable tokens with a per-drop
+  log; the node is invoked only through its public binary.
+- Every `shim/sitecustomize.py` patch is disclosed with the node gap it
+  bridges, carries an env var that disables it so the raw failure reproduces,
+  preserves upstream post-conditions where it applies, and is deleted once
+  the node-side gap closes.
+- Measured reports are scoped to exactly the selected candidate list
+  (`tests/clean-candidates.txt`): failures are triaged to numbered node gaps
+  or harness causes, and no compatibility claim is extrapolated to scripts
+  that were not selected.
+- `tests/wrapper_smoke.py` verifies the wrapper's translation table,
+  cookie/datadir layout, drop logging, and error paths without a Core
+  checkout.
+- Host prerequisite: a local Core checkout and a built node binary; CI does
+  not run this lane.
+
 ## Verification boundaries
 
 The binary process harness owns real Core comparisons over RPC, P2P announcements, reorgs, and negotiated transport. Shared fixture/custody checks validate inputs; they do not replace a provisioned process run or close the clause-local gaps. The configured CI/evidence lanes own execution results.

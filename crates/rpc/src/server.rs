@@ -857,43 +857,59 @@ enum CallResponse {
     Reply {
         body: Value,
         version: JsonRpcVersion,
-        error_code: Option<i64>,
+        error: Option<RpcError>,
         envelope_error: bool,
     },
-    Notification,
+    Notification {
+        pre_reservation_refusal: bool,
+    },
 }
 
 impl CallResponse {
-    fn reply(body: Value, version: JsonRpcVersion, error: Option<&RpcError>) -> Self {
+    fn reply(body: Value, version: JsonRpcVersion, error: Option<RpcError>) -> Self {
         Self::Reply {
             body,
             version,
-            error_code: error.map(RpcError::code),
+            error,
             envelope_error: false,
         }
     }
 
-    fn envelope_error(body: Value, version: JsonRpcVersion, error: &RpcError) -> Self {
+    fn envelope_error(body: Value, version: JsonRpcVersion, error: RpcError) -> Self {
         Self::Reply {
             body,
             version,
-            error_code: Some(error.code()),
+            error: Some(error),
             envelope_error: true,
         }
+    }
+
+    /// The request was refused before it could hold a reservation, so the
+    /// keep-alive slot it answered on has nothing a close would release.
+    const fn pre_reservation_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Reply {
+                error: Some(RpcError::ScanInProgress(_)),
+                ..
+            } | Self::Notification {
+                pre_reservation_refusal: true,
+            }
+        )
     }
 
     const fn http_status(&self) -> u16 {
         match self {
             Self::Reply {
                 version,
-                error_code: Some(code),
+                error: Some(error),
                 ..
-            } => version.error_status_for_code(*code),
+            } => version.error_status_for_code(error.code()),
             Self::Reply {
                 envelope_error: true,
                 ..
             } => 400,
-            Self::Reply { .. } | Self::Notification => 200,
+            Self::Reply { .. } | Self::Notification { .. } => 200,
         }
     }
 }
@@ -925,38 +941,39 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
                 &Value::new_null(),
             );
         }
-        let close = requests.iter().any(crate::registry::blocking_request);
         if requests.is_empty() {
             return JsonResponse {
-                close,
+                close: false,
                 status: 200,
                 reason: reason_for_status(200),
                 body: Some(json!([])),
             };
         }
         let mut responses = Vec::with_capacity(requests.len());
+        let mut worker_held = false;
         for request in requests {
             let response = handle_single_json(handler, request);
+            worker_held |=
+                crate::registry::blocking_request(request) && !response.pre_reservation_refusal();
             if let CallResponse::Reply { body, .. } = response {
                 responses.push(body);
             }
         }
         if responses.is_empty() {
-            return if close {
+            return if worker_held {
                 closing_no_content_response()
             } else {
                 no_content_response()
             };
         }
         return JsonResponse {
-            close,
+            close: worker_held,
             status: 200,
             reason: reason_for_status(200),
             body: Some(json!(responses)),
         };
     }
     let close = crate::registry::blocking_request(request);
-
     if !request.is_object() {
         return legacy_error_response(
             &RpcError::TopLevelParse("Top-level object parse error"),
@@ -966,6 +983,7 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
 
     let response = handle_single_json(handler, request);
     let status = response.http_status();
+    let close = close && !response.pre_reservation_refusal();
     match response {
         CallResponse::Reply { body, .. } => JsonResponse {
             close,
@@ -973,7 +991,7 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             reason: reason_for_status(status),
             body: Some(body),
         },
-        CallResponse::Notification => {
+        CallResponse::Notification { .. } => {
             if close {
                 closing_no_content_response()
             } else {
@@ -988,7 +1006,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     if !request.is_object() {
         let error = RpcError::InvalidRequest("Invalid Request object");
         let version = JsonRpcVersion::Legacy;
-        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, error);
     }
     let version = match JsonRpcVersion::classify(request) {
         Ok(version) => version,
@@ -997,23 +1015,23 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
             return CallResponse::envelope_error(
                 version.error_response(&error, &id),
                 version,
-                &error,
+                error,
             );
         }
     };
     let Some(method) = request.get("method").filter(|method| !method.is_null()) else {
         let error = RpcError::InvalidRequest("Missing method");
-        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, error);
     };
     let Some(method) = method.as_str() else {
         let error = RpcError::InvalidRequest("Method must be a string");
-        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, error);
     };
     let null_params = Value::new_null();
     let params = request.get("params").unwrap_or(&null_params);
     if !(params.is_array() || params.is_object() || params.is_null()) {
         let error = RpcError::InvalidRequest("Params must be an array or object");
-        return CallResponse::envelope_error(version.error_response(&error, &id), version, &error);
+        return CallResponse::envelope_error(version.error_response(&error, &id), version, error);
     }
     let empty_params = json!([]);
     let params = if params.is_null() {
@@ -1022,13 +1040,16 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
         params
     };
     let result = handler.dispatch(method, params);
+    let pre_reservation_refusal = matches!(&result, Err(RpcError::ScanInProgress(_)));
     if version == JsonRpcVersion::V2 && request.get("id").is_none() {
-        return CallResponse::Notification;
+        return CallResponse::Notification {
+            pre_reservation_refusal,
+        };
     }
     match result {
         Ok(result) => CallResponse::reply(version.success_response(&result, &id), version, None),
         Err(error) => {
-            CallResponse::reply(version.error_response(&error, &id), version, Some(&error))
+            CallResponse::reply(version.error_response(&error, &id), version, Some(error))
         }
     }
 }

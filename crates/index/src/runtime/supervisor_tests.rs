@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
     DerivedIndexOpenSpec {
+        scripthash_limit: crate::runtime::DEFAULT_SCRIPTHASH_LIMIT,
         data_dir: dir.to_path_buf(),
         namespace: "txindex",
         storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,

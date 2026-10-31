@@ -1204,10 +1204,18 @@ impl MempoolGateway {
     }
 
     pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
-        self.pool.write().set_unbroadcast(wtxid, false);
+        self.pool.write().mark_broadcast(wtxid);
     }
 
-    pub(crate) fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    pub fn commit_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().commit_broadcast(wtxid);
+    }
+
+    pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().restore_broadcast(wtxid);
+    }
+
+    pub(crate) fn set_pending_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 

@@ -216,46 +216,43 @@ pub(crate) fn eval_script(
                 });
             }
         };
-        let opcode_byte = match instruction {
+        match instruction {
             Instruction::PushBytes(data) => {
                 let opcode_byte = *script.get(instruction_start).ok_or(ScriptError::Invalid {
                     code: ScriptErrCode::BadOpcode,
                 })?;
                 handle_push_bytes(data, opcode_byte, conditions.all_true(), flags, stack)?;
-                check_stack_depth(stack, &altstack)?;
-                opcode_pos = opcode_pos.saturating_add(1);
-                instruction_start = script.len() - iter.remaining.len();
-                continue;
             }
-            Instruction::Op(op) => op,
-        };
-        check_opcode_rules(opcode_byte, sigversion, flags, &mut op_count)?;
+            Instruction::Op(opcode_byte) => {
+                check_opcode_rules(opcode_byte, sigversion, flags, &mut op_count)?;
 
-        let f_exec = conditions.all_true();
-        if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
-            dispatch(
-                opcode_byte,
-                f_exec,
-                stack,
-                &mut altstack,
-                &mut conditions,
-                &mut op_count,
-                require_minimal,
-                flags,
-                checker,
-                sigversion,
-                validation_weight_left,
-                opcode_pos,
-                &mut code_separator,
-                instruction_start,
-                tapleaf_hash,
-                script,
-            )?;
+                let f_exec = conditions.all_true();
+                if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
+                    dispatch(
+                        opcode_byte,
+                        f_exec,
+                        stack,
+                        &mut altstack,
+                        &mut conditions,
+                        &mut op_count,
+                        require_minimal,
+                        flags,
+                        checker,
+                        sigversion,
+                        validation_weight_left,
+                        opcode_pos,
+                        &mut code_separator,
+                        instruction_start,
+                        tapleaf_hash,
+                        script,
+                    )?;
+                }
+            }
         }
 
         check_stack_depth(stack, &altstack)?;
-        opcode_pos = opcode_pos.saturating_add(1);
         instruction_start = script.len() - iter.remaining.len();
+        opcode_pos = opcode_pos.saturating_add(1);
     }
 
     if !conditions.is_empty() {

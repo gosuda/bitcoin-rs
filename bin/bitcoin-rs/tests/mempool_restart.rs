@@ -112,36 +112,19 @@ fn pending_inventory(
     }
 }
 
-fn request_body(
-    node: &mut ProcessNode,
-    peer: &mut wire_peer::Peer,
-    item: Inventory,
-    wanted: &Transaction,
-) -> TestResult {
+fn request_body(peer: &mut wire_peer::Peer, item: Inventory, wanted: &Transaction) -> TestResult {
     let deadline = Instant::now() + Duration::from_secs(10);
     peer.send(NetworkMessage::GetData(vec![item]), deadline)?;
     loop {
         match peer.recv(deadline)? {
             NetworkMessage::Tx(tx) => {
                 assert_eq!(&tx, wanted);
-                break;
+                return Ok(());
             }
             NetworkMessage::Ping(nonce) => peer.send(NetworkMessage::Pong(nonce), deadline)?,
             _ => {}
         }
     }
-    node.wait_for(
-        "initial broadcast completion",
-        Duration::from_secs(10),
-        |node| {
-            let entry = node.rpc(
-                "getmempoolentry",
-                &json!([wanted.compute_txid().to_string()]),
-            )?;
-            Ok((entry["unbroadcast"] == false).then_some(()))
-        },
-    )?;
-    Ok(())
 }
 
 #[test]
@@ -160,7 +143,7 @@ fn restart_retries_only_uncompleted_local_initial_broadcasts() -> TestResult {
         2,
         "inventory alone does not complete initial broadcast"
     );
-    request_body(&mut node, &mut peer, item, &parent)?;
+    request_body(&mut peer, item, &parent)?;
     assert_eq!(
         node.rpc(
             "getmempoolentry",
@@ -183,7 +166,7 @@ fn restart_retries_only_uncompleted_local_initial_broadcasts() -> TestResult {
         1
     );
     let (mut peer, item) = pending_inventory(&node, &child, Some(&parent), "pending-child")?;
-    request_body(&mut node, &mut peer, item, &child)?;
+    request_body(&mut peer, item, &child)?;
     assert_eq!(
         node.rpc("getmempoolinfo", &json!([]))?["unbroadcastcount"],
         0

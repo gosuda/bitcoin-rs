@@ -126,6 +126,8 @@ pub enum ConfigError {
     RpcNonLoopbackNeedsAuth,
     #[error("RPC and public connection limits must be positive")]
     RpcConnectionLimits,
+    #[error("Esplora query limit must be positive")]
+    EsploraMaxQueries,
     #[error("public-bind and rpc-bind must not overlap")]
     RpcBindOverlap,
     #[error("unsupported storage backend {backend}")]
@@ -528,6 +530,7 @@ pub struct RpcConfig {
     pub public_bind: Option<SocketAddr>,
     pub max_connections: usize,
     pub public_max_connections: usize,
+    pub esplora_max_queries: usize,
     pub rest: bool,
     pub silent_payments: bool,
     pub compressed_transactions: bool,
@@ -536,6 +539,7 @@ pub struct RpcConfig {
 
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
+    pub scripthash_limit: usize,
     pub txindex: bool,
     pub blockfilterindex: bool,
     pub script_index: ScriptIndexMode,
@@ -615,6 +619,10 @@ impl NodeConfig {
             p2p: materialize_p2p(&settings.p2p, &profile, selection.consensus_network()),
             rpc: materialize_rpc(&settings.rpc, &profile, rpc_auth(settings)),
             indexes: IndexConfig {
+                scripthash_limit: settings
+                    .indexes
+                    .scripthash_limit
+                    .unwrap_or(bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT),
                 txindex: settings.indexes.txindex.unwrap_or(false),
                 blockfilterindex: settings.indexes.blockfilterindex.unwrap_or(false),
                 script_index: settings
@@ -690,6 +698,9 @@ impl NodeConfig {
         }
         if !(self.rpc.max_connections > 0 && self.rpc.public_max_connections > 0) {
             return Err(ConfigError::RpcConnectionLimits);
+        }
+        if self.rpc.esplora_max_queries == 0 {
+            return Err(ConfigError::EsploraMaxQueries);
         }
         if !self.rpc.public_bind.is_none_or(|address| {
             let management = self.rpc.bind;
@@ -886,6 +897,9 @@ fn materialize_rpc(
         public_bind: settings.public_bind,
         max_connections: settings.max_connections.unwrap_or(128),
         public_max_connections: settings.public_max_connections.unwrap_or(128),
+        esplora_max_queries: settings
+            .esplora_max_queries
+            .unwrap_or(bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()),
         rest: settings.rest.unwrap_or(false),
         silent_payments: settings.silent_payments.unwrap_or(false),
         compressed_transactions: settings.compressed_transactions.unwrap_or(false),

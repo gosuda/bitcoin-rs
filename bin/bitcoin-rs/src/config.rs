@@ -308,6 +308,17 @@ impl CoreValue for Option<u64> {
     }
 }
 
+impl CoreValue for Option<usize> {
+    fn apply(key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
+        *slot = Some(
+            value
+                .parse()
+                .map_err(|_| format!("{key}={value:?} is not a valid nonnegative entry limit"))?,
+        );
+        Ok(())
+    }
+}
+
 impl CoreValue for Option<String> {
     fn apply(_key: &str, value: &str, slot: &mut Self) -> Result<(), String> {
         *slot = Some(value.to_owned());

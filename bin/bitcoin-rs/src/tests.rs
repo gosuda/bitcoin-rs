@@ -300,6 +300,87 @@ fn environment_parses_script_index() {
 }
 
 #[test]
+fn esplora_query_limit_resolves_and_rejects_zero() -> Result<(), TestError> {
+    assert_eq!(
+        resolved(&["bitcoin-rs"], &[]).rpc.esplora_max_queries,
+        bitcoin_rs_rpc::esplora::DEFAULT_MAX_QUERIES.get()
+    );
+    let config = load_file(
+        "--config",
+        "esplora_max_queries = 3\n",
+        &[],
+        std::iter::empty(),
+    )?;
+    assert_eq!(config.rpc.esplora_max_queries, 3);
+    let config = load_file(
+        "--config",
+        "esplora_max_queries = 3\n",
+        &["--esplora-max-queries", "1"],
+        [(
+            OsString::from("BITCOIN_RS_ESPLORA_MAX_QUERIES"),
+            OsString::from("4"),
+        )]
+        .into_iter(),
+    )?;
+    assert_eq!(config.rpc.esplora_max_queries, 1);
+    let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_ESPLORA_MAX_QUERIES", "4")]);
+    assert_eq!(config.rpc.esplora_max_queries, 4);
+    assert!(
+        load_file(
+            "--config",
+            "esplora_max_queries = 0\n",
+            &[],
+            std::iter::empty()
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn scripthash_limit_defaults_and_cli_override_environment() {
+    assert!(
+        load_file(
+            "--bitcoin-conf",
+            "scripthash-limit=-1",
+            &[],
+            std::iter::empty()
+        )
+        .is_err()
+    );
+    for (flag, text) in [
+        ("--config", "scripthash_limit = 7000"),
+        ("--bitcoin-conf", "scripthash-limit=7000"),
+    ] {
+        let config = load_file(flag, text, &[], std::iter::empty())
+            .unwrap_or_else(|error| panic!("valid script query limit: {error}"));
+        assert_eq!(config.indexes.scripthash_limit, 7000);
+    }
+    assert_eq!(
+        resolved(&["bitcoin-rs"], &[]).indexes.scripthash_limit,
+        25_000
+    );
+    assert_eq!(
+        resolved(
+            &["bitcoin-rs"],
+            &[("BITCOIN_RS_SCRIPTHASH_LIMIT", "100000")]
+        )
+        .indexes
+        .scripthash_limit,
+        100_000
+    );
+    assert_eq!(
+        resolved(
+            &["bitcoin-rs", "--scripthash-limit=5000"],
+            &[("BITCOIN_RS_SCRIPTHASH_LIMIT", "100000")]
+        )
+        .indexes
+        .scripthash_limit,
+        5000
+    );
+}
+
+#[test]
 fn environment_parses_script_index_utxo() {
     let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "utxo")]);
 

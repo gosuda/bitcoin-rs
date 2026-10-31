@@ -21,6 +21,8 @@ pub enum RpcError {
     #[error("{0}")]
     InvalidParameter(String),
     #[error("{0}")]
+    ScanInProgress(String),
+    #[error("{0}")]
     InvalidAddressOrKey(String),
     #[error("{0}")]
     TxRejected(String),
@@ -68,7 +70,7 @@ impl RpcError {
             Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
             Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
             Self::Deserialization(_) => Self::CORE_DESERIALIZATION_ERROR,
-            Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
+            Self::InvalidParameter(_) | Self::ScanInProgress(_) => Self::CORE_INVALID_PARAMETER,
             Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
             Self::MethodDisabled(_) | Self::Internal(_) | Self::CoreInternal(_) => {

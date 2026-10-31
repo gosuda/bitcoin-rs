@@ -61,7 +61,18 @@ pub struct HttpResponse {
 
 impl HttpResponse {
     pub fn json(&self) -> Result<Value> {
-        sonic_rs::from_slice(&self.body).map_err(Error::Json)
+        match sonic_rs::from_slice(&self.body) {
+            Ok(value) => Ok(value),
+            Err(error) if (200..300).contains(&self.status) => Err(Error::Protocol(format!(
+                "status {} body is not JSON: {error}; headers {:#?}",
+                self.status, self.headers
+            ))),
+            Err(_) => Err(Error::Protocol(format!(
+                "status {} body is not JSON: {:?}",
+                self.status,
+                String::from_utf8_lossy(&self.body)
+            ))),
+        }
     }
 
     pub fn text(&self) -> Result<String> {
@@ -667,10 +678,21 @@ impl ProcessNode {
         timeout: Duration,
         mut condition: impl FnMut(&mut Self) -> Result<Option<T>>,
     ) -> Result<T> {
+        self.wait_for_detail(operation, timeout, |node, _detail| condition(node))
+    }
+
+    /// Waits like [`Self::wait_for`], and lets the condition record what it
+    /// last observed so a timeout says whether the node was stuck or slow.
+    pub fn wait_for_detail<T>(
+        &mut self,
+        operation: &'static str,
+        timeout: Duration,
+        mut condition: impl FnMut(&mut Self, &mut String) -> Result<Option<T>>,
+    ) -> Result<T> {
         let deadline = Instant::now() + timeout;
         let mut detail = String::new();
         loop {
-            match condition(self) {
+            match condition(self, &mut detail) {
                 Ok(Some(value)) => return Ok(value),
                 Ok(None) => {}
                 Err(error) => detail = error.to_string(),
@@ -688,11 +710,12 @@ impl ProcessNode {
     }
 
     pub fn wait_block_count(&mut self, height: u64, timeout: Duration) -> Result<u64> {
-        self.wait_for("block count", timeout, move |node| {
+        self.wait_for_detail("block count", timeout, move |node, detail| {
             let count = node
                 .rpc("getblockcount", &json!([]))?
                 .as_u64()
                 .ok_or_else(|| Error::Assertion("getblockcount is not a number".into()))?;
+            *detail = format!("last block count {count}, waiting for {height}");
             Ok((count >= height).then_some(count))
         })
     }

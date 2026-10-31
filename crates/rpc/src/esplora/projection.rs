@@ -464,13 +464,20 @@ impl<'a> Projection<'a> {
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
         let snapshot = index.history_snapshot(script_hash).map_err(query_error)?;
+        let mut confirmations = std::collections::HashMap::<u32, Confirmation>::new();
         let mut confirmed = snapshot
             .history
             .into_iter()
             .map(|record| {
-                let confirmation = self
-                    .confirmation_at_height(record.height)
-                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                let confirmation = match confirmations.entry(record.height) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let confirmation = self
+                            .confirmation_at_height(record.height)
+                            .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                        *entry.insert(confirmation)
+                    }
+                };
                 Ok(ConfirmedActivity {
                     record,
                     confirmation,

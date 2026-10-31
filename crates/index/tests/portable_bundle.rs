@@ -515,6 +515,7 @@ impl Node {
         let shutdown = Arc::new(LatchWriter::new());
         let crash = start.crash_after_bulk_import;
         let spec = DerivedIndexOpenSpec {
+            scripthash_limit: bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT,
             data_dir: data_dir.to_path_buf(),
             namespace: "txindex",
             storage_backend: StorageBackend::Fjall,

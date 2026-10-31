@@ -758,6 +758,15 @@ wallet interoperability remain unverified.
 - All admitted connections (including incomplete heads, idle keep-alives, blocking requests) count; neither binding is exempt.
 - Each accept loop may additionally hold one refused socket while writing its 503, bounded by the idle timeout.
 - This isolates connection capacity only, not CPU, descriptors, storage, or locks.
+- The node RPC `Context` owns Esplora script-query admission, shared across listeners and `/api`/`/esplora`.
+- Address and scripthash summaries, UTXOs, and transaction histories (including summary/mempool and chain pages) reserve one of `esplora_max_queries` slots before capturing the chain view or querying indexes.
+- The positive limit defaults to 2 and is independent of connection and JSON-RPC blocking admission.
+- Exhaustion returns HTTP 503 `expensive Esplora query limit reached` without queuing or index/body work.
+- Permits release after projection and generation checks on success or failure.
+- Cheap tip and status routes are exempt.
+- Per-query budgets and HTTP 422 script-limit errors remain unchanged.
+- Fixed-name active, rejected, and execution-latency metrics have no user-input labels.
+- This bounds optional query concurrency, not foreground CPU or storage latency (`SYNC-03`).
 - An empty accept queue waits on listener readiness (connections wake it immediately).
 - The read-only atomic shutdown latch has no notifier so the wait uses a 20-ms readiness timeout.
 - Timeout alone does not retry accept.
