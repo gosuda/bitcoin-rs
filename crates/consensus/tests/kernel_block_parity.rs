@@ -11,7 +11,7 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
 
-use crate::support::error::TestError;
+use crate::support::error::{OracleFault, TestError};
 
 type TestResult = Result<(), TestError>;
 
@@ -54,7 +54,7 @@ fn kernel_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), 
     )
 }
 
-fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), String> {
+fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), TestError> {
     for (input_index, (input, prevout)) in tx.inputs.iter().zip(prevouts).enumerate() {
         let witness = input.witness.clone();
         let passed = Interpreter
@@ -67,9 +67,12 @@ fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result
                 tx,
                 input_index,
             )
-            .map_err(|error| format!("input {input_index}: {error}"))?;
+            .map_err(|source| TestError::Interpreter {
+                input: input_index,
+                source,
+            })?;
         if !passed {
-            return Err(format!("input {input_index}: script evaluated to false"));
+            return Err(TestError::InterpreterRejected { input: input_index });
         }
     }
     Ok(())
@@ -173,7 +176,7 @@ fn flip_signature_bit(tx: &mut Tx) -> bool {
         }
     }
     for input in &mut tx.inputs {
-        let mut elements = input.witness.clone();
+        let mut elements: Vec<Vec<u8>> = input.witness.iter().map(<[u8]>::to_vec).collect();
         if let Some(element) = elements
             .iter_mut()
             .find(|element| is_signature_element(element))
@@ -181,7 +184,7 @@ fn flip_signature_bit(tx: &mut Tx) -> bool {
             let mid = element.len() / 2;
             if let Some(byte) = element.get_mut(mid) {
                 *byte ^= 0x01;
-                input.witness = elements;
+                input.witness = Witness::from_stack(elements);
                 return true;
             }
         }
@@ -213,9 +216,9 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
         }
     }
     for input in &mut tx.inputs {
-        let mut elements = input.witness.clone();
+        let mut elements: Vec<Vec<u8>> = input.witness.iter().map(<[u8]>::to_vec).collect();
         let mut mutated = false;
-        for element in elements.iter_mut() {
+        for element in &mut elements {
             if looks_like_der_sig(element) || element.len() == 65 {
                 if let Some(byte) = element.last_mut() {
                     *byte ^= 0x02;
@@ -230,7 +233,7 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
             }
         }
         if mutated {
-            input.witness = elements;
+            input.witness = Witness::from_stack(elements);
             return true;
         }
     }
@@ -239,14 +242,14 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
 
 fn tamper_witness(tx: &mut Tx) -> bool {
     for input in &mut tx.inputs {
-        let mut elements = input.witness.clone();
+        let mut elements: Vec<Vec<u8>> = input.witness.iter().map(<[u8]>::to_vec).collect();
         if let Some(last) = elements.last_mut()
             && !last.is_empty()
         {
             let mid = last.len() / 2;
             if let Some(byte) = last.get_mut(mid) {
                 *byte ^= 0x01;
-                input.witness = elements;
+                input.witness = Witness::from_stack(elements);
                 return true;
             }
         }
@@ -256,9 +259,9 @@ fn tamper_witness(tx: &mut Tx) -> bool {
 
 fn truncate_witness(tx: &mut Tx) -> bool {
     for input in &mut tx.inputs {
-        let mut elements = input.witness.clone();
+        let mut elements: Vec<Vec<u8>> = input.witness.iter().map(<[u8]>::to_vec).collect();
         if elements.pop().is_some() {
-            input.witness = elements;
+            input.witness = Witness::from_stack(elements);
             return true;
         }
     }
@@ -467,10 +470,8 @@ fn differential_is_non_vacuous() -> TestResult {
 
     let kernel = kernel_result(&script_path.tx, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&script_path.tx, &script_path.prevouts, script_path.flags);
-    let pristine_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| {
-        TestError::Oracle {
-            fault: OracleFault::PristineKernel,
-        }
+    let pristine_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| TestError::Oracle {
+        fault: OracleFault::PristineKernel,
     })?;
     assert_eq!(
         pristine_kernel_verdict,
@@ -488,10 +489,8 @@ fn differential_is_non_vacuous() -> TestResult {
         .ok_or("TamperWitness must apply to a taproot script-path spend")?;
     let kernel = kernel_result(&tampered, &script_path.prevouts, script_path.flags);
     let interpreter = interpreter_result(&tampered, &script_path.prevouts, script_path.flags);
-    let tampered_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| {
-        TestError::Oracle {
-            fault: OracleFault::TamperedKernel,
-        }
+    let tampered_kernel_verdict = Verdict::of_kernel(&kernel).map_err(|_| TestError::Oracle {
+        fault: OracleFault::TamperedKernel,
     })?;
     assert_eq!(
         tampered_kernel_verdict,

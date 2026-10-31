@@ -10,8 +10,13 @@ pub(crate) enum TestError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("json error: {0}")]
     Json(#[from] sonic_rs::Error),
-    #[error("missing fixture: {0}")]
-    MissingFixture(String),
+    #[error(
+        "missing fixture {height}.{extension}; run scripts/fetch-golden.sh to populate testdata"
+    )]
+    MissingFixture {
+        height: u32,
+        extension: &'static str,
+    },
     #[error("missing expected value: {0}")]
     Missing(&'static str),
 }

@@ -124,14 +124,12 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), TestError>
     Ok(())
 }
 
-fn read_fixture(height: u32, extension: &str) -> Result<Vec<u8>, TestError> {
+fn read_fixture(height: u32, extension: &'static str) -> Result<Vec<u8>, TestError> {
     let path = format!("tests/testdata/{height}.{extension}");
     match std::fs::read(&path) {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(TestError::MissingFixture(format!(
-                "missing {path}; run scripts/fetch-golden.sh to populate testdata"
-            )))
+            Err(TestError::MissingFixture { height, extension })
         }
         Err(error) => Err(error.into()),
     }

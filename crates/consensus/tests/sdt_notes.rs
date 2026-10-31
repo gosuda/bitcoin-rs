@@ -2,7 +2,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-#[path = "support/error.rs"]
+#[path = "sdt_notes_error.rs"]
 mod error;
 use error::TestError;
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "kernel")]
 use bitcoin_rs_primitives::OutPoint;
 
 #[expect(dead_code, reason = "used when feature kernel is enabled")]
@@ -47,21 +48,35 @@ pub(crate) enum TestError {
         prevouts: usize,
         inputs: usize,
     },
+    #[cfg(feature = "kernel")]
     #[error("vector row {row}: {fault}")]
     Row { row: usize, fault: RowFault },
+    #[cfg(feature = "kernel")]
     #[error("vector row {row}: tx does not decode: {source}")]
     RowDecode {
         row: usize,
         source: bitcoin_rs_primitives::DecodeError,
     },
+    #[cfg(feature = "kernel")]
     #[error("vector row {row}: missing prevout for input {outpoint:?}")]
     RowMissingPrevout { row: usize, outpoint: OutPoint },
+    #[cfg(feature = "kernel")]
     #[error("flags {names} are not a filled combination")]
     UnfilledFlags { names: RowFlagNames },
+    #[cfg(feature = "kernel")]
     #[error("unknown opcode token: {token}")]
     UnknownOpcode { token: TokenText },
-    #[error("malformed note in {path}: {reason}")]
-    MalformedNote { path: String, reason: &'static str },
+    #[cfg(feature = "kernel")]
+    #[error("interpreter failed on input {input}: {source}")]
+    Interpreter {
+        input: usize,
+        #[source]
+        source: bitcoin_rs_script::ScriptError,
+    },
+    #[cfg(feature = "kernel")]
+    #[error("interpreter rejected input {input}")]
+    InterpreterRejected { input: usize },
+    #[cfg(feature = "kernel")]
     #[error("kernel oracle failed on the {fault} fixture")]
     Oracle { fault: OracleFault },
     #[error("zero vectors loaded for {0}: gate is vacuous")]
@@ -76,6 +91,7 @@ impl From<&'static str> for TestError {
     }
 }
 
+#[cfg(feature = "kernel")]
 #[derive(Debug)]
 pub(crate) enum RowFault {
     NotText(&'static str),
@@ -84,6 +100,7 @@ pub(crate) enum RowFault {
     OutOfRange(&'static str),
 }
 
+#[cfg(feature = "kernel")]
 impl std::fmt::Display for RowFault {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -95,30 +112,36 @@ impl std::fmt::Display for RowFault {
     }
 }
 
+#[cfg(feature = "kernel")]
 #[derive(Debug)]
 pub(crate) struct RowFlagNames(pub(crate) &'static str);
 
+#[cfg(feature = "kernel")]
 impl std::fmt::Display for RowFlagNames {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.0)
     }
 }
 
+#[cfg(feature = "kernel")]
 #[derive(Debug)]
 pub(crate) struct TokenText(pub(crate) String);
 
+#[cfg(feature = "kernel")]
 impl std::fmt::Display for TokenText {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
+#[cfg(feature = "kernel")]
 #[derive(Debug)]
 pub(crate) enum OracleFault {
     PristineKernel,
     TamperedKernel,
 }
 
+#[cfg(feature = "kernel")]
 impl std::fmt::Display for OracleFault {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
