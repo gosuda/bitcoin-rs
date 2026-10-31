@@ -70,7 +70,6 @@ impl Worker {
         Ok(identities)
     }
 
-    #[expect(clippy::too_many_lines, reason = "Leg scheduling stays in one owner")]
     pub(super) fn catch_up_to(
         &self,
         target: &TipSnapshot,
@@ -301,10 +300,6 @@ impl Worker {
         Ok(ControlFlow::Break(ForwardLeg::Settled(action)))
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep bounded preparation, capability failure and batch admission in one owner"
-    )]
     pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],

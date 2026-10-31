@@ -1142,10 +1142,6 @@ fn funding_prefix_scan_ignores_outputs_paying_other_scripts()
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the large-history fixture and its I/O oracle together"
-)]
 fn high_activity_history_is_exact_and_shared_spenders_are_read_once()
 -> Result<(), Box<dyn std::error::Error>> {
     // Exceeds both former 4,096-read and 4,096-scan limits.
@@ -1255,10 +1251,6 @@ fn high_activity_history_is_exact_and_shared_spenders_are_read_once()
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the three-height cursor fixture and independent history oracle together"
-)]
 fn history_pages_include_recent_spends_of_old_funding_and_skip_old_spender_bodies()
 -> Result<(), Box<dyn std::error::Error>> {
     let (genesis, mut chain, script) = paying_chain()?;

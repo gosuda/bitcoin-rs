@@ -384,7 +384,6 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "Frontier escalation scenario")]
 fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
     let (sync, peers, _block_tree, _applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(

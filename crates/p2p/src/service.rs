@@ -36,7 +36,6 @@ const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::as_conversions,
-    clippy::suboptimal_flops,
     reason = "53-bit input is exact and finite delay fits u64; preserve Core multiply-then-add rounding without FMA"
 )]
 fn feeler_delay(uniform: u64) -> Duration {
@@ -596,10 +595,6 @@ impl P2pService {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One drain loop owns active handles, parked admission, and teardown in one epoch"
-    )]
     fn spawn_outbound_worker(
         &self,
         shared: crate::listener::ConnectionShared,
@@ -1235,7 +1230,6 @@ fn bootstrap_fixed_peer_endpoints<R, I>(
     }
 }
 
-#[expect(clippy::needless_pass_by_value)]
 fn run_fixed_peer_resolution(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,

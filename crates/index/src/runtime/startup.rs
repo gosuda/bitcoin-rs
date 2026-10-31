@@ -54,7 +54,6 @@ where
     }
 }
 
-#[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(super) fn run_worker_with_open(
     runtime: &Arc<DerivedIndexRuntime>,
     spec: DerivedIndexOpenSpec,
@@ -176,7 +175,6 @@ pub(super) fn publish_lifecycle(
     });
 }
 
-#[expect(clippy::too_many_arguments, clippy::ref_option)]
 pub(super) fn open_and_run(
     runtime: &Arc<DerivedIndexRuntime>,
     spec: &DerivedIndexOpenSpec,

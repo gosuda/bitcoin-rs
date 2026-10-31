@@ -175,7 +175,6 @@ impl ReplayAccumulator {
 }
 
 #[cfg(test)]
-#[expect(clippy::needless_pass_by_value)]
 fn replay_records(
     records: Vec<JournalRecord>,
     tree: BlockTree,

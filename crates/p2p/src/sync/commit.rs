@@ -62,7 +62,6 @@ impl BlockSync {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn apply_buffered_blocks(
         &self,
         next_expected_hash: Option<Hash256>,

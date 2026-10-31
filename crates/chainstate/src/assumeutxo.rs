@@ -34,7 +34,6 @@ mod serde_opt_hash256 {
     use bitcoin_rs_primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    #[expect(clippy::ref_option)]
     pub(super) fn serialize<S>(hash: &Option<Hash256>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -353,10 +352,6 @@ impl AssumeUtxoManager {
         Ok(manager)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Keep the durable historical recovery inputs together"
-    )]
     fn open_historical_chainstate(
         active: &Arc<Chainstate>,
         network: Network,
@@ -594,10 +589,6 @@ impl AssumeUtxoManager {
         self.pending_activation_mint.lock().take()
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Keep the serialized lifecycle transition and its failure ordering together"
-    )]
     pub fn step_historical(
         &self,
         payload: &BlockPayload,

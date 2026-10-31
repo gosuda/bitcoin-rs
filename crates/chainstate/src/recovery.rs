@@ -161,7 +161,6 @@ fn cold_initial_chainstate(
     })
 }
 
-#[expect(clippy::too_many_lines)]
 pub fn prepare_initial_chainstate(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,

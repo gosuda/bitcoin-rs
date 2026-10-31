@@ -798,10 +798,6 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
 /// decimal parsing, expanding e/E notation without floating point arithmetic and
 /// rejecting signs other than optional positive, non-digits, more than 8 fractional
 /// decimals, fractional satoshis, and overflow.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one amount parser keeps sign, exponent, mantissa, and scale checks in a single auditable sequence"
-)]
 fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
     let text = if let Some(text) = value.as_str() {
         text.to_owned()

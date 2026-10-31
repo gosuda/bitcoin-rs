@@ -3,8 +3,6 @@
     clippy::as_conversions,
     clippy::cast_precision_loss,
     clippy::needless_borrow,
-    clippy::needless_pass_by_value,
-    clippy::redundant_closure_for_method_calls,
     clippy::significant_drop_in_scrutinee
 )]
 

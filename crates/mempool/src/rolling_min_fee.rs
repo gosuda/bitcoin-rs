@@ -28,10 +28,6 @@ impl RollingMinFee {
                 halflife /= 2.0;
             }
             let elapsed = (now - self.last_update) as f64;
-            #[expect(
-                clippy::suboptimal_flops,
-                reason = "Core GetMinFee divides by pow(2.0, elapsed / halflife) (txmempool.cpp); exp2 is not shown bit-identical to libm pow(2.0, x), so the port keeps the C++-mirroring powf."
-            )]
             let decay = 2f64.powf(elapsed / halflife);
             self.rate /= decay;
             self.last_update = now;

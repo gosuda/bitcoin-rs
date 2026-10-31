@@ -122,10 +122,6 @@ fn check_ancestor_shape(txs: &[Tx]) -> Result<(), AcceptanceRejectReason> {
 }
 
 impl MempoolGateway {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep Core's individual pass, atomic reconsideration and final membership results in one auditable sequence"
-    )]
     pub fn submit_rpc_package(
         &self,
         txs: &[Tx],
@@ -321,10 +317,6 @@ impl MempoolGateway {
         Ok(attempt.mutation)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one stamped package preparation/commit owner serves native and RPC submission"
-    )]
     fn submit_package_attempt(
         &self,
         txs: &[Tx],

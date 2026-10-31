@@ -70,10 +70,6 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the rejection, unchanged consumer state and recovery in one scenario"
-)]
 fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = regtest_genesis_block()?;

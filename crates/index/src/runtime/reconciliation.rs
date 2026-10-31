@@ -127,10 +127,6 @@ impl Worker {
         Ok(ReconcileAction::CaughtUp)
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep rollback recovery decisions and their fence updates together"
-    )]
     pub(super) fn reconcile_pass(
         &self,
         pending: &mut Option<PendingForward>,

@@ -612,10 +612,6 @@ pub(crate) fn scan_descriptor_range(
     scan_descriptor_range_budgeted(text, network, range, 1024_u64, 1_048_576_u64, cancelled)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "descriptor range expansion and budget validation"
-)]
 pub(crate) fn scan_descriptor_range_budgeted(
     text: &str,
     network: Network,
@@ -682,10 +678,6 @@ pub(crate) fn scan_descriptor_range_budgeted(
         (0, 0)
     };
     let paths = if descriptor.is_multipath() {
-        #[expect(
-            clippy::redundant_clone,
-            reason = "explicit clone before into_single_descriptors"
-        )]
         descriptor
             .clone()
             .into_single_descriptors()
