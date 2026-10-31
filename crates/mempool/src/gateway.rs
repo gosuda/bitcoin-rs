@@ -1601,8 +1601,8 @@ mod ordering_gate {
         }) else {
             return;
         };
-        let _ = parked_tx.send(());
-        let _ = release_rx.recv();
+        let _receiver_gone = parked_tx.send(());
+        let _sender_gone = release_rx.recv();
     }
 }
 

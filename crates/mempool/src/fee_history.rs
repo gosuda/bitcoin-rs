@@ -107,7 +107,7 @@ pub fn save(data_dir: &Path, history_bytes: &[u8]) {
         file.sync_all()?;
         std::fs::rename(&temp_path, &live_path)?;
         if let Ok(dir) = std::fs::File::open(data_dir) {
-            let _ = dir.sync_all();
+            dir.sync_all()?;
         }
         Ok(Some(history_bytes.len()))
     })();
