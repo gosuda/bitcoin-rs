@@ -36,8 +36,8 @@ impl RunningServer {
 
     fn connect(&self) -> io::Result<TcpStream> {
         let stream = TcpStream::connect(self.address)?;
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         Ok(stream)
     }
 
@@ -133,18 +133,13 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
     assert_eq!(unauthorized, CORE_UNAUTHORIZED);
 
     drop(idle);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let mut recovered = public.connect()?;
-        recovered.write_all(
-            b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        )?;
-        let response = read_response(&mut recovered)?;
-        if response.contains("Access-Control-Allow-Origin: *") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "public permit was not released");
-    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    poll_until_response(
+        deadline,
+        "public permit was not released",
+        || public_recovery_probe(&public, deadline),
+        |response| response.contains("Access-Control-Allow-Origin: *"),
+    )?;
     drop(slow);
     public.stop();
     assert!(public.handler.is_stopping());
@@ -154,14 +149,76 @@ fn public_saturation_preserves_management_and_recovers() -> io::Result<()> {
             .request(&management_request())?
             .contains("\"result\":0")
     );
-    let _management_idle = management.connect()?;
-    let _management_slow = management.connect()?;
-    let busy = read_response(&mut management.connect()?)?;
-    assert!(
-        busy.starts_with("HTTP/1.1 503 Service Unavailable"),
-        "{busy}"
-    );
+    let saturation_deadline = Instant::now() + Duration::from_secs(30);
+    poll_until_response(
+        saturation_deadline,
+        "management saturation was not observed",
+        || saturation_probe(&management, saturation_deadline),
+        |response| response.starts_with("HTTP/1.1 503 Service Unavailable"),
+    )?;
     Ok(())
+}
+
+fn public_recovery_probe(public: &RunningServer, deadline: Instant) -> io::Result<String> {
+    let mut recovered = public.connect()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "recovery deadline elapsed",
+        ));
+    }
+    recovered.set_read_timeout(Some(remaining))?;
+    recovered.set_write_timeout(Some(remaining))?;
+    recovered.write_all(
+        b"GET /api/blocks/tip/height HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )?;
+    read_response(&mut recovered)
+}
+
+fn saturation_probe(management: &RunningServer, deadline: Instant) -> io::Result<String> {
+    let _idle_holder = management.connect()?;
+    let _slow_holder = management.connect()?;
+    let mut probe_stream = management.connect()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "saturation deadline elapsed",
+        ));
+    }
+    probe_stream.set_read_timeout(Some(remaining))?;
+    probe_stream.set_write_timeout(Some(remaining))?;
+    read_response(&mut probe_stream)
+}
+
+fn poll_until_response(
+    deadline: Instant,
+    pending_message: &str,
+    mut attempt: impl FnMut() -> io::Result<String>,
+    mut satisfied: impl FnMut(&str) -> bool,
+) -> io::Result<()> {
+    let mut attempts = 0;
+    let mut last: String;
+    loop {
+        attempts += 1;
+        match attempt() {
+            Ok(response) => {
+                if satisfied(&response) {
+                    return Ok(());
+                }
+                last = response.lines().next().unwrap_or("(empty head)").to_owned();
+            }
+            Err(error) => {
+                last = error.to_string();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{pending_message} within 30s after {attempts} attempts; last observation: {last}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]

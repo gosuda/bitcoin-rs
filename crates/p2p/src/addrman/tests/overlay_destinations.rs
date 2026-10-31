@@ -37,25 +37,56 @@ fn overlay_self_announcements_keep_the_advertised_time() {
     ] {
         let book = AddressBook::open(None, [1; 4], false, None);
         let own = PeerEndpoint::new(address, 8333);
-        let other = PeerEndpoint::new(crate::PeerAddress::Onion([5; 32]), 8333);
-        book.learn_peer(
-            crate::PeerRemote::Endpoint(PeerEndpoint::new(address, 8333)),
-            &[(own, 9, EPOCH), (other, 9, EPOCH)],
+        book.learn_peer(crate::PeerRemote::Endpoint(own), &[(own, 9, EPOCH)], EPOCH);
+        assert_eq!(
+            last_seen(&book, own),
             EPOCH,
+            "self announcement keeps its time"
         );
-        let state = book.state.lock();
-        let seen = |endpoint| {
-            state
-                .stored
-                .records
-                .iter()
-                .find(|entry| entry.endpoint == endpoint)
-                .expect("learned endpoint")
-                .last_seen
-        };
-        assert_eq!(seen(own), EPOCH);
-        assert_eq!(seen(other), EPOCH - 2 * 60 * 60);
     }
+
+    let book = AddressBook::open(None, [1; 4], false, None);
+    let source = PeerEndpoint::new(crate::PeerAddress::Onion([3; 32]), 8333);
+    let gossiped = PeerEndpoint::new(crate::PeerAddress::Onion([5; 32]), 8333);
+    book.learn_peer(
+        crate::PeerRemote::Endpoint(source),
+        &[(gossiped, 9, EPOCH)],
+        EPOCH,
+    );
+    assert_eq!(
+        last_seen(&book, gossiped),
+        EPOCH - 2 * 60 * 60,
+        "a gossiped address pays the relay penalty"
+    );
+}
+
+/// Reads an endpoint's advertised time, naming every stored record when the
+/// endpoint is absent.
+fn last_seen(book: &AddressBook, endpoint: PeerEndpoint) -> u64 {
+    let state = book.state.lock();
+    state
+        .stored
+        .records
+        .iter()
+        .find(|entry| entry.endpoint == endpoint)
+        .unwrap_or_else(|| {
+            panic!(
+                "{endpoint:?} is not stored; book holds {:#?}",
+                state
+                    .stored
+                    .records
+                    .iter()
+                    .map(|entry| (entry.endpoint, entry.last_seen))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .last_seen
+}
+
+/// Pins the table secret so bucket placement is a fixed property of the test
+/// rather than an entropy draw: these assertions need both endpoints admitted.
+fn pin_layout(book: &AddressBook) {
+    book.state.lock().stored.secret = [7; 32];
 }
 
 #[test]
@@ -63,6 +94,7 @@ fn overlay_endpoints_sources_and_anchors_survive_restart_and_addrv2_gossip() {
     let directory = tempfile::tempdir().expect("directory");
     let base = directory.path().join("peers.dat");
     let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+    pin_layout(&book);
     let onion = PeerEndpoint::new(crate::PeerAddress::Onion([1; 32]), 8333);
     let i2p = PeerEndpoint::new(crate::PeerAddress::I2p([2; 32]), 8333);
     book.learn_peer(

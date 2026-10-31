@@ -64,6 +64,100 @@ fn pending_broadcast_index_tracks_flags_across_entry_lifecycle() -> Result<(), M
 }
 
 #[test]
+fn a_failed_send_cannot_undo_a_completed_broadcast() -> Result<(), MempoolError> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let tx = Arc::new(tx(1, Vec::new()));
+    let wtxid = tx.wtxid();
+    let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+    entry.unbroadcast = true;
+    pool.insert_entry(entry)?;
+
+    pool.mark_broadcast(wtxid);
+    pool.commit_broadcast(wtxid);
+    pool.mark_broadcast(wtxid);
+    pool.restore_broadcast(wtxid);
+
+    let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+    assert!(
+        !entry.unbroadcast && !pool.derived.unbroadcast.contains(&wtxid),
+        "a failed send must not undo a broadcast that already completed"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_earlier_failure_cannot_overwrite_a_peer_success() -> Result<(), MempoolError> {
+    // Two peers' serves interleave on one entry: the second send commits
+    // between the first send's mark and its failure, so the first failure's
+    // rollback must not re-flag the transaction.
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let tx = Arc::new(tx(1, Vec::new()));
+    let wtxid = tx.wtxid();
+    let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+    entry.unbroadcast = true;
+    pool.insert_entry(entry)?;
+
+    pool.mark_broadcast(wtxid);
+    pool.mark_broadcast(wtxid);
+    pool.commit_broadcast(wtxid);
+    pool.restore_broadcast(wtxid);
+
+    let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+    assert!(
+        !entry.unbroadcast && !pool.derived.unbroadcast.contains(&wtxid),
+        "an earlier failure must not overwrite a successful send"
+    );
+    Ok(())
+}
+
+#[test]
+fn unbroadcast_returns_only_after_every_in_flight_send_fails() -> Result<(), MempoolError> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let tx = Arc::new(tx(1, Vec::new()));
+    let wtxid = tx.wtxid();
+    let mut entry = MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0);
+    entry.unbroadcast = true;
+    pool.insert_entry(entry)?;
+
+    pool.mark_broadcast(wtxid);
+    pool.mark_broadcast(wtxid);
+    pool.restore_broadcast(wtxid);
+    assert!(
+        !pool.derived.unbroadcast.contains(&wtxid),
+        "a send still in flight keeps the broadcast window open"
+    );
+    pool.restore_broadcast(wtxid);
+    assert!(
+        pool.derived.unbroadcast.contains(&wtxid),
+        "with no send committed the entry is unbroadcast again"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_stale_rollback_cannot_revive_a_replaced_entry() -> Result<(), MempoolError> {
+    // The entry a failing send marked was evicted and re-admitted before
+    // the rollback arrived: the new entry keeps its own broadcast state.
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let tx = Arc::new(tx(1, Vec::new()));
+    let wtxid = tx.wtxid();
+    pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
+    pool.mark_broadcast(wtxid);
+    pool.remove_for_block(&[tx.as_ref()], &[tx.txid()], 2, 1);
+    pool.insert_entry(MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0))?;
+
+    pool.restore_broadcast(wtxid);
+    pool.commit_broadcast(wtxid);
+
+    let entry = pool.entry_by_txid(&tx.txid()).expect("entry lives");
+    assert!(
+        !entry.unbroadcast && !entry.broadcast_done && entry.broadcast_marks == 0,
+        "a stale attempt must not touch a replaced entry"
+    );
+    Ok(())
+}
+
+#[test]
 fn default_min_relay_fee_is_1_sat_per_vbyte() {
     let pool = Mempool::new(MempoolLimits::default());
     assert_eq!(pool.min_relay_fee_sat_per_kvb(), 1_000);

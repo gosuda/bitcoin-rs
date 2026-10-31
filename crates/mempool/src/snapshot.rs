@@ -636,7 +636,7 @@ fn restore_candidates(
                     if let Some(saved) = positions.get(&id)
                         && saved.unbroadcast
                     {
-                        gateway.restore_unbroadcast(saved.tx.wtxid());
+                        gateway.set_pending_broadcast(saved.tx.wtxid());
                     }
                 }
             }

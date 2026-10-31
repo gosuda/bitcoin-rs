@@ -89,13 +89,11 @@ fn peer_and_network_introspection() -> Result<()> {
     let peers = peers
         .as_array()
         .ok_or_else(|| Error::Assertion("getpeerinfo not array".into()))?;
+    let expected = format!("127.0.0.1:{}", core.p2p_addr.port());
     let peer = peers
-        .first()
-        .ok_or_else(|| Error::Assertion("no peer recorded".into()))?;
-    assert_eq!(
-        peer.str_field("addr")?,
-        format!("127.0.0.1:{}", core.p2p_addr.port())
-    );
+        .iter()
+        .find(|row| row.str_field("addr").is_ok_and(|addr| addr == expected))
+        .ok_or_else(|| Error::Assertion(format!("no peer dialed to {expected} in {peers:?}")))?;
     assert!(peer.u64_field("conntime")? > 0, "peer conntime: {peer}");
     assert!(
         peer.str_field("subver")?.starts_with("/Satoshi:"),

@@ -9,7 +9,7 @@ use bitcoin_rs_e2e::differential::{CommonFunds, compare_reply, mine_common_chain
 use bitcoin_rs_e2e::helpers::{
     coinbase_script_sig, funding_address, grind_pow, sign_p2pkh_inputs, signed_spend,
 };
-use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 #[derive(Clone, Copy)]
@@ -292,10 +292,32 @@ fn transaction_cases(
     Ok(valid)
 }
 
+fn spawn_isolated_core() -> Result<ProcessNode> {
+    ProcessNode::spawn_with(
+        Kind::Core,
+        &SpawnOptions {
+            extra_args: &["-maxconnections=0"],
+            ..Default::default()
+        },
+    )
+}
+
+fn spawn_isolated_node() -> Result<ProcessNode> {
+    ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            toml_override: Some(
+                "network = \"regtest\"\np2p_listen = []\ndns_seeds_enabled = false\n",
+            ),
+            ..Default::default()
+        },
+    )
+}
+
 #[test]
 fn curated_live_acceptance() -> Result<()> {
-    let mut core = ProcessNode::spawn(Kind::Core)?;
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    let mut core = spawn_isolated_core()?;
+    let mut node = spawn_isolated_node()?;
     let funds = common_active_chain(&mut core, &mut node)?;
     let valid = transaction_cases(&mut core, &mut node, &funds)?;
     let valid_block = core_candidate(&mut core, &[])?;

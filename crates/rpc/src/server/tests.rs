@@ -136,6 +136,93 @@ fn blocking_quota_leaves_the_busiest_source_an_ordinary_slot() {
     }
 }
 
+/// A `scantxoutset start` refused because another scan holds the
+/// reservation kept no worker, so its keep-alive slot stays open. A `start`
+/// refused on its descriptors shares the -8 code but ran as a blocking
+/// request, so it still closes.
+#[test]
+fn a_refused_scan_start_keeps_the_connection_alive() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let permit = handler
+        .context()
+        .chain
+        .utxo
+        .reserve_scan()
+        .expect("the first reservation always wins");
+
+    let refused = handle_json(
+        &handler,
+        br#"{"jsonrpc":"2.0","id":1,"method":"scantxoutset","params":["start"]}"#,
+    );
+    let body = refused.body.expect("a refused start replies");
+    assert_eq!(
+        body.get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64),
+        Some(-8),
+        "a running scan refuses a new start: {body:?}"
+    );
+    assert!(
+        !refused.close,
+        "a pre-reservation refusal holds nothing a close would release"
+    );
+    drop(permit);
+
+    let descriptor = format!("raw({})", "0".repeat(17_000));
+    let request = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"scantxoutset","params":["start",["{descriptor}"]]}}"#
+    );
+    let bad_descriptors = handle_json(&handler, request.as_bytes());
+    let body = bad_descriptors.body.expect("bad descriptors reply");
+    assert_eq!(
+        body.get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64),
+        Some(-8),
+        "descriptor failures share the -8 code: {body:?}"
+    );
+    assert!(
+        bad_descriptors.close,
+        "a blocking start refused on its descriptors still held a worker"
+    );
+}
+
+/// The batch branch applies the same rule per request: a batch whose only
+/// blocking request was refused pre-reservation stays alive, while a batch
+/// containing a blocking request that ran still closes.
+#[test]
+fn a_batch_scan_refusal_keeps_the_connection_alive() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let _permit = handler
+        .context()
+        .chain
+        .utxo
+        .reserve_scan()
+        .expect("the first reservation always wins");
+
+    let refused_only = handle_json(
+        &handler,
+        br#"[{"jsonrpc":"2.0","id":1,"method":"scantxoutset","params":["start"]}]"#,
+    );
+    assert_eq!(refused_only.status, 200);
+    assert!(
+        !refused_only.close,
+        "a batch whose blocking request was refused pre-reservation stays alive"
+    );
+
+    let mixed = handle_json(
+        &handler,
+        br#"[{"jsonrpc":"2.0","id":1,"method":"scantxoutset","params":["start"]},
+             {"jsonrpc":"2.0","id":2,"method":"verifychain","params":["x"]},
+             {"jsonrpc":"2.0","id":3,"method":"getblockcount","params":[]}]"#,
+    );
+    assert_eq!(mixed.status, 200);
+    assert!(
+        mixed.close,
+        "a blocking request that ran still closes the batch connection"
+    );
+}
+
 #[test]
 fn connection_admission_reserves_slots_for_other_peers() {
     let source = IpAddr::V4(Ipv4Addr::LOCALHOST);

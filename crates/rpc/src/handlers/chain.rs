@@ -1231,7 +1231,7 @@ fn scan_arguments(params: &Value) -> Result<(&str, Option<&sonic_rs::Array>), Rp
 fn scan_error(error: &bitcoin_rs_utxo::scan::UtxoScanError) -> RpcError {
     match error {
         bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
-            RpcError::InvalidParameter(error.to_string())
+            RpcError::ScanInProgress(error.to_string())
         }
         _ => RpcError::Misc(error.to_string()),
     }

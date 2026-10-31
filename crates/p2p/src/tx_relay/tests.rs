@@ -114,6 +114,7 @@ fn pending_local_broadcast_survives_absent_peers_and_saturation() {
     assert_eq!(gateway.read().unbroadcast_transactions().count(), 1);
     assert!(sink.log().iter().all(|row| row.0 == local.txid()));
     gateway.mark_broadcast(local.wtxid());
+    gateway.commit_broadcast(local.wtxid());
     retry_initial_broadcast(&gateway, &sink, &mut cursor);
     assert_eq!(sink.log().len(), 3);
 }
@@ -152,6 +153,7 @@ fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
     );
     for (_, wtxid, _) in first {
         gateway.mark_broadcast(wtxid);
+        gateway.commit_broadcast(wtxid);
     }
     retry_initial_broadcast(&gateway, &sink, &mut cursor);
     assert_eq!(
@@ -166,6 +168,7 @@ fn pending_broadcast_batches_resume_by_key_after_completion_and_removal() {
         .collect::<Vec<_>>();
     for (_, wtxid, _) in remaining {
         gateway.mark_broadcast(wtxid);
+        gateway.commit_broadcast(wtxid);
     }
     gateway
         .insert_entry(

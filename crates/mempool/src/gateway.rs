@@ -1183,13 +1183,33 @@ impl MempoolGateway {
         self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
-    /// A successful P2P getdata response completes initial broadcast of this
-    /// exact witness body. Membership and its public sequence do not change.
+    /// A P2P getdata response is about to carry this witness body. The mark
+    /// is taken before the send so the initial-broadcast window cannot be
+    /// completed falsely. Membership and its public sequence do not change.
     pub fn mark_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
-        self.pool.write().set_unbroadcast(wtxid, false);
+        self.pool.write().mark_broadcast(wtxid);
     }
 
-    pub(crate) fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+    /// The marked send committed: initial broadcast of this exact witness
+    /// body completed. Membership and its public sequence do not change.
+    pub fn commit_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().commit_broadcast(wtxid);
+    }
+
+    /// Reverts a broadcast mark when the response carrying the transaction
+    /// never reached the peer. The rollback is conditional on the entry's
+    /// broadcast state: it only re-flags while the transaction still needs
+    /// its initial broadcast and no send has committed or remains in
+    /// flight, so one peer's failure cannot undo another's success and a
+    /// replaced entry cannot be revived.
+    pub fn restore_unbroadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
+        self.pool.write().restore_broadcast(wtxid);
+    }
+
+    /// Marks a snapshot-restored entry as still awaiting its initial
+    /// broadcast. Restore admissions are not flagged pending, so the saved
+    /// flag is re-applied explicitly.
+    pub(crate) fn set_pending_broadcast(&self, wtxid: bitcoin_rs_primitives::Wtxid) {
         self.pool.write().set_unbroadcast(wtxid, true);
     }
 
