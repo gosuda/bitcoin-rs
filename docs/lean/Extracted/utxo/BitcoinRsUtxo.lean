@@ -77,14 +77,14 @@ axiom core.result.Result.ok
   {T : Type _} {E : Type _} : core.result.Result T E → Result (Option T)
 
 /-- [bitcoin_rs_primitives::units::Amount]
-    Source: 'crates/primitives/src/units.rs', lines 7:0-7:17
+    Source: 'crates/primitives/src/units.rs', lines 4:0-4:17
     Name pattern: [bitcoin_rs_primitives::units::Amount]
     Visibility: public -/
 @[rust_type "bitcoin_rs_primitives::units::Amount"]
 axiom bitcoin_rs_primitives.units.Amount : Type
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
-    Source: 'crates/primitives/src/units.rs', lines 14:4-14:29
+    Source: 'crates/primitives/src/units.rs', lines 10:4-10:29
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::MAX_MONEY]
     Visibility: public -/
 @[rust_const
@@ -93,7 +93,7 @@ axiom bitcoin_rs_primitives.units.Amount.MAX_MONEY
   : Result bitcoin_rs_primitives.units.Amount
 
 /-- [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]:
-    Source: 'crates/primitives/src/units.rs', lines 22:4-22:36
+    Source: 'crates/primitives/src/units.rs', lines 18:4-18:36
     Name pattern: [bitcoin_rs_primitives::units::{bitcoin_rs_primitives::units::Amount}::to_sat]
     Visibility: public -/
 @[rust_fun
@@ -102,14 +102,14 @@ axiom bitcoin_rs_primitives.units.Amount.to_sat
   : bitcoin_rs_primitives.units.Amount → Result Std.U64
 
 /-- [bitcoin_rs_utxo::compress::MAX_COMPRESSIBLE_AMOUNT]
-    Source: 'crates/utxo/src/compress.rs', lines 69:0-69:75 -/
+    Source: 'crates/utxo/src/compress.rs', lines 66:0-66:75 -/
 @[global_simps, irreducible]
 def compress.MAX_COMPRESSIBLE_AMOUNT : Result Std.U64 := do
   let a ← bitcoin_rs_primitives.units.Amount.MAX_MONEY
   bitcoin_rs_primitives.units.Amount.to_sat a
 
 /-- [bitcoin_rs_utxo::scan::UtxoScanError]
-    Source: 'crates/utxo/src/scan.rs', lines 20:0-27:1
+    Source: 'crates/utxo/src/scan.rs', lines 18:0-25:1
     Visibility: public -/
 @[discriminant isize]
 inductive scan.UtxoScanError where
@@ -139,7 +139,7 @@ inductive set.UtxoError where
 | AmountOutOfRange : Std.U64 → set.UtxoError
 
 /-- [bitcoin_rs_utxo::compress::compress_amount]: loop body 0:
-    Source: 'crates/utxo/src/compress.rs', lines 81:4-84:5 -/
+    Source: 'crates/utxo/src/compress.rs', lines 78:4-81:5 -/
 @[rust_loop_body]
 def compress.compress_amount_loop.body
   (n : Std.U64) (exponent : Std.U64) :
@@ -157,7 +157,7 @@ def compress.compress_amount_loop.body
   else ok (done (n, exponent))
 
 /-- [bitcoin_rs_utxo::compress::compress_amount]: loop 0:
-    Source: 'crates/utxo/src/compress.rs', lines 81:4-84:5 -/
+    Source: 'crates/utxo/src/compress.rs', lines 78:4-81:5 -/
 @[rust_loop]
 def compress.compress_amount_loop
   (n : Std.U64) (exponent : Std.U64) : Result (Std.U64 × Std.U64) := do
@@ -166,7 +166,7 @@ def compress.compress_amount_loop
     (n, exponent)
 
 /-- [bitcoin_rs_utxo::compress::compress_amount]:
-    Source: 'crates/utxo/src/compress.rs', lines 72:0-92:1 -/
+    Source: 'crates/utxo/src/compress.rs', lines 69:0-89:1 -/
 def compress.compress_amount
   (amount : Std.U64) : Result (core.result.Result Std.U64 set.UtxoError) := do
   let i ← compress.MAX_COMPRESSIBLE_AMOUNT
@@ -196,7 +196,7 @@ def compress.compress_amount
         ok (core.result.Result.Ok i4)
 
 /-- [bitcoin_rs_utxo::compress::POW10]
-    Source: 'crates/utxo/src/compress.rs', lines 94:0-105:2 -/
+    Source: 'crates/utxo/src/compress.rs', lines 91:0-102:2 -/
 @[global_simps, irreducible]
 def compress.POW10 : Array Std.U64 10#usize :=
   Array.make 10#usize [
@@ -205,7 +205,7 @@ def compress.POW10 : Array Std.U64 10#usize :=
     ]
 
 /-- [bitcoin_rs_utxo::compress::decompress_amount]:
-    Source: 'crates/utxo/src/compress.rs', lines 108:0-125:1 -/
+    Source: 'crates/utxo/src/compress.rs', lines 105:0-122:1 -/
 def compress.decompress_amount
   (compressed : Std.U64) : Result (Option Std.U64) := do
   if compressed = 0#u64
