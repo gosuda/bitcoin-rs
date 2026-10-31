@@ -1,5 +1,6 @@
 use std::io::{Cursor, Seek};
 
+use crate::support::{TestError, TestResult};
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{
@@ -25,8 +26,7 @@ fn txout(seed: u64) -> TxOut {
 }
 
 #[test]
-fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
--> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries() -> TestResult {
     let set = UtxoSet::new();
     let live_txid = txid(42_000);
     let low = OutPoint::new(live_txid.into(), 63);
@@ -63,21 +63,21 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
         !loaded
             .set
             .get_entry(&low)
-            .ok_or("missing low entry")?
+            .ok_or(TestError::Missing("missing low entry"))?
             .coinbase
     );
     assert!(
         loaded
             .set
             .get_entry(&high)
-            .ok_or("missing high entry")?
+            .ok_or(TestError::Missing("missing high entry"))?
             .coinbase
     );
     assert_eq!(
         loaded
             .set
             .get_entry(&max)
-            .ok_or("missing max entry")?
+            .ok_or(TestError::Missing("missing max entry"))?
             .height,
         u32::MAX
     );
@@ -85,7 +85,7 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
 }
 
 #[test]
-fn strict_v4_snapshot_requires_complete_exact_input() -> Result<(), Box<dyn std::error::Error>> {
+fn strict_v4_snapshot_requires_complete_exact_input() -> TestResult {
     let mut snapshot = Vec::new();
     write_snapshot_observed(&UtxoSet::new(), &txid(64_100), 64, &mut snapshot, ())?;
 
@@ -139,8 +139,7 @@ impl SnapshotCoinObserver for RecordingSnapshotObserver {
 }
 
 #[test]
-fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dyn std::error::Error>>
-{
+fn observed_snapshot_traversal_matches_the_current_reader() -> TestResult {
     let set = UtxoSet::new();
     let first_txid = txid(200_000);
     let second_txid = txid(200_001);
@@ -196,7 +195,7 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dy
 }
 
 #[test]
-fn snapshot_trailer_round_trips_without_a_listener() -> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_trailer_round_trips_without_a_listener() -> TestResult {
     let set = UtxoSet::new();
 
     let op = OutPoint::new(txid(130_000).into(), 0);

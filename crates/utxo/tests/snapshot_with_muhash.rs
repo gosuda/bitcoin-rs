@@ -3,7 +3,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoSet, write_snapshot_observed};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::support::TestResult;
 
 const TRAILER_LEN: usize = 384;
 

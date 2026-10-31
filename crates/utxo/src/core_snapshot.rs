@@ -869,7 +869,7 @@ mod sealed_state_tests {
 
     use super::*;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+    use crate::test_support::{TestError, TestResult};
 
     const CORE: &[u8] = include_bytes!("../tests/fixtures/core-v2/core200.dat");
 
@@ -953,7 +953,9 @@ mod sealed_state_tests {
     #[test]
     fn wrong_commitment_never_reaches_the_table_or_the_statistics() -> TestResult {
         let mut forged = CORE.to_vec();
-        let last = forged.last_mut().ok_or("empty fixture")?;
+        let last = forged
+            .last_mut()
+            .ok_or(TestError::Missing("empty fixture"))?;
         *last ^= 1;
         let before = crate::set::SNAPSHOT_INSERTIONS.with(std::cell::Cell::get);
         assert!(matches!(

@@ -907,7 +907,7 @@ mod seed_no_token_tests {
     use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
     use std::io::Cursor;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    use crate::test_support::{TestError, TestResult};
 
     fn txid(seed: u64) -> Hash256 {
         let mut bytes = [0_u8; 32];
@@ -991,7 +991,8 @@ mod seed_no_token_tests {
         let (set, tip, height) = fixture_set()?;
         let mut good = Vec::new();
         let (_, (), encode_witness) = write_snapshot_witnessed(&set, &tip, height, &mut good, ())?;
-        let encode_witness = encode_witness.ok_or("valid encode must mint a witness")?;
+        let encode_witness =
+            encode_witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
         assert_eq!(encode_witness.byte_len(), u64::try_from(good.len())?);
         assert_eq!(encode_witness.record_count(), 2);
         assert_eq!(encode_witness.output_count(), 3);

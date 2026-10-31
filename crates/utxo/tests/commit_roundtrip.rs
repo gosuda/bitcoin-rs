@@ -4,7 +4,7 @@ use bitcoin_rs_utxo::{UtxoError, UtxoSet};
 use sha2::{Digest, Sha256};
 
 type Entry = (OutPoint, TxOut, bool, u32);
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::support::{TestError, TestResult};
 
 fn txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
@@ -50,7 +50,7 @@ fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-fn expected_hash_serialized_3(entries: &[Entry]) -> Result<Hash256, Box<dyn std::error::Error>> {
+fn expected_hash_serialized_3(entries: &[Entry]) -> Result<Hash256, TestError> {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_unstable_by(|left, right| {
         left.0
@@ -191,7 +191,11 @@ fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult 
                 (invalid_add, oversized_txout(201), false, 11),
             ];
             let error = match commit(&set, &adds, &[retained], &txid(103)) {
-                Ok(()) => return Err("oversized script unexpectedly committed".into()),
+                Ok(()) => {
+                    return Err(TestError::UnexpectedSuccess(
+                        "oversized script unexpectedly committed",
+                    ));
+                }
                 Err(error) => error,
             };
             assert!(
@@ -266,7 +270,7 @@ fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
         assert_eq!(set.get(outpoint).as_ref(), Some(txout));
         let entry = set
             .get_entry(outpoint)
-            .ok_or("expected a committed output to be live")?;
+            .ok_or(TestError::Missing("expected a committed output to be live"))?;
         assert_eq!(&entry.txout, txout);
         assert_eq!(entry.coinbase, *coinbase, "coinbase lost at {outpoint:?}");
         assert_eq!(entry.height, *height, "height lost at {outpoint:?}");

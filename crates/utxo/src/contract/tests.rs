@@ -9,7 +9,7 @@ use bitcoin_rs_storage::{
 use super::*;
 use crate::stats::CoinStats;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use crate::test_support::{TestError, TestResult};
 
 const HEIGHT: u32 = 91;
 const HASH: Hash256 = Hash256::from_le_bytes(&[0x5a; 32]);
@@ -213,7 +213,9 @@ fn rollback_restores_the_exact_prior_state() -> TestResult {
     );
     assert_eq!(observe(&utxo, &coin_stats)?, before);
     assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::RolledBack, HEIGHT, HASH)
@@ -236,7 +238,9 @@ fn in_flight_marker_refuses_before_arming() -> TestResult {
         "{outcome:?}"
     );
     assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::InFlight, HEIGHT - 1, torn)
@@ -254,7 +258,9 @@ fn recovery_rewind_preserves_the_surviving_marker() -> TestResult {
     rollback_block_recovery(&utxo, &coin_stats, HEIGHT, 1, 2, &undo)?;
 
     assert_eq!(observe(&utxo, &coin_stats)?, before);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::InFlight, HEIGHT - 1, torn)
@@ -274,7 +280,9 @@ fn rolled_back_marker_carries_into_the_next_disconnect() -> TestResult {
 
     assert_eq!(observe(&utxo, &coin_stats)?, before);
     assert_eq!(receipt.restored_parents, vec![FUNDED.txid]);
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(
         (marker.phase, marker.height, marker.hash),
         (DisconnectPhase::RolledBack, HEIGHT, HASH)
@@ -348,7 +356,9 @@ fn completion_failure_is_fatal_and_leaves_the_marker_in_flight() -> TestResult {
         matches!(outcome, Err(RollbackError::Marker(_))),
         "{outcome:?}"
     );
-    let marker = store.load_disconnect_marker()?.ok_or("marker missing")?;
+    let marker = store
+        .load_disconnect_marker()?
+        .ok_or(TestError::Missing("marker missing"))?;
     assert_eq!(marker.phase, DisconnectPhase::InFlight);
     Ok(())
 }
@@ -386,7 +396,7 @@ fn undo_txout(seed: u64) -> TxOut {
     }
 }
 
-fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, Box<dyn std::error::Error>> {
+fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, TestError> {
     let mut live: Vec<UtxoAdd> = Vec::new();
     let mut blocks = Vec::with_capacity(10);
 

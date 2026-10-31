@@ -7,3 +7,4 @@ mod snapshot_roundtrip;
 mod snapshot_v4_golden;
 mod snapshot_with_muhash;
 mod snapshot_witnessed;
+mod support;

@@ -1,3 +1,4 @@
+use crate::support::TestResult;
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsDecodeError, CoinStatsListener};
@@ -21,8 +22,7 @@ fn finish_block_applies_height_and_transaction_delta() {
 }
 
 #[test]
-fn coin_stats_codec_is_exact_and_preserves_muhash_continuation()
--> Result<(), Box<dyn std::error::Error>> {
+fn coin_stats_codec_is_exact_and_preserves_muhash_continuation() -> TestResult {
     let old_op = OutPoint::new(txid(1_000).into(), 3);
     let old_txout = TxOut {
         value: Amount::from_sat(12_345),

@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::io::{Cursor, Seek, Write};
 
+use crate::support::{TestError, TestResult};
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_storage::checkpoint::CheckpointReference;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
@@ -27,7 +28,7 @@ fn txout(seed: u64) -> TxOut {
     }
 }
 
-fn fixture_set() -> Result<(bitcoin_rs_utxo::UtxoSet, Hash256, u32), Box<dyn std::error::Error>> {
+fn fixture_set() -> TestResult<(bitcoin_rs_utxo::UtxoSet, Hash256, u32)> {
     let set = bitcoin_rs_utxo::UtxoSet::new();
     let first = txid(7_001);
     let second = txid(7_002);
@@ -90,16 +91,15 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     digest.into()
 }
 
-fn encoded_witnessed() -> Result<(Vec<u8>, bitcoin_rs_utxo::V4Witness), Box<dyn std::error::Error>>
-{
+fn encoded_witnessed() -> TestResult<(Vec<u8>, bitcoin_rs_utxo::V4Witness)> {
     let (set, tip, height) = fixture_set()?;
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, height, &mut bytes, ())?;
-    let witness = witness.ok_or("valid encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
     Ok((bytes, witness))
 }
 
-fn file_with(bytes: &[u8]) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+fn file_with(bytes: &[u8]) -> TestResult<std::fs::File> {
     let mut file = tempfile::tempfile()?;
     file.write_all(bytes)?;
     file.rewind()?;
@@ -133,8 +133,7 @@ fn raw_projection(
 }
 
 #[test]
-fn witnessed_write_matches_plain_bytes_and_mints_exact_witness()
--> Result<(), Box<dyn std::error::Error>> {
+fn witnessed_write_matches_plain_bytes_and_mints_exact_witness() -> TestResult {
     let (set, tip, height) = fixture_set()?;
     let mut plain = Vec::new();
     let (plain_trailer, ()) = write_snapshot_observed(&set, &tip, height, &mut plain, ())?;
@@ -144,7 +143,7 @@ fn witnessed_write_matches_plain_bytes_and_mints_exact_witness()
 
     assert_eq!(plain, witnessed);
     assert_eq!(plain_trailer, witness_trailer);
-    let witness = witness.ok_or("valid encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
     assert_eq!(witness.byte_len(), u64::try_from(plain.len())?);
     assert_eq!(witness.sha256(), sha256(&plain));
     assert_eq!(witness.tip_hash(), tip);
@@ -158,13 +157,12 @@ fn witnessed_write_matches_plain_bytes_and_mints_exact_witness()
 }
 
 #[test]
-fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins()
--> Result<(), Box<dyn std::error::Error>> {
+fn witnessed_read_accepts_exact_and_raw_traversal_replays_coins() -> TestResult {
     let (set, tip, height) = fixture_set()?;
     let mut bytes = Vec::new();
     let (_, writer_observer, witness) =
         write_snapshot_witnessed(&set, &tip, height, &mut bytes, RecordingObserver::default())?;
-    let witness = witness.ok_or("valid encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
 
     let mut file = file_with(&bytes)?;
     let (load, reader_observer, read_witness) =
@@ -237,7 +235,7 @@ fn append_snapshot_output(
 }
 
 #[test]
-fn strict_loader_rejects_malformed_without_witness() -> Result<(), Box<dyn std::error::Error>> {
+fn strict_loader_rejects_malformed_without_witness() -> TestResult {
     let (good, _) = encoded_witnessed()?;
     assert!(
         read_snapshot_strict_v4_witnessed(&mut Cursor::new(good.clone()), ()).is_ok(),
@@ -300,7 +298,7 @@ fn strict_loader_rejects_malformed_without_witness() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn tampered_or_truncated_artifact_yields_integrity() -> Result<(), Box<dyn std::error::Error>> {
+fn tampered_or_truncated_artifact_yields_integrity() -> TestResult {
     let (bytes, witness) = encoded_witnessed()?;
     let first_script = 52 + 45 + 19;
 
@@ -344,7 +342,7 @@ fn tampered_or_truncated_artifact_yields_integrity() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn same_fd_pins_bytes_despite_path_replace() -> Result<(), Box<dyn std::error::Error>> {
+fn same_fd_pins_bytes_despite_path_replace() -> TestResult {
     let (bytes, _) = encoded_witnessed()?;
     let (set, tip, height) = fixture_set()?;
     let mut canonical = Vec::new();
@@ -391,7 +389,7 @@ fn same_fd_pins_bytes_despite_path_replace() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
-fn grown_file_after_seal_yields_integrity() -> Result<(), Box<dyn std::error::Error>> {
+fn grown_file_after_seal_yields_integrity() -> TestResult {
     let (bytes, witness) = encoded_witnessed()?;
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("coins.dat");
@@ -415,7 +413,7 @@ fn grown_file_after_seal_yields_integrity() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn emit_failure_aborts_as_emit() -> Result<(), Box<dyn std::error::Error>> {
+fn emit_failure_aborts_as_emit() -> TestResult {
     #[derive(Debug)]
     struct Boom;
 
@@ -449,12 +447,12 @@ fn emit_failure_aborts_as_emit() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn empty_snapshot_mints_and_traverses_zero_coins() -> Result<(), Box<dyn std::error::Error>> {
+fn empty_snapshot_mints_and_traverses_zero_coins() -> TestResult {
     let set = bitcoin_rs_utxo::UtxoSet::new();
     let tip = txid(99);
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 0, &mut bytes, ())?;
-    let witness = witness.ok_or("empty encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("empty encode must mint a witness"))?;
     assert_eq!(witness.record_count(), 0);
     assert_eq!(witness.output_count(), 0);
     assert_eq!(witness.byte_len(), u64::try_from(bytes.len())?);
@@ -483,10 +481,7 @@ fn empty_snapshot_mints_and_traverses_zero_coins() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn tiny_artifact(
-    tip_seed: u64,
-    base_byte: u8,
-) -> Result<VerifiedSnapshotArtifact, Box<dyn std::error::Error>> {
+fn tiny_artifact(tip_seed: u64, base_byte: u8) -> TestResult<VerifiedSnapshotArtifact> {
     let set = bitcoin_rs_utxo::UtxoSet::new();
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
@@ -499,7 +494,7 @@ fn tiny_artifact(
     let tip = txid(tip_seed + 3);
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 11, &mut bytes, ())?;
-    let witness = witness.ok_or("tiny encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("tiny encode must mint a witness"))?;
     let file = file_with(&bytes)?;
     Ok(VerifiedSnapshotArtifact::seal(
         file,
@@ -511,7 +506,7 @@ fn tiny_artifact(
 }
 
 #[test]
-fn offer_without_demand_is_skipped_and_stores_nothing() -> Result<(), Box<dyn std::error::Error>> {
+fn offer_without_demand_is_skipped_and_stores_nothing() -> TestResult {
     let cell = SeedSlot::new();
     assert!(!cell.is_wanted());
     assert!(matches!(
@@ -524,7 +519,7 @@ fn offer_without_demand_is_skipped_and_stores_nothing() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn first_offer_wins_take_clears_demand() -> Result<(), Box<dyn std::error::Error>> {
+fn first_offer_wins_take_clears_demand() -> TestResult {
     let cell = SeedSlot::new();
     cell.want();
     assert!(cell.is_wanted());
@@ -538,7 +533,9 @@ fn first_offer_wins_take_clears_demand() -> Result<(), Box<dyn std::error::Error
         OfferOutcome::Skipped
     ));
 
-    let mut taken = cell.take().ok_or("queued artifact missing")?;
+    let mut taken = cell
+        .take()
+        .ok_or(TestError::Missing("queued artifact missing"))?;
     assert_eq!(taken.tip(), (11, txid(34)));
     assert!(cell.take().is_none());
     assert!(!cell.is_wanted());
@@ -560,7 +557,7 @@ fn first_offer_wins_take_clears_demand() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn rest_drops_artifact_and_demand() -> Result<(), Box<dyn std::error::Error>> {
+fn rest_drops_artifact_and_demand() -> TestResult {
     let cell = SeedSlot::new();
     assert!(cell.take().is_none());
     cell.want();
@@ -593,7 +590,7 @@ fn cell_handles_are_thread_shareable() {
 }
 
 #[test]
-fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn std::error::Error>> {
+fn seed_traversal_polls_cancellation_every_4096_coins() -> TestResult {
     let set = bitcoin_rs_utxo::UtxoSet::new();
     let mut changes = BlockChanges::default();
     for i in 0..9_000_u64 {
@@ -608,7 +605,7 @@ fn seed_traversal_polls_cancellation_every_4096_coins() -> Result<(), Box<dyn st
     let tip = txid(200_001);
     let mut bytes = Vec::new();
     let (_, (), witness) = write_snapshot_witnessed(&set, &tip, 7, &mut bytes, ())?;
-    let witness = witness.ok_or("valid encode must mint a witness")?;
+    let witness = witness.ok_or(TestError::Missing("valid encode must mint a witness"))?;
     let mut file = file_with(&bytes)?;
     let (_, (), read_witness) = read_snapshot_strict_v4_witnessed(&mut file, ())?;
     let mut artifact = VerifiedSnapshotArtifact::seal(
