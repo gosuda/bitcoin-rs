@@ -69,6 +69,9 @@ pub fn i64_to_f64(value: i64) -> f64 {
 }
 
 #[cfg(test)]
+pub(crate) mod test_error;
+
+#[cfg(test)]
 mod float_conversion_tests {
     use super::{i64_to_f64, u64_to_f64};
 

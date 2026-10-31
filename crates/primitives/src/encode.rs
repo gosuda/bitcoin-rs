@@ -333,7 +333,9 @@ mod tests {
     use super::{ConsensusEncode, DecodeError, deserialize, varint};
     use crate::hex::hex_encode;
 
-    type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    use crate::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
 
     #[test]
     fn hex_encoding_preserves_byte_order_and_lowercase() {

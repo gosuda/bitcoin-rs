@@ -14,7 +14,9 @@ use bitcoin_rs_primitives::{
     Sequence, SighashCache, Tx as NativeTx, Witness, Wtxid, consensus_bytes, deserialize,
 };
 
-type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+use crate::support::TestError;
+
+type Result<T, E = TestError> = std::result::Result<T, E>;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
 
 fn repo_root() -> PathBuf {

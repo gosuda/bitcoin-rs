@@ -4,7 +4,9 @@ use crate::encode::DecodeError;
 
 use crate::{BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 
-type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+use crate::test_error::TestError;
+
+type Result<T, E = TestError> = std::result::Result<T, E>;
 
 #[test]
 fn genesis_block_hash_matches_known_value() -> Result<()> {

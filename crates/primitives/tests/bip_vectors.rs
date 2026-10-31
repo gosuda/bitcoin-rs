@@ -10,7 +10,9 @@ use bitcoin_rs_primitives::{
 };
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
-type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+use crate::support::TestError;
+
+type Result<T, E = TestError> = std::result::Result<T, E>;
 
 fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vectors")

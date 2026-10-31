@@ -2,6 +2,7 @@
 //! blockstream-recorded values.
 use std::str::FromStr;
 
+use crate::support::TestError;
 use bitcoin_rs_primitives::{Block as PrimitiveBlock, BlockHash, Txid, Wtxid, deserialize};
 const HEIGHTS: &[(u32, &str)] = &[
     (
@@ -67,7 +68,7 @@ const HEIGHTS: &[(u32, &str)] = &[
 ];
 
 #[test]
-fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn std::error::Error>> {
+fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), TestError> {
     for (height, expected_hash) in HEIGHTS {
         let block_bytes = read_fixture(*height, "bin")?;
         let txid_text = String::from_utf8(read_fixture(*height, "txids.txt")?)?;
@@ -123,18 +124,20 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn read_fixture(height: u32, extension: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn read_fixture(height: u32, extension: &str) -> Result<Vec<u8>, TestError> {
     let path = format!("tests/testdata/{height}.{extension}");
     match std::fs::read(&path) {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(format!("missing {path}; run scripts/fetch-golden.sh to populate testdata").into())
+            Err(TestError::MissingFixture(format!(
+                "missing {path}; run scripts/fetch-golden.sh to populate testdata"
+            )))
         }
         Err(error) => Err(error.into()),
     }
 }
 
-fn parse_wtxids(wtxid_text: &str) -> Result<Vec<Wtxid>, Box<dyn std::error::Error>> {
+fn parse_wtxids(wtxid_text: &str) -> Result<Vec<Wtxid>, TestError> {
     wtxid_text
         .lines()
         .filter(|line| !line.trim().is_empty())

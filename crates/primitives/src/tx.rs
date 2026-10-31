@@ -125,7 +125,9 @@ mod tests {
     use crate::deserialize;
     use crate::{DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes};
 
-    type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
+    use crate::test_error::TestError;
+
+    type Result<T, E = TestError> = std::result::Result<T, E>;
 
     fn native_tx() -> Tx {
         Tx {
