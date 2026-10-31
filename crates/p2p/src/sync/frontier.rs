@@ -1,5 +1,3 @@
-//! Canonical sync-frontier reconciliation.
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,22 +53,10 @@ pub(crate) fn body_capability(claimed: i32, active_height: Option<u32>) -> Optio
 }
 
 impl UsablePeer {
-    /// Demonstrated serving capability for this connection: the height it is
-    /// trusted at, precomputed once per observation instead of per request
-    /// peer.
     pub(crate) fn capability(&self) -> Option<u32> {
         body_capability(self.info.best_known_height, self.active_height)
     }
 
-    /// The height this connection PROVED it can serve by handing us headers that
-    /// entered the block tree.
-    ///
-    /// `None` while it has announced nothing we accepted, whatever its handshake
-    /// claimed: Core's eviction rule reads `pindexBestKnownBlock`, a tip the peer
-    /// actually sent, and never the version height (`net_processing.cpp`).
-    /// Where `capability` falls back to the claimed height to choose whom to ask for a
-    /// body, this one has no fallback, because the rule that reads it decides whether
-    /// to keep the connection.
     pub(crate) fn demonstrated_height(&self) -> Option<u32> {
         if self.demonstrated_tips.is_empty() {
             return None;

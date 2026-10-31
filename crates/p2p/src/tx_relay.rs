@@ -1,5 +1,3 @@
-//! Outbound transaction relay worker.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -23,7 +21,6 @@ const INITIAL_BROADCAST_BATCH: usize = 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct RelayRequest {
     pub txid: Txid,
-    /// Accepted transaction's witness identifier for BIP339 peers.
     pub wtxid: Wtxid,
     pub source: Option<u64>,
     pub sequence: u64,

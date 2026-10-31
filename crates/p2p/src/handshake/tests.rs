@@ -49,7 +49,6 @@ fn services() -> ServiceFlags {
 
 #[test]
 fn a_block_before_readiness_is_refused_before_materialization() -> Result<(), PeerError> {
-    // Typed block decoding would fail with NativeDecode on this truncated body.
     let (_, result) =
         inbound_handshake_over(&[Message::BlockPayload(bytes::Bytes::from(vec![0; 80]))])?;
     assert!(

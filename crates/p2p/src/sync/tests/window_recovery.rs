@@ -154,7 +154,6 @@ fn mutated_window_moves_the_uncommitted_tail_back_without_copying_decoded_blocks
     );
     fixture.sync.scheduler.lock().stager.restore_many(restored);
 
-    // Replacing just the mutated parent must apply its retained successors.
     stage_body(&fixture.sync, &fixture.blocks[1]);
     assert_eq!(fixture.sync.apply_buffered_blocks(None), (3, 0));
     assert_eq!(

@@ -1,5 +1,3 @@
-//! Header backpressure, cancellation, and body/header ordering at ingress.
-
 use super::*;
 use crate::test_support::TestResult;
 
@@ -25,7 +23,6 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
         let _ = done_tx.send(());
     });
 
-    // The body is available while its paired header is still backpressured.
     let body = blocks_rx.recv_timeout(Duration::from_secs(3))?;
     assert_eq!(body.payload().block().header, expected);
     assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
@@ -101,9 +98,6 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
     Ok(())
 }
 
-/// Exercise the actual send paths against real sync ticks, with a producer
-/// kept ahead of the consumer. The payload estimate excludes channel/Vec
-/// metadata, in-flight senders, bodies, allocator overhead and process RSS.
 // P2P-07
 #[test]
 fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {

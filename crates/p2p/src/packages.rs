@@ -18,9 +18,6 @@ pub const PKG_RELAY_PKGTXNS: u64 = 1 << 0;
 
 pub const PKG_RELAY_ANC: u64 = 1 << 1;
 
-/// Largest list any BIP331 list message carries on the wire.
-/// BIP331 bounds `getpkgtxns` at 100 wtxids; `ancpkginfo` feeds `getpkgtxns`
-/// and `pkgtxns` answers it, so all three share the bound.
 pub const MAX_GETPKGTXNS: usize = 100;
 
 pub const MSG_ANCPKGINFO: u32 = 0x7;
@@ -29,7 +26,6 @@ pub const MSG_PKGTXNS: u32 = 0x6;
 
 const WTXID_LEN: usize = 32;
 
-/// Errors from encoding or decoding a BIP331 message payload.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PackageError {
     #[error("truncated package payload")]
@@ -40,7 +36,6 @@ pub enum PackageError {
     Empty,
     #[error("package list count {count} exceeds bound {max}")]
     TooMany { count: u64, max: usize },
-    /// An `ancpkginfo` repeated a wtxid, which BIP331 defines as malformed.
     #[error("ancpkginfo repeats a wtxid")]
     DuplicateWtxid,
     #[error("trailing {0} bytes after package payload")]
@@ -189,8 +184,6 @@ fn check_count(count: u64) -> Result<usize, PackageError> {
     }
 }
 
-/// The one reader for every BIP331 list payload: minimal encoding and a count
-/// from `1` through [`MAX_GETPKGTXNS`] are decided here from the prefix alone.
 pub fn read_count(payload: &[u8]) -> Result<(usize, &[u8]), PackageError> {
     let (count, consumed) = varint::decode(payload).map_err(|err| match err {
         varint::VarintError::Truncated { .. } => PackageError::Truncated,

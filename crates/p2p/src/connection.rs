@@ -1,5 +1,3 @@
-//! Per-connection identity and cancellation.
-
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::net::SocketAddr;
 use std::sync::Arc;

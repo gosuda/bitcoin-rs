@@ -1,5 +1,3 @@
-//! Ordered staged-block commit draining and expected-prefix caching.
-
 use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
@@ -11,7 +9,6 @@ use std::vec::Vec;
 
 use crate::block_stager::DrainedBlock;
 
-/// Where restoration of un-applied drained blocks must start.
 pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize) -> usize {
     let base = chunk_start.saturating_add(stopped);
     if stopped < chunk_len {
@@ -232,16 +229,11 @@ impl BlockSync {
         }
     }
 
-    /// Horizon for an apply-cache repopulation: the larger of `staged_count`
-    /// (the run must cover this round's drain) and the download window's
-    /// pending-block budget (so later rounds hit the cache).
     pub(super) fn expected_apply_horizon(&self, staged_count: usize) -> usize {
         let max_pending_blocks = self.scheduler.lock().window.max_pending_blocks();
         staged_count.max(max_pending_blocks)
     }
 
-    /// Walks the active header chain from `applied_tip + 1` up to `max_count`
-    /// blocks, snapshotting the chain/applied tip it walked against.
     fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedApplyCache> {
         if max_count == 0 {
             return None;

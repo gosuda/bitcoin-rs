@@ -26,13 +26,10 @@ pub enum PeerState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerCapabilities {
-    /// Peer requested header announcements per BIP130.
     pub send_headers: bool,
-    /// Peer supports BIP155 addrv2 messages.
     pub addr_v2: bool,
 }
 
-/// BIP339 wtxid-relay negotiation state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WtxidRelayState {
     peer_advertised: bool,
@@ -43,15 +40,11 @@ impl WtxidRelayState {
         self.peer_advertised = true;
     }
 
-    /// Return true if the remote peer advertised BIP339 support.
     pub const fn peer_supported(self) -> bool {
         self.peer_advertised
     }
 }
 
-/// BIP331 package-relay negotiation state.
-/// (see [`Peer::package_relay_versions`]). Nothing here is a BIP434 feature:
-/// BIP331 negotiates through its own pre-`verack` message.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PackageRelayNegotiation {
     offered: u64,
@@ -96,18 +89,14 @@ impl PackageRelayNegotiation {
     }
 }
 
-/// The one BIP331 download `dispatch` asks the request owner to start after
-/// an `ancpkginfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PackageRequest {
     pub(crate) subject: Wtxid,
     pub(crate) wtxids: Vec<Wtxid>,
 }
 
-/// BIP152 compact-block protocol version this node speaks and advertises.
 pub const COMPACT_BLOCK_VERSION: u64 = 2;
 
-/// Remote BIP152 compact-block negotiation preference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactBlockNegotiation {
     pub remote_send_compact: Option<bool>,
@@ -121,7 +110,6 @@ impl CompactBlockNegotiation {
         version == COMPACT_BLOCK_VERSION
     }
 
-    /// for versions we did not advertise have no effect, as BIP152 requires.
     pub(crate) const fn record_remote_preference(&mut self, preference: &SendCmpct) {
         if !Self::supports_version(preference.version) {
             return;
@@ -150,8 +138,6 @@ impl CompactBlockNegotiation {
         }
     }
 
-    /// `None` while the peer has not announced a mutually supported BIP152
-    /// version. Unsupported messages never change the negotiated profile.
     #[must_use]
     pub(crate) const fn servable_version(&self) -> Option<u64> {
         match self.remote_preference() {
@@ -220,24 +206,14 @@ pub struct Peer<S> {
     pub remote_version: Option<VersionMessage>,
     pub version_received_time: Option<u64>,
     pub received_verack: bool,
-    /// Whether our VERACK was successfully written; closes the BIP434 send window.
     sent_verack: bool,
     pub capabilities: PeerCapabilities,
-    /// BIP152 compact-block negotiation state for the peer.
     pub compact_blocks: CompactBlockNegotiation,
-    /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
-    /// BIP434 feature announcements the peer sent between its `version` and
-    /// `verack`, by identifier.
     pub(crate) remote_features: HashMap<FeatureId, Vec<u8>>,
-    /// BIP331 `sendpackages` negotiation for the peer.
     pub(crate) package_relay: PackageRelayNegotiation,
-    /// Whether this node announces BIP332 stale-tip relay to the peer, and
-    /// its `prefers_blocks` byte; `None`, the default, announces nothing.
     pub(crate) stale_tip_offer: Option<bool>,
     pub(crate) pending_package_request: Option<PackageRequest>,
-    /// One BIP157 request waiting for asynchronous index publication or for
-    /// outbound room.
     pub(crate) pending_filter_request: Option<ParkedFilter>,
     pub(crate) deferred_inbound: Option<Message>,
     pub(crate) pending_getdata: Vec<Inventory>,
@@ -292,8 +268,6 @@ impl<S> Peer<S> {
         self.send.take()
     }
 
-    /// Offer BIP331 package relay on this connection with `versions`, the
-    /// `PKG_RELAY_*` bits to put in our `sendpackages`.
     pub fn offer_package_relay(&mut self, versions: u64) {
         self.package_relay.offer(versions);
     }
@@ -331,8 +305,6 @@ impl<S> Peer<S> {
         self.pending_package_request.take()
     }
 
-    /// The payload the peer announced for the recognised BIP434 feature `id`,
-    /// or `None` when it announced no valid one before `verack`.
     #[must_use]
     pub fn remote_feature(&self, id: &[u8]) -> Option<&[u8]> {
         self.remote_features.get(id).map(Vec::as_slice)

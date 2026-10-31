@@ -1,4 +1,3 @@
-//! Core31.1 IP and overlay netgroups. Classification never rewrites a dial endpoint.
 use bitcoin_rs_primitives::PeerAddress;
 use std::net::{IpAddr, Ipv4Addr};
 

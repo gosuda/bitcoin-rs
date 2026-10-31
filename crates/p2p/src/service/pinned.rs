@@ -1,4 +1,3 @@
-//! Connection retry policy for every configured pin, independent of its route.
 use super::{ActiveOutbound, HashMap, PeerEndpoint, is_manual_endpoint};
 use std::time::{Duration, Instant};
 

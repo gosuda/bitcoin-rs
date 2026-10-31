@@ -1,5 +1,3 @@
-//! Header request ownership, locator construction, and inbound header admission.
-
 use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
@@ -33,12 +31,8 @@ use bitcoin_rs_primitives::Header;
 use std::time::Instant;
 use std::vec::Vec;
 
-/// Cap on retained off-chain tips per session: honest peers announce one
-/// chain, so more than this many distinct side branches is a misbehavior
-/// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
-/// Empty and stale-source batches must also yield to block/recovery work.
 pub(super) const MAX_HEADER_BATCHES_PER_TICK: usize = 32;
 /// Stop between whole batches, never in a download-twice response page.
 /// A final protocol-bounded batch can exceed this by at most 1,999 headers.
@@ -54,8 +48,6 @@ struct PresyncOutcome {
 }
 
 impl BlockSync {
-    /// Receipt ends the peer's response deadline, but admission still owns
-    /// request consumption and presync cursor advancement.
     pub(crate) fn note_header_response_received(&self, source: PeerSource) {
         let now = Instant::now();
         self.peer_table.with_current(source, || {
@@ -685,8 +677,6 @@ impl BlockSync {
         }
     }
 
-    /// P2P-05: probes the capability frontier at the applied anchor through
-    /// `source` — the peer `SyncFrontier::probe_pick` selected this tick.
     pub(super) fn probe_frontier_peer(
         &self,
         frontier: &SyncFrontier,

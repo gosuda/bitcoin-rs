@@ -1,13 +1,8 @@
-//! BIP324 message types: a one-byte ID for the commands the BIP assigns, or a
-//! zero byte followed by the 12-byte command field of the v1 header.
-
 use bitcoin::p2p::message::CommandString;
 use bytes::Bytes;
 
 use crate::wire::read_command;
 
-/// Commands with a one-byte ID, indexed by that ID. Index 0 introduces the
-/// 13-byte long form; IDs past the table are undefined.
 const SHORT_IDS: [&str; 38] = [
     "",
     "addr",
@@ -49,10 +44,8 @@ const SHORT_IDS: [&str; 38] = [
     crate::feature::FEATURE_COMMAND,
 ];
 
-/// First byte of the long form.
 const LONG_FORM: u8 = 0;
 
-/// Bytes of the command field that follows [`LONG_FORM`].
 const COMMAND_LEN: usize = 12;
 
 pub(crate) fn encode(command: &CommandString, payload: &[u8]) -> Vec<u8> {

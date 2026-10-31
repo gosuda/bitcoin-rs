@@ -1,5 +1,3 @@
-//! Bounded inbound body draining and exact staged-body admission.
-
 use super::BlockSync;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;

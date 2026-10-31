@@ -51,7 +51,6 @@ type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 #[derive(Clone, Default)]
 pub struct ListenerExtras {
     pub tx_inventory: TxInventoryHandle,
-    /// Compact-block short-ID hints (the shared mempool gateway) for BIP152
     pub compact_hints: CompactHintsHandle,
     pub inbound_tx: Option<Sender<crate::InboundBody>>,
     pub package_capacity: Option<crate::PackageCapacity>,
@@ -62,11 +61,8 @@ pub struct ListenerExtras {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RelayOffers {
-    /// Whether this node offers BIP331 ancestor package relay: `sendpackages`
     pub package_relay: bool,
-    /// Whether this node announces BIP332 stale-tip relay in its BIP434
     pub stale_tip_relay: bool,
-    /// The `prefers_blocks` byte of the BIP332 announcement. Read only with
     pub stale_tip_prefers_blocks: bool,
 }
 
@@ -85,7 +81,6 @@ pub struct ConnectionShared {
     pub chain_query: ChainQueryHandle,
     pub wake_tx: SyncWakeHandle,
     pub tx_inventory: TxInventoryHandle,
-    /// Compact-block short-ID hints for BIP152 reconstruction.
     pub compact_hints: CompactHintsHandle,
     pub inbound_tx: Option<Sender<crate::InboundBody>>,
     pub package_capacity: Option<crate::PackageCapacity>,
@@ -94,7 +89,6 @@ pub struct ConnectionShared {
     pub block_announcer: Option<Arc<crate::block_announce::BlockAnnouncer>>,
     pub max_inbound: usize,
     pub local_services: ServiceFlags,
-    /// Whether connections try BIP324 v2: inbound detects v1 and v2, and
     pub v2_transport: bool,
     pub relay_offers: RelayOffers,
     pub(crate) overlay: Arc<crate::overlay::OverlayTransport>,
@@ -171,8 +165,6 @@ impl ConnectionShared {
         }
     }
 
-    ///   `sendpackages` carrying both BIP331 version bits during the
-    ///   BIP332 with [`RelayOffers::stale_tip_prefers_blocks`] as the
     fn offer_relay_capabilities<S>(&self, peer: &mut Peer<S>, role: crate::PeerRole) {
         if self.relay_offers.package_relay && role.relays_transactions() {
             peer.offer_package_relay(
@@ -184,8 +176,6 @@ impl ConnectionShared {
         }
     }
 
-    /// Records the BIP332 `prefers_blocks` byte `peer` announced back.
-    ///   stale-tip relay and `peer` announced BIP332; otherwise nothing.
     fn note_peer_stale_tip_relay<S>(
         &self,
         peer: &Peer<S>,
@@ -604,8 +594,6 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> Result<TcpListener, Listener
     Ok(listener)
 }
 
-/// # Errors
-/// Returns [`ListenerError::Accept`] when the listener cannot report its
 #[expect(clippy::needless_pass_by_value)]
 pub fn serve(
     listener: TcpListener,
@@ -883,7 +871,6 @@ enum Dialed {
     V1Retry,
 }
 
-/// BIP324 handshake when `try_v2` is set.
 #[expect(
     clippy::too_many_lines,
     reason = "One connection owner keeps admission, TCP health, lease publication, and handshake teardown ordered"
@@ -1188,7 +1175,6 @@ fn spawn_handshake_thread(
     }
 }
 
-/// The transport an inbound connection speaks: BIP324 when this node speaks
 fn negotiate_inbound(
     stream: &mut crate::CountingStream<TcpStream>,
     shared: &ConnectionShared,
@@ -2587,7 +2573,6 @@ fn process_compact_wire_message(
     }
 }
 
-/// Applies one BIP152 receive-side outcome: a finished block enters the
 fn handle_compact_outcome(
     outcome: crate::compact_blocks::Outcome,
     sink: &ProductionSink<'_>,
@@ -2629,7 +2614,6 @@ fn handle_compact_outcome(
     }
 }
 
-/// Feeds one receive-side BIP152 message into the loop's reconstruction
 fn process_compact_message(
     reconstruction: &mut crate::compact_blocks::Reconstruction,
     message: &crate::Message,

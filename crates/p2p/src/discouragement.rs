@@ -1,5 +1,3 @@
-//! Bounded, process-local avoidance of protocol-invalid remote peer addresses.
-
 use bitcoin_rs_primitives::PeerAddress;
 use std::collections::VecDeque;
 use std::net::IpAddr;

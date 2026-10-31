@@ -1,7 +1,3 @@
-//! A connection's transport: legacy v1 framing or a BIP324 v2 session, split
-//! into the receive half the connection thread keeps and the send half its
-//! writer thread takes once the handshake completes.
-
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
@@ -18,7 +14,6 @@ use crate::wire::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportProtocol {
     V1,
-    /// A BIP324 encrypted session.
     V2 {
         /// The id both sides derived for this session. Comparing it out of
         /// band is the only way BIP324 detects a man in the middle.
@@ -42,14 +37,12 @@ fn transport_error(error: TransportError) -> PeerError {
 #[derive(Debug)]
 pub(crate) enum RecvTransport {
     V1(V1Receiver),
-    /// BIP324 packets.
     V2(Box<PacketReader>),
 }
 
 #[derive(Debug)]
 pub(crate) enum SendTransport {
     V1(Magic),
-    /// BIP324 packets.
     V2(Box<SendCipher>),
 }
 
@@ -61,7 +54,6 @@ pub(crate) struct Negotiated {
 }
 
 impl Negotiated {
-    /// The v1 transport of a connection that never attempted BIP324.
     pub(crate) fn v1(magic: Magic) -> Self {
         Self {
             recv: RecvTransport::V1(V1Receiver::default()),
@@ -100,9 +92,6 @@ impl RecvTransport {
 }
 
 impl SendTransport {
-    /// Encodes `message`: a v1 frame, or a sealed BIP324 packet.
-    /// [`message_payload`] refuses a payload above the protocol message bound
-    /// on either transport.
     pub(crate) fn encode(&mut self, message: &Message) -> Result<FramedMessage, PeerError> {
         match self {
             Self::V1(magic) => encode_frame(*magic, message),

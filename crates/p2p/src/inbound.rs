@@ -1,5 +1,3 @@
-//! Inbound payloads received from peers.
-
 use bitcoin_rs_primitives::{Block, BlockPayload, Header, Tx};
 
 pub(crate) mod block_memory;

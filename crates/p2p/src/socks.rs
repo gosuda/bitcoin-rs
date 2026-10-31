@@ -1,5 +1,3 @@
-//! Minimal SOCKS5 client (RFC 1928, username/password auth per RFC 1929).
-
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};

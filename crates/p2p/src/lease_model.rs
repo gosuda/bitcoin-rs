@@ -65,9 +65,6 @@ impl State {
     }
 }
 
-/// Returns the successor state, or `None` when the action is blocked.
-///
-/// `None` is the Lean model's blocked action, which leaves the state unchanged.
 #[must_use]
 pub(crate) fn step(state: &State, action: Action) -> Option<State> {
     if state.done && !matches!(action, Action::Stutter) {

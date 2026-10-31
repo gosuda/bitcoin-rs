@@ -30,12 +30,6 @@ fn until(predicate: impl Fn() -> bool) {
     }
 }
 
-/// Reads one SAM line, waiting through idle read timeouts.
-///
-/// Returns false at end of stream or after the test stops the fixture. An idle
-/// read is not a client that went away, and a listener on a reused port can
-/// accept a stray connection from another test, so the fixture decides what a
-/// line means instead of panicking on the first one it does not expect.
 fn read_sam_line(reader: &mut impl std::io::BufRead, line: &mut String, stop: &AtomicBool) -> bool {
     loop {
         line.clear();

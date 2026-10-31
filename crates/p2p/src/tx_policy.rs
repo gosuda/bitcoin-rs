@@ -1,6 +1,3 @@
-//! Connection-bound transaction download policy. Mempool remains the authority
-//! for accepted, orphan and rejected bodies; this owner retains identities only.
-
 mod ingress;
 mod relay;
 

@@ -1,5 +1,3 @@
-//! Public peer metadata published after a successful handshake.
-
 use crate::PeerRemote;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,7 +31,6 @@ pub struct PeerInfo {
     pub network: NetworkLabel,
     pub addr: PeerRemote,
     pub version: u32,
-    /// Whether this connection requested BIP339 witness-id announcements.
     pub wtxid_relay: bool,
     pub relay_transactions: bool,
     /// Whether this connection announced BIP152 compact-block relay (sent a `sendcmpct`
@@ -43,7 +40,6 @@ pub struct PeerInfo {
     /// post-verack announcement arrives; compact-fetch eligibility reads this, never a
     /// stale guess.
     pub compact_block_relay: bool,
-    /// Whether this connection requested BIP130 header announcements (`sendheaders`).
     pub send_headers: bool,
     pub services: u64,
     pub user_agent: String,
