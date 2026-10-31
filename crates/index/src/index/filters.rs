@@ -143,6 +143,7 @@ pub(super) fn build(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "test fixture construction failures abort")]
 mod tests {
     use super::*;
     use bitcoin::{consensus::deserialize, hashes::Hash as _, hex::FromHex as _};
@@ -194,7 +195,8 @@ mod tests {
     }
 
     #[test]
-    fn same_block_spends_resolve_locally_and_empty_filters_encode_zero() -> Result<(), crate::portable::TestError> {
+    fn same_block_spends_resolve_locally_and_empty_filters_encode_zero()
+    -> Result<(), crate::portable::TestError> {
         use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, consensus::serialize};
 
         let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
@@ -254,6 +256,39 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_scripts_stay_in_basic_filters() -> Result<(), crate::portable::TestError> {
+        use bitcoin::{ScriptBuf, consensus::serialize};
+
+        let mut block = bitcoin::constants::genesis_block(bitcoin::Network::Regtest);
+        let oversized = ScriptBuf::from_bytes(vec![0x51_u8; crate::MAX_LIVE_SCRIPT_SIZE + 1]);
+        block.txdata[0].output[0].script_pubkey = oversized.clone();
+        let bytes = serialize(&block);
+        let filter = build(
+            &ParsedBlock::parse_exact(&bytes)?,
+            0,
+            &block.block_hash().to_byte_array(),
+            &Scripts(hashbrown::HashMap::new()),
+        )
+        .expect("oversized script stays in the filter");
+
+        let mut expected = Vec::new();
+        let hash = block.block_hash().to_byte_array();
+        let mut writer = bitcoin::bip158::GcsFilterWriter::new(
+            &mut expected,
+            u64::from_le_bytes(hash[..8].try_into().expect("eight bytes")),
+            u64::from_le_bytes(hash[8..16].try_into().expect("eight bytes")),
+            784_931,
+            19,
+        );
+        writer.add_element(oversized.as_bytes());
+        writer
+            .finish()
+            .expect("reference filter encodes one element");
+        assert_eq!(filter.filter, expected);
         Ok(())
     }
 }
