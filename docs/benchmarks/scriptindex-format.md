@@ -67,7 +67,7 @@ The chain is layout-valid only. Custom input outpoints do not name real predeces
 
 ### Decision rule
 
-Keep Fjall as the index namespace default unless another backend writes at least 2 times fewer physical bytes. Its query p95 and build time must be no more than 10 percent worse. Record the measured table and the decision below. When another backend wins, make it the default for new index namespaces. The format gate rebuilds any existing index.
+Keep Fjall as the index namespace default unless another backend meets both criteria. The backend must write at least 2 times fewer physical bytes, and its query p95 and build time must be no more than 10 percent worse. Record the measured table and the decision below. When another backend wins, make it the default for new index namespaces. The format gate rebuilds any existing index.
 
 ## Measured results
 
