@@ -99,7 +99,7 @@ pub fn verify_block_rules_precomputed(
             max: MAX_BLOCK_WEIGHT,
         });
     }
-    Ok(())
+    verify_block_transaction_basics(&block.txs)
 }
 
 pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> {
@@ -110,8 +110,14 @@ pub fn verify_block_non_contextual(block: &Block) -> Result<(), ConsensusError> 
     if size > max {
         return Err(ConsensusError::BlockBaseSize { size, max });
     }
+    verify_block_transaction_basics(&block.txs)
+}
+
+// Shared by live admission and context-free revalidation. Script proofs and
+// execution-skip provenance cannot substitute for these CheckBlock checks.
+fn verify_block_transaction_basics(txs: &[Tx]) -> Result<(), ConsensusError> {
     let mut sigop_cost = 0_u32;
-    for tx in &block.txs {
+    for tx in txs {
         crate::verify_tx::verify_transaction_structure(tx)?;
         sigop_cost = sigop_cost
             .saturating_add(bitcoin_rs_script::sigops::count_tx_legacy(tx).saturating_mul(4));

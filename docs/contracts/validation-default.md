@@ -25,6 +25,20 @@
   `CheckTransaction` before script verification). `tx_valid` accepts no
   skips.
 
+### Block admission invariants
+
+- Live block rules and context-free revalidation share the consensus-owned
+  transaction structure and aggregate legacy sigop checks in `verify_block.rs`.
+  Every transaction, including coinbase, must pass them before the PoW-valid
+  announce hook. Coinbase-only shortcuts, script caches, window proofs, Fast,
+  AssumeValid, and replay provenance do not exempt a block from these checks.
+- Proposal and commit both enforce absolute transaction finality using the same
+  height and locktime cutoff, including coinbase. Proposals retain their existing
+  lack of commit/publication effects and their PoW/signet exceptions.
+- Early announcement is not a commit receipt: contextual P2SH/witness sigop,
+  input-script, and coinbase reward checks can still reject a block after the
+  hook. A later connect failure does not retract that announcement.
+
 ### Native Taproot witness rules
 
 - Bare P2TR is recognized in the existing witness-program path when witness
