@@ -192,9 +192,7 @@ fn known_body_retires_both_identities_without_guessing_unknown_pairs() {
     assert_eq!(select(&mut policy, now).len(), 2);
     policy.forget(Identity::Txid(hash));
     policy.forget(Identity::from_inventory(item(1)).unwrap_or(Identity::Txid(hash)));
-    assert!(policy.requests.is_empty());
-    assert!(policy.counts.is_empty());
-    assert_eq!(policy.announcements, 0);
+    assert_eq!(select(&mut policy, now), []);
 }
 #[test]
 fn alternates_global_cap_and_delay_are_enforced() {

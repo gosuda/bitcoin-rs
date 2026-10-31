@@ -17,17 +17,32 @@ fn tor_endpoint() -> PeerEndpoint {
 
 #[test]
 fn parse_format_round_trips() -> Result<(), TestError> {
-    for endpoint in [
-        PeerEndpoint::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333)),
-        PeerEndpoint::Ip("[::1]:8333".parse::<SocketAddr>()?),
-        tor_endpoint(),
-        PeerEndpoint::I2p {
-            hash: [5u8; 32],
-            port: 7656,
-        },
+    for (endpoint, expected) in [
+        (
+            PeerEndpoint::Ip(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333)),
+            "127.0.0.1:8333".to_owned(),
+        ),
+        (
+            PeerEndpoint::Ip("[::1]:8333".parse::<SocketAddr>()?),
+            "[::1]:8333".to_owned(),
+        ),
+        (
+            tor_endpoint(),
+            format!(
+                "{}.onion:8333",
+                bitcoin_rs_primitives::endpoint::base32_encode(&tor_v3_payload(&[3u8; 32]))
+            ),
+        ),
+        (
+            PeerEndpoint::I2p {
+                hash: [0u8; 32],
+                port: 8333,
+            },
+            format!("{}.b32.i2p:8333", "a".repeat(52)),
+        ),
     ] {
-        let text = format_endpoint(endpoint);
-        assert_eq!(parse_endpoint(&text), Some(endpoint), "{text}");
+        assert_eq!(format_endpoint(endpoint), expected);
+        assert_eq!(parse_endpoint(&expected), Some(endpoint));
     }
     Ok(())
 }

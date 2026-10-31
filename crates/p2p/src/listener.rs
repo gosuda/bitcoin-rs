@@ -1738,7 +1738,7 @@ mod keepalive_tests {
         keepalive.record_send(t0);
         assert_eq!(
             keepalive.next_action_while_parked(t0 + PING_INTERVAL),
-            keepalive.next_action(t0 + PING_INTERVAL)
+            KeepaliveAction::Ping
         );
     }
 

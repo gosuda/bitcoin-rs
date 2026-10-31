@@ -310,8 +310,10 @@ fn feature_message_v1_roundtrip() -> Result<(), PeerError> {
     let (decoded, raw) = read_message(&mut cursor, Magic::REGTEST)?;
     assert_eq!(decoded, message);
 
-    let payload = encode_payload(&message)?;
-    assert_eq!(raw.as_ref(), payload.as_slice());
+    assert_eq!(
+        raw.as_ref(),
+        &[6, b'B', b'I', b'P', b'3', b'3', b'2', 4, 1, 2, 3, 4]
+    );
     Ok(())
 }
 

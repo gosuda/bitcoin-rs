@@ -57,13 +57,9 @@ fn request_frontier_retains_parent_plan_on_height_gaps() -> TestResult {
         .or_fail("regtest fixture header");
     let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
     tree.node_mut(child)?.height = 2;
-    let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
-    let [first] = plan.connect.as_slice() else {
-        return Err("expected one connect node".into());
-    };
     assert_eq!(
         BlockSync::first_connect_height(&tree, root_hash, child),
-        Some(tree.node(*first)?.height),
+        Some(2),
     );
     Ok(())
 }
