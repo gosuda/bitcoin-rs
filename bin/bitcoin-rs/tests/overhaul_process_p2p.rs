@@ -43,13 +43,11 @@ fn p2p_connect_waits_for_a_delayed_listener() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn p2p_connect_to_an_absent_listener_has_a_fixed_deadline() {
-    use std::net::TcpListener;
-    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve fixture port");
-    let addr = reservation.local_addr().expect("fixture address");
-    drop(reservation);
+    let refused_port = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     let start = Instant::now();
-    let result = connect_loopback(addr, start + Duration::from_millis(80));
+    let result = connect_loopback(refused_port, start + Duration::from_millis(80));
     assert!(result.is_err());
     assert!(start.elapsed() < Duration::from_millis(600));
 }
