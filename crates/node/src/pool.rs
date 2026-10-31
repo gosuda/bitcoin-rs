@@ -92,7 +92,7 @@ fn composed_core_config(max_connections: u32) -> Result<ComposedCore, RunError> 
 impl PoolService {
     pub(crate) fn prepare(
         state: &crate::state::NodeState,
-        control: Arc<dyn MiningControl>,
+        control: &Arc<dyn MiningControl>,
     ) -> Result<Option<Self>, RunError> {
         let Some(config) = state.config().pool.as_ref() else {
             return Ok(None);
@@ -119,7 +119,7 @@ impl PoolService {
         ));
         let composed = composed_core_config(config.max_connections)?;
         let core = Arc::new(
-            PoolCore::new(composed.book, Arc::clone(&control), host.clone())?
+            PoolCore::new(composed.book, Arc::clone(control), host.clone())?
                 .with_ledger_retry(1, Duration::ZERO)
                 .with_outbox(composed.outbox_items, composed.outbox_bytes),
         );
@@ -135,7 +135,7 @@ impl PoolService {
             host,
             core,
             #[cfg(feature = "pool-sv2")]
-            control,
+            control: Arc::clone(control),
             chain,
             cancel: bitcoin_rs_chain::LatchWriter::new(),
             worker: None,

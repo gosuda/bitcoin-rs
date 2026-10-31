@@ -758,8 +758,7 @@ pub(crate) fn start_node(
     )?;
     #[cfg(feature = "pool")]
     {
-        guard.services.pool =
-            crate::pool::PoolService::prepare(state, Arc::clone(&mining_control))?;
+        guard.services.pool = crate::pool::PoolService::prepare(state, &mining_control)?;
     }
     #[cfg(feature = "pool")]
     let pool_handles = guard.services.pool.as_ref().map_or_else(

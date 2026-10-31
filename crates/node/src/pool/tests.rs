@@ -168,8 +168,7 @@ fn restart_epoch_separates_reused_wire_job(open: OpenStore) -> TestResult {
         ledger.set_payout_script(MinerId(42), &[0x51])?;
         first_epoch = ledger.allocate_run_epoch()?;
         let host = LedgerHost::new(ledger, first_epoch, payout_policy());
-        host.record_share(&worker(), &first)
-            .map_err(|_| "first-epoch share record unavailable")?;
+        host.record_share(&worker(), &first)?;
     }
     let ledger = Arc::new(Ledger::open(open(directory.path())?, config())?);
     let second_epoch = ledger.allocate_run_epoch()?;
@@ -200,8 +199,7 @@ fn failed_block_receipt_stays_pending(open: OpenStore) -> TestResult {
     {
         let host = registered_host(open, directory.path(), EPOCH)?;
         let receipt = Err(MiningControlError::Rejected("invalid candidate".into()));
-        host.record_block(&worker(), &found, &receipt)
-            .map_err(|_| "failed-submission block record unavailable")?;
+        host.record_block(&worker(), &found, &receipt)?;
         assert_eq!(host.ledger().share_count()?, 1);
     }
     let ledger = Ledger::open(open(directory.path())?, config())?;
@@ -271,7 +269,7 @@ fn sv2_permanent_share_conflict_is_rejected(open: OpenStore) -> TestResult {
             .unwrap_or_else(|error| panic!("share conflict surfaced as unavailable: {error:?}")),
         RecordOutcome::Rejected
     );
-    let mut same_identity = first.clone();
+    let mut same_identity = first;
     same_identity.hash = BlockHash::from(Hash256::from_le_bytes(&[9; 32]));
     assert_eq!(
         host.record_accepted_share(account, &same_identity)
@@ -342,7 +340,7 @@ fn durable_undetermined_keeps_reservation_until_waiter_removed(open: OpenStore) 
     let mut charges = Vec::new();
     for index in 0..8 {
         let mut found = found_block()?;
-        let lane = u32::try_from(index).map_err(|_| "lane exceeds u32")?;
+        let lane = u32::try_from(index)?;
         found.share.header.nonce = found.share.header.nonce.wrapping_add(lane);
         found.share.hash = found.share.header.compute_hash();
         found.block.header = found.share.header;
@@ -563,7 +561,7 @@ fn ledger_create_open_and_epoch_under_guard(
     let guard = crate::state::lock_pool_directory(&datadir)?;
     let ledger_path = datadir.join("ledger");
     let policy = || pool_ledger::PoolConfig::new(1_000, vec![0x51]);
-    let (_ledger, first): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
+    let (ledger, first): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
         "pool",
         backend,
         &ledger_path,
@@ -571,8 +569,8 @@ fn ledger_create_open_and_epoch_under_guard(
         &guard,
         super::LedgerComposer { config: policy() },
     )?;
-    drop(_ledger);
-    let (_ledger, second): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
+    drop(ledger);
+    let (ledger, second): (pool_ledger::Ledger, u32) = crate::storage_backend::open_generic(
         "pool",
         backend,
         &ledger_path,
@@ -584,7 +582,7 @@ fn ledger_create_open_and_epoch_under_guard(
         second > first,
         "run-epoch allocation must advance across restarts while the directory lock is held"
     );
-    drop(_ledger);
+    drop(ledger);
     let mismatch = pool_ledger::PoolConfig::new(2_000, vec![0x51]);
     let outcome = crate::storage_backend::open_generic(
         "pool",
@@ -595,13 +593,13 @@ fn ledger_create_open_and_epoch_under_guard(
         super::LedgerComposer { config: mismatch },
     )
     .map(|_: (pool_ledger::Ledger, u32)| ());
-    let error = outcome.unwrap_err();
+    let Err(error) = outcome else {
+        panic!("outcome must be error");
+    };
     assert!(
         matches!(
-            error.downcast_ref::<RunError>(),
-            Some(RunError::PoolLedger(
-                pool_ledger::LedgerError::ConfigMismatch
-            ))
+            error,
+            RunError::PoolLedger(pool_ledger::LedgerError::ConfigMismatch)
         ),
         "a changed policy must fail rather than reinterpret history: {error:?}"
     );
@@ -709,9 +707,11 @@ fn pool_prepare_holds_directory_lock_for_service_lifetime() -> TestResult {
         max_payout_outputs: 10,
     });
     let state = crate::state::NodeState::open(config, None)?;
-    let control = Arc::new(bitcoin_rs_mining::FakeMiningControl::default());
-    let service =
-        super::PoolService::prepare(&state, control)?.expect("enabled pool must prepare a service");
+    let control: Arc<dyn bitcoin_rs_mining::MiningControl> =
+        Arc::new(bitcoin_rs_mining::FakeMiningControl::default());
+    let Some(service) = super::PoolService::prepare(&state, &control)? else {
+        panic!("enabled pool must prepare a service");
+    };
     assert!(
         crate::state::lock_pool_directory(&pool_datadir).is_err(),
         "pool datadir must stay locked while the prepared service lives"

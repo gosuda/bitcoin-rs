@@ -57,6 +57,15 @@ pub enum TestError {
     #[cfg(feature = "pool")]
     #[error(transparent)]
     Ledger(#[from] bitcoin_rs_mining::pool::ledger::LedgerError),
+    #[cfg(feature = "pool")]
+    #[error(transparent)]
+    ChainView(#[from] bitcoin_rs_mining::pool::ledger::ChainViewError),
+    #[cfg(feature = "pool")]
+    #[error(transparent)]
+    Sv1Config(#[from] bitcoin_rs_mining::pool::stratum::sv1::ConfigError),
+    #[cfg(feature = "pool")]
+    #[error(transparent)]
+    LedgerUnavailable(#[from] bitcoin_rs_mining::pool::LedgerUnavailable),
     #[error(transparent)]
     PruneService(#[from] bitcoin_rs_rpc::context::PruneServiceError),
     #[error(transparent)]

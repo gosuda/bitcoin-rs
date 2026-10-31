@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::pool::ledger::MinerId;
-use bitcoin_rs_mining::pool::stratum::sv1::ConnectionLimiter;
+use bitcoin_rs_mining::pool::stratum::sv1::{ConnectionLimiter, ConnectionPermit};
 use bitcoin_rs_mining::pool::stratum::sv2::{
     AdmitError, AuthorityKeypair, BlockSubmission, Connection, ERROR_CODE_SHARE_NOT_RECORDED,
     ERROR_CODE_SUBMIT_SHARES_STALE_SHARE, Event, Limits, MAX_FEED_LEN, PendingBlock, ServerConfig,
 };
-use bitcoin_rs_mining::pool::{BlockStatus, PoolCore, RecordOutcome};
+use bitcoin_rs_mining::pool::{BlockStatus, PoolCore, RecordOutcome, ShareTarget};
 use bitcoin_rs_primitives::BlockHash;
 
 use super::authority;
@@ -32,6 +32,7 @@ struct DeferredBlock {
     pending: PendingBlock,
     submission: BlockSubmission,
     attempts: u32,
+    #[expect(dead_code, reason = "held for RAII drop cleanup")]
     charge: DeferredCharge,
 }
 
@@ -157,6 +158,90 @@ impl Drop for Sv2Service {
     }
 }
 
+fn loopback_connect_addr(local_addr: SocketAddr) -> SocketAddr {
+    match local_addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        ),
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            addr.port(),
+        ),
+        addr => addr,
+    }
+}
+
+fn make_server_config(ledger: Arc<LedgerHost>, initial_target: ShareTarget) -> ServerConfig {
+    let admit_user = Arc::new(move |identity: &[u8]| {
+        let login = std::str::from_utf8(identity).map_err(|_| AdmitError::InvalidIdentity)?;
+        ledger
+            .account(login)
+            .map(|_| ())
+            .ok_or(AdmitError::UnknownUser)
+    });
+    let mut server_config = ServerConfig::new(initial_target);
+    server_config.limits = Limits {
+        max_frame_payload: 8 * 1024,
+        max_channels: 8,
+        max_jobs_per_channel: 16,
+        max_pending_acks: 16,
+        pending_ack_timeout: Limits::DEFAULT.pending_ack_timeout,
+        max_outbound_frames: 256,
+        max_pending_events: 32,
+        max_outbound_bytes: 1_048_576,
+    };
+    server_config.admit_user = admit_user;
+    server_config
+}
+
+struct Sv2Services {
+    core: Arc<PoolCore>,
+    ledger: Arc<LedgerHost>,
+    control: Arc<dyn MiningControl>,
+}
+
+struct ConnectionWorkerArgs {
+    stream: TcpStream,
+    peer: SocketAddr,
+    permit: ConnectionPermit,
+    authority: Arc<AuthorityKeypair>,
+    server_config: ServerConfig,
+    services: Sv2Services,
+    cancel: bitcoin_rs_chain::LatchReader,
+}
+
+fn spawn_connection_worker(
+    args: ConnectionWorkerArgs,
+    connections: &Arc<Mutex<Vec<JoinHandle<()>>>>,
+) {
+    let ConnectionWorkerArgs {
+        stream,
+        peer,
+        permit,
+        authority,
+        server_config,
+        services,
+        cancel,
+    } = args;
+    match thread::Builder::new()
+        .name(format!("pool-sv2-{}", peer.ip()))
+        .spawn(move || {
+            let _permit = permit;
+            if let Err(error) =
+                serve_connection(stream, &authority, server_config, &services, &cancel)
+            {
+                tracing::debug!(peer = %peer, %error, "SV2 connection closed");
+            }
+        }) {
+        Ok(handle) => connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(handle),
+        Err(error) => tracing::warn!(peer = %peer, %error, "could not spawn SV2 connection worker"),
+    }
+}
+
 pub(crate) fn start(
     config: &PoolConfig,
     core: Arc<PoolCore>,
@@ -178,21 +263,11 @@ pub(crate) fn start(
     let local_addr = listener
         .local_addr()
         .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
-    let connect_addr = match local_addr {
-        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            addr.port(),
-        ),
-        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            addr.port(),
-        ),
-        addr => addr,
-    };
+    let connect_addr = loopback_connect_addr(local_addr);
     let parent_cancel = cancel.into();
     let service_cancel = parent_cancel.child();
     let thread_cancel = service_cancel.reader();
-    let _hook = thread_cancel.on_cancel(move || {
+    let cancel_hook = thread_cancel.on_cancel(move || {
         let _ = TcpStream::connect(connect_addr);
     });
 
@@ -205,7 +280,7 @@ pub(crate) fn start(
     let listener_thread = thread::Builder::new()
         .name("pool-sv2-listener".to_owned())
         .spawn(move || {
-            let _guard = _hook;
+            let _guard = cancel_hook;
             while !thread_cancel.is_triggered() {
                 match listener.accept() {
                     Ok((stream, peer)) => {
@@ -217,56 +292,26 @@ pub(crate) fn start(
                             drop(stream);
                             continue;
                         };
-                        let core = Arc::clone(&core);
-                        let ledger = Arc::clone(&ledger);
-                        let control = Arc::clone(&control);
-                        let authority = Arc::clone(&authority);
+                        let server_config = make_server_config(Arc::clone(&ledger), initial_target);
                         let conn_writer = thread_cancel.child();
                         let cancel = conn_writer.reader();
-                        let connection_ledger = Arc::clone(&ledger);
-                        let admit_user = Arc::new(move |identity: &[u8]| {
-                            let login = std::str::from_utf8(identity)
-                                .map_err(|_| AdmitError::InvalidIdentity)?;
-                            connection_ledger
-                                .account(login)
-                                .map(|_| ())
-                                .ok_or(AdmitError::UnknownUser)
-                        });
-                        let mut server_config = ServerConfig::new(initial_target);
-                        server_config.limits = Limits {
-                            max_frame_payload: 8 * 1024,
-                            max_channels: 8,
-                            max_jobs_per_channel: 16,
-                            max_pending_acks: 16,
-                            pending_ack_timeout: Limits::DEFAULT.pending_ack_timeout,
-                            max_outbound_frames: 256,
-                            max_pending_events: 32,
-                            max_outbound_bytes: 1_048_576,
+                        let services = Sv2Services {
+                            core: Arc::clone(&core),
+                            ledger: Arc::clone(&ledger),
+                            control: Arc::clone(&control),
                         };
-                        server_config.admit_user = admit_user;
-                        match thread::Builder::new()
-                            .name(format!("pool-sv2-{}", peer.ip()))
-                            .spawn(move || {
-                                let _permit = permit;
-                                if let Err(error) = serve_connection(
-                                    stream,
-                                    &authority,
-                                    server_config,
-                                    &core,
-                                    &ledger,
-                                    &*control,
-                                    &cancel,
-                                ) {
-                                    tracing::debug!(peer = %peer, %error, "SV2 connection closed");
-                                }
-                            })
-                        {
-                            Ok(handle) => thread_connections
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .push(handle),
-                            Err(error) => tracing::warn!(peer = %peer, %error, "could not spawn SV2 connection worker"),
-                        }
+                        spawn_connection_worker(
+                            ConnectionWorkerArgs {
+                                stream,
+                                peer,
+                                permit,
+                                authority: Arc::clone(&authority),
+                                server_config,
+                                services,
+                                cancel,
+                            },
+                            &thread_connections,
+                        );
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) => {
@@ -288,15 +333,57 @@ pub(crate) fn start(
     })
 }
 
-fn serve_connection(
-    mut stream: TcpStream,
-    authority: &AuthorityKeypair,
-    config: ServerConfig,
-    core: &PoolCore,
-    ledger: &Arc<LedgerHost>,
+fn process_deferred_blocks(
+    deferred: &mut Vec<DeferredBlock>,
+    ledger: &LedgerHost,
     control: &dyn MiningControl,
-    cancel: &bitcoin_rs_chain::LatchReader,
-) -> Result<(), RunError> {
+    connection: &mut Connection,
+    core: &PoolCore,
+) -> bool {
+    let deferred_before = deferred.len();
+    let mut still_deferred = Vec::with_capacity(deferred.len());
+    for entry in std::mem::take(deferred) {
+        if let Some(waiter) = settle_one_deferred(entry, ledger, control, connection, core) {
+            still_deferred.push(waiter);
+        }
+    }
+    *deferred = still_deferred;
+    deferred.len() != deferred_before
+}
+
+fn flush_transmit(
+    transmit: &mut PendingTransmit,
+    connection: &mut Connection,
+    stream: &mut TcpStream,
+) -> Result<bool, RunError> {
+    transmit.fill(connection);
+    let pending_bytes = transmit.remaining();
+    transmit.flush(stream)?;
+    Ok(pending_bytes != transmit.remaining())
+}
+
+fn read_connection_input(
+    stream: &mut TcpStream,
+    connection: &Connection,
+    input: &mut [u8],
+) -> Result<Option<usize>, RunError> {
+    let read_len = connection.read_hint().clamp(1, MAX_FEED_LEN);
+    match stream.read(&mut input[..read_len]) {
+        Ok(0) => Ok(None),
+        Ok(length) => Ok(Some(length)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(Some(0))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn configure_connection_stream(stream: &TcpStream) -> Result<(), RunError> {
     stream.set_nodelay(true)?;
     stream
         .set_read_timeout(Some(SOCKET_POLL_INTERVAL))
@@ -304,11 +391,53 @@ fn serve_connection(
     stream
         .set_write_timeout(Some(SOCKET_POLL_INTERVAL))
         .map_err(|source| RunError::PoolSv2Nonblocking { source })?;
+    Ok(())
+}
+
+fn process_connection_turn(
+    connection: &mut Connection,
+    services: &Sv2Services,
+    accounts: &mut HashMap<u32, MinerId>,
+    pipeline: BlockPipeline<'_>,
+    input: &[u8],
+) -> Result<bool, RunError> {
+    services
+        .core
+        .with_job_book(|book| connection.feed(input, book))?;
+    let events_before = connection.session().pending_acks();
+    handle_events(
+        connection,
+        &services.core,
+        &services.ledger,
+        &*services.control,
+        accounts,
+        pipeline,
+    )?;
+    let expired = services.core.with_job_book(|book| {
+        connection
+            .session_mut()
+            .expire_tickets(book, Instant::now())
+    });
+    if !expired.is_empty() {
+        tracing::debug!(count = expired.len(), "SV2 pending tickets expired");
+    }
+    Ok(events_before != connection.session().pending_acks() || !expired.is_empty())
+}
+
+fn serve_connection(
+    mut stream: TcpStream,
+    authority: &AuthorityKeypair,
+    config: ServerConfig,
+    services: &Sv2Services,
+    cancel: &bitcoin_rs_chain::LatchReader,
+) -> Result<(), RunError> {
+    configure_connection_stream(&stream)?;
     let stream_clone = stream.try_clone()?;
     let _guard = cancel.on_cancel(move || {
         let _ = stream_clone.shutdown(std::net::Shutdown::Both);
     });
-    let mut connection = core
+    let mut connection = services
+        .core
         .with_job_book(|book| Connection::accept(authority, CERTIFICATE_VALIDITY, config, book))
         .map_err(|source| RunError::PoolSv2ConnectionAccept { source })?;
     let mut accounts = HashMap::new();
@@ -326,50 +455,32 @@ fn serve_connection(
             if last_progress.elapsed() >= IDLE_TIMEOUT {
                 return Err(RunError::PoolSv2IdleTimeout);
             }
-            let deferred_before = deferred.len();
-            let mut still_deferred = Vec::with_capacity(deferred.len());
-            for entry in std::mem::take(&mut deferred) {
-                if let Some(waiter) =
-                    settle_one_deferred(entry, ledger, control, &mut connection, core)
-                {
-                    still_deferred.push(waiter);
-                }
-            }
-            deferred = still_deferred;
-            if deferred.len() != deferred_before {
+            if process_deferred_blocks(
+                &mut deferred,
+                &services.ledger,
+                &*services.control,
+                &mut connection,
+                &services.core,
+            ) {
                 last_progress = Instant::now();
             }
-            announce_current_job(&mut connection, core)?;
-            transmit.fill(&mut connection);
-            let pending_bytes = transmit.remaining();
-            transmit.flush(&mut stream)?;
-            if pending_bytes != transmit.remaining() {
+            announce_current_job(&mut connection, &services.core)?;
+            if flush_transmit(&mut transmit, &mut connection, &mut stream)? {
                 last_progress = Instant::now();
             }
 
             if buffered_input.is_none() {
-                let read_len = connection.read_hint().clamp(1, MAX_FEED_LEN);
-                match stream.read(&mut input[..read_len]) {
-                    Ok(0) => break,
-                    Ok(length) => {
+                match read_connection_input(&mut stream, &connection, &mut input)? {
+                    None => break,
+                    Some(0) => continue,
+                    Some(length) => {
                         buffered_input = Some(length);
                         last_progress = Instant::now();
                     }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::TimedOut
-                                | io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
                 }
             }
 
-            let Some(block_permit) = ledger.try_reserve_block_slot() else {
+            let Some(block_permit) = services.ledger.try_reserve_block_slot() else {
                 crossbeam_channel::select! {
                     recv(cancel.closed()) -> _ => break,
                     recv(crossbeam_channel::after(SOCKET_POLL_INTERVAL)) -> _ => continue,
@@ -379,34 +490,20 @@ fn serve_connection(
             let length = buffered_input
                 .take()
                 .ok_or(RunError::PoolSv2BufferedInputMissing)?;
-            core.with_job_book(|book| connection.feed(&input[..length], book))?;
-            let events_before = connection.session().pending_acks();
-            handle_events(
+            let pipeline = BlockPipeline {
+                permit: &mut block_permit,
+                deferred: &mut deferred,
+            };
+            if process_connection_turn(
                 &mut connection,
-                core,
-                ledger,
-                control,
+                services,
                 &mut accounts,
-                BlockPipeline {
-                    permit: &mut block_permit,
-                    deferred: &mut deferred,
-                },
-            )?;
-            let expired = core.with_job_book(|book| {
-                connection
-                    .session_mut()
-                    .expire_tickets(book, Instant::now())
-            });
-            if !expired.is_empty() {
-                tracing::debug!(count = expired.len(), "SV2 pending tickets expired");
-            }
-            if events_before != connection.session().pending_acks() || !expired.is_empty() {
+                pipeline,
+                &input[..length],
+            )? {
                 last_progress = Instant::now();
             }
-            transmit.fill(&mut connection);
-            let queued_before = transmit.remaining();
-            transmit.flush(&mut stream)?;
-            if transmit.remaining() != queued_before {
+            if flush_transmit(&mut transmit, &mut connection, &mut stream)? {
                 last_progress = Instant::now();
             }
         }
@@ -417,13 +514,112 @@ fn serve_connection(
         &mut stream,
         Instant::now() + SOCKET_POLL_INTERVAL,
     );
-    core.with_job_book(|book| connection.release(book));
+    services.core.with_job_book(|book| connection.release(book));
     result
 }
 
 fn announce_current_job(connection: &mut Connection, core: &PoolCore) -> Result<(), RunError> {
     if let Some(installed) = core.current_installed() {
         connection.announce(&installed)?;
+    }
+    Ok(())
+}
+
+fn handle_block_found(
+    connection: &mut Connection,
+    core: &PoolCore,
+    control: &dyn MiningControl,
+    account: MinerId,
+    pending: PendingBlock,
+    pipeline: BlockPipeline<'_>,
+) -> Result<(), RunError> {
+    let BlockPipeline {
+        permit: block_permit,
+        deferred,
+    } = pipeline;
+    let permit = block_permit
+        .take()
+        .ok_or(RunError::PoolSv2BlockReservationMissing)?;
+    let found = pending.found_block();
+    let submission = pending.submit(control);
+    if let Ok(submitted) = &submission
+        && submitted.receipt().status() == BlockStatus::Applied
+    {
+        core.invalidate_active();
+    }
+    let receipt = submission
+        .as_ref()
+        .map(|submitted| submitted.receipt().clone())
+        .map_err(Clone::clone);
+    match permit.record_or_enqueue(account, found, &receipt) {
+        (BlockRecordOutcome::Durable, charge) => {
+            if matches!(
+                &submission,
+                Ok(submitted) if submitted.receipt().status() == BlockStatus::Undetermined
+            ) {
+                let Ok(submitted) = submission else {
+                    return Err(RunError::PoolSv2BlockSubmissionLost);
+                };
+                let hash = found.share.hash;
+                let Some(charge) = charge else {
+                    return Err(RunError::PoolSv2DurableReservationMissing);
+                };
+                deferred.push(DeferredBlock {
+                    hash,
+                    pending,
+                    submission: submitted,
+                    attempts: 0,
+                    charge,
+                });
+                return Ok(());
+            }
+            debug_assert!(charge.is_none());
+        }
+        (BlockRecordOutcome::Queued, charge) => {
+            if matches!(
+                &submission,
+                Ok(submitted)
+                    if matches!(
+                        submitted.receipt().status(),
+                        BlockStatus::Applied | BlockStatus::Undetermined
+                    )
+            ) {
+                let Ok(submitted) = submission else {
+                    return Err(RunError::PoolSv2BlockSubmissionLost);
+                };
+                let hash = found.share.hash;
+                let Some(charge) = charge else {
+                    return Err(RunError::PoolSv2QueuedReservationMissing);
+                };
+                deferred.push(DeferredBlock {
+                    hash,
+                    pending,
+                    submission: submitted,
+                    attempts: 0,
+                    charge,
+                });
+                return Ok(());
+            }
+        }
+        (BlockRecordOutcome::Unrecordable, _) => {
+            return Err(RunError::PoolSv2BlockUnrecordable);
+        }
+    }
+    let submission =
+        submission.map_err(|source| RunError::PoolSv2BlockSubmissionFailed { source })?;
+    match submission.receipt().status() {
+        BlockStatus::Applied => {
+            connection.confirm_block(&submission)?;
+        }
+        BlockStatus::Undetermined => {
+            return Err(RunError::PoolSv2UndeterminedReservationLost);
+        }
+        BlockStatus::Rejected if submission.receipt().is_stale_parent() => {
+            connection.reject_block(&submission, ERROR_CODE_SUBMIT_SHARES_STALE_SHARE)?;
+        }
+        BlockStatus::Rejected => {
+            return Err(RunError::PoolSv2BlockRejected);
+        }
     }
     Ok(())
 }
@@ -478,92 +674,17 @@ fn handle_events(
                 let Some(account) = accounts.get(&pending.channel_id()).copied() else {
                     return Err(RunError::PoolSv2BlockChannelUnaccounted);
                 };
-                let permit = block_permit
-                    .take()
-                    .ok_or(RunError::PoolSv2BlockReservationMissing)?;
-                let found = pending.found_block();
-                let submission = pending.submit(control);
-                if let Ok(submitted) = &submission
-                    && submitted.receipt().status() == BlockStatus::Applied
-                {
-                    core.invalidate_active();
-                }
-                let receipt = submission
-                    .as_ref()
-                    .map(|submitted| submitted.receipt().clone())
-                    .map_err(Clone::clone);
-                match permit.record_or_enqueue(account, found, &receipt) {
-                    (BlockRecordOutcome::Durable, charge) => {
-                        if matches!(
-                            &submission,
-                            Ok(submitted)
-                                if submitted.receipt().status() == BlockStatus::Undetermined
-                        ) {
-                            let Ok(submitted) = submission else {
-                                return Err(RunError::PoolSv2BlockSubmissionLost);
-                            };
-                            let hash = found.share.hash;
-                            let Some(charge) = charge else {
-                                return Err(RunError::PoolSv2DurableReservationMissing);
-                            };
-                            deferred.push(DeferredBlock {
-                                hash,
-                                pending,
-                                submission: submitted,
-                                attempts: 0,
-                                charge,
-                            });
-                            continue;
-                        }
-                        debug_assert!(charge.is_none());
-                    }
-                    (BlockRecordOutcome::Queued, charge) => {
-                        if matches!(
-                            &submission,
-                            Ok(submitted)
-                                if matches!(
-                                    submitted.receipt().status(),
-                                    BlockStatus::Applied | BlockStatus::Undetermined
-                                )
-                        ) {
-                            let Ok(submitted) = submission else {
-                                return Err(RunError::PoolSv2BlockSubmissionLost);
-                            };
-                            let hash = found.share.hash;
-                            let Some(charge) = charge else {
-                                return Err(RunError::PoolSv2QueuedReservationMissing);
-                            };
-                            deferred.push(DeferredBlock {
-                                hash,
-                                pending,
-                                submission: submitted,
-                                attempts: 0,
-                                charge,
-                            });
-                            continue;
-                        }
-                    }
-                    (BlockRecordOutcome::Unrecordable, _) => {
-                        return Err(RunError::PoolSv2BlockUnrecordable);
-                    }
-                }
-                let submission = submission
-                    .map_err(|source| RunError::PoolSv2BlockSubmissionFailed { source })?;
-                match submission.receipt().status() {
-                    BlockStatus::Applied => {
-                        connection.confirm_block(&submission)?;
-                    }
-                    BlockStatus::Undetermined => {
-                        return Err(RunError::PoolSv2UndeterminedReservationLost);
-                    }
-                    BlockStatus::Rejected if submission.receipt().is_stale_parent() => {
-                        connection
-                            .reject_block(&submission, ERROR_CODE_SUBMIT_SHARES_STALE_SHARE)?;
-                    }
-                    BlockStatus::Rejected => {
-                        return Err(RunError::PoolSv2BlockRejected);
-                    }
-                }
+                handle_block_found(
+                    connection,
+                    core,
+                    control,
+                    account,
+                    pending,
+                    BlockPipeline {
+                        permit: block_permit,
+                        deferred,
+                    },
+                )?;
             }
             Event::SetupRejected { code } => tracing::debug!(code, "SV2 setup rejected"),
             Event::ChannelOpenRejected { code, .. } => {

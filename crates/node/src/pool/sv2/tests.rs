@@ -465,7 +465,7 @@ impl Host {
             },
         )?;
         let sent = self.connection.take_transmit();
-        Ok(self.miner.open(&sent)?)
+        self.miner.open(&sent)
     }
 
     fn open_channel(&mut self) -> Result<Channel, FixtureError> {
@@ -525,7 +525,7 @@ fn applied_sv2_block_retires_the_common_job_before_a_sibling_reaches_the_node() 
     let job = Arc::clone(&host.job);
     let winners = block_nonces(&job, &channel.prefix, 2)?;
     let &[first, second] = winners.as_slice() else {
-        return Err("two winning nonces exist".into());
+        return Err(FixtureError::NonceSpace(2));
     };
 
     let applied = host.submit(&channel, 1, &job, first)?;
@@ -603,7 +603,7 @@ fn undetermined_sv2_block_withholds_success_and_retries_authoritative_state() ->
 
 // POOL-09
 #[test]
-fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
+fn reaped_worker_panic_propagates_through_stop_join() {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
@@ -619,7 +619,7 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .all(|handle| handle.is_finished())
+        .all(std::thread::JoinHandle::is_finished)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -642,19 +642,18 @@ fn reaped_worker_panic_propagates_through_stop_join() -> TestResult {
         connections,
         worker_panicked,
     };
-    let error = service
-        .stop_join(Instant::now() + Duration::from_secs(5))
-        .expect_err("reaped panic must fail shutdown");
+    let Err(error) = service.stop_join(Instant::now() + Duration::from_secs(5)) else {
+        panic!("reaped panic must fail shutdown");
+    };
     assert!(
         error.to_string().contains("panicked"),
         "unexpected error: {error:?}"
     );
-    Ok(())
 }
 
 // POOL-09
 #[test]
-fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
+fn stop_join_joins_remaining_workers_after_panic() {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Instant;
@@ -678,9 +677,9 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
         connections: Arc::clone(&connections),
         worker_panicked: Arc::clone(&worker_panicked),
     };
-    let error = service
-        .stop_join(Instant::now() + Duration::from_secs(5))
-        .expect_err("worker panic must fail shutdown");
+    let Err(error) = service.stop_join(Instant::now() + Duration::from_secs(5)) else {
+        panic!("worker panic must fail shutdown");
+    };
     assert!(
         error.to_string().contains("panicked"),
         "unexpected error: {error:?}"
@@ -696,7 +695,6 @@ fn stop_join_joins_remaining_workers_after_panic() -> TestResult {
             .is_empty(),
         "stop_join joins every remaining worker"
     );
-    Ok(())
 }
 
 #[test]
@@ -712,12 +710,12 @@ fn sv2_listener_stops_promptly_on_cancellation() -> TestResult {
         stage: "local_addr",
         detail: error.to_string(),
     })?;
-    let _hook = cancel_reader.on_cancel(move || {
+    let cancel_hook = cancel_reader.on_cancel(move || {
         let _ = std::net::TcpStream::connect(local_addr);
     });
     let (tx, rx) = crossbeam_channel::bounded(1);
     let handle = std::thread::spawn(move || {
-        let _guard = _hook;
+        let _guard = cancel_hook;
         while !cancel_reader.is_triggered() {
             match listener.accept() {
                 Ok((_stream, _peer)) => {

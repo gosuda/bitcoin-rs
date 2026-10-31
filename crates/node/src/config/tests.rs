@@ -212,12 +212,12 @@ fn pool_sv2_requires_feature_and_paired_authority_path_without_opening_it() {
         assert!(super::resolve(&[&layer]).is_err());
     }
     #[cfg(not(feature = "pool-sv2"))]
-    assert!(
-        super::resolve(&[&layer])
-            .unwrap_err()
-            .to_string()
-            .contains("pool-sv2")
-    );
+    {
+        let Err(error) = super::resolve(&[&layer]) else {
+            panic!("resolve must fail without pool-sv2 feature");
+        };
+        assert!(error.to_string().contains("pool-sv2"));
+    }
     layer.pool.sv2_bind = None;
     assert!(super::resolve(&[&layer]).is_err());
 }

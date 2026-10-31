@@ -109,10 +109,11 @@ mod tests {
         mode: u32,
     ) -> std::path::PathBuf {
         let path = directory.join(name);
-        std::fs::write(&path, contents).expect("fixture key file must be writable");
+        std::fs::write(&path, contents)
+            .unwrap_or_else(|error| panic!("fixture key file must be writable: {error}"));
         #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-            .expect("fixture key file mode must be settable");
+            .unwrap_or_else(|error| panic!("fixture key file mode must be settable: {error}"));
         #[cfg(not(unix))]
         let _ = mode;
         path
@@ -125,9 +126,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_accepts_exactly_two_hex_fields_in_a_0600_regular_file() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let path = write_key_file(directory.path(), "authority.key", &valid_contents(), 0o600);
-        let pair = load(&path).expect("a 0600 regular file with two key fields must load");
+        let pair = load(&path).unwrap_or_else(|error| {
+            panic!("a 0600 regular file with two key fields must load: {error:?}")
+        });
         assert_eq!(pair.public(), &[0x11; KEY_BYTES]);
         let rendered = format!("{pair:?}");
         assert!(
@@ -143,7 +147,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_tolerates_surrounding_ascii_whitespace_but_nothing_else() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let padded = format!("\t{PUBLIC_HEX}  {SECRET_HEX}\r\n").into_bytes();
         let path = write_key_file(directory.path(), "padded.key", &padded, 0o600);
         assert!(
@@ -179,7 +184,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_rejects_inputs_larger_than_256_bytes() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let oversized = vec![b'2'; MAX_KEY_FILE_BYTES + 1];
         assert_eq!(oversized.len(), 257);
         let path = write_key_file(directory.path(), "oversized.key", &oversized, 0o600);
@@ -192,16 +198,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_errors_carry_no_key_input() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let evil = format!("{PUBLIC_HEX} {}", "zz".repeat(KEY_BYTES)).into_bytes();
         let path = write_key_file(directory.path(), "evil.key", &evil, 0o644);
-        let error = load(&path).expect_err("a 0644 key file must be refused");
+        let Err(error) = load(&path) else {
+            panic!("a 0644 key file must be refused");
+        };
         assert!(
             !matches!(error, AuthorityKeyError::InvalidFormat),
             "permission refusal must precede parsing: {error:?}"
         );
         let path = write_key_file(directory.path(), "badhex.key", &evil, 0o600);
-        let error = load(&path).expect_err("non-hex secret must be refused");
+        let Err(error) = load(&path) else {
+            panic!("non-hex secret must be refused");
+        };
         assert!(
             matches!(error, AuthorityKeyError::InvalidFormat),
             "malformed key must fail as InvalidFormat: {error:?}"
@@ -224,13 +235,14 @@ mod tests {
     fn load_enforces_regular_file_and_0600_descriptor_checks() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         for mode in [0o644, 0o640, 0o600 | 0o111, 0o400] {
             let name = format!("mode-{mode:o}.key");
             let path = write_key_file(directory.path(), &name, &valid_contents(), mode);
             assert_eq!(
                 std::fs::metadata(&path)
-                    .expect("mode probe must be statable")
+                    .unwrap_or_else(|error| panic!("mode probe must be statable: {error}"))
                     .permissions()
                     .mode()
                     & 0o7777,
@@ -243,7 +255,8 @@ mod tests {
             );
         }
         let subdirectory = directory.path().join("not-a-file");
-        std::fs::create_dir(&subdirectory).expect("fixture directory must exist");
+        std::fs::create_dir(&subdirectory)
+            .unwrap_or_else(|error| panic!("fixture directory must exist: {error}"));
         assert!(
             matches!(load(&subdirectory), Err(AuthorityKeyError::InsecureFile)),
             "a directory must be refused as insecure"
@@ -254,10 +267,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_refuses_a_final_component_symlink() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let target = write_key_file(directory.path(), "target.key", &valid_contents(), 0o600);
         let link = directory.path().join("link.key");
-        std::os::unix::fs::symlink(&target, &link).expect("fixture symlink must exist");
+        std::os::unix::fs::symlink(&target, &link)
+            .unwrap_or_else(|error| panic!("fixture symlink must exist: {error}"));
         assert!(
             load(&link).is_err(),
             "a final-component symlink must not bypass the descriptor check"
@@ -267,7 +282,8 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn load_fails_closed_without_platform_support() {
-        let directory = tempfile::tempdir().expect("test scratch directory must exist");
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("test scratch directory must exist: {error}"));
         let path = write_key_file(directory.path(), "authority.key", &valid_contents(), 0o600);
         assert!(
             load(&path).is_err(),

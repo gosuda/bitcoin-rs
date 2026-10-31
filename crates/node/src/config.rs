@@ -318,13 +318,13 @@ impl PoolConfig {
         #[cfg(feature = "pool")]
         {
             self.ledger_config().validate()?;
-            return match bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
+            match bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(
                 &self.share_difficulty,
             ) {
                 Ok(target) if target == self.share_target => Ok(()),
                 Ok(_) => Err(ConfigError::PoolShareTargetMismatch),
                 Err(difficulty_error) => Err(ConfigError::PoolShareDifficulty { difficulty_error }),
-            };
+            }
         }
         #[cfg(not(feature = "pool"))]
         Ok(())
@@ -855,11 +855,17 @@ fn materialize_p2p(
                 .unwrap_or_else(|| network.default_p2p_port()),
         },
         magic: settings.magic.unwrap_or(profile.magic),
-        listen: settings.listen.clone().unwrap_or_else(|| profile.listen.clone()),
+        listen: settings
+            .listen
+            .clone()
+            .unwrap_or_else(|| profile.listen.clone()),
         dns_seeds_enabled: settings.dns_seeds.unwrap_or(profile.dns_seeds),
         asmap: settings.asmap.clone(),
         noban_subnets: settings.noban_subnets.clone().unwrap_or_default(),
-        connect: settings.connect.clone().unwrap_or_else(|| profile.connect.clone()),
+        connect: settings
+            .connect
+            .clone()
+            .unwrap_or_else(|| profile.connect.clone()),
         fast_sync: settings.fast_sync.unwrap_or(false),
         v2_transport: settings.v2_transport.unwrap_or(true),
         relay_offers: bitcoin_rs_p2p::RelayOffers {

@@ -1065,7 +1065,7 @@ fn final_payout_script_prefers_pool_when_values_differ() {
         max_connections_per_ip: 1,
         share_difficulty: String::from("1"),
         share_target: bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal("1")
-            .expect("fixed test difficulty parses"),
+            .unwrap_or_else(|error| panic!("fixed test difficulty parses: {error}")),
         window_work: 1,
         fee_bps: 0,
         reward_script: vec![0x52],

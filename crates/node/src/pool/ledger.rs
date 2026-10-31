@@ -15,8 +15,8 @@ use bitcoin_rs_mining::pool::ledger::{
 };
 use bitcoin_rs_mining::pool::stratum::sv1::{AccountResolver, AuthDenied, Password};
 use bitcoin_rs_mining::pool::{
-    AcceptedShare, BlockReceipt, BlockStatus, FoundBlock, LedgerUnavailable, RecordOutcome,
-    ShareLedger, WorkerIdentity,
+    AcceptedShare, BlockReceipt, FoundBlock, LedgerUnavailable, RecordOutcome, ShareLedger,
+    WorkerIdentity,
 };
 use bitcoin_rs_primitives::encode::deserialize;
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint as NodeOutPoint, Txid};
@@ -286,8 +286,10 @@ impl ChainView for RawChainView<'_> {
     }
 }
 
+#[cfg(any(test, feature = "pool-sv2"))]
 const MAX_PENDING_BLOCK_RECORDS: usize = 8;
 const MAX_BLOCK_RECORD_BYTES: usize = 4_000_000;
+#[cfg(any(test, feature = "pool-sv2"))]
 const MAX_PENDING_BLOCK_BYTES: usize = MAX_PENDING_BLOCK_RECORDS * MAX_BLOCK_RECORD_BYTES;
 
 const RECOVERY_QUEUED_ALIVE: u8 = 0;
@@ -351,11 +353,13 @@ impl Drop for QueuedRecoveryHold {
     }
 }
 
+#[expect(dead_code, reason = "fields held for RAII drop cleanup")]
 pub(crate) enum DeferredCharge {
     Permit(BlockRecordPermit),
     Queued(QueuedRecoveryHold),
 }
 
+#[cfg(any(test, feature = "pool-sv2"))]
 pub(crate) enum BlockRecordOutcome {
     Durable,
     Queued,
@@ -369,12 +373,14 @@ pub(crate) struct BlockRecordPermit {
 }
 
 impl BlockRecordPermit {
+    #[cfg(any(test, feature = "pool-sv2"))]
     pub(crate) fn record_or_enqueue(
         mut self,
         account: MinerId,
         block: &FoundBlock,
         submission: &Result<BlockReceipt, bitcoin_rs_mining::MiningControlError>,
     ) -> (BlockRecordOutcome, Option<DeferredCharge>) {
+        use bitcoin_rs_mining::pool::BlockStatus;
         let host = Arc::clone(&self.host);
         self.armed = false;
         let bytes = self.bytes;
@@ -392,7 +398,7 @@ impl BlockRecordPermit {
             .is_ok();
         if recorded_directly || matches!(host.found_block_recorded(block.share.hash), Ok(true)) {
             if undetermined {
-                let permit = BlockRecordPermit {
+                let permit = Self {
                     host,
                     bytes,
                     armed: true,
@@ -491,8 +497,8 @@ impl ChainView for NodeChainView {
 }
 
 fn tip_unchanged(
-    before: &Option<Arc<bitcoin_rs_chain::TipSnapshot>>,
-    after: &Option<Arc<bitcoin_rs_chain::TipSnapshot>>,
+    before: Option<&Arc<bitcoin_rs_chain::TipSnapshot>>,
+    after: Option<&Arc<bitcoin_rs_chain::TipSnapshot>>,
 ) -> bool {
     match (before, after) {
         (None, None) => true,
@@ -522,6 +528,7 @@ impl LedgerHost {
         }
     }
 
+    #[cfg(any(test, feature = "pool-sv2"))]
     pub(crate) fn try_reserve_block_slot(self: &Arc<Self>) -> Option<BlockRecordPermit> {
         let block_bytes = MAX_BLOCK_RECORD_BYTES;
         let mut pending = self
@@ -656,7 +663,7 @@ impl LedgerHost {
         let reconcile_result = loop {
             let before = chain.tip_generation();
             let observation = RawChainView(chain);
-            let aborted = || !tip_unchanged(&before, &chain.tip_generation());
+            let aborted = || !tip_unchanged(before.as_ref(), chain.tip_generation().as_ref());
             let result: Result<(bool, bool, Option<u64>, Option<u64>), pool_ledger::LedgerError> =
                 (|| {
                     let (_, round_more, round_next) = self.ledger.reconcile_rounds_checked_limit(
@@ -676,9 +683,11 @@ impl LedgerHost {
                 })();
             let after = chain.tip_generation();
             match result {
-                Ok((false, false, _, _)) if tip_unchanged(&before, &after) => break Ok(()),
+                Ok((false, false, _, _)) if tip_unchanged(before.as_ref(), after.as_ref()) => {
+                    break Ok(());
+                }
                 Ok((round_more, payout_more, round_next, payout_next))
-                    if tip_unchanged(&before, &after) =>
+                    if tip_unchanged(before.as_ref(), after.as_ref()) =>
                 {
                     round_after = round_next;
                     payout_after = payout_next;
@@ -694,7 +703,7 @@ impl LedgerHost {
                 }
                 Err(error) => {
                     attempts += 1;
-                    if attempts >= 2 || tip_unchanged(&before, &after) {
+                    if attempts >= 2 || tip_unchanged(before.as_ref(), after.as_ref()) {
                         break Err(error);
                     }
                 }
@@ -707,6 +716,7 @@ impl LedgerHost {
         }
     }
 
+    #[cfg(any(test, feature = "pool-sv2"))]
     pub(crate) fn record_accepted_share(
         &self,
         account: MinerId,
@@ -723,6 +733,7 @@ impl LedgerHost {
         }
     }
 
+    #[cfg(any(test, feature = "pool-sv2"))]
     pub(crate) fn record_submitted_block(
         &self,
         account: MinerId,
@@ -741,6 +752,7 @@ impl LedgerHost {
             .map(|round| round.is_some())
     }
 
+    #[cfg(any(test, feature = "pool-sv2"))]
     pub(crate) fn record_found_block(
         &self,
         account: MinerId,
