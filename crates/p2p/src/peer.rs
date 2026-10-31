@@ -413,13 +413,17 @@ impl<S: Read> Peer<S> {
         let net_trace = self.net_trace.as_ref();
         let counters = self.counters.clone();
         self.recv
-            .read_message(&mut self.stream, self.magic, |command, payload, wire_len| {
-                crate::net_trace::inbound_message(net_trace, command, payload);
-                if let Some(counters) = counters.as_ref() {
-                    counters.record_msg_recv(command, wire_len);
-                }
-                admit(command, payload)
-            })
+            .read_message(
+                &mut self.stream,
+                self.magic,
+                |command, payload, wire_len| {
+                    crate::net_trace::inbound_message(net_trace, command, payload);
+                    if let Some(counters) = counters.as_ref() {
+                        counters.record_msg_recv(command, wire_len);
+                    }
+                    admit(command, payload)
+                },
+            )
             .map_err(PeerError::inbound)
     }
 
