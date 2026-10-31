@@ -426,7 +426,6 @@ fn cmpctblock_missing_above_the_request_bound_falls_back() {
     assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
 }
 
-/// wtxids collide on one BIP152 short ID under `native`'s header and
 fn colliding_hint_pair(native: &Block, nonce: u64) -> (Tx, Tx, ShortId) {
     let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
     let (first_payload, second_payload) = COLLIDING_PAYLOADS;

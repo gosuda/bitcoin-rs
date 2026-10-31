@@ -1,13 +1,9 @@
-//! BIP434 feature negotiation message codec.
-
 use bitcoin_rs_primitives::varint;
 
-/// Protocol version that implements BIP434 feature negotiation.
 pub const FEATURE_VERSION: u32 = 70_017;
 
 pub const FEATURE_COMMAND: &str = "feature";
 
-/// BIP324 short message type ID for the `feature` command.
 pub const FEATURE_V2_SHORT_ID: u8 = 37;
 
 pub const MIN_ID_LEN: usize = 4;
@@ -16,10 +12,8 @@ pub const MAX_ID_LEN: usize = 80;
 
 pub const MAX_DATA_LEN: usize = 512;
 
-/// BIP332 stale-tip relay feature identifier.
 pub(crate) const BIP332_ID: &[u8] = b"BIP332";
 
-/// A feature identifier negotiated via BIP434.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FeatureId(Vec<u8>);
 
@@ -69,7 +63,6 @@ impl PartialEq<str> for FeatureId {
     }
 }
 
-/// A BIP434 feature announcement message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeatureAnnouncement {
     pub id: FeatureId,
@@ -82,7 +75,6 @@ impl FeatureAnnouncement {
         Self { id, data }
     }
 
-    /// This node's BIP332 stale-tip relay announcement; `prefers_blocks` is
     pub(crate) fn bip332(prefers_blocks: bool) -> Self {
         Self::new(
             FeatureId::from_raw_unchecked(BIP332_ID.to_vec()),
@@ -90,14 +82,11 @@ impl FeatureAnnouncement {
         )
     }
 
-    /// recognised identifiers with invalid data are ignored (BIP434 requires
-    /// ignoring the former; BIP332 the latter): a BIP332 payload is exactly
     pub(crate) fn is_supported(&self) -> bool {
         self.id.as_bytes() == BIP332_ID && matches!(self.data.as_slice(), [0 | 1])
     }
 }
 
-/// Errors occurring during BIP434 feature announcement encoding or decoding.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FeatureError {
     #[error("truncated feature payload")]
@@ -112,7 +101,6 @@ pub enum FeatureError {
     Trailing(usize),
 }
 
-/// Encodes a [`FeatureAnnouncement`] into wire bytes according to BIP434.
 pub fn encode(announcement: &FeatureAnnouncement) -> Result<Vec<u8>, FeatureError> {
     let id_bytes = announcement.id.as_bytes();
     if !(MIN_ID_LEN..=MAX_ID_LEN).contains(&id_bytes.len()) {
@@ -141,7 +129,6 @@ pub fn encode(announcement: &FeatureAnnouncement) -> Result<Vec<u8>, FeatureErro
     Ok(out)
 }
 
-/// Decodes a [`FeatureAnnouncement`] from wire bytes according to BIP434.
 pub fn decode(bytes: &[u8]) -> Result<FeatureAnnouncement, FeatureError> {
     let (id_len_u64, id_len_bytes) = varint::decode(bytes).map_err(|err| match err {
         varint::VarintError::Truncated { .. } => FeatureError::Truncated,

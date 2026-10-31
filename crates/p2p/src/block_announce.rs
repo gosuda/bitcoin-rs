@@ -1,5 +1,3 @@
-//! Outbound block announcement owner: headers-first, high-bandwidth compact block,
-
 #[cfg(test)]
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,7 +87,6 @@ impl BlockAnnounceReceiver {
 
 #[derive(Default)]
 struct AnnounceState {
-    /// BIP152: "Nodes MUST NOT send `sendcmpct(high_bandwidth=true)` to more than 3 peers."
     high_bandwidth_requested_peers: Vec<PeerSource>,
     last_processed_tip: Option<Hash256>,
     highest_fast_announce: u32,
@@ -137,7 +134,6 @@ impl BlockAnnouncer {
         }
     }
 
-    /// can relay recent stale tips to peers that negotiated BIP332.
     #[must_use]
     pub fn with_stale_tips(
         mut self,
@@ -411,7 +407,6 @@ impl BlockAnnouncer {
         (source, peer_state, known_position)
     }
 
-    /// knows the tip's parent, and was not already sent this header. BIP152
     fn plan_compact_push(
         &self,
         session: &crate::PeerSession,
@@ -670,7 +665,6 @@ impl BlockAnnouncer {
         self.process_tip()
     }
 
-    /// Relays recent stale tips to ready peers that negotiated BIP332.
     pub fn process_stale_tips(&self) -> Vec<(Option<crate::PeerEndpoint>, Message)> {
         if self.in_ibd() {
             return Vec::new();

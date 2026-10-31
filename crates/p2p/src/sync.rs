@@ -1,5 +1,3 @@
-//! Block download orchestrator.
-
 mod branches;
 pub mod chain;
 mod commit;
@@ -81,8 +79,6 @@ struct StaleTipState {
 }
 
 impl StaleTipState {
-    /// INVARIANT: the allowance is this record's only output, so the
-    ///   connection manager never reads a staleness clock of its own.
     fn follow(
         &mut self,
         tip_height: u32,
@@ -106,9 +102,6 @@ impl StaleTipState {
     }
 }
 
-/// INVARIANT: this is Core's `TipMayBeStale` (`net_processing.cpp`),
-///   which weighs the last tip update against `3 * nPowTargetSpacing` with
-///   nothing in flight.
 fn tip_may_be_stale(
     state: &mut StaleTipState,
     blocks_in_flight: usize,
@@ -136,7 +129,6 @@ pub struct BlockSync {
     refused_rerequest_at: Mutex<Option<Instant>>,
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     apply_halted: std::sync::atomic::AtomicBool,
-    /// Recent stale tips for BIP332 relay, kept across [`BlockSync::install_budget`]
     stale_tips: Arc<StaleTipRetainer>,
 }
 
@@ -163,8 +155,6 @@ struct SchedulerState {
     stager: BlockStager,
     header_request_owner: Option<PeerSource>,
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
-    /// [`requests::BODY_UNAVAILABLE_RETRY`] with a safety ceiling, and
-    /// independent of the window's pending budget.
     body_unavailable: requests::UnavailableBodies,
     chain_sync: hashbrown::HashMap<PeerSource, peers::ChainSyncState>,
     headers_sync: hashbrown::HashMap<PeerSource, PeerHeadersSync>,
@@ -185,8 +175,6 @@ impl SchedulerState {
             .and_then(|source| self.headers_sync.get(&source)?.request)
     }
 
-    /// INVARIANT: ownership is compared by connection identity, never by
-    ///   address alone.
     fn release_unowned(&mut self, live: &[PeerSource]) {
         let owns = |source: &PeerSource| live.contains(source);
         self.window.retain_owned_by(owns);
@@ -202,8 +190,6 @@ impl SchedulerState {
         self.headers_sync.retain(|source, _| owns(source));
     }
 
-    /// INVARIANT: only the chain-sync sweep writes this map outside its own
-    ///   decision, and it writes it back the way it found it.
     fn restore_chain_sync(&mut self, source: PeerSource, prior: Option<peers::ChainSyncState>) {
         match prior {
             Some(state) => {
@@ -285,8 +271,6 @@ struct GetdataRequestOutcome {
 }
 
 impl BlockSync {
-    /// INVARIANT: the latch is never replaced and never copied into a cached
-    ///   boolean.
     #[must_use]
     pub fn new(
         chain: Arc<dyn SyncChain>,
@@ -338,10 +322,6 @@ impl BlockSync {
         };
     }
 
-    /// INVARIANT: one entry per connection — the first unprocessed
-    /// announcement wins, so a later vector cannot replace an unknown tip
-    /// before header sync drains it — and a flooding peer cannot grow the
-    /// queue past the live session set.
     pub(crate) fn announce_block(&self, source: PeerSource, hash: Hash256) {
         self.block_announcements
             .lock()
@@ -349,10 +329,6 @@ impl BlockSync {
             .or_insert(hash);
     }
 
-    /// INVARIANT: `send_then` is not used here because it would charge a new
-    /// budget credit instead of spending the held reply reservation; the
-    /// `with_current` guard plus the reserved-credit `enqueue` is the
-    /// linearizable path.
     pub(crate) fn enqueue_owned_body_fetch(
         &self,
         source: PeerSource,
@@ -371,9 +347,6 @@ impl BlockSync {
         admitted && published
     }
 
-    /// INVARIANT: ownership is compared by connection identity, never by
-    ///   address alone, so a same-address replacement cannot claim its
-    ///   predecessor's request.
     #[must_use]
     pub(crate) fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
         if self.historical.lock().window.pending_owner(&hash) == Some(source) {
@@ -518,9 +491,6 @@ impl BlockSync {
         }
     }
 
-    /// INVARIANT: the staleness question is asked at most once per
-    ///   `STALE_CHECK_INTERVAL`, so a stalled tip costs one dial rather than
-    ///   one decision per tick.
     fn follow_tip_progress(&self, frontier: &SyncFrontier, now: Instant) {
         let Some(tip) = frontier.chain.applied_tip.as_ref() else {
             return;
@@ -534,15 +504,11 @@ impl BlockSync {
             .follow(tip.height, tip.hash, blocks_in_flight, block_spacing, now);
     }
 
-    /// INVARIANT: the connection manager is the only reader, because it is the
-    ///   only part of the node that can dial.
     #[must_use]
     pub(crate) fn allow_extra_full_relay_dial(&self) -> bool {
         self.scheduler.lock().stale_tip.extra_dial_allowed
     }
 
-    /// INVARIANT: the answer comes from the same window the fetch budget
-    ///   reads, so a peer never both downloads and is retired as idle.
     #[must_use]
     pub(crate) fn is_downloading_bodies(&self, source: PeerSource) -> bool {
         self.scheduler.lock().window.is_downloading(source)
@@ -715,8 +681,6 @@ mod tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-/// INVARIANT: test-only. Production wires the node's chain-owned latch; a test
-///   that exercises the block-service clause builds its own fixture.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::InitialBlockDownload> {

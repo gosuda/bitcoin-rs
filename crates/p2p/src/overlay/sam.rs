@@ -1,4 +1,3 @@
-//! IVNP SAM v3 STREAM session lifecycle, naming, connect, and accept.
 use super::{
     Arc, AtomicBool, Connected, Duration, Instant, Ordering, OverlayTransport, PeerAddress,
     PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io, pause,

@@ -66,7 +66,6 @@ pub fn request_package_info(
     peers.request_package_info_from_token(source, subject, parents)
 }
 
-/// Applies BIP144's witness request flag to transaction vectors without
 pub(crate) fn request_witness(items: &mut [Inventory]) {
     for item in items {
         if let Inventory::Transaction(txid) = *item {
@@ -85,7 +84,6 @@ pub(crate) fn inventory_block_hash(item: &Inventory) -> Option<Hash256> {
     }
 }
 
-/// `WTx` (BIP339) it is the wtxid. The caller interprets the hash according
 pub(crate) fn inventory_tx_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {

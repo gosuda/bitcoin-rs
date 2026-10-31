@@ -1,5 +1,3 @@
-//! Bitcoin Core P2P compatibility inventory.
-
 pub const PINNED_CORE_VERSION: &str = "31.1";
 
 pub const COMMANDS: &[&str] = &[

@@ -1,4 +1,3 @@
-//! Opt-in transport setup. Successful streams enter the ordinary P2P session owner.
 use bitcoin_rs_primitives::{PeerAddress, PeerEndpoint, PeerNetwork};
 use parking_lot::RwLock;
 use std::{

@@ -1,5 +1,3 @@
-//! Node-wide admission for block decoding and queued decoded bodies.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,11 +5,8 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::wire::PeerError;
 
-// Includes peak parser metadata plus the materialized block. A maximum wire
-// frame must fit on its own; retaining queued blocks can only delay decoding.
 pub(crate) const BLOCK_INGRESS_BYTES: usize = 512 * 1024 * 1024;
 
-/// Commands whose typed decoding allocates far more heap than their wire length.
 pub(crate) fn expands_on_decode(command: &str) -> bool {
     matches!(
         command,
@@ -67,8 +62,6 @@ pub(crate) struct BlockMemoryCredit {
 impl BlockMemoryCredit {
     pub(crate) fn retain(&mut self, bytes: usize) -> Result<(), PeerError> {
         if bytes > self.bytes {
-            // Refuse locally without weakening the accounting or blaming the
-            // peer for an implementation's underestimated allocation bound.
             return Err(
                 std::io::Error::other("decoded block exceeded its allocation bound").into(),
             );

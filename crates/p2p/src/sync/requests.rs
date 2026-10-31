@@ -1,5 +1,3 @@
-//! Budgeted body requests, prefix probes, and cold-front hedges.
-
 use super::BlockSync;
 use super::GetdataRequestOutcome;
 use super::SchedulerState;
@@ -23,27 +21,10 @@ use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
 
-/// Requested blocks within this distance of the header tip ride the compact-block
-/// flavor: reconstruction costs a fraction of the full-body transfer exactly where
-/// blocks are freshest.
-///
-/// Deeper requests keep the witness flavor, where full-body availability dominates; the
-/// download window stays hash-keyed, so either answer resolves the same pending
-/// request.
 pub(super) const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
 
-/// How long a connection that answered `notfound` for a body is demoted for
-/// that same body: it is the last resort for the hash, and the request path
-/// refuses to ask it again, until the interval passes.
 pub(super) const BODY_UNAVAILABLE_RETRY: Duration = Duration::from_mins(1);
 
-/// Safety ceiling on retained availability records: every live record below it is kept,
-/// so ledger pressure can never evict one peer's live answer to make room for
-/// another's.
-///
-/// The bound caps memory at a few mebibytes, and evicting above it costs at most one
-/// redundant round trip — never a stall — because per-entry filtering only re-asks a
-/// peer it wrongly forgot.
 pub(super) const MAX_UNAVAILABLE_BODY_RECORDS: usize = 65_536;
 
 #[derive(Debug, Default)]

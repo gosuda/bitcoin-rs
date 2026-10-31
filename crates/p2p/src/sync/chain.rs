@@ -1,7 +1,3 @@
-//! Applied-chain seam driven by the block-download executor. The
-//! implementation owns applied-tip mutation (node, ARCH-07); the executor
-//! owns download scheduling, staging, and peer policy.
-
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
@@ -92,9 +88,6 @@ pub trait SyncChain: Send + Sync {
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
-    /// INVARIANT: the threshold has exactly one source — the configured
-    ///   network's parameter table; implementations override only to
-    ///   substitute a fixture threshold.
     fn minimum_chain_work(&self) -> bitcoin_rs_chain::ChainWork {
         bitcoin_rs_chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
     }

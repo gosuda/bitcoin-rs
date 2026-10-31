@@ -105,7 +105,6 @@ fn maximum_wire_image_fits_alone_and_cannot_bypass_peak_admission() -> TestResul
                 cancelled.load(Ordering::Acquire)
             })
         });
-        // The waiter must observe cancellation without receiving any memory.
         entered_rx.recv_timeout(Duration::from_secs(5))?;
         cancelled.store(true, Ordering::Release);
         assert!(
@@ -216,7 +215,6 @@ fn cancellation_precedes_typed_decode_and_malformed_decode_releases_credit() -> 
     let mut peer = Peer::new(Cursor::new(frame), Magic::REGTEST);
     assert!(peer.read_message_bounded(&memory, || false).is_err());
     assert_eq!(*memory.used.lock(), 0);
-    // A subsequent ordinary block still decodes and its permit releases.
     let mut frame = Vec::new();
     crate::wire::write_message(
         &mut frame,

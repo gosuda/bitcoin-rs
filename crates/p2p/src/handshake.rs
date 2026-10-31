@@ -44,12 +44,6 @@ pub const fn feature_messages() -> [Message; 3] {
     ]
 }
 
-/// BIP434 feature announcements sent after [`feature_messages`] and before our POST:
-/// empty for a peer below [`FEATURE_VERSION`]: BIP434 forbids sending it a `feature`,
-/// so its handshake bytes are those of a pre-BIP434 session.
-///
-/// BIP332 when offered, nothing by default. BIP330 and BIP331 negotiate on BIP434
-/// permits a `feature`.
 pub(crate) fn negotiated_features<S>(
     peer: &Peer<S>,
     remote_version: u32,
@@ -63,7 +57,6 @@ pub(crate) fn negotiated_features<S>(
     )
 }
 
-/// The BIP434 version rule: `local` announcements go only to a peer at
 fn announceable_to(
     remote_version: u32,
     local: Vec<FeatureAnnouncement>,
@@ -75,7 +68,6 @@ fn announceable_to(
     }
 }
 
-/// BIP152 compact-block relay is announced in low-bandwidth mode: we ask for
 const fn post_verack_messages() -> [Message; 1] {
     [Message::SendCmpct(SendCmpct {
         send_compact: false,
@@ -94,7 +86,6 @@ pub(crate) fn send_post_verack_messages<S: Read + Write>(
     Ok(())
 }
 
-///   role advertising `relay = false` offers no BIP331 package relay: that
 pub fn start<S>(
     peer: &mut Peer<S>,
     nonce: u64,
@@ -117,8 +108,6 @@ pub fn start<S>(
     messages
 }
 
-/// # Errors
-/// Returns [`PeerError`] if reading or writing the wire stream fails, if the
 pub fn run_inbound_handshake<S: Read + Write>(
     peer: &mut Peer<S>,
     our_nonce: u64,

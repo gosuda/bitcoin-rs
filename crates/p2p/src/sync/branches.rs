@@ -1,5 +1,3 @@
-//! Heavier-branch handoff and committed reorganization body retirement.
-
 use super::BlockSync;
 use super::chain::ReorgError;
 use super::chain::WindowApplyDisposition;
@@ -112,10 +110,6 @@ impl BlockSync {
         }
     }
 
-    /// Frees every bounded download slot held by an invalidated hash under
-    /// one `scheduler` acquisition.
-    /// INVARIANT: all releases share one `now`, so one purge stamps an
-    ///      owner's queue age at a single instant.
     #[doc(hidden)]
     pub fn purge_invalidated(&self, hashes: &[Hash256]) {
         if hashes.is_empty() {
@@ -129,7 +123,6 @@ impl BlockSync {
         }
     }
 
-    /// Returns the header tip when the applied chain is not on its branch.
     pub(super) fn outweighed_branch_target(&self) -> Option<NodeId> {
         let chain_tip = self.chain.chain_tip()?;
         let applied = self.chain.applied_tip()?;

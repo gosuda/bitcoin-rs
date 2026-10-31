@@ -1,5 +1,3 @@
-//! Active-chain header walks and hash-addressed block serving.
-
 use crate::inv::native_block_hash;
 
 use std::sync::Arc;
@@ -222,7 +220,6 @@ impl ActiveChainQuery {
         false
     }
 
-    /// peer's servable BIP152 profile. Shared by the stored path and the
     fn blocktxn_message(
         payload: &[u8],
         request: &BlockTransactionsRequest,
@@ -604,7 +601,6 @@ impl ChainQuery for ActiveChainQuery {
         Ok(outcome)
     }
 
-    /// servable BIP152 profile.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -738,7 +734,6 @@ fn strip_witnesses(transactions: &mut BlockTransactions) {
 }
 
 impl ActiveChainQuery {
-    /// inventory policy at the negotiated BIP152 version.
     fn compact_block_for(
         &self,
         height: u32,
@@ -853,8 +848,6 @@ fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
         | Inventory::Unknown { .. } => None,
     }
 }
-/// Fresh BIP152 serving nonce. `RandomState` draws fresh keys per call, so
-/// two responses never share one (BIP152: SHOULD NOT reuse across blocks).
 fn fresh_nonce() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     std::collections::hash_map::RandomState::new()
@@ -862,7 +855,6 @@ fn fresh_nonce() -> u64 {
         .finish()
 }
 
-/// `None` for a non-BIP152 version or an unencodable block.
 pub(crate) fn cmpct_message_from_native(block: &Block, version: u64) -> Option<Message> {
     let version = u32::try_from(version).ok()?;
     if version != 1 && version != 2 {

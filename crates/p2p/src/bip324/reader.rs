@@ -1,5 +1,3 @@
-//! Resumable reads of BIP324 packets from a blocking stream.
-
 use std::io::Read;
 
 use bytes::Bytes;
@@ -10,9 +8,6 @@ use super::packet::{HEADER_LEN, RecvCipher};
 use crate::recv;
 use crate::wire::MAX_MESSAGE_PAYLOAD;
 
-/// Largest contents length accepted from a peer: a type byte, a 12-byte long
-/// type, and a payload of up to [`MAX_MESSAGE_PAYLOAD`] bytes, as Bitcoin Core
-/// accepts.
 pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 
 #[derive(Debug)]
@@ -31,8 +26,6 @@ struct PendingBody {
 }
 
 impl PacketReader {
-    /// `aad` authenticates the first packet: the garbage the peer sent before
-    /// its garbage terminator.
     pub(crate) const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
         Self {
             cipher,
@@ -43,11 +36,6 @@ impl PacketReader {
         }
     }
 
-    /// A contents length above [`MAX_RECV_CONTENTS_LEN`] is refused before any byte of
-    /// its body is read.
-    ///
-    /// POST: on `Ok(None)` every packet byte is consumed and its cipher advanced; the
-    /// next call reads a fresh packet.
     pub(crate) fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
@@ -71,8 +59,6 @@ impl PacketReader {
         Ok(Some(Bytes::from(body.bytes).slice(HEADER_LEN..end)))
     }
 
-    /// Completes and decrypts the next length field. The cipher advances only
-    /// once all three bytes are in.
     fn read_length<R: Read>(&mut self, reader: &mut R) -> Result<PendingBody, TransportError> {
         if let Err(error) = recv::fill(reader, &mut self.field, &mut self.field_filled) {
             if !recv::is_poll_timeout(&error) {

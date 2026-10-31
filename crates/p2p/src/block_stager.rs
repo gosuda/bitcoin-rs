@@ -1,5 +1,3 @@
-//! Out-of-order block staging bounded by the download window budget.
-
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},

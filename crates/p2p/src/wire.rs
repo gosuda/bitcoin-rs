@@ -21,9 +21,6 @@ use thiserror::Error;
 
 use crate::inv::MAX_INV_PER_MSG;
 
-/// `getnetworkinfo.protocolversion`. It is at least the version at which BIP434
-/// `feature` negotiation starts, so a peer that honors our advertisement also
-/// honors the feature handshake.
 pub const PROTOCOL_VERSION: u32 = 70_017;
 
 const _: () = assert!(PROTOCOL_VERSION >= crate::feature::FEATURE_VERSION);
@@ -80,25 +77,12 @@ pub enum Message {
     WtxidRelay,
     AddrV2(Vec<AddrV2Message>),
     SendAddrV2,
-    /// BIP434 `feature`
     Feature(crate::feature::FeatureAnnouncement),
-    /// BIP331 `sendpackages`
     SendPackages(crate::packages::SendPackages),
-    /// BIP331 `ancpkginfo`
     AncPkgInfo(crate::packages::AncPkgInfo),
-    /// BIP331 `getpkgtxns`
     GetPkgTxns(crate::packages::GetPkgTxns),
-    /// BIP331 `pkgtxns`, typed: the serving side's encode-only variant. The
-    /// decoder never produces it; decode a received frame explicitly with
-    /// [`crate::packages::PkgTxns::decode`].
     PkgTxns(crate::packages::PkgTxns),
-    /// BIP331 `pkgtxns` exactly as received or already serialized.
-    ///
-    /// The decoder produces this variant instead of parsing the transactions, so a
-    /// caller charges the frame against its ingress budget before any decoded `Vec<Tx>`
-    /// exists. Written as a `pkgtxns` command without re-encoding.
     PkgTxnsPayload(bytes::Bytes),
-    /// BIP332 `staletip`
     StaleTip(crate::staletip::StaleTipAnnouncement),
     Unknown {
         command: CommandString,
@@ -245,13 +229,10 @@ pub enum PeerError {
     Varint(#[from] bitcoin_rs_primitives::varint::VarintError),
     #[error("native consensus decode error: {0}")]
     NativeDecode(#[from] bitcoin_rs_primitives::DecodeError),
-    /// BIP434 feature announcement decoding or encoding failed.
     #[error("feature error: {0}")]
     Feature(#[from] crate::feature::FeatureError),
-    /// BIP331 package message decoding or encoding failed.
     #[error("package error: {0}")]
     Package(#[from] crate::packages::PackageError),
-    /// BIP332 stale-tip announcement decoding or encoding failed.
     #[error("staletip error: {0}")]
     StaleTip(#[from] crate::staletip::StaleTipError),
     #[error("invalid command `{0}`")]
@@ -272,19 +253,11 @@ pub enum PeerError {
     DiscouragedDestination(bitcoin_rs_primitives::PeerAddress),
     #[error("banned destination {0}")]
     BannedDestination(bitcoin_rs_primitives::PeerAddress),
-    /// The BIP324 transport failed: a malformed handshake, or a packet that
-    /// is oversized or fails authentication. BIP324 does not authenticate
-    /// peers, so this ends the connection without implicating the peer.
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportFailure),
 }
 
 impl PeerError {
-    /// Attributes a receive failure to the remote, except I/O, transport failures and a
-    /// frame under another network's magic.
-    ///
-    /// Core closes a transport on a wrong message start without `Misbehaving`, and a
-    /// BIP324 key read by a node with v2 off arrives exactly this way.
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
             Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
@@ -342,12 +315,10 @@ pub(crate) struct FramedMessage {
 
 enum FrameWire {
     V1([u8; HEADER_LEN]),
-    /// A sealed BIP324 packet, written instead of the header and payload.
     V2(Vec<u8>),
 }
 
 impl FramedMessage {
-    /// A BIP324 packet carrying `payload`.
     pub(crate) const fn sealed(packet: Vec<u8>, payload: bytes::Bytes) -> Self {
         Self {
             wire: FrameWire::V2(packet),
@@ -458,8 +429,6 @@ struct PendingBody {
 }
 
 impl V1Receiver {
-    /// A receiver whose first header already holds `prefix`: the bytes a
-    /// BIP324 responder read before it recognized a v1 peer.
     pub(crate) fn with_prefix(prefix: &[u8]) -> Self {
         let mut receiver = Self::default();
         let len = prefix.len().min(HEADER_LEN);
@@ -883,8 +852,6 @@ fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerErro
     Ok(raw)
 }
 
-/// Parses a 12-byte command field: a UTF-8 name, then only zero padding. The
-/// v1 header and the BIP324 long message type share this encoding.
 pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
     let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|byte| *byte != 0) {

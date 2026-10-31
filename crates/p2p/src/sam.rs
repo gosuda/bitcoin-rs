@@ -1,5 +1,3 @@
-//! I2P SAM v3 client (pinned IVNP bridge) for typed I2P transports.
-
 use parking_lot::{Mutex, MutexGuard};
 use std::cell::Cell;
 use std::fmt::Write as _;

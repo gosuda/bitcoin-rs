@@ -1,23 +1,15 @@
-//! The BIP324 forward-secure ciphers: `FSChaCha20` encrypts the length field,
-//! `FSChaCha20Poly1305` seals the packet body.
-
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit as _, StreamCipher as _, StreamCipherSeek as _};
 use chacha20poly1305::{AeadInOut as _, ChaCha20Poly1305, KeyInit as _};
 
-/// Length fields or packets each cipher handles before it rekeys.
 const REKEY_INTERVAL: u32 = 224;
 
-/// Bytes in the encrypted length field.
 pub(crate) const LENGTH_FIELD_LEN: usize = 3;
 
-/// Bytes in a Poly1305 authentication tag.
 pub(crate) const TAG_LEN: usize = 16;
 
-/// `ChaCha20` block 1, where `ChaCha20-Poly1305` starts its keystream.
 const FIRST_PAYLOAD_BLOCK_OFFSET: u64 = 64;
 
-/// The 96-bit `ChaCha20` nonce `LE32(prefix) || LE64(epoch)`.
 fn nonce(prefix: u32, epoch: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[..4].copy_from_slice(&prefix.to_le_bytes());
@@ -25,14 +17,6 @@ fn nonce(prefix: u32, epoch: u64) -> [u8; 12] {
     nonce
 }
 
-/// Each rekey epoch is one continuous `ChaCha20` keystream under nonce `LE32(0) ||
-/// LE64(epoch)`.
-///
-/// After [`REKEY_INTERVAL`] length fields the next 32 keystream bytes key the following
-/// epoch.
-///
-/// A field is always [`LENGTH_FIELD_LEN`] bytes, so an epoch consumes `224 * 3 + 32 =
-/// 704` bytes, exactly eleven `ChaCha20` blocks: no keystream outlives its key.
 pub(crate) struct FsChaCha20 {
     stream: ChaCha20,
     epoch: u64,
@@ -79,11 +63,6 @@ fn length_stream(key: [u8; 32], epoch: u64) -> ChaCha20 {
 #[error("BIP324 packet failed authentication")]
 pub(crate) struct AuthFailed;
 
-/// Packet `i` of epoch `e` is sealed under nonce `LE32(i) || LE64(e)`.
-///
-/// After the last packet of an epoch the key becomes the first 32 bytes of `ChaCha20`
-/// block 1 under nonce `0xffffffff || LE64(e)`. Every call advances the packet counter,
-/// including a failed authentication, as the reference does.
 pub(crate) struct FsChaCha20Poly1305 {
     key: [u8; 32],
     epoch: u64,
@@ -99,7 +78,6 @@ impl FsChaCha20Poly1305 {
         }
     }
 
-    /// `ChaCha20-Poly1305` refuses only plaintexts beyond 256 GiB.
     pub(crate) fn encrypt(
         &mut self,
         aad: &[u8],

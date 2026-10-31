@@ -1,5 +1,3 @@
-//! Per-connection traffic counters.
-
 use bitcoin_rs_primitives::unix_time_secs;
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
@@ -119,8 +117,6 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
-    /// # Errors
-    /// Returns the error `TcpStream::set_nodelay` returned.
     pub(crate) fn from_connected(
         stream: std::net::TcpStream,
         counters: Arc<PeerCounters>,
@@ -133,8 +129,6 @@ impl CountingStream<std::net::TcpStream> {
         self.inner.nodelay()
     }
 
-    /// # Errors
-    /// Returns the error `TcpStream::try_clone` returned.
     pub fn try_clone(&self) -> IoResult<Self> {
         Ok(Self::new(
             self.inner.try_clone()?,

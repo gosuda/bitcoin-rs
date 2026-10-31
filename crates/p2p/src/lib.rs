@@ -2,22 +2,18 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub(crate) mod addrman;
-/// BIP324 v2 transport cryptography: key schedule and packet ciphers.
 pub(crate) mod bip324;
 pub mod block_announce;
 pub(crate) mod block_stager;
 pub(crate) mod chain_query;
-/// BIP152 compact-block reconstruction: bounded per-peer pending state.
 pub mod compact_blocks;
 pub mod compat;
 pub(crate) mod connection;
 pub(crate) mod counters;
 pub mod dispatch;
 pub mod download_window;
-/// Typed endpoint parsing, BIP155 conversion, and the single transport dial.
 pub mod endpoint;
 pub(crate) mod eviction;
-/// BIP434 feature negotiation messages and codec.
 pub mod feature;
 pub(crate) mod fsm;
 pub mod handshake;
@@ -30,7 +26,6 @@ pub use overlay::OverlayNetworkState;
 
 mod net_trace;
 
-/// BIP331 ancestor package relay codec and combined package hash.
 pub mod packages;
 
 pub(crate) mod peer;
@@ -40,11 +35,9 @@ pub(crate) mod recv;
 pub(crate) mod sam;
 pub(crate) mod service;
 pub(crate) mod socks;
-/// BIP332 `staletip` message codec.
 pub mod staletip;
 pub mod subnet;
 pub mod sync;
-/// A connection's v1 or BIP324 v2 transport and its negotiation.
 pub(crate) mod transport;
 pub(crate) mod tx_policy;
 pub(crate) mod tx_relay;

@@ -1850,7 +1850,6 @@ fn version_at(version: u32) -> Message {
     })
 }
 
-/// below BIP434's version never receives a `feature` frame.
 #[test]
 fn version_reply_orders_features_between_feature_messages_and_verack() -> Result<(), PeerError> {
     for version in [FEATURE_VERSION - 1, PROTOCOL_VERSION] {
