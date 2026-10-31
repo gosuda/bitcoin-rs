@@ -70,6 +70,7 @@ pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
     lease: Option<crate::PeerLease>,
+    cancel_guard: Option<bitcoin_rs_chain::HookGuard>,
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
@@ -84,6 +85,7 @@ impl<S> CountingStream<S> {
             inner,
             counters,
             lease: None,
+            cancel_guard: None,
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
@@ -123,6 +125,16 @@ impl CountingStream<std::net::TcpStream> {
     ) -> IoResult<Self> {
         stream.set_nodelay(true)?;
         Ok(Self::new(stream, counters))
+    }
+
+    /// # Errors
+    /// Returns the error `TcpStream::try_clone` returned.
+    pub(crate) fn with_cancel(mut self, cancel: &bitcoin_rs_chain::LatchReader) -> IoResult<Self> {
+        let shutdown_stream = std::sync::Arc::new(self.inner.try_clone()?);
+        self.cancel_guard = Some(cancel.on_cancel(move || {
+            let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
+        }));
+        Ok(self)
     }
 
     pub fn nodelay(&self) -> IoResult<bool> {

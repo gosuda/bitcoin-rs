@@ -488,3 +488,34 @@ fn a_cancelled_stream_stops_a_payload_that_keeps_arriving() -> IoResult<()> {
     }
     Ok(())
 }
+
+#[test]
+fn an_idle_read_unblocks_on_the_cancel_latch() -> IoResult<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let client = std::net::TcpStream::connect(listener.local_addr()?)?;
+    let (server, _) = listener.accept()?;
+    let latch = bitcoin_rs_chain::LatchWriter::new();
+    let mut stream = CountingStream::from_connected(server, Arc::new(PeerCounters::default()))?
+        .with_cancel(&latch.reader())?;
+    let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+    let reader = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        let result = stream.read(&mut buffer);
+        let _ = done_tx.send(result.map_err(|error| error.kind()));
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    latch.trigger();
+    let outcome = done_rx.recv_timeout(std::time::Duration::from_millis(200));
+    drop(client);
+    let _ = reader.join();
+    assert!(
+        outcome.is_ok(),
+        "an idle socket read must return once the cancel latch triggers"
+    );
+    let result = outcome.map_err(|_| std::io::Error::other("read outcome missing"))?;
+    assert!(
+        result.is_err() || result == Ok(0),
+        "a cancelled idle read reports end of stream, got {result:?}"
+    );
+    Ok(())
+}

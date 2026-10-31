@@ -18,12 +18,14 @@ use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_mins(1);
-const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const HANDSHAKE_READ_POLL: Duration = Duration::from_secs(1);
+
+const BUDGET_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(STREAM_POLL_INTERVAL))?;
+    stream.set_read_timeout(Some(HANDSHAKE_READ_POLL))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
     Ok(())
 }
@@ -393,7 +395,11 @@ impl ConnectionShared {
                 }
             }
             recv(self.session_cancel.closed()) -> _ => {}
-            recv(close_rx) -> _ => {}
+            recv(close_rx) -> signal => {
+                if signal.is_ok() {
+                    lease.cancel();
+                }
+            }
         }
     }
 
@@ -944,6 +950,7 @@ fn dial(
     }
 
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let connection_cancel = shared.session_cancel.child();
     let stream = crate::CountingStream::from_connected(stream, counters)
         .map_err(crate::wire::PeerError::Io)?;
 
@@ -969,7 +976,10 @@ fn dial(
             "transport or network unavailable",
         ));
     };
-    let stream = stream.stop_reading_when(lease.clone());
+    let stream = stream
+        .stop_reading_when(lease.clone())
+        .with_cancel(&connection_cancel.reader())
+        .map_err(crate::wire::PeerError::Io)?;
     let check = match origin {
         ConnectionOrigin::Manual => shared.check_manual_destination(addr),
         ConnectionOrigin::Automatic => shared.check_automatic_destination(addr),
@@ -1251,8 +1261,13 @@ fn run_handshake(
     }
 
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let connection_cancel = shared.session_cancel.child();
     let stream = match crate::CountingStream::from_connected(stream, counters)
-        .map(|stream| stream.stop_reading_when(lease.clone()))
+        .and_then(|stream| {
+            stream
+                .stop_reading_when(lease.clone())
+                .with_cancel(&connection_cancel.reader())
+        })
         .map_err(crate::wire::PeerError::Io)
     {
         Ok(stream) => stream,
@@ -1434,7 +1449,10 @@ fn run_connected_session(
         "p2p handshake complete; entering message loop",
     );
 
-    let loop_result = run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref());
+    let loop_result = match peer.stream.set_read_timeout(None) {
+        Ok(()) => run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref()),
+        Err(error) => Err(crate::wire::PeerError::Io(error)),
+    };
 
     let source = lease.source(peer_addr.endpoint());
     if let Err(error) = &loop_result {
@@ -1895,7 +1913,7 @@ fn retry_deferred_request<S>(
         Err(crate::connection::Refusal::Local) => {
             if defers_on_local(&message) && !budget.writer_dead() {
                 peer.deferred_inbound = Some(message);
-                budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
+                budget.wait_for(BUDGET_DRAIN_TIMEOUT, may_reserve);
                 DeferredStep::Waiting
             } else {
                 lease.cancel();
@@ -1905,7 +1923,7 @@ fn retry_deferred_request<S>(
         Err(refusal) => {
             keepalive.note_refusal(refusal);
             peer.deferred_inbound = Some(message);
-            budget.wait_for(STREAM_POLL_INTERVAL, may_reserve);
+            budget.wait_for(BUDGET_DRAIN_TIMEOUT, may_reserve);
             DeferredStep::Waiting
         }
     }
@@ -2054,6 +2072,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             let read_result = peer.read_message_bounded(&shared.block_memory, || {
                 lease.is_cancelled() || shared.is_session_cancelled()
             });
+            if shared.is_session_cancelled() {
+                tracing::debug!(
+                    peer_addr = %peer_addr,
+                    "p2p session cancelled during read; closing"
+                );
+                return Ok(());
+            }
             if lease.is_cancelled() {
                 tracing::debug!(
                     peer_addr = %peer_addr,
@@ -2414,7 +2439,7 @@ fn step_parked_getdata<S>(
             }
             Err(refusal) => {
                 keepalive.note_refusal(refusal);
-                budget.wait_for(STREAM_POLL_INTERVAL, || {
+                budget.wait_for(BUDGET_DRAIN_TIMEOUT, || {
                     budget.may_charge(crate::wire::HEADER_LEN)
                 });
                 Ok(ParkedStep::StillParked)
@@ -2459,7 +2484,7 @@ fn report_parked_misses<S>(
         Ok(credit) => credit,
         Err(refusal) => {
             keepalive.note_refusal(refusal);
-            budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_charge(bound));
+            budget.wait_for(BUDGET_DRAIN_TIMEOUT, || budget.may_charge(bound));
             return Ok(false);
         }
     };
@@ -2502,7 +2527,7 @@ fn resume_parked_getdata<S>(
     peer.pending_notfound = not_found;
     if let Some(refusal) = sink.refusal() {
         keepalive.note_refusal(refusal);
-        budget.wait_for(STREAM_POLL_INTERVAL, || budget.may_reserve_production());
+        budget.wait_for(BUDGET_DRAIN_TIMEOUT, || budget.may_reserve_production());
     }
     Ok(())
 }
@@ -3092,7 +3117,7 @@ mod session_socket_tests {
     use bitcoin_rs_primitives::PeerEndpoint;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
 
-    use super::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
+    use super::{HANDSHAKE_READ_POLL, HANDSHAKE_TIMEOUT, configure_peer_stream};
 
     #[test]
     fn session_sockets_disable_nagle() {
@@ -3113,7 +3138,7 @@ mod session_socket_tests {
         assert!(server.nodelay().expect("server nodelay"));
         assert_eq!(
             client.read_timeout().expect("client read timeout"),
-            Some(STREAM_POLL_INTERVAL)
+            Some(HANDSHAKE_READ_POLL)
         );
         assert_eq!(
             server.write_timeout().expect("server write timeout"),
