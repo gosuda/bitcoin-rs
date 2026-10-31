@@ -1,4 +1,3 @@
-/// Logical storage column families.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ColumnFamily {
@@ -12,20 +11,12 @@ pub enum ColumnFamily {
     UtxoMeta = 7,
     BlockBodies = 8,
     UndoData = 9,
-    /// Live script-index rows: `script-prefix || outpoint` for currently
-    /// unspent outputs.
     ScriptLive = 10,
-    /// Grouped transaction-level live coin records: one row per
-    /// transaction with live outputs, keyed by the full 256-bit txid and
-    /// valued by the lossless canonical v5 record payload.
     CoinRecords = 11,
-    /// Durable pool-ledger rows: one byte-keyed keyspace holding the
-    /// ledger revision sentinel and its tagged logical tables.
     PoolLedger = 12,
 }
 
 impl ColumnFamily {
-    /// All supported column families, in stable on-disk order.
     pub const ALL: &'static [Self] = &[
         Self::TxConfirmed,
         Self::TxMempool,
@@ -41,7 +32,6 @@ impl ColumnFamily {
         Self::CoinRecords,
         Self::PoolLedger,
     ];
-    /// Stable backend column-family/table name.
     pub const fn name(self) -> &'static str {
         match self {
             Self::TxConfirmed => "tx_confirmed",
@@ -60,7 +50,6 @@ impl ColumnFamily {
         }
     }
 
-    /// Stable zero-based index for arrays keyed by column family.
     pub const fn index(self) -> usize {
         match self {
             Self::TxConfirmed => 0,

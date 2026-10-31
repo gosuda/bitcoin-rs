@@ -1,7 +1,3 @@
-//! Deletion of historical block bodies and undo records, once the active
-//! chain no longer needs them.
-//!
-
 use alloc::sync::Arc;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
@@ -17,12 +13,9 @@ pub use lease::{
 };
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
-/// Block and undo pruning policy.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PrunePolicy {
-    /// Target serialized block-data footprint in mebibytes.
     pub target_size_mb: u64,
-    /// Caller-requested number of blocks retained below the active tip.
     pub keep_below_tip: u32,
 }
 
@@ -53,7 +46,6 @@ const PRUNE_EXECUTED_METADATA_KEY: &[u8] = b"node:prune_executed";
 /// when a retry repeats the same frontier and requested height.
 const PRUNE_BATCH_METADATA_KEY: &[u8] = b"node:prune_batch";
 
-/// Reads one big-endian `u32` metadata row from the UTXO meta family.
 fn load_u32_metadata<S: crate::KvStore>(
     store: &S,
     key: &[u8],
@@ -88,10 +80,6 @@ fn load_prune_batch<S: crate::KvStore>(store: &S) -> Result<Option<u64>, Storage
     Ok(Some(u64::from_be_bytes(encoded)))
 }
 
-/// Loads the persisted manual-prune line.
-/// This is the operator's requested height: intent, and never proof that
-/// rows were deleted. The deleted range is
-/// [`load_executed_frontier`].
 pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
     load_u32_metadata(store, PRUNEHEIGHT_METADATA_KEY, "pruneheight")
 }
@@ -103,16 +91,6 @@ pub fn load_executed_frontier<S: crate::KvStore>(
     Ok(height.map(ExecutedFrontier::new))
 }
 
-/// The durable, monotonic executed prune frontier: one past the highest
-/// block-body or undo row a committed prune pass deleted.
-///
-/// PRE: [`Self::NONE`] is the state of a store that has deleted nothing.
-///
-/// POST: a pass writes its frontier inside the same batch as its row deletions, so the
-/// record and the deletion commit together or not at all, and a restart reconstructs
-/// exactly the committed boundary. INVARIANT: the frontier never moves backwards, every
-/// height below it is gone, and no lease is granted below it, so no reader can pin rows
-/// the frontier names as deleted.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ExecutedFrontier(u32);
 
@@ -124,7 +102,6 @@ impl ExecutedFrontier {
         Self(height)
     }
 
-    /// The raw height: one past the highest deleted row.
     #[must_use]
     pub(crate) const fn get(self) -> u32 {
         self.0
@@ -135,10 +112,6 @@ impl ExecutedFrontier {
         if self.0 >= other.0 { self } else { other }
     }
 
-    /// Loads the committed frontier without inferring deletions from surviving rows.
-    ///
-    /// Absence is legitimate only before any pass committed. A missing frontier
-    /// alongside either prune record is incompatible data, never an empty frontier.
     pub fn reconstruct<S: crate::KvStore>(store: &S) -> Result<Self, StorageError> {
         if let Some(frontier) = load_executed_frontier(store)? {
             return Ok(frontier);
@@ -152,7 +125,6 @@ impl ExecutedFrontier {
     }
 }
 
-/// What one pruning pass staged for its caller's atomic batch.
 #[derive(Debug, Default)]
 pub struct StagedPrune {
     pub blocks: PruneOutcome,
@@ -161,12 +133,6 @@ pub struct StagedPrune {
     pub pruned_below: u32,
 }
 
-/// One manual prune pass.
-///
-/// PRE: the caller holds the pruning authority, so passes do not overlap.
-///
-/// INVARIANT: no lease is granted below the line this pass deletes through, because the
-/// reservation refuses such grants from the moment it is taken.
 pub fn prune_to_height<S: crate::KvStore>(
     store: &S,
     block_files: &crate::FlatFileBlockStore,
@@ -240,14 +206,6 @@ pub fn prune_to_height<S: crate::KvStore>(
     Ok(staged)
 }
 
-/// Stages block-body and undo-row pruning into a caller-owned atomic batch.
-///
-/// PRE: `reservation` was taken from the registry the pass commits through, with a line
-/// derived from the durable tip and the policy's retention depth.
-///
-/// The pass deletes through [`PruneReservation::line`] and never re-derives it, so a
-/// lease registered after the reservation cannot narrow the range this batch has
-/// already staged.
 pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
     batch: &mut BufferedWriteBatch,
@@ -283,7 +241,6 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     })
 }
 
-/// Deletes staged flat block files after their block-index rows are committed.
 pub fn reclaim_staged_flat_block_files<S: crate::KvStore>(
     store: &S,
     block_files: &crate::FlatFileBlockStore,
@@ -308,12 +265,9 @@ pub fn reclaim_staged_flat_block_files<S: crate::KvStore>(
     Ok(())
 }
 
-/// Result of one pruning pass.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PruneOutcome {
-    /// Number of payload bytes deleted from storage.
     pub bytes_freed: u64,
-    /// Number of block or undo rows deleted from storage.
     pub blocks_removed: u64,
     pub max_height: Option<u32>,
 }
@@ -331,16 +285,12 @@ impl PruneOutcome {
     }
 }
 
-/// Errors returned while pruning persisted block or undo rows.
 #[derive(Debug, Error)]
 pub enum PruneError {
-    /// A storage backend operation failed.
     #[error(transparent)]
     Storage(#[from] StorageError),
-    /// A storage row length could not fit in the pruning byte counter.
     #[error("storage row length {size} does not fit in u64")]
     RowSizeOverflow {
-        /// Row length returned by the storage backend.
         size: usize,
     },
 }

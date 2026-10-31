@@ -113,9 +113,6 @@ fn fjall_durable_head_faults_never_tear_the_state() -> Result<(), StorageError> 
     Ok(())
 }
 
-/// After a one-shot fault on the head commit, a reopened store shows either
-/// the complete old head or the complete new head — never absence, never a
-/// torn decode (`P2` at the storage boundary).
 fn fault_leaves_an_intact_head(fault: PersistFault) -> Result<(), StorageError> {
     let temp = tempfile::tempdir()?;
     let first = head(1, 1);

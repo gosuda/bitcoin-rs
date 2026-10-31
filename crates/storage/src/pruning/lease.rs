@@ -1,9 +1,3 @@
-//! The binding constraint is the *lowest* active floor.
-//!
-//! Each lease requires rows at heights at or above its floor to survive, so the union
-//! of the constraints keeps exactly the rows the deepest lease needs; rows below every
-//! floor remain prunable.
-
 use crate::pruning::ExecutedFrontier;
 use alloc::sync::Arc;
 use core::fmt;
@@ -28,9 +22,6 @@ struct RegistryInner {
 }
 
 impl RegistryInner {
-    /// The lowest line a lease floor must reach: everything below the
-    /// executed prune line or below any outstanding prune reservation is
-    /// gone or already claimed for deletion.
     fn refusal_line(&self) -> u32 {
         self.pruned_below
             .max(self.reservations.iter().copied().max().unwrap_or(0))
@@ -106,20 +97,10 @@ impl RetentionBudget {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum HistoryUnavailable {
-    /// Heights below `below` are permanently gone: a committed pass deleted
-    /// them. The defined recovery for an optional consumer is a rebuild from
-    /// what remains, not a retry.
     #[error("history below height {below} is pruned")]
     Pruned { below: u32 },
-    /// Heights below `below` are claimed by a prune pass that has not yet committed or
-    /// aborted.
-    ///
-    /// The claim is provisional — it may release the range without deleting anything —
-    /// so the defined reaction is to wait and retry, never to rebuild.
     #[error("history below height {below} is reserved by an in-flight prune pass")]
     Reserved { below: u32 },
-    /// The row lies inside retained history but is not there yet: it may
-    /// appear through backfill or a reconnect. Retry; do not rebuild.
     #[error("retained history is temporarily unavailable")]
     Missing,
     #[error("history is unavailable while the node shuts down")]
@@ -299,8 +280,6 @@ impl MandatoryRetention {
     }
 }
 
-/// INVARIANT: the executed prune line never moves backwards, and it never
-/// advances for a deletion that did not commit.
 #[derive(Debug)]
 pub struct PruneReservation {
     registry: Arc<RetentionRegistry>,
@@ -363,12 +342,6 @@ impl Drop for RetentionLease {
     }
 }
 
-/// While this lease lives the authority deletes no row at or above its floor.
-///
-/// That guarantee is what types a byte read: a read that returns nothing under a live
-/// grant is transient absence ([`HistoryUnavailable::Missing`]), never lost history.
-///
-/// The consumer relays those meanings instead of deciding permanence on its own.
 #[derive(Debug)]
 pub struct HistoryLease {
     registry: Arc<RetentionRegistry>,

@@ -11,11 +11,6 @@ use crate::KvStore;
 use std::io::Write;
 
 impl<S: KvStore> JournalWriter<S> {
-    /// Buffers one record.
-    ///
-    /// Idempotent per height: re-appending a record whose height equals the last
-    /// appended height is rejected as a duplicate via the strict ordering rule (callers
-    /// replay whole records after a crash).
     pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
         if record.height != self.next_height {

@@ -6,30 +6,18 @@ use super::record::JournalRecord;
 use super::writer::{JournalWriter, JournalWriterError};
 use crate::KvStore;
 
-/// The checkpoint base a journal compaction publishes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckpointBase {
-    /// Checkpoint generation this base publishes.
     pub generation: u64,
-    /// Tip height the journal is compacted to.
     pub height: u32,
-    /// Tip block hash the journal is compacted to.
     pub hash: [u8; 32],
-    /// Previous block hash of that tip.
     pub prev_hash: [u8; 32],
-    /// Chain transaction count at that tip.
     pub chain_tx_count: u64,
 }
 
 pub trait JournalEmit: Send + Sync {
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError>;
 
-    /// The current apply records an append error, but the writer then enters a
-    /// fail-closed append-gap state.
-    ///
-    /// `prepare_for_apply` refuses the next block before mutation, so a transient I/O
-    /// failure cannot grow an untracked hole between live chainstate and the journal
-    /// frontier.
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError>;
 
     fn mark_append_gap(&mut self, height: u32);
@@ -50,11 +38,8 @@ pub trait JournalEmit: Send + Sync {
 
     fn freeze(&mut self) -> Result<(), JournalWriterError>;
 
-    /// Publishes a checkpoint base and retires the full-revalidation marker.
     fn compact_to_checkpoint(&mut self, base: CheckpointBase) -> Result<(), JournalWriterError>;
 
-    /// Publishes a checkpoint base while boot replay is still below the durable
-    /// head, keeping the full-revalidation marker for the resumed recovery.
     fn compact_to_checkpoint_for_recovery(
         &mut self,
         base: CheckpointBase,

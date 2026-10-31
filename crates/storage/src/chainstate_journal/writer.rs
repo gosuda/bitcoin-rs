@@ -55,9 +55,6 @@ pub fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), JournalW
     clear_full_revalidation_marker(&dir)
 }
 
-/// Require the next start to rebuild the chainstate by executing every script.
-///
-/// An existing marker is success. The marker file and its directory entry are durable on return.
 pub fn mark_full_revalidation_at(data_dir: &Path) -> Result<(), JournalWriterError> {
     use std::io::Write as _;
 
@@ -132,8 +129,6 @@ pub enum JournalWriterError {
     NotOpen { state: &'static str },
     #[error("chainstate journal append out of order: got {got}, expected {expected}")]
     OutOfOrder { got: u32, expected: u32 },
-    /// A live block advanced after its journal append failed. Further applies
-    /// must stop until restart recovery discards the partial tail.
     #[error("chainstate journal has an untracked append gap at height {height}")]
     AppendGap { height: u32 },
     #[error("chainstate journal head marker is unreadable: {0}")]

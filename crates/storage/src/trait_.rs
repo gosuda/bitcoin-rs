@@ -2,44 +2,31 @@ use crate::batch::BufferedWriteBatch;
 use crate::{ColumnFamily, StorageError};
 use bytes::Bytes;
 
-/// Owned key-value pair returned by portable iterators.
 pub type KvPair = (Vec<u8>, Vec<u8>);
 
-/// Boxed portable key-value iterator.
 pub type KvIter<'a> = Box<dyn Iterator<Item = Result<KvPair, StorageError>> + 'a>;
 
-/// Limits for one bounded prefix scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrefixScanLimit {
-    /// Maximum rows returned. Zero returns no rows.
     pub max_rows: usize,
-    /// Maximum returned key-plus-value bytes after the first row.
     pub max_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrefixScan {
-    /// Matching rows in key order.
     pub rows: Vec<KvPair>,
     pub complete: bool,
 }
 
-/// Precondition evaluated against the pre-batch store state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteCondition<'a> {
-    /// Requires a missing key.
     Absent {
-        /// Column family containing the key.
         cf: ColumnFamily,
-        /// Key that must be absent.
         key: &'a [u8],
     },
-    /// Requires an exact value.
     Equals {
         cf: ColumnFamily,
-        /// Key whose value is compared.
         key: &'a [u8],
-        /// Required value.
         expected: &'a [u8],
     },
 }
@@ -51,7 +38,6 @@ impl WriteCondition<'_> {
         }
     }
 
-    /// Tests a pre-batch value against this condition.
     pub fn matches(&self, current: Option<&[u8]>) -> bool {
         match self {
             Self::Absent { .. } => current.is_none(),
@@ -60,37 +46,25 @@ impl WriteCondition<'_> {
     }
 }
 
-/// Persistence boundary used by fault-injection tests.
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistBoundary {
-    /// Atomic batch application.
     Apply,
-    /// Durability synchronization.
     Sync,
-    /// Deferred-write flush.
     Flush,
 }
 
-/// One-shot persistence fault used by storage proof tests.
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PersistFault {
-    /// Fail before applying the batch.
     FailApply,
-    /// Drop the apply step.
     LostApply,
-    /// Attempt a partial apply; the backend must expose no partial batch.
     PartialApply,
-    /// Fail after apply while completing durability.
     FailSync,
-    /// Drop durability completion after apply.
     LostSync,
-    /// Fail while flushing deferred writes.
     FailFlush,
-    /// Lose flush completion and return an error without confirming durability.
     LostFlush,
 }
 
@@ -116,7 +90,6 @@ impl PersistFault {
     }
 }
 
-/// One-shot persistence fault slot used by storage backends.
 #[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Default)]
@@ -124,7 +97,6 @@ pub(crate) struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
 
 #[cfg(any(test, feature = "test-seam"))]
 impl PersistFaultSlot {
-    /// Arms one fault, replacing any previously armed fault.
     #[cfg_attr(
         not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
         allow(dead_code)
@@ -149,19 +121,9 @@ impl PersistFaultSlot {
     }
 }
 
-/// Backend-neutral key-value store over named column families.
-///
-/// Every batch is atomic across all column families it touches.
-///
-/// `write` and `write_deferred` need not survive a crash; `write_durable`,
-/// `write_durable_if`, and successful `flush` complete durability. Atomicity prevents
-/// partial batches, but an error from a durability API is not a rollback receipt:
-/// application may already have completed before the durability completion failed or
-/// was lost. Snapshots are coherent across families.
 pub trait KvStore: Send + Sync + 'static {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
-    /// Copies a value only after its borrowed/pinned length fits `max_bytes`.
     fn get_bounded(
         &self,
         _cf: ColumnFamily,
@@ -171,14 +133,12 @@ pub trait KvStore: Send + Sync + 'static {
         Err(crate::BoundedReadError::Unsupported)
     }
 
-    /// Iterates matching key-value pairs in key order.
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
 
-    /// Collects matching rows within `limit`.
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,
@@ -188,16 +148,6 @@ pub trait KvStore: Send + Sync + 'static {
         collect_bounded_prefix(self.iter_prefix(cf, prefix)?, &[], limit)
     }
 
-    /// Collects matching rows from the inclusive full-key seek point `start`.
-    ///
-    /// PRE: none. A caller resuming after returned row `k` passes `k` followed by one
-    /// zero byte, the least key above `k`. POST: rows are in key order, begin at the
-    /// first key `>= max(start, prefix)`, and end where keys stop beginning with
-    /// `prefix`. A `start` before the prefix begins at its first row; a `start` beyond
-    /// every key of the prefix yields an empty, complete scan. `complete` is true only
-    /// when the scan reached the end of the prefix with no row withheld by `limit`; a
-    /// row that does not fit `limit` makes it false. and a store that cannot serve the
-    /// scan returns an error rather than an empty or falsely complete one.
     fn scan_prefix_from_bounded(
         &self,
         cf: ColumnFamily,
@@ -206,9 +156,6 @@ pub trait KvStore: Send + Sync + 'static {
         limit: PrefixScanLimit,
     ) -> Result<PrefixScan, StorageError>;
 
-    /// Returns an empty buffered batch for this or any other store.
-    /// PRE: none. POST: the batch records operations but touches no engine
-    /// state until one write method consumes it.
     fn new_batch(&self) -> BufferedWriteBatch;
 
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
@@ -223,52 +170,27 @@ pub trait KvStore: Send + Sync + 'static {
         self.write(batch)
     }
 
-    /// Atomically applies a batch without a crash-durability guarantee.
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError>;
 
-    /// Atomically applies a batch whose durability may wait for `flush`.
     fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write(batch)
     }
 
-    /// Atomically applies a batch and completes its durability before success.
-    ///
-    /// `Ok(())` is the durability receipt. `Err` is not a rollback receipt: the failure
-    /// may occur before application, or after the whole atomic batch became visible
-    /// while durability completion failed or was lost. [`StorageError`] does not
-    /// classify that phase. A caller must therefore not blindly retry a non-idempotent
-    /// batch after `Err`; it must reconcile through the state owner's recovery
-    /// protocol, or independently prove that the batch did not apply before retrying.
     fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
     }
 
-    /// Durably commits `batch` iff every condition matches the pre-batch state.
-    ///
-    /// Conditions and commit form one write boundary. `Ok(true)` means the whole batch
-    /// is durable; `Ok(false)` is the only result that proves the conditions did not
-    /// match and no operation applied. Lookup, backend, or persistence failures return
-    /// `Err` rather than a mismatch or false it must not be treated as `Ok(false)` or
-    /// as permission to blindly retry a non-idempotent batch. The state owner must
-    /// reconcile the outcome.
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError>;
 
-    /// Makes every earlier completed write durable before success.
-    ///
-    /// `Ok(())` is the receipt covering those writes. `Err` provides no such receipt,
-    /// but also does not prove that earlier writes were unapplied or non-durable:
-    /// synchronization can fail or its completion can be lost
     fn flush(&self) -> Result<(), StorageError>;
 
-    /// Captures a coherent point-in-time view across column families.
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError>;
 
-    /// Arms a one-shot persistence fault for storage proof tests.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: PersistFault);
@@ -276,11 +198,9 @@ pub trait KvStore: Send + Sync + 'static {
 
 fn _kv_store_is_dyn_compatible(_: &dyn KvStore) {}
 
-/// Point-in-time read view over a [`KvStore`].
 pub trait KvSnapshot: Send + Sync {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
-    /// Returns one value per strictly ascending input key.
     fn get_many_sorted(
         &self,
         cf: ColumnFamily,
@@ -294,14 +214,12 @@ pub trait KvSnapshot: Send + Sync {
         keys.iter().map(|key| self.get(cf, key)).collect()
     }
 
-    /// Iterates matching snapshot key-value pairs in key order.
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
 
-    /// Returns the greatest snapshot row with the given prefix, if any.
     fn last_prefix(&self, cf: ColumnFamily, prefix: &[u8]) -> Result<Option<KvPair>, StorageError> {
         let mut last = None;
         for item in self.iter_prefix(cf, prefix)? {
@@ -310,7 +228,6 @@ pub trait KvSnapshot: Send + Sync {
         Ok(last)
     }
 
-    /// Collects matching snapshot rows within `limit`.
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,
@@ -320,7 +237,6 @@ pub trait KvSnapshot: Send + Sync {
         collect_bounded_prefix(self.iter_prefix(cf, prefix)?, &[], limit)
     }
 
-    /// Collects matching snapshot rows from the inclusive full-key seek point
     fn scan_prefix_from_bounded(
         &self,
         cf: ColumnFamily,
@@ -351,11 +267,6 @@ pub(crate) fn push_bounded_row(
     true
 }
 
-/// Collects ordered pairs under `limit`, ending at the first key outside `prefix`.
-///
-/// Rows are copied only once accepted, so the first row `limit` refuses and the first
-/// key past the prefix are read but never copied. `complete` is true only when the
-/// stream ended or left the prefix without a refused row.
 pub(crate) fn collect_bounded_prefix<K, V>(
     rows: impl Iterator<Item = Result<(K, V), StorageError>>,
     prefix: &[u8],

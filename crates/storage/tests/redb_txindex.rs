@@ -1,6 +1,3 @@
-//! `ScriptLive` rows in these tests protect the `IDX-01` empty-valued
-//! `script-hash-prefix || full-outpoint` representation.
-
 #![cfg(feature = "redb")]
 
 use bitcoin_rs_storage::{

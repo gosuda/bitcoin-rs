@@ -1,5 +1,3 @@
-//! Framed, checksummed chainstate journal records.
-
 use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
 use std::io::{self, Write};
 

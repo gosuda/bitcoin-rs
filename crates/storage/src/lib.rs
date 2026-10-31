@@ -66,7 +66,6 @@ pub enum StorageBackend {
 }
 
 impl StorageBackend {
-    /// Returns the stable configuration spelling.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -76,7 +75,6 @@ impl StorageBackend {
         }
     }
 
-    /// Whether this backend is compiled into the current crate.
     #[must_use]
     pub const fn is_compiled_in(self) -> bool {
         match self {
