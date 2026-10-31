@@ -39,26 +39,27 @@ fn reply(stream: &mut BufReader<TcpStream>, response: &str) {
 }
 
 fn with_owner<T>(config: OverlayConfig, fixture: impl FnOnce(&Arc<OverlayTransport>) -> T) {
-    struct StopOnDrop(Arc<AtomicBool>);
+    struct StopOnDrop(bitcoin_rs_chain::LatchWriter);
     impl Drop for StopOnDrop {
         fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
+            self.0.trigger();
         }
     }
     let owner = Arc::new(OverlayTransport::new(Arc::new(config)));
     let shared = shared(&owner);
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = bitcoin_rs_chain::LatchWriter::new();
+    let reader = shutdown.reader();
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| {
             if let Some(address) = owner.config.tor_control {
-                owner.run_tor(address, None, &shared, &shutdown);
+                owner.run_tor(address, None, &shared, &reader);
             } else {
-                owner.run_sam(owner.config.i2p_sam.expect("SAM"), None, &shared, &shutdown);
+                owner.run_sam(owner.config.i2p_sam.expect("SAM"), None, &shared, &reader);
             }
         });
-        let _stop = StopOnDrop(Arc::clone(&shutdown));
+        let stop = StopOnDrop(shutdown);
         let connections = fixture(&owner);
-        shutdown.store(true, Ordering::Release);
+        stop.0.trigger();
         until(|| worker.is_finished());
         worker.join().expect("overlay owner");
         assert!(owner.local_onion.read().is_none());

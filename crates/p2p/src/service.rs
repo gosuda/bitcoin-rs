@@ -166,7 +166,7 @@ pub enum P2pControlError {
 
 struct Workers {
     shutdown: bitcoin_rs_chain::LatchWriter,
-    overlay_shutdown: Arc<AtomicBool>,
+    overlay_shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
     session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
@@ -179,7 +179,7 @@ impl Default for Workers {
     fn default() -> Self {
         Self {
             shutdown: bitcoin_rs_chain::LatchWriter::new(),
-            overlay_shutdown: Arc::new(AtomicBool::new(false)),
+            overlay_shutdown: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
             session_cancel: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
             listeners: Vec::new(),
             outbound: None,
@@ -193,7 +193,7 @@ impl Default for Workers {
 impl Workers {
     fn new(
         shutdown: bitcoin_rs_chain::LatchWriter,
-        overlay_shutdown: Arc<AtomicBool>,
+        overlay_shutdown: Arc<bitcoin_rs_chain::LatchWriter>,
         session_cancel: Arc<bitcoin_rs_chain::LatchWriter>,
     ) -> Self {
         Self {
@@ -211,7 +211,7 @@ impl Workers {
     fn cancel(&self, peer_table: &crate::PeerTable, addresses: &Mutex<Vec<crate::PeerEndpoint>>) {
         self.session_cancel.trigger();
         self.shutdown.trigger();
-        self.overlay_shutdown.store(true, Ordering::Release);
+        self.overlay_shutdown.trigger();
         peer_table.cancel_all();
         if let Some(session) = &self.sam_session {
             session.close();
@@ -383,7 +383,7 @@ pub struct P2pService {
     overlay: Arc<crate::overlay::OverlayTransport>,
     config: P2pServiceConfig,
     shutdown: bitcoin_rs_chain::LatchReader,
-    worker_shutdown: Mutex<Arc<AtomicBool>>,
+    worker_shutdown: Mutex<Arc<bitcoin_rs_chain::LatchWriter>>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
     banned: BannedReader,
@@ -441,7 +441,7 @@ impl P2pService {
             config,
             address_book,
             shutdown: shutdown.into(),
-            worker_shutdown: Mutex::new(Arc::new(AtomicBool::new(false))),
+            worker_shutdown: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
             session_cancel: Mutex::new(Arc::new(bitcoin_rs_chain::LatchWriter::new())),
@@ -496,7 +496,7 @@ impl P2pService {
             return Err(P2pServiceError::AlreadyStarted);
         }
 
-        let overlay_shutdown = Arc::new(AtomicBool::new(false));
+        let overlay_shutdown = Arc::new(bitcoin_rs_chain::LatchWriter::new());
         let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
         *self.session_cancel.lock() = Arc::clone(&session_cancel);
         *self.worker_shutdown.lock() = Arc::clone(&overlay_shutdown);
@@ -566,7 +566,7 @@ impl P2pService {
         );
         shared = shared.with_shared_outbound(&self.shared_outbound);
 
-        let overlay_shutdown = Arc::clone(&workers.overlay_shutdown);
+        let overlay_shutdown = workers.overlay_shutdown.reader();
         workers
             .listeners
             .extend(self.overlay.start(&shared, &overlay_shutdown)?);
@@ -806,7 +806,7 @@ impl P2pService {
         if let Some(workers) = self.workers.lock().as_mut() {
             workers.cancel(&self.peer_table, &self.overlay_addresses);
         }
-        self.worker_shutdown.lock().store(true, Ordering::Release);
+        self.worker_shutdown.lock().trigger();
         self.session_cancel.lock().trigger();
         self.overlay_addresses.lock().clear();
         if !demonstrated.is_empty() {

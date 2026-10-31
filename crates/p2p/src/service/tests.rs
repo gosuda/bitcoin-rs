@@ -2232,7 +2232,7 @@ fn workers_teardown_cleans_resources_and_cancels_sessions() {
         [127, 0, 0, 1],
         8333,
     )))]);
-    let overlay_shutdown = Arc::new(AtomicBool::new(false));
+    let overlay_shutdown = Arc::new(bitcoin_rs_chain::LatchWriter::new());
     let session_cancel = Arc::new(bitcoin_rs_chain::LatchWriter::new());
     let mut workers = Workers::new(
         bitcoin_rs_chain::LatchWriter::new(),
@@ -2250,14 +2250,14 @@ fn workers_teardown_cleans_resources_and_cancels_sessions() {
 
     assert!(!shutdown.is_triggered());
     assert!(!session_cancel.reader().is_triggered());
-    assert!(!overlay_shutdown.load(Ordering::Acquire));
+    assert!(!overlay_shutdown.reader().is_triggered());
     assert!(!addresses.lock().is_empty());
 
     workers.teardown(&peer_table, &addresses);
 
     assert!(shutdown.is_triggered());
     assert!(session_cancel.reader().is_triggered());
-    assert!(overlay_shutdown.load(Ordering::Acquire));
+    assert!(overlay_shutdown.reader().is_triggered());
     assert!(addresses.lock().is_empty());
     assert!(workers.listeners.is_empty());
 }

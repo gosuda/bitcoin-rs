@@ -301,7 +301,7 @@ impl OverlayTransport {
     pub(crate) fn start(
         self: &Arc<Self>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &Arc<AtomicBool>,
+        shutdown: &bitcoin_rs_chain::LatchReader,
     ) -> io::Result<Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>> {
         self.config.validate()?;
         let i2p_key = if self.config.i2p_accept {
@@ -320,18 +320,20 @@ impl OverlayTransport {
         } else {
             None
         };
+        let abort_latch = shutdown.child();
+        let abort_reader = abort_latch.reader();
         let mut workers = Vec::new();
         if let Some(address) = self.config.i2p_sam
             && self.config.allows(PeerNetwork::I2p)
         {
             let owner = Arc::clone(self);
             let shared = shared.clone();
-            let shutdown = Arc::clone(shutdown);
+            let sam_shutdown = abort_reader.clone();
             workers.push(
                 std::thread::Builder::new()
                     .name("bitcoin-rs-ivnp-sam".into())
                     .spawn(move || {
-                        owner.run_sam(address, i2p_key, &shared, &shutdown);
+                        owner.run_sam(address, i2p_key, &shared, &sam_shutdown);
                         Ok(())
                     })?,
             );
@@ -339,7 +341,7 @@ impl OverlayTransport {
         if let Some(address) = self.config.tor_control {
             let owner = Arc::clone(self);
             let shared = shared.clone();
-            let tor_shutdown = Arc::clone(shutdown);
+            let tor_shutdown = abort_reader;
             match std::thread::Builder::new()
                 .name("bitcoin-rs-tor-control".into())
                 .spawn(move || {
@@ -348,7 +350,7 @@ impl OverlayTransport {
                 }) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
-                    shutdown.store(true, Ordering::Release);
+                    abort_latch.trigger();
                     for worker in workers {
                         let _ = worker.join();
                     }
@@ -599,11 +601,4 @@ fn socks_impl(
     };
     setup.read(&mut vec![0; length + 2])?;
     setup.finish()
-}
-
-fn pause(cancelled: &dyn Fn() -> bool, delay: Duration) {
-    let deadline = Instant::now() + delay;
-    while !cancelled() && Instant::now() < deadline {
-        std::thread::sleep(POLL.min(deadline.saturating_duration_since(Instant::now())));
-    }
 }

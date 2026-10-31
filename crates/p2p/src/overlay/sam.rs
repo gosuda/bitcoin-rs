@@ -1,6 +1,6 @@
 use super::{
     Arc, AtomicBool, Connected, Duration, Instant, Ordering, OverlayTransport, PeerAddress,
-    PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io, pause,
+    PeerEndpoint, SETUP_TIMEOUT, Setup, SocketAddr, cancelled_error, identity, invalid, io,
 };
 use sha2::{Digest, Sha256};
 pub(super) struct Session {
@@ -236,9 +236,9 @@ impl OverlayTransport {
         address: SocketAddr,
         mut key: Option<String>,
         shared: &crate::listener::ConnectionShared,
-        shutdown: &AtomicBool,
+        shutdown: &bitcoin_rs_chain::LatchReader,
     ) {
-        let cancelled = || shutdown.load(Ordering::Acquire) || shared.is_session_cancelled();
+        let cancelled = || shutdown.is_triggered() || shared.is_session_cancelled();
         let mut backoff = Duration::from_secs(1);
         while !cancelled() {
             let result = (|| -> io::Result<()> {
@@ -261,7 +261,11 @@ impl OverlayTransport {
                             if healthy_since.elapsed() >= Duration::from_secs(60) {
                                 backoff = Duration::from_secs(1);
                             }
-                            pause(&stop, Duration::from_secs(1));
+                            crossbeam_channel::select! {
+                                recv(shutdown.closed()) -> _ => break,
+                                recv(shared.session_cancel.closed()) -> _ => break,
+                                recv(crossbeam_channel::after(Duration::from_secs(1))) -> _ => {}
+                            }
                         }
                         if !alive.load(Ordering::Acquire) && !cancelled() {
                             Err(io::Error::new(io::ErrorKind::NotConnected, InvalidSession))
@@ -288,7 +292,11 @@ impl OverlayTransport {
                     tracing::warn!(%error, "IVNP SAM unavailable; retiring streams and retrying");
                 }
             }
-            pause(&cancelled, backoff);
+            crossbeam_channel::select! {
+                recv(shutdown.closed()) -> _ => {},
+                recv(shared.session_cancel.closed()) -> _ => {},
+                recv(crossbeam_channel::after(backoff)) -> _ => {},
+            }
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
     }
@@ -335,7 +343,10 @@ impl OverlayTransport {
             if let Err(error) = result {
                 if !stop() {
                     tracing::warn!(%error, "IVNP inbound stream rejected");
-                    pause(&stop, Duration::from_secs(1));
+                    crossbeam_channel::select! {
+                        recv(shared.session_cancel.closed()) -> _ => {},
+                        recv(crossbeam_channel::after(Duration::from_secs(1))) -> _ => {}
+                    }
                 }
             }
         }

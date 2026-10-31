@@ -446,6 +446,7 @@ fn sam_session_recovery(mode: SamRecoveryMode) {
     })));
     let shared = shared(&owner);
     let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_latch = bitcoin_rs_chain::LatchWriter::new();
     let controls = Arc::new(AtomicUsize::new(0));
     let break_control = Arc::new(AtomicBool::new(false));
     let public = identity::i2p_base64().encode([0; 387]);
@@ -458,7 +459,9 @@ fn sam_session_recovery(mode: SamRecoveryMode) {
         public,
         mode,
     );
-    let workers = owner.start(&shared, &shutdown).expect("backend worker");
+    let workers = owner
+        .start(&shared, &shutdown_latch.reader())
+        .expect("backend worker");
     until(|| owner.sam.read().is_some());
     let mut connected = owner.connect(endpoint, &|| false).expect("SAM stream");
     let mut bytes = [0; 7];
@@ -522,7 +525,26 @@ fn sam_session_recovery(mode: SamRecoveryMode) {
         !shared.banned.is_discouraged(endpoint.address()),
         "local router loss is not remote misbehavior"
     );
+    stop_sam_workers(
+        workers,
+        &shutdown,
+        &shutdown_latch,
+        &replacement,
+        &independent,
+        fixture,
+    );
+}
+
+fn stop_sam_workers(
+    workers: Vec<std::thread::JoinHandle<Result<(), crate::listener::ListenerError>>>,
+    shutdown: &AtomicBool,
+    latch: &bitcoin_rs_chain::LatchWriter,
+    replacement: &crate::PeerLease,
+    independent: &crate::PeerLease,
+    fixture: std::thread::JoinHandle<()>,
+) {
     shutdown.store(true, Ordering::Release);
+    latch.trigger();
     for worker in workers {
         worker.join().expect("worker").expect("backend");
     }
