@@ -122,6 +122,7 @@ pub(super) struct Report {
     format: &'static str,
     observation: &'static str,
     family_attribution: &'static str,
+    undo_attribution: &'static str,
     totals: Bytes,
     namespaces: BTreeMap<String, Bytes>,
     classes: Classes,
@@ -151,6 +152,7 @@ pub(super) fn measure(root: &Path) -> io::Result<Report> {
         format: "bitcoin-rs-storage-allocation-v1",
         observation: "offline_snapshot_lower_bound",
         family_attribution: "path_named_family_directories",
+        undo_attribution: "unattributed_inside_kv",
         totals: Bytes::default(),
         namespaces: BTreeMap::new(),
         classes: Classes::default(),
@@ -167,6 +169,9 @@ pub(super) fn measure(root: &Path) -> io::Result<Report> {
         0,
     )?;
     report.classes.finalize()?;
+    if report.classes.undo_data_named_dirs.apparent_bytes > 0 {
+        report.undo_attribution = "path_named_directory";
+    }
     Ok(report)
 }
 
@@ -406,6 +411,10 @@ mod tests {
             report.family_attribution, "path_named_family_directories",
             "oracle: the report states how family bytes were attributed"
         );
+        assert_eq!(
+            report.undo_attribution, "path_named_directory",
+            "oracle: a path-named undo directory makes the undo bytes available"
+        );
         Ok(())
     }
 
@@ -470,6 +479,10 @@ mod tests {
         let report = measure(dir.path())?;
         assert_eq!(report.namespaces.len(), 4);
         let root = fs::metadata(dir.path())?;
+        assert_eq!(
+            report.undo_attribution, "unattributed_inside_kv",
+            "oracle: without a path-named undo directory the tool must not report undo bytes"
+        );
         assert_eq!(report.namespaces["."].apparent_bytes, root.len());
         assert_eq!(report.namespaces["."].allocated_bytes, root.blocks() * 512);
         assert_eq!(

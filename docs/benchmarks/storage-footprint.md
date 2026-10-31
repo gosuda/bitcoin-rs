@@ -17,15 +17,17 @@ Apparent bytes are file lengths. They are not logical serialized bytes. Allocate
 
 The JSON object `classes` assigns every entry of the measured tree to one class. Each class reports apparent and allocated bytes. The three classes add up to `totals` in both units. The field set is additive to `bitcoin-rs-storage-allocation-v1`: `totals` and `namespaces` keep their earlier meaning.
 
+The field `undo_attribution` states whether the tool separated undo bytes. `path_named_directory` means a path-named undo directory exists and its bytes are in `undo_data_named_dirs`. `unattributed_inside_kv` means no such directory exists, those bytes stay in `kv`, and the zero in `undo_data_named_dirs` is not an undo measurement. The tool never infers a family from a backend file name.
+
 | Class | Contents |
 |---|---|
 | `block_files` | The `blocks` directory and everything below it. The tool walks each `blkNNNNN.dat` file as `BRSB` frames. |
-| `undo_data_named_dirs` | Entries whose path holds a directory component named `undo_data`. |
+| `undo_data_named_dirs` | Entries whose path holds a directory component named `undo_data`. Without such a directory, `undo_attribution` reports `unattributed_inside_kv` and the undo bytes stay in `kv`. |
 | `kv` | All other entries. This class holds backend files, journals, checkpoints, loose files and directory metadata. |
 
 `block_files` splits framed bytes into three fields. `payload_bytes` is the summed record body length. `framing_bytes` is 44 bytes for each record header. `unframed_bytes` is a tail that cannot start a complete record. The field `other_bytes` holds directory metadata and bytes outside frames, so the block-file fields add up to the class total.
 
-The field `family_attribution` states the attribution rule: `path_named_family_directories`. The tool attributes a family only when the backend names a directory after that family. Fjall stores keyspaces in numeric directories (`keyspaces/<id>`) and keeps the name mapping inside keyspace 0. A fjall datadir therefore reports zero undo bytes, and the tool keeps those bytes inside `kv`. Read the undo numbers below as a separate store assessment, not as tool output.
+The field `family_attribution` states the attribution rule: `path_named_family_directories`. The tool attributes a family only when the backend names a directory after that family. Fjall stores keyspaces in numeric directories (`keyspaces/<id>`) and keeps the name mapping inside keyspace 0. A fjall datadir therefore reports `undo_attribution: "unattributed_inside_kv"`, and the tool keeps those bytes inside `kv`. Read the undo numbers below as a separate store assessment, not as tool output.
 
 A frame walk reads record headers and seeks over bodies. It reads no body byte. A frame counts only when its magic is `BRSB` and its claimed body fits the file. A stopped-writer tail therefore lands in `unframed_bytes`, and the storage owner truncates the same tail on open.
 
@@ -45,6 +47,7 @@ One datadir, one host, one run. Measured on 2026-10-31.
 | Datadir | `.outline/evidence/index-write-attr-20261025/scratch-c150-parent/iwa-20261026T145932-437673-9917f1/r00-p4-TX_AND_SCRIPTS/data` |
 | Tool output | `/tmp/footprint-c150.json`, outside the datadir |
 | Run wall time | 2.76 s for the final command, including cargo startup, with the binary already built |
+| Tool undo state | `unattributed_inside_kv`; `undo_data_named_dirs` holds 0 bytes |
 
 The search scanned the repository `.outline/` tree and `~/.cache/` for `CURRENT_SCHEMA` markers. It found 224 of them. It ranked the candidate directories that also hold a `blocks` directory by apparent size. This datadir is the largest candidate. Its apparent size is 1,660,866,929 bytes. The search did not cover every other tree under `/home/alpha`. A broader scan of `/home/alpha` stopped at its 700 s limit without a result.
 
@@ -96,7 +99,7 @@ Two findings stand out. The index namespace is the second largest at 38.25% of a
 
 ## Undo family assessment
 
-The tool cannot attribute fjall keyspace bytes by family. This assessment read the family from the store instead, on a copy of the datadir `chainstate` directory (`/tmp/fp-undo/chainstate`). It opened the copy with fjall 3.1.12 and issued reads only. The engine performs its own recovery and compaction on the copy, and the source datadir stays unchanged.
+The tool reports undo as unavailable for this backend: `undo_attribution` is `unattributed_inside_kv`, and the zero in `undo_data_named_dirs` is not an undo measurement. This assessment read the family from the store instead, on a copy of the datadir `chainstate` directory (`/tmp/fp-undo/chainstate`). It opened the copy with fjall 3.1.12 and issued reads only. The engine performs its own recovery and compaction on the copy, and the source datadir stays unchanged.
 
 The store maps `undo_data` to keyspace 10 of 13 column families. The keyspace holds 150,001 rows. Each key is 37 bytes (`u` prefix, big-endian height, 32-byte block hash), so the key bytes total 5,550,037. The row values total 321,713,563 logical bytes.
 
@@ -187,4 +190,4 @@ Full-tip and peak results remain unmeasured here. There is no in-tree footprint 
 
 `tools/storage-footprint/src/frames.rs` tests the frame split against hand-built fixtures. The tests cover a complete file, an incomplete tail, a body shorter than its header claim, a foreign magic, and an empty file.
 
-`tools/storage-footprint/src/linux.rs` tests the class accounting. The fixture holds one block file with two framed bodies, one undo row in a directory named `undo_data`, one KV file with a hard link, and known directory metadata. The test asserts the payload and framing split, the undo row attribution, one count for the hard link, and that the three classes partition both totals. The existing tests keep hard-link deduplication, namespace totals, unchanged file contents, depth refusal, and the refusal of symlinks and special entries.
+`tools/storage-footprint/src/linux.rs` tests the class accounting. The fixture holds one block file with two framed bodies, one undo row in a directory named `undo_data`, one KV file with a hard link, and known directory metadata. The test asserts the payload and framing split, the undo row attribution, one count for the hard link, and that the three classes partition both totals. It also asserts `path_named_directory` for that fixture, and `namespace_totals_match_and_measurement_leaves_files_unchanged` asserts `unattributed_inside_kv` for a fixture with no undo directory. The existing tests keep hard-link deduplication, namespace totals, unchanged file contents, depth refusal, and the refusal of symlinks and special entries.
