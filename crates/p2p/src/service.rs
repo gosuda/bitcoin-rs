@@ -269,6 +269,12 @@ enum DialPurpose {
     Anchor,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodePersistence {
+    Persistent,
+    OneTry,
+}
+
 impl OutboundDial {
     #[must_use]
     pub const fn auto(addr: PeerEndpoint) -> Self {
@@ -970,13 +976,26 @@ impl P2pService {
         self.added_nodes.read().clone()
     }
 
-    pub fn add_node(&self, addr: PeerEndpoint, persist: bool) -> Result<(), P2pControlError> {
+    pub fn add_node(&self, addr: PeerEndpoint) -> Result<(), P2pControlError> {
+        self.add_node_with_persistence(addr, NodePersistence::Persistent)
+    }
+
+    pub fn add_node_onetry(&self, addr: PeerEndpoint) -> Result<(), P2pControlError> {
+        self.add_node_with_persistence(addr, NodePersistence::OneTry)
+    }
+
+    fn add_node_with_persistence(
+        &self,
+        addr: PeerEndpoint,
+        persistence: NodePersistence,
+    ) -> Result<(), P2pControlError> {
         if !self.overlay.config.allows(addr.address().network()) {
             return Err(P2pControlError::NetworkDisabled);
         }
         if self.banned.is_banned(addr.address(), SystemTime::now()) {
             return Err(P2pControlError::Banned);
         }
+        let persist = matches!(persistence, NodePersistence::Persistent);
         if persist {
             let mut added = self.added_nodes.write();
             if !added.contains(&addr) {
@@ -1416,7 +1435,12 @@ fn spawn_outbound_dial(
     let handle = if dial.manual {
         crate::listener::spawn_pinned_outbound_connection(dial.addr, shared, role)
     } else {
-        crate::listener::spawn_dial(dial.addr, shared, role, false, count_failure)
+        let accounting = if count_failure {
+            crate::listener::FailureAccounting::Count
+        } else {
+            crate::listener::FailureAccounting::Ignore
+        };
+        crate::listener::spawn_automatic_dial(dial.addr, shared, role, accounting)
     };
     active.insert(
         dial.addr,

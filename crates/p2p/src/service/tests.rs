@@ -566,7 +566,7 @@ fn add_node_enqueues_and_respects_queue_capacity() {
     let addr1: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
     let addr2: PeerEndpoint = "127.0.0.2:8333".parse().expect("addr");
 
-    assert!(service.add_node(addr1, true).is_ok());
+    assert!(service.add_node(addr1).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr1]);
     let dial = service.outbound_rx.lock().try_recv().expect("recv");
     assert_eq!(dial, OutboundDial::pinned(addr1));
@@ -577,11 +577,11 @@ fn add_node_enqueues_and_respects_queue_capacity() {
         .expect("send");
 
     assert_eq!(
-        service.add_node(addr2, false),
+        service.add_node_onetry(addr2),
         Err(P2pControlError::QueueFull)
     );
 
-    assert!(service.add_node(addr2, true).is_ok());
+    assert!(service.add_node(addr2).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr1, addr2]);
 }
 
@@ -593,7 +593,7 @@ fn add_node_inactive_skips_queueing() {
     );
     service.set_network_active(false);
     let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
-    assert!(service.add_node(addr, true).is_ok());
+    assert!(service.add_node(addr).is_ok());
     assert_eq!(service.added_nodes().as_slice(), &[addr]);
     assert!(service.outbound_rx.lock().try_recv().is_err());
 }
@@ -612,7 +612,7 @@ fn add_node_rejects_banned_address() {
         reason: String::new(),
     });
     let addr: PeerEndpoint = "127.0.0.1:8333".parse().expect("addr");
-    assert_eq!(service.add_node(addr, true), Err(P2pControlError::Banned));
+    assert_eq!(service.add_node(addr), Err(P2pControlError::Banned));
     assert_eq!(service.added_nodes().as_slice(), &[]);
     assert!(service.outbound_rx.lock().try_recv().is_err());
 }

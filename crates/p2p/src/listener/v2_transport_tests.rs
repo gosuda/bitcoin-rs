@@ -50,17 +50,26 @@ type TestResult = Result<(), TestError>;
 
 const MAGIC: Magic = Magic::BITCOIN;
 
-fn shared(v2_transport: bool) -> (ConnectionShared, Arc<PeerTable>) {
+fn v1_shared() -> (ConnectionShared, Arc<PeerTable>) {
     let table = Arc::new(PeerTable::new());
     let mut shared = test_shared(
         Arc::clone(&table),
         crossbeam_channel::unbounded().0,
         crossbeam_channel::unbounded().0,
     );
-    shared.v2_transport = v2_transport;
-    if v2_transport {
-        shared.local_services |= ServiceFlags::P2P_V2;
-    }
+    shared.v2_transport = false;
+    (shared, table)
+}
+
+fn v2_shared() -> (ConnectionShared, Arc<PeerTable>) {
+    let table = Arc::new(PeerTable::new());
+    let mut shared = test_shared(
+        Arc::clone(&table),
+        crossbeam_channel::unbounded().0,
+        crossbeam_channel::unbounded().0,
+    );
+    shared.v2_transport = true;
+    shared.local_services |= ServiceFlags::P2P_V2;
     (shared, table)
 }
 
@@ -121,7 +130,7 @@ fn read_until(peer: &mut Peer<TcpStream>, wanted: &Message) -> Result<(), TestEr
 }
 
 fn handshake_and_ping(addr: PeerEndpoint, stream: TcpStream, negotiated: Negotiated) -> TestResult {
-    let (client, _) = shared(false);
+    let (client, _) = v1_shared();
     let lease = lease();
     let mut peer = Peer::with_transport(stream, MAGIC, negotiated);
     run_outbound_handshake(&mut peer, 7, 0, &lease, deadline(), addr, &client)?;
@@ -135,7 +144,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
     use crate::packages::{PKG_RELAY_ANC, PKG_RELAY_PKGTXNS, SendPackages};
     for v2 in [false, true] {
         for version in [FEATURE_VERSION - 1, FEATURE_VERSION] {
-            let (mut listener_shared, table) = shared(v2);
+            let (mut listener_shared, table) = if v2 { v2_shared() } else { v1_shared() };
             listener_shared.relay_offers = super::RelayOffers {
                 package_relay: true,
                 stale_tip_relay: true,
@@ -216,7 +225,7 @@ fn bip434_windows_preserve_bip332_and_package_negotiation_on_v1_and_v2() -> Test
 
 #[test]
 fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
-    let (listener_shared, _) = shared(true);
+    let (listener_shared, _) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     let mut stream = connect(addr)?;
@@ -232,7 +241,7 @@ fn a_v2_listener_negotiates_bip324_with_a_v2_initiator() -> TestResult {
 
 #[test]
 fn a_v2_listener_still_serves_a_v1_peer() -> TestResult {
-    let (listener_shared, _) = shared(true);
+    let (listener_shared, _) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
     handshake_and_ping(addr, connect(addr)?, Negotiated::v1(MAGIC))?;
@@ -274,7 +283,7 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
         Ok(peer.transport())
     });
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr.into(), dialer, PeerRole::FullRelay);
     let protocol = responder.join().map_err(|_| "responder panicked")??;
     assert!(matches!(protocol, TransportProtocol::V2 { .. }));
@@ -286,10 +295,10 @@ fn an_outbound_v2_dial_negotiates_bip324() -> TestResult {
 
 #[test]
 fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
-    let (listener_shared, listener_table) = shared(true);
+    let (listener_shared, listener_table) = v2_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let published = loop {
@@ -324,10 +333,10 @@ fn both_ends_publish_the_negotiated_v2_session() -> TestResult {
 
 #[test]
 fn an_unanswered_v2_dial_retries_once_over_v1() -> TestResult {
-    let (listener_shared, listener_table) = shared(false);
+    let (listener_shared, listener_table) = v1_shared();
     let (addr, shutdown, handle) = listen(listener_shared)?;
 
-    let (dialer, dialer_table) = shared(true);
+    let (dialer, dialer_table) = v2_shared();
     let dial = spawn_pinned_outbound_connection(addr, dialer, PeerRole::FullRelay);
     let deadline = deadline();
     let dialed = loop {
@@ -501,7 +510,7 @@ fn a_decoy_only_peer_yields_and_lease_cancel_ends_the_loop() -> TestResult {
             return Err("expected a v2 transport".into());
         }
 
-        let (client, _) = shared(false);
+        let (client, _) = v1_shared();
         let (lease, replies) = lease_with_replies();
         let cancel_handle = lease.clone();
         let mut peer = Peer::with_transport(stream, MAGIC, negotiated);

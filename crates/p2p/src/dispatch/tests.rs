@@ -1165,12 +1165,11 @@ fn announced_transactions_request_witness_without_changing_hashes() {
                 Inventory::Transaction(txid)
             };
             let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
-            let (responses, announced) = dispatch_collect_announcements(
+            let (responses, announced) = dispatch_collect_announcements_with_relay(
                 &mut peer,
                 &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
                 None,
                 view,
-                true,
             );
             assert_eq!(
                 responses,
@@ -1191,12 +1190,11 @@ fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
     let block = Inventory::Block(block_hash);
 
     let mut peer = ready_peer();
-    let (gated, announced) = dispatch_collect_announcements(
+    let (gated, announced) = dispatch_collect_announcements_closed_relay(
         &mut peer,
         &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
         None,
         None,
-        false,
     );
     assert!(
         gated.is_empty(),
@@ -1209,12 +1207,11 @@ fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
     );
 
     let mut peer = ready_peer();
-    let (open, announced) = dispatch_collect_announcements(
+    let (open, announced) = dispatch_collect_announcements_with_relay(
         &mut peer,
         &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
         None,
         None,
-        true,
     );
     assert_eq!(
         open,
@@ -1233,12 +1230,11 @@ fn inv_wtx_vectors_not_requested_while_tx_relay_closed() {
     let block = Inventory::Block(block_hash);
 
     let mut peer = ready_peer();
-    let (responses, announced) = dispatch_collect_announcements(
+    let (responses, announced) = dispatch_collect_announcements_closed_relay(
         &mut peer,
         &Message::Inv(vec![witness_txid, wtxid, block]),
         None,
         Some(&inventory),
-        false,
     );
     assert!(
         responses.is_empty(),
@@ -1265,16 +1261,27 @@ fn inv_block_uses_headers_not_body_getdata() {
                 bitcoin::p2p::ServiceFlags::NETWORK
             };
             peer.remote_version = Some(version);
-            let (responses, announced) = dispatch_collect_announcements(
-                &mut peer,
-                &Message::Inv(vec![
-                    Inventory::Block(block_hash),
-                    Inventory::WitnessBlock(block_hash),
-                ]),
-                None,
-                None,
-                relay_open,
-            );
+            let (responses, announced) = if relay_open {
+                dispatch_collect_announcements_with_relay(
+                    &mut peer,
+                    &Message::Inv(vec![
+                        Inventory::Block(block_hash),
+                        Inventory::WitnessBlock(block_hash),
+                    ]),
+                    None,
+                    None,
+                )
+            } else {
+                dispatch_collect_announcements_closed_relay(
+                    &mut peer,
+                    &Message::Inv(vec![
+                        Inventory::Block(block_hash),
+                        Inventory::WitnessBlock(block_hash),
+                    ]),
+                    None,
+                    None,
+                )
+            };
             assert!(
                 responses.is_empty(),
                 "block inventory must not emit a body getdata"
@@ -1605,35 +1612,58 @@ fn announced_hash(block_hash: bitcoin::BlockHash) -> Hash256 {
     Hash256::from_le_bytes(block_hash.as_byte_array())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelayGate {
+    Open,
+    Closed,
+}
+
 fn dispatch_collect_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
 ) -> Vec<Message> {
-    dispatch_collect_gated(peer, message, chain, tx_inventory, true)
+    dispatch_collect_announcements_with_relay(peer, message, chain, tx_inventory).0
 }
 
-fn dispatch_collect_gated<S>(
+fn dispatch_collect_closed_relay<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
-    relay_open: bool,
 ) -> Vec<Message> {
-    dispatch_collect_announcements(peer, message, chain, tx_inventory, relay_open).0
+    dispatch_collect_announcements_closed_relay(peer, message, chain, tx_inventory).0
+}
+
+fn dispatch_collect_announcements_with_relay<S>(
+    peer: &mut Peer<S>,
+    message: &Message,
+    chain: Option<&dyn ChainQuery>,
+    tx_inventory: Option<&dyn TxInventory>,
+) -> (Vec<Message>, Vec<Hash256>) {
+    dispatch_collect_announcements_gated(peer, message, chain, tx_inventory, RelayGate::Open)
+}
+fn dispatch_collect_announcements_closed_relay<S>(
+    peer: &mut Peer<S>,
+    message: &Message,
+    chain: Option<&dyn ChainQuery>,
+    tx_inventory: Option<&dyn TxInventory>,
+) -> (Vec<Message>, Vec<Hash256>) {
+    dispatch_collect_announcements_gated(peer, message, chain, tx_inventory, RelayGate::Closed)
 }
 
 #[expect(clippy::expect_used)]
-fn dispatch_collect_announcements<S>(
+fn dispatch_collect_announcements_gated<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
-    relay_open: bool,
+    gate: RelayGate,
 ) -> (Vec<Message>, Vec<Hash256>) {
     let collected = RefCell::new(Vec::new());
     let mut announced = Vec::new();
+    let relay_open = gate == RelayGate::Open;
     dispatch_inbound_full(
         peer,
         message,
@@ -2352,14 +2382,13 @@ fn ancpkginfo_is_not_requested_while_transaction_relay_is_closed() -> Result<(),
     let wtxid = dummy_tx(1).wtxid();
     let mut peer = package_peer(BOTH_PACKAGE_BITS)?;
 
-    let responses = dispatch_collect_gated(
+    let responses = dispatch_collect_closed_relay(
         &mut peer,
         &Message::AncPkgInfo(AncPkgInfo {
             wtxids: vec![wtxid],
         }),
         None,
         None,
-        false,
     );
 
     assert_eq!(responses, []);

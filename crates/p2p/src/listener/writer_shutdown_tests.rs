@@ -135,7 +135,7 @@ fn sinks_stamp_exact_connection_source() -> Result<(), TestError> {
     let payload = bitcoin_rs_primitives::BlockPayload::from_raw(serialized.clone())?;
     let source = lease.source(Some(addr));
 
-    shared.send_headers(&lease, source, Vec::new(), true);
+    shared.send_headers_response(&lease, source, Vec::new());
     shared.send_block(&lease, addr, payload, None);
 
     assert_eq!(headers_rx.try_recv()?.source, Some(source));

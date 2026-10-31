@@ -12,7 +12,7 @@ fn full_header_ingress_preserves_responses_and_body_first_order() -> TestResult 
     let lease = crate::PeerLease::new(tx);
     let addr = PeerEndpoint::from((std::net::Ipv4Addr::LOCALHOST, 18_450));
     let source = lease.source(Some(addr));
-    shared.send_headers(&lease, source, Vec::new(), true);
+    shared.send_headers_response(&lease, source, Vec::new());
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let payload = bitcoin_rs_primitives::BlockPayload::from_raw(bytes::Bytes::from(
         bitcoin::consensus::serialize(&genesis),
@@ -55,11 +55,11 @@ fn full_header_ingress_observes_session_and_lease_cancellation() -> TestResult {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
         let source = lease.source(None);
-        shared.send_headers(&lease, source, Vec::new(), true);
+        shared.send_headers_response(&lease, source, Vec::new());
         let stop = lease.clone();
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let worker = std::thread::spawn(move || {
-            shared.send_headers(&lease, source, Vec::new(), true);
+            shared.send_headers_response(&lease, source, Vec::new());
             let _ = done_tx.send(());
         });
         assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
@@ -85,10 +85,10 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
     let (tx, _rx) = crossbeam_channel::unbounded();
     let lease = crate::PeerLease::new(tx);
     let source = lease.source(None);
-    shared.send_headers(&lease, source, Vec::new(), true);
+    shared.send_headers_response(&lease, source, Vec::new());
     let (done_tx, done_rx) = crossbeam_channel::bounded(1);
     let worker = std::thread::spawn(move || {
-        shared.send_headers(&lease, source, Vec::new(), true);
+        shared.send_headers_response(&lease, source, Vec::new());
         let _ = done_tx.send(());
     });
     assert!(done_rx.recv_timeout(Duration::from_millis(30)).is_err());
@@ -144,11 +144,10 @@ fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
         let producer = std::thread::spawn(move || {
             for (n, block) in blocks.into_iter().enumerate() {
                 if wire_response {
-                    shared.send_headers(
+                    shared.send_headers_response(
                         &lease,
                         source,
                         vec![block.header; crate::wire::MAX_HEADERS_MESSAGE_COUNT],
-                        true,
                     );
                 } else {
                     // Model a requested delivery through the existing owned

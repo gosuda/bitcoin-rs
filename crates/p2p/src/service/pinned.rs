@@ -201,9 +201,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
             );
             if !fixed {
-                service
-                    .add_node(endpoint, true)
-                    .expect("persistent addnode");
+                service.add_node(endpoint).expect("persistent addnode");
             }
             let ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync> = Arc::new(|_| {});
             service

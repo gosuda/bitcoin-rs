@@ -495,13 +495,13 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
         "add" => {
             ctx.network
                 .p2p
-                .add_node(addr, true)
+                .add_node(addr)
                 .map_err(control_error_to_rpc_error)?;
         }
         "onetry" => {
             ctx.network
                 .p2p
-                .add_node(addr, false)
+                .add_node_onetry(addr)
                 .map_err(control_error_to_rpc_error)?;
         }
         "remove" => {
@@ -1084,10 +1084,7 @@ mod getnodeaddresses_tests {
         add_peer(&ctx, peer("127.0.0.1:8333", 9));
         ctx.network
             .p2p
-            .add_node(
-                bitcoin_rs_p2p::parse_endpoint("127.0.0.1:8333").expect("addr"),
-                true,
-            )
+            .add_node(bitcoin_rs_p2p::parse_endpoint("127.0.0.1:8333").expect("addr"))
             .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))
@@ -1132,10 +1129,7 @@ mod getnodeaddresses_tests {
         let ctx = Context::new();
         ctx.network
             .p2p
-            .add_node(
-                bitcoin_rs_p2p::parse_endpoint("10.0.0.1:8333").expect("addr"),
-                true,
-            )
+            .add_node(bitcoin_rs_p2p::parse_endpoint("10.0.0.1:8333").expect("addr"))
             .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))

@@ -62,7 +62,7 @@ fn addnode_returns_error_when_outbound_queue_is_full() {
         },
         bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
-    p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)).into(), false)
+    p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
     let mut ctx = Context::new();
     ctx.network.p2p = Arc::clone(&p2p);
@@ -85,7 +85,7 @@ fn addnode_add_persists_when_outbound_queue_is_full() {
         },
         bitcoin_rs_chain::LatchReader::fixture_never(),
     ));
-    p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)).into(), false)
+    p2p.add_node_onetry(SocketAddr::from(([127, 0, 0, 1], 8333)).into())
         .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
     let mut ctx = Context::new();
     ctx.network.p2p = Arc::clone(&p2p);
@@ -321,7 +321,8 @@ fn getpeerinfo_row_carries_ids_above_u32_max_exactly() -> Result<(), crate::test
 }
 
 #[test]
-fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let lease = register_peer(&ctx, "127.0.0.1:9103".parse()?);
     let ctx = Arc::new(ctx);
@@ -337,7 +338,8 @@ fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection() -> Resu
 }
 
 #[test]
-fn getpeerinfo_ids_are_connection_identities_not_positions() -> Result<(), crate::test_error::TestError> {
+fn getpeerinfo_ids_are_connection_identities_not_positions()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr_a: SocketAddr = "127.0.0.1:9001".parse()?;
     let addr_b: SocketAddr = "127.0.0.1:9002".parse()?;
@@ -385,7 +387,8 @@ fn getpeerinfo_ids_are_connection_identities_not_positions() -> Result<(), crate
 }
 
 #[test]
-fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8333".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -417,7 +420,8 @@ fn disconnectnode_nodeid_never_disconnects_a_replacement_at_the_same_address() -
 }
 
 #[test]
-fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session()
+-> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_p2p::{PeerInfo, PeerLease};
     use crossbeam_channel::unbounded;
 
@@ -477,7 +481,8 @@ fn disconnectnode_nodeid_addresses_an_anonymous_inbound_session() -> Result<(), 
 }
 
 #[test]
-fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8350".parse()?;
     let selected = register_peer(&ctx, addr);
@@ -513,7 +518,8 @@ fn disconnectnode_address_and_nodeid_is_a_conjunction_under_replacement() -> Res
 }
 
 #[test]
-fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8360".parse()?;
     let lease = register_peer(&ctx, addr);
@@ -555,7 +561,8 @@ fn disconnectnode_address_only_still_selects_by_address() -> Result<(), crate::t
 }
 
 #[test]
-fn disconnectnode_address_only_ignores_a_session_still_handshaking() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_address_only_ignores_a_session_still_handshaking()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8370".parse()?;
     let pending = register_pending_peer(&ctx, addr);
@@ -584,7 +591,8 @@ fn disconnectnode_address_only_ignores_a_session_still_handshaking() -> Result<(
 }
 
 #[test]
-fn disconnectnode_identity_forms_ignore_a_session_still_handshaking() -> Result<(), crate::test_error::TestError> {
+fn disconnectnode_identity_forms_ignore_a_session_still_handshaking()
+-> Result<(), crate::test_error::TestError> {
     let ctx = Context::new();
     let addr: SocketAddr = "127.0.0.1:8371".parse()?;
     let pending = register_pending_peer(&ctx, addr);
