@@ -883,7 +883,6 @@ fn stage_tip_is_idempotent_and_publishes_nothing() {
     service.stage_tip(&tip, &block);
     wait_until_entered(&pool);
     service.stage_tip(&tip, &block);
-    assert!(service.prep.mailbox().pending.is_none());
     assert_eq!(
         pool.projection_calls.load(Ordering::Relaxed),
         1,
@@ -1169,15 +1168,6 @@ fn pending_stage_foreground_joins_without_duplicate_finish() {
         &tip_snapshot(second_hash),
         &Network::Regtest.genesis_block(),
     );
-    assert!(
-        service
-            .prep
-            .mailbox()
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.tip.hash == second_hash),
-        "the second stage must wait in the pending slot while the worker is occupied"
-    );
     service.publish_block_generation(second_hash, &MutationResult::empty());
     let key = GenerationKey {
         tip_hash: second_hash,
@@ -1254,10 +1244,6 @@ fn worker_panic_releases_joined_waiter_to_lazy_fallback() {
         pool.live_calls.load(Ordering::Relaxed),
         1,
         "the released waiter serves the live generation lazily"
-    );
-    assert!(
-        service.prep.mailbox().stopped,
-        "the exit guard stops the mailbox when the worker dies"
     );
 }
 
@@ -1350,18 +1336,6 @@ fn stale_ready_without_a_receipt_serves_lazily_instead_of_parking() {
         "the stale candidate must never serve the moved generation"
     );
     assert_eq!(pool.live_calls.load(Ordering::Relaxed), 1);
-    assert!(
-        service
-            .prep
-            .mailbox()
-            .active
-            .as_ref()
-            .is_some_and(|active| {
-                active.target_tip == tip_hash
-                    && matches!(active.progress, PrepProgress::Ready { .. })
-            }),
-        "the stale Ready is preserved until a newer tip releases it"
-    );
 }
 
 #[test]

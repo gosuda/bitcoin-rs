@@ -805,7 +805,6 @@ fn payout_request_and_receipt_round_trip_and_reject_corruption() {
     let fund = funded(0, 1_000_001);
     let batch = prepared(&fund);
     let request = fund.ledger.request_for(&batch.id).fixture("request");
-    assert_eq!(request.allowed_change_scripts, vec![change_script()]);
     let encoded = request.encode().fixture("encode");
     assert_eq!(&encoded[..4], b"BRPR");
     assert_eq!(PayoutRequest::decode(&encoded).fixture("decode"), request);

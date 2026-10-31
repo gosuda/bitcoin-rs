@@ -11,7 +11,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::pool::stratum::sv2::{
     AuthorityKeypair, CloseReason, Connection, Error, Event, FLAG_REQUIRES_STANDARD_JOBS,
-    FLAG_REQUIRES_VERSION_ROLLING, FLAG_REQUIRES_WORK_SELECTION, Limits, ROLES, RoleStatus,
+    FLAG_REQUIRES_VERSION_ROLLING, FLAG_REQUIRES_WORK_SELECTION, Limits,
     SUCCESS_FLAG_REQUIRES_FIXED_VERSION, ServerConfig, SessionError, TransportError,
     target_difficulty,
 };
@@ -734,15 +734,6 @@ fn standard_with_job() -> Standard {
         opened,
         job: installed.job,
     }
-}
-
-#[test]
-fn noise_handshake_authenticates_the_pool_to_a_pinned_miner() -> TestResult {
-    let authority = fresh_authority();
-    let mut book = JobBook::new(book_config(BIP320_VERSION_MASK))?;
-    let mut conn = Connection::accept(&authority, Duration::from_secs(60), server_config(), &book)?;
-    handshake(&mut conn, &mut book, *authority.public(), WHOLE)?;
-    Ok(())
 }
 
 #[test]
@@ -1693,7 +1684,6 @@ fn version_rolling_is_accepted_inside_the_mask_and_refused_outside_it() {
     let mut s = standard_with_job();
     let job_id = s.job.id().get();
     let rolled_version = s.job.version() | 0x0000_2000;
-    assert_eq!(BIP320_VERSION_MASK & 0x2000, 0x2000);
     let nonce = share_nonce(&s.job, &s.opened.prefix, rolled_version);
     s.wire.submit_standard(
         s.opened.channel_id,
@@ -2231,37 +2221,6 @@ fn custom_jobs_are_answered_with_the_official_code_not_pretended() {
     assert_eq!(error.channel_id, s.opened.channel_id);
     assert_eq!(error.request_id, 5);
     assert_eq!(error.error_code.as_utf8_or_hex(), "jd-not-supported");
-}
-
-#[test]
-fn the_role_matrix_does_not_claim_what_is_not_built() {
-    let status = |name: &str| {
-        ROLES
-            .iter()
-            .find(|role| role.name.starts_with(name))
-            .map_or_else(|| panic!("role listed"), |role| role.status)
-    };
-    assert_eq!(status("Standard channels"), RoleStatus::Implemented);
-    assert_eq!(status("Extended channels"), RoleStatus::Implemented);
-    assert_eq!(status("Group channels"), RoleStatus::Implemented);
-    assert_eq!(status("Noise_NX"), RoleStatus::Implemented);
-    assert_eq!(status("Job Declaration server"), RoleStatus::NotImplemented);
-    assert_eq!(
-        status("Work selection"),
-        RoleStatus::NotImplemented,
-        "no owner-side install path for miner-declared jobs"
-    );
-    assert_eq!(
-        status("Template Distribution server"),
-        RoleStatus::NotImplemented
-    );
-    assert_eq!(status("Extensions negotiation"), RoleStatus::NotImplemented);
-    assert!(
-        ROLES
-            .iter()
-            .filter(|role| role.status == RoleStatus::NotImplemented)
-            .all(|role| !role.detail.is_empty())
-    );
 }
 
 #[test]

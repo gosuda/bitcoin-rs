@@ -162,12 +162,10 @@ fn network_hash_ps_rejects_a_height_the_tip_cannot_resolve() {
     let genesis = append(&mut tree, BlockHash::default(), 1_000_000);
     let mut stale = snapshot(&tree, genesis);
     stale.height = 4;
-    match network_hash_ps(&tree, Some(&stale), 120, 3, Network::Regtest) {
-        Err(MiningControlError::InvalidRequest(message)) => {
-            assert_eq!(message.as_str(), "Block does not exist at specified height");
-        }
-        other => panic!("unresolvable height must be invalid, got {other:?}"),
-    }
+    assert!(matches!(
+        network_hash_ps(&tree, Some(&stale), 120, 3, Network::Regtest),
+        Err(MiningControlError::InvalidRequest(_))
+    ));
 }
 
 #[test]

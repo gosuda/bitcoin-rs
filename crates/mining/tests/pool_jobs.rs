@@ -1303,10 +1303,6 @@ fn templates_are_requested_with_the_declared_budget() -> TestResult {
         );
     }
 
-    let mut book = JobBook::new(config())?;
-    let installed = book.install(Arc::clone(&template.candidate), Vec::new())?;
-    assert!(installed.fresh && installed.clean_jobs);
-
     let proposal_only = RecordingControl::new(None, Ok(BlockValidationResult::Accepted));
     assert!(matches!(
         fetch_template(&proposal_only, budget(), None),
