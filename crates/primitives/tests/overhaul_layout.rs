@@ -236,3 +236,13 @@ fn parsed_transaction_txid_and_base_size_match_materialized_form() {
         "the fixtures must exercise both encodings, got {segwit} SegWit of {compared}"
     );
 }
+
+#[test]
+fn stripped_parts_never_panics_on_truncated_or_boundary_segwit_tx() {
+    let raw = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    if let Ok(parsed) = ParsedTransaction::parse_exact(&raw) {
+        let _ = parsed.stripped_parts();
+        let _ = parsed.txid();
+        let _ = parsed.base_size();
+    }
+}

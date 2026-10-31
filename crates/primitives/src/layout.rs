@@ -458,13 +458,9 @@ impl<'a> ParsedTransaction<'a> {
             || self.output_count_span.end(),
             |output| output.script_pubkey().end(),
         );
-        let bytes = slice_at(self.bytes, self.span);
-        let origin = u64::from(self.span.start());
-        let start = usize::try_from(u64::from(self.input_count_span.start()) - origin)
-            .unwrap_or_else(|_| unreachable!("body start is inside the transaction"));
-        let end = usize::try_from(body_end - origin)
-            .unwrap_or_else(|_| unreachable!("body end is inside the transaction"));
-        &bytes[start..end]
+        let start = widen(self.input_count_span.start());
+        let end = usize::try_from(body_end).unwrap_or(start);
+        self.bytes.get(start..end).unwrap_or(&[])
     }
 
     #[must_use]
