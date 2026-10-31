@@ -1,14 +1,3 @@
-//! Codec tests: published BIP337 vectors (fixture context derived from
-//! real mainnet block bodies), signed round-trips per spend type, and
-//! malformed/context failure modes.
-//!
-//! The fixture at `crates/rpc/tests/bip337_vectors.json` was derived once from the
-//! published vectors plus mempool.space mainnet block bodies at heights 833265..833280
-//! by a throwaway generator; no context field was written by hand.
-//!
-//! The ignored `mainnet_bodies_truth` test re-derives every field from the bodies
-//! themselves.
-
 #![expect(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -55,8 +44,6 @@ impl MapResolver {
             .insert((height, first_flat + vout), (outpoint, resolved));
     }
 
-    /// Registers every output of `tx` as confirmed at `height`, with
-    /// `first_flat` outputs preceding it in the block.
     fn register_tx(&mut self, height: u32, tx: &Tx, first_flat: u32) {
         for (vout, output) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(vout).unwrap();
@@ -330,7 +317,6 @@ fn published_vectors_restore_byte_for_byte() {
     }
 }
 
-/// Derives (prev transaction, spending transaction) signed test pairs.
 struct Signer {
     secp: Secp256k1<bitcoin::secp256k1::All>,
     secret: SecretKey,
@@ -361,7 +347,6 @@ impl Signer {
         super::hash160_20(&self.compressed_pubkey())
     }
 
-    /// Signs `digest` as ECDSA; `high_s` flips `s` to `n - s`.
     fn ecdsa_item(&self, digest: Hash256, high_s: bool) -> Vec<u8> {
         let message = Message::from_digest(*digest.as_byte_array());
         let signature = self.secp.sign_ecdsa(&message, &self.secret);
@@ -1049,12 +1034,6 @@ fn missing_context_degrades_compress_but_refuses_decompress() {
     );
 }
 
-/// Production resolver integration: a Context whose block log and body source serve one
-/// crafted block must compress the spend's outpoint (no warning) and restore it through
-/// the handlers.
-///
-/// Exercises `RpcPrevoutResolver` against `block_by_height_in_view` and the body source
-/// directly, not a codec fake.
 #[test]
 fn production_resolver_resolves_through_block_bodies() {
     use std::sync::Arc;
@@ -1076,8 +1055,6 @@ fn production_resolver_resolves_through_block_bodies() {
         }
     }
 
-    /// Height-only txindex: the resolver must walk from this height to
-    /// the body source for the prevout itself.
     struct StubTxIndex(Txid);
     impl bitcoin_rs_index::DerivedIndexQuery for StubTxIndex {
         fn transaction(&self, _txid: &Txid) -> Result<Option<Tx>, bitcoin_rs_index::TxQueryError> {
@@ -1200,9 +1177,6 @@ fn malformed_streams_are_rejected() {
     assert_eq!(error, CodecError::Cancelled);
 }
 
-/// Resolver backed directly by downloaded mainnet bodies, used only by
-/// the ignored truth test. Indexes are rebuilt from the bodies on every
-/// run, so a stale fixture cannot pass against itself.
 #[cfg(test)]
 struct BodyResolver {
     heights: HashMap<Txid, (u32, u32, u32, u32)>,
@@ -1313,11 +1287,6 @@ impl PrevoutResolver for BodyResolver {
     }
 }
 
-/// Truth loop over the downloaded mainnet bodies: re-derives every fixture field, then
-/// compresses and decompresses every published vector against body-derived context,
-/// reporting ratio and cost per representative type.
-///
-/// Absent bodies are BLOCKED, not a pass.
 #[test]
 #[ignore = "requires BITCOIN_RS_BIP337_MAINNET_BODIES with mainnet block bodies"]
 #[allow(
@@ -1716,7 +1685,6 @@ fn production_resolver_clones_only_the_requested_output() {
     assert!(resolver.outpoint_at(100, 9).unwrap().is_none());
 }
 
-/// Counts body reads per height so tests prove each body loads once.
 struct CountingBodies {
     bodies: HashMap<u32, Vec<u8>>,
     loads: std::sync::Mutex<HashMap<u32, usize>>,
@@ -1737,11 +1705,6 @@ impl bitcoin_rs_chain::BlockBodySource for CountingBodies {
     }
 }
 
-/// Builds one single-output funding block per `heights` entry, wires the records plus a
-/// counting body source into a fresh [`Context`], and funds the UTXO set so the
-/// compress pass resolves prevouts without body reads.
-///
-/// Returns the context, the source, and the funding txids in height order.
 fn cycling_fixture(
     heights: &[u32],
 ) -> (
@@ -1800,8 +1763,6 @@ fn cycling_fixture(
     (ctx, source, txids)
 }
 
-/// Builds a spender with `inputs` inputs round-robining `txids` (vout 0),
-/// empty authorizations, and one change output.
 fn cycling_spend(txids: &[Txid], inputs: usize) -> Tx {
     Tx {
         version: 2,
@@ -1836,12 +1797,6 @@ fn assert_loads(source: &CountingBodies, heights: &[u32], per_height: usize) {
     assert_eq!(total, heights.len() * per_height);
 }
 
-/// Five heights cycling through the four-body cache: grouped resolution loads each body
-/// once instead of paying a full body read, parse, materialization, and txid pass per
-/// input inside the stable-chainstate exclusion.
-///
-/// Ten inputs round-robin five heights; the counting source proves five total loads
-/// (one per height), and both codec passes round-trip the spending transaction.
 #[test]
 fn five_heights_cycling_loads_each_body_once() {
     use std::sync::Arc;
@@ -1872,10 +1827,6 @@ fn five_heights_cycling_loads_each_body_once() {
     assert_loads(&source, &heights, 2);
 }
 
-/// Past the grouped handful, the cumulative body-load budget fails closed:
-/// ten distinct heights need ten loads against a budget of eight, so the
-/// call refuses with `LimitExceeded` after bounded work instead of
-/// materializing every body under the exclusion.
 #[test]
 fn cumulative_body_budget_fails_closed_past_grouped_heights() {
     use std::sync::Arc;

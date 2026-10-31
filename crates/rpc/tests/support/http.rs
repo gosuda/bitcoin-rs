@@ -1,5 +1,3 @@
-//! Bounded HTTP/1.1 replay client for the Core parity gate.
-
 use core::time::Duration;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -12,12 +10,9 @@ use super::limits::{
 
 const READ_BUFFER_CAPACITY: usize = 8 * 1024;
 
-/// One decoded HTTP/1.1 response: complete tuple, body carried to its
-/// declared length, never truncated at end of stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RawResponse {
     pub(crate) version: String,
-    /// Numeric status code (`200`, `204`, `401`, `500`, ...).
     pub(crate) status: u16,
     pub(crate) reason: String,
     pub(crate) headers: Vec<(String, String)>,

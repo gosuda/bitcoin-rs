@@ -834,9 +834,6 @@ impl JsonRpcVersion {
         }
     }
 
-    /// HTTP status for a failing call in this dialect.
-    /// `RPC_INVALID_REQUEST` maps to 400 and `RPC_METHOD_NOT_FOUND` to 404;
-    /// every other code keeps 500.
     const fn error_status_for(self, error: &RpcError) -> u16 {
         self.error_status_for_code(error.code())
     }
@@ -918,8 +915,6 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
     handle_decoded_json(handler, &request)
 }
 
-/// Largest accepted JSON-RPC batch. The 16 MiB body limit alone would admit
-/// roughly 490,000 minimal members, so the element count is bounded as well.
 const MAX_BATCH_ELEMENTS: usize = 1_000;
 
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {

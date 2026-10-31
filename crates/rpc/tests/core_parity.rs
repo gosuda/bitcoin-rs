@@ -261,8 +261,6 @@ fn seeded_chain_tx_count(node: &NodeHarness) -> Result<u64, support::TestError> 
         .ok_or_else(|| support::fail("the applied tip publishes no transaction count"))?)
 }
 
-/// Decodes one JSON-RPC envelope answered while the barrier was held: HTTP
-/// 200, the matching id, and no error member.
 fn decoded_success(
     response: &RawResponse,
     method: &str,

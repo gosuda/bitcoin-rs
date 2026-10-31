@@ -25,8 +25,6 @@ use corepc_types::v31;
 
 pub(crate) mod submit_package;
 
-/// A non-hex string is a correctly typed but unacceptable value, so it
-/// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
     bitcoin_rs_primitives::hex::hex_decode(hex).map_err(|error| match error {
         bitcoin_rs_primitives::hex::HexError::OddLength => {
@@ -39,8 +37,6 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
     })
 }
 
-/// Builds Bitcoin Core 31.1's `-8` message for a malformed block-hash
-/// parameter.
 fn block_hash_param_error(value: &str, label: &str) -> RpcError {
     if value.len() != 64 {
         return RpcError::InvalidParameter(format!(
@@ -455,8 +451,6 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic(&v31::VerifyTxOutProof(result))
 }
 
-/// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
-/// Bitcoin Core's `DEFAULT_MAX_RAW_TX_FEE_RATE`, `COIN / 10` — 0.1 BTC per kvB.
 use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -605,8 +599,6 @@ pub(crate) fn decoderawtransaction(
     Ok(value)
 }
 
-/// with one warning each. Disabled (`-32603`) unless the node started
-/// with `--compressed-transactions`.
 pub(crate) fn compressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
@@ -648,8 +640,6 @@ pub(crate) fn compressrawtransaction(
     })
 }
 
-/// Disabled (`-32603`) unless the node started with
-/// `--compressed-transactions`.
 pub(crate) fn decompressrawtransaction(
     ctx: &Arc<Context>,
     params: &Value,
@@ -809,8 +799,6 @@ fn parse_create_tx_outputs(
     Ok(tx_outputs)
 }
 
-/// Deserialize a raw transaction hex string, reporting failures as Core's
-/// `RPC_DESERIALIZATION_ERROR` (-22) with the method-specific message.
 fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     let bytes = hex_decode(raw).map_err(|_| RpcError::Deserialization(message.clone()))?;
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
@@ -846,10 +834,6 @@ fn decode_inspection_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     decode_tx(raw, message)
 }
 
-/// Converts a BTC-denominated JSON value (number or string) to satoshis using exact
-/// decimal parsing, expanding e/E notation without floating point arithmetic and
-/// rejecting signs other than optional positive, non-digits, more than 8 fractional
-/// decimals, fractional satoshis, and overflow.
 #[expect(
     clippy::too_many_lines,
     reason = "one amount parser keeps sign, exponent, mantissa, and scale checks in a single auditable sequence"
@@ -987,8 +971,6 @@ fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> 
     Ok(sats)
 }
 
-/// `sendrawtransaction`'s fee argument: Core's `maxfeerate` amount, or the
-/// one pre-0.19 `allowhighfees` value that btcd's RPC client still emits.
 fn send_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, RpcError> {
     let legacy_default = params_array(params)?
         .get(index)
@@ -1042,12 +1024,6 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
     sats_from_btc(value, "Invalid amount")
 }
 
-/// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the policy-contract
-/// integration test.
-///
-/// All other admission rejections are transaction rejections (`-26`), matching Bitcoin
-/// Core's `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to Core's
-/// public `too-large-cluster` reason.
 pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
@@ -1066,8 +1042,6 @@ fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
     }
 }
 
-/// Cluster count and weight failures share Core's `too-large-cluster` reason;
-/// other variants use the mempool owner's public policy reason.
 fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
     match reason {
         AcceptanceRejectReason::PackageLimit(

@@ -443,10 +443,6 @@ fn an_invalidated_applied_tip_is_not_reported_as_active() -> Result<(), crate::t
     Ok(())
 }
 
-/// Tips come back highest first, with no special place for the active one.
-///
-/// Core orders by height descending. A fork longer than the active chain is what an
-/// operator is looking for, and sorting the active tip to the front would bury it.
 #[test]
 fn tips_are_ordered_by_height_descending() -> Result<(), crate::test_error::TestError> {
     let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;

@@ -1,4 +1,3 @@
-//! Strict bounded loader for the checked-in Core 31.1 fixture corpus.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -27,15 +26,10 @@ pub(crate) enum Relation {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Provenance pinned by every fixture; the loader refuses a fixture that
-/// drifts from the audited Core 31.1 binary or the regtest network.
 pub(crate) struct Provenance {
-    /// Pinned Core version string; must be `31.1.0`.
     pub core_version: String,
     pub core_source_commit: String,
-    /// SHA-256 of the exact `bitcoind` binary the probe captured.
     pub core_binary_sha256: String,
-    /// Network the capture ran on; must be `regtest`.
     pub network: String,
     pub tip_height: u64,
     pub tip_hash: String,
@@ -73,7 +67,6 @@ pub(crate) struct HttpTuple {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "form", rename_all = "snake_case")]
 pub(crate) enum BodyForm {
-    /// Zero-length body (204 notifications, 401 auth failures).
     Empty,
     Text {
         text: String,
@@ -167,7 +160,6 @@ pub(crate) enum BodyCheck {
 pub(crate) const PINNED_NETWORK: &str = "regtest";
 
 #[derive(Debug)]
-/// Load error: every refusal names the ceiling or rule it hit.
 pub(crate) enum LoadError {
     Violation(String),
     Io(std::io::Error),

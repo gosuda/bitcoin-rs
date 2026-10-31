@@ -44,8 +44,6 @@ use std::time::Instant;
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 pub const DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
-/// Block and undo responses materialize a body and its projection.
-/// Bound concurrent materializations independently of socket connections.
 const MAX_CONCURRENT_BLOCK_RENDERS: usize = 2;
 
 #[derive(Debug)]
@@ -129,7 +127,6 @@ pub struct PruneResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PruneServiceError {
-    /// Storage or backend-specific pruning failure.
     #[error("{0}")]
     Failed(String),
 }
@@ -198,34 +195,25 @@ pub trait ChainControl: Send + Sync {
 
 #[derive(Debug, serde::Serialize)]
 pub struct SnapshotImport {
-    /// Number of unspent outputs loaded, not transaction records.
     pub coins_loaded: u64,
     pub tip_hash: String,
     pub base_height: u32,
-    /// UTF-8 display of the absolute input path, rendered before activation.
-    /// Non-UTF-8 filesystem bytes are replaced for JSON output only.
     pub path: String,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct SnapshotExport {
-    /// Number of unspent outputs written, not transaction records.
     pub coins_written: u64,
     pub base_hash: String,
     pub base_height: u32,
-    /// UTF-8 display of the absolute output path. Non-UTF-8 filesystem bytes
-    /// in a parent directory are replaced for JSON output only.
     pub path: String,
-    /// `hash_serialized_3` commitment of the written coins, in RPC display order.
     pub txoutset_hash: String,
-    /// Transactions in the chain up to and including the base block.
     pub nchaintx: u64,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct ChainstatesInfo {
     pub headers: u32,
-    /// Historical role first, active role last.
     pub chainstates: Vec<ChainstateInfo>,
 }
 
@@ -233,28 +221,21 @@ pub struct ChainstatesInfo {
 pub struct ChainstateInfo {
     pub blocks: u32,
     pub bestblockhash: String,
-    /// Transaction-based estimate; unavailable counts are omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verificationprogress: Option<f64>,
-    /// Pinned base for a snapshot-derived active role.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_blockhash: Option<String>,
-    /// Whether these coins have been verified from genesis.
     pub validated: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotControlError {
-    /// Input path cannot be opened or is not a regular file.
     #[error("{0}")]
     File(String),
-    /// The file or its compiled trust anchor was rejected before activation.
     #[error("{0}")]
     Invalid(String),
-    /// The lifecycle cannot accept this request at present.
     #[error("{0}")]
     Unavailable(String),
-    /// Activation, persistence, or post-commit consumer settlement failed.
     #[error("{0}")]
     Failed(String),
     #[error("Snapshot export interrupted")]
@@ -263,19 +244,14 @@ pub enum SnapshotControlError {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ChainControlError {
-    /// The requested block is unknown.
     #[error("unknown block")]
     UnknownBlock,
-    /// Genesis cannot be invalidated.
     #[error("cannot invalidate the genesis block")]
     Genesis,
-    /// The mutation failed after its request was accepted.
     #[error("{0}")]
     Failed(String),
-    /// Verification stopped because the requesting caller cancelled it.
     #[error("block verification interrupted")]
     Interrupted,
-    /// Verification refused because the chainstate is closed for recovery.
     #[error("chainstate is unavailable for verification")]
     Unavailable,
 }
@@ -777,9 +753,6 @@ pub(crate) struct RpcPrevoutResolver<'ctx> {
     bodies: Vec<RetainedBody>,
     retained_tx_bytes: usize,
     retained_index_bytes: usize,
-    /// Cumulative body loads performed (distinct reads; eviction reloads
-    /// count again, so cycling past the retained slots cannot do unbounded
-    /// parse work under the exclusion). Never decremented.
     loads: usize,
     loaded_bytes: usize,
     memo: HashMap<OutPoint, Option<ResolvedPrevout>>,
@@ -787,9 +760,6 @@ pub(crate) struct RpcPrevoutResolver<'ctx> {
 }
 
 impl<'ctx> RpcPrevoutResolver<'ctx> {
-    /// # Errors
-    /// Returns retryable `Misc` (-1) when both block-render slots are
-    /// busy; the caller never queues behind a render.
     pub(crate) fn new(ctx: &'ctx Context, cancellation: LatchReader) -> Result<Self, RpcError> {
         let permit = ctx
             .try_acquire_block_render()

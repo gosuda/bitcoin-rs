@@ -1,5 +1,3 @@
-//! Independent admission and route boundaries for split HTTP listeners.
-
 use super::*;
 
 struct RunningServer {

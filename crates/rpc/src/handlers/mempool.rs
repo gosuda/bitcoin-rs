@@ -63,9 +63,6 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     typed_to_sonic(&response)
 }
 
-/// Resolve all requested outpoints against one mempool generation. Copy only
-/// transaction references while locked; hex encoding and JSON serialization
-/// happen after the guard is released.
 struct SpendingPrevoutQuery<'a> {
     prevouts: Vec<(OutPoint, &'a str)>,
     mempool_only: bool,
@@ -195,7 +192,6 @@ pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result
     typed_to_sonic(&v31::GetTxSpendingPrevout(rows))
 }
 
-/// Core's strict object check validates declared fields before unknown keys.
 fn check_prevout_fields(
     value: &Value,
     fields: &[(&str, &str)],
@@ -228,7 +224,6 @@ fn check_prevout_fields(
     Ok(())
 }
 
-/// Fold this method's named-only option keys before ordinary argument binding.
 fn spending_prevout_arguments(params: &Value) -> Result<Cow<'_, Value>, RpcError> {
     let option_names = ["mempool_only", "return_spending_tx"];
     if !params.is_object() || !option_names.iter().any(|name| params.get(*name).is_some()) {

@@ -1,5 +1,3 @@
-//! Shared support for the Core parity vertical gate.
-
 pub(crate) mod chain;
 pub(crate) mod compare;
 pub(crate) mod fixture;

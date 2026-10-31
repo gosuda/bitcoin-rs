@@ -1,4 +1,3 @@
-//! Bitcoin Core wire-contract compatibility tests.
 extern crate alloc;
 
 use crate::support;
@@ -223,13 +222,6 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), crate::suppor
     Ok(())
 }
 
-/// Both validateaddress failure classes answer exactly Core's sparse `{"isvalid":
-/// false}` object: `isvalid` is the only key and every valid-only field (`address`,
-/// `scriptPubKey`, `isscript`, `iswitness`, `witness_version`, `witness_program`) is
-/// absent.
-///
-/// The pinned corepc type models those fields as required, so this branch cannot
-/// round-trip through `typed()` and is pinned by key-set assertions (`local_shape`).
 fn assert_sparse_invalid(value: &sonic_rs::Value) {
     let object = value
         .as_object()

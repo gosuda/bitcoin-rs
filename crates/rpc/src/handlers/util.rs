@@ -20,7 +20,6 @@ use crate::handlers::{
     ensure_at_most_params, params_array, required_i64, required_str, required_u64,
 };
 
-/// Core `MAX_CONFIRM_TARGET` in `policy/fees.h`.
 const ESTIMATE_SMART_FEE_MAX_TARGET_I64: i64 = 1008;
 const ESTIMATE_SMART_FEE_TARGET_ERROR: &str = "Invalid conf_target, must be between 1 and 1008";
 const ESTIMATE_SMART_FEE_MODE_ERROR: &str =
@@ -190,9 +189,6 @@ fn is_core_fee_estimate_mode(mode: &str) -> bool {
         || mode.eq_ignore_ascii_case("conservative")
 }
 
-/// Local response shape: the fee estimator does not expose Core's
-/// `decay`/`scale` internals, so `{short,medium,long}` carry `feerate` only
-/// and the no-estimate branch stays `{}` (see the manifest row note).
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let pool = ctx.mempool.gateway.read();
@@ -213,10 +209,6 @@ pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value
     Ok(Value::from(object))
 }
 
-/// Local response shape: an invalid address (malformed or wrong network)
-/// answers Core's sparse `{"isvalid": false}` object only, which the pinned
-/// corepc type cannot represent because its valid-address fields are
-/// required; that branch is hand-built (see the manifest row note).
 pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use core::str::FromStr as _;
 
@@ -297,8 +289,6 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     }
 }
 
-/// A descriptor that does not parse is `-5`; a range that does not match a
-/// descriptor that parsed fine is `-8`. They are different questions and Core
 fn descriptor_error(error: DescriptorError) -> RpcError {
     match error {
         DescriptorError::Range(message) => RpcError::InvalidParameter(message.to_owned()),
@@ -363,7 +353,6 @@ fn checksummed_payload(
     Ok((payload, computed))
 }
 
-/// Bitcoin Core's `ParseDescriptorRange`: an end, or an inclusive `[begin,end]`.
 pub(crate) fn parse_derivation_range(value: &Value) -> Result<(u32, u32), RpcError> {
     let integer = |value: &Value| {
         value
@@ -773,15 +762,10 @@ fn classify_scan_descriptor_kind(
 
 #[derive(Debug)]
 struct DescriptorInfo {
-    /// Canonical form, with private keys replaced by their public counterparts.
     canonical: String,
-    /// One entry per multipath expansion; empty for a single-path descriptor.
     multipath_expansion: Vec<String>,
-    /// Whether the descriptor carries a `*`, and so describes a range.
     is_range: bool,
-    /// Whether the descriptor carries enough information to produce a spend.
     is_solvable: bool,
-    /// Whether the *input* carried at least one private key.
     has_private_keys: bool,
 }
 

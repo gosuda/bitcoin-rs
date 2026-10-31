@@ -124,8 +124,6 @@ pub(crate) fn loadtxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     )
 }
 
-/// Core 31.1 `dumptxoutset`, restricted to `type = "latest"`: the snapshot is
-/// the applied tip's UTXO set. Rollback snapshots and `options` are not served.
 pub(crate) fn dumptxoutset(
     ctx: &Arc<Context>,
     params: &Value,
@@ -312,12 +310,9 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 struct ChainTxStats {
     selected: bool,
     is_applied_tip: bool,
-    /// Cumulative transactions through the selected block, when known.
     total_tx_count: Option<u64>,
     tip_time: u32,
-    /// Transactions inside the window, when the window is open and known.
     window_tx_count: Option<u64>,
-    /// The window's length in seconds (a difference of two median times).
     window_interval: u64,
 }
 
@@ -834,7 +829,6 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
     })
 }
 
-/// Core's `PER_UTXO_OVERHEAD`: serialized outpoint plus creation height.
 const PER_UTXO_OVERHEAD: u64 = 36 + 4;
 
 fn output_utxo_size(output: &TxOut) -> u64 {
@@ -1245,7 +1239,6 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     typed_to_sonic(&v31::GetIndexInfo(selected))
 }
 
-/// bitcoin-rs extension `getcapabilities`.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let snapshot = bitcoin_rs_index::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
@@ -1618,8 +1611,6 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
     Hash256::from_str(value).map_err(|_| RpcError::InvalidParams("hash must be 64 hex characters"))
 }
 
-/// The block's depth in the **active chain**, or `-1` when it is not in the
-/// active chain at all.
 pub(super) fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
     let Some(tip) = view.tip() else {
         return -1;

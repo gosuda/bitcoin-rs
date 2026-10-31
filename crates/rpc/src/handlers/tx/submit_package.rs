@@ -1,5 +1,3 @@
-//! submitpackage wire boundary; admission and all mutations stay in mempool.
-
 use super::*;
 use bitcoin_rs_mempool::{PackageSubmission, PackageTxResult};
 

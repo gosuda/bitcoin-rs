@@ -1,5 +1,3 @@
-//! Wallet-facing electrs/Esplora routes.
-
 use core::str::FromStr as _;
 use std::sync::Arc;
 
@@ -31,8 +29,6 @@ use crate::rest::{
 pub(super) const CHAIN_PAGE: usize = 25;
 const MEMPOOL_PAGE: usize = 50;
 
-/// API-10: the raw hex broadcast route has no per-request override. Preserve
-/// its 0.1 BTC/kvB ceiling independently of RPC defaults and parameters.
 const MAX_BROADCAST_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
 pub(super) fn get(ctx: &Context, path: &str) -> Response {
@@ -521,7 +517,6 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     }
     json_ok(&values)
 }
-/// POST: Capture aggregate statistics and one `(fee_rate, total_vsize)` row per distinct rate.
 fn mempool(ctx: &Context) -> Response {
     let (stats, fee_histogram) = {
         let pool = ctx.mempool.gateway.read();
@@ -540,7 +535,6 @@ fn mempool(ctx: &Context) -> Response {
             .collect(),
     })
 }
-/// POST: Capture the ten latest transactions by `(time, txid)`.
 fn mempool_recent(ctx: &Context) -> Response {
     const RECENT: usize = 10;
     let latest = {

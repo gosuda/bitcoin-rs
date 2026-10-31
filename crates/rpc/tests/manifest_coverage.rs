@@ -1,5 +1,3 @@
-//! Compatibility-manifest coverage gate.
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,7 +7,6 @@ use bitcoin_rs_rpc::manifest::{self, Entry, Status, SurfaceKind};
 use bitcoin_rs_rpc::{Handler, RpcError};
 use sonic_rs::json;
 
-/// ZMQ PUB topics Bitcoin Core 31.x registers (src/zmq/zmqpublishnotifier.cpp).
 const CORE_ZMQ_TOPICS: [&str; 5] = ["hashblock", "hashtx", "rawblock", "rawtx", "sequence"];
 
 const CARGO_LOCK: &str = include_str!("../../../Cargo.lock");
@@ -217,7 +214,6 @@ fn esplora_extension_row_resolves_to_the_router() {
     );
 }
 
-/// Invariant 2: no duplicate (kind, name) rows.
 #[test]
 fn manifest_has_no_duplicate_rows() {
     let mut seen = BTreeSet::new();
@@ -231,8 +227,6 @@ fn manifest_has_no_duplicate_rows() {
     }
 }
 
-/// Notes must be single-line, pipe-free text so the generated Markdown table
-/// cannot be broken by row content.
 #[test]
 fn notes_are_markdown_table_safe() {
     for entry in manifest::MANIFEST {

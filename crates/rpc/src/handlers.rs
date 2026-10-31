@@ -47,9 +47,6 @@ impl Handler {
         }
     }
 
-    /// Admits blocking calls on all but one of the connections a single
-    /// source may hold, so its own blocking calls never take its last
-    /// connection. A full pool still refuses every source.
     pub(crate) fn configure_blocking_admission(&self, source_connections: usize) {
         self.blocking_requests.lock().1 = source_connections.saturating_sub(1);
     }
@@ -156,12 +153,6 @@ pub(crate) fn params_array(params: &Value) -> Result<&sonic_rs::Array, RpcError>
         .ok_or(RpcError::InvalidParams("params must be an array"))
 }
 
-/// Binds a method's ordinary named arguments to its positional order.
-///
-/// Core's optional `args` prefix fills only the initial unnamed positions; explicit
-/// nulls still count as named arguments. Omitted trailing arguments stay omitted, and a
-/// non-array `args` value is consumed without effect. Method owners retain arity, type,
-/// default, and value validation.
 pub(crate) fn bind_named_params<'a>(
     params: &'a Value,
     names: &[&str],
@@ -211,7 +202,6 @@ pub(crate) fn bind_named_params<'a>(
     Ok(Cow::Owned(Value::from(values)))
 }
 
-/// Validate original object keys before a method folds named-only options.
 pub(crate) fn ensure_unique_named_params(object: &sonic_rs::Object) -> Result<(), RpcError> {
     let mut seen = hashbrown::HashSet::new();
     for (key, _) in object {

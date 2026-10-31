@@ -307,11 +307,6 @@ pub(crate) fn getprioritisedtransactions(
     Ok(Value::from(object))
 }
 
-/// Bitcoin Core `getnetworkhashps(nblocks=120, height=-1)`: both arguments are
-/// optional, extra positionals are rejected, and omitted/`null` params use the
-/// defaults.
-///
-/// Invalid `nblocks`/`height` values are Core `-8`, not JSON-RPC `-32602`.
 fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
     ensure_at_most_params(params, 2)?;
     let lookup = optional_i64(params, 0, 120)?;

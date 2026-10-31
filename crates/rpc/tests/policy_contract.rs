@@ -359,8 +359,6 @@ fn staged_outpoint(label: u8) -> OutPoint {
     }
 }
 
-/// `(mempoolminfee, minrelaytxfee)` as `getmempoolinfo` quotes them, in
-/// BTC/kvB.
 fn quoted_floors(handler: &Handler) -> Result<(f64, f64), crate::support::TestError> {
     let info = handler.dispatch("getmempoolinfo", &json!([]))?;
     let floor = info
@@ -374,13 +372,10 @@ fn quoted_floors(handler: &Handler) -> Result<(f64, f64), crate::support::TestEr
     Ok((floor, relay))
 }
 
-/// Whether a BTC/kvB quote is `sat_per_kvb` to the satoshi.
 fn quotes_sat_per_kvb(quoted: f64, sat_per_kvb: u32) -> bool {
     (quoted - f64::from(sat_per_kvb) / 100_000_000.0).abs() < 1e-9
 }
 
-/// `testmempoolaccept` for one transaction: whether it is allowed, and its
-/// reject reason.
 fn preview_verdict(
     handler: &Handler,
     transaction: &Tx,
