@@ -1,5 +1,3 @@
-//! Golden block fixture tests: native decode, block hash, and txids against
-//! blockstream-recorded values.
 use std::str::FromStr;
 
 use crate::support::TestError;

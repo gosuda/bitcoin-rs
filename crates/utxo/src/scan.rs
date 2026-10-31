@@ -6,9 +6,7 @@ use parking_lot::Mutex;
 
 use crate::{UtxoCoin, UtxoScan, UtxoSet};
 
-/// Maximum number of distinct script needles in one scan.
 pub const MAX_SCAN_SCRIPTS: usize = 1_024;
-/// Maximum combined script bytes in one scan.
 pub const MAX_SCAN_SCRIPT_BYTES: usize = 1_048_576;
 const MAX_VISITED_COINS: usize = 250_000_000;
 const MAX_MATCHES: usize = 10_000;

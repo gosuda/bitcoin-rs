@@ -210,7 +210,6 @@ fn verify_block_rules_rejects_coinbase_empty_outputs() {
 
 #[test]
 fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
-    // 79,996 cost = 19,999 legacy sigops (cost = sigops * 4) in coinbase output
     let mut coinbase = coinbase_tx();
     coinbase.outputs[0].script_pubkey =
         Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 19_999]);
@@ -220,7 +219,6 @@ fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
         "79,996 legacy sigop cost is within budget"
     );
 
-    // 80,000 cost = 20,000 legacy sigops in coinbase output
     coinbase.outputs[0].script_pubkey =
         Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_000]);
     assert_eq!(
@@ -229,7 +227,6 @@ fn verify_block_rules_enforces_legacy_sigop_budget_boundaries() {
         "80,000 legacy sigop cost is at exact budget"
     );
 
-    // 80,004 cost = 20,001 legacy sigops in coinbase output
     coinbase.outputs[0].script_pubkey =
         Script::from_bytes(vec![bitcoin_rs_script::opcode::OP_CHECKSIG; 20_001]);
     assert_eq!(

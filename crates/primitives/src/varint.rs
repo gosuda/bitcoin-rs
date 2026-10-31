@@ -15,7 +15,6 @@ pub enum VarintError {
     NonCanonical { value: u64 },
 }
 
-/// Decodes a Bitcoin compact-size integer and returns `(value, bytes_consumed)`.
 pub fn decode(buf: &[u8]) -> Result<(u64, usize), VarintError> {
     let Some((&prefix, rest)) = buf.split_first() else {
         return Err(VarintError::Truncated {
@@ -54,7 +53,6 @@ pub fn decode(buf: &[u8]) -> Result<(u64, usize), VarintError> {
     }
 }
 
-/// Byte length of the canonical compact-size encoding of `value`.
 #[must_use]
 pub const fn encoded_len(value: u64) -> usize {
     if value <= 0xfc {

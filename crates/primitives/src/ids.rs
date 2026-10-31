@@ -1,5 +1,3 @@
-//! Identifier newtypes over [`Hash256`]: transaction, witness-transaction, and block hashes.
-
 use core::fmt;
 use core::str::FromStr;
 
@@ -18,7 +16,6 @@ macro_rules! identifier_newtype {
         pub struct $name(pub Hash256);
 
         impl $name {
-            /// Returns the 32-byte consensus (little-endian) encoding.
             #[must_use]
             pub const fn as_bytes(&self) -> &[u8; 32] {
                 self.0.as_byte_array()
@@ -54,16 +51,13 @@ macro_rules! identifier_newtype {
 }
 
 identifier_newtype!(
-    /// The double-SHA256 of a transaction's non-witness serialization.
     Txid
 );
 
 identifier_newtype!(
-    /// The double-SHA256 of a transaction's full serialization including witness data.
     Wtxid
 );
 
 identifier_newtype!(
-    /// The double-SHA256 of an 80-byte block header.
     BlockHash
 );

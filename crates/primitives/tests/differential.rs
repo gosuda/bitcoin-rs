@@ -1,6 +1,3 @@
-//! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
-//! `sighash.json` vectors, and fuzz-corpus self-consistency.
-
 #![expect(
     clippy::expect_used,
     reason = "test fixtures: a malformed vector or missing fixture file is an authoring bug, not a runtime path"

@@ -1,5 +1,3 @@
-//! Script verification entry points over the native transaction type.
-
 use std::borrow::Cow;
 use std::fmt;
 
@@ -244,7 +242,6 @@ pub enum ScriptError {
 pub struct Interpreter;
 
 impl Interpreter {
-    /// `prevouts` must contain one spent output for each input, in input order.
     pub fn execute_with_prevouts(
         &self,
         script_pubkey: &[u8],

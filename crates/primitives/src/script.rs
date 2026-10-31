@@ -1,5 +1,3 @@
-//! Native script and witness byte stacks.
-
 use core::ops::{Deref, DerefMut, Index};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -21,8 +19,6 @@ impl Script {
         &self.0
     }
 
-    /// Returns the heap bytes allocated for this script's byte buffer,
-    /// including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         self.0.capacity()
@@ -146,8 +142,6 @@ impl Witness {
         }
     }
 
-    /// Returns the heap bytes allocated for this witness stack: the flat
-    /// item buffer and the item end offsets, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         self.bytes.capacity().saturating_add(

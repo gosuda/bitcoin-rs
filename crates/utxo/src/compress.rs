@@ -1,5 +1,3 @@
-//! Compact encodings for UTXO record fields.
-
 use core::cmp::Ordering;
 
 use crate::UtxoError;
@@ -65,7 +63,6 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
     Err(UtxoError::CorruptRecord)
 }
 
-/// Largest amount the compression is defined for: 21,000,000 BTC in satoshis.
 pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
 #[inline]
@@ -124,7 +121,6 @@ pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     (value <= MAX_COMPRESSIBLE_AMOUNT).then_some(value)
 }
 
-/// Writes `value` as Bitcoin Core's subtract-one MSB VARINT into `out`.
 pub(crate) fn write_core_varint(mut value: u64, out: &mut Vec<u8>) {
     let mut buf = [0_u8; 10];
     let mut len = 0;
@@ -170,10 +166,6 @@ pub(crate) fn cmp_core_varint_key(left: u32, right: u32) -> Ordering {
     left_bytes[..left_len].cmp(&right_bytes[..right_len])
 }
 
-/// Compresses a scriptPubKey into Bitcoin Core's snapshot format.
-///
-/// Returns `None` for any other script, or for uncompressed P2PK with an invalid curve
-/// point, prompting the caller to emit raw script length + 6.
 pub(crate) fn compress_script(script: &[u8]) -> Option<(u64, &[u8])> {
     if script.len() == 25
         && script[0] == 0x76

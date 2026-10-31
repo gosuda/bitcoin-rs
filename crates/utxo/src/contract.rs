@@ -1,5 +1,3 @@
-//! The chainstate-facing apply/commit/disconnect contract.
-
 use std::borrow::Borrow;
 
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxOut, Txid};
@@ -163,8 +161,6 @@ pub trait SpentOutputLookup {
     fn entry(&self, outpoint: &OutPoint) -> Option<&UtxoCoin>;
 }
 
-/// Where a block's prevouts are read from: the committed set, or a window
-/// overlay over blocks prepared but not yet committed.
 pub trait OutputSource {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin>;
 }
@@ -219,7 +215,6 @@ pub enum UndoLoadError {
 pub use bitcoin_rs_storage::{BoundedReadError, pruning::HistoryUnavailable};
 
 pub trait BlockUndoSource: Send + Sync {
-    /// Reads one complete block/input view without exposing storage mutation.
     fn block_spends(
         &self,
         hash: Hash256,
@@ -230,8 +225,6 @@ pub trait BlockUndoSource: Send + Sync {
 #[derive(Debug)]
 pub struct BlockSpends {
     pub block: Block,
-    /// Complete input rows (coinbase empty), or the typed reason this body
-    /// has no certified retained undo. Partial rows are never returned.
     pub spent: Result<Vec<Vec<UtxoCoin>>, HistoryUnavailable>,
 }
 
@@ -357,14 +350,6 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
     set.commit_block(changes, block_hash)
 }
 
-/// # Errors [`BlockChangeError::TxidCountMismatch`] when `txids` does not cover every
-/// transaction, refused before iterating so no trailing transaction can be silently
-/// dropped; [`BlockChangeError::VoutOverflow`] when a transaction carries more outputs
-/// than a `u32` vout can index; [`BlockChangeError::BlockValueOverflow`] when value
-/// totals overflow; and [`BlockChangeError::UndoPrevoutMissing`] when a spend has no
-/// resolved prevout.
-///
-/// Genesis returns empty mutations.
 pub fn build_block_changes<'a>(
     inputs: &BlockChangeInputs<'a, '_>,
     resolved: &impl SpentOutputLookup,
@@ -550,9 +535,6 @@ pub fn persist_block_undo(
     Ok(UndoRecord::new(record))
 }
 
-/// # Errors
-/// Read failure, absent record, or a record that does not decode as this
-/// block's.
 pub fn load_block_undo(
     store: &dyn UndoStore,
     height: u32,
@@ -565,9 +547,6 @@ pub fn load_block_undo(
     undo_codec::decode(&record, hash).map_err(|source| UndoLoadError::Unreadable { hash, source })
 }
 
-/// # Errors
-/// [`RollbackError::Refused`] before the marker is armed; every other variant
-/// after.
 pub fn rollback_block(
     store: &dyn UndoStore,
     utxo: &UtxoSet,
@@ -610,9 +589,6 @@ pub fn rollback_block(
     })
 }
 
-/// # Errors
-/// `RollbackError::Utxo` or `RollbackError::CoinStats`. Never `Refused`:
-/// the arming guard does not apply to a marker recovery already owns.
 pub fn rollback_block_recovery(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,

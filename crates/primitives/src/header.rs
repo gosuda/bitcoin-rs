@@ -1,5 +1,3 @@
-//! Native block header type and header hash computation.
-
 use crate::{BlockHash, CompactTarget, Hash256, encode::double_sha256};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

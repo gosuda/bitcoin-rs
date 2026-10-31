@@ -1,6 +1,3 @@
-//! Hexadecimal text: one encoder and one decoder for the whole workspace.
-
-/// Why a hexadecimal string was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum HexError {
     #[error("hex string has an odd length")]
@@ -11,7 +8,6 @@ pub enum HexError {
     WrongLength { expected: usize, got: usize },
 }
 
-/// Lowercase hexadecimal text of `bytes`.
 #[must_use]
 pub fn hex_encode(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -23,7 +19,6 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// Value of one hexadecimal digit of either case.
 #[must_use]
 pub const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
@@ -34,18 +29,12 @@ pub const fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Whether every character is a digit or a lowercase `a` to `f`.
 #[must_use]
 pub fn is_lowercase_hex(text: &str) -> bool {
     text.bytes()
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Decodes a hexadecimal string of either case.
-///
-/// # Errors
-///
-/// Fails on an odd length or a character that is not a hexadecimal digit.
 pub fn hex_decode(text: &str) -> Result<Vec<u8>, HexError> {
     let (pairs, odd_tail) = text.as_bytes().as_chunks::<2>();
     if !odd_tail.is_empty() {
@@ -58,11 +47,6 @@ pub fn hex_decode(text: &str) -> Result<Vec<u8>, HexError> {
         .collect()
 }
 
-/// Decodes exactly `N` bytes from a hexadecimal string of either case.
-///
-/// # Errors
-///
-/// Fails on a length other than `2 * N` or a character that is not a hexadecimal digit.
 pub fn hex_decode_array<const N: usize>(text: &str) -> Result<[u8; N], HexError> {
     let expected = N.saturating_mul(2);
     if text.len() != expected {

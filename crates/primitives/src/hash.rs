@@ -47,7 +47,6 @@ impl Hash256 {
         self.0
     }
 
-    /// Parses a conventional big-endian lowercase or uppercase hexadecimal hash.
     pub fn from_str_be(s: &str) -> Result<Self, HashError> {
         let bytes = s.as_bytes();
         if bytes.len() != 64 {
@@ -67,7 +66,6 @@ impl Hash256 {
         Ok(Self(out))
     }
 
-    /// Formats this hash as conventional big-endian lowercase hexadecimal.
     #[must_use]
     pub fn to_string_be(self) -> String {
         self.to_string()

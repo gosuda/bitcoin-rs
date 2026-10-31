@@ -5,14 +5,12 @@ use nohash_hasher::NoHashHasher;
 
 pub(crate) type UtxoBuildHasher = BuildHasherDefault<NoHashHasher<u64>>;
 
-/// Eight-byte transaction-id prefix used as the UTXO map key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct UtxoKey([u8; 8]);
 
 impl UtxoKey {
     pub(crate) const SHARD_COUNT: usize = 256;
 
-    /// Builds a key from the first eight little-endian txid bytes.
     #[must_use]
     #[inline]
     pub(crate) fn from_txid(txid: &Txid) -> Self {

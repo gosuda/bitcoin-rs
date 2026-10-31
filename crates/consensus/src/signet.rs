@@ -1,5 +1,3 @@
-//! BIP325 signet block solution check: a port of Core `src/signet.cpp`.
-
 use bitcoin_rs_primitives::{
     Amount, Block, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
     Witness, varint,

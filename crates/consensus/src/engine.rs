@@ -1,5 +1,3 @@
-//! The one runtime validation-engine selector.
-
 use core::fmt;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

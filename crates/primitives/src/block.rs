@@ -1,5 +1,3 @@
-//! Native block type and block-level hashing helpers.
-
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -26,7 +24,6 @@ impl Block {
         self.txs.iter().map(Tx::txid).collect()
     }
 
-    /// Full consensus serialization length, including BIP144 witness sections.
     #[must_use]
     pub fn total_size(&self) -> usize {
         self.consensus_size()
@@ -41,7 +38,6 @@ impl Block {
             .saturating_add(self.txs.iter().map(Tx::base_size).sum())
     }
 
-    /// BIP141 block weight: `stripped_size * 3 + total_size` weight units.
     #[must_use]
     pub fn weight(&self) -> u64 {
         u64::try_from(self.stripped_size())
@@ -50,8 +46,6 @@ impl Block {
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
     }
 
-    /// Returns the total heap bytes allocated for this block's transaction vector,
-    /// transactions, inputs, outputs, scripts, and witness stacks, including spare capacity.
     #[must_use]
     pub fn retained_heap_bytes(&self) -> usize {
         let mut total = self

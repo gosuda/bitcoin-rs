@@ -1,5 +1,3 @@
-//! Script verification, sigop counting, and native script utilities.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 mod checker;
