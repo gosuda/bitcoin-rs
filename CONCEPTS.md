@@ -111,7 +111,7 @@ deadline. "Core differs: Core counts every received byte as activity; btcrs
 counts only frames that carry a message."
 
 ### Paused getdata tail
-The unserved remainder of one `getdata` that stopped because the session could not reserve send credit before building the next reply. The refusal came either from the connection's own bound or from the node's aggregate outbound budget (see "Outbound queue accounting" in `docs/policies/p2p-compatibility.md`). The remainder stays in request order, with the misses found before it. The connection reads nothing from the peer while it holds them. The misses go out in one `notfound` once a reservation for its exact length succeeds, and never without one. The remaining items resume once a fresh production reservation succeeds, and reads stay held until they do, so the peer's next reply has a slot. A dead writer, a cancelled lease, or a pause past 20 minutes ends the session. Time that the aggregate budget refused counts toward neither the 20 minutes nor the request and receive ages. Shared saturation defers without cancelling. Only the connection's own bound keeps cancel-on-refusal. Every reply is built under a reservation taken before it exists, so no check-then-send race remains. "Core differs: Core keeps receiving into its buffer while paused and pauses processing of every message while its send buffer is full; btcrs stops reading the socket until the tail is served and holds reads only after a `getdata`, so any other message keeps the plain saturation policy."
+The unserved remainder of one `getdata` that stopped because the session could not reserve send credit before building the next reply. The refusal came either from the connection's own bound or from the node's aggregate outbound budget (see "Outbound queue accounting" in `docs/policies/p2p-compatibility.md`). The remainder stays in request order, with the misses found before it. The connection reads nothing from the peer while it holds them. The misses go out in one `notfound` once a reservation for its exact length succeeds, and never without one. The remaining items resume once a fresh production reservation succeeds, and reads stay held until they do, so the peer's next reply has a slot. A dead writer, a cancelled lease, or a pause past 20 minutes ends the session. Time that the aggregate budget refused counts toward neither the 20 minutes nor the request and receive ages. Shared saturation defers without cancelling. Only the connection's own bound keeps cancel-on-refusal. Every reply is built under a reservation taken before it exists, so no check-then-send race remains. "Core differs: Core keeps receiving into its buffer while paused. It pauses processing of every message while its send buffer is full. btcrs stops reading the socket until the tail is served and holds reads only after a `getdata`, so any other message keeps the plain saturation policy."
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
@@ -167,7 +167,7 @@ The greatest height up to which every block has been validated and committed to 
 The bounded set of blocks in flight: requested but not yet received. Capped jointly by a block count and an estimated-bytes budget (see *Count-and-byte bound*) and refilled as blocks arrive.
 
 ### Staller
-A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block.
+A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation). It does not blame a peer when local apply/stager backpressure is the bottleneck. It disconnects the staller so another peer can supply the block.
 
 ### Peer lifecycle ownership
 `P2pService` owns P2P control state and workers. Live sessions live in one
@@ -185,7 +185,7 @@ Skipping script-signature verification for blocks at or below a trusted height w
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
 
 ### Optimized default posture
-The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 256, 16 in-flight per peer once fan-out engages), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
+The default mainnet configuration uses the `fjall` backend and multi-peer download (outbound target 8, pending block budget 256, 16 in-flight per peer once fan-out engages). It enables hash-pinned assume-valid, 450 MiB `dbcache`, and keeps `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`. It runs unprivileged and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. Owner: `NetworkProfile::for_selection` in `crates/node/src/config.rs`; layering is `ARCH-05` in `docs/contracts/architecture.md`.
@@ -201,16 +201,16 @@ The owned Bitcoin protocol vocabulary in `crates/primitives`: `Tx`, `Block`,
 `Script`, `Witness`, hashes, sighash, compact-size encoding, and network
 constants. These types are implemented here; they are not `rust-bitcoin`
 aliases, wrappers, or conversion shims. Field types on `Tx`/`Header` are the
-same native newtypes — satoshis, nBits, scripts, and locktime are not raw
+same native newtypes. Satoshis, nBits, scripts, and locktime are not raw
 integers at the protocol boundary. Durable tests pin Core vectors,
 published genesis hashes, and golden fixtures. RPC address/`asm` rendering
 may still use `rust-bitcoin` at the RPC boundary only.
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), compiled in when the `kernel` Cargo feature is enabled. The `kernel` feature is a capability ("bitcoinkernel support is compiled in"), not a selection; the engine that runs is chosen at runtime by `validation.engine` (`native` by default, `kernel` to route input-script verification and the one-shot block parse through `bitcoinkernel`). Rust performs the surrounding non-script transaction and block checks. `native` is the default engine in every build; the `bin/bitcoin-rs` binary and all library crates default to kernel-free, so `cargo build -p bitcoin-rs` uses the native interpreter and links no C++ engine. Builds with `kernel` need `cmake` and `libboost-dev`. Selecting `kernel` without the feature fails at startup with an unsupported-build error, never with silent engine substitution (`docs/contracts/validation-default.md`).
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), compiled in when the `kernel` Cargo feature is enabled. The `kernel` feature is a capability ("bitcoinkernel support is compiled in"), not a selection. The engine that runs is chosen at runtime by `validation.engine` (`native` by default, `kernel` to route input-script verification and the one-shot block parse through `bitcoinkernel`). Rust performs the surrounding non-script transaction and block checks. `native` is the default engine in every build. The `bin/bitcoin-rs` binary and all library crates default to kernel-free, so `cargo build -p bitcoin-rs` uses the native interpreter and links no C++ engine. Builds with `kernel` need `cmake` and `libboost-dev`. Selecting `kernel` without the feature fails at startup with an unsupported-build error, never with silent engine substitution (`docs/contracts/validation-default.md`).
 
 ### Native Rust interpreter
-The pure-Rust script path in `crates/script`, the default `validation.engine` in every build — including `kernel` builds, where `validation.engine = "native"` still reaches it. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine and the default production engine.
+The pure-Rust script path in `crates/script`, the default `validation.engine` in every build, including `kernel` builds where `validation.engine = "native"` still reaches it. It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine and the default production engine.
 
 ### One-shot block parse
 Parsing each block exactly once on the apply path, then reusing that parse downstream for txids. On the `Kernel` arm only, it also reuses the borrowed `TransactionRef` objects that script preparation reuses. The `Native` arm reads the view's decoded transactions. `kernel::BlockParse` (`crates/consensus/src/kernel.rs`) is the one-shot parse. Its parse engine follows the selected `validation.engine`, so `Native` parses with the Rust parser and `Kernel` with `bitcoinkernel::Block::new`. The `Native` variant is compiled in every build. The `Kernel` variant exists only in `kernel`-feature builds, where selecting `validation.engine = "kernel"` reaches it. Any other selection fails closed with the unsupported-build error.
@@ -256,7 +256,7 @@ are not part of node configuration, including CLI, environment, TOML, and
 
 ## Block apply
 ### Window script batching
-Verifying the ordered transaction unit of several consecutive blocks in one parallel dispatch. The window prepares each block against an ordered overlay, dispatches once, and issues a private, single-use `BlockValidationProof` that owns the `PreparedApply` it certifies and binds block hash, predecessor, height, flags, and locktime cutoff. Blocks then commit one at a time, in order; commit re-derives all five fields and on mismatch discards proof and prepared state and rebuilds from the live UTXO set. The proof bypasses only the transaction-validation slot: block rules and BIP30 stay before it, coinbase maturity and BIP68 after. Assume-valid produces a distinct `AssumeValidSkipped` state that never takes the bypass.
+Verifying the ordered transaction unit of several consecutive blocks in one parallel dispatch. The window prepares each block against an ordered overlay, dispatches once, and issues a private, single-use `BlockValidationProof`. That proof owns the `PreparedApply` it certifies and binds block hash, predecessor, height, flags, and locktime cutoff. Blocks then commit one at a time, in order. Commit re-derives all five fields and on mismatch discards proof and prepared state, then rebuilds from the live UTXO set. The proof bypasses only the transaction-validation slot: block rules and BIP30 stay before it, coinbase maturity and BIP68 after. Assume-valid produces a distinct `AssumeValidSkipped` state that never takes the bypass.
 
 ### Front-half duplication
 The failure mode where a batched fast path recomputes the sequential path's preparation instead of replacing it, so the saving is paid straight back. The tell is that the accelerated stage shrinks by roughly what the new stage costs. The fix is splitting the sequential path into a prepare half and a commit half, never a cheaper second pass.
@@ -265,10 +265,10 @@ The failure mode where a batched fast path recomputes the sequential path's prep
 A stage that is parallel in shape but serial in effect because each dispatch is too small to amortise waking the workers. Diagnose with a scaling sweep (1, 4, 32 threads), not a profiler. On the apply path, issuing fewer, larger dispatches (*Window script batching*) addresses it.
 
 ### Parallel granularity (per-item cost rule)
-Whether a fan-out pays is decided by per-item work against dispatch cost, not by how parallelizable the loop looks: ~100 µs script checks want more parallelism (`MIN_PARALLEL_SCRIPT_CHECKS` = 32, `crates/consensus/src/verify_tx.rs`), ~500 ns UTXO lookups want none, ~2.6 µs Merkle nodes gain from SIMD batching rather than task fan-out. Thresholds have an interior optimum in both directions. Gate on **elapsed**, never on the stage being targeted.
+Whether a fan-out pays is decided by per-item work against dispatch cost, not by how parallelizable the loop looks. ~100 µs script checks want more parallelism (`MIN_PARALLEL_SCRIPT_CHECKS` = 32, `crates/consensus/src/verify_tx.rs`). ~500 ns UTXO lookups want none. ~2.6 µs Merkle nodes gain from SIMD batching rather than task fan-out. Thresholds have an interior optimum in both directions. Gate on **elapsed**, never on the stage being targeted.
 
 ### Global rayon pool cap
-The process-wide rayon pool is capped at `GLOBAL_RAYON_THREADS` (4) by `cap_global_thread_pool` (`crates/node/src/lifecycle.rs`). It serves the apply-path parse and non-script checks, UTXO commit, coinstats, and index preparation fan-outs, while `SCRIPT_VERIFY_POOL` separately holds up to 32 threads; uncapped, its workers oversubscribe a many-core host and spin. Rationale and the measurement table are at the constant's doc comment.
+The process-wide rayon pool is capped at `GLOBAL_RAYON_THREADS` (4) by `cap_global_thread_pool` (`crates/node/src/lifecycle.rs`). It serves the apply-path parse, non-script checks, UTXO commit, coinstats, and index preparation fan-outs. `SCRIPT_VERIFY_POOL` separately holds up to 32 threads; uncapped, its workers oversubscribe a many-core host and spin. Rationale and the measurement table are at the constant's doc comment.
 
 ### Chain generation
 The even/odd atomic counter on `MempoolGateway` that fences admission
@@ -284,7 +284,7 @@ and reopens admission (retryable, no restart); a `UtxoCommit` refusal, panic,
 crash, or torn state leaves the generation odd until recovery establishes a
 consistent chainstate. A generation-settlement failure itself (`finish` CAS
 failure / `GenerationMoved`) is an invariant violation: admission stays closed
-and the failure is surfaced as fatal — the node does not retry until recovery
+and the failure is surfaced as fatal. The node does not retry until recovery
 or restart re-establishes a consistent gateway.
 
 ### Admission origin
@@ -320,19 +320,19 @@ A window sized by whichever of a count cap and a byte cap binds first, because i
 ## Chain state and reorg
 
 ### Chain control
-Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip, loads every body the disconnect/connect plan needs, then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
+Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip and loads every body the disconnect/connect plan needs. It then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
 
 ### Commit point (multi-store mutation)
-The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/chainstate/src/error.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start recovers from it automatically). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried. `DisconnectError` (`crates/chainstate/src/error.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, though uncleared in-flight marker forces recovery on next start). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
 
 ### Disconnect marker phase
-The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; an ordinary checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup recovers automatically from either phase: it reconciles the certified durable-head chain with the restored state — rewinding a checkpoint the disconnect outran, replaying a gap that trails it — warns with the mode chosen, publishes a clean checkpoint, and retires the marker only after that publication is durable; durable evidence the head chain cannot authenticate still fails closed.
+The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; an ordinary checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup recovers automatically from either phase. It reconciles the certified durable-head chain with the restored state, rewinding a checkpoint the disconnect outran or replaying a gap that trails it. It warns with the mode chosen, publishes a clean checkpoint, and retires the marker only after that publication is durable; durable evidence the head chain cannot authenticate still fails closed.
 
 ### Undo record
 The per-block inverse of a UTXO commit, queued before later apply mutations and made durable by the clean checkpoint rather than a per-block fsync. Keyed by height **and** block hash so an abandoned-branch record cannot replay against another block at the same height. Retained after a disconnect because branch flip-flop is normal.
 
 ### Owed derived state
-State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
+State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller. It preloads all disconnect bodies and the available contiguous connect prefix. A `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
 
 ## Derived indexes
 
@@ -349,7 +349,7 @@ A query returns a result only when one snapshot proves that every capability it 
 A key that says which producer wrote a row, not merely where it is. Funding, spending, and txid keys are an 8-byte prefix plus height, so two same-height blocks sharing a script collide. A second rollback of the first block would then delete the second block's rows. The block-header row is keyed by the 80-byte header whose hash is the block hash, so it is identity-bearing. Checking it before deleting stands in for rekeying the other families, which would break the electrs-compatible layout.
 
 ### All-or-scan position fallback
-Index row values carry transaction byte positions without a block tag. The reader validates the whole position list (nonempty, strictly increasing, unique, in-bounds, no overflow), reads each range from the canonical `(height, full hash)` body, and exact-checks the decoded txid or scripthash. If any position fails it discards every tentative result for that row and scans the full block — never skipping one position and keeping the rest.
+Index row values carry transaction byte positions without a block tag. The reader validates the whole position list (nonempty, strictly increasing, unique, in-bounds, no overflow). It reads each range from the canonical `(height, full hash)` body and exact-checks the decoded txid or scripthash. If any position fails, it discards every tentative result for that row and scans the full block. It never skips one position and keeps the rest.
 
 ## Storage
 
@@ -435,7 +435,7 @@ Automatic removal of transactions strictly older than 336 hours (`now.saturating
 ## Mining
 
 ### Template tail fill
-Template tail fill is the second selection pass that reuses block space left after the main chunk walk. It scans chunks skipped only for weight, size, or sigop limits in index order and appends the longest fitting prefix whose aggregate modified-fee rate meets the 1 sat/kvB floor. Prefixes respect ancestor closure, finality, and exact count growth, so total fees never fall. Core differs: Core skips a chunk that does not fit and drops the rest of its cluster; btcrs fills the space left at the end with ordered prefixes of skipped chunks.
+Template tail fill is the second selection pass that reuses block space left after the main chunk walk. It scans chunks skipped only for weight, size, or sigop limits in index order. It appends the longest fitting prefix whose aggregate modified-fee rate meets the 1 sat/kvB floor. Prefixes respect ancestor closure, finality, and exact count growth, so total fees never fall. Core differs: Core skips a chunk that does not fit and drops the rest of its cluster. btcrs fills the remaining space with ordered prefixes of skipped chunks.
 
 ### Prepared template
 A candidate selected for a staged tip while that block's files synchronize.
@@ -463,7 +463,7 @@ exclusive union is subtracted from whole-run wall. Owner:
 `docs/benchmarks/hot-path-ledger.toml`.
 
 ### Retained benchmark contract
-Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
+Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained Criterion targets are the `benches/` directories of the owning crates. These currently cover consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write. Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
 
 ### C150
 The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
@@ -472,7 +472,7 @@ The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH,
 The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
-A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians.
+A cross-node benchmark matches every input that is not the thing under test before any ratio is quoted. These inputs include block source, validation posture, allocator, CPU pinning, and time of measurement. Interleave both nodes back-to-back on an idle host and quote paired medians.
 
 ### Offline full-validation comparator
 The processing-bound cross-node oracle: Bitcoin Core 31.1 and bitcoin-rs both

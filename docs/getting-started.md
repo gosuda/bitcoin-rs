@@ -217,7 +217,7 @@ The optional `silent-payments` build feature plus `--silent-payments` enables
 the authenticated, experimental `getblocktweaks` RPC. It needs retained certified
 block inputs rather than txindex; see [Silent Payments usage and limits](silent-payments.md).
 
-`--fast-sync` (also `BITCOIN_RS_FAST_SYNC` or `fast_sync` in TOML) relaxes the block-download policy: the node targets 32 full-relay outbound peers instead of 8 (its two block-relay-only slots are unchanged), fans block requests out as soon as two eligible outbound peers are connected instead of eight, and divides the 256-block download window across the eligible peers with a floor of 8 blocks per peer instead of 16 (two peers get 128 each; the 8-block floor is reached at 32 peers). Consensus validation is unchanged. The mode is opt-in and its throughput has not been measured against the default.
+`--fast-sync` (also `BITCOIN_RS_FAST_SYNC` or `fast_sync` in TOML) relaxes the block-download policy. The node targets 32 full-relay outbound peers instead of 8 (its two block-relay-only slots are unchanged). It fans block requests out as soon as two eligible outbound peers are connected instead of eight. It divides the 256-block download window across the eligible peers with a floor of 8 blocks per peer instead of 16; two peers get 128 each. The 8-block floor is reached at 32 peers. Consensus validation is unchanged. The mode is opt-in and its throughput has not been measured against the default.
 
 ## Check progress
 
@@ -317,7 +317,7 @@ See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 `--validation-mode` (also `BITCOIN_RS_VALIDATION_MODE` or `validation_mode` in TOML) selects which historical script verification the apply path may skip. Non-script consensus checks always run.
 
 - `assume-valid` (default): Bitcoin Core `-assumevalid` semantics. Scripts are skipped through `--assume-valid-height` only while the active chain contains the pinned network anchor.
-- `full`: every script executes; `--assume-valid-height` is ignored. Every committed block must have executed its scripts. When the stored chain was committed with scripts skipped, or its attestation is missing, the next `full` start rebuilds the chainstate from the stored blocks and executes every script; this needs an unpruned datadir. A datadir that was pruned stops with `full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync`.
+- `full`: every script executes; `--assume-valid-height` is ignored. Every committed block must have executed its scripts. When the stored chain was committed with scripts skipped, or its attestation is missing, the next `full` start rebuilds the chainstate from the stored blocks. It executes every script; this needs an unpruned datadir. A datadir that was pruned stops with `full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync`.
 
 Startup replay distinguishes cold revalidation from recovery after an accepted checkpoint; [the recovery contract](contracts/recovery.md#rcv-02-ordered-commit-protocol) defines that trust boundary.
 
@@ -332,7 +332,7 @@ Startup replay distinguishes cold revalidation from recovery after an accepted c
 - `native` (default): the native Rust interpreter. It is compiled in every build.
 - `kernel`: Bitcoin Core's C++ engine (`libbitcoinkernel`). Requires a build with `--features kernel` (plus `cmake` and `libboost-dev`). The feature compiles kernel support in; the setting selects it.
 
-Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error: ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)``. The failure comes before chain state opens or workers start. There is no silent engine substitution.
+Setting `kernel` on a build without the `kernel` feature fails at startup with an unsupported-build error. The error message is: ``validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)``. The failure comes before chain state opens or workers start. The node never substitutes another engine silently.
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel

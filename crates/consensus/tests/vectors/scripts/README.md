@@ -4,7 +4,7 @@ Per-transaction script-verdict fixtures for
 `crates/consensus/tests/kernel_block_parity.rs`.
 One JSON per script class; each carries the raw transaction hex, its expected
 `txid` **and** `wtxid`, **every** input's prevout (scriptPubKey hex + amount
-in sats — the kernel taproot path needs all prevouts for
+in sats, because the kernel taproot path needs all prevouts for
 `PrecomputedTransactionData`), and the Core-named verify flags the production
 apply path computes at the spend height. For pre-segwit transactions
 `wtxid == txid`; it is recorded (computed, not assumed) so the schema stays
@@ -15,8 +15,8 @@ The corpus is committed so CI depends on neither the local datadir nor the
 network. The test loader recomputes each transaction's txid **and wtxid**
 from `tx_hex` and fails loudly on any mismatch with the `txid`/`wtxid` fields
 below. The txid alone covers only the witness-stripped serialization; the
-wtxid commits to the witness bytes too, so the full raw data — witnesses
-included — is self-authenticating against the recorded provenance.
+wtxid commits to the witness bytes too, so the full raw data, witnesses
+included, is self-authenticating against the recorded provenance.
 
 ## Manifest
 
@@ -31,7 +31,7 @@ included — is self-authenticating against the recorded provenance.
 
 ## Selection notes
 
-- **`legacy_p2pk`** is the canonical block-170 Satoshi→Finney transaction —
+- **`legacy_p2pk`** is the canonical block-170 Satoshi→Finney transaction,
   the first ever non-coinbase Bitcoin transaction, spending the block-9
   coinbase P2PK output.
 - **`legacy_p2pkh`** is the first transaction in the local 0→150k datadir
@@ -40,7 +40,7 @@ included — is self-authenticating against the recorded provenance.
 - **`p2sh_spend`** is post-activation (BIP16 activated at height ≈173,805,
   height >= 173,805 after BIP16 activation). Height 400,000 was chosen after
   mechanical scans of the activation window (173,805–173,905 plus spot blocks
-  at 183k/200k/220k/250k/290k/320k) found no all-P2SH-input spend — organic
+  at 183k/200k/220k/250k/290k/320k) found no all-P2SH-input spend. Organic
   P2SH usage stayed rare for years after activation. The redeem script is a
   2-of-2 multisig, so this fixture also exercises `OP_CHECKMULTISIG`
   (the "multisig era" legacy semantics) through the kernel.
