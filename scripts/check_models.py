@@ -12,6 +12,7 @@ Exit codes: 11 tool identity, 12 parse/type error, 13 counterexample,
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -21,9 +22,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from dataclasses import dataclass
 
+PRINT_LOCK = threading.Lock()
 ROOT = Path(__file__).resolve().parents[1]
 FORMAL_CONTRACT = Path("docs/contracts/formal-verification.md")
 MODEL_ROOT = Path("docs/models")
@@ -210,8 +213,9 @@ def run_once(root: Path, executable: Path, module: Module, property_arg: str, bo
         json.dumps({"k": bound, "native_rc": native, "evidence_rc": code}) + "\n",
         encoding="utf-8",
     )
-    print(f"{module.name} {kind}: K={bound} native={native} evidence={code}; {run_dir}",
-          flush=True)
+    with PRINT_LOCK:
+        print(f"{module.name} {kind}: K={bound} native={native} evidence={code}; {run_dir}",
+              flush=True)
     return native, code, run_dir
 
 
@@ -226,58 +230,230 @@ def run_module(root: Path, executable: Path, module: Module, property_arg: str, 
         bound = max(1, bound // 2)
 
 
+@dataclass(frozen=True)
+class RunEnv:
+    root: Path
+    executable: Path
+    timeout: int
+    out_dir: Path
+
+
+@dataclass(frozen=True)
+class LaneJob:
+    module: Module
+    property_arg: str
+    kind: str
+    start_k: int
+
+
+def tool_version(root: Path) -> str:
+    manifest_path = root / "crates/rpc/core-compat.toml"
+    with manifest_path.open("rb") as stream:
+        manifest = tomllib.load(stream)
+    return str(manifest["reference"]["formal_tool"]["version"])
+
+
+def load_memo(path: Path) -> dict[str, dict[str, int | str]]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def memo_bound(
+    memo: dict[str, dict[str, int | str]],
+    module: Module,
+    kind: str,
+    tool_ver: str,
+) -> int | None:
+    lane_key = f"{module.name}:{kind}"
+    entry = memo.get(lane_key)
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("tla_sha256") != module.tla_sha256:
+        return None
+    if entry.get("tool_version") != tool_ver:
+        return None
+    bound = entry.get("k")
+    if isinstance(bound, int) and bound > 0:
+        return bound
+    return None
+
+
+def save_memo(path: Path, memo: dict[str, dict[str, int | str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_text(json.dumps(memo, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+    except OSError as error:
+        with PRINT_LOCK:
+            print(f"warning: failed to write memo: {error}", file=sys.stderr, flush=True)
+
+
+def run_lane(env: RunEnv, job: LaneJob) -> tuple[Module, str, dict[str, int | str | None]]:
+    try:
+        record = run_module(
+            env.root, env.executable, job.module, job.property_arg,
+            env.timeout, job.start_k, env.out_dir,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        with PRINT_LOCK:
+            print(f"{job.module.name} {job.kind}: artifact error: {error}",
+                  file=sys.stderr, flush=True)
+        record = {"k": job.start_k, "native_rc": None, "evidence_rc": 14, "run": ""}
+    return job.module, job.kind, record
+
+
+def build_jobs(
+    inventory: tuple[Module, ...],
+    explicit_k: int | None,
+    memo: dict[str, dict[str, int | str]],
+    tool_ver: str,
+) -> list[LaneJob]:
+    jobs: list[LaneJob] = []
+    for module in inventory:
+        for property_arg in PROPERTIES:
+            kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+            if explicit_k is not None:
+                start_k = explicit_k
+            else:
+                cached = memo_bound(memo, module, kind, tool_ver)
+                start_k = cached if cached is not None else START_BOUND
+            jobs.append(LaneJob(module, property_arg, kind, start_k))
+    return jobs
+
+
+def execute_jobs(
+    root: Path,
+    executable: Path,
+    jobs: list[LaneJob],
+    timeout: int,
+    out_dir: Path,
+    requested_jobs: int | None,
+) -> dict[tuple[str, str], dict[str, int | str | None]]:
+    cpus = os.cpu_count() or 1
+    max_workers = requested_jobs if requested_jobs is not None else max(1, min(cpus, len(jobs)))
+    env = RunEnv(root, executable, timeout, out_dir)
+    results: dict[tuple[str, str], dict[str, int | str | None]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(run_lane, env, job): (job.module.name, job.kind, job.start_k)
+            for job in jobs
+        }
+        for future in as_completed(futures):
+            mod_name, kind, start_k = futures[future]
+            try:
+                _, _, record = future.result()
+            except Exception as err:
+                with PRINT_LOCK:
+                    print(f"{mod_name} {kind}: unexpected error: {err}",
+                          file=sys.stderr, flush=True)
+                record = {"k": start_k, "native_rc": None, "evidence_rc": 14, "run": ""}
+            results[(mod_name, kind)] = record
+    return results
+
+
+def build_summary(
+    inventory: tuple[Module, ...],
+    results: dict[tuple[str, str], dict[str, int | str | None]],
+) -> dict[str, dict[str, dict[str, int | str | None]]]:
+    summary: dict[str, dict[str, dict[str, int | str | None]]] = {}
+    for module in sorted(inventory, key=lambda item: item.name):
+        summary[module.name] = {}
+        for property_arg in PROPERTIES:
+            kind = "safety" if property_arg.startswith("--inv=") else "temporal"
+            if (module.name, kind) in results:
+                summary[module.name][kind] = results[(module.name, kind)]
+    return summary
+
+
+def write_summary_report(
+    out_dir: Path,
+    summary: dict[str, dict[str, dict[str, int | str | None]]],
+) -> None:
+    report = out_dir / "summary.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(f"{'module':<28} {'lane':<9} {'K':>4} {'native':>7} {'evidence':>9}", flush=True)
+    for name, lanes in summary.items():
+        for kind, record in lanes.items():
+            print(f"{name:<28} {kind:<9} {record['k']:>4} "
+                  f"{str(record['native_rc']):>7} {str(record['evidence_rc']):>9}", flush=True)
+    print(f"summary: {report}", flush=True)
+
+
+def update_memo(
+    memo: dict[str, dict[str, int | str]],
+    jobs: list[LaneJob],
+    summary: dict[str, dict[str, dict[str, int | str | None]]],
+    tool_ver: str,
+    memo_path: Path,
+) -> None:
+    for job in jobs:
+        record = summary[job.module.name][job.kind]
+        lane_key = f"{job.module.name}:{job.kind}"
+        if record.get("evidence_rc") == 0 and record.get("k") is not None:
+            memo[lane_key] = {
+                "tla_sha256": job.module.tla_sha256,
+                "tool_version": tool_ver,
+                "k": int(record["k"]),
+            }
+        else:
+            memo.pop(lane_key, None)
+    save_memo(memo_path, memo)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-only", action="store_true",
                         help="check identities, not model properties")
     parser.add_argument("--timeout", type=int, default=3600,
                         help="maximum seconds per solver invocation")
-    parser.add_argument("--k-start", type=int, default=START_BOUND,
-                        help=f"first step bound (default {START_BOUND})")
-    parser.add_argument("--module", action="append", default=[],
+    parser.add_argument("--k-start", type=int, default=None,
+                        help=f"first step bound (default {START_BOUND} or memo)")
+    parser.add_argument("--k-memo", default="target/apalache/k-memo.json",
+                        help="path to K bound memo cache (default target/apalache/k-memo.json)")
+    parser.add_argument("--jobs", "-j", type=int, default=None,
+                        help="maximum concurrent lanes (default: min(cpu_count, lanes))")
+    parser.add_argument("--module", action="append", default=None,
                         help="run only these Owner/Machine modules (repeatable)")
     parser.add_argument("--out-dir", default="target/apalache",
                         help="artifact root, relative to the repository (default target/apalache)")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
-    if args.k_start <= 0:
+    if args.k_start is not None and args.k_start <= 0:
         parser.error("--k-start must be positive")
+    if args.jobs is not None and args.jobs <= 0:
+        parser.error("--jobs must be positive")
+    selected_modules = args.module if args.module is not None else []
     try:
         inventory = modules(ROOT)
-        if args.module:
-            unknown = sorted(set(args.module) - {module.name for module in inventory})
+        if selected_modules:
+            unknown = sorted(set(selected_modules) - {module.name for module in inventory})
             if unknown:
                 raise EvidenceError(15, f"unknown module: {', '.join(unknown)}")
-            inventory = tuple(module for module in inventory if module.name in args.module)
+            inventory = tuple(module for module in inventory if module.name in selected_modules)
         executable = tool(ROOT)
         if args.check_only:
             print(f"Tool and {len(inventory)} model identities checked; properties NOT evaluated.")
             return 0
-        summary: dict[str, dict[str, dict[str, int | str | None]]] = {}
-        for module in inventory:
-            summary[module.name] = {}
-            for property_arg in PROPERTIES:
-                kind = "safety" if property_arg.startswith("--inv=") else "temporal"
-                try:
-                    summary[module.name][kind] = run_module(
-                        ROOT, executable, module, property_arg, args.timeout, args.k_start,
-                        ROOT / args.out_dir,
-                    )
-                except (OSError, subprocess.SubprocessError) as error:
-                    print(f"{module.name} {kind}: artifact error: {error}", file=sys.stderr)
-                    summary[module.name][kind] = {
-                        "k": args.k_start, "native_rc": None, "evidence_rc": 14, "run": "",
-                    }
-        report = ROOT / args.out_dir / "summary.json"
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        print(f"{'module':<28} {'lane':<9} {'K':>4} {'native':>7} {'evidence':>9}")
-        for name, lanes in summary.items():
-            for kind, record in lanes.items():
-                print(f"{name:<28} {kind:<9} {record['k']:>4} "
-                      f"{str(record['native_rc']):>7} {str(record['evidence_rc']):>9}")
-        print(f"summary: {report}")
+        tool_ver = tool_version(ROOT)
+        memo_path = Path(args.k_memo)
+        if not memo_path.is_absolute():
+            memo_path = ROOT / memo_path
+        memo = load_memo(memo_path)
+        jobs = build_jobs(inventory, args.k_start, memo, tool_ver)
+        results = execute_jobs(ROOT, executable, jobs, args.timeout, ROOT / args.out_dir, args.jobs)
+        summary = build_summary(inventory, results)
+        write_summary_report(ROOT / args.out_dir, summary)
+        update_memo(memo, jobs, summary, tool_ver, memo_path)
         worst = max(
             (int(record["evidence_rc"]) for lanes in summary.values()
              for record in lanes.values()),
@@ -285,12 +461,11 @@ def main() -> int:
         )
         return 0 if worst == 0 else worst
     except EvidenceError as error:
-        print(error, file=sys.stderr)
+        print(error, file=sys.stderr, flush=True)
         return error.code
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError, subprocess.SubprocessError) as error:
-        print(f"Formal evidence unavailable: {error}", file=sys.stderr)
+        print(f"Formal evidence unavailable: {error}", file=sys.stderr, flush=True)
         return 14
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
