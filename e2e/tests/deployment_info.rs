@@ -1,5 +1,3 @@
-//! Deployment transport and declared native differences against pinned Core.
-
 use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};
 use bitcoin_rs_e2e::{Kind, ProcessNode, Result, SpawnOptions};
 use sonic_rs::{JsonValueTrait as _, json};

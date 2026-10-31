@@ -1,4 +1,3 @@
-//! Transaction wire versions through actual accepted blocks and lookup consumers.
 use bitcoin::consensus::{deserialize, encode::serialize_hex};
 use bitcoin::hex::FromHex as _;
 use bitcoin_rs_e2e::differential::{compare_reply, mine_common_chain};

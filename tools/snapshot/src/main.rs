@@ -1,5 +1,3 @@
-//! Read-only inspection and verification of Bitcoin Core portable snapshots.
-
 use std::{
     fs::{self, File},
     io::{self, BufReader, Write},

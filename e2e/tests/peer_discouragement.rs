@@ -1,5 +1,3 @@
-//! Core 31.1 comparison of local disconnects and operator `NoBan` protection.
-
 use std::time::{Duration, Instant};
 
 use bitcoin::p2p::message::{CommandString, NetworkMessage};

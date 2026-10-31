@@ -1,4 +1,3 @@
-//! rust-bitcoin parses tx/witness; bitcoin-rs runs consensus and policy.
 #![no_main]
 
 use std::sync::Arc;

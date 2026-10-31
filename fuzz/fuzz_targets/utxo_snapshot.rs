@@ -1,4 +1,3 @@
-//! Fuzz native checkpoint v4 and bounded Core portable v2 input separately.
 #![no_main]
 
 use std::io::Cursor;

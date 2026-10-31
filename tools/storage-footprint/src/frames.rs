@@ -1,5 +1,3 @@
-//! Frame accounting for append-only block-body files.
-
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::Path;
@@ -70,12 +68,6 @@ impl FileFrames {
     }
 }
 
-/// Splits one block file into record payload, record framing and an unframed tail.
-///
-/// The walk reads only record headers and seeks over bodies. It stops at the
-/// first byte that cannot start a complete record and reports the rest of the
-/// file as an unframed tail, which is what a stopped writer leaves behind and
-/// what the storage owner truncates on open.
 pub(super) fn file_frames(path: &Path) -> io::Result<FrameSplit> {
     let mut file = File::open(path)?;
     let file_len = file.metadata()?.len();

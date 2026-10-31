@@ -1,5 +1,3 @@
-//! Retained undo across public RPC/REST, compared with pinned unmodified Core.
-
 use std::io::Cursor;
 use std::time::Duration;
 

@@ -1,5 +1,3 @@
-//! Node lifecycle E2E: startup identity, readiness, graceful restart,
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

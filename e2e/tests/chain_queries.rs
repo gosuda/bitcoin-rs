@@ -1,5 +1,3 @@
-//! Chain-state query E2E: block/height lookups, chain tips, UTXO set
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

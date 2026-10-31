@@ -1,5 +1,3 @@
-//! Offline allocation snapshot; never opens a database or starts a node.
-
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 #[cfg(target_os = "linux")]

@@ -179,8 +179,6 @@ fn assert_matches_declared_semantics(state: &NodeState, shadow: &FeeEstimator) {
 }
 
 fn seed_replayable_history(state: &NodeState) -> Result<()> {
-    // Restart rebuilds coins from block bodies, so these confirmations need
-    // real funding ancestry rather than the admission-only fund_utxo seam.
     let first = mine_and_apply(state, applied_tip_hash(state)?, 1, 0, Vec::new())?;
     let mut tip = first.block_hash().0;
     for height in 2..=100 {

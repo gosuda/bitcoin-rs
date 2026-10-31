@@ -1,5 +1,3 @@
-//! Signed policy scenarios against two isolated public regtest processes.
-
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute, transaction,

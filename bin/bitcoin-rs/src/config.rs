@@ -94,13 +94,10 @@ macro_rules! emit_cli {
             pub(crate) config: Option<PathBuf>,
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
-            /// Single regular Core-framed archive file for foreground offline import.
             #[arg(long)]
             pub(crate) corpus: Option<PathBuf>,
-            /// Archive manifest binding the corpus identity and stop tip.
             #[arg(long)]
             pub(crate) manifest: Option<PathBuf>,
-            /// Output certified-state JSON for the offline import.
             #[arg(long)]
             pub(crate) state: Option<PathBuf>,
             $(

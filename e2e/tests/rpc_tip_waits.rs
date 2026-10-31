@@ -1,5 +1,3 @@
-//! Active-tip waits against an unmodified pinned Core process.
-
 #![expect(clippy::expect_used)]
 
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};

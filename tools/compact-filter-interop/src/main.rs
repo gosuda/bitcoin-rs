@@ -1,4 +1,3 @@
-//! Application driver for the unmodified, commit-pinned Kyoto consumer.
 use bip157::{Builder, ChainState, Event, HashCheckpoint, Network, ScriptBuf};
 use sonic_rs::json;
 use std::{

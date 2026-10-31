@@ -1,4 +1,3 @@
-//! Fuzz the Bitcoin P2P command decoders.
 #![no_main]
 
 use std::io::Cursor;

@@ -1,5 +1,3 @@
-//! Process custody for `bitcoin-rs` and pinned Bitcoin Core nodes.
-
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};

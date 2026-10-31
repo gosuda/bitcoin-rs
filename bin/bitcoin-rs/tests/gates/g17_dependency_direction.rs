@@ -1,5 +1,3 @@
-//! ARCH-01..ARCH-04: check the live Cargo graph against the architecture contract.
-
 #[path = "../support/dependency_graph.rs"]
 mod dependency_graph;
 
@@ -125,8 +123,6 @@ fn workspace_dependency_direction_is_one_way() {
     }
 }
 
-/// EMB-03: a real production embedder must not inherit fixture visibility
-/// through Cargo's workspace dev-feature unification.
 // EMB-03
 #[test]
 fn node_composition_root_is_not_a_production_embedding_api() -> Result<(), TestError> {

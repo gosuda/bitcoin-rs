@@ -130,7 +130,6 @@ fn request_body(
             _ => {}
         }
     }
-    // Receiving the body can precede the serving thread's broadcast bookkeeping.
     node.wait_for(
         "initial broadcast completion",
         Duration::from_secs(10),

@@ -1,5 +1,3 @@
-//! Mempool and transaction E2E: broadcast, entry/ancestor/descendant views,
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

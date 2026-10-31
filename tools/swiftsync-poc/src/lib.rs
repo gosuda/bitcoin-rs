@@ -1,5 +1,3 @@
-//! Research prototype for SwiftSync-style sync hints. Not compiled into the node.
-
 pub mod chain;
 pub mod convert;
 pub mod error;

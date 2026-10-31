@@ -1,9 +1,3 @@
-//! Shared typed error for the node's own tests, benches and test-seam embedders.
-//!
-//! Every node test returns `Result<(), TestError>` rather than a type-erased carrier. The
-//! `#[from]` arms cover the error types tests meet through the public entry
-//! points; ad-hoc expectation failures use [`TestError::message`].
-
 #[cfg(any(test, feature = "test-seam"))]
 #[derive(Debug, thiserror::Error)]
 pub enum TestError {

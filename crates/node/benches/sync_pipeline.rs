@@ -1,4 +1,3 @@
-//! Deterministic initial-sync proxy benchmark.
 #![expect(
     clippy::as_conversions,
     reason = "benchmark casts are intentionally lossy for perf measurement"
@@ -4204,7 +4203,6 @@ struct WindowUnit {
     cpu_ticks: u64,
     rss_start_bytes: u64,
     rss_peak_bytes: u64,
-    /// Whether `rss_peak_bytes` covers one unit (`true`) or the whole process.
     rss_reset: bool,
     requested: usize,
     applied_height: u32,
@@ -4276,11 +4274,6 @@ fn process_cpu_ticks() -> u64 {
     user.saturating_add(system)
 }
 
-/// Resets the kernel peak-RSS counter and returns the baseline it implies.
-///
-/// Writing `5` to `clear_refs` needs `CAP_SYS_RESOURCE`. Without it the peak
-/// stays process-wide, so the second field reports `false` and every RSS number
-/// covers the whole process rather than one unit.
 fn reset_peak_rss() -> (u64, bool) {
     let reset = std::fs::OpenOptions::new()
         .write(true)

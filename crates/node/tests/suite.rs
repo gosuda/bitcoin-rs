@@ -1,5 +1,3 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
 mod chainstate_journal;
 mod config_layered;
 mod embed;

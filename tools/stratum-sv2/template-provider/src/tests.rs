@@ -1,4 +1,3 @@
-//! Production public-Node consumer: no RPC client, test seam, or fake coordinator.
 use super::*;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_mining::{

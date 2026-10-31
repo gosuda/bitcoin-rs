@@ -155,9 +155,6 @@ impl HintSet {
         Self::decode(&text)
     }
 
-    /// Fixed payload of one hint coin: outpoint, height, coinbase flag, value,
-    /// script length and script. Both this and the reconstruction's export carry
-    /// the same coin, so the two sizes are comparable.
     pub fn payload_bytes(&self) -> u64 {
         self.coins
             .values()

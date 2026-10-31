@@ -1,4 +1,3 @@
-//! rust-bitcoin parses; bitcoin-rs runs `verify_block_rules` and per-tx non-script checks.
 #![no_main]
 
 use bitcoin::consensus::encode::{deserialize, serialize};

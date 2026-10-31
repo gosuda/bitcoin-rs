@@ -1,4 +1,3 @@
-//! Regtest-only embedded Node -> SV2 Template Distribution adapter.
 mod server;
 mod template;
 

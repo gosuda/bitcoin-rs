@@ -1,4 +1,3 @@
-//! Fuzz the production default script interpreter.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

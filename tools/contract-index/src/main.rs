@@ -26,11 +26,9 @@ const README_PATH: &str = "docs/contracts/README.md";
         citations; document paths are checked as Markdown links."
 )]
 struct Args {
-    /// Verify the generated files and the citations instead of writing them
     #[arg(long)]
     check: bool,
 
-    /// Repository root
     #[arg(long, value_name = "PATH", default_value = ".")]
     root: PathBuf,
 }

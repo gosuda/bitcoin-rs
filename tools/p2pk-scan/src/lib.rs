@@ -1,7 +1,3 @@
-//! Read-only P2PK listing: line order in the block file defines block height, and
-//! the blocks are replayed without validation, so the file must hold the canonical
-//! chain from genesis.
-
 use std::collections::HashSet;
 use std::io::{self, BufRead, Read};
 
@@ -89,8 +85,6 @@ enum ApplyFailure {
     VoutOverflow(Txid),
 }
 
-/// Matches `bitcoin_rs_script::is_p2pk`; that function owns the push width, key
-/// prefix and trailing `OP_CHECKSIG` rule, so this crate must not restate them.
 #[must_use]
 pub fn p2pk_pubkey(script: &[u8]) -> Option<(&[u8], KeyShape)> {
     if !bitcoin_rs_script::is_p2pk(script) {

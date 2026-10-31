@@ -1,4 +1,3 @@
-//! Public Core 31.1 script projections, using the existing process custody owner.
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_e2e::Kind;
 use bitcoin_rs_e2e::differential::compare_rpc;

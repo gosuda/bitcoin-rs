@@ -39,16 +39,11 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 const COMMON_BLOCKS: u32 = 101;
 
-/// Whether the OS still reports a live process under `pid`. On unix the
-/// kernel drops `/proc/<pid>` once the parent reaps the child; Windows
-/// answers via the process object's exit code.
 #[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
-/// Whether the OS still reports a live process under `pid`. Windows marks
-/// a terminated object's exit code, so a present-but-dead pid is not alive.
 #[cfg(windows)]
 fn pid_is_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
@@ -1687,8 +1682,6 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     assert_reaped(pid);
 }
 
-/// Restart: a clean stop and restart over the same datadir restores
-/// Ready readiness at the pinned tip with the index intact.
 #[test]
 fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
     let mut node = start_txindex_node();
@@ -1729,8 +1722,6 @@ fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
     assert_reaped(pid);
 }
 
-/// Reorg: invalidating a mid-chain block and mining a fork rewinds the
-/// derived watermark and returns readiness to Ready on the forked tip.
 #[test]
 fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
     let mut node = start_txindex_node();
@@ -1767,8 +1758,6 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
     assert_reaped(pid);
 }
 
-/// API-02 / REF-07: an explicit retained block lookup follows Core's applied
-/// ancestry after disconnect and replacement, while its raw bytes stay readable.
 #[test]
 fn retained_transaction_confirmations_match_core_after_reorg() {
     let compare_transaction = |core: &mut ProcessNode, node: &mut ProcessNode, params: &Value| {

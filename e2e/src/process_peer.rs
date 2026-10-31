@@ -1,5 +1,3 @@
-//! Bounded, recorded v1 wire peer for the public-process lane.
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};

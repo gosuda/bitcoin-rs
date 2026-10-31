@@ -1,5 +1,3 @@
-//! Reorg E2E: `invalidateblock` rewinds, a heavier competing Core chain
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

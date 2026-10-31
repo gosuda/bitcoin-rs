@@ -1,5 +1,3 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
 mod addrman_restart_e2e;
 mod block_inputs;
 mod compact_blocks_e2e;

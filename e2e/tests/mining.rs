@@ -1,5 +1,3 @@
-//! Mining-surface E2E: block templates, `submitblock`/`submitheader`,
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 

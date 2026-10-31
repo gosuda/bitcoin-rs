@@ -1,5 +1,3 @@
-//! Consumer-boundary tests, grouped into one integration binary.
-
 mod acceptance;
 mod assumeutxo;
 mod block_spends;

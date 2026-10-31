@@ -1,4 +1,3 @@
-//! Tests for failure records (REF-07d).
 #![expect(
     clippy::expect_used,
     reason = "test fixtures abort on their first unmet setup invariant"

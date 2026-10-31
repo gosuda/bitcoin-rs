@@ -1,5 +1,3 @@
-//! Offline allocation snapshot with block-frame and file-class accounting.
-
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;

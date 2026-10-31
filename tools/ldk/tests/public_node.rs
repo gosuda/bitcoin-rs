@@ -1,5 +1,3 @@
-//! Real public-API consumer on a blocking OS thread; no test-seam or RPC client.
-
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
     WPubkeyHash, Witness, absolute, consensus, hashes::Hash, transaction,

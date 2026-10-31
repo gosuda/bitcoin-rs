@@ -1,5 +1,3 @@
-//! Handshaken, journaled loopback peer for the binary's wire scenarios.
-
 use std::fs::File;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpStream};

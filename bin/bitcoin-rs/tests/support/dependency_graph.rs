@@ -1,5 +1,3 @@
-//! Shared dependency-graph parser and validator for `g17_dependency_direction`.
-
 #![expect(
     clippy::expect_used,
     reason = "malformed Cargo metadata is a test failure"

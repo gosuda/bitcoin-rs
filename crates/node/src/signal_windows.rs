@@ -76,7 +76,6 @@ impl Drop for ShutdownHandler {
 }
 
 #[cfg(test)]
-// Both platform implementations share these test-only lifecycle counters.
 #[path = "signal/testing.rs"]
 pub(crate) mod testing;
 

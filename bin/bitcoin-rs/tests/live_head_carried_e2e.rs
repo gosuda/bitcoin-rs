@@ -12,8 +12,6 @@ use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::live_peer::pump_until_tip;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 
-/// Pumps until a `getdata` requests `hash` (serving every request
-/// type-faithfully), up to `dur`. Returns true when the request was seen.
 fn pump_until_request(peer: &mut LivePeer, want: bitcoin::BlockHash, dur: Duration) -> bool {
     let end = Instant::now() + dur;
     while Instant::now() < end && !peer.dropped {

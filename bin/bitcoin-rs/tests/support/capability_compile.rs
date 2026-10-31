@@ -1,5 +1,3 @@
-//! Compile real consumer code without workspace dev-feature unification.
-
 use std::path::Path;
 use std::process::{Command, Output};
 

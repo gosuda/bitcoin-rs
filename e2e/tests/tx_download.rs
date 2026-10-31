@@ -1,5 +1,3 @@
-//! Core v31.1 `p2p_tx_download.py` comparison at the real process boundary.
-
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::{message::NetworkMessage, message_blockdata::Inventory};
 use bitcoin_rs_e2e::helpers::{mine_bare_blocks, submit_genesis};
@@ -116,7 +114,6 @@ fn request_owner_notfound_and_disconnect_match_core() -> Result<()> {
     scenario(Kind::Core)
 }
 
-/// Use a legacy-announcing peer and a BIP339 peer so both inv forms are valid.
 fn mixed_identity_scenario(kind: Kind) -> Result<()> {
     let mut node = ProcessNode::spawn(kind)?;
     if kind == Kind::BitcoinRs {

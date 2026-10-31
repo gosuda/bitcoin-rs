@@ -12,9 +12,7 @@ use clap::Parser;
     version
 )]
 struct Args {
-    /// Hexadecimal blocks, one per line, in canonical order from the genesis block
     blocks: PathBuf,
-    /// Emit the report as JSON
     #[arg(long)]
     json: bool,
 }
