@@ -653,20 +653,20 @@ pub(super) fn history(
         Vec::new()
     };
 
-    let records = match projection.confirmed_history(h) {
+    let records = match projection.history_page(
+        h,
+        last.and_then(|value| {
+            Txid::from_str(value)
+                .ok()
+                .filter(|txid| txid.to_string() == value)
+        }),
+        CHAIN_PAGE,
+    ) {
         Ok(records) => records,
         Err(response) => return response,
     };
-    let start = last.and_then(|x| {
-        records
-            .iter()
-            .position(|entry| entry.txid.to_string() == x)
-            .map(|n| n + 1)
-    });
     let chain = match records
         .into_iter()
-        .skip(start.unwrap_or(0))
-        .take(CHAIN_PAGE)
         .map(|record| {
             let confirmation = projection
                 .confirmation_at_height(record.height)

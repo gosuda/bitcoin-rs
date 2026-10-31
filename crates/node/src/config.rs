@@ -348,6 +348,7 @@ pub struct RpcConfig {
 
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
+    pub scripthash_limit: usize,
     pub txindex: bool,
     pub blockfilterindex: bool,
     pub script_index: ScriptIndexMode,
@@ -475,6 +476,10 @@ impl NodeConfig {
                 auth: rpc_auth(settings),
             },
             indexes: IndexConfig {
+                scripthash_limit: settings
+                    .indexes
+                    .scripthash_limit
+                    .unwrap_or(bitcoin_rs_index::runtime::DEFAULT_SCRIPTHASH_LIMIT),
                 txindex: settings.indexes.txindex.unwrap_or(false),
                 blockfilterindex: settings.indexes.blockfilterindex.unwrap_or(false),
                 script_index: settings

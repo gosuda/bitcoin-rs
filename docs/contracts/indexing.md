@@ -29,6 +29,20 @@ Owners:
 
 ### `IDX-03`: Query gating and snapshot consistency
 
+- Script history and live queries have a configurable `scripthash-limit` (default
+  25,000 candidate funding positions/matching outputs or live locators). Query
+  scan/read counts scale with this allowance; the shared row/byte budgets stay
+  in force. Esplora maps the explicit script-limit refusal to HTTP 422. Statistics
+  remain exact or fail; limits never produce capped successful statistics.
+  History pages retain the full funding/outpoint scan because an old output can
+  have a recent spender. Spender candidates are grouped by height and position;
+  bodies strictly below a proven page boundary need not be resolved. Same-height
+  ties, exclusive cursors, compact-prefix verification and fallback reads retain
+  their existing semantics. This is not an O(page-size) history index. Evidence:
+  `high_activity_history_is_exact_and_shared_spenders_are_read_once` and
+  `history_pages_include_recent_spends_of_old_funding_and_skip_old_spender_bodies`
+  in `crates/index/src/runtime/query_tests.rs`.
+
 - Ready invariant: `ready` holds if and only if `cursor == applied_tip` on the active chain. `DerivedIndexQueryEngine::with_snapshot` and `index_info` gate every read: (1) the worker runtime must be healthy (neither `failed` nor `shutdown`); (2) the applied tip loaded before snapshot creation must match the durable capability watermark (`IndexWatermark { height, hash }`) for every consumed capability; (3) the runtime revision (`DerivedIndexRuntime::revision`) and the applied tip identity must remain identical before and after snapshot acquisition.
 - A lagging, rebuilding, rolling-back, or concurrently-advanced-against index refuses with `TxQueryError::Retry` or `TxQueryError::Unavailable`. Stale, unconfirmed, or torn rows are never returned. A body-store read failure is `TxQueryError::Storage`, not a missing body. `unspent_outputs` consumes the `ScriptLive` watermark only; the query holds chain-transition authority across watermark validation, live locator scan, and authoritative UTXO resolution (apply mutates the UTXO set before publishing the applied tip, so a before/after tip comparison cannot exclude that window). History and tx-lookup queries take no lock. A missing locator under an otherwise ready matching watermark is unavailable; a compact-prefix collision is filtered by the exact script check. A required capability missing from the configured selection is `Unavailable` with a distinct disabled reason; a configured capability whose watermark lags is `Retry` (backfilling), never disabled.
 - A query MUST retain at most one decoded block in its memo. Consecutive full-block reads at the same `(height, hash)` reuse it. An identity miss MUST evict the retained block before fetching another one, and evicted identities are read and charged again. Proof (`crates/index/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`; `crates/index/src/runtime/query_tests.rs`: `confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_query`, `confirmed_history_with_nonmatching_script_falls_back_per_height_and_stays_empty`).

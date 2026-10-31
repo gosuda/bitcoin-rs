@@ -460,13 +460,20 @@ impl<'a> Projection<'a> {
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
         let snapshot = index.history_snapshot(script_hash).map_err(query_error)?;
+        let mut confirmations = std::collections::HashMap::<u32, Confirmation>::new();
         let mut confirmed = snapshot
             .history
             .into_iter()
             .map(|record| {
-                let confirmation = self
-                    .confirmation_at_height(record.height)
-                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                let confirmation = match confirmations.entry(record.height) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let confirmation = self
+                            .confirmation_at_height(record.height)
+                            .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
+                        *entry.insert(confirmation)
+                    }
+                };
                 Ok(ConfirmedActivity {
                     record,
                     confirmation,
@@ -492,9 +499,11 @@ impl<'a> Projection<'a> {
         })
     }
 
-    pub(super) fn confirmed_history(
+    pub(super) fn history_page(
         &self,
         script_hash: ScriptHash,
+        last: Option<Txid>,
+        limit: usize,
     ) -> Result<Vec<ScriptHistoryRecord>, Response> {
         let index = self
             .ctx
@@ -502,15 +511,9 @@ impl<'a> Projection<'a> {
             .script_index
             .as_ref()
             .ok_or_else(|| service_unavailable("script index is disabled"))?;
-        let mut history = index.confirmed_history(script_hash).map_err(query_error)?;
-        history.sort_by(|left, right| {
-            right
-                .height
-                .cmp(&left.height)
-                .then_with(|| right.txid.cmp(&left.txid))
-        });
-        history.dedup_by_key(|record| record.txid);
-        Ok(history)
+        index
+            .history_page(script_hash, last, limit)
+            .map_err(query_error)
     }
 
     pub(super) fn mempool_activity_for(
@@ -551,13 +554,20 @@ impl<'a> Projection<'a> {
                 })
                 .collect::<Vec<_>>()
         };
+        let mut confirmations = std::collections::HashMap::<u32, TransactionStatus>::new();
         let mut outputs = confirmed
             .into_iter()
             .map(|record| {
-                let status = self
-                    .confirmation_at_height(record.height)
-                    .map(TransactionStatus::from)
-                    .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                let status = match confirmations.entry(record.height) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let status = self
+                            .confirmation_at_height(record.height)
+                            .map(TransactionStatus::from)
+                            .ok_or_else(|| service_unavailable("funding block unavailable"))?;
+                        entry.insert(status).clone()
+                    }
+                };
                 Ok(UtxoValue {
                     txid: record.txid.to_string(),
                     vout: record.vout,

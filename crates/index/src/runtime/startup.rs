@@ -205,18 +205,21 @@ pub(super) fn open_and_run(
         return Ok(());
     }
 
-    let query_engine = Arc::new(DerivedIndexQueryEngine::new(
-        Arc::clone(runtime),
-        Arc::clone(&open.reader),
-        block_tree.clone(),
-        applied_tip.clone(),
-        body_source.clone(),
-        QueryEngineLive {
-            utxo: spec.utxo.clone(),
-            chain_transition: spec.chain_transition.clone(),
-            enabled: spec.enabled,
-        },
-    ));
+    let query_engine = Arc::new(
+        DerivedIndexQueryEngine::new(
+            Arc::clone(runtime),
+            Arc::clone(&open.reader),
+            block_tree.clone(),
+            applied_tip.clone(),
+            body_source.clone(),
+            QueryEngineLive {
+                utxo: spec.utxo.clone(),
+                chain_transition: spec.chain_transition.clone(),
+                enabled: spec.enabled,
+            },
+        )
+        .with_scripthash_limit(spec.scripthash_limit),
+    );
 
     publish_lifecycle(
         lifecycle,
@@ -575,6 +578,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("must-not-be-created");
         let spec = DerivedIndexOpenSpec {
+            scripthash_limit: crate::runtime::DEFAULT_SCRIPTHASH_LIMIT,
             data_dir: dir.path().to_path_buf(),
             namespace: "txindex",
             storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,

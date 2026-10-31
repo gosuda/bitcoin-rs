@@ -14,6 +14,14 @@ pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
 
 pub(super) fn query_error(e: TxQueryError) -> Response {
     match e {
+        TxQueryError::Unavailable(
+            bitcoin_rs_index::TxUnavailableCause::ScriptHashLimitExceeded { .. },
+        ) => Response {
+            status: 422,
+            reason: "Unprocessable Entity",
+            content_type: "text/plain",
+            body: e.to_string().into_bytes(),
+        },
         TxQueryError::Retry | TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
         TxQueryError::Storage(_) => internal_error(e.to_string()),
     }
@@ -47,6 +55,27 @@ pub(super) fn dispatch_error(e: crate::RpcError) -> Response {
 mod tests {
     use super::admission_error;
     use bitcoin_rs_mempool::SubmitError;
+
+    #[test]
+    fn script_work_limits_are_explicit_but_unavailable_indexes_remain_503() {
+        use bitcoin_rs_index::{TxQueryError, TxUnavailableCause};
+        let response = super::query_error(TxQueryError::Unavailable(
+            TxUnavailableCause::ScriptHashLimitExceeded { limit: 25_000 },
+        ));
+        assert_eq!(response.status, 422);
+        assert!(
+            String::from_utf8_lossy(&response.body)
+                .contains("scripthash limit exceeded (25000 entries)")
+        );
+        assert_eq!(super::query_error(TxQueryError::Retry).status, 503);
+        assert_eq!(
+            super::query_error(TxQueryError::Unavailable(
+                TxUnavailableCause::BodyReadBudgetExhausted
+            ))
+            .status,
+            503
+        );
+    }
 
     #[test]
     fn admission_consensus_and_retry_failures_preserve_the_http_dialect() {
