@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, Txid};
 
 use super::*;
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, LatchReader, NodeId, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockLog;
 
 struct SingleBlockSource {
@@ -515,10 +515,43 @@ fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
     }
 }
 
+// API-34
+#[test]
+fn gettxoutsetinfo_holds_one_blocking_slot_and_refuses_a_concurrent_run() {
+    let ctx = Arc::new(Context::new());
+    let handler = crate::handlers::Handler::new(Arc::clone(&ctx));
+    handler.configure_blocking_admission(2);
+    let slot = handler
+        .reserve_blocking_request()
+        .expect("the fixture owns one of two blocking slots");
+    let refused = handler.dispatch("gettxoutsetinfo", &json!([]));
+    assert!(
+        matches!(&refused, Err(RpcError::Misc(message)) if message == "RPC blocking request limit reached"),
+        "an exhausted blocking quota must refuse before the UTXO walk: {refused:?}"
+    );
+    drop(slot);
+
+    let running = ctx
+        .chain
+        .utxo
+        .reserve_scan()
+        .expect("the fixture reserves the shared UTXO-wide scan");
+    let concurrent = handler.dispatch("gettxoutsetinfo", &json!([]));
+    let error = concurrent.expect_err("a second UTXO-wide read must be refused");
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER, "{error}");
+    assert_eq!(error.to_string(), "a UTXO-wide scan is already running");
+    drop(running);
+
+    assert!(
+        handler.dispatch("gettxoutsetinfo", &json!([])).is_ok(),
+        "the released shared reservation must serve the next call"
+    );
+}
+
 #[test]
 fn gettxoutsetinfo_omits_core_optionals_for_hash_type_none() {
     let ctx = Arc::new(Context::new());
-    let result = gettxoutsetinfo(&ctx, &json!(["none"]))
+    let result = gettxoutsetinfo(&ctx, &json!(["none"]), &LatchReader::fixture_never())
         .unwrap_or_else(|err| panic!("gettxoutsetinfo failed: {err}"));
     assert!(
         result.get("muhash").is_none(),
@@ -542,8 +575,12 @@ fn gettxoutsetinfo_omits_core_optionals_for_hash_type_none() {
 #[test]
 fn gettxoutsetinfo_accepts_production_muhash_triplet() {
     let ctx = Arc::new(Context::new());
-    let result = gettxoutsetinfo(&ctx, &json!(["muhash", null, false]))
-        .unwrap_or_else(|err| panic!("production triplet must be accepted: {err}"));
+    let result = gettxoutsetinfo(
+        &ctx,
+        &json!(["muhash", null, false]),
+        &LatchReader::fixture_never(),
+    )
+    .unwrap_or_else(|err| panic!("production triplet must be accepted: {err}"));
     assert_eq!(
         result.get("muhash").and_then(JsonValueTrait::as_str),
         Some("dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8")
@@ -555,8 +592,8 @@ fn gettxoutsetinfo_accepts_production_muhash_triplet() {
 #[test]
 fn gettxoutsetinfo_refuses_unsupported_arguments() {
     let ctx = Arc::new(Context::new());
-    let unknown_type =
-        gettxoutsetinfo(&ctx, &json!(["sha3"])).expect_err("an unknown hash type must be refused");
+    let unknown_type = gettxoutsetinfo(&ctx, &json!(["sha3"]), &LatchReader::fixture_never())
+        .expect_err("an unknown hash type must be refused");
     assert_eq!(
         unknown_type.to_string(),
         "invalid params: hash_type must be one of: hash_serialized_3, muhash, none"
@@ -568,7 +605,8 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
         json!(["muhash", 1000]),
         json!(["muhash", historical_hash]),
     ] {
-        let error = gettxoutsetinfo(&ctx, &params).expect_err("historical height must be refused");
+        let error = gettxoutsetinfo(&ctx, &params, &LatchReader::fixture_never())
+            .expect_err("historical height must be refused");
         assert_eq!(
             error.code(),
             RpcError::CORE_INVALID_PARAMETER,
@@ -587,8 +625,12 @@ fn gettxoutsetinfo_refuses_unsupported_arguments() {
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() {
     let ctx = Arc::new(Context::new());
-    let trailing = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
-        .expect_err("trailing parameters must be refused");
+    let trailing = gettxoutsetinfo(
+        &ctx,
+        &json!(["muhash", null, false, true]),
+        &LatchReader::fixture_never(),
+    )
+    .expect_err("trailing parameters must be refused");
     assert_eq!(trailing.code(), RpcError::INVALID_PARAMS, "{trailing}");
 }
 
@@ -635,7 +677,7 @@ fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
     let mut seen_a = false;
     let mut seen_b = false;
     for iteration in 0..100_000 {
-        let result = gettxoutsetinfo(&ctx, &json!(null))
+        let result = gettxoutsetinfo(&ctx, &json!(null), &LatchReader::fixture_never())
             .unwrap_or_else(|error| panic!("gettxoutsetinfo failed: {error}"));
         let height = result
             .get("height")

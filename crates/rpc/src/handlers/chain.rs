@@ -958,7 +958,11 @@ pub(crate) fn verifychain(
     typed_to_sonic(&v31::VerifyChain(verified))
 }
 
-pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn gettxoutsetinfo(
+    ctx: &Arc<Context>,
+    params: &Value,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Value, RpcError> {
     let array = if params.is_null() {
         None
     } else {
@@ -987,7 +991,17 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
+    let _scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
+        bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
+            RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
+        }
+        error => RpcError::Internal(error.to_string()),
+    })?;
+    let interrupted = || RpcError::Misc("gettxoutsetinfo interrupted".to_owned());
     let scan = |view: &AppliedView| {
+        if cancellation.is_triggered() {
+            return Err(interrupted());
+        }
         ctx.chain.utxo.with_stable_view(|stable| {
             let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
                 .map_err(|err| RpcError::Internal(err.to_string()))?;

@@ -898,12 +898,19 @@ fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
     handle_decoded_json(handler, &request)
 }
 
+/// Largest accepted JSON-RPC batch. The 16 MiB body limit alone would admit
+/// roughly 490,000 minimal members, so the element count is bounded as well.
+const MAX_BATCH_ELEMENTS: usize = 1_000;
+
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
-    let close = request.as_array().map_or_else(
-        || crate::registry::blocking_request(request),
-        |requests| requests.iter().any(crate::registry::blocking_request),
-    );
     if let Some(requests) = request.as_array() {
+        if requests.len() > MAX_BATCH_ELEMENTS {
+            return legacy_error_response(
+                &RpcError::InvalidRequest("Batch size limit exceeded"),
+                &Value::new_null(),
+            );
+        }
+        let close = requests.iter().any(crate::registry::blocking_request);
         if requests.is_empty() {
             return JsonResponse {
                 close,
@@ -933,6 +940,7 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
             body: Some(json!(responses)),
         };
     }
+    let close = crate::registry::blocking_request(request);
 
     if !request.is_object() {
         return legacy_error_response(

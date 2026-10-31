@@ -855,6 +855,54 @@ fn an_empty_batch_answers_an_empty_ok_batch() {
     assert_eq!(body, json!([]), "an empty batch answers []: {body:?}");
 }
 
+// API-08
+#[test]
+fn an_oversized_batch_is_refused_before_any_member_runs() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let at_limit = (0..MAX_BATCH_ELEMENTS)
+        .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"getblockcount","params":[]}))
+        .collect::<Vec<_>>();
+    let accepted = handle_decoded_json(&handler, &Value::from(at_limit));
+    assert_eq!(accepted.status, 200, "a batch at the limit is served");
+    assert_eq!(
+        accepted
+            .body
+            .expect("batch replies")
+            .as_array()
+            .map(sonic_rs::Array::len),
+        Some(MAX_BATCH_ELEMENTS),
+        "every member at the limit answers"
+    );
+
+    handler.context().network.p2p.set_network_active(true);
+    let mut too_many = (0..MAX_BATCH_ELEMENTS)
+        .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"setnetworkactive","params":[false]}))
+        .collect::<Vec<_>>();
+    too_many.push(json!({
+        "jsonrpc": "2.0",
+        "id": MAX_BATCH_ELEMENTS,
+        "method": "setnetworkactive",
+        "params": [false],
+    }));
+    let refused = handle_decoded_json(&handler, &Value::from(too_many));
+    assert_eq!(
+        refused.status, 400,
+        "an over-limit batch is refused as a request error"
+    );
+    let body = refused.body.expect("refusal replies");
+    assert_eq!(
+        body.get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_i64),
+        Some(-32600),
+        "the batch refusal is -32600: {body:?}"
+    );
+    assert!(
+        handler.context().network.p2p.network_active(),
+        "no member of a refused batch may run"
+    );
+}
+
 #[test]
 fn a_top_level_scalar_is_a_parse_error() {
     let handler = Handler::new(Arc::new(Context::new()));
