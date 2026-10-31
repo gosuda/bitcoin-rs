@@ -730,15 +730,9 @@ mod tests {
     fn legacy_masked_sighash_flags_pin_raw_wire_patterns() {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x52, 0x53];
-        #[expect(
-            clippy::as_conversions,
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "the value is a raw 32-bit wire pattern; the truncating cast is the point"
-        )]
         let flags: [(u32, &str); 6] = [
             (
-                (-1_391_424_484_i64) as u32,
+                u32::from_le_bytes((-1_391_424_484_i32).to_le_bytes()),
                 "33ed02ca66219e1b2fc5d7f7c0496e1c7792ab8853364a4853327bd13168e8a3",
             ),
             (

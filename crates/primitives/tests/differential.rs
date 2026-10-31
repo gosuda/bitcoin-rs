@@ -344,13 +344,11 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
         let native_tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("vector {expected}: native decode failed: {error}"));
         let script = hex_decode(script_hex);
-        #[expect(
-            clippy::as_conversions,
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "sighash type is a raw 32-bit wire pattern; the truncation is the point"
-        )]
-        let flag = hash_type as u32;
+        let flag = u32::from_le_bytes(
+            hash_type.to_le_bytes()[..4]
+                .try_into()
+                .expect("slice of length 4"),
+        );
         let input_index = usize::try_from(input_index)
             .unwrap_or_else(|error| panic!("vector {expected}: input index overflow: {error}"));
 

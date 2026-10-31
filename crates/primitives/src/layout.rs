@@ -12,11 +12,6 @@ use crate::{
     varint,
 };
 
-#[expect(
-    clippy::as_conversions,
-    reason = "the fixed 80-byte header fits in u64"
-)]
-const HEADER_LEN: u64 = Header::LEN as u64;
 /// Wire bytes every element of a kind consumes outside the bytes of the elements it contains.
 const MIN_TX_LEN: usize = 10;
 const MIN_INPUT_LEN: usize = 41;
@@ -603,7 +598,7 @@ impl<'a> ParsedBlock<'a> {
             image,
             pos: *cursor,
         };
-        let header_span = cur.take(HEADER_LEN)?;
+        let header_span = cur.take(widening(Header::LEN))?;
         let (tx_count_value, tx_count_span) = cur.read_compact()?;
         cur.require_count(tx_count_value, MIN_TX_LEN)?;
 
