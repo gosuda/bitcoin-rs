@@ -380,7 +380,7 @@ fn materialization_limits_fail_explicitly() -> Result {
     scripts[0] = vec![0x51; MAX_PREVOUT_BYTES + 1].into();
     assert!(matches!(
         derive(&tx, &scripts),
-        Err(TweakError::ResourceLimit)
+        Err(TestError::Tweak(TweakError::ResourceLimit))
     ));
     let oversized_view = view(tx.clone(), &scripts);
     assert!(matches!(
