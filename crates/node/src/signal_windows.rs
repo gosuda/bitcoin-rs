@@ -40,7 +40,7 @@ impl ShutdownHandler {
             ) {
                 if received.swap(false, Ordering::Acquire) {
                     request_shutdown();
-                    let _ = shutdown_tx.try_send(());
+                    let _receiver_gone = shutdown_tx.try_send(());
                 }
             }
         });
@@ -57,7 +57,7 @@ impl ShutdownHandler {
         for id in self.registrations.drain(..) {
             signal_hook::low_level::unregister(id);
         }
-        let _ = self.stop.try_send(());
+        let _receiver_gone = self.stop.try_send(());
         if let Some(thread) = self.thread.take() {
             #[cfg(test)]
             testing::note_closed();

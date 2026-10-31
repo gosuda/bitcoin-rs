@@ -123,10 +123,16 @@ impl MiningCoordinator {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "tree.node cannot fail after successful tree.lookup under the same read guard"
+    )]
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
-        let node = tree.node(node_id).ok()?;
+        let node = tree
+            .node(node_id)
+            .expect("node exists for looked-up id under block_tree read guard");
         if node.status == NodeStatus::Invalid {
             return Some(BlockValidationResult::DuplicateInvalid);
         }
@@ -430,6 +436,10 @@ impl MiningControl for MiningCoordinator {
         )
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "tree.node cannot fail after successful tree.lookup under the same read guard"
+    )]
     fn submit_block(
         &self,
         payload: BlockPayload,
@@ -437,7 +447,10 @@ impl MiningControl for MiningCoordinator {
         let segwit_active = {
             let tree = self.block_tree.read();
             tree.lookup(payload.block().header.prev_blockhash.into())
-                .and_then(|prev_id| tree.node(prev_id).ok())
+                .map(|prev_id| {
+                    tree.node(prev_id)
+                        .expect("node exists for looked-up id under block_tree read guard")
+                })
                 .map(|prev| {
                     self.chainstate
                         .network()
