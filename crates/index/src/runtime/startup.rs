@@ -329,7 +329,7 @@ pub(super) fn open_derived_index_with_timeout(
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let _ = tx.send(open_store(&dir));
+            let _receiver_gone = tx.send(open_store(&dir));
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
@@ -373,7 +373,7 @@ impl Heartbeat {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
         let start = Instant::now();
-        let handle = thread::Builder::new()
+        let handle = match thread::Builder::new()
             .name(format!("bitcoin-rs-{capability}-heartbeat"))
             .spawn(move || {
                 while !stop_clone.load(Ordering::Acquire) {
@@ -392,8 +392,13 @@ impl Heartbeat {
                         thread::sleep(Duration::from_millis(100));
                     }
                 }
-            })
-            .ok();
+            }) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(%error, "failed to spawn heartbeat thread; continuing without telemetry");
+                None
+            }
+        };
         Self { stop, handle }
     }
 
@@ -513,7 +518,7 @@ mod tests {
             let result = wait_for_open_result(&open_rx, Duration::from_secs(30), || {
                 checks.fetch_add(1, Ordering::Relaxed) > 0
             });
-            let _ = done_tx.send(result);
+            let _receiver_gone = done_tx.send(result);
         });
         let result = done_rx.recv_timeout(Duration::from_secs(2));
         drop(open_tx);

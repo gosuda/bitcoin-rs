@@ -114,7 +114,7 @@ impl DerivedIndexRuntime {
 
     pub fn wake(&self) {
         self.revision.fetch_add(1, Ordering::Release);
-        let _ = self.wake_tx.try_send(());
+        let _receiver_gone = self.wake_tx.try_send(());
     }
 
     pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
@@ -158,7 +158,7 @@ impl DerivedIndexRuntime {
 
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = self.wake_tx.try_send(());
+        let _receiver_gone = self.wake_tx.try_send(());
     }
 
     #[must_use]

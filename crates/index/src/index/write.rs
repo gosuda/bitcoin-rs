@@ -678,7 +678,7 @@ pub(crate) const FAMILY_HEADERS: &str = "headers";
 pub(crate) const FAMILY_FILTERS: &str = "filters";
 
 fn metric_f64_from_usize(val: usize) -> f64 {
-    bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).unwrap_or(u64::MAX))
+    bitcoin_rs_primitives::u64_to_f64(u64::try_from(val).expect("usize fits in u64"))
 }
 
 pub(crate) fn record_family_byte_histograms(family_bytes: &IndexRowBytes) {
