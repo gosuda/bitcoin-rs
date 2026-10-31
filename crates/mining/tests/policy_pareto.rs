@@ -40,30 +40,24 @@ fn selected(candidate: &Candidate) -> Vec<Txid> {
 #[test]
 fn selects_independent_transactions_in_modified_fee_order() -> Result<(), TestError> {
     let mut mempool = zero_fee_pool();
+    let mut expected = Vec::with_capacity(50);
     for index in 0_u32..50 {
         let fee = u64::from(50_u32 - index) * 1_000;
+        let transaction = tx(u8::try_from(index)?, 1_000, None);
+        expected.push(transaction.txid());
         insert(
             &mut mempool,
-            tx(u8::try_from(index)?, 1_000, None),
-            100 + (index % 5),
+            transaction,
+            200,
             fee,
             u64::from(index),
             800_000,
         )?;
     }
 
-    let snapshot = mempool.mining_snapshot();
     let candidate = assemble_candidate(&context(), &mempool, PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 50);
-
-    assert_eq!(
-        selected(&candidate),
-        snapshot
-            .entries
-            .iter()
-            .map(|entry| entry.txid)
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(selected(&candidate), expected);
     Ok(())
 }
 
