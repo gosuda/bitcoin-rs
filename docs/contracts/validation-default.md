@@ -41,6 +41,13 @@
 
 ### Native Taproot witness rules
 
+- Tapscript signature messages commit to the zero-based decoded opcode index
+  of the last executed `OP_CODESEPARATOR`, or `0xffffffff` if none executed
+  ([BIP342](https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki#common-signature-message-extension)).
+  Each push counts once regardless of payload length; parsed instructions in
+  skipped branches also count, but their separators do not replace the last
+  executed separator. Legacy/SegWit v0 byte-based `scriptCode` slicing and
+  legacy-only FindAndDelete remain unchanged.
 - Bare P2TR is recognized in the existing witness-program path when witness
   verification is active. Taproot verification runs only with its activation
   flag. A recognized v1/32-byte program before activation succeeds even with
@@ -71,10 +78,15 @@
   signatures and control blocks against both native complete-prevout entry
   points, including flag activation, wrapped-v1 and error-order cases.
   `overhaul_process_harness::taproot_spend_cases` compares 40 transaction
-  signature/scriptSig cases and 28 `OP_SUCCESS` cases through actual
-  native/Core 31.1 block validation over identical funded regtest histories.
+  signature/scriptSig cases, 28 `OP_SUCCESS` cases, and 48 opcode-position
+  signature cases through actual native/Core 31.1 block validation over
+  identical funded regtest histories.
   Block proposals isolate consensus from annex relay policy. Fixture keys exist only in test targets; no performance claim
   or production signing capability follows from these checks.
+- The opcode-position fixtures use independent rust-bitcoin signing and cover
+  `CHECKSIG`, `CHECKSIGVERIFY`, and `CHECKSIGADD`, multi-byte pushes, skipped
+  branches, multiple separators and wrong-position signatures. A `kernel`-gated
+  test in `taproot_spend_rules` compares these same fixtures to the Kernel engine.
 
 ### Admission signature cache
 
