@@ -258,7 +258,7 @@ fn a_window_commits_a_block_that_spends_the_previous_blocks_output() -> TestResu
 
     let mut parent = Network::Regtest.genesis_block().block_hash();
     let mut funding = None;
-    for height in 1..=u32::try_from(100).expect("literal fits") {
+    for height in 1..=100_u32 {
         let block = coinbase_child(parent, height, &[OP_PUSHNUM_1])?;
         if height == 1 {
             funding = Some(OutPoint::new(block.txs[0].txid(), 0));
@@ -612,7 +612,7 @@ fn a_window_crash_at_a_group_commit_boundary_keeps_the_last_complete_group() -> 
         let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
         seed_genesis(&chain)?;
         let fault = Arc::new(CrashOnCommitHead::new(fail_on_commit));
-        chain.durable_head = Arc::clone(&fault) as Arc<dyn DurableHeadStore>;
+        chain.durable_head = fault;
         commit_genesis_head(&chain)?;
         let refs: Vec<&Block> = blocks.iter().collect();
         apply_headers(&chain, &refs)?;

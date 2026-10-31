@@ -1103,7 +1103,10 @@ fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost()
     }?;
     manager.step_historical(&BlockPayload::from_local(fixture.blocks[0].clone()))?;
     let mut invalid = fixture.blocks[1].clone();
-    invalid.txs.clear();
+    invalid.txs[0].inputs[0].script_sig = bitcoin_rs_primitives::Script::new();
+    invalid.header.merkle_root =
+        bitcoin_rs_chain::regtest_fixture::merkle_root(&invalid.txs).ok_or("merkle root")?;
+    bitcoin_rs_chain::regtest_fixture::mine_block_to_declared_target(&mut invalid)?;
     assert!(
         manager
             .step_historical(&BlockPayload::from_local(invalid.clone()))
