@@ -26,6 +26,7 @@ arc-swap.workspace = true
 parking_lot.workspace = true
 ruint.workspace = true
 thiserror.workspace = true
+crossbeam-channel.workspace = true
 
 [dev-dependencies]
 bitcoin.workspace = true

@@ -311,6 +311,7 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
  "ruint",

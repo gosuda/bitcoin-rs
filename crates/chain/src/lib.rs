@@ -6,6 +6,7 @@ mod count;
 mod deployment;
 pub mod header_sync;
 mod ibd;
+mod latch;
 pub mod node;
 mod progress;
 #[cfg(feature = "test-seam")]
@@ -47,12 +48,13 @@ pub struct TipSnapshot {
     pub chain_tx_count: ChainTxCount,
 }
 
+pub use latch::{HookGuard, LatchReader, LatchWriter};
 pub use tip_wait::{ActiveTipWait, TipWaitCondition};
 pub use transition::{
     StableRead, StableReadGuard, TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,
 };
 pub use tree::{BlockTree, InvalidationOutcome};
-pub use view::{BlockTreeReader, LatchReader, TipReader};
+pub use view::{BlockTreeReader, TipReader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("block ancestry read budget exhausted")]
