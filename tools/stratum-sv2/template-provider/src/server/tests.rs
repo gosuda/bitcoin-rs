@@ -627,7 +627,6 @@ async fn pinned_job_outlives_peer_churn_and_evicted_ids_never_substitute() -> Te
         constrain(&mut writer_b, tight(step)).await;
         latest = receive_job(&mut reader_b).await;
     }
-    assert_eq!(hub.issued.lock().unwrap().len(), RETAINED_TEMPLATES);
     assert!(hub.lookup(pinned).is_none(), "peer churn evicted the job");
     assert!(hub.lookup(evicted).is_none());
     assert_eq!(

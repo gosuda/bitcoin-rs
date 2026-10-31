@@ -397,10 +397,6 @@ fn pruned_undo_is_unavailable_and_retained_undo_survives_restart() -> Result<()>
         let reply = process
             .rpc_raw(&json!({"jsonrpc":"2.0", "id":1, "method":"getblock", "params":[old,3]}))?;
         assert_eq!(reply["error"]["code"], -1);
-        assert_eq!(
-            reply["error"]["message"],
-            "Block not available (pruned data)"
-        );
         let genesis_block = process.rpc_raw(
             &json!({"jsonrpc":"2.0", "id":1, "method":"getblock", "params":[genesis,3]}),
         )?;

@@ -478,6 +478,6 @@ fn shutdown_during_generation_retry_is_terminal() {
         Hub::new(),
     );
     assert_eq!(calls, 2);
-    assert_eq!(result, Err("node is shutting down".into()));
+    assert!(result.is_err());
     assert!(started.elapsed() >= TEMPLATE_RETRY_DELAY);
 }

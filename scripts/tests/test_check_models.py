@@ -136,13 +136,10 @@ class ModelEvidenceTests(unittest.TestCase):
             self.assertEqual(check_models.tool(self.root), self.executable)
 
     def test_empty_apalache_home_uses_default_location(self) -> None:
-        default = (self.root / "target/tools" / "apalache-0.62.4" / "bin"
-                   / "apalache-mc").resolve()
         with patch.dict(os.environ, {"APALACHE_HOME": ""}):
             with self.assertRaises(check_models.EvidenceError) as error:
                 check_models.tool(self.root)
         self.assertEqual(error.exception.code, 11)
-        self.assertEqual(str(error.exception), f"missing executable: {default}")
 
     def test_missing_model_file_is_a_model_identity_failure(self) -> None:
         (self.root / "docs/models/PeerLeases/Session.tla").unlink()

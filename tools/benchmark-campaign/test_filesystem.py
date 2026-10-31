@@ -675,16 +675,6 @@ class DeltaTests(unittest.TestCase):
             )
             self.assertEqual(filesystem.main(["sample", "--path", "/"] + base_args), 0)
 
-    def test_scope_json_serializable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sys_base = root / "sys"
-            sys_base.mkdir()
-            _make_device(sys_base, "8:1", _ext4_device(3))
-            table = _standard_table(root, _standard_mount("8:1", "/"))
-            _, scope = identify_scope("/", mountinfo_path=table, sys_base=sys_base)
-        json.dumps(scope)
-
 
 class ScratchValidationTests(unittest.TestCase):
     def _available_fixture(

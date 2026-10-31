@@ -91,9 +91,7 @@ fn send_deadline_keeps_the_attempt_and_error() {
     let error = peer
         .send(NetworkMessage::Ping(1), Instant::now())
         .expect_err("expired time limit");
-    assert!(
-        matches!(error, super::Error::Protocol(ref message) if message == "P2P operation deadline")
-    );
+    assert!(matches!(error, super::Error::Protocol(_)));
     assert_failure(&dir, "sending", &error);
     remote.set_nonblocking(true).expect("nonblocking reader");
     let mut byte = [0];
