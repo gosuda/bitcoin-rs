@@ -317,6 +317,15 @@ fn handle_stream_command(
             ));
         }
     }
+    echo_bridged_byte(line, writer, reader, stop)
+}
+
+fn echo_bridged_byte(
+    line: &str,
+    writer: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+    stop: &AtomicBool,
+) -> io::Result<()> {
     let mut byte = [0u8; 1];
     if !stop.load(Ordering::Acquire) {
         match reader.read_exact(&mut byte) {
@@ -445,47 +454,15 @@ fn handle_fake_sam_stream(
             close_root(writer, reader, closed_tx);
             return Ok(());
         }
-        match reader.read_until(b'\n', &mut pending) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if stop.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                continue;
-            }
-            Err(error) => {
-                if stop.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                if last_command.is_empty() && !peer.opened_by_a_session() {
-                    let _ = strangers.send(client);
-                    return Ok(());
-                }
-                let kind = if is_root {
-                    "the root connection"
-                } else {
-                    "a bridge connection"
-                };
-                let after = if last_command.is_empty() {
-                    "before any command".to_owned()
-                } else {
-                    format!("after `{last_command}`")
-                };
-                return Err(worker_failure(
-                    &format!(
-                        "reading a command on {kind} from {client} {after} \
-                             with {} unterminated byte(s)",
-                        pending.len()
-                    ),
-                    &error,
-                ));
-            }
+        let ctx = FakeSamStreamContext {
+            is_root,
+            client,
+            last_command: &last_command,
+            strangers,
+            opened_by_session: peer.opened_by_a_session(),
+        };
+        if read_fake_sam_line(&mut reader, &mut pending, stop, &ctx)?.is_none() {
+            return Ok(());
         }
         if pending.last() != Some(&b'\n') {
             continue;
@@ -514,6 +491,65 @@ fn handle_fake_sam_stream(
             drop(reader);
             let _ = closed_tx.send(());
             return Ok(());
+        }
+    }
+}
+struct FakeSamStreamContext<'a> {
+    is_root: bool,
+    client: SocketAddr,
+    last_command: &'a str,
+    strangers: &'a mpsc::Sender<SocketAddr>,
+    opened_by_session: bool,
+}
+
+fn read_fake_sam_line(
+    reader: &mut BufReader<TcpStream>,
+    pending: &mut Vec<u8>,
+    stop: &AtomicBool,
+    ctx: &FakeSamStreamContext<'_>,
+) -> io::Result<Option<()>> {
+    match reader.read_until(b'\n', pending) {
+        Ok(0) => Ok(None),
+        Ok(_) => Ok(Some(())),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            if stop.load(Ordering::Acquire) {
+                Ok(None)
+            } else {
+                Ok(Some(()))
+            }
+        }
+        Err(error) => {
+            if stop.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            if ctx.last_command.is_empty() && !ctx.opened_by_session {
+                let _ = ctx.strangers.send(ctx.client);
+                return Ok(None);
+            }
+            let kind = if ctx.is_root {
+                "the root connection"
+            } else {
+                "a bridge connection"
+            };
+            let after = if ctx.last_command.is_empty() {
+                "before any command".to_owned()
+            } else {
+                format!("after `{}`", ctx.last_command)
+            };
+            Err(worker_failure(
+                &format!(
+                    "reading a command on {kind} from {} {after} \
+                         with {} unterminated byte(s)",
+                    ctx.client,
+                    pending.len()
+                ),
+                &error,
+            ))
         }
     }
 }
@@ -2381,34 +2417,14 @@ fn orchestrate_close_before_wake(
                 let _ = reported_tx.send(res);
             });
 
-            let accepted = match accepted_rx.recv_timeout(LIVENESS) {
-                Ok(Ok(stream)) => Ok(stream),
-                Ok(Err(err)) => Err(io::Error::new(
-                    err.kind(),
-                    format!("recovery listener accept failed: {err}"),
-                )),
-                Err(err) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("recovery connect not accepted: {err}"),
-                )),
-            };
+            let accepted = receive_accepted_stream(&accepted_rx);
 
             let closed_published = if accepted.is_ok() {
                 scope.spawn(move || {
                     session.close();
                     let _ = closed_tx.send(());
                 });
-
-                let give_up = Instant::now() + LIVENESS;
-                let mut published = false;
-                while Instant::now() < give_up {
-                    if session.closed.load(Ordering::Acquire) {
-                        published = true;
-                        break;
-                    }
-                    std::thread::yield_now();
-                }
-                published
+                wait_for_closed(session)
             } else {
                 false
             };
@@ -2442,6 +2458,30 @@ fn orchestrate_close_before_wake(
 
         Ok((rep, stream))
     })
+}
+fn receive_accepted_stream(rx: &mpsc::Receiver<io::Result<TcpStream>>) -> io::Result<TcpStream> {
+    match rx.recv_timeout(LIVENESS) {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(err)) => Err(io::Error::new(
+            err.kind(),
+            format!("recovery listener accept failed: {err}"),
+        )),
+        Err(err) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("recovery connect not accepted: {err}"),
+        )),
+    }
+}
+
+fn wait_for_closed(session: &SamSession) -> bool {
+    let give_up = Instant::now() + LIVENESS;
+    while Instant::now() < give_up {
+        if session.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        std::thread::yield_now();
+    }
+    false
 }
 
 fn close_between_root_connect_and_wake_registration(verb: Verb) -> Result<(), TestError> {

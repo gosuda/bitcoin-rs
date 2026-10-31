@@ -993,6 +993,38 @@ impl SamSession {
         let hash = destination_hash(&bytes);
         Ok((value, hash))
     }
+    fn retry_stream_connect(
+        &self,
+        root: u64,
+        destination: &str,
+        port: u16,
+        deadline: Instant,
+    ) -> Result<TcpStream, crate::endpoint::DialFailure> {
+        use crate::endpoint::DialFailure;
+        self.retire_root(root, deadline)
+            .map_err(DialFailure::Transport)?;
+        if self.ensure_control(deadline).is_ok() {
+            if let Ok(mut retry_conn) = SamConn::connect_with_deadline(self.sam, deadline) {
+                if retry_conn.hello(deadline).is_ok() {
+                    let cmd = format!(
+                        "STREAM CONNECT ID={} DESTINATION={destination} TO_PORT={port}",
+                        self.id
+                    );
+                    if let Ok(retry_reply) = retry_conn.command(&cmd, deadline) {
+                        if let Ok(retry_fields) = parse_fields(&retry_reply, "STREAM STATUS") {
+                            if field(&retry_fields, "RESULT") == Some("OK") {
+                                return Ok(retry_conn.into_stream());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Err(DialFailure::Transport(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "sam stream request failed: STREAM STATUS RESULT=INVALID_ID",
+        )))
+    }
 
     pub fn connect(
         &self,
@@ -1041,35 +1073,7 @@ impl SamSession {
                     format!("sam peer unreachable: STREAM STATUS RESULT={result}"),
                 )))
             }
-            Some("INVALID_ID") => {
-                self.retire_root(root, deadline)
-                    .map_err(DialFailure::Transport)?;
-                if self.ensure_control(deadline).is_ok() {
-                    if let Ok(mut retry_conn) = SamConn::connect_with_deadline(self.sam, deadline) {
-                        if retry_conn.hello(deadline).is_ok() {
-                            if let Ok(retry_reply) = retry_conn.command(
-                                &format!(
-                                    "STREAM CONNECT ID={} DESTINATION={destination} TO_PORT={port}",
-                                    self.id
-                                ),
-                                deadline,
-                            ) {
-                                if let Ok(retry_fields) =
-                                    parse_fields(&retry_reply, "STREAM STATUS")
-                                {
-                                    if field(&retry_fields, "RESULT") == Some("OK") {
-                                        return Ok(retry_conn.into_stream());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(DialFailure::Transport(io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "sam stream request failed: STREAM STATUS RESULT=INVALID_ID",
-                )))
-            }
+            Some("INVALID_ID") => self.retry_stream_connect(root, &destination, port, deadline),
             Some(result) => Err(DialFailure::Transport(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 format!(
