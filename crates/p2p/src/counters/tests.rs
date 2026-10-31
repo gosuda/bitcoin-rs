@@ -613,7 +613,6 @@ fn receive_buckets_cover_core_v31_known_commands() {
         "cfcheckpt",
         "wtxidrelay",
         "sendtxrcncl",
-        "feature",
     ];
     for command in core_known {
         assert_eq!(
@@ -626,7 +625,14 @@ fn receive_buckets_cover_core_v31_known_commands() {
 
 #[test]
 fn unknown_and_post_v31_receives_fold_into_other() {
-    for command in ["frobnicate", "", "sendpackages", "staletip", "alert"] {
+    for command in [
+        "frobnicate",
+        "",
+        "feature",
+        "sendpackages",
+        "staletip",
+        "alert",
+    ] {
         assert_eq!(
             MessageAccount::receive(command),
             MessageAccount::Other,

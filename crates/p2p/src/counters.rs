@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One per-message accounting bucket, named by its wire command.
 ///
-/// The buckets up to and including [`MessageAccount::Feature`] are Bitcoin
+/// The buckets up to and including [`MessageAccount::SendTxrcncl`] are Bitcoin
 /// Core v31.1's known message commands (`ALL_NET_MESSAGE_TYPES`,
 /// `src/protocol.h`): a received frame under any other command folds into
 /// [`MessageAccount::Other`], exactly as `CNode::ReceiveMsgBytes` pre-seeds
@@ -174,7 +174,8 @@ impl MessageAccount {
     fn receive(command: &str) -> Self {
         match Self::from_command(command) {
             Some(
-                Self::Alert
+                Self::Feature
+                | Self::Alert
                 | Self::Reject
                 | Self::SendPackages
                 | Self::AncPkgInfo
