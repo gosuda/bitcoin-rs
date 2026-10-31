@@ -61,13 +61,13 @@ impl TaprootFixture {
     }
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "test helper for small sizes"
-)]
+#[expect(clippy::expect_used, reason = "n < 0xfd fits in u8")]
 fn compact_size(n: usize) -> Vec<u8> {
-    if n < 0xfd { vec![n as u8] } else { vec![] }
+    if n < 0xfd {
+        vec![u8::try_from(n).expect("n < 0xfd fits in u8")]
+    } else {
+        vec![]
+    }
 }
 
 #[test]

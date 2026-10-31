@@ -763,14 +763,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
     Ok(rows)
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "satoshi amounts from Core test vectors are non-negative integers represented as f64"
-)]
+#[expect(clippy::expect_used, reason = "Core satoshi amounts are valid u64")]
 fn btc_to_sats(btc: f64) -> u64 {
-    (btc * 100_000_000.0).round() as u64
+    format!("{:.0}", (btc * 100_000_000.0).round())
+        .parse::<u64>()
+        .expect("btc amount is non-negative and fits u64")
 }
 
 fn run_script_tests(
@@ -813,10 +810,7 @@ struct TxVectorRow {
 
 #[expect(
     clippy::too_many_lines,
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "test vector parser; vout indices are small non-negative integers stored as i64"
+    reason = "test vector parser mirrors Core's linear test loader structure"
 )]
 fn load_tx_vectors(
     name: &str,
@@ -900,7 +894,9 @@ fn load_tx_vectors(
                 prevout_error = true;
                 break;
             };
-            let vout = vout_i64 as u32;
+            let mut vout_bytes = [0_u8; 4];
+            vout_bytes.copy_from_slice(&vout_i64.to_le_bytes()[..4]);
+            let vout = u32::from_le_bytes(vout_bytes);
             let Some(script_asm) = spec_arr.get(2).and_then(sonic_rs::Value::as_str) else {
                 counts.record_skip("prevout script not a string");
                 prevout_error = true;
