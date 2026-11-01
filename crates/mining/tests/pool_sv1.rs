@@ -9,7 +9,7 @@ use crate::support::TestError;
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mining::pool::stratum::sv1::{
     ConnectionLimiter, DifficultyPolicy, FrameError, LineBuffer, Observer, RefusalReason, Server,
-    ServerConfig, ServerDeps, ServerEvent, ShutdownReport, StaticAccountResolver,
+    ServerConfig, ServerDeps, ServerEvent, SessionEnd, ShutdownReport, StaticAccountResolver,
     prevhash_from_wire, prevhash_to_wire, swap_words,
 };
 use bitcoin_rs_mining::pool::{
@@ -1669,4 +1669,303 @@ fn cancel_wakes_blocked_accept_loop() {
     join_thread
         .join()
         .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+}
+
+#[test]
+fn stratum_v1_rejects_malformed_json_and_oversize_lines() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("miner1", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let diff_policy = DifficultyPolicy::new("1.0", "0.1", "100.0")
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    let mut config = ServerConfig::new(diff_policy);
+    config.max_frame_bytes = 256;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observer: Observer = {
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+        })
+    };
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: Some(observer),
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    let mut client = TestClient::connect(addr);
+    client.send("{invalid json line}\n");
+    let resp = client.read_line();
+    assert!(resp.contains("-32700"), "must return parse error: {resp}");
+    assert!(
+        resp.contains("Parse error"),
+        "must return parse error message: {resp}"
+    );
+
+    client.send("GET / HTTP/1.1\r\n\r\n");
+    let resp = client.read_line();
+    assert!(resp.contains("-32700"), "must return parse error: {resp}");
+
+    let oversize = "a".repeat(300) + "\n";
+    client.send(&oversize);
+    let eof = client.read_line();
+    assert!(eof.is_empty(), "oversize line must close the connection");
+
+    server.shutdown();
+    let recorded = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        recorded.iter().any(|event| matches!(
+            event,
+            ServerEvent::SessionEnded {
+                end: SessionEnd::FrameTooLong,
+                ..
+            }
+        )),
+        "must record FrameTooLong session end"
+    );
+}
+
+#[test]
+fn stratum_v1_rejects_duplicate_subscribe_and_submit_before_authorize() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("miner2", "secret")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let diff_policy = DifficultyPolicy::new("1.0", "0.1", "100.0")
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    let config = ServerConfig::new(diff_policy);
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: None,
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    let mut client = TestClient::connect(addr);
+    client.send("{\"id\":10,\"method\":\"mining.subscribe\",\"params\":[]}\n");
+    let sub1 = client.read_line();
+    assert!(
+        sub1.contains("\"result\":[[["),
+        "first subscribe must succeed: {sub1}"
+    );
+
+    client.send("{\"id\":11,\"method\":\"mining.subscribe\",\"params\":[]}\n");
+    let sub2 = client.read_line();
+    assert!(
+        sub2.contains("\"error\":[20,\"Already subscribed\",null]"),
+        "duplicate subscribe must be rejected: {sub2}"
+    );
+
+    client.send("{\"id\":12,\"method\":\"mining.submit\",\"params\":[\"miner2\",\"00000001\",\"00000001\",\"60000000\",\"00000000\"]}\n");
+    let submit_unauth = client.read_line();
+    assert!(
+        submit_unauth.contains("\"error\":[24,\"Unauthorized worker\",null]"),
+        "submit before auth must fail: {submit_unauth}"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn stratum_v1_enforces_stale_jobs_and_extranonce_overflow() {
+    let prev = Hash256::from_le_bytes(&[0x77; 32]);
+    let candidate = Arc::new(sample_candidate(
+        prev,
+        CompactTarget::from_consensus(0x207f_ffff),
+        5,
+    ));
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let installed = pool
+        .install(candidate, Vec::new())
+        .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let job_id = installed.job.id();
+
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("miner3", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let diff_policy = DifficultyPolicy::new("1.0", "0.1", "100.0")
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    let config = ServerConfig::new(diff_policy);
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: None,
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    let mut client = TestClient::connect(addr);
+    client.send("{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[]}\n");
+    let _ = client.read_line();
+    client.send("{\"id\":2,\"method\":\"mining.authorize\",\"params\":[\"miner3\",\"pass\"]}\n");
+    let _ = client.read_line();
+    let _ = client.read_line();
+    let _ = client.read_line();
+
+    client.send("{\"id\":3,\"method\":\"mining.submit\",\"params\":[\"miner3\",\"ffffffff\",\"00000001\",\"60000000\",\"00000000\"]}\n");
+    let stale_resp = client.read_line();
+    assert!(
+        stale_resp.contains("\"error\":[21,\"Job not found\",null]"),
+        "stale/unknown job must reject: {stale_resp}"
+    );
+
+    let long_en2 = format!(
+        "{{\"id\":4,\"method\":\"mining.submit\",\"params\":[\"miner3\",\"{job_id:08x}\",\"0000000000000001\",\"60000000\",\"00000000\"]}}\n",
+        job_id = job_id.get(),
+    );
+    client.send(&long_en2);
+    let en2_err = client.read_line();
+    assert!(
+        en2_err.contains("Invalid extranonce2 length")
+            || en2_err.contains("-32602")
+            || en2_err.contains("20"),
+        "overflow extranonce must reject: {en2_err}"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn stratum_v1_enforces_difficulty_policy_edges() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("miner4", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let diff_policy = DifficultyPolicy::new("1.0", "0.5", "10.0")
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    let config = ServerConfig::new(diff_policy);
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: None,
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    let mut client = TestClient::connect(addr);
+
+    client.send("{\"id\":1,\"method\":\"mining.suggest_difficulty\",\"params\":[0.49]}\n");
+    let below = client.read_line();
+    assert!(
+        below.contains("\"error\":[20,\"Difficulty out of range\",null]"),
+        "below min diff must be rejected: {below}"
+    );
+
+    client.send("{\"id\":2,\"method\":\"mining.suggest_difficulty\",\"params\":[0.5]}\n");
+    let at_min = client.read_line();
+    assert_eq!(
+        at_min, "{\"id\":2,\"result\":true,\"error\":null}\n",
+        "min edge must be accepted"
+    );
+
+    client.send("{\"id\":3,\"method\":\"mining.suggest_difficulty\",\"params\":[10.0]}\n");
+    let at_max = client.read_line();
+    assert_eq!(
+        at_max, "{\"id\":3,\"result\":true,\"error\":null}\n",
+        "max edge must be accepted"
+    );
+
+    client.send("{\"id\":4,\"method\":\"mining.suggest_difficulty\",\"params\":[10.01]}\n");
+    let above = client.read_line();
+    assert!(
+        above.contains("\"error\":[20,\"Difficulty out of range\",null]"),
+        "above max diff must be rejected: {above}"
+    );
+
+    server.shutdown();
+}
+
+#[test]
+fn stratum_v1_recovers_from_connection_reset_mid_message() {
+    let pool = build_pool(
+        Arc::new(FakeMiningControl::default()),
+        Arc::new(TestLedger::default()),
+    );
+    let accounts = Arc::new(
+        StaticAccountResolver::new()
+            .with_account("miner5", "pass")
+            .unwrap_or_else(|error| panic!("test operation failed: {error:?}")),
+    );
+    let diff_policy = DifficultyPolicy::new("1.0", "0.1", "100.0")
+        .unwrap_or_else(|error| panic!("test operation failed: {error:?}"));
+    let config = ServerConfig::new(diff_policy);
+    let server = Server::bind(
+        "127.0.0.1:0",
+        config,
+        ServerDeps {
+            pool,
+            accounts,
+            observer: None,
+        },
+    )
+    .unwrap_or_else(|error| panic!("test operation failed: {error}"));
+    let addr = server.local_addr();
+
+    {
+        let mut stream =
+            TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+        stream
+            .write_all(b"{\"id\":1,\"method\":\"mining.sub")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        drop(stream);
+    }
+
+    thread::sleep(Duration::from_millis(50));
+
+    let mut next_client = TestClient::connect(addr);
+    next_client.send("{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[]}\n");
+    let resp = next_client.read_line();
+    assert!(
+        resp.contains("\"result\":[[["),
+        "subsequent client must succeed after peer reset: {resp}"
+    );
+
+    let report = server.shutdown();
+    assert_eq!(report.sessions_joined, 2);
 }
