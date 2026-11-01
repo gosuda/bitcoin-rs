@@ -257,3 +257,30 @@ fn combo_does_not_derive_from_a_testnet_wif_on_mainnet() {
     assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
     assert!(error.to_string().contains("test network"), "got {error}");
 }
+#[test]
+#[expect(clippy::expect_used)]
+fn deriveaddresses_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let desc = checksummed(&format!("addr({ADDRESS})"));
+    let named = deriveaddresses(&ctx, &json!({"descriptor": desc}))
+        .unwrap_or_else(|err| panic!("named params failed: {err}"));
+    assert_eq!(named, json!([ADDRESS]));
+
+    let excess = deriveaddresses(&ctx, &json!([desc, Value::new_null(), "extra"]))
+        .expect_err("excess parameters must be rejected");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
+}
+
+#[test]
+#[expect(clippy::expect_used)]
+fn getdescriptorinfo_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let desc = format!("addr({ADDRESS})");
+    let named = getdescriptorinfo(&ctx, &json!({"descriptor": desc}))
+        .unwrap_or_else(|err| panic!("named params failed: {err}"));
+    assert!(named.get("descriptor").is_some());
+
+    let excess = getdescriptorinfo(&ctx, &json!([desc, "extra"]))
+        .expect_err("excess parameters must be rejected");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
+}

@@ -130,13 +130,20 @@ fn raw_transaction_verbosity(params: &Value) -> Result<u64, RpcError> {
     if let Some(verbose) = value.as_bool() {
         return Ok(u64::from(verbose));
     }
-    match value.as_u64() {
-        Some(verbosity @ 0..=2) => Ok(verbosity),
-        Some(_) => Err(RpcError::InvalidParams("verbosity must be 0, 1, or 2")),
-        None => Err(RpcError::InvalidType(
-            "verbosity must be a boolean or integer".to_owned(),
-        )),
+    if let Some(verbosity) = value.as_i64() {
+        return match verbosity {
+            0 => Ok(0),
+            1 => Ok(1),
+            2 => Ok(2),
+            _ => Err(RpcError::InvalidParams("verbosity must be 0, 1, or 2")),
+        };
     }
+    if value.as_u64().is_some() {
+        return Err(RpcError::InvalidParams("verbosity must be 0, 1, or 2"));
+    }
+    Err(RpcError::InvalidType(
+        "verbosity must be a boolean or integer".to_owned(),
+    ))
 }
 
 fn load_block(ctx: &Context, record: &BlockRecord) -> Result<NativeBlock, RpcError> {
@@ -515,6 +522,9 @@ enum AcceptanceRow {
 }
 
 pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["rawtxs", "maxfeerate"])?;
+    let params = bound.as_ref();
+    super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
     let raw_txs = array
         .first()

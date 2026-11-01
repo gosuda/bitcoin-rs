@@ -239,6 +239,9 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 }
 
 pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["descriptor"])?;
+    let params = bound.as_ref();
+    super::ensure_at_most_params(params, 1)?;
     let descriptor = required_str(params, 0, "descriptor is required")?;
     let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
@@ -265,6 +268,9 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let bound = super::bind_named_params(params, &["descriptor", "range"])?;
+    let params = bound.as_ref();
+    super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
     let descriptor = required_str(params, 0, "descriptor is required")?;
     let (payload, _checksum) = checked_checksum(descriptor, ChecksumRequirement::Required)?;

@@ -83,6 +83,66 @@ fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
     assert!(gettxout(&ctx, &json!([txid.to_string(), 1]))?.is_null());
     Ok(())
 }
+#[test]
+fn getrawtransaction_rejects_invalid_verbosity() {
+    let ctx = Arc::new(Context::new());
+    let txid = "00".repeat(32);
+    let err_99 = getrawtransaction(&ctx, &json!([txid, 99])).expect_err("verbosity 99 must fail");
+    assert!(matches!(err_99, RpcError::InvalidParams(_)));
+
+    let err_3 = getrawtransaction(&ctx, &json!([txid, 3])).expect_err("verbosity 3 must fail");
+    assert!(matches!(err_3, RpcError::InvalidParams(_)));
+
+    let err_neg = getrawtransaction(&ctx, &json!([txid, -1])).expect_err("verbosity -1 must fail");
+    assert!(matches!(err_neg, RpcError::InvalidParams(_)));
+}
+#[test]
+fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
+    let ctx = Arc::new(Context::new());
+    let odd =
+        super::sendrawtransaction(&ctx, &json!(["abc"])).expect_err("odd length hex must fail");
+    assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let invalid =
+        super::sendrawtransaction(&ctx, &json!(["zz"])).expect_err("invalid hex must fail");
+    assert_eq!(invalid.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let limit = usize::try_from(super::MAX_BROADCAST_HEX_CHARS / 2).unwrap_or(0);
+    let oversize = "00".repeat(limit + 1);
+    let too_large =
+        super::sendrawtransaction(&ctx, &json!([oversize])).expect_err("oversize hex must fail");
+    assert_eq!(too_large.code(), RpcError::CORE_INVALID_PARAMETER);
+}
+
+#[test]
+fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
+    let ctx = Arc::new(Context::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let odd = super::decoderawtransaction(&ctx, &json!(["abc"]), &latch)
+        .expect_err("odd length hex must fail");
+    assert_eq!(odd.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let invalid = super::decoderawtransaction(&ctx, &json!(["zz"]), &latch)
+        .expect_err("invalid hex must fail");
+    assert_eq!(invalid.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+
+    let limit = usize::try_from(super::MAX_INSPECT_HEX_CHARS / 2).unwrap_or(0);
+    let oversize = "00".repeat(limit + 1);
+    let too_large = super::decoderawtransaction(&ctx, &json!([oversize]), &latch)
+        .expect_err("oversize hex must fail");
+    assert_eq!(too_large.code(), RpcError::CORE_INVALID_PARAMETER);
+}
+#[test]
+fn testmempoolaccept_binds_named_parameters_and_rejects_excess() {
+    let ctx = Arc::new(Context::new());
+    let excess = super::testmempoolaccept(&ctx, &json!([[], 0, "extra"]))
+        .expect_err("excess parameters must fail");
+    assert!(matches!(excess, RpcError::InvalidParams(_)));
+
+    let named = super::testmempoolaccept(&ctx, &json!({"rawtxs": []}))
+        .expect_err("named params must reach rawtxs validation");
+    assert!(matches!(named, RpcError::InvalidParams(_)));
+}
 
 #[test]
 fn getrawtransaction_checks_mempool_before_failing_txindex()
