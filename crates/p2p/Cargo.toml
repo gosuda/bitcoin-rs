@@ -79,3 +79,7 @@ harness = false
 [[test]]
 name = "suite"
 path = "tests/suite.rs"
+
+[[test]]
+name = "decode_heap_amplification"
+path = "tests/decode_heap_amplification.rs"

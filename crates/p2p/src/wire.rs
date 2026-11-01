@@ -38,6 +38,12 @@ pub const MAX_LOCATOR_HASHES: usize = 101;
 
 pub const MAX_BLOCK_TX_COUNT: usize = 100_000;
 
+const MIN_TRANSACTION_WIRE_BYTES: usize = 10;
+
+const MIN_PREFILLED_WIRE_BYTES: usize = MIN_TRANSACTION_WIRE_BYTES + 1;
+
+const SHORT_ID_WIRE_BYTES: usize = 6;
+
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
 
 pub(crate) const HEADER_LEN: usize = 24;
@@ -923,7 +929,8 @@ fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
             "cmpctblock short_ids count too large",
         ));
     }
-    let mut short_ids = Vec::with_capacity(short_ids_cap);
+    let mut short_ids =
+        Vec::with_capacity(short_ids_cap.min(reader.len() / SHORT_ID_WIRE_BYTES));
     for _ in 0..short_ids_count {
         short_ids.push(ShortId::consensus_decode(&mut reader)?);
     }
@@ -940,9 +947,16 @@ fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
             "cmpctblock total transactions too large",
         ));
     }
-    let mut prefilled_txs = Vec::with_capacity(prefilled_cap);
+    let mut prefilled_txs = Vec::with_capacity(
+        prefilled_cap.min(reader.len() / MIN_PREFILLED_WIRE_BYTES),
+    );
     for _ in 0..prefilled_count {
-        prefilled_txs.push(PrefilledTransaction::consensus_decode(&mut reader)?);
+        let idx = u16::try_from(
+            bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0,
+        )
+        .map_err(|_| PeerError::Misbehavior("cmpctblock prefilled index out of bounds"))?;
+        let tx = decode_bounded_transaction(&mut reader)?;
+        prefilled_txs.push(PrefilledTransaction { idx, tx });
     }
     if !reader.is_empty() {
         return Err(PeerError::Misbehavior(
@@ -959,6 +973,12 @@ fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
     })
 }
 
+fn decode_bounded_transaction(reader: &mut &[u8]) -> Result<Transaction, PeerError> {
+    let tx = Tx::consensus_decode(reader)?;
+    let raw = bitcoin_rs_primitives::consensus_bytes(&tx);
+    Transaction::consensus_decode(&mut raw.as_slice()).map_err(PeerError::from)
+}
+
 fn decode_blocktxn(payload: &[u8]) -> Result<BlockTxn, PeerError> {
     let mut reader = payload;
     let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
@@ -967,9 +987,10 @@ fn decode_blocktxn(payload: &[u8]) -> Result<BlockTxn, PeerError> {
     if capacity > MAX_BLOCK_TX_COUNT {
         return Err(PeerError::Misbehavior("blocktxn count too large"));
     }
-    let mut transactions = Vec::with_capacity(capacity);
+    let mut transactions =
+        Vec::with_capacity(capacity.min(reader.len() / MIN_TRANSACTION_WIRE_BYTES));
     for _ in 0..count {
-        transactions.push(Transaction::consensus_decode(&mut reader)?);
+        transactions.push(decode_bounded_transaction(&mut reader)?);
     }
     if !reader.is_empty() {
         return Err(PeerError::Misbehavior(
@@ -994,7 +1015,7 @@ fn decode_getblocktxn(payload: &[u8]) -> Result<GetBlockTxn, PeerError> {
             "getblocktxn indexes count too large",
         ));
     }
-    let mut indexes = Vec::with_capacity(capacity);
+    let mut indexes = Vec::with_capacity(capacity.min(reader.len()));
     let mut last_index: u64 = 0;
     for _ in 0..count {
         let differential = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
