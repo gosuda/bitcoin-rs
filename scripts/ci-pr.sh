@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|deep|all|proofs}" >&2
+  echo "usage: $0 {fmt|clippy|test-crates|test-binary|test-workspace|test|deny|contracts|book|deep|all|proofs}" >&2
   exit 2
 }
 
@@ -381,6 +381,17 @@ case "$1" in
 
   contracts)
     cargo run --locked -p contract-index -- --check
+    ;;
+
+  book)
+    # CI installs the pinned binary (.github/workflows/main.yml); the
+    # build lands in target/book per docs/book/book.toml.
+    if ! command -v mdbook >/dev/null 2>&1; then
+      echo "mdbook is missing; install it with: cargo install mdbook --locked --version 0.5.4" >&2
+      exit 1
+    fi
+    profile "book: mdbook build" mdbook build docs/book
+    profile "book: link check" python3 scripts/check_book_links.py docs/book
     ;;
 
   proofs)
