@@ -78,15 +78,16 @@ pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
 }
 
 /// Core `src/rpc/server.cpp` `stop`: trips the node's graceful-shutdown latch,
-/// then returns Core's exact status string; the reply is written before
-/// teardown can begin.
+/// then returns this node's own status string; the reply is written before
+/// teardown can begin. The framework never reads the reply (`test_node.py`
+/// `stop` discards it), so Core's exact string is not copied.
 pub(crate) fn stop(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
     let request_shutdown = ctx.shutdown_request.as_ref().ok_or_else(|| {
         RpcError::Internal("node shutdown control is not attached to this context".to_owned())
     })?;
     request_shutdown();
-    Ok(json!("Bitcoin Core stopping"))
+    Ok(json!("bitcoin-rs stopping"))
 }
 
 pub(crate) fn getmemoryinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1347,14 +1348,14 @@ mod tests {
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
     #[test]
-    fn stop_returns_core_status_and_triggers_the_attached_shutdown() {
+    fn stop_returns_this_nodes_status_and_triggers_the_attached_shutdown() {
         let called = Arc::new(AtomicBool::new(false));
         let witness = Arc::clone(&called);
         let ctx = Arc::new(
             Context::new().with_shutdown_request(move || witness.store(true, Ordering::SeqCst)),
         );
         let result = stop(&ctx, &json!([])).unwrap_or_else(|err| panic!("stop failed: {err}"));
-        assert_eq!(result, json!("Bitcoin Core stopping"));
+        assert_eq!(result, json!("bitcoin-rs stopping"));
         assert!(
             called.load(Ordering::SeqCst),
             "stop must request the node shutdown"

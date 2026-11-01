@@ -279,9 +279,9 @@ wallet interoperability remain unverified.
 ### `API-36`: `stop` lifecycle control
 
 - Owner: `stop` in `crates/rpc/src/handlers/util.rs`, triggering the node's single graceful-shutdown latch (`Chainstate::request_shutdown`, the same latch the SIGTERM/SIGINT handler trips). No second shutdown path exists.
-- The reply is Core 31.1's exact status string (`Bitcoin Core stopping`, `src/rpc/server.cpp`), dispatched before teardown can begin so it always reaches the client; the process then runs the ordinary teardown and exits 0. A context without attached node control (embedded/test use) answers `-32603`.
+- The reply is this node's own status string (`bitcoin-rs stopping`), dispatched before teardown can begin so it always reaches the client; the process then runs the ordinary teardown and exits 0. The string deliberately differs from Core's (`Bitcoin Core stopping`, `src/rpc/server.cpp`): the functional framework discards the stop reply (`test_node.py` `stop` never reads it), so no test required Core-string equality, and this node does not imitate Core's identity elsewhere (`--version`). A context without attached node control (embedded/test use) answers `-32603`.
 - Declared deviation: Core's hidden numeric `wait` argument is not honored — any argument is refused with the local `-32602` shape error — and the node does not wait for other in-flight RPC connections to drain before exiting.
-- Proven by `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_core_status_and_exits_zero` (real binary, Core-shaped reply, exit code 0 within a bounded wait).
+- Proven by `handlers::util::stop` unit tests (status string, shutdown trigger, missing control, argument refusal) and `e2e/tests/lifecycle.rs::stop_rpc_answers_the_node_status_and_exits_zero` (real binary, node-shaped reply, exit code 0 within a bounded wait).
 
 ## Live gaps
 
