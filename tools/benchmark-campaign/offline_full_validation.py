@@ -44,6 +44,7 @@ from evidence import (
     canonical_bytes,
     canonical_sha256,
     copy_pinned,
+    process_start_time,
     publish_result,
     summarize,
 )
@@ -1264,7 +1265,7 @@ def _sample_child(pid: int) -> tuple[int, int] | None:
 
 
 def _wait_child(
-    process: subprocess.Popen[bytes], deadline_ns: int
+    process: subprocess.Popen[bytes], deadline_ns: int, start_time: int
 ) -> tuple[int, int, int]:
     peak_rss = 0
     cpu_ns = 0
@@ -1275,7 +1276,7 @@ def _wait_child(
             peak_rss = max(peak_rss, rss)
         remaining = deadline_ns - time.monotonic_ns()
         if remaining <= 0:
-            _kill_tree(process)
+            _kill_tree(process, start_time)
             raise ContractError("arm exceeded its monotonic deadline")
         try:
             code = process.wait(timeout=min(0.05, remaining / 1_000_000_000))
@@ -1286,7 +1287,23 @@ def _wait_child(
         return code, cpu_ns, peak_rss
 
 
-def _kill_tree(process: subprocess.Popen[bytes]) -> None:
+def _live_start_time(pid: int) -> int | None:
+    try:
+        return process_start_time(pid)
+    except ContractError:
+        if Path(f"/proc/{pid}/stat").exists():
+            raise
+        return None
+
+
+def _require_generation(pid: int, start_time: int) -> None:
+    observed = _live_start_time(pid)
+    if observed is not None and observed != start_time:
+        raise ContractError("child process start time changed before signal")
+
+
+def _kill_tree(process: subprocess.Popen[bytes], start_time: int) -> None:
+    _require_generation(process.pid, start_time)
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1296,6 +1313,7 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> None:
         if process.poll() is not None:
             return
         time.sleep(0.01)
+    _require_generation(process.pid, start_time)
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -1336,14 +1354,18 @@ def _reap_owned_descendants() -> list[int]:
     return leftover
 
 
-def _settle_after_wait(process: subprocess.Popen[bytes]) -> None:
+def _settle_after_wait(
+    process: subprocess.Popen[bytes], start_time: int
+) -> None:
+    _require_generation(process.pid, start_time)
     group_left = False
     try:
         os.killpg(process.pid, 0)
         group_left = True
     except ProcessLookupError:
-        pass
+        group_left = False
     if group_left:
+        _require_generation(process.pid, start_time)
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -1383,13 +1405,21 @@ def _run_phase(
         )
     except OSError as error:
         raise ContractError(f"cannot spawn arm process: {error}") from error
+    start_time: int | None = None
     try:
-        code, cpu_ns, peak_rss = _wait_child(process, deadline_ns)
-        _settle_after_wait(process)
+        start_time = process_start_time(process.pid)
+        code, cpu_ns, peak_rss = _wait_child(process, deadline_ns, start_time)
+        _settle_after_wait(process, start_time)
     except BaseException:
-        if process.poll() is None:
-            _kill_tree(process)
-        _reap_owned_descendants()
+        try:
+            if start_time is None:
+                if process.poll() is None:
+                    process.kill()
+            elif process.poll() is None:
+                _kill_tree(process, start_time)
+        finally:
+            _reap_owned_descendants()
+            process.poll()
         raise
     wall_ns = time.monotonic_ns() - started
     if wall_ns <= 0:

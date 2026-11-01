@@ -11,9 +11,11 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import TypeIs
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "campaign-corpus"))
@@ -733,6 +735,42 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(summary["samples"], 7)
         self.assertEqual(summary["p50_ns"], 40)
         self.assertEqual(summary["max_ns"], 70)
+
+    def test_recycled_start_time_refuses_settle_signal(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-settle-start-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        arm_dir = root / "arm"
+        arm_dir.mkdir()
+        deadline = time.monotonic_ns() + 5_000_000_000
+        with (
+            mock.patch.object(
+                offline, "process_start_time", side_effect=[111, 222]
+            ),
+            mock.patch.object(offline.os, "killpg") as killpg,
+            self.assertRaisesRegex(ContractError, "start time changed"),
+        ):
+            offline._run_phase((sys.executable, "-c", "pass"), arm_dir, deadline)
+        self.assertFalse(killpg.called)
+
+    def test_recycled_start_time_refuses_deadline_kill(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-kill-start-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        arm_dir = root / "arm"
+        arm_dir.mkdir()
+        deadline = time.monotonic_ns() + 100_000_000
+        with (
+            mock.patch.object(
+                offline, "process_start_time", side_effect=[111] + [222] * 8
+            ),
+            mock.patch.object(offline.os, "killpg") as killpg,
+            self.assertRaisesRegex(ContractError, "start time changed"),
+        ):
+            offline._run_phase(
+                (sys.executable, "-c", "import time; time.sleep(30)"),
+                arm_dir,
+                deadline,
+            )
+        self.assertFalse(killpg.called)
 
 
 class IndexedParityHarnessTests(unittest.TestCase):
