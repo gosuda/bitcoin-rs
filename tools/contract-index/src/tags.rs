@@ -205,6 +205,7 @@ fn rust_kind(attributes: &[&str], macro_name: Option<&str>) -> Kind {
     }
     let has_test = attributes.iter().any(|attribute| {
         let inner = attribute
+            .trim()
             .trim_start_matches("#![")
             .trim_start_matches("#[")
             .trim_end_matches(']')
@@ -439,6 +440,22 @@ mod tests {
         );
         assert_eq!(tagged["DEMO-02"][0].item, "owner");
         assert_eq!(tagged["DEMO-02"][0].kind, Kind::Owner);
+    }
+
+    #[test]
+    fn indented_test_attribute_classifies_as_a_test() {
+        let (_directory, tagged) = fixture(&[(
+            "crates/demo/src/lib.rs",
+            "// DEMO-01\nmod inner {\n    // DEMO-02\n    #[test]\n    fn nested_test() {}\n}\n",
+        )]);
+        let artifacts = &tagged["DEMO-02"];
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].item, "nested_test");
+        assert_eq!(
+            artifacts[0].kind,
+            Kind::Test,
+            "a #[test] attribute keeps its meaning when the line is indented"
+        );
     }
 
     #[test]
