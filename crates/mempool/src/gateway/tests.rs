@@ -2358,6 +2358,38 @@ fn input_structure_nonstandard_transactions_keep_policy_precedence() {
     }
 }
 
+#[test]
+fn nonstandard_inputs_rejection_caches_the_txid_for_witness_transactions() {
+    use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+    let gateway = gateway_with(None);
+    let mut candidate = standard_tx(95);
+    candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+    let origin = AdmissionOrigin::Peer(crate::PeerToken {
+        endpoint: Some(bitcoin_rs_primitives::PeerEndpoint::Ip(
+            core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+        )),
+        addr: Some(bitcoin_rs_primitives::PeerEndpoint::from((
+            [127, 0, 0, 1],
+            8333,
+        ))),
+        connection_id: 7,
+    });
+    let mut request = admit_request(&gateway, &candidate, origin);
+    request.prevouts[0].1.script_pubkey = Script::new();
+    assert_eq!(
+        gateway.admit_transaction(request),
+        Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(
+            StandardnessError::NonStandardInput
+        )))
+    );
+    let lifecycle = gateway.lifecycle.lock();
+    assert!(
+        lifecycle.rejects_inventory(Hash256::from(candidate.txid()), false),
+        "a txid announcement must be filtered after bad-txns-nonstandard-inputs"
+    );
+    assert!(lifecycle.rejects_inventory(Hash256::from(candidate.wtxid()), true));
+}
+
 fn p2sh_prevout() -> TxOut {
     let mut script = Vec::with_capacity(23);
     script.push(0xa9);

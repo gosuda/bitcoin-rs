@@ -215,7 +215,7 @@ impl PreparedAdmission {
         ) {
             return;
         }
-        let default_scope = rejection_scope(&request.tx);
+        let default_scope = rejection_scope(&request.tx, None);
         let Some(height) = request.height.checked_add(1) else {
             self.reject(AdmitError::Consensus, default_scope);
             return;
@@ -274,7 +274,7 @@ impl PreparedAdmission {
             self.refused_bump = None;
             return;
         };
-        let default_scope = rejection_scope(&request.tx);
+        let default_scope = rejection_scope(&request.tx, None);
         let signature_cache = bitcoin_rs_script::SignatureCache::new();
         let standard_pass = {
             let chain = PrevoutMap::new(&self.prevouts);
@@ -365,7 +365,18 @@ fn replacement_rejection(error: RbfError) -> AdmitError {
     }
 }
 
-fn rejection_scope(tx: &Tx) -> RejectScope {
+fn rejection_scope(
+    tx: &Tx,
+    reason: Option<crate::standardness::AcceptanceRejectReason>,
+) -> RejectScope {
+    if matches!(
+        reason,
+        Some(crate::standardness::AcceptanceRejectReason::NonStandard(
+            crate::standardness::StandardnessError::NonStandardInput,
+        ))
+    ) {
+        return RejectScope::Transaction;
+    }
     if tx.has_witness() {
         RejectScope::Witness
     } else {
@@ -812,7 +823,7 @@ impl MempoolGateway {
                     self.record_peer_failure(pool, request, error, scope);
                     return Err(error);
                 }
-                let default_reject_scope = rejection_scope(&request.tx);
+                let default_reject_scope = rejection_scope(&request.tx, None);
 
                 let ReplacementStage::Verified(plan) = prepared.replacement else {
                     return Err(AdmitError::MempoolChanged);
@@ -947,9 +958,12 @@ impl MempoolGateway {
             floor,
             &finality,
         );
-        let rejection = fact
-            .reject_reason
-            .map(|reason| (AdmitError::Policy(reason), rejection_scope(&request.tx)));
+        let rejection = fact.reject_reason.map(|reason| {
+            (
+                AdmitError::Policy(reason),
+                rejection_scope(&request.tx, Some(reason)),
+            )
+        });
         let mut prepared = PreparedAdmission {
             fact,
             prevouts,
@@ -986,7 +1000,7 @@ impl MempoolGateway {
                     AdmitError::Policy(
                         crate::standardness::AcceptanceRejectReason::MempoolConflict,
                     ),
-                    rejection_scope(&request.tx),
+                    rejection_scope(&request.tx, None),
                 );
             }
             if prepared.rejection.is_none() {
@@ -997,7 +1011,10 @@ impl MempoolGateway {
                 ) {
                     Ok(_) => prepared.replacement = ReplacementStage::Package,
                     Err(error) => {
-                        prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
+                        prepared.reject(
+                            replacement_rejection(error),
+                            rejection_scope(&request.tx, None),
+                        );
                     }
                 }
             }
@@ -1033,7 +1050,10 @@ impl MempoolGateway {
             match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
-                    prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
+                    prepared.reject(
+                        replacement_rejection(error),
+                        rejection_scope(&request.tx, None),
+                    );
                 }
             }
             if prepared.rejection.is_none()
@@ -1048,7 +1068,7 @@ impl MempoolGateway {
                     AdmitError::Policy(
                         crate::standardness::AcceptanceRejectReason::MissingEphemeralSpends,
                     ),
-                    rejection_scope(&request.tx),
+                    rejection_scope(&request.tx, None),
                 );
             }
         }
