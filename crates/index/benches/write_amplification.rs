@@ -141,12 +141,11 @@ mod bench_runner {
         (block_hash, body)
     }
 
-    fn write_bytes_now() -> u64 {
-        let io = std::fs::read_to_string("/proc/self/io").expect("/proc/self/io must be readable");
+    fn write_bytes_now() -> Option<u64> {
+        let io = std::fs::read_to_string("/proc/self/io").ok()?;
         io.lines()
             .find_map(|line| line.strip_prefix("write_bytes: "))
             .and_then(|value| value.trim().parse().ok())
-            .expect("/proc/self/io must report write_bytes")
     }
 
     fn directory_bytes(path: &Path) -> u64 {
@@ -172,7 +171,7 @@ mod bench_runner {
         family: Family,
         backend: &'static str,
         blocks: u32,
-        write_bytes: u64,
+        write_bytes: Option<u64>,
         logical_bytes: u64,
         build: Duration,
         snapshot_open: Duration,
@@ -187,9 +186,15 @@ mod bench_runner {
     fn print_report(report: &RunReport) {
         let amplification_permille = report
             .write_bytes
-            .saturating_mul(1_000)
-            .checked_div(report.logical_bytes)
-            .unwrap_or(0);
+            .and_then(|write_bytes| {
+                write_bytes
+                    .saturating_mul(1_000)
+                    .checked_div(report.logical_bytes)
+            })
+            .map_or_else(|| "n/a".to_owned(), |value| value.to_string());
+        let write_bytes = report
+            .write_bytes
+            .map_or_else(|| "n/a".to_owned(), |write_bytes| write_bytes.to_string());
         println!(
             "family={} backend={} blocks={} write_bytes={} logical_bytes={} amplification_permille={} \
          build_ms={} snapshot_open_us={} footprint_bytes={} query_p50_us={} query_p95_us={} \
@@ -197,7 +202,7 @@ mod bench_runner {
             report.family.name(),
             report.backend,
             report.blocks,
-            report.write_bytes,
+            write_bytes,
             report.logical_bytes,
             amplification_permille,
             report.build.as_millis(),
@@ -333,7 +338,9 @@ mod bench_runner {
             previous = hash;
         }
         let build = build_started.elapsed();
-        let write_bytes = write_bytes_now().saturating_sub(write_before);
+        let write_bytes = write_bytes_now()
+            .zip(write_before)
+            .map(|(after, before)| after.saturating_sub(before));
         drop(writer);
 
         let snapshot_started = Instant::now();
