@@ -47,12 +47,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arc-swap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -151,6 +145,7 @@ dependencies = [
  "arc-swap",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
  "ruint",
@@ -162,7 +157,6 @@ dependencies = [
 name = "bitcoin-rs-chainstate"
 version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
@@ -173,6 +167,7 @@ dependencies = [
  "bytes",
  "cap-fs-ext",
  "cap-std",
+ "crossbeam-channel",
  "hashbrown 0.17.1",
  "metrics",
  "parking_lot",
@@ -278,7 +273,6 @@ dependencies = [
 name = "bitcoin-rs-node"
 version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
@@ -363,7 +357,6 @@ dependencies = [
 name = "bitcoin-rs-rpc"
 version = "0.15.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
