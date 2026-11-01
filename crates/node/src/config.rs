@@ -41,6 +41,8 @@ pub enum ConfigError {
     PoolFeatureRequired,
     #[error("--pool-datadir must not be empty")]
     PoolDatadirEmpty,
+    #[error("data-dir must not be empty")]
+    DataDirEmpty,
     #[error("--pool requires an explicit --pool-v1-bind or --pool-sv2-bind")]
     PoolBindMissing,
     #[error("pool listener addresses must differ")]
@@ -662,6 +664,9 @@ impl NodeConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.data_dir.as_os_str().is_empty() {
+            return Err(ConfigError::DataDirEmpty);
+        }
         if let Some(pool) = &self.pool {
             pool.validate()?;
             if self.mining.payout_script.is_empty() {

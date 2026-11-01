@@ -1277,3 +1277,15 @@ fn prune_rejects_conflicting_index_options() {
         assert!(matches!(error, ConfigError::PruneWithIndexes), "{error:?}");
     }
 }
+
+#[test]
+fn empty_data_dir_is_rejected_by_config_validation() {
+    let empty_dir = UserConfig {
+        data_dir: Some(std::path::PathBuf::from("")),
+        ..UserConfig::default()
+    };
+    let Err(error) = super::resolve(&[&empty_dir]) else {
+        panic!("empty data_dir must fail config validation");
+    };
+    assert!(matches!(error, ConfigError::DataDirEmpty), "{error:?}");
+}
