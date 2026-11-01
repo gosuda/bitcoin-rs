@@ -7,6 +7,10 @@
 mod percentiles;
 
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+#[path = "../../../tools/benchmark-support/disk_backed_tmpdir.rs"]
+mod disk_backed_tmpdir;
+
+#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 #[expect(clippy::expect_used, reason = "benchmark harness assertions")]
 mod bench_runner {
     use std::path::Path;
@@ -21,7 +25,9 @@ mod bench_runner {
     use bitcoin_rs_storage::{KvStore, PrefixScanLimit};
 
     #[derive(Debug, thiserror::Error)]
-    enum BenchError {
+    pub(super) enum BenchError {
+        #[error(transparent)]
+        TempDir(#[from] crate::disk_backed_tmpdir::TempDirMountError),
         #[error(transparent)]
         Index(#[from] bitcoin_rs_index::IndexError),
         #[error(transparent)]
@@ -394,19 +400,34 @@ mod bench_runner {
             }
         }};
     }
-    pub(super) fn run() {
+    pub(super) fn run() -> Result<(), BenchError> {
+        let mount = crate::disk_backed_tmpdir::require_disk_backed_temp_dir()?;
+        eprintln!(
+            "write amplification bench: temp dir {} on {} ({}) mounted at {}",
+            mount.temp_dir.display(),
+            mount.fstype,
+            mount.device,
+            mount.mount_point
+        );
         #[cfg(feature = "fjall")]
         backend_run!("fjall", bitcoin_rs_storage::FjallStore::open);
         #[cfg(all(feature = "redb", not(feature = "fjall")))]
         backend_run!("redb", bitcoin_rs_storage::RedbStore::open);
         #[cfg(all(feature = "rocksdb", not(feature = "fjall"), not(feature = "redb")))]
         backend_run!("rocksdb", bitcoin_rs_storage::RocksDbStore::open);
+        Ok(())
     }
 }
 
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-fn main() {
-    bench_runner::run();
+fn main() -> std::process::ExitCode {
+    match bench_runner::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(not(any(feature = "fjall", feature = "redb", feature = "rocksdb")))]
