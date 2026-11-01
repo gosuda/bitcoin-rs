@@ -1288,6 +1288,30 @@ fn activation_stages_witness_only_after_durable_commit() -> TestResult {
     Ok(())
 }
 
+// RCV-02
+#[test]
+fn activation_attests_the_snapshot_base_as_assume_valid() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let head = fixture
+        .active
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing activated durable head"))?;
+    assert!(matches!(
+        head.assumeutxo,
+        AssumeUtxoDiskStatus::Validating { .. }
+    ));
+    assert_eq!(
+        fixture.active.durable_head.load_attestation(&head)?,
+        bitcoin_rs_storage::ScriptAttestation::AssumeValid,
+        "the snapshot base was not script-checked locally"
+    );
+    Ok(())
+}
+
 #[test]
 fn activation_failure_leaves_no_staged_witness() -> TestResult {
     let fixture = Fixture::new()?;

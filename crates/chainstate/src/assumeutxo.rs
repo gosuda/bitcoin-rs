@@ -653,7 +653,10 @@ impl AssumeUtxoManager {
                 self.active_chainstate.durable_head.commit(
                     prior,
                     &next,
-                    &bitcoin_rs_storage::CommitRecords::default(),
+                    &bitcoin_rs_storage::CommitRecords {
+                        attestation: Some(bitcoin_rs_storage::ScriptAttestation::AssumeValid),
+                        ..bitcoin_rs_storage::CommitRecords::default()
+                    },
                 )?;
                 Ok(())
             })?;
