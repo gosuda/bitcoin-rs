@@ -11,12 +11,13 @@ use crate::wire::MAX_MESSAGE_PAYLOAD;
 pub(crate) const MAX_RECV_CONTENTS_LEN: usize = 1 + 12 + MAX_MESSAGE_PAYLOAD;
 
 #[derive(Debug)]
-pub(crate) struct PacketReader {
+pub struct PacketReader {
     cipher: RecvCipher,
     aad: Vec<u8>,
     field: [u8; LENGTH_FIELD_LEN],
     field_filled: usize,
     body: Option<PendingBody>,
+    failed: bool,
 }
 
 #[derive(Debug)]
@@ -26,32 +27,54 @@ struct PendingBody {
 }
 
 impl PacketReader {
-    pub(crate) const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
+    pub const fn new(cipher: RecvCipher, aad: Vec<u8>) -> Self {
         Self {
             cipher,
             aad,
             field: [0; LENGTH_FIELD_LEN],
             field_filled: 0,
             body: None,
+            failed: false,
         }
     }
 
-    pub(crate) fn read_contents<R: Read>(
+    pub fn read_contents<R: Read>(
         &mut self,
         reader: &mut R,
     ) -> Result<Option<Bytes>, TransportError> {
+        if self.failed {
+            return Err(TransportError::Packet(
+                crate::bip324::packet::PacketError::AuthFailed(crate::bip324::cipher::AuthFailed),
+            ));
+        }
         let mut body = match self.body.take() {
             Some(body) => body,
-            None => self.read_length(reader)?,
+            None => match self.read_length(reader) {
+                Ok(body) => body,
+                Err(error) => {
+                    if !is_poll_timeout(&error) {
+                        self.failed = true;
+                    }
+                    return Err(error);
+                }
+            },
         };
         if let Err(error) = recv::fill_growing(reader, &mut body.bytes, body.len) {
             if recv::is_poll_timeout(&error) {
                 self.body = Some(body);
+            } else {
+                self.failed = true;
             }
             return Err(error.into());
         }
         let aad = core::mem::take(&mut self.aad);
-        let opened = self.cipher.open(&aad, &mut body.bytes)?;
+        let opened = match self.cipher.open(&aad, &mut body.bytes) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.failed = true;
+                return Err(error.into());
+            }
+        };
         if opened.ignore {
             return Ok(None);
         }
@@ -78,7 +101,7 @@ impl PacketReader {
     }
 }
 
-pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
+pub fn is_poll_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
 
@@ -206,6 +229,25 @@ mod tests {
                 .ok_or_else(|| io::Error::other("a real packet"))?
                 .len(),
             MAX_RECV_CONTENTS_LEN
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tag_failure_poisons_reader_so_subsequent_packets_are_never_accepted() -> TestResult {
+        let (mut sender, mut reader) = pair();
+        let mut corrupted = sender.seal(b"first", &[], false)?;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+        let valid = sender.seal(b"second", &[], false)?;
+
+        let mut stream1 = std::io::Cursor::new(corrupted);
+        assert!(reader.read_contents(&mut stream1).is_err());
+
+        let mut stream2 = std::io::Cursor::new(valid);
+        assert!(
+            reader.read_contents(&mut stream2).is_err(),
+            "no packet may be accepted after authentication tag failure"
         );
         Ok(())
     }
