@@ -91,11 +91,11 @@ macro_rules! emit_cli {
             pub(crate) config: Option<PathBuf>,
             #[arg(long = "bitcoin-conf")]
             pub(crate) bitcoin_conf: Option<PathBuf>,
-            #[arg(long)]
+            #[arg(long, help = "Core-framed corpus archive to replay offline")]
             pub(crate) corpus: Option<PathBuf>,
-            #[arg(long)]
+            #[arg(long, help = "Corpus manifest pinning the archive and stop height")]
             pub(crate) manifest: Option<PathBuf>,
-            #[arg(long)]
+            #[arg(long, help = "Directory for offline-import certification state")]
             pub(crate) state: Option<PathBuf>,
             $(
                 $(#[$fdoc])*
