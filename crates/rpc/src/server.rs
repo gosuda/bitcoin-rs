@@ -14,6 +14,7 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+const MAX_HEADER_COUNT: usize = 100;
 const RESERVED_POOL_DIVISOR: usize = 4;
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -581,6 +582,27 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+const fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
 fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(String, usize)> {
     let mut line = String::new();
     let limit = u64::try_from(remaining + 1).unwrap_or(u64::MAX);
@@ -601,6 +623,7 @@ fn read_headers(
     let mut content_length = None;
     let mut authorization = None;
     let mut keep_alive = false;
+    let mut header_count = 0;
     loop {
         let (line, read) = read_head_line(reader, MAX_HEADER_BYTES - header_bytes)?;
         if read == 0 {
@@ -613,9 +636,19 @@ fn read_headers(
         if line == "\r\n" {
             return Ok((header_bytes, content_length, authorization, keep_alive));
         }
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many headers",
+            ));
+        }
         let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
         };
+        if name.is_empty() || !name.bytes().all(is_token_char) || value.contains('\0') {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
+        }
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
             let parsed = value.parse::<usize>().map_err(|_| {
@@ -687,28 +720,19 @@ fn read_request_head(
     let Some(path) = request_parts.next() else {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
     };
-    if method.is_empty()
-        || !method.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-    {
+    let Some(version) = request_parts.next() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
+    };
+    if request_parts.next().is_some() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request line").into());
+    }
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request version").into());
+    }
+    if path.is_empty() || path.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request target").into());
+    }
+    if method.is_empty() || !method.bytes().all(is_token_char) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid request method").into());
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;

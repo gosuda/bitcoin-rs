@@ -1734,3 +1734,124 @@ fn invalid_listener_errors_are_returned() -> io::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn rejects_header_with_whitespace_before_colon() -> io::Result<()> {
+    let request = b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\nTransfer-Encoding : chunked\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject whitespace before header colon: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_header_with_empty_name() -> io::Result<()> {
+    let request = b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n: invalid\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject empty header name: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_header_with_nul_byte() -> io::Result<()> {
+    let request = b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\nX-Bad\0: 1\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject NUL byte in header: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_too_many_headers() -> io::Result<()> {
+    let mut request = b"POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n".to_vec();
+    for i in 0..101 {
+        request.extend_from_slice(format!("X-Hdr-{i}: 1\r\n").as_bytes());
+    }
+    request.extend_from_slice(b"\r\n");
+    let seen = exchange(&request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject too many headers: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_request_line_without_http_version() -> io::Result<()> {
+    let request = b"POST /\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject request line without HTTP version: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_request_line_with_trailing_tokens() -> io::Result<()> {
+    let request = b"POST / HTTP/1.1 extra\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject request line with trailing tokens: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_request_line_with_unsupported_http_version() -> io::Result<()> {
+    let request = b"POST / HTTP/2.0\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject unsupported HTTP version: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_request_target_with_control_characters() -> io::Result<()> {
+    let request = b"POST /\x01 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject control characters in request target: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
+
+#[test]
+fn rejects_request_target_with_nul_byte() -> io::Result<()> {
+    let request = b"POST /\0 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: 0\r\n\r\n";
+    let seen = exchange(request)?;
+    assert!(
+        seen.response.starts_with("HTTP/1.1 400 Bad Request"),
+        "must reject NUL byte in request target: {}",
+        seen.response
+    );
+    assert!(seen.eof);
+    Ok(())
+}
