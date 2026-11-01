@@ -81,7 +81,7 @@ struct MultiInputFixture {
 fn signed_multi_input_p2tr_with_types(
     keys: &[SecretKey],
     sighash_types: &[TapSighashType],
-) -> Option<MultiInputFixture> {
+) -> MultiInputFixture {
     let secp = Secp256k1::new();
     let mut keypairs = Vec::with_capacity(keys.len());
     let mut oracle_prevouts = Vec::with_capacity(keys.len());
@@ -134,13 +134,14 @@ fn signed_multi_input_p2tr_with_types(
             .copied()
             .unwrap_or(TapSighashType::Default);
         let mut cache = SighashCache::new(&tx);
-        let sighash = cache
-            .taproot_key_spend_signature_hash(
-                input_idx,
-                &Prevouts::All(&oracle_prevouts),
-                sighash_type,
-            )
-            .ok()?;
+        let sighash = match cache.taproot_key_spend_signature_hash(
+            input_idx,
+            &Prevouts::All(&oracle_prevouts),
+            sighash_type,
+        ) {
+            Ok(hash) => hash,
+            Err(err) => panic!("oracle taproot sighash failed: {err}"),
+        };
         let message = Message::from_digest(*sighash.as_byte_array());
         let signature = secp.sign_schnorr(&message, keypair.as_keypair());
         let sig_bytes = serialize_taproot_signature(signature, sighash_type);
@@ -148,10 +149,10 @@ fn signed_multi_input_p2tr_with_types(
     }
 
     let native_prevouts = oracle_prevouts.iter().map(to_native_prevout).collect();
-    Some(MultiInputFixture {
+    MultiInputFixture {
         tx: to_native(&tx),
         prevouts: native_prevouts,
-    })
+    }
 }
 
 proptest! {
@@ -163,9 +164,7 @@ proptest! {
         sighash_types in prop::collection::vec(sighash_type_strategy(), 1..=3),
         use_standard_flags in any::<bool>(),
     ) {
-        let Some(fixture) = signed_multi_input_p2tr_with_types(&keys, &sighash_types) else {
-            return Ok(());
-        };
+        let fixture = signed_multi_input_p2tr_with_types(&keys, &sighash_types);
         let interpreter = Interpreter;
         let flags = if use_standard_flags {
             VerifyFlags::STANDARD
@@ -195,9 +194,7 @@ proptest! {
         corruption_mode in 0u8..=7u8,
         extra_bytes in prop::collection::vec(any::<u8>(), 0..=80),
     ) {
-        let Some(fixture) = signed_multi_input_p2tr_with_types(&[key], &[sighash_type]) else {
-            return Ok(());
-        };
+        let fixture = signed_multi_input_p2tr_with_types(&[key], &[sighash_type]);
         let interpreter = Interpreter;
         let input = &fixture.tx.inputs[0];
         let prevout = &fixture.prevouts[0];
