@@ -112,11 +112,23 @@ impl<S: KvStore> JournalWriter<S> {
         ) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if self.durable.offset > 0 {
+                    return Err(JournalWriterError::CursorMismatch(format!(
+                        "active journal segment {name} is missing with durable offset {}",
+                        self.durable.offset
+                    )));
+                }
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
         let length = file.metadata()?.len();
+        if length < self.durable.offset {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "active journal segment {name} is truncated: length {length} < durable offset {}",
+                self.durable.offset
+            )));
+        }
         if length > self.durable.offset {
             file.set_len(self.durable.offset)?;
             file.sync_all()?;

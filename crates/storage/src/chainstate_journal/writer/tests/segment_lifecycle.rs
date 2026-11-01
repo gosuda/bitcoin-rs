@@ -45,6 +45,53 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
 
 // JW-REC-1
 #[test]
+fn rejects_reopen_when_active_segment_is_truncated() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir;
+    let seg_name;
+    {
+        let mut writer = open_fresh("seg-trunc", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.flush_to(1)?;
+        assert!(writer.durable.offset > 0);
+        dir = writer.dir.try_clone()?;
+        seg_name = segment_name(writer.segment_gen);
+        let file = dir.open_with(&seg_name, cap_std::fs::OpenOptions::new().write(true))?;
+        file.set_len(1)?;
+        file.sync_all()?;
+    }
+    let result = JournalWriter::open(dir, store);
+    assert!(matches!(
+        &result,
+        Err(JournalWriterError::CursorMismatch(msg)) if msg.contains("truncated")
+    ));
+    Ok(())
+}
+
+// JW-REC-1
+#[test]
+fn rejects_reopen_when_active_segment_is_missing() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir;
+    {
+        let mut writer = open_fresh("seg-missing", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.flush_to(1)?;
+        assert!(writer.durable.offset > 0);
+        dir = writer.dir.try_clone()?;
+        let seg_name = segment_name(writer.segment_gen);
+        dir.remove_file(&seg_name)?;
+    }
+    let result = JournalWriter::open(dir, store);
+    assert!(matches!(
+        &result,
+        Err(JournalWriterError::CursorMismatch(msg)) if msg.contains("missing")
+    ));
+    Ok(())
+}
+
+// JW-REC-1
+#[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let dir;
