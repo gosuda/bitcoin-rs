@@ -1,3 +1,4 @@
+mod adversarial_index;
 mod be_order;
 mod compact_filters;
 mod index_roundtrip;
