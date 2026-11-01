@@ -221,4 +221,16 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn hex_decode_array_two_byte_instantiation_decodes_and_refuses() {
+        assert_eq!(hex_decode_array::<2>("dead"), Ok([0xde, 0xad]));
+        assert_eq!(
+            hex_decode_array::<2>("deadbeef"),
+            Err(HexError::WrongLength {
+                expected: 4,
+                got: 8,
+            })
+        );
+    }
 }
