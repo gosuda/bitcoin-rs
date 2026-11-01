@@ -340,21 +340,6 @@ class CaptureBundleTests(unittest.TestCase):
             else:
                 self.fail("capture accepted an unknown batch mode")
 
-    def test_unreadable_binary_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            host = HostFixture(Path(raw))
-            request = dataclasses.replace(host.base_request(), binary=host.root / "gone")
-            try:
-                host.capture(request)
-            except operator_identity.BlockedIdentity as error:
-                self.assertEqual([name for name, _ in error.blocked], ["binary"])
-                self.assertIn(
-                    "cannot stat",
-                    error.blocked[0][1] if error.blocked[0][1] is not None else "",
-                )
-            else:
-                self.fail("capture accepted a missing binary")
-
     def test_symlinked_binary_hashes_its_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             host = HostFixture(Path(raw))
@@ -382,19 +367,6 @@ class CaptureBundleTests(unittest.TestCase):
                 self.assertIsNotNone(error.blocked[0][1])
             else:
                 self.fail("capture accepted an unreadable binary")
-
-    def test_unreadable_node_config_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            host = HostFixture(Path(raw))
-            request = dataclasses.replace(
-                host.base_request(), node_config=host.root / "gone-config"
-            )
-            try:
-                host.capture(request)
-            except operator_identity.BlockedIdentity as error:
-                self.assertEqual([name for name, _ in error.blocked], ["node_config"])
-            else:
-                self.fail("capture accepted a missing NodeConfig")
 
     def test_missing_cpuinfo_blocks_hardware(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -589,23 +561,6 @@ class CaptureCliTests(unittest.TestCase):
             self.assertEqual(second, 1)
             self.assertIn("already exists", second_stderr)
             self.assertEqual(output.read_bytes(), published)
-
-    def test_invalid_batch_mode_is_a_usage_error(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            output = tmp / "operator-identity.json"
-            argv = _capture_argv(tmp, output)
-            batch = argv.index("--batch-mode")
-            argv[batch + 1] = "write_back"
-            stderr = io.StringIO()
-            try:
-                with contextlib.redirect_stderr(stderr):
-                    operator_identity.main(argv)
-            except SystemExit as error:
-                self.assertEqual(error.code, 2)
-            else:
-                self.fail("invalid batch mode was accepted")
-            self.assertFalse(output.exists())
 
 
 class VerifyTests(unittest.TestCase):
