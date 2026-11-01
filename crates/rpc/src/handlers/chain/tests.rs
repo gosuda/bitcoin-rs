@@ -427,6 +427,23 @@ fn getblock_verbosity_2_emits_every_transaction_of_the_stored_body() {
         );
     }
 }
+#[test]
+fn getblock_rejects_invalid_verbosity() {
+    let block = fixture_block_with_spend();
+    let record = BlockRecord::from_block(0, &block);
+    let ctx = Arc::new(Context::new());
+    seed_block(&ctx, &block, record);
+    let block_hash = block.block_hash().0.to_string_be();
+
+    let err_99 = getblock(&ctx, &json!([block_hash, 99])).expect_err("verbosity 99 must fail");
+    assert!(matches!(err_99, RpcError::InvalidParams(_)));
+
+    let err_4 = getblock(&ctx, &json!([block_hash, 4])).expect_err("verbosity 4 must fail");
+    assert!(matches!(err_4, RpcError::InvalidParams(_)));
+
+    let err_neg = getblock(&ctx, &json!([block_hash, -1])).expect_err("verbosity -1 must fail");
+    assert!(matches!(err_neg, RpcError::InvalidParams(_)));
+}
 
 #[test]
 fn verbose_block_and_raw_consumers_preserve_unsigned_transaction_versions() {
