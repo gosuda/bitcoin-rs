@@ -565,6 +565,7 @@ impl FlatFileBlockReader {
             || header[8..12] != height.to_le_bytes()
             || header[12..] != hash
         {
+            state.cursor = None;
             return Err(StorageError::CorruptBlockFrame("frame header mismatch"));
         }
 
