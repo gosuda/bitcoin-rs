@@ -176,8 +176,10 @@ pub fn decode(bytes: &[u8]) -> Result<FeatureAnnouncement, FeatureError> {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn advertised_id_validates_length_bounds() {
@@ -376,5 +378,117 @@ mod tests {
         wire.extend_from_slice(&[0xbb, 0xcc]);
         assert_eq!(decode(&wire), Err(FeatureError::Trailing(3)));
         Ok(())
+    }
+
+    fn feature_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(1024)
+    }
+
+    fn arbitrary_feature_id() -> impl Strategy<Value = FeatureId> {
+        prop_oneof![
+            (MIN_ID_LEN..=MAX_ID_LEN).prop_flat_map(|len| {
+                prop::collection::vec(0x20..=0x7eu8, len).prop_map(|bytes| {
+                    FeatureId::advertised(&bytes)
+                        .expect("valid printable ascii within length bounds")
+                })
+            }),
+            (MIN_ID_LEN..=MAX_ID_LEN).prop_flat_map(|len| {
+                prop::collection::vec(any::<u8>(), len).prop_map(FeatureId::from_raw_unchecked)
+            }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: feature_cases(), ..ProptestConfig::default() })]
+
+        #[test]
+        fn feature_announcement_roundtrip_and_canonical_invariants(
+            id in arbitrary_feature_id(),
+            data in prop_oneof![
+                Just(vec![]),
+                Just(vec![0u8]),
+                Just(vec![1u8]),
+                Just(vec![0x42; MAX_DATA_LEN]),
+                Just(vec![0xff; MAX_DATA_LEN - 1]),
+                prop::collection::vec(any::<u8>(), 0..=MAX_DATA_LEN),
+            ],
+        ) {
+            let announcement = FeatureAnnouncement::new(id.clone(), data.clone());
+            let encoded = encode(&announcement).expect("valid announcement encodes");
+
+            let id_len = u64::try_from(id.as_bytes().len()).expect("id len fits u64");
+            let data_len = u64::try_from(data.len()).expect("data len fits u64");
+            let expected_len = varint::encoded_len(id_len) + id.as_bytes().len()
+                + varint::encoded_len(data_len) + data.len();
+            prop_assert_eq!(encoded.len(), expected_len, "encoded length matches canonical varint calculation");
+
+            let decoded = decode(&encoded).expect("encoded announcement decodes");
+            prop_assert_eq!(&decoded, &announcement, "decoded announcement matches original");
+
+            let re_encoded = encode(&decoded).expect("decoded re-encodes");
+            prop_assert_eq!(re_encoded, encoded, "re-encoding is strictly idempotent");
+        }
+
+        #[test]
+        fn feature_decoder_rejects_corrupted_and_boundary_violating_inputs(
+            mode in 0..6u8,
+            mutate_offset in 0..1024usize,
+            raw_bytes in prop::collection::vec(any::<u8>(), 0..1024),
+        ) {
+            match mode {
+                0 => {
+                    let short_len = mutate_offset % MIN_ID_LEN;
+                    let short_len_u64 = u64::try_from(short_len).expect("fits u64");
+                    let mut wire: Vec<u8> = varint::encode(short_len_u64).to_vec();
+                    wire.extend(vec![0x61; short_len]);
+                    wire.extend(varint::encode(0));
+                    prop_assert_eq!(decode(&wire), Err(FeatureError::IdLength(short_len)));
+                }
+                1 => {
+                    let long_len = MAX_ID_LEN + 1 + (mutate_offset % 200);
+                    let long_len_u64 = u64::try_from(long_len).expect("fits u64");
+                    let mut wire: Vec<u8> = varint::encode(long_len_u64).to_vec();
+                    wire.extend(vec![0x61; long_len]);
+                    wire.extend(varint::encode(0));
+                    prop_assert_eq!(decode(&wire), Err(FeatureError::IdLength(long_len)));
+                }
+                2 => {
+                    let long_data = MAX_DATA_LEN + 1 + (mutate_offset % 500);
+                    let mut wire: Vec<u8> = varint::encode(4).to_vec();
+                    wire.extend_from_slice(b"test");
+                    let long_data_u64 = u64::try_from(long_data).expect("fits u64");
+                    wire.extend(varint::encode(long_data_u64));
+                    prop_assert_eq!(decode(&wire), Err(FeatureError::DataTooLong(long_data)));
+                }
+                3 => {
+                    let announcement = FeatureAnnouncement::new(
+                        FeatureId::from_raw_unchecked(b"test".to_vec()),
+                        vec![1, 2, 3, 4],
+                    );
+                    let wire = encode(&announcement).expect("encodes");
+                    let cut = mutate_offset % wire.len();
+                    prop_assert!(matches!(
+                        decode(&wire[..cut]),
+                        Err(FeatureError::Truncated | FeatureError::IdLength(_))
+                    ));
+                }
+                4 => {
+                    let announcement = FeatureAnnouncement::new(
+                        FeatureId::from_raw_unchecked(b"test".to_vec()),
+                        vec![1, 2, 3],
+                    );
+                    let mut wire = encode(&announcement).expect("encodes");
+                    let extra = 1 + (mutate_offset % 64);
+                    wire.extend(vec![0xff; extra]);
+                    prop_assert_eq!(decode(&wire), Err(FeatureError::Trailing(extra)));
+                }
+                _ => {
+                    let _ = decode(&raw_bytes);
+                }
+            }
+        }
     }
 }
