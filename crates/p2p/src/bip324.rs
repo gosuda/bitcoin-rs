@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 mod cipher;
 mod handshake;
 mod keys;
@@ -6,8 +8,11 @@ mod packet;
 mod reader;
 
 pub use handshake::{Established, Handshake, Step};
-pub use packet::{Opened, PacketError, RecvCipher, SendCipher};
-pub use reader::{PacketReader, is_poll_timeout};
+pub use packet::SendCipher;
+#[cfg(feature = "fuzzing")]
+pub use packet::{PacketError, RecvCipher};
+pub use reader::PacketReader;
+pub(crate) use reader::is_poll_timeout;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {

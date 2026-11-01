@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use std::io::Read;
 
 use bitcoin::p2p::Magic;
@@ -29,9 +31,9 @@ pub enum Step {
 
 #[derive(Debug)]
 pub struct Established {
-    pub send: SendCipher,
-    pub recv: PacketReader,
-    pub session_id: [u8; 32],
+    pub(crate) send: SendCipher,
+    pub(crate) recv: PacketReader,
+    pub(crate) session_id: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -116,11 +118,11 @@ impl Handshake {
         }
     }
 
-    pub fn take_outbound(&mut self) -> Vec<u8> {
+    pub(crate) fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
 
-    pub const fn received_any(&self) -> bool {
+    pub(crate) const fn received_any(&self) -> bool {
         self.received_any
     }
 

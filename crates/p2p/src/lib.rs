@@ -1,8 +1,14 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+#[cfg(feature = "fuzzing")]
 pub mod addrman;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod addrman;
+#[cfg(feature = "fuzzing")]
 pub mod bip324;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod bip324;
 pub mod block_announce;
 pub(crate) mod block_stager;
 pub(crate) mod chain_query;
@@ -32,13 +38,19 @@ pub(crate) mod peer;
 pub(crate) mod peer_info;
 pub(crate) mod peer_table;
 pub(crate) mod recv;
+#[cfg(feature = "fuzzing")]
 pub mod sam;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod sam;
 pub(crate) mod service;
+#[cfg(feature = "fuzzing")]
 pub mod socks;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod socks;
 pub mod staletip;
 pub mod subnet;
 pub mod sync;
-pub mod transport;
+pub(crate) mod transport;
 pub(crate) mod tx_policy;
 pub(crate) mod tx_relay;
 pub mod wire;

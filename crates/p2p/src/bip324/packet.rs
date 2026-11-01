@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use super::cipher::{AuthFailed, FsChaCha20, FsChaCha20Poly1305, LENGTH_FIELD_LEN, TAG_LEN};
 
 pub(crate) const HEADER_LEN: usize = 1;
@@ -59,9 +61,9 @@ impl SendCipher {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Opened<'a> {
-    pub ignore: bool,
-    pub contents: &'a [u8],
+pub(crate) struct Opened<'a> {
+    pub(crate) ignore: bool,
+    pub(crate) contents: &'a [u8],
 }
 
 #[derive(Debug)]
@@ -78,12 +80,16 @@ impl RecvCipher {
         }
     }
 
-    pub fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
+    pub(crate) fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
         self.length.crypt(&mut field);
         usize::from(field[0]) | (usize::from(field[1]) << 8) | (usize::from(field[2]) << 16)
     }
 
-    pub fn open<'a>(&mut self, aad: &[u8], body: &'a mut [u8]) -> Result<Opened<'a>, PacketError> {
+    pub(crate) fn open<'a>(
+        &mut self,
+        aad: &[u8],
+        body: &'a mut [u8],
+    ) -> Result<Opened<'a>, PacketError> {
         let sealed_len = body
             .len()
             .checked_sub(TAG_LEN)

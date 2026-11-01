@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use bitcoin_rs_primitives::PeerEndpoint;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -996,13 +998,10 @@ impl AddressBook {
         }
     }
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.state.lock().stored.records.len()
     }
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+    #[cfg_attr(not(feature = "fuzzing"), allow(dead_code))]
     #[must_use]
     pub fn is_writable(&self) -> bool {
         self.state.lock().writable

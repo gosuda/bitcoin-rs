@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit as _, StreamCipher as _, StreamCipherSeek as _};
 use chacha20poly1305::{AeadInOut as _, ChaCha20Poly1305, KeyInit as _};

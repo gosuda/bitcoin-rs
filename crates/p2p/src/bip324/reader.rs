@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use std::io::Read;
 
 use bytes::Bytes;
@@ -101,7 +103,7 @@ impl PacketReader {
     }
 }
 
-pub fn is_poll_timeout(error: &TransportError) -> bool {
+pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
 

@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use parking_lot::{Mutex, MutexGuard};
 use std::cell::Cell;
 use std::fmt::Write as _;

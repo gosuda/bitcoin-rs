@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "fuzzing"), allow(unreachable_pub))]
+
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -128,6 +130,7 @@ pub fn parse_auth_reply(reply: [u8; 2]) -> Result<(), DialFailure> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "fuzzing"), allow(dead_code))]
 pub fn parse_connect_reply<R: Read>(reader: &mut R) -> Result<(), DialFailure> {
     let mut head = [0u8; 4];
     reader
