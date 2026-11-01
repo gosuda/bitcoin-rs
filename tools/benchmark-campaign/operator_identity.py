@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import evidence
 import filesystem
+import hashlib
 
 SCHEMA = "operator-identity-v1"
 BATCH_MODES = ("write", "write_deferred", "write_durable")
@@ -103,16 +104,28 @@ class BlockedIdentity(Exception):
 def _file_digest(path: Path, identity: str) -> FileDigest:
     """SHA-256 and byte size of one existing regular file."""
     try:
-        status = path.stat()
+        descriptor = os.open(
+            path.resolve(),
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as error:
         raise BlockedIdentity([(identity, f"cannot stat {path}: {error}")]) from error
-    if not stat.S_ISREG(status.st_mode):
-        raise BlockedIdentity([(identity, f"{path} is not a regular file")])
     try:
-        digest = evidence.hash_regular_file(path.resolve())
-    except (OSError, evidence.ContractError) as error:
-        raise BlockedIdentity([(identity, str(error))]) from error
-    return digest, status.st_size
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise BlockedIdentity([(identity, f"{path} is not a regular file")])
+        digest = hashlib.sha256()
+        try:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        except OSError as error:
+            raise BlockedIdentity([(identity, str(error))]) from error
+    finally:
+        os.close(descriptor)
+    return digest.hexdigest(), status.st_size
 
 
 def _validated_required(identity: str, value: str | None) -> tuple[str | None, str | None]:

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -643,6 +644,30 @@ class VerifyTests(unittest.TestCase):
             )
             self.assertEqual(code, 1)
             self.assertIn("cannot hash binary", stderr)
+
+
+class FileDigestTests(unittest.TestCase):
+    def test_size_and_digest_share_one_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "node-config"
+            original = b"a" * 16
+            replacement = b"b" * 40
+            path.write_bytes(original)
+            real_open = os.open
+            swapped = False
+
+            def swapping_open(file, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if not swapped and Path(file) == path.resolve():
+                    swapped = True
+                    path.write_bytes(replacement)
+                return real_open(file, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch("os.open", swapping_open):
+                digest, size = operator_identity._file_digest(path, "node_config")
+            self.assertTrue(swapped)
+            self.assertEqual(digest, hashlib.sha256(replacement).hexdigest())
+            self.assertEqual(size, len(replacement))
 
 
 if __name__ == "__main__":
