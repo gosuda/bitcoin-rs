@@ -1658,6 +1658,16 @@ impl DownloadWindow {
         self.last_front_advance = Some(now);
     }
 
+    #[cfg(test)]
+    pub(crate) fn backdate_stall_for_test(&mut self, elapsed: Duration) {
+        if let Some(episode) = self.stall.as_mut() {
+            episode.since = episode.since.checked_sub(elapsed).unwrap_or(episode.since);
+        }
+        for since in self.owner_downloading_since.values_mut() {
+            *since = since.checked_sub(elapsed).unwrap_or(*since);
+        }
+    }
+
     pub(crate) fn reject_delivery(
         &mut self,
         hash: Hash256,

@@ -189,7 +189,10 @@ fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp() -> T
     sync.tick();
     assert_eq!(sync.scheduler.lock().window.pending_len(), 2);
 
-    std::thread::sleep(Duration::from_millis(300));
+    sync.scheduler
+        .lock()
+        .window
+        .backdate_stall_for_test(Duration::from_millis(500));
     sync.tick();
 
     assert_no_getdata(&rxs[0])?;
@@ -447,7 +450,10 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() 
     }
     assert!(honest_rx.try_recv().is_err());
 
-    std::thread::sleep(Duration::from_millis(150));
+    sync.scheduler
+        .lock()
+        .window
+        .backdate_stall_for_test(Duration::from_millis(500));
     sync.tick();
     assert!(!peers.is_connected(staller));
     assert_eq!(
