@@ -161,8 +161,8 @@ fn verify_startup_window(
             paths: Box::new(StartupVerificationPaths {
                 blocks: data_dir.join("blocks"),
                 chainstate_dir: data_dir.join("chainstate"),
-                checkpoints: data_dir.join("checkpoints"),
-                txindex: data_dir.join("indexes").join("txindex"),
+                checkpoints: data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT),
+                txindex: data_dir.join(crate::state::TXINDEX_NAMESPACE),
             }),
             source,
         }),
@@ -556,8 +556,10 @@ impl NodeState {
             Err(error @ bitcoin_rs_chainstate::ApplyError::DurableHeadGapUnrecoverable { .. }) => {
                 return Err(NodeOpenError::UnrecoverableDurableHeadGap {
                     chainstate: config.data_dir.join("chainstate"),
-                    checkpoints: config.data_dir.join("chainstate-checkpoints"),
-                    txindex: config.data_dir.join("txindex"),
+                    checkpoints: config
+                        .data_dir
+                        .join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT),
+                    txindex: config.data_dir.join(crate::state::TXINDEX_NAMESPACE),
                     source: Box::new(error),
                 });
             }

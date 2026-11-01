@@ -64,6 +64,7 @@ pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
+pub(crate) const TXINDEX_NAMESPACE: &str = "txindex";
 
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
@@ -423,7 +424,7 @@ fn build_derived_index_open_spec(
     Ok(Some(bitcoin_rs_index::runtime::DerivedIndexOpenSpec {
         scripthash_limit: config.indexes.scripthash_limit,
         data_dir: config.data_dir.clone(),
-        namespace: "txindex",
+        namespace: TXINDEX_NAMESPACE,
         storage_backend: config.storage.backend,
         epoch,
         enabled,

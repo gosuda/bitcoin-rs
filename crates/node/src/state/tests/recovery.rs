@@ -615,7 +615,8 @@ fn startup_verification_refuses_a_corrupt_tip_body() -> Result<(), TestError> {
 
     let (_dir, state, config) = applied_regtest_chain(2, 2)?;
     drop(state);
-    let path = config.data_dir.join("blocks/blk00000.dat");
+    let data_dir = config.data_dir.clone();
+    let path = data_dir.join("blocks/blk00000.dat");
     let mut damaged = std::fs::read(&path)?;
     *damaged.last_mut().ok_or(TestError::Missing("block file"))? ^= 0xff;
     std::fs::write(&path, &damaged)?;
@@ -625,15 +626,29 @@ fn startup_verification_refuses_a_corrupt_tip_body() -> Result<(), TestError> {
         .ok_or(TestError::UnexpectedSuccess(
             "a damaged tip body was accepted",
         ))?;
+    let NodeOpenError::StartupVerification { paths, source, .. } = &error else {
+        return Err(TestError::ExpectationFailed(
+            "a damaged tip body must refuse startup verification",
+        ));
+    };
     assert!(
-        matches!(
-            error,
-            NodeOpenError::StartupVerification {
-                source: VerifyError::Binding { height: 2, .. },
-                ..
-            }
-        ),
+        matches!(source, VerifyError::Binding { height: 2, .. }),
         "unexpected refusal: {error:#}"
+    );
+    assert_eq!(
+        paths.checkpoints,
+        data_dir.join(bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT),
+        "the operator must be pointed at the checkpoint root that holds the files"
+    );
+    assert!(
+        paths.checkpoints.is_dir(),
+        "the named checkpoint directory must exist: {}",
+        paths.checkpoints.display()
+    );
+    assert_eq!(
+        paths.txindex,
+        data_dir.join(crate::state::TXINDEX_NAMESPACE),
+        "the operator must be pointed at the txindex namespace directory"
     );
     assert_eq!(
         std::fs::read(&path)?,
