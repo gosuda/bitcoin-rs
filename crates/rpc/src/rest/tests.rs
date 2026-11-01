@@ -574,6 +574,10 @@ fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
 
 // API-03
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "covers every registered REST URI and status"
+)]
 fn route_status_table() {
     const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     let ctx = Arc::new(Context::new());
@@ -603,6 +607,11 @@ fn route_status_table() {
             "verbose=true&mempool_sequence=true",
             400,
         ),
+        (
+            "/rest/mempool/contents.json".into(),
+            "mempool_sequence=maybe",
+            400,
+        ),
         ("/rest/mempool/foo.json".into(), "", 400),
         ("/rest/mempool/info.bin".into(), "", 404),
         (format!("/rest/headers/{HASH}.json"), "count=1", 200),
@@ -624,6 +633,8 @@ fn route_status_table() {
         ("/rest/blockhashbyheight/abc.json".into(), "", 400),
         ("/rest/blockhashbyheight/0".into(), "", 404),
         ("/rest/blockhashbyheight/0.txt".into(), "", 400),
+        ("/rest/blockhashbyheight/-1.json".into(), "", 400),
+        ("/rest/blockhashbyheight/4294967296.json".into(), "", 400),
         (format!("/rest/spenttxouts/{HASH}.json"), "", 404),
         ("/rest/spenttxouts/not-a-hash.json".into(), "", 400),
         (format!("/rest/block/notxdetails/{HASH}.hex"), "", 404),
@@ -633,6 +644,9 @@ fn route_status_table() {
         (format!("/rest/headers/{HASH}.hex"), "count=1", 200),
         (format!("/rest/headers/{HASH}.bin"), "count=1", 200),
         (format!("/rest/headers/{HASH}.json"), "count=0", 400),
+        (format!("/rest/headers/{HASH}.json"), "count=2001", 400),
+        (format!("/rest/headers/{HASH}.json"), "count=-1", 400),
+        (format!("/rest/headers/{HASH}.json"), "count=abc", 400),
         (format!("/rest/getutxos/{HASH}-0.txt"), "", 400),
         (
             format!("/rest/getutxos/checkmempool/{HASH}-0.json"),
