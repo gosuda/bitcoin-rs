@@ -801,8 +801,7 @@ fn bip324_session_id_matches_official_packet_test_vectors() {
 
     fn fixture_array<const LEN: usize>(text: &str) -> [u8; LEN] {
         let bytes = fixture_bytes(text);
-        let array = <[u8; LEN]>::try_from(bytes.as_slice()).expect("fixture hex length");
-        array
+        <[u8; LEN]>::try_from(bytes.as_slice()).expect("fixture hex length")
     }
 
     fn decode_fixture(text: &str) -> String {
