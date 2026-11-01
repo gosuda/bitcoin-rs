@@ -65,11 +65,11 @@ Arm medians: `single_group` control 32.557 ms, candidate 35.574 ms; `multi_group
 | `multi_group` | control | 39.641 / 47.654 / 51.235 ms | 39.330 / 46.564 / 50.458 ms | 55.748 / 72.116 / 80.166 ms | 8.642 / 9.476 / 9.777 ms | 12.605 / 14.344 / 15.804 ms | 2.51 / 2.66 / 2.58 s | 10.13 / 10.19 / 10.33 MiB |
 | `multi_group` | candidate | 58.571 / 57.144 / 57.947 ms | 58.207 / 55.511 / 56.204 ms | 91.518 / 83.149 / 94.662 ms | 9.540 / 9.460 / 9.435 ms | 15.276 / 15.018 / 14.830 ms | 2.97 / 2.89 / 2.82 s | 10.62 / 10.34 / 10.49 MiB |
 
-Each cell lists rounds 1 / 2 / 3. The candidate holds the transition longer, because it adds one thread handoff per block and one verifier wakeup per verdict. Candidate peak RSS stays within 0.5 MiB of control in both scenarios, inside the 10% guard. CPU total rises by up to 0.39 s per run in `multi_group`; the 10 ms tick resolution cannot resolve `single_group`.
+Each cell lists rounds 1 / 2 / 3. The candidate holds the transition longer, because it adds one thread handoff per block and one verifier wakeup per verdict. Candidate peak RSS stays within 0.5 MiB of control in both scenarios, inside the 3% non-target guard. CPU total rises by up to 0.39 s per run in `multi_group`; the 10 ms tick resolution cannot resolve `single_group`.
 
 ### Decision
 
-REJECT. The target gate needs control divided by candidate to reach 1.05, with the improvement larger than the control range. Control divided by candidate is between 0.43 and 0.96 over the six paired rounds. Candidate divided by control is between 1.045 and 2.343. The non-target gate also fails. The candidate raises the median wall time by 9.3% in `single_group` and 12.3% in `multi_group`, beyond the 3% limit. It raises p95 by more than 5% in `multi_group`. `window.rs` went back to its baseline, and the six regression tests stayed.
+REJECT. The target gate needs control divided by candidate to reach 1.05, with the improvement larger than the control range. Control divided by candidate is between 0.43 and 0.96 over the six paired rounds. Candidate divided by control is between 1.045 and 2.343. The non-target gate also fails. The candidate raises the median wall time by 9.3% in `single_group` and 12.3% in `multi_group`, beyond the 3% limit. Candidate p95 is also higher in every `multi_group` round. `window.rs` went back to its baseline, and the six regression tests stayed.
 
 ### Why it lost on this corpus
 

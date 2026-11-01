@@ -16,6 +16,6 @@ Routing regression (`crates/index/src/runtime/recovery_tests.rs`, small fork fix
 | 2 | 562,004 | 590,221 | 95,219 |
 | 3 | 552,931 | 608,231 | 90,908 |
 
-Medians: t_fw 562,004 ns, t_rb 608,231 ns, derived 95,219; spread (max minus min) 4,654, which is 4.89% of the median, stable. One post-revision verification run with per-rollback fence recapture measured t_fw 461,187 ns and t_rb 477,798 ns, deriving 96,523. The derivation is `cutover = clamp(100_000 x 562_004 / 608_231, 1_000, 100_000) = 95_219`, which rounds to `100_000` at one significant figure.
+Medians: t_fw 562,004 ns, t_rb 608,231 ns, derived 95,219; spread (max minus min) 4,654, which is 4.89% of the median, stable. One post-revision verification run with per-rollback fence recapture measured t_fw 461,187 ns and t_rb 477,798 ns, deriving 96,523. The derivation is `cutover = clamp(100_000 x t_fw / t_rb, 1_000, 100_000)` per run; the median of the three derived values is 95,219, which rounds to `100_000` at one significant figure.
 
 Conclusion: the default is `100_000` (grounds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` in `crates/index/src/runtime.rs`); the #208 834k-gap shape rebuilds and reorgs around 100 blocks or fewer rewind; the per-block ratio does not prove rebuild always scales better, since total cost depends on tip height versus rollback depth.

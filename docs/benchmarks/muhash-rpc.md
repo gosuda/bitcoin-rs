@@ -27,7 +27,7 @@ The query is a bounded read under the existing read fence; it cannot consume the
 
 ## Prior candidate evidence (controller contract before the rewrite)
 
-Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
+Retained verbatim from the pre-rewrite document. Nothing below is end-state proof.
 
 `tools/benchmark-campaign/muhash_rpc.py` compares the production full-UTXO
 MuHash query in Bitcoin Core 31.1 with the same query in bitcoin-rs. It is a
