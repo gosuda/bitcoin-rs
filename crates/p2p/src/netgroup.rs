@@ -333,6 +333,7 @@ pub(crate) const LINKED_ASMAP: &[u8] =
 #[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn overlay_groups_use_address_prefixes() {
@@ -494,10 +495,271 @@ mod tests {
         }
     }
 
+    fn naive_routable(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                let o = v4.octets();
+                if o == [255, 255, 255, 255] || o[0] == 0 || o[0] == 127 {
+                    return false;
+                }
+                if o[0] == 10
+                    || (o[0] == 172 && (16..=31).contains(&o[1]))
+                    || (o[0] == 192 && o[1] == 168)
+                {
+                    return false;
+                }
+                if o[0] == 169 && o[1] == 254 {
+                    return false;
+                }
+                if (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                    || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                    || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+                {
+                    return false;
+                }
+                if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+                    return false;
+                }
+                if o[0] == 100 && (64..=127).contains(&o[1]) {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                let o = v6.octets();
+                if v6.is_unspecified() || v6.is_loopback() {
+                    return false;
+                }
+                if (o[0] & 0xfe) == 0xfc {
+                    return false;
+                }
+                if o[..8] == [0xfe, 0x80, 0, 0, 0, 0, 0, 0] {
+                    return false;
+                }
+                if o[..4] == [0x20, 0x01, 0x0d, 0xb8] {
+                    return false;
+                }
+                if o[..3] == [0x20, 0x01, 0x00] && (o[3] & 0xf0 == 0x10 || o[3] & 0xf0 == 0x20) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn naive_canonical_ip(ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V6(v6) => {
+                let o = v6.octets();
+                if o[..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
+                    IpAddr::V4(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+                } else {
+                    IpAddr::V6(v6)
+                }
+            }
+            IpAddr::V4(_) => ip,
+        }
+    }
+
+    fn naive_linked_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {
+        let canon = naive_canonical_ip(ip);
+        if !naive_routable(canon) {
+            return None;
+        }
+        match canon {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(v6) => {
+                let o = v6.octets();
+                if o[..2] == [0x20, 0x02] {
+                    Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
+                } else if o[..12] == [0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0]
+                    || o[..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0]
+                {
+                    Some(Ipv4Addr::new(o[12], o[13], o[14], o[15]))
+                } else if o[..4] == [0x20, 0x01, 0, 0] {
+                    Some(Ipv4Addr::new(!o[12], !o[13], !o[14], !o[15]))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn naive_network_class(addr: PeerAddress) -> NetworkClass {
+        match addr {
+            PeerAddress::Onion(_) => NetworkClass::Onion,
+            PeerAddress::I2p(_) => NetworkClass::I2p,
+            PeerAddress::Ip(ip) => {
+                let canon = naive_canonical_ip(ip);
+                if !naive_routable(canon) {
+                    NetworkClass::Unroutable
+                } else if naive_linked_ipv4(canon).is_some() {
+                    NetworkClass::Ipv4
+                } else {
+                    NetworkClass::Ipv6
+                }
+            }
+        }
+    }
+
+    fn naive_netgroup(addr: PeerAddress) -> Vec<u8> {
+        match addr {
+            PeerAddress::Onion(key) => vec![4, key[0] | 15],
+            PeerAddress::I2p(key) => vec![5, key[0] | 15],
+            PeerAddress::Ip(ip) => {
+                let canon = naive_canonical_ip(ip);
+                if !naive_routable(canon) {
+                    return vec![0];
+                }
+                if let Some(v4) = naive_linked_ipv4(canon) {
+                    let o = v4.octets();
+                    return vec![1, o[0], o[1]];
+                }
+                match canon {
+                    IpAddr::V6(v6) => {
+                        let o = v6.octets();
+                        let mut grp = vec![2, o[0], o[1], o[2], o[3]];
+                        if o[..4] == [0x20, 0x01, 0x04, 0x70] {
+                            grp.push(o[4] | 15);
+                        }
+                        grp
+                    }
+                    IpAddr::V4(_) => vec![0],
+                }
+            }
+        }
+    }
+
+    fn arbitrary_peer_address() -> impl proptest::strategy::Strategy<Value = PeerAddress> {
+        use proptest::prelude::*;
+        prop_oneof![
+            3 => any::<[u8; 4]>().prop_map(|b| PeerAddress::Ip(IpAddr::V4(Ipv4Addr::from(b)))),
+            2 => prop_oneof![
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::BROADCAST))),
+                Just(PeerAddress::Ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))),
+            ],
+            3 => any::<[u8; 16]>().prop_map(|b| PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))),
+            2 => prop_oneof![
+                Just(PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))),
+                Just(PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED))),
+                any::<[u8; 15]>().prop_map(|tail| {
+                    let mut b = [0u8; 16];
+                    b[0] = 0xfc;
+                    b[1..].copy_from_slice(&tail);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 15]>().prop_map(|tail| {
+                    let mut b = [0u8; 16];
+                    b[0] = 0xfd;
+                    b[1..].copy_from_slice(&tail);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 14]>().prop_map(|tail| {
+                    let mut b = [0u8; 16];
+                    b[0] = 0xfe;
+                    b[1] = 0x80;
+                    b[2..].copy_from_slice(&tail);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 12]>().prop_map(|tail| {
+                    let mut b = [0u8; 16];
+                    b[..4].copy_from_slice(&[0x20, 0x01, 0x04, 0x70]);
+                    b[4..].copy_from_slice(&tail);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 4]>().prop_map(|v4| {
+                    let mut b = [0u8; 16];
+                    b[10] = 0xff;
+                    b[11] = 0xff;
+                    b[12..].copy_from_slice(&v4);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 4]>().prop_map(|v4| {
+                    let mut b = [0u8; 16];
+                    b[1] = 0x64;
+                    b[2] = 0xff;
+                    b[3] = 0x9b;
+                    b[12..].copy_from_slice(&v4);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 4]>().prop_map(|v4| {
+                    let mut b = [0u8; 16];
+                    b[0] = 0x20;
+                    b[1] = 0x02;
+                    b[2..6].copy_from_slice(&v4);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+                any::<[u8; 4]>().prop_map(|v4| {
+                    let mut b = [0u8; 16];
+                    b[0] = 0x20;
+                    b[1] = 0x01;
+                    b[12..].copy_from_slice(&v4);
+                    PeerAddress::Ip(IpAddr::V6(std::net::Ipv6Addr::from(b)))
+                }),
+            ],
+            1 => any::<[u8; 32]>().prop_map(PeerAddress::Onion),
+            1 => any::<[u8; 32]>().prop_map(PeerAddress::I2p),
+        ]
+    }
+
+    fn netgroup_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(1024)
+    }
+
     proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: netgroup_cases(),
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
         #[test]
-        fn validated_programs_terminate_for_arbitrary_addresses(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128), ip in proptest::prelude::any::<[u8; 16]>()) {
-            if valid(&bytes) { proptest::prop_assert!(interpret(&bytes, std::net::Ipv6Addr::from(ip).into()).is_some()); }
+        fn netgroup_matches_independent_reference_for_all_network_classes(
+            addr in arbitrary_peer_address()
+        ) {
+            let default_groups = NetGroups::default();
+            let expected_class = naive_network_class(addr);
+            let expected_group = naive_netgroup(addr);
+
+            proptest::prop_assert_eq!(network_class(addr), expected_class, "network class must match naive reference");
+            proptest::prop_assert_eq!(default_groups.group(addr), expected_group, "default prefix netgroup must match naive reference");
+        }
+
+        #[test]
+        fn asmap_interpretation_and_fallback_invariants(
+            ip in any::<[u8; 16]>(),
+            corrupt_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128)
+        ) {
+            let ip_addr = IpAddr::V6(std::net::Ipv6Addr::from(ip));
+            let default_groups = NetGroups::default();
+
+            if let Some(asn) = interpret(CORE_ASMAP, ip_addr) {
+                if asn != 0 && routable(ip_addr) {
+                    let mut expected_asn_group = vec![2];
+                    expected_asn_group.extend_from_slice(&asn.to_le_bytes());
+                    let groups = NetGroups {
+                        bytes: CORE_ASMAP.to_vec(),
+                        identity: Some(Sha256::digest(CORE_ASMAP).into()),
+                    };
+                    proptest::prop_assert_eq!(groups.group(ip_addr), expected_asn_group);
+                }
+            }
+
+            if valid(&corrupt_bytes) {
+                proptest::prop_assert!(interpret(&corrupt_bytes, ip_addr).is_some());
+            } else {
+                proptest::prop_assert_eq!(default_groups.identity(), None);
+                proptest::prop_assert_eq!(default_groups.group(ip_addr), prefix_group(ip_addr));
+            }
         }
     }
 }
