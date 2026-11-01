@@ -898,7 +898,10 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
         ));
     }
     let command_bytes = &raw[..end];
-    if !command_bytes.iter().all(u8::is_ascii_graphic) {
+    if !command_bytes
+        .iter()
+        .all(|byte| (0x20..=0x7e).contains(byte))
+    {
         return Err(PeerError::InvalidCommand(
             String::from_utf8_lossy(raw).into_owned(),
         ));

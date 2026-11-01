@@ -18,12 +18,14 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, Se
 use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::PeerRole;
+use bitcoin_rs_p2p::dispatch::dispatch_inbound;
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::wire::{
     MAX_ADDR_MESSAGE_COUNT, MAX_BLOCK_TX_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, Message,
     PeerError, read_message, write_message,
 };
+use bitcoin_rs_p2p::{Peer, PeerState};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -367,9 +369,10 @@ fn command_padding_rejects_non_ascii_control_and_dirty_padding() {
             "dirty padding after nul terminator",
         ),
         (&b"ping\n\0\0\0\0\0\0\0"[..], "control character in command"),
+        (&b"ping\x1f\0\0\0\0\0\0\0"[..], "control byte below space"),
+        (&b"ping\x7f\0\0\0\0\0\0\0"[..], "del byte in command"),
         (&b"ping\x80\0\0\0\0\0\0\0"[..], "non-ascii byte in command"),
         (&b"\0\0\0\0\0\0\0\0\0\0\0\0"[..], "empty command"),
-        (&b"pi ng\0\0\0\0\0\0\0"[..], "space in command"),
     ];
 
     for (cmd, desc) in cases {
@@ -385,6 +388,48 @@ fn command_padding_rejects_non_ascii_control_and_dirty_padding() {
             "{desc} must fail with InvalidCommand, got {res:?}"
         );
     }
+}
+
+#[test]
+fn space_byte_in_command_name_is_a_valid_unknown_command() -> Result<(), PeerError> {
+    let frame = message_frame(b"pi ng", &[])?;
+    let (message, payload) = read_message(&mut Cursor::new(frame), Magic::BITCOIN)?;
+    assert!(payload.is_empty());
+    assert!(matches!(message, Message::Unknown { .. }));
+    assert_eq!(message.command().as_ref(), "pi ng");
+
+    let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::BITCOIN);
+    let responses = dispatch_inbound(
+        &mut peer,
+        &Message::Version(version_message(
+            1,
+            0,
+            PeerRole::FullRelay,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        )),
+    )?;
+    assert_eq!(
+        responses,
+        vec![
+            Message::WtxidRelay,
+            Message::SendAddrV2,
+            Message::SendHeaders,
+            Message::Verack
+        ]
+    );
+    dispatch_inbound(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+
+    let unknown = Message::Unknown {
+        command: "pi ng"
+            .parse()
+            .map_err(|_| PeerError::InvalidCommand("pi ng".to_owned()))?,
+        payload: Vec::new(),
+    };
+    let responses = dispatch_inbound(&mut peer, &unknown)?;
+    assert_eq!(responses, []);
+    assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
 }
 
 #[test]
