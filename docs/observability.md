@@ -90,7 +90,7 @@ That pass runs after it has emptied the receiver.
 a peak. It is not refreshed on passes that emit nothing.
 
 Staging policy decision (retained): production keeps the fixed 256-block /
-512 MiB wire budget. An isolated count-horizon experiment ran 48 synthetic
+512 MiB wire budget. Observed once, not evidence. The run used 48 synthetic
 regtest trials (4 cells x 4 policies x 3 rounds, 320 blocks applied each).
 Candidate `f24b7ded0` was committed after the matrix so source bytes match
 the gated binary (raw samples in
@@ -98,14 +98,14 @@ the gated binary (raw samples in
 evaluated it under the fixed Step 25 criteria (>=10% peak-RSS reduction,
 throughput >=98%, strictly lower retained high-water, no
 retry/starvation/stall regression) and rejected it. No horizon met the RSS
-gate (binding medians ~1.00-1.01x fixed vs required <=0.90). The
+gate (observed binding medians ~1.00-1.01x fixed vs required <=0.90). The
 modern-large 8-peer 15 s and 30 s horizons each added a stall-episode start
-(median 1 vs fixed 0; disconnects stayed 0, which does not cancel the episode
-regression). Five early-multi rows were not valid binding comparisons (all
-60 s first refusals arrived after the corpus was fully requested; 30 s
-rounds 1-2 had no refusal). Synthetic regtest only (early/small and
-modern/large-OP_RETURN corpora, 3 runs per arm); no mainnet, p99, or
-whole-node claim.
+(observed median 1 vs fixed 0; disconnects stayed 0, which does not cancel
+the episode regression). Five early-multi rows were not valid binding
+comparisons (all 60 s first refusals arrived after the corpus was fully
+requested; 30 s rounds 1-2 had no refusal). Synthetic regtest only
+(early/small and modern/large-OP_RETURN corpora, 3 runs per arm); no mainnet,
+p99, or whole-node claim.
 
 The call-site audit table below is a snapshot of its audited base. It has no
 row for `index.family_planned_write_bytes`. This clause describes it.
