@@ -12,7 +12,7 @@ pub use packet::SendCipher;
 #[cfg(feature = "fuzzing")]
 pub use packet::{PacketError, RecvCipher};
 pub use reader::PacketReader;
-pub(crate) use reader::is_poll_timeout;
+pub use reader::is_poll_timeout;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {

@@ -103,7 +103,7 @@ impl PacketReader {
     }
 }
 
-pub(crate) fn is_poll_timeout(error: &TransportError) -> bool {
+pub fn is_poll_timeout(error: &TransportError) -> bool {
     matches!(error, TransportError::Io(error) if recv::is_poll_timeout(error))
 }
 

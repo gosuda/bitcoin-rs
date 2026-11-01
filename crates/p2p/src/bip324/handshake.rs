@@ -31,9 +31,9 @@ pub enum Step {
 
 #[derive(Debug)]
 pub struct Established {
-    pub(crate) send: SendCipher,
-    pub(crate) recv: PacketReader,
-    pub(crate) session_id: [u8; 32],
+    pub send: SendCipher,
+    pub recv: PacketReader,
+    pub session_id: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -118,7 +118,7 @@ impl Handshake {
         }
     }
 
-    pub(crate) fn take_outbound(&mut self) -> Vec<u8> {
+    pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
 

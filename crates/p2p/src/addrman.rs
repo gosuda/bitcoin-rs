@@ -998,8 +998,13 @@ impl AddressBook {
         }
     }
     #[must_use]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.state.lock().stored.records.len()
+    }
+    #[cfg_attr(not(feature = "fuzzing"), allow(dead_code))]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
     #[cfg_attr(not(feature = "fuzzing"), allow(dead_code))]
     #[must_use]
