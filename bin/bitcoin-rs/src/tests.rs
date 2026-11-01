@@ -691,33 +691,24 @@ fn known_non_utf8_environment_value_is_rejected() {
 
 /// Core's `-version` leg of `feature_help.py` (v31.1) asserts exit 0 and the
 /// word "version" on stdout. The flag short-circuits before any datadir
-/// work and prints Core's output shape (a `<client> daemon version
-/// <version>` line plus the copyright/license paragraph) with this node's
-/// own workspace version and license - never a Core version number.
+/// work and prints one line with this node's own name and workspace
+/// version - never a Core identity or version number.
 #[test]
-fn version_flag_short_circuits_with_the_core_output_shape() {
+fn version_flag_short_circuits_with_the_node_version_line() {
     use clap::Parser as _;
     let cli = super::config::CliArgs::try_parse_from(["bitcoin-rs", "--version"])
         .unwrap_or_else(|error| panic!("--version must parse: {error}"));
     assert!(cli.version);
 
     let notice = super::version_notice();
-    assert!(
-        notice.starts_with(&format!(
-            "bitcoin-rs daemon version {}\n",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "first line must be the node's own version: {notice:?}"
+    assert_eq!(
+        notice,
+        format!("bitcoin-rs daemon version {}\n", env!("CARGO_PKG_VERSION")),
+        "the whole notice is the node's own version line"
     );
     assert!(
         notice.contains("version"),
         "feature_help.py's -version assertion"
-    );
-    assert!(
-        notice.contains("Copyright (C) 2026 The bitcoin-rs developers")
-            && notice.contains("Apache License 2.0")
-            && notice.contains("LICENSE"),
-        "the license paragraph keeps Core's shape with this node's license: {notice:?}"
     );
     assert!(
         !notice.contains("Bitcoin Core") && !notice.contains("v31."),

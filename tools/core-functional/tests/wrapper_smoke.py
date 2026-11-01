@@ -240,7 +240,8 @@ check("wallets dir 0700 on mainnet",
 check("datadir root itself not chmodded (mainnet chain dir is \"\")",
       stat.S_IMODE(os.lstat(datadir).st_mode) == 0o755,
       oct(stat.S_IMODE(os.lstat(datadir).st_mode)))
-check("printtoconsole=0 -> silent console", "--log-level=off" in argv, argv)
+check("printtoconsole=0 -> fully silent console",
+      "--log-level=off,fjall=off,rocksdb=off" in argv, argv)
 check("node data dir still the fresh subdir",
       f"--data-dir={datadir}/bitcoin-rs-data" in argv, argv)
 
@@ -282,7 +283,8 @@ check("uacomment occurrences append", argv.count("--uacomment=testnode0") == 1
 check("conf uacomment suppressed when CLI set it",
       "uacomment=fromconf" not in (datadir / "bitcoin-rs-derived.conf").read_text())
 check("suppression logged", any(d["token"] == "uacomment=fromconf" for d in drops(datadir)))
-check("argv printtoconsole=0 -> silent console", "--log-level=off" in argv, argv)
+check("argv printtoconsole=0 -> fully silent console",
+      "--log-level=off,fjall=off,rocksdb=off" in argv, argv)
 datadir = fresh_datadir("node12")
 argv = run_wrapper(datadir, ["-datadir=" + str(datadir), "-regtest"],
                    FRAMEWORK_CONF + "uacomment=fromconf\n")

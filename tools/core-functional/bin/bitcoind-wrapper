@@ -258,13 +258,16 @@ class Translation:
         if key == "printtoconsole":
             # Core: 0 routes logs to debug.log and keeps the console silent;
             # bitcoin-rs has no log-file/console split (NG-6), so the closest
-            # translation of the framework's printtoconsole=0 is the node's
-            # fully silent console level. Tests assert an empty stderr at stop.
+            # translation of the framework's printtoconsole=0 is a fully
+            # silent console. A bare --log-level=off keeps the node's
+            # fjall/rocksdb=warn floors, so the silence is composed here as
+            # an explicit directive that overrides them per target. Tests
+            # assert an empty stderr at stop.
             normalized = bool_value(value) if value is not None else "true"
             if normalized is None:
                 self.drop("argv", raw, "unparseable boolean")
             elif normalized == "false":
-                self.out.append("--log-level=off")
+                self.out.append("--log-level=off,fjall=off,rocksdb=off")
             return
         if key in WALLET_DROP:
             self.drop("argv", raw, "wallet/server option has no bitcoin-rs equivalent")
@@ -427,7 +430,7 @@ class Translation:
                 # See the argv branch: 0 means "console stays quiet" in Core.
                 if bool_value(value) == "false" and not any(
                         flag.startswith("--log-level") for flag in self.out):
-                    self.out.append("--log-level=off")
+                    self.out.append("--log-level=off,fjall=off,rocksdb=off")
                 continue
             if key in NETWORKS:
                 if section is None and self.network_value is None and bool_value(value) == "true":

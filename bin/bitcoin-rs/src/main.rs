@@ -17,23 +17,13 @@ fn load(
     config::resolve(cli, vars)
 }
 
-/// Core's `-version` output shape (`src/bitcoind.cpp` `ProcessInitCommands`: a
-/// `<client> daemon version <version>` line followed by the license paragraph
-/// from `src/common/license_info.cpp`), rendered with this node's own
-/// identity, workspace version, and license. Core's version number is never
-/// imitated.
+/// The `-version` output: one line carrying this node's own name and
+/// workspace version. Core's `feature_help.py` (v31.1) asserts only exit 0
+/// and the word "version" on stdout, so Core's license paragraph is not
+/// imitated (a fixed copyright year would also go stale).
 fn version_notice() -> String {
     format!(
-        "bitcoin-rs daemon version {version}\n\
-         Copyright (C) 2026 The bitcoin-rs developers\n\
-         \n\
-         Please contribute if you find bitcoin-rs useful. \
-         Visit <https://github.com/gosuda/bitcoin-rs> for further information about the software.\n\
-         The source code is available from <https://github.com/gosuda/bitcoin-rs>.\n\
-         \n\
-         This is experimental software.\n\
-         Distributed under the Apache License 2.0, see the accompanying file LICENSE \
-         or <https://www.apache.org/licenses/LICENSE-2.0>\n",
+        "bitcoin-rs daemon version {version}\n",
         version = env!("CARGO_PKG_VERSION")
     )
 }
