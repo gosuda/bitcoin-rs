@@ -81,8 +81,9 @@ outranks conf. Mapped Core flag -> bitcoin-rs flag (both `-flag=v` and
 | `-onlynet=list` | `--onlynet=list` (validated) |
 | `-dbcache=N` / `-prune=N` | `--dbcache-mb=N` / `--prune-target-mb=N` |
 | `-txindex=B` / `-blockfilterindex=B` / `-rest=B` / `-persistmempool=B` | same-meaning bitcoin-rs flags |
+| `-printtoconsole=0` (conf/argv) | `--log-level=off,fjall=off,rocksdb=off` (Core keeps the console silent; the node's bare `off` keeps the `fjall=warn,rocksdb=warn` floors, so full silence composes the directive per target — tests assert an empty stderr at stop) |
 | `-proxyrandomize=B` / `-i2pacceptincoming=B` | `--proxy-randomize-credentials=B` / `--i2p-accept=B` |
-| `-h` / `-version` | `--help` / `--version` (`--version` prints the node's own version and license notice in Core's output shape and exits 0 - NG-15 fixed after the 2026-10-30 measured run, where the binary rejected the flag with clap exit 2) |
+| `-h` / `-version` | `--help` / `--version` (`--version` prints the node's own one-line version notice and exits 0 - NG-15 fixed after the 2026-10-30 measured run, where the binary rejected the flag with clap exit 2) |
 
 Conf keys carried into the derived conf (Core spelling, under the original
 network sections): `dbcache, prune, txindex, blockfilterindex, rest, dnsseed,
@@ -90,7 +91,7 @@ v2transport, onlynet, proxy, onion, i2psam, torcontrol, proxyrandomize,
 i2pacceptincoming, listen`. `rpcuser`/`rpcpassword`/`rpccookiefile` become the
 cookie file the adapter writes (see below). Everything else - including the
 framework's `server, keypool, discover, fixedseeds, listenonion, peertimeout,
-printtoconsole, natpmp, fallbackfee, rpcservertimeout, rpcdoccheck, rpcthreads,
+natpmp, fallbackfee, rpcservertimeout, rpcdoccheck, rpcthreads,
 maxconnections, par, shrinkdebugfile, unsafesqlitesync, connect=0` and test
 flags like `-uacomment, -logtimemicros, -debug, -debugexclude, -wallet*,
 -loadblock, -includeconf, -whitelist, -rpcauth, -startupnotify, -stopatheight` -
