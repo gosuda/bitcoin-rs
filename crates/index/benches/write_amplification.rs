@@ -1,3 +1,11 @@
+#[path = "../../../tools/benchmark-support/percentiles.rs"]
+#[expect(dead_code, reason = "each consumer uses a different subset")]
+#[expect(
+    unreachable_pub,
+    reason = "the evidence bench re-exports the published names; this consumer does not"
+)]
+mod percentiles;
+
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 #[expect(clippy::expect_used, reason = "benchmark harness assertions")]
 mod bench_runner {
@@ -20,6 +28,8 @@ mod bench_runner {
         Storage(#[from] bitcoin_rs_storage::StorageError),
         #[error(transparent)]
         TryFromInt(#[from] std::num::TryFromIntError),
+        #[error(transparent)]
+        Percentiles(#[from] crate::percentiles::PercentileError),
         #[error("missing {0}")]
         Missing(&'static str),
     }
@@ -156,19 +166,6 @@ mod bench_runner {
             }
         }
         total
-    }
-
-    fn percentile_micros(samples: &mut [Duration], percent: usize) -> u128 {
-        if samples.is_empty() {
-            return 0;
-        }
-        samples.sort_unstable();
-        let index = samples.len().saturating_mul(percent) / 100;
-        samples[index.min(samples.len() - 1)].as_micros()
-    }
-
-    fn max_micros(samples: &[Duration]) -> u128 {
-        samples.iter().map(Duration::as_micros).max().unwrap_or(0)
     }
 
     struct RunReport {
@@ -344,8 +341,16 @@ mod bench_runner {
         let _snapshot = reader.snapshot()?;
         let snapshot_open = snapshot_started.elapsed();
 
-        let mut samples = query_samples(store, family, scripthash_prefix)?;
+        let samples = query_samples(store, family, scripthash_prefix)?;
         let reorg = rollback_chain(store, capabilities, &watermarks, &bodies, &spent)?;
+        let sample_nanos: Vec<u64> = samples
+            .iter()
+            .map(|sample| {
+                u64::try_from(sample.as_nanos())
+                    .unwrap_or_else(|error| panic!("query sample exceeds u64 nanoseconds: {error}"))
+            })
+            .collect();
+        let quantiles = crate::percentiles::Quantiles::of(&sample_nanos)?;
 
         Ok(RunReport {
             family,
@@ -356,10 +361,10 @@ mod bench_runner {
             build,
             snapshot_open,
             footprint: directory_bytes(dir).saturating_sub(footprint_baseline),
-            query_p50: percentile_micros(&mut samples, 50),
-            query_p95: percentile_micros(&mut samples, 95),
-            query_p99: percentile_micros(&mut samples, 99),
-            query_max: max_micros(&samples),
+            query_p50: u128::from(quantiles.p50) / 1_000,
+            query_p95: u128::from(quantiles.p95) / 1_000,
+            query_p99: u128::from(quantiles.p99) / 1_000,
+            query_max: u128::from(quantiles.max) / 1_000,
             reorg,
         })
     }

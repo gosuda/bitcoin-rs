@@ -14,10 +14,6 @@
     clippy::cast_sign_loss,
     reason = "benchmark: sign loss is intentional for perf measurement"
 )]
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "benchmark: precision loss is intentional for perf measurement"
-)]
 
 use std::hint::black_box;
 use std::io::Write as _;
@@ -2348,31 +2344,16 @@ fn run_counted_row(row: &str) {
 }
 
 fn print_percentiles(label: &str, samples: &[Duration]) {
-    if samples.is_empty() {
-        return;
-    }
-    let mut sorted: Vec<Duration> = samples.to_vec();
-    sorted.sort();
-    let n = sorted.len();
-    let percentile = |p: f64| -> Duration {
-        let rank = p * (n as f64 - 1.0) / 100.0;
-        let lower = rank.floor() as usize;
-        let upper = rank.ceil() as usize;
-        if lower == upper {
-            sorted[lower]
-        } else {
-            let frac = rank - lower as f64;
-            let lo = sorted[lower].as_nanos() as f64;
-            let hi = sorted[upper].as_nanos() as f64;
-            Duration::from_nanos((lo + (hi - lo) * frac) as u64)
-        }
-    };
+    let nanos: Vec<u64> = samples.iter().copied().map(duration_nanos).collect();
+    let quantiles =
+        evidence::Quantiles::of(&nanos).unwrap_or_else(|error| panic!("{label}: {error}"));
     println!(
-        "{label} samples={n} p50={:?} p95={:?} p99={:?} max={:?}",
-        percentile(50.0),
-        percentile(95.0),
-        percentile(99.0),
-        sorted[n - 1],
+        "{label} samples={} p50={:?} p95={:?} p99={:?} max={:?}",
+        quantiles.n,
+        Duration::from_nanos(quantiles.p50),
+        Duration::from_nanos(quantiles.p95),
+        Duration::from_nanos(quantiles.p99),
+        Duration::from_nanos(quantiles.max),
     );
 }
 
@@ -4424,18 +4405,17 @@ fn assert_window_unit(scenario: WindowScenario, unit: &WindowUnit) {
 }
 
 fn quantiles_json(values: &[u64]) -> sonic_rs::Value {
-    if let Some(quantiles) = evidence::Quantiles::of(values) {
-        json!({
-            "n": quantiles.n,
-            "p50": quantiles.p50,
-            "p95": quantiles.p95,
-            "p99": quantiles.p99,
-            "max": quantiles.max,
-            "p99_supported": quantiles.p99_supported(),
-        })
-    } else {
-        json!({ "n": 0, "observed": false })
-    }
+    let Ok(quantiles) = evidence::Quantiles::of(values) else {
+        return json!({ "n": 0, "observed": false });
+    };
+    json!({
+        "n": quantiles.n,
+        "p50": quantiles.p50,
+        "p95": quantiles.p95,
+        "p99": quantiles.p99,
+        "max": quantiles.max,
+        "p99_supported": quantiles.p99_supported(),
+    })
 }
 
 fn window_unit_json(index: usize, origin: quanta::Instant, unit: &WindowUnit) -> sonic_rs::Value {

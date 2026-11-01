@@ -172,48 +172,10 @@ impl Ledger {
     }
 }
 
-pub const MIN_SAMPLES_FOR_P99: usize = 100;
+#[path = "../../../tools/benchmark-support/percentiles.rs"]
+mod percentiles;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Quantiles {
-    pub n: usize,
-    pub p50: u64,
-    pub p95: u64,
-    pub p99: u64,
-    pub max: u64,
-}
-
-impl Quantiles {
-    #[must_use]
-    pub fn of(samples: &[u64]) -> Option<Self> {
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        let max = *sorted.last()?;
-        let at = |percent: u64| -> u64 {
-            let last_rank = u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX);
-            let scaled = percent.saturating_mul(last_rank);
-            let lower = usize::try_from(scaled / 100).unwrap_or(usize::MAX);
-            let remainder = scaled % 100;
-            let low = sorted[lower];
-            let high = sorted.get(lower + 1).copied().unwrap_or(low);
-            let span = u128::from(high - low);
-            let step = span * u128::from(remainder);
-            low + u64::try_from((step + 50) / 100).unwrap_or(u64::MAX)
-        };
-        Some(Self {
-            n: sorted.len(),
-            p50: at(50),
-            p95: at(95),
-            p99: at(99),
-            max,
-        })
-    }
-
-    #[must_use]
-    pub const fn p99_supported(&self) -> bool {
-        self.n >= MIN_SAMPLES_FOR_P99
-    }
-}
+pub use percentiles::{PercentileError, Quantiles};
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "benchmark evidence rejection tests")]
@@ -420,7 +382,11 @@ mod tests {
     // HPA-13
     #[test]
     fn quantiles_are_exact_order_statistics_with_a_support_floor() {
-        assert_eq!(Quantiles::of(&[]), None, "an empty set is not a zero");
+        assert_eq!(
+            Quantiles::of(&[]),
+            Err(PercentileError::Empty),
+            "an empty set is not a zero"
+        );
 
         let single = Quantiles::of(&[7]).expect("one sample");
         assert_eq!(
