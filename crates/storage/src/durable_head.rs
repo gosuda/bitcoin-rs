@@ -367,7 +367,8 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
     }
 
     fn attest(&self, head: &DurableHead, level: ScriptAttestation) -> Result<(), StorageError> {
-        if self.head.read().as_ref() != Some(head) {
+        let current = self.head.read();
+        if current.as_ref() != Some(head) {
             return Err(StorageError::InvalidOperation(
                 "durable head moved since it was read",
             ));
@@ -529,6 +530,43 @@ mod tests {
         assert_eq!(store.load()?, Some(first));
         store.commit(Some(&first), &second, &CommitRecords::default())?;
         assert_eq!(store.load()?, Some(second));
+        Ok(())
+    }
+
+    // RCV-02
+    #[test]
+    fn memory_attest_holds_the_head_until_the_attestation_is_written() -> Result<(), StorageError> {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let store = Arc::new(InMemoryDurableHeadStore::new());
+        let head = sample(1);
+        store.commit(None, &head, &CommitRecords::default())?;
+        let attestation = store.attestation.write();
+        let worker = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.attest(&head, ScriptAttestation::Full))
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if store.head.try_write().is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attest released the head before writing the attestation"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(attestation);
+        worker
+            .join()
+            .map_err(|_| StorageError::InvalidOperation("attest thread panicked"))??;
+        assert_eq!(
+            store.load_attestation(&head)?,
+            ScriptAttestation::Full,
+            "the attestation names the head it was checked against"
+        );
         Ok(())
     }
 }
