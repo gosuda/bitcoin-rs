@@ -2172,3 +2172,48 @@ fn json_depth_limit_exceeded_returns_parse_error_without_stack_overflow() {
     assert_eq!(response.status, 500);
     assert!(response.body.is_some());
 }
+
+#[test]
+fn json_depth_limit_matches_core_and_parses_at_the_limit() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let worker = std::thread::Builder::new()
+        .name("json-depth-proof".to_owned())
+        .stack_size(super::RPC_CONNECTION_STACK_BYTES)
+        .spawn(move || {
+            let request = |nesting: usize| {
+                let mut body = Vec::from(
+                    &b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getblockcount\",\"params\":"[..],
+                );
+                body.extend(std::iter::repeat_n(b'[', nesting));
+                body.extend(std::iter::repeat_n(b']', nesting));
+                body.push(b'}');
+                body
+            };
+            [
+                handle_json(&handler, &request(300)),
+                handle_json(&handler, &request(511)),
+                handle_json(&handler, &request(512)),
+            ]
+        })
+        .expect("spawn depth proof thread");
+    let [accepted, at_limit, refused] = worker.join().expect("depth proof thread");
+    assert_eq!(accepted.status, 200);
+    assert_eq!(at_limit.status, 200);
+    assert!(
+        at_limit
+            .body
+            .expect("limit response body")
+            .to_string()
+            .contains("-32602"),
+        "a depth 512 request must reach dispatch"
+    );
+    assert_eq!(refused.status, 500);
+    assert!(
+        refused
+            .body
+            .expect("refusal response body")
+            .to_string()
+            .contains("-32700"),
+        "a depth 513 request must answer a typed parse error"
+    );
+}

@@ -208,6 +208,7 @@ impl RpcServer {
         let idle_timeout = self.idle_timeout;
         thread::Builder::new()
             .name("rpc-connection".to_owned())
+            .stack_size(RPC_CONNECTION_STACK_BYTES)
             .spawn(move || {
                 let _permit = permit;
                 if let Err(error) =
@@ -949,7 +950,9 @@ impl CallResponse {
     }
 }
 
-const MAX_JSON_DEPTH: usize = 128;
+const RPC_CONNECTION_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+const MAX_JSON_DEPTH: usize = 512;
 
 fn check_json_depth(body: &[u8]) -> Result<(), RpcError> {
     let mut depth: usize = 0;
