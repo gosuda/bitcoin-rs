@@ -126,27 +126,93 @@ fn an_unknown_disconnect_phase_byte_is_an_error() {
     }
 }
 
+// EVT-05
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
+        ..ProptestConfig::default()
+    })]
     #[test]
     fn every_accepted_marker_row_re_encodes_to_the_same_bytes(
-        hash_bytes in proptest::array::uniform32(any::<u8>()),
-        height in any::<u32>(),
+        hash_bytes in prop_oneof![
+            Just([0_u8; 32]),
+            Just([0xff_u8; 32]),
+            proptest::array::uniform32(any::<u8>()),
+        ],
+        height in prop_oneof![
+            Just(0_u32),
+            Just(1),
+            Just(2),
+            Just(8_400_000),
+            Just(u32::MAX - 1),
+            Just(u32::MAX),
+            any::<u32>(),
+        ],
         phase_byte in 0_u8..=1,
+        invalid_phase in 2_u8..=u8::MAX,
+        trunc_len in 0_usize..37,
+        extra_bytes in prop::collection::vec(any::<u8>(), 1..=24),
+        flip_pos in 0_usize..37,
+        flip_mask in 1_u8..=255,
     ) {
-        let mut row = Vec::with_capacity(37);
-        row.extend_from_slice(&hash_bytes);
-        row.extend_from_slice(&height.to_be_bytes());
-        row.push(phase_byte);
+        let mut row = [0_u8; 37];
+        row[..32].copy_from_slice(&hash_bytes);
+        row[32..36].copy_from_slice(&height.to_be_bytes());
+        row[36] = phase_byte;
 
         let marker = DisconnectMarker::decode(&row)
-            .expect("phase 0 and 1 rows are the format's accepted marker shape");
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
         prop_assert_eq!(marker.height, height);
+        prop_assert_eq!(marker.hash.to_le_bytes(), hash_bytes);
+        let expected_phase = match phase_byte {
+            0 => DisconnectPhase::InFlight,
+            _ => DisconnectPhase::RolledBack,
+        };
+        prop_assert_eq!(marker.phase, expected_phase);
         let reencoded = marker.encode();
         prop_assert_eq!(
             reencoded.as_slice(),
             row.as_slice(),
-            "a decoded marker must re-encode to the bytes it came from, so no accepted row decodes to a different marker than it encodes"
+            "a decoded marker must re-encode to the bytes it came from"
         );
+
+        let mut invalid_phase_row = row;
+        invalid_phase_row[36] = invalid_phase;
+        prop_assert!(
+            matches!(DisconnectMarker::decode(&invalid_phase_row), Err(StorageError::Backend(_))),
+            "phase byte {} must fail decode",
+            invalid_phase
+        );
+
+        prop_assert!(
+            matches!(DisconnectMarker::decode(&row[..trunc_len]), Err(StorageError::Backend(_))),
+            "truncated row of length {} must fail decode",
+            trunc_len
+        );
+
+        let mut extended = row.to_vec();
+        extended.extend_from_slice(&extra_bytes);
+        prop_assert!(
+            matches!(DisconnectMarker::decode(&extended), Err(StorageError::Backend(_))),
+            "extended row of length {} must fail decode",
+            extended.len()
+        );
+
+        let mut flipped = row;
+        flipped[flip_pos] ^= flip_mask;
+        if flipped != row {
+            let res = DisconnectMarker::decode(&flipped);
+            if flip_pos == 36 && flipped[36] >= 2 {
+                prop_assert!(matches!(res, Err(StorageError::Backend(_))));
+            } else if let Ok(other) = res {
+                let other_encoded = other.encode();
+                prop_assert_eq!(
+                    other_encoded.as_slice(),
+                    flipped.as_slice(),
+                    "decoded marker from mutated bytes must re-encode to mutated bytes"
+                );
+            }
+        }
     }
 }
 
