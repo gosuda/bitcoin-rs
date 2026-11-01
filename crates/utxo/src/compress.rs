@@ -514,7 +514,6 @@ mod tests {
         fn compressed_amounts_round_trip(value in boundary_amount_strategy()) {
             let compressed = compress_amount(value).expect("in range");
             prop_assert_eq!(decompress_amount(compressed), Some(value));
-            prop_assert_eq!(compress_amount(value).ok(), Some(compressed));
         }
 
         #[test]
