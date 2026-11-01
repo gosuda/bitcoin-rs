@@ -352,3 +352,67 @@ fn append_snapshot_output(
     bytes.extend_from_slice(&script_len.to_le_bytes());
     bytes.extend_from_slice(script_pubkey);
 }
+
+#[test]
+fn rejects_snapshot_record_with_zero_outputs() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&1_u64.to_le_bytes());
+    let txid = [0x22; 32];
+    data.push(txid[0]);
+    data.extend_from_slice(&txid[..8]);
+    data.extend_from_slice(&txid);
+    data.extend_from_slice(&0_u32.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotRecordCountMismatch {
+            declared: 1,
+            actual: 0
+        })
+    ));
+}
+
+#[test]
+fn rejects_snapshot_record_with_too_many_outputs() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&1_u64.to_le_bytes());
+    let txid = [0x22; 32];
+    data.push(txid[0]);
+    data.extend_from_slice(&txid[..8]);
+    data.extend_from_slice(&txid);
+    data.extend_from_slice(&2_000_000_u32.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotOutputCountTooLarge { count: 2_000_000 })
+    ));
+}
+
+#[test]
+fn rejects_snapshot_with_record_count_exceeding_budget() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    data.extend_from_slice(&4_u32.to_le_bytes());
+    data.extend_from_slice(&[0x11; 32]);
+    data.extend_from_slice(&100_u32.to_le_bytes());
+    data.extend_from_slice(&300_000_000_u64.to_le_bytes());
+    data.extend_from_slice(&[0_u8; 384]);
+
+    let result = read_snapshot_strict_v4(&mut Cursor::new(&data));
+    assert!(matches!(
+        &result,
+        Err(UtxoError::SnapshotRecordCountTooLarge { count: 300_000_000 })
+    ));
+}

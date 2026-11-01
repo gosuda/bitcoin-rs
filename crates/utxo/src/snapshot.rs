@@ -17,6 +17,8 @@ const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
 const SNAPSHOT_WRITE_VERSION: u32 = 4;
 const MUHASH_TRAILER_LEN: usize = 384;
 const SEED_READ_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_SNAPSHOT_RECORDS: u64 = 250_000_000;
+const MAX_SNAPSHOT_COINS_PER_TXID: u32 = 1_000_000;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -292,6 +294,11 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
         height,
         record_count,
     } = read_snapshot_metadata_v4(reader)?;
+    if record_count > MAX_SNAPSHOT_RECORDS {
+        return Err(UtxoError::SnapshotRecordCountTooLarge {
+            count: record_count,
+        });
+    }
     let record_count_usize =
         usize::try_from(record_count).map_err(|_| UtxoError::SnapshotRecordCountTooLarge {
             count: record_count,
@@ -400,6 +407,11 @@ fn read_snapshot_outputs(
     output_count: u32,
     seen_vouts: &mut HashSet<u32>,
 ) -> Result<Vec<OwnedUtxoOut>, UtxoError> {
+    if output_count > MAX_SNAPSHOT_COINS_PER_TXID {
+        let count = usize::try_from(output_count)
+            .map_err(|_| UtxoError::SnapshotOutputCountTooLarge { count: usize::MAX })?;
+        return Err(UtxoError::SnapshotOutputCountTooLarge { count });
+    }
     seen_vouts.clear();
     let mut outputs = Vec::new();
     for _ in 0..output_count {
