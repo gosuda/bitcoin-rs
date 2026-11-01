@@ -451,7 +451,10 @@ impl OutboundBudget {
         }
         let messages = self.pending_messages.load(Ordering::Acquire);
         let bytes = self.pending_bytes.load(Ordering::Acquire);
-        if messages >= self.max_messages || bytes >= self.max_bytes {
+        let byte_cap_exceeded = bytes
+            .checked_add(wire_len)
+            .is_none_or(|total| total > self.max_bytes);
+        if messages >= self.max_messages || (byte_cap_exceeded && bytes > 0) {
             #[cfg(test)]
             self.refusals.fetch_add(1, Ordering::Relaxed);
             return Err(Refusal::Local);
@@ -618,7 +621,7 @@ impl OutboundBudget {
 
     #[must_use]
     pub(crate) fn may_charge(&self, bytes: usize) -> bool {
-        self.local_has_room()
+        self.local_has_room(bytes)
             && self
                 .shared
                 .as_ref()
@@ -636,10 +639,14 @@ impl OutboundBudget {
                     <= self.max_bytes)
     }
 
-    fn local_has_room(&self) -> bool {
+    fn local_has_room(&self, wire_len: usize) -> bool {
+        let bytes = self.pending_bytes.load(Ordering::Acquire);
         !self.writer_dead()
             && self.pending_messages.load(Ordering::Acquire) < self.max_messages
-            && self.pending_bytes.load(Ordering::Acquire) < self.max_bytes
+            && (bytes == 0
+                || bytes
+                    .checked_add(wire_len)
+                    .is_some_and(|total| total <= self.max_bytes))
     }
 }
 
