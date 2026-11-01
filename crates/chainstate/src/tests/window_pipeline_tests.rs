@@ -15,8 +15,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_script::opcode::OP_PUSHNUM_1;
 use bitcoin_rs_storage::{
-    CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, ScriptAttestation,
-    StorageError,
+    CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
+    InMemoryUndoStore, ScriptAttestation, StorageError, UndoStore,
 };
 use bitcoin_rs_utxo::UtxoSet;
 
@@ -243,6 +243,87 @@ fn a_window_commits_every_block_in_order() -> TestResult {
         (head.height, head.tip),
         (3, expected[2].1),
         "the durable head names the last block of the window"
+    );
+    Ok(())
+}
+
+struct PoisonedUndoStore {
+    inner: InMemoryUndoStore,
+}
+
+impl UndoStore for PoisonedUndoStore {
+    fn persist_undo(
+        &self,
+        height: u32,
+        hash: Hash256,
+        record: &[u8],
+    ) -> Result<(), StorageError> {
+        if height == 0 {
+            return self.inner.persist_undo(height, hash, record);
+        }
+        Err(StorageError::backend("FjallError: Poisoned"))
+    }
+
+    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_undo(height, hash)
+    }
+
+    fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
+        self.inner.arm_disconnect(height, hash)
+    }
+
+    fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
+        self.inner.complete_disconnect(height, hash)
+    }
+
+    fn disarm_disconnect(&self) -> Result<(), StorageError> {
+        self.inner.disarm_disconnect()
+    }
+
+    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
+        self.inner.retire_disconnect_marker()
+    }
+
+    fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
+        self.inner.load_disconnect_marker()
+    }
+}
+
+// SYNC-04
+#[test]
+fn a_poisoned_undo_store_settles_the_window_fatal() -> TestResult {
+    let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    seed_genesis(&chain)?;
+    commit_genesis_head(&chain)?;
+    chain.undo_store = Arc::new(PoisonedUndoStore {
+        inner: InMemoryUndoStore::default(),
+    });
+
+    let block = mined_child(Network::Regtest.genesis_block().block_hash(), 1)?;
+    apply_headers(&chain, &[&block])?;
+    let payloads = dump_payloads(&[block]);
+    let window: Vec<&BlockPayload> = payloads.iter().collect();
+
+    let error = chain.apply_window(&window).err().ok_or(TestError::Missing(
+        "a poisoned undo store must fail the window",
+    ))?;
+
+    assert!(
+        matches!(error.source, ApplyError::UndoPersistence(_)),
+        "the failure must name undo persistence, got {:?}",
+        error.source
+    );
+    assert_eq!(
+        error.disposition,
+        WindowApplyDisposition::Fatal,
+        "an unusable undo store is durable corruption: retry cannot recover it, so the window settles fatal"
+    );
+    assert_eq!(error.applied, 0, "no block commits on a failed undo write");
+    assert_eq!(error.committed.len(), 0);
+    assert_eq!(
+        chain.applied_tip_snapshot().map(|tip| tip.height),
+        Some(0),
+        "a failed undo write publishes no applied tip"
     );
     Ok(())
 }

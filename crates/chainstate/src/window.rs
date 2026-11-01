@@ -346,7 +346,12 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         ApplyError::UtxoCommit(_)
         | ApplyError::DurableHeadCommit(_)
         | ApplyError::DurableHeadLineage { .. }
-        | ApplyError::DurableHeadGapUnrecoverable { .. } => Fatal,
+        | ApplyError::DurableHeadGapUnrecoverable { .. }
+        | ApplyError::BlockBodyPersistence(_)
+        | ApplyError::UndoPersistence(_)
+        | ApplyError::RecoveryPublication(_) => Fatal,
+        ApplyError::JournalBackpressure(error) if error.is_backpressure() => Operational,
+        ApplyError::JournalBackpressure(_) => Fatal,
         ApplyError::ProofOfWork { .. } | ApplyError::TargetAboveLimit => Permanent,
         ApplyError::Chain(error) => classify_chain_error(error),
         ApplyError::Consensus(error) => classify_consensus_error(error),
@@ -359,15 +364,11 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
         | ApplyError::TxidCountMismatch { .. }
         | ApplyError::BlockValueOverflow
         | ApplyError::BlockOutputsExceedInputs
-        | ApplyError::BlockBodyPersistence(_)
-        | ApplyError::UndoPersistence(_)
-        | ApplyError::JournalBackpressure(_)
         | ApplyError::UndoPrevoutMissing { .. }
         | ApplyError::UndoLoad(_)
         | ApplyError::DisconnectNotTip { .. }
         | ApplyError::DisconnectBodyMismatch { .. }
         | ApplyError::DisconnectOffDurableHead { .. }
-        | ApplyError::RecoveryPublication(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }
         | ApplyError::PruneDuringHistoricalValidation { .. }

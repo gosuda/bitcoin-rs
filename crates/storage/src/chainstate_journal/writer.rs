@@ -141,6 +141,16 @@ pub enum JournalWriterError {
     ForkBelowBase { fork_height: u32, base_height: u32 },
 }
 
+impl JournalWriterError {
+    /// True when the error is the designed flow-control state that compaction
+    /// relieves in-process; every other variant is an engine or invariant
+    /// failure that no in-process retry can clear.
+    #[must_use]
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::RetentionLimit { .. })
+    }
+}
+
 /// Serialized as: `HEAD_MAGIC | version u8 | crc32c(payload) | payload`,
 /// where payload is a JSON object. The checksum covers the payload so a torn
 /// rename or a bit flip fails closed at load.

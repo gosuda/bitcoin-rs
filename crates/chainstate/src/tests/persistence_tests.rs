@@ -130,10 +130,14 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched() -> TestResult {
         .map_err(|_| TestError::Exhausted("waiter send"))?;
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
     assert!(
-        remained_pending,
-        "failed persistence must leave the waiter pending"
+        !remained_pending,
+        "an unrecoverable undo failure closes admission and the shutdown wake releases the waiter"
     );
     assert_eq!(observed.map(|tip| tip.hash), Some(applied_hash));
+    assert!(
+        handles.is_closed_for_recovery(),
+        "undo persistence is unrecoverable in-process, so the transition fails closed"
+    );
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
         Some(applied_hash),
