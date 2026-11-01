@@ -185,8 +185,9 @@ fn idle_keepalive_rpc_connection(addr: SocketAddr) -> Result<std::net::TcpStream
     Ok(stream)
 }
 
+// EMB-01
 #[test]
-fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> Result<(), TestError>
+fn idle_keepalive_rpc_connection_releases_the_directory_lock_at_shutdown() -> Result<(), TestError>
 {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
@@ -199,30 +200,19 @@ fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> 
         .rpc_address(bitcoin_rs_rpc::RpcSurface::Shared)
         .ok_or(TestError::Missing("shared rpc address"))?;
     let client = idle_keepalive_rpc_connection(address)?;
+
+    let started = std::time::Instant::now();
     node.shutdown_blocking()?;
+    let elapsed = started.elapsed();
 
-    let Err(error) = NodeState::open(config.clone(), None) else {
-        panic!("an idle keep-alive connection must keep the directory locked after shutdown");
-    };
-    assert_in_use(&error, &data_dir);
-
+    let reopened = NodeState::open(config, None)?;
+    drop(reopened);
     drop(client);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        match NodeState::open(config.clone(), None) {
-            Ok(state) => {
-                drop(state);
-                return Ok(());
-            }
-            Err(error) => assert_in_use(&error, &data_dir),
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(TestError::Timeout(
-                "closed connection releases the data directory",
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    assert!(
+        elapsed < crate::lifecycle::DRAIN_DEADLINE * 2,
+        "an idle keep-alive reader held the shutdown for {elapsed:?}"
+    );
+    Ok(())
 }
 
 #[test]

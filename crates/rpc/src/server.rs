@@ -4,12 +4,14 @@ use alloc::sync::Arc;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::auth::Auth;
 use crate::error::RpcError;
@@ -30,6 +32,7 @@ const MAX_DRAIN_BYTES: usize = 64 * 1_024;
 const DRAIN_BUDGET: Duration = Duration::from_secs(1);
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+const CONNECTION_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const LISTENER_TOKEN: mio::Token = mio::Token(0);
 const WAKER_TOKEN: mio::Token = mio::Token(1);
 
@@ -143,27 +146,48 @@ impl RpcServer {
         let _cancel_guard = shutdown.on_cancel(move || {
             let _ = waker_cancel.wake();
         });
+        let connections = Arc::new(ConnectionTracker::default());
+        let connection_waker = Arc::clone(&connections);
+        let _connection_guard = shutdown.on_cancel(move || {
+            connection_waker.wake_readers();
+        });
+        let (exited_tx, exited_rx) = mpsc::channel();
         let mut events = mio::Events::with_capacity(2);
-        let active = Arc::new(Mutex::new(ActiveConnections::default()));
+        let context = AcceptContext {
+            active: Arc::new(Mutex::new(ActiveConnections::default())),
+            connections: Arc::clone(&connections),
+            exited: exited_tx.clone(),
+            shutdown: shutdown.clone(),
+            surface,
+        };
+        let mut outcome = Ok(());
         while !shutdown.is_triggered() {
             match accept(&listener) {
                 Ok((stream, addr)) => {
                     let stream: TcpStream = stream.into();
                     if let Err(error) = stream
                         .set_nonblocking(false)
-                        .and_then(|()| self.handle_accept(&active, stream, addr.ip(), surface))
+                        .and_then(|()| self.handle_accept(&context, stream, addr.ip()))
                     {
                         debug!(%error, "rpc connection setup failed");
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    wait_for_accept_readiness(shutdown, &mut readiness, &mut events)?;
+                    if let Err(error) =
+                        wait_for_accept_readiness(shutdown, &mut readiness, &mut events)
+                    {
+                        outcome = Err(error);
+                        break;
+                    }
                 }
                 Err(error) => match error.kind() {
                     io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted => {
                         debug!(%error, "rpc accept interrupted or connection aborted");
                     }
-                    io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => return Err(error),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::NotConnected => {
+                        outcome = Err(error);
+                        break;
+                    }
                     _ => {
                         warn!(%error, "rpc accept failed; retrying after backoff");
                         if !wait_accept_backoff(shutdown) {
@@ -173,15 +197,18 @@ impl RpcServer {
                 },
             }
         }
-        Ok(())
+        connections.wake_readers();
+        drain_connections(&connections, &exited_rx);
+        outcome
     }
+
     fn handle_accept(
         &self,
-        active: &Arc<Mutex<ActiveConnections>>,
+        context: &AcceptContext,
         stream: TcpStream,
         peer: IpAddr,
-        surface: RpcSurface,
     ) -> io::Result<()> {
+        let surface = context.surface;
         let mut stream = match prepare_http_socket(stream) {
             Ok(stream) => stream,
             Err(error) => {
@@ -189,7 +216,7 @@ impl RpcServer {
                 return Ok(());
             }
         };
-        let should_accept = active.lock().admit(peer, self.max_connections);
+        let should_accept = context.active.lock().admit(peer, self.max_connections);
         if !should_accept {
             metrics::counter!("rpc.connections.rejected_total", "surface" => surface.label())
                 .increment(1);
@@ -199,7 +226,7 @@ impl RpcServer {
         }
 
         let permit = ConnectionPermit {
-            active: Arc::clone(active),
+            active: Arc::clone(&context.active),
             peer,
             surface,
         };
@@ -208,18 +235,39 @@ impl RpcServer {
         let handler = Arc::clone(&self.handler);
         let rest_enabled = self.rest_enabled;
         let idle_timeout = self.idle_timeout;
-        thread::Builder::new()
+        let id = context.connections.next_id();
+        context.connections.admit(id, stream.try_clone()?);
+        if context.shutdown.is_triggered() {
+            context.connections.wake_readers();
+        }
+        let tracker = Arc::clone(&context.connections);
+        let exited = context.exited.clone();
+        let spawned = thread::Builder::new()
             .name("rpc-connection".to_owned())
             .stack_size(RPC_CONNECTION_STACK_BYTES)
             .spawn(move || {
+                let _slot = ConnectionSlot {
+                    tracker,
+                    id,
+                    exited,
+                };
                 let _permit = permit;
                 if let Err(error) =
                     serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
                 {
                     debug!(%error, "rpc connection closed with error");
                 }
-            })?;
-        Ok(())
+            });
+        match spawned {
+            Ok(handle) => {
+                context.connections.record_thread(handle);
+                Ok(())
+            }
+            Err(error) => {
+                context.connections.release(id);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -297,6 +345,88 @@ impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.active.lock().release(self.peer);
         metrics::gauge!("rpc.connections.active", "surface" => self.surface.label()).decrement(1.0);
+    }
+}
+
+struct AcceptContext {
+    active: Arc<Mutex<ActiveConnections>>,
+    connections: Arc<ConnectionTracker>,
+    exited: mpsc::Sender<()>,
+    shutdown: bitcoin_rs_chain::LatchReader,
+    surface: RpcSurface,
+}
+
+#[derive(Default)]
+struct ConnectionTracker {
+    streams: Mutex<HashMap<u64, TcpStream>>,
+    threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    next_id: AtomicU64,
+}
+
+impl ConnectionTracker {
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn admit(&self, id: u64, stream: TcpStream) {
+        self.streams.lock().insert(id, stream);
+    }
+
+    fn release(&self, id: u64) {
+        self.streams.lock().remove(&id);
+    }
+
+    fn record_thread(&self, handle: thread::JoinHandle<()>) {
+        self.threads.lock().push(handle);
+    }
+
+    fn wake_readers(&self) {
+        for stream in self.streams.lock().values() {
+            let _ = stream.shutdown(std::net::Shutdown::Read);
+        }
+    }
+
+    fn take_threads(&self) -> Vec<thread::JoinHandle<()>> {
+        std::mem::take(&mut *self.threads.lock())
+    }
+}
+
+struct ConnectionSlot {
+    tracker: Arc<ConnectionTracker>,
+    id: u64,
+    exited: mpsc::Sender<()>,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.tracker.release(self.id);
+        let _ = self.exited.send(());
+    }
+}
+
+fn drain_connections(connections: &ConnectionTracker, exited: &mpsc::Receiver<()>) {
+    let handles = connections.take_threads();
+    let deadline = Instant::now() + CONNECTION_DRAIN_DEADLINE;
+    let mut drained = 0;
+    while drained < handles.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || exited.recv_timeout(remaining).is_err() {
+            break;
+        }
+        drained += 1;
+    }
+    let all_drained = drained == handles.len();
+    if !all_drained {
+        warn!(
+            drained,
+            pending = handles.len() - drained,
+            "rpc connections exceeded the drain deadline"
+        );
+    }
+    for handle in handles {
+        if (all_drained || handle.is_finished()) && handle.join().is_err() {
+            error!("rpc connection panicked");
+        }
     }
 }
 

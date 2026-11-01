@@ -11,6 +11,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - Teardown requests shutdown and wakes the event loop.
   - The node shutdown latch is a child of the chainstate latch, so a chainstate recovery closure stops the node instead of only its P2P, index, and mining users.
   - Teardown joins the event loop and all configured RPC/HTTP listeners.
+  - Teardown wakes idle RPC connection readers and joins their threads under a bounded drain.
   - Teardown stops metrics.
   - Teardown joins P2P core, ingress, and relay workers.
   - Teardown joins bootstrap, checkpoint, and signal workers before publishing the clean checkpoint if eligible.
