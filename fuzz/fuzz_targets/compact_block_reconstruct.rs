@@ -285,11 +285,16 @@ fuzz_target!(|data: &[u8]| {
         let invalid = CmpctBlock {
             compact_block: corrupt,
         };
-        assert!(matches!(
-            recon.receive_cmpctblock(&invalid, u64::from(version), &hints, start),
-            Outcome::Fallback(_) | Outcome::RequestMissing(_) | Outcome::Idle
-        ));
-        finish(&mut recon, start, start_budget);
+        let mut invalid_recon = Reconstruction::new();
+        let invalid_budget = invalid_recon.retained_bytes();
+        assert!(
+            matches!(
+                invalid_recon.receive_cmpctblock(&invalid, u64::from(version), &hints, start),
+                Outcome::Fallback(_)
+            ),
+            "an out-of-range prefill index must fall back"
+        );
+        finish(&mut invalid_recon, start, invalid_budget);
     }
 
     if let Some(first) = cmpct.compact_block.prefilled_txs.first() {
@@ -311,11 +316,16 @@ fuzz_target!(|data: &[u8]| {
         let duplicated = CmpctBlock {
             compact_block: duplicate,
         };
-        assert!(matches!(
-            recon.receive_cmpctblock(&duplicated, u64::from(version), &hints, start),
-            Outcome::Fallback(_) | Outcome::RequestMissing(_) | Outcome::Idle
-        ));
-        finish(&mut recon, start, start_budget);
+        let mut duplicate_recon = Reconstruction::new();
+        let duplicate_budget = duplicate_recon.retained_bytes();
+        assert!(
+            matches!(
+                duplicate_recon.receive_cmpctblock(&duplicated, u64::from(version), &hints, start),
+                Outcome::Fallback(_)
+            ),
+            "a repeated short id must fall back"
+        );
+        finish(&mut duplicate_recon, start, duplicate_budget);
     }
 
     let Some(coinbaseless) = block_of(vec![sixty_four_byte_tx(), coinbase.clone()]) else {
