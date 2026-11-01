@@ -171,3 +171,29 @@ fn bip94_retarget_scales_anchor_block_bits() -> Result<(), TestError> {
     assert_eq!(got, want, "BIP94 scales the anchor block's bits, not the last block's");
     Ok(())
 }
+
+#[test]
+fn testnet_min_difficulty_boundary_is_strict_and_walks_back() -> Result<(), TestError> {
+    let network = Network::Testnet3;
+    let mut tree = BlockTree::new();
+    let mut prev = BlockHash::default();
+    let mut times = vec![1_600_000_000_u32];
+    for height in 1..8_u32 {
+        let index = usize::try_from(height - 1).expect("index fits usize");
+        let bits = if height == 5 { 0x1b04_04cb } else { TESTNET_POW_LIMIT_BITS };
+        let header = chain_header(&mut prev, times[index] + 700, bits, height);
+        times.push(header.time);
+        tree.insert_header(header, NodeStatus::HeaderValid)?;
+    }
+    let tip_id = tree.lookup(prev.0).ok_or(TestError::from("fixture tip"))?;
+
+    let late = next_work_required(&tree, tip_id, times[7] + 1201, network)?.to_consensus();
+    assert_eq!(late, TESTNET_POW_LIMIT_BITS);
+
+    let exact = next_work_required(&tree, tip_id, times[7] + 1200, network)?.to_consensus();
+    assert_eq!(exact, 0x1b04_04cb);
+
+    let early = next_work_required(&tree, tip_id, times[7] + 60, network)?.to_consensus();
+    assert_eq!(early, 0x1b04_04cb);
+    Ok(())
+}
