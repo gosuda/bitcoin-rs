@@ -98,7 +98,18 @@ pub struct NodeState {
 impl Drop for NodeState {
     fn drop(&mut self) {
         self.shutdown.trigger();
+        self.chainstate.request_shutdown();
         let _admission = self.chainstate.close();
+        self.p2p.shutdown();
+        if let Err(error) = self.p2p.join() {
+            tracing::warn!(%error, "failed to join p2p workers during node state drop");
+        }
+        if let Err(error) = self
+            .derived_index
+            .shutdown(core::time::Duration::from_secs(5))
+        {
+            tracing::warn!(%error, "failed to shut down derived index during node state drop");
+        }
         self.storage.retention().shutdown();
     }
 }

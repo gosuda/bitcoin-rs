@@ -726,6 +726,13 @@ impl NodeConfig {
         {
             return Err(ConfigError::StaleTipPrefersBlocks);
         }
+        if self.storage.prune_target_mb > 0
+            && (self.indexes.txindex
+                || self.indexes.blockfilterindex
+                || self.indexes.script_index != ScriptIndexMode::Disabled)
+        {
+            return Err(ConfigError::PruneWithIndexes);
+        }
         self.validate_index_bundle()?;
         self.validate_p2p_network()?;
         self.p2p.overlay.validate()?;

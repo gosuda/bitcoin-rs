@@ -1249,3 +1249,31 @@ fn earlier_set_fields_survive_a_later_bare_network_selection() {
         "a field no layer set still fills from the winning profile"
     );
 }
+
+#[test]
+fn prune_rejects_conflicting_index_options() {
+    for mode in [
+        (true, false, ScriptIndexMode::Disabled),
+        (false, true, ScriptIndexMode::Disabled),
+        (false, false, ScriptIndexMode::Utxo),
+        (false, false, ScriptIndexMode::Full),
+    ] {
+        let prune_with_index = UserConfig {
+            storage: StorageOverrides {
+                prune_target_mb: Some(1000),
+                ..StorageOverrides::default()
+            },
+            indexes: crate::options::IndexOverrides {
+                txindex: Some(mode.0),
+                blockfilterindex: Some(mode.1),
+                script_index: Some(mode.2),
+                ..crate::options::IndexOverrides::default()
+            },
+            ..UserConfig::default()
+        };
+        let Err(error) = super::resolve(&[&prune_with_index]) else {
+            panic!("prune with indexes must fail validation");
+        };
+        assert!(matches!(error, ConfigError::PruneWithIndexes), "{error:?}");
+    }
+}
