@@ -91,20 +91,23 @@ run_extract() {
   fi
   local out="$OUT/$crate"
   mkdir -p "$out"
+
+  reject() {
+    rm -rf -- "${out:?extraction output for $crate}"
+    printf '%s %s\n' "$crate" "$1" > "$dest/status"
+  }
+
   if ! ("$AENEAS" -backend lean -dest "$out" "$llbc" > "$log" 2>&1); then
     sed "s/^/[$crate] /" "$log" >&2 || true
-    rm -rf -- "${out:?extraction output for $crate}"
-    printf '%s aeneas failed; no output kept\n' "$crate" > "$dest/status"
+    reject "aeneas failed; no output kept"
     return 0
   fi
   if grep -r -q -E '\b(sorry|admit)\b' "$out"; then
-    rm -rf -- "${out:?extraction output for $crate}"
-    printf '%s aeneas emitted sorry or admit; no output kept\n' "$crate" > "$dest/status"
+    reject "aeneas emitted sorry or admit; no output kept"
     return 0
   fi
   if ! grep -r -q -E '^(noncomputable )?def ' "$out"; then
-    rm -rf -- "${out:?extraction output for $crate}"
-    printf '%s no translated definitions; no output kept\n' "$crate" > "$dest/status"
+    reject "no translated definitions; no output kept"
     return 0
   fi
   printf '%s extracted\n' "$crate" > "$dest/status"
