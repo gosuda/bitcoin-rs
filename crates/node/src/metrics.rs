@@ -337,17 +337,7 @@ fn serve_metrics(
     let Ok(local_addr) = listener.local_addr() else {
         return;
     };
-    let connect_addr = match local_addr {
-        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            addr.port(),
-        ),
-        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            addr.port(),
-        ),
-        addr => addr,
-    };
+    let connect_addr = crate::run::loopback_connect_addr(local_addr);
     let _guard = cancel.on_cancel(move || {
         let _ = TcpStream::connect(connect_addr);
     });

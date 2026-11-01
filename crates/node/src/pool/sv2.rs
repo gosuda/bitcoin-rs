@@ -19,7 +19,7 @@ use bitcoin_rs_primitives::BlockHash;
 use super::authority;
 use super::ledger::{BlockRecordOutcome, BlockRecordPermit, DeferredCharge, LedgerHost};
 use crate::config::PoolConfig;
-use crate::run::RunError;
+use crate::run::{RunError, loopback_connect_addr};
 
 const CERTIFICATE_VALIDITY: Duration = Duration::new(86_400, 0);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -155,20 +155,6 @@ impl Drop for Sv2Service {
         {
             let _ = connection.join();
         }
-    }
-}
-
-fn loopback_connect_addr(local_addr: SocketAddr) -> SocketAddr {
-    match local_addr {
-        SocketAddr::V4(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            addr.port(),
-        ),
-        SocketAddr::V6(addr) if addr.ip().is_unspecified() => SocketAddr::new(
-            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-            addr.port(),
-        ),
-        addr => addr,
     }
 }
 

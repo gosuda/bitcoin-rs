@@ -1,9 +1,21 @@
 use std::io::IsTerminal as _;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::config::{NodeConfig, RuntimeInputs};
+
+pub(crate) fn loopback_connect_addr(local_addr: SocketAddr) -> SocketAddr {
+    match local_addr {
+        SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
+        }
+        SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), addr.port())
+        }
+        addr => addr,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
