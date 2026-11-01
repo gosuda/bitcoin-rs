@@ -1594,16 +1594,18 @@ fn getblock_verbosity(params: &Value) -> Result<u64, RpcError> {
         return Ok(u64::from(verbose));
     }
     if let Some(verbosity) = value.as_i64() {
-        return match verbosity {
-            0 => Ok(0),
-            1 => Ok(1),
-            2 => Ok(2),
-            3 => Ok(3),
-            _ => Err(RpcError::InvalidParams("verbosity must be between 0 and 3")),
+        let Ok(verbosity) = i32::try_from(verbosity) else {
+            return Err(RpcError::Misc("JSON integer out of range".to_owned()));
         };
+        return Ok(match verbosity {
+            ..=0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3,
+        });
     }
-    if value.as_u64().is_some() {
-        return Err(RpcError::InvalidParams("verbosity must be between 0 and 3"));
+    if value.is_number() {
+        return Err(RpcError::Misc("JSON integer out of range".to_owned()));
     }
     Err(RpcError::InvalidType(
         "verbosity must be number or boolean".to_owned(),

@@ -83,18 +83,82 @@ fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
     assert!(gettxout(&ctx, &json!([txid.to_string(), 1]))?.is_null());
     Ok(())
 }
+struct SpentRows {
+    block: Block,
+}
+
+impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentRows {
+    fn block_spends(
+        &self,
+        _hash: Hash256,
+        _expected: Hash256,
+    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
+    {
+        use bitcoin_rs_primitives::{Amount, Script};
+        let Some(spend) = self.block.txs.get(1) else {
+            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+        };
+        let spent = spend
+            .inputs
+            .iter()
+            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+                outpoint: input.previous_output,
+                txout: TxOut {
+                    value: Amount::from_sat(5_000_000_000),
+                    script_pubkey: Script::new(),
+                },
+                coinbase: false,
+                height: 0,
+            })
+            .collect();
+        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+            block: self.block.clone(),
+            spent: Ok(vec![vec![], spent]),
+        })
+    }
+}
+
 #[test]
-fn getrawtransaction_rejects_invalid_verbosity() {
-    let ctx = Arc::new(Context::new());
-    let txid = "00".repeat(32);
-    let err_99 = getrawtransaction(&ctx, &json!([txid, 99])).expect_err("verbosity 99 must fail");
-    assert!(matches!(err_99, RpcError::InvalidParams(_)));
-
-    let err_3 = getrawtransaction(&ctx, &json!([txid, 3])).expect_err("verbosity 3 must fail");
-    assert!(matches!(err_3, RpcError::InvalidParams(_)));
-
-    let err_neg = getrawtransaction(&ctx, &json!([txid, -1])).expect_err("verbosity -1 must fail");
-    assert!(matches!(err_neg, RpcError::InvalidParams(_)));
+fn getrawtransaction_clamps_out_of_range_verbosity_like_core()
+-> Result<(), crate::test_error::TestError> {
+    let block = block_with_two_txs(9);
+    let spend = block
+        .txs
+        .get(1)
+        .cloned()
+        .ok_or_else(|| RpcError::Internal("fixture lost its spend".to_owned()))?;
+    let mut ctx = Context::new();
+    ctx.chain
+        .block_tree
+        .write()
+        .insert_node(None, block.header, NodeStatus::Active)
+        .expect("header");
+    ctx.chain.block_undo_source = Some(Arc::new(SpentRows {
+        block: block.clone(),
+    }));
+    attach_body_for_block(&mut ctx, &block, 0);
+    let ctx = Arc::new(ctx);
+    let hash = block.block_hash().to_string();
+    let txid = spend.txid().to_string();
+    let expected_hex = consensus_bytes(&spend).to_lower_hex_string();
+    for verbosity in [json!(-1), json!(0), json!(false)] {
+        let value = getrawtransaction(&ctx, &json!([txid.as_str(), verbosity, hash.as_str()]))?;
+        assert_eq!(
+            value.as_str(),
+            Some(expected_hex.as_str()),
+            "verbosity {verbosity} renders hex"
+        );
+    }
+    let level_one = getrawtransaction(&ctx, &json!([txid.as_str(), true, hash.as_str()]))?;
+    assert!(level_one["vin"][0].get("prevout").is_none());
+    for verbosity in [json!(2), json!(3), json!(4), json!(99)] {
+        let value = getrawtransaction(&ctx, &json!([txid.as_str(), verbosity, hash.as_str()]))?;
+        assert!(
+            value["vin"][0].get("prevout").is_some(),
+            "verbosity {verbosity} renders level two: {value:?}"
+        );
+    }
+    Ok(())
 }
 #[test]
 fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {

@@ -427,22 +427,85 @@ fn getblock_verbosity_2_emits_every_transaction_of_the_stored_body() {
         );
     }
 }
+struct SpentSource {
+    block: Block,
+}
+
+impl bitcoin_rs_utxo::contract::BlockUndoSource for SpentSource {
+    fn block_spends(
+        &self,
+        _hash: Hash256,
+        _expected: Hash256,
+    ) -> Result<bitcoin_rs_utxo::contract::BlockSpends, bitcoin_rs_utxo::contract::BlockSpendsError>
+    {
+        let Some(spend) = self.block.txs.get(1) else {
+            return Err(bitcoin_rs_utxo::contract::BlockSpendsError::UnknownBlock);
+        };
+        let spent = spend
+            .inputs
+            .iter()
+            .map(|input| bitcoin_rs_utxo::UtxoCoin {
+                outpoint: input.previous_output,
+                txout: bitcoin_rs_primitives::TxOut {
+                    value: bitcoin_rs_primitives::Amount::from_sat(5_000_000_000),
+                    script_pubkey: bitcoin_rs_primitives::Script::new(),
+                },
+                coinbase: false,
+                height: 0,
+            })
+            .collect();
+        Ok(bitcoin_rs_utxo::contract::BlockSpends {
+            block: self.block.clone(),
+            spent: Ok(vec![Vec::new(), spent]),
+        })
+    }
+}
+
 #[test]
-fn getblock_rejects_invalid_verbosity() {
+fn getblock_clamps_out_of_range_verbosity_like_core() {
     let block = fixture_block_with_spend();
     let record = BlockRecord::from_block(0, &block);
-    let ctx = Arc::new(Context::new());
+    let mut context = Context::new();
+    context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
+        height: 0,
+        hash: record.hash,
+        body: consensus_bytes(&block),
+        calls: AtomicUsize::new(0),
+    }));
+    context.chain.block_undo_source = Some(Arc::new(SpentSource {
+        block: block.clone(),
+    }));
+    let ctx = Arc::new(context);
     seed_block(&ctx, &block, record);
     let block_hash = block.block_hash().0.to_string_be();
+    let expected_hex = consensus_bytes(&block).to_lower_hex_string();
 
-    let err_99 = getblock(&ctx, &json!([block_hash, 99])).expect_err("verbosity 99 must fail");
-    assert!(matches!(err_99, RpcError::InvalidParams(_)));
-
-    let err_4 = getblock(&ctx, &json!([block_hash, 4])).expect_err("verbosity 4 must fail");
-    assert!(matches!(err_4, RpcError::InvalidParams(_)));
-
-    let err_neg = getblock(&ctx, &json!([block_hash, -1])).expect_err("verbosity -1 must fail");
-    assert!(matches!(err_neg, RpcError::InvalidParams(_)));
+    for verbosity in [json!(-1), json!(false)] {
+        assert_eq!(
+            getblock(&ctx, &json!([block_hash.as_str(), verbosity])).expect("hex render"),
+            json!(expected_hex),
+            "verbosity {verbosity} renders hex"
+        );
+    }
+    let level_one = getblock(&ctx, &json!([block_hash.as_str(), 1])).expect("level one");
+    assert_eq!(
+        getblock(&ctx, &json!([block_hash.as_str(), true])).expect("legacy true"),
+        level_one
+    );
+    let level_two = getblock(&ctx, &json!([block_hash.as_str(), 2])).expect("level two");
+    assert!(level_two["tx"][1]["vin"][0].get("prevout").is_none());
+    let level_three = getblock(&ctx, &json!([block_hash.as_str(), 3])).expect("level three");
+    assert!(
+        level_three["tx"][1]["vin"][0].get("prevout").is_some(),
+        "level three carries prevouts: {level_three:?}"
+    );
+    for verbosity in [json!(4), json!(99)] {
+        assert_eq!(
+            getblock(&ctx, &json!([block_hash.as_str(), verbosity])).expect("clamped level three"),
+            level_three,
+            "verbosity {verbosity} renders level three"
+        );
+    }
 }
 
 #[test]
