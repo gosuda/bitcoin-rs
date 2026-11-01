@@ -65,6 +65,10 @@ fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
 }
 
 impl ChainControl for RpcChainControl {
+    fn is_apply_halted(&self) -> bool {
+        self.sync.apply_halted()
+    }
+
     fn load_txoutset(
         &self,
         path: &std::path::Path,

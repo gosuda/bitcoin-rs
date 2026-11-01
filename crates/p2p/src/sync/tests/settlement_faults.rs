@@ -34,6 +34,90 @@ fn fatal_settlement_halts_further_apply_attempts() -> TestResult {
     Ok(())
 }
 
+// SYNC-04, SYNC-06
+#[test]
+fn fatal_settlement_raises_the_halt_signal_exactly_once() -> TestResult {
+    let (mut tree, blocks) = mined_chain(3, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(PeerTable::new());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    ));
+    let chain_handle: Arc<TestChain> = Arc::clone(&chain);
+    let chain_ref: Arc<dyn SyncChain> = chain_handle;
+    let sync = BlockSync::new(
+        chain_ref,
+        peers,
+        headers_rx,
+        blocks_rx,
+        crate::sync::syncing_ibd_latch(),
+    );
+    sync.tick();
+    assert_eq!(
+        applied_tip.load_full().map(|tip| tip.height),
+        Some(0),
+        "genesis must be applied before the scripted failure"
+    );
+
+    let failed = Hash256::from_le_bytes(blocks[0].block_hash().as_bytes());
+    let suffix = Hash256::from_le_bytes(blocks[1].block_hash().as_bytes());
+    *chain.scripted_commit_failure.lock() =
+        Some((failed, super::super::chain::WindowApplyDisposition::Fatal));
+    stage_body(&sync, &blocks[0]);
+    stage_body(&sync, &blocks[1]);
+    let staged = sync.scheduler.lock().stager.received_len();
+    let cursor = sync.scheduler.lock().window.request_cursor();
+
+    assert_eq!(
+        sync.apply_buffered_blocks(None),
+        (0, 1),
+        "the fatal settlement stops the window at the failed block"
+    );
+    assert!(
+        sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
+        "a fatal settlement must raise the halt signal"
+    );
+    assert!(
+        !sync.scheduler.lock().stager.contains(&failed),
+        "the fatally settled block must not be restored for an in-process retry"
+    );
+    assert_eq!(
+        sync.scheduler.lock().stager.received_len(),
+        staged - 1,
+        "the drained suffix is preserved in the stager for restart recreation"
+    );
+    assert_eq!(
+        sync.scheduler.lock().window.request_cursor(),
+        cursor,
+        "a fatal settlement must not rewind the request cursor"
+    );
+
+    *chain.scripted_commit_failure.lock() =
+        Some((suffix, super::super::chain::WindowApplyDisposition::Fatal));
+    assert_eq!(
+        sync.apply_buffered_blocks(None),
+        (0, 0),
+        "a halted sync must not re-enter commit_window"
+    );
+    let scripted = chain.scripted_commit_failure.lock().take();
+    assert!(
+        scripted.is_some(),
+        "the halt latched after one settlement: commit_window never consumed a second fatal script"
+    );
+    assert_eq!(
+        applied_tip.load_full().map(|tip| tip.height),
+        Some(0),
+        "no block of the settled window commits"
+    );
+    Ok(())
+}
+
 #[test]
 fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestResult {
     let fixture = deterministic_proxy_fixture()?;

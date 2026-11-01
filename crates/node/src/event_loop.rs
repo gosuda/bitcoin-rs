@@ -57,6 +57,12 @@ impl EventLoop {
                     }
                 }
             }
+            if self.sync.apply_halted() {
+                metrics::counter!("node.sync.apply_halt_shutdowns").increment(1);
+                metrics::gauge!("node.shutdown.requested").set(1.0);
+                request_shutdown();
+                break;
+            }
             let now = Instant::now();
             if progress_due(last_progress, now) {
                 self.sync.emit_sync_progress();

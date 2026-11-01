@@ -76,6 +76,14 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             "is_closed_for_recovery",
             json!(ctx.chain.closed_for_recovery.is_triggered()),
         );
+        object.insert(
+            "is_apply_halted",
+            json!(ctx
+                .chain
+                .chain_control
+                .as_ref()
+                .is_some_and(|control| control.is_apply_halted())),
+        );
     }
     Ok(response)
 }

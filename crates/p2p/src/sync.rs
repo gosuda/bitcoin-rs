@@ -418,6 +418,11 @@ impl BlockSync {
         extends_applied || self.owns_body_fetch(source, hash)
     }
 
+    #[must_use]
+    pub fn apply_halted(&self) -> bool {
+        self.apply_halted.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn tick(&self) {
         self.retire_timed_out_header_syncs(Instant::now());
         self.drain_inbound_headers();

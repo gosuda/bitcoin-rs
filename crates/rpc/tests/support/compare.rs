@@ -1137,7 +1137,7 @@ fn json_kind(value: &Value) -> u8 {
     }
 }
 
-const CHAININFO_EXTENSION_KEYS: [&str; 1] = ["is_closed_for_recovery"];
+const CHAININFO_EXTENSION_KEYS: [&str; 2] = ["is_closed_for_recovery", "is_apply_halted"];
 
 pub(crate) fn typed_getblockchain_info(
     body: &[u8],

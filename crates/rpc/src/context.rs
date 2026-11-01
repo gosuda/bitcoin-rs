@@ -191,6 +191,13 @@ pub trait ChainControl: Send + Sync {
         nblocks: u32,
         cancellation: &LatchReader,
     ) -> Result<bool, ChainControlError>;
+
+    /// True once block-apply settled a failure the process cannot recover from.
+    /// The node latches this state, closes admission, and shuts down so a
+    /// supervisor restart can replay the durable state with a clean engine.
+    fn is_apply_halted(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

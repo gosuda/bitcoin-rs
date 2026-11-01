@@ -210,3 +210,6 @@ mod reorg_invalidation;
 
 #[cfg(test)]
 mod branch_connect_mempool;
+
+#[cfg(test)]
+mod fatal_halt;
