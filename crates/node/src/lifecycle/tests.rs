@@ -31,23 +31,18 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
 #[test]
 fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let management_address = management.local_addr()?;
-    let public_address = public.local_addr()?;
     let mut config = isolated_config(dir.path());
-    config.rpc.bind = management_address;
-    config.rpc.public_bind = Some(public_address);
-    drop((management, public));
+    config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    config.rpc.public_bind = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
     let node = start_node(config, RuntimeInputs::default(), false)?;
-    assert_eq!(
-        node.services
-            .as_ref()
-            .ok_or(TestError::Missing("node services"))?
-            .rpc_threads
-            .len(),
-        2
-    );
+    let services = node.services.as_ref().ok_or(TestError::Missing("node services"))?;
+    assert_eq!(services.rpc_threads.len(), 2);
+    let management_address = services
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Management)
+        .ok_or(TestError::Missing("management address"))?;
+    let public_address = services
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Public)
+        .ok_or(TestError::Missing("public address"))?;
     for (address, request, expected) in [
         (
             public_address,
@@ -68,38 +63,33 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), Test
         assert!(response.starts_with(expected), "{response}");
     }
     node.shutdown_blocking()?;
-    let _management = std::net::TcpListener::bind(management_address)?;
-    let _public = std::net::TcpListener::bind(public_address)?;
     Ok(())
 }
 
 #[test]
 fn public_bind_failure_rolls_back_management_binding_and_node_state() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
-    let management = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let address = management.local_addr()?;
     let mut config = isolated_config(dir.path());
-    config.rpc.bind = address;
-    config.rpc.public_bind = Some(public.local_addr()?);
-    drop(management);
-    let error = start_node(config.clone(), RuntimeInputs::default(), false)
-        .err()
-        .ok_or(TestError::UnexpectedSuccess(
-            "occupied public bind succeeded",
-        ))?;
+    let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public_address = public.local_addr()?;
+    config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    config.rpc.public_bind = Some(public_address);
+    let error = match start_node(config.clone(), RuntimeInputs::default(), false) {
+        Ok(_) => {
+            return Err(TestError::UnexpectedSuccess(
+                "occupied public bind succeeded",
+            ));
+        }
+        Err(error) => error,
+    };
     assert_eq!(
         error.to_string(),
-        format!(
-            "failed to bind public HTTP listener at {}",
-            public.local_addr()?
-        )
+        format!("failed to bind public HTTP listener at {public_address}")
     );
     let RunError::PublicRpcBind { source, .. } = &error else {
         panic!("expected RunError::PublicRpcBind, got: {error:?}");
     };
     assert_eq!(source.kind(), std::io::ErrorKind::AddrInUse);
-    let _management = std::net::TcpListener::bind(address)?;
     let _reopened = NodeState::open(config, None)?;
     Ok(())
 }
