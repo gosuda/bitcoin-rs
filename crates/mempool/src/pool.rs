@@ -23,6 +23,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 mod chunk_order_tests;
 pub(crate) mod fee_policy;
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod model_tests;
 pub(crate) use fee_policy::ProjectionScope;
 pub(crate) mod package;
 
@@ -2608,46 +2611,6 @@ mod dynamic_memory_usage_tests {
             charged >= measured,
             "the per-entry charge {charged} must cover the index's own count {measured}"
         );
-    }
-
-    proptest::proptest! {
-        #[test]
-        fn incremental_usage_equals_a_full_recount_after_any_insert_and_removal_sequence(
-            ops in proptest::collection::vec((proptest::bool::ANY, 0_u8..24, 0_u8..24), 1..60)
-        ) {
-            let mut pool = Mempool::new(MempoolLimits {
-                max_total_bytes: 0,
-                ..MempoolLimits::default()
-            });
-            let mut known: Vec<Txid> = Vec::new();
-            for (insert, pick, parent_pick) in ops {
-                if insert {
-                    let mut tx = tx_with(usize::from(pick) + 1, pick);
-                    if let Some(parent) = known.get(usize::from(parent_pick) % known.len().max(1)) {
-                        tx.inputs[0].previous_output = OutPoint::new(*parent, 0);
-                    }
-                    let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
-                    let txid = entry.txid;
-                    if pool.insert_entry(entry).is_ok() {
-                        known.push(txid);
-                    }
-                } else {
-                    let ids: Vec<EntryId> = pool
-                        .entries
-                        .iter()
-                        .filter_map(|(index, _)| EntryId::try_from(index).ok())
-                        .collect();
-                    if let Some(&id) = ids.get(usize::from(pick) % ids.len().max(1)) {
-                        let mut changes = Vec::new();
-                        pool.remove_entries_with_reasons(
-                            &[(id, crate::mutation::RemovalReason::PolicyEviction)],
-                            &mut changes,
-                        );
-                    }
-                }
-                proptest::prop_assert_eq!(pool.dynamic_memory_usage(), pool.recount_memory_usage());
-            }
-        }
     }
 }
 
