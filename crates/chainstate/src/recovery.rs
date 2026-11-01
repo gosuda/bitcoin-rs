@@ -210,10 +210,7 @@ pub(crate) fn restore_snapshot(
     network: bitcoin_rs_primitives::Network,
     pinned: &bitcoin_rs_primitives::AssumeUtxoData,
 ) -> Result<InitialChainstate, RecoveryError> {
-    let config = crate::checkpoint::headers::HeaderCheckpointConfig {
-        network,
-        genesis: network.genesis_block_hash(),
-    };
+    let config = header_checkpoint_config(network);
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
     if let crate::checkpoint::CheckpointLoad::Complete(restored) =
         crate::checkpoint::load_checkpoint_from_dir(&data, config)?

@@ -28,8 +28,7 @@ where
     O: ReorgObserver + ?Sized,
     S: FnMut(&mut O, core::result::Result<(), ReorgError>) -> core::result::Result<(), ReorgError>,
 {
-    let validation = invalidation_root(handles, hash).map(|_| ());
-    if let Err(error) = validation {
+    if let Err(error) = invalidation_root(handles, hash).map(|_| ()) {
         return settle_reorg_without_transition(handles, observer, Err(error), &mut settle)
             .map(|()| InvalidationOutcome::default());
     }
