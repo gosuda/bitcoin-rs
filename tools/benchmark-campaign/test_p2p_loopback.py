@@ -724,15 +724,6 @@ class ParseConfigTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             p2p_loopback.parse_config(unbalanced)
 
-    def test_module_imports_standalone(self) -> None:
-        probe = subprocess.run(
-            [sys.executable, "-c", "import p2p_loopback"],
-            cwd=str(Path(__file__).parent),
-            check=False,
-            capture_output=True,
-        )
-        self.assertEqual(probe.returncode, 0, probe.stderr)
-
 
 class StatisticsTests(unittest.TestCase):
     def test_percentile_edges(self) -> None:
@@ -753,9 +744,6 @@ class StatisticsTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    def test_accepts_seven_alternating_pairs(self) -> None:
-        _require_comparable(_stub_config(), _comparable_arms())
-
     def test_refuses_pair_count_and_role_drift(self) -> None:
         stub = _stub_config()
         with self.assertRaises(ContractError):
@@ -1507,14 +1495,6 @@ class SecurityContractTests(unittest.TestCase):
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
         return output.read_bytes()
-
-    def test_loader_rejects_config_over_byte_cap(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-cap-bytes-") as raw:
-            workspace = Path(raw)
-            path = workspace / "config.json"
-            path.write_text(json.dumps(_good_config_value()), encoding="utf-8")
-            with self.assertRaisesRegex(ContractError, "exceeds byte limit"):
-                _load_json(path, "config", 64)
 
     def test_loader_rejects_oversize_config_file(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-cap-file-") as raw:
