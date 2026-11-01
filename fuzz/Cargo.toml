@@ -21,6 +21,10 @@ bitcoin-rs-consensus = { path = "../crates/consensus", default-features = false 
 bitcoin-rs-mempool = { path = "../crates/mempool", default-features = false }
 bitcoin-rs-utxo = { path = "../crates/utxo" }
 tempfile = "3"
+bitcoin-rs-index = { path = "../crates/index" }
+bitcoin-rs-rpc = { path = "../crates/rpc", default-features = false, features = ["test-seam"] }
+sonic-rs = "0.5"
+miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "p2p_message"
@@ -61,3 +65,19 @@ path = "fuzz_targets/compact_block_reconstruct.rs"
 [[bin]]
 name = "socks_sam_reply"
 path = "fuzz_targets/socks_sam_reply.rs"
+
+[[bin]]
+name = "rpc_http_request"
+path = "fuzz_targets/rpc_http_request.rs"
+
+[[bin]]
+name = "jsonrpc_batch"
+path = "fuzz_targets/jsonrpc_batch.rs"
+
+[[bin]]
+name = "esplora_route"
+path = "fuzz_targets/esplora_route.rs"
+
+[[bin]]
+name = "rpc_hex_params"
+path = "fuzz_targets/rpc_hex_params.rs"
