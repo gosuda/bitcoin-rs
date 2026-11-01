@@ -100,6 +100,11 @@ Owners:
 - `confirmed_history_page` returns one newest-first page after an exclusive `(height, position)` cursor.
 - It reads at most one height-row scan per 32 rows.
 - `history_cursor` resolves an `API-09` transaction id to that cursor through `TxLookup` rows.
+- The resolution picks the newest covered occurrence of that transaction id.
+- A pre-BIP34 duplicate transaction id names several rows of one script history.
+- The public cursor names the transaction id and carries no height.
+- A page after the older occurrence repeats the rows from below the newest occurrence through the older occurrence.
+- No cursor page drops a row.
 - Therefore a cursor page requires the transaction index.
 - Without `TxLookup`, the page starts from the first page, as `API-09` defines for an unknown cursor.
 

@@ -331,7 +331,7 @@ impl DerivedIndexQueryEngine {
             .map(|row| row.row.height())
             .filter(|height| prefix.covers(*height))
             .collect();
-        heights.sort_unstable();
+        heights.sort_unstable_by(|left, right| right.cmp(left));
         heights.dedup();
         if heights.is_empty() {
             return Self::scoped_absence(prefix, "transaction index");
@@ -824,7 +824,7 @@ mod tests {
 
     // IDX-02
     #[test]
-    fn history_cursor_resolves_the_oldest_covered_occurrence() {
+    fn history_cursor_resolves_the_newest_covered_occurrence() {
         let script = ScriptHash::from_byte_array([4; 32]);
         let duplicate = occurrence(script, 9, 77);
         let snapshot = HistorySnapshot::new(
@@ -841,8 +841,66 @@ mod tests {
         .unwrap_or_else(|error| panic!("cursor resolution failed: {error}"));
         assert_eq!(
             cursor,
-            Some((5, 66)),
-            "the cursor excludes every earlier occurrence of the same transaction"
+            Some((20, 77)),
+            "the cursor continues below the newest occurrence of the transaction"
+        );
+    }
+
+    // IDX-02
+    #[test]
+    fn duplicated_txid_cursor_pages_cover_the_full_history() {
+        let script = ScriptHash::from_byte_array([6; 32]);
+        let rows: Vec<(u32, Vec<ScriptHistoryOccurrence>)> = (1..=25)
+            .rev()
+            .map(|height| match height {
+                20 => (height, vec![occurrence(script, 9, 100)]),
+                5 => (height, vec![occurrence(script, 9, 90)]),
+                other => {
+                    let txid = u8::try_from(100 + other).unwrap_or(0);
+                    (other, vec![occurrence(script, txid, CURSOR_OFFSET)])
+                }
+            })
+            .collect();
+        let snapshot = HistorySnapshot::new(script, rows);
+        let budget = &mut QueryBudget::new();
+        let mut oracle: Vec<ScriptHistoryRecord> = snapshot
+            .rows
+            .iter()
+            .map(|(height, occurrences)| ScriptHistoryRecord {
+                txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                    &occurrences[0].txid,
+                )),
+                height: *height,
+            })
+            .collect();
+        oracle.sort_by_key(|record| core::cmp::Reverse(record.height));
+        let limit = 6;
+        let mut served: Vec<ScriptHistoryRecord> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = DerivedIndexQueryEngine::confirmed_history_page_for(
+                &snapshot,
+                &prefix(),
+                budget,
+                script,
+                cursor,
+                limit,
+            )
+            .unwrap_or_else(|error| panic!("history page failed: {error}"));
+            assert!(page.cursor_found, "every fixture cursor resolves");
+            let short = page.records.len() < limit;
+            served.extend(page.records);
+            if short {
+                break;
+            }
+            let Some(last) = served.last() else {
+                break;
+            };
+            cursor = Some(last.txid);
+        }
+        assert_eq!(
+            served, oracle,
+            "the union of pages equals the newest-first full scan"
         );
     }
 
@@ -856,6 +914,7 @@ mod tests {
             vec![
                 (20, vec![duplicate, occurrence(script, 7, 50)]),
                 (5, vec![occurrence(script, 9, 90)]),
+                (3, vec![occurrence(script, 3, 30)]),
             ],
         );
         let budget = &mut QueryBudget::new();
@@ -868,7 +927,7 @@ mod tests {
                 budget,
                 script,
                 cursor,
-                1,
+                2,
             )
             .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
             assert!(page.cursor_found);
