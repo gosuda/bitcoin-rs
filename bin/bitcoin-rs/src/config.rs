@@ -47,11 +47,8 @@ pub(crate) enum BinError {
         #[source]
         source: std::io::Error,
     },
-    #[error("invalid bitcoin.conf value{suffix}: {details}")]
-    InvalidBitcoinConf {
-        suffix: &'static str,
-        details: String,
-    },
+    #[error("invalid bitcoin.conf: {details}")]
+    InvalidBitcoinConf { details: String },
     #[error("--corpus, --manifest, and --state must be given together")]
     IncompleteOfflineImportArguments,
 }
@@ -202,7 +199,8 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
     let mut current_section_selected = None;
     let mut errors = Vec::new();
 
-    for raw_line in text.lines() {
+    for (index, raw_line) in text.lines().enumerate() {
+        let line_number = index + 1;
         let line = strip_inline_comment(raw_line).trim();
         if line.is_empty() {
             continue;
@@ -212,9 +210,18 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
             continue;
         }
         let Some((raw_key, raw_value)) = line.split_once('=') else {
+            errors.push(format!(
+                "line {line_number}: {line:?} is not a key=value entry"
+            ));
             continue;
         };
         let key = raw_key.trim().trim_start_matches('-');
+        if key == "rpcpassword" && raw_line.contains('#') {
+            errors.push(format!(
+                "line {line_number}: rpcpassword contains '#', which is ambiguous"
+            ));
+            continue;
+        }
         let value = raw_value.trim();
         let outcome = match current_section_selected {
             None => apply_core_key(&mut global, key, value),
@@ -222,15 +229,13 @@ fn parse_for_network(text: &str, network: Network) -> Result<[UserConfig; 2], Bi
             Some(false) => Ok(()),
         };
         if let Err(error) = outcome {
-            errors.push(error);
+            errors.push(format!("line {line_number}: {error}"));
         }
     }
-
     if errors.is_empty() {
         Ok([global, selected])
     } else {
         Err(BinError::InvalidBitcoinConf {
-            suffix: if errors.len() == 1 { "" } else { "s" },
             details: errors.join("; "),
         })
     }
@@ -428,7 +433,7 @@ fn section_matches_network(section: &str, network: Network) -> bool {
 }
 
 fn strip_inline_comment(line: &str) -> &str {
-    &line[..line.find(['#', ';']).unwrap_or(line.len())]
+    &line[..line.find('#').unwrap_or(line.len())]
 }
 
 #[cfg(test)]
@@ -531,7 +536,6 @@ mod compat_tests {
 -rpcpassword=bar
 -server=1
 -listen=0
--txindex=1
 -dbcache=768
 ",
             Network::Mainnet,
@@ -540,8 +544,10 @@ mod compat_tests {
         assert_eq!(config.storage.prune_target_mb, 550);
         assert_auth(&config.rpc.auth, "foo", "bar");
         assert_eq!(config.p2p.listen, []);
-        assert!(config.indexes.txindex);
         assert_eq!(config.storage.dbcache_mb, 768);
+
+        let indexed = load_conf("-txindex=1\n", Network::Mainnet)?;
+        assert!(indexed.indexes.txindex);
 
         let conf_with_overlays = load_conf(
             r"
@@ -606,6 +612,44 @@ onlynet=onion,i2p
         assert!(
             error.to_string().contains("onlynet"),
             "refusal names the key: {error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_conf_keeps_semicolons_inside_values() -> Result<(), TestError> {
+        let config = load_conf(
+            r"
+rpcuser=ab;cd
+rpcpassword=xy;z
+",
+            Network::Mainnet,
+        )?;
+
+        assert_auth(&config.rpc.auth, "ab;cd", "xy;z");
+        Ok(())
+    }
+
+    #[test]
+    fn bitcoin_conf_refuses_a_hash_inside_rpcpassword() {
+        let error = match load_conf("rpcpassword=ab#cd\n", Network::Mainnet) {
+            Ok(_) => panic!("an ambiguous rpcpassword must not be truncated silently"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("rpcpassword"),
+            "the refusal names the key: {error}"
+        );
+    }
+
+    #[test]
+    fn bitcoin_conf_refuses_a_line_without_an_equals_sign() {
+        let error = match load_conf("prune 550\n", Network::Mainnet) {
+            Ok(_) => panic!("a line without = must not be dropped silently"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("prune 550"),
+            "the refusal quotes the malformed line: {error}"
         );
     }
 
@@ -804,6 +848,31 @@ indexbundleexport=/srv/out
         for layer in &layers {
             assert_eq!(layer.indexes.bundle_import, None);
             assert_eq!(layer.indexes.bundle_export, None);
+        }
+    }
+
+    #[test]
+    fn numeric_flags_stop_at_their_declared_width() {
+        for (flag, widest) in [
+            ("--overlay-port", "65535"),
+            ("--pool-fee-bps", "65535"),
+            ("--assume-valid-height", "4294967295"),
+            ("--mempool-snapshot-max-mb", "18446744073709551615"),
+        ] {
+            assert!(
+                CliArgs::try_parse_from(["bitcoin-rs", flag, widest]).is_ok(),
+                "{flag} accepts its widest value"
+            );
+            let mut over = widest.to_owned();
+            over.push('0');
+            assert!(
+                CliArgs::try_parse_from(["bitcoin-rs", flag, &over]).is_err(),
+                "{flag} refuses a value one digit past its width"
+            );
+            assert!(
+                CliArgs::try_parse_from(["bitcoin-rs", flag, "-1"]).is_err(),
+                "{flag} refuses a negative value"
+            );
         }
     }
 }
