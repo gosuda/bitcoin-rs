@@ -93,6 +93,7 @@ pub fn start<S>(
     role: PeerRole,
     local_services: ServiceFlags,
 ) -> Vec<Message> {
+    peer.local_nonce = Some(nonce);
     peer.state = PeerState::VersionExchange;
     if !role.relays_transactions() {
         peer.package_relay.withdraw_offer();
@@ -116,6 +117,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     lease: &PeerLease,
     deadline: Instant,
 ) -> Result<(), PeerError> {
+    peer.local_nonce = Some(our_nonce);
     let (_, responses) = next_handshake_step(peer, lease, deadline)?;
 
     peer.state = PeerState::VersionExchange;

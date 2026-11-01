@@ -393,6 +393,18 @@ fn the_largest_garbage_is_accepted() -> TestResult {
 }
 
 #[test]
+fn the_smallest_garbage_zero_bytes_is_accepted() -> TestResult {
+    let (initiator, mut responder, mut inbox, mut session) = scripted(6, 0)?;
+    let mut tail = session.send_garbage_terminator.to_vec();
+    tail.extend(session.send.seal(&[], &initiator.garbage, false)?);
+    assert!(matches!(
+        finish(&mut responder, &mut inbox, &tail)?,
+        Step::Established(_)
+    ));
+    Ok(())
+}
+
+#[test]
 fn garbage_beyond_the_limit_is_refused() -> TestResult {
     let (initiator, mut responder, mut inbox, mut session) = scripted(8, MAX_GARBAGE_LEN + 1)?;
     let mut tail = session.send_garbage_terminator.to_vec();

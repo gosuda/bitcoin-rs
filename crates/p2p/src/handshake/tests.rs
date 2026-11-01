@@ -549,3 +549,34 @@ fn outbound_handshake_start_carries_the_connection_role() {
     );
     assert_eq!(peer.state, PeerState::VersionExchange);
 }
+
+#[test]
+fn self_connection_nonce_is_rejected() -> Result<(), PeerError> {
+    let magic = Magic::BITCOIN;
+    let our_nonce = 0x1234_5678_9abc_def0;
+    let mut remote_version_bytes = Vec::new();
+    write_message(
+        &mut remote_version_bytes,
+        magic,
+        &Message::Version(VersionMessage {
+            nonce: our_nonce,
+            ..version_message(our_nonce, 0, PeerRole::FullRelay, services())
+        }),
+    )?;
+
+    let mut peer = Peer::new(ScriptedStream::new(remote_version_bytes), magic);
+    let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+    let lease = crate::PeerLease::new_inbound(lease_tx);
+
+    let outcome = run_inbound_handshake(
+        &mut peer,
+        our_nonce,
+        0,
+        services(),
+        &lease,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    );
+
+    assert!(matches!(outcome, Err(PeerError::SelfConnection)));
+    Ok(())
+}

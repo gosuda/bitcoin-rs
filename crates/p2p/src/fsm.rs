@@ -10,27 +10,37 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
         Message::Feature(announcement) => receive_feature(peer, announcement),
         Message::SendPackages(send_packages) => receive_send_packages(peer, *send_packages),
         Message::SendHeaders => {
+            ensure_version_received(peer)?;
             ensure_negotiating_or_ready(peer)?;
             peer.capabilities.send_headers = true;
             Ok(())
         }
         Message::SendAddrV2 => {
+            ensure_version_received(peer)?;
             ensure_negotiating_or_ready(peer)?;
             peer.capabilities.addr_v2 = true;
             Ok(())
         }
         Message::WtxidRelay => {
-            ensure_negotiating_or_ready(peer)?;
+            ensure_version_received(peer)?;
             if peer.state == PeerState::Ready {
                 return Ok(());
             }
+            ensure_negotiating_or_ready(peer)?;
             peer.wtxid_relay.mark_peer_supported();
             Ok(())
         }
         Message::SendCmpct(send_cmpct) => {
+            ensure_version_received(peer)?;
             ensure_negotiating_or_ready(peer)?;
             peer.compact_blocks.record_remote_preference(send_cmpct);
             Ok(())
+        }
+        Message::FeeFilter(rate) => {
+            if *rate < 0 {
+                return Err(PeerError::Misbehavior("negative feefilter rate"));
+            }
+            require_ready(peer.state)
         }
         Message::Addr(_)
         | Message::Inv(_)
@@ -61,7 +71,6 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
         | Message::BlockTxn(_)
         | Message::Alert(_)
         | Message::Reject(_)
-        | Message::FeeFilter(_)
         | Message::AddrV2(_)
         | Message::AncPkgInfo(_)
         | Message::GetPkgTxns(_)
@@ -88,6 +97,11 @@ fn receive_version<S>(
 ) -> Result<(), PeerError> {
     if peer.remote_version.is_some() {
         return Err(PeerError::Misbehavior("duplicate version message"));
+    }
+    if let Some(local_nonce) = peer.local_nonce {
+        if version.nonce == local_nonce && local_nonce != 0 {
+            return Err(PeerError::SelfConnection);
+        }
     }
     match peer.state {
         PeerState::Disconnected | PeerState::VersionExchange | PeerState::Verack => {
@@ -150,9 +164,22 @@ const fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
     if peer.remote_version.is_none() {
         return Err(PeerError::Misbehavior("verack received before version"));
     }
+    if peer.received_verack {
+        return Err(PeerError::Misbehavior("duplicate verack message"));
+    }
     peer.received_verack = true;
     peer.refresh_ready_state();
     Ok(())
+}
+
+const fn ensure_version_received<S>(peer: &Peer<S>) -> Result<(), PeerError> {
+    if peer.remote_version.is_none() && !matches!(peer.state, PeerState::Ready) {
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 const fn ensure_negotiating_or_ready<S>(peer: &Peer<S>) -> Result<(), PeerError> {

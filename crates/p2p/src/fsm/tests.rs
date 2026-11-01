@@ -383,3 +383,107 @@ fn feature_negotiation_is_accepted_during_and_after_handshake() -> Result<(), Pe
     );
     Ok(())
 }
+
+#[test]
+fn duplicate_verack_is_rejected() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    step(&mut peer, &Message::Version(version_message()))?;
+    step(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+    assert!(matches!(
+        step(&mut peer, &Message::Verack),
+        Err(PeerError::Misbehavior("duplicate verack message"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn negotiation_messages_before_version_are_rejected() {
+    let mut peer = fresh_peer();
+    peer.state = PeerState::VersionExchange;
+
+    assert!(matches!(
+        step(&mut peer, &Message::SendHeaders),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::SendAddrV2),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::WtxidRelay),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &sendcmpct_message(true, 2)),
+        Err(PeerError::Misbehavior(
+            "negotiation message received before version"
+        ))
+    ));
+}
+
+#[test]
+fn negative_feefilter_is_rejected() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    step(&mut peer, &Message::Version(version_message()))?;
+    step(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(-1)),
+        Err(PeerError::Misbehavior("negative feefilter rate"))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(i64::MIN)),
+        Err(PeerError::Misbehavior("negative feefilter rate"))
+    ));
+    assert!(step(&mut peer, &Message::FeeFilter(0)).is_ok());
+    assert!(step(&mut peer, &Message::FeeFilter(1_000)).is_ok());
+    Ok(())
+}
+
+#[test]
+fn messages_before_handshake_completion_are_rejected() -> Result<(), PeerError> {
+    let mut peer = fresh_peer();
+    peer.state = PeerState::VersionExchange;
+
+    assert!(matches!(
+        step(&mut peer, &Message::Ping(1)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::Headers(Vec::new())),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(1_000)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+
+    step(&mut peer, &Message::Version(version_message()))?;
+    assert!(matches!(
+        step(&mut peer, &Message::Ping(1)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    assert!(matches!(
+        step(&mut peer, &Message::FeeFilter(1_000)),
+        Err(PeerError::Misbehavior(
+            "message received before handshake completed"
+        ))
+    ));
+    Ok(())
+}
