@@ -359,17 +359,15 @@ impl BlockSync {
         now: Instant,
     ) -> GetdataRequestOutcome {
         let compact_fetch = self.compact_fetch_eligible(request, frontier);
-        let inventory: Vec<Inventory> = request
-            .entries()
-            .map(|(_, hash)| {
-                let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-                if compact_fetch {
-                    Inventory::CompactBlock(block_hash)
-                } else {
-                    Inventory::WitnessBlock(block_hash)
-                }
-            })
-            .collect();
+        let mut inventory = Vec::with_capacity(request.len());
+        for (_, hash) in request.entries() {
+            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+            inventory.push(if compact_fetch {
+                Inventory::CompactBlock(block_hash)
+            } else {
+                Inventory::WitnessBlock(block_hash)
+            });
+        }
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
