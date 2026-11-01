@@ -363,7 +363,7 @@ The crash and error points in this contract and `docs/policies/db-migration.md` 
 - `CURRENT_SCHEMA` increments only when the durable root format changes.
 - The fee estimator carries its own estimator-owned version.
 - The P2P discovery store its own discovery-owned version.
-- The index carries its own durability marker (`[0x00, b'V']`, currently row-format 5) with full-reset rebuild on mismatch.
+- The index carries its own durability marker (`[0x00, b'V']`, currently row-format 6) with full-reset rebuild on mismatch.
 - None of these increment `CURRENT_SCHEMA`.
 - A missing or unknown owner-local version never fails node startup.
 - The affected owner degrades to a typed, logged state and rebuilds from canonical or seeded data.

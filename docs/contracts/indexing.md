@@ -142,8 +142,13 @@ Owners:
 - Proof:
   - `crates/index/src/runtime/query.rs`: `block_memo_retains_only_the_latest_identity`
   - `crates/index/src/runtime/query_tests.rs`:
-    - `confirmed_history_fetches_shared_block_once_per_query_and_refetches_next_query`
-    - `confirmed_history_with_nonmatching_script_falls_back_per_height_and_stays_empty`
+    - `history_limit_counts_occurrences_not_heights`
+    - `confirmed_history_serves_stored_occurrences_without_block_bodies`
+    - `history_summary_never_consults_spender_rows`
+  - `crates/index/src/runtime/query/scripts.rs`:
+    - `first_page_scan_work_is_constant_at_100_1000_and_10000_entries`
+    - `cursor_page_continues_without_skipping_or_repeating`
+  - `crates/rpc/src/esplora/http.rs`: `script_work_limits_are_explicit_but_unavailable_indexes_remain_503`
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -570,7 +575,7 @@ That document gives consumer usage and defers to this clause for every consisten
 - Same-block spends resolve from the parsed block before consulting the existing authoritative undo record.
 - Genesis outputs and oversized scripts follow BIP158, not UTXO admission rules.
 - There is no second UTXO set or consensus-validation path.
-- The existing format-5 `UtxoMeta` table gains an additive namespace:
+- The existing format-6 `UtxoMeta` table gains an additive namespace:
   - `01 46 || block_hash` stores `filter_hash || filter_header || serialized_filter` (hashes in wire byte order).
   - Watermark key `00 46` stores the usual height and hash.
 - Rows, header-chain advancement, cursor, and watermark commit atomically through the existing writer fence.
