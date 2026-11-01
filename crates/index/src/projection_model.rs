@@ -235,6 +235,17 @@ mod tests {
     }
 
     #[test]
+    fn commit_batch_refused_when_watermark_reaches_applied_height() {
+        let state = State {
+            applied_height: 4,
+            watermark: 4,
+            rows_committed: 4,
+            phase: 2,
+        };
+        assert_eq!(step(&state, Action::CommitBatch), None);
+    }
+
+    #[test]
     fn a_mismatched_capability_watermark_is_not_selected() {
         let mut watermarks = IndexWatermarks::default();
         watermarks.set(
