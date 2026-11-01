@@ -251,19 +251,7 @@ fn scantxoutset_refuses_malformed_requests() {
             ]),
             "Supported scan descriptors",
         ),
-        (
-            "bad descriptor checksum",
-            json!(["start", ["addr(1111111111111111111114oLvT2)#badbadba"]]),
-            "does not match computed checksum",
-        ),
-        (
-            "address from another network",
-            json!([
-                "start",
-                ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]
-            ]),
-            "Address is not valid",
-        ),
+
     ];
 
     for (name, params, message) in cases {
@@ -275,6 +263,23 @@ fn scantxoutset_refuses_malformed_requests() {
             ),
         }
     }
+
+    let descriptor = "addr(1111111111111111111114oLvT2)";
+    let computed = crate::handlers::util::descriptor_checksum(descriptor)
+        .unwrap_or_else(|| panic!("{descriptor} must have a checksum"));
+    let error = scantxoutset(&ctx, &json!(["start", [format!("{descriptor}#badbadba")]]))
+        .expect_err("a wrong checksum must be refused");
+    assert_eq!(
+        error.to_string(),
+        format!("Provided checksum 'badbadba' does not match computed checksum '{computed}'")
+    );
+
+    let error = scantxoutset(
+        &ctx,
+        &json!(["start", ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]]),
+    )
+    .expect_err("another network's address must be refused");
+    assert_eq!(error.to_string(), "Address is not valid");
 }
 
 #[test]
