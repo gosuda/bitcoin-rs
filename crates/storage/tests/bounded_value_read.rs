@@ -211,3 +211,78 @@ fn indexed_body_checks_locator_and_frame_length_before_copy() -> Result {
     ));
     Ok(())
 }
+
+#[cfg(feature = "fjall")]
+#[test]
+fn empty_and_maximum_size_values_and_read_after_error() -> Result {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(dir.path())?);
+    let cf = ColumnFamily::TxConfirmed;
+
+    assert!(matches!(
+        store.put(cf, b"", b"empty_key_payload"),
+        Err(bitcoin_rs_storage::StorageError::InvalidOperation(_))
+    ));
+    assert_eq!(store.get(cf, b"")?, None);
+
+    store.put(cf, b"empty_val", b"")?;
+    assert_eq!(store.get(cf, b"empty_val")?, Some(Vec::new()));
+    assert_eq!(store.get_bounded(cf, b"empty_val", 0)?, Some(Vec::new()));
+
+    let large = vec![0x42_u8; 1024 * 1024];
+    store.put(cf, b"large_row", &large)?;
+    assert!(matches!(
+        store.get_bounded(cf, b"large_row", 512),
+        Err(BoundedReadError::Limit {
+            size: 1_048_576,
+            limit: 512
+        })
+    ));
+    assert_eq!(
+        store.get_bounded(cf, b"large_row", 1024 * 1024)?,
+        Some(large.clone())
+    );
+    assert_eq!(store.get(cf, b"large_row")?, Some(large));
+
+    assert!(matches!(
+        store.get_bounded(cf, b"large_row", 10),
+        Err(BoundedReadError::Limit { .. })
+    ));
+    assert_eq!(store.get(cf, b"empty_val")?, Some(Vec::new()));
+    assert_eq!(store.get(cf, b"")?, None);
+
+    store.put(cf, b"prefix", b"short")?;
+    store.put(cf, b"prefix_longer", b"long")?;
+    assert_eq!(store.get(cf, b"prefix")?, Some(b"short".to_vec()));
+    assert_eq!(store.get(cf, b"prefix_longer")?, Some(b"long".to_vec()));
+    assert_eq!(store.get(cf, b"prefi")?, None);
+
+    Ok(())
+}
+
+#[test]
+fn flat_file_zero_byte_body_and_read_after_error_recovery() -> Result {
+    let dir = tempfile::tempdir()?;
+    let store = bitcoin_rs_storage::FlatFileBlockStore::open(dir.path())?;
+    let hash1 = [0x11_u8; 32];
+    let hash2 = [0x22_u8; 32];
+
+    let pos_empty = store.append(1, hash1, b"")?;
+    assert_eq!(pos_empty.len, 0);
+    assert_eq!(store.load(pos_empty, 1, hash1)?, Some(Vec::new()));
+
+    let pos_real = store.append(2, hash2, b"actual_payload")?;
+    assert_eq!(
+        store.load(pos_real, 2, hash2)?,
+        Some(b"actual_payload".to_vec())
+    );
+
+    assert_eq!(store.load(pos_empty, 1, hash2)?, None);
+    assert_eq!(
+        store.load(pos_real, 2, hash2)?,
+        Some(b"actual_payload".to_vec())
+    );
+    assert_eq!(store.load(pos_empty, 1, hash1)?, Some(Vec::new()));
+
+    Ok(())
+}

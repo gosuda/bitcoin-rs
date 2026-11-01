@@ -147,6 +147,11 @@ impl FjallStore {
         for (index, op) in ops.into_iter().enumerate() {
             match op {
                 BatchOp::Put { cf, key, value } => {
+                    if key.is_empty() {
+                        return Err(StorageError::InvalidOperation(
+                            "storage keys may not be empty",
+                        ));
+                    }
                     if last_range[cf.index()].is_some_and(|last| index < last) {
                         staged_puts[cf.index()].insert(key.clone());
                     }
@@ -157,6 +162,11 @@ impl FjallStore {
                     );
                 }
                 BatchOp::Delete { cf, key } => {
+                    if key.is_empty() {
+                        return Err(StorageError::InvalidOperation(
+                            "storage keys may not be empty",
+                        ));
+                    }
                     staged_puts[cf.index()].remove(&key);
                     fjall_batch.remove(cached_keyspace(self, &mut keyspaces, cf)?, key);
                 }
@@ -196,6 +206,9 @@ impl KvStore for FjallStore {
         key: &[u8],
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, crate::BoundedReadError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.keyspace(cf)?
             .get(key)
             .map_err(StorageError::backend)?
@@ -204,6 +217,9 @@ impl KvStore for FjallStore {
     }
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.keyspace(cf)?
             .get(key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
@@ -243,6 +259,11 @@ impl KvStore for FjallStore {
     }
 
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        if key.is_empty() {
+            return Err(StorageError::InvalidOperation(
+                "storage keys may not be empty",
+            ));
+        }
         let _guard = self.write_lock.lock();
         self.keyspace(cf)?
             .insert(key, value)
@@ -323,12 +344,14 @@ struct FjallSnapshot<'a> {
 
 impl KvSnapshot for FjallSnapshot<'_> {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if key.is_empty() {
+            return Ok(None);
+        }
         self.snapshot
             .get(self.store.keyspace(cf)?, key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
             .map_err(StorageError::backend)
     }
-
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
