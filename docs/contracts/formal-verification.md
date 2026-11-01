@@ -56,7 +56,7 @@ apalache-mc check --config=docs/models/<Owner>/<Machine>.cfg --temporal=Conditio
 Compiling the extracted tree needs the Aeneas Lean library as a lake dependency, and the contract pins only the Aeneas tool asset, so that wiring remains a recorded gap.
 `scripts/extract_lean.sh` runs Charon and Aeneas for the listed functions and writes `docs/lean/Extracted/`.
 With `--check` it writes to a temporary directory and fails when the output differs from `docs/lean/Extracted/`.
-It also fails with exit 67 on any crate whose status is not `extracted`, except the crates named in `EXTRACT_UNEXTRACTED_ALLOW` (default `primitives`), and it prints each allowed failure.
+It also fails with exit 67 on any crate whose status is not `extracted`, except the crates named in `EXTRACT_UNEXTRACTED_ALLOW` (unset by default), and it prints each allowed failure.
 The chainstate admission model step implements the state machine verified in `docs/lean/ChainAdmission/Safety.lean`.
 
 ## Per-module Apalache table

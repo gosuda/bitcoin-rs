@@ -68,28 +68,43 @@ pub const fn encoded_len(value: u64) -> usize {
 
 #[must_use]
 pub fn encode(value: u64) -> ArrayVec<[u8; 9]> {
+    let mut buf = [0_u8; 9];
+    let len = encode_into(value, &mut buf);
     let mut out = ArrayVec::new();
-    if value <= 0xfc {
-        out.push(u8::try_from(value).unwrap_or_else(|_| unreachable_small_value()));
-    } else if value <= 0xffff {
-        out.push(0xfd);
-        out.extend_from_slice(
-            &u16::try_from(value)
-                .unwrap_or_else(|_| unreachable_small_value())
-                .to_le_bytes(),
-        );
-    } else if value <= 0xffff_ffff {
-        out.push(0xfe);
-        out.extend_from_slice(
-            &u32::try_from(value)
-                .unwrap_or_else(|_| unreachable_small_value())
-                .to_le_bytes(),
-        );
-    } else {
-        out.push(0xff);
-        out.extend_from_slice(&value.to_le_bytes());
-    }
+    out.extend_from_slice(&buf[..len]);
     out
+}
+
+#[must_use]
+pub fn encode_into(value: u64, out: &mut [u8; 9]) -> usize {
+    let payload = value.to_le_bytes();
+    if value <= 0xfc {
+        out[0] = payload[0];
+        1
+    } else if value <= 0xffff {
+        out[0] = 0xfd;
+        out[1] = payload[0];
+        out[2] = payload[1];
+        3
+    } else if value <= 0xffff_ffff {
+        out[0] = 0xfe;
+        out[1] = payload[0];
+        out[2] = payload[1];
+        out[3] = payload[2];
+        out[4] = payload[3];
+        5
+    } else {
+        out[0] = 0xff;
+        out[1] = payload[0];
+        out[2] = payload[1];
+        out[3] = payload[2];
+        out[4] = payload[3];
+        out[5] = payload[4];
+        out[6] = payload[5];
+        out[7] = payload[6];
+        out[8] = payload[7];
+        9
+    }
 }
 
 fn read_array<const N: usize>(
@@ -107,10 +122,6 @@ fn read_array<const N: usize>(
     let mut out = [0_u8; N];
     out.copy_from_slice(&rest[..N]);
     Ok(out)
-}
-
-fn unreachable_small_value() -> ! {
-    unreachable!("compact-size branch bounds guarantee integer width")
 }
 
 #[cfg(kani)]

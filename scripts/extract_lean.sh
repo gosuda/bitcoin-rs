@@ -116,12 +116,10 @@ if [ -n "${EXTRACT_CRATES:-}" ]; then
     extract "$crate"
   done
 else
-  extract primitives layout::decode_reservation varint::encode varint::decode \
-    crate::layout::decode_reservation crate::varint::encode crate::varint::decode
-  extract utxo compress::compress_amount compress::decompress_amount \
-    crate::compress::compress_amount crate::compress::decompress_amount
-  extract mempool crate::fee_diagram::FeeWeight::rate_cmp \
-    fee_diagram::FeeWeight::rate_cmp
+  extract primitives crate::layout::decode_reservation crate::varint::encode_into \
+    crate::varint::decode
+  extract utxo crate::compress::compress_amount crate::compress::decompress_amount
+  extract mempool crate::fee_diagram::FeeWeight::rate_cmp
 fi
 
 NPROC=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -159,7 +157,7 @@ done
   printf '%s\n' "${STATUS[@]}"
 } > "$OUT/status.txt"
 
-allowed=${EXTRACT_UNEXTRACTED_ALLOW-primitives}
+allowed=${EXTRACT_UNEXTRACTED_ALLOW-}
 unextracted=0
 for line in "${STATUS[@]}"; do
   crate=${line%% *}
