@@ -150,7 +150,8 @@ reads this later then does not have to reconstruct the trade.
 
 v5 costs about **3 ns per lookup** at the measured mainnet average and **3-21%
 on block commit p95**. Both sit against budgets with roughly twenty times the
-headroom. It buys **12 points of the 16 GiB tip-RSS budget**. That is a good
+headroom. The G14 commit p95 budget is 50 ms, and the worst case measured is
+2.57 ms. It buys **12 points of the 16 GiB tip-RSS budget**. That is a good
 trade only while tip RSS is actually near the budget, and the budget has never
 been measured. The 13.83 GiB figure everything here is projected from comes from
 *excluded* evidence at height 645,804, on a run that never made the tip.
