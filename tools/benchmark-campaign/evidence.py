@@ -274,11 +274,12 @@ def copy_pinned(
     """Copy pinned bytes onto a new path and verify both ends.
 
     The source is opened with ``O_NOFOLLOW`` and must be a regular file.
-    ``O_EXCL`` refuses an existing destination. The digest is computed
-    while copying, the destination is re-opened with ``O_NOFOLLOW`` and
-    hashed again, and only then is its mode set. A digest mismatch and
-    any I/O failure after create unlink the destination and raise
-    ``ContractError``; no failure is retried here.
+    ``O_EXCL`` refuses an existing destination. The destination is created
+    with ``mode``, the mode is applied again with ``fchmod`` after the
+    copy, and the digest is computed while copying. Both that digest and a
+    fresh ``O_NOFOLLOW`` re-read of the destination must equal ``sha256``.
+    A digest mismatch and any I/O failure after create unlink the
+    destination and raise ``ContractError``; no failure is retried here.
     """
     descriptor = _open_pinned_source(source)
     try:
