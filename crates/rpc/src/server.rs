@@ -379,9 +379,6 @@ fn serve_connection(
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
     loop {
-        if handler.is_stopping() {
-            return Ok(());
-        }
         reader.get_mut().reset_deadline(idle_timeout);
         let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
             Ok(Some(head)) => head,
