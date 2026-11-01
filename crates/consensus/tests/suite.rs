@@ -1,3 +1,4 @@
+mod adversarial_consensus;
 mod block_facts_borrowed;
 mod coinbase_amount;
 mod kernel_block_parity;

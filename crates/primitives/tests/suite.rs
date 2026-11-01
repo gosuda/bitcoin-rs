@@ -1,3 +1,4 @@
+mod adversarial_decode;
 mod bip_vectors;
 mod differential;
 mod genesis;
