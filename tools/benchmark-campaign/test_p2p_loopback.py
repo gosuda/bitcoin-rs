@@ -2,6 +2,7 @@
 # pyright: strict
 """Behavioral tests for the deterministic P2P loopback comparator."""
 
+import functools
 import hashlib
 import json
 import math
@@ -14,7 +15,9 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeIs
 from unittest import mock
@@ -634,6 +637,25 @@ def _stub_config() -> Config:
     return p2p_loopback.parse_config(_good_config_value())
 
 
+def _in_fresh_fork(
+    test: Callable[[unittest.TestCase], None],
+) -> Callable[[unittest.TestCase], None]:
+    @functools.wraps(test)
+    def wrapper(self: unittest.TestCase) -> None:
+        child = os.fork()
+        if child == 0:
+            code = 0
+            try:
+                test(self)
+            except Exception:
+                traceback.print_exc()
+                code = 1
+            os._exit(code)
+        self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 0)
+
+    return wrapper
+
+
 class ParseConfigTests(unittest.TestCase):
     def test_accepts_deterministic_config(self) -> None:
         value = _good_config_value()
@@ -838,7 +860,7 @@ class PacingTests(unittest.TestCase):
         started = time.monotonic_ns()
         _send_paced(left, payload, rate, threading.Event())
         elapsed_ns = time.monotonic_ns() - started
-        reader.join(5.0)
+        reader.join()
         self.assertGreaterEqual(elapsed_ns, floor_ns - 20_000_000)
         left.close()
         right.close()
@@ -995,8 +1017,7 @@ class MagicGateTests(unittest.TestCase):
         reader.start()
         time.sleep(0.05)
         cancel.set()
-        reader.join(2.0)
-        self.assertFalse(reader.is_alive())
+        reader.join()
         self.assertIsInstance(outcome.get("error"), ContractError)
         silent.settimeout(2.0)
         self.assertEqual(silent.recv(1), b"")
@@ -1328,6 +1349,7 @@ class SecurityContractTests(unittest.TestCase):
                 self.assertTrue(_wait_pid_gone(pid), f"helper {pid} survived")
             self.assertTrue(_no_survivor_markers(arms_dir))
 
+    @_in_fresh_fork
     def test_registration_failure_reaps_fast_double_fork_daemon(self) -> None:
         """A daemon escaping before the leader publishes is swept anyway."""
         with tempfile.TemporaryDirectory(prefix="p2p-regfail-") as raw:
@@ -1336,10 +1358,11 @@ class SecurityContractTests(unittest.TestCase):
             survived_path = workspace / "daemon-survived"
             script = (
                 "import os, signal, sys, time\n"
-                "if os.fork():\n"
-                "    os._exit(0)\n"  # the leader exits before publication
+                "child = os.fork()\n"
+                "if child:\n"
+                f"    open({str(daemon_pid_path)!r}, 'w').write(str(child))\n"
+                "    os._exit(0)\n"
                 "os.setsid()\n"
-                "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
                 "signal.signal(signal.SIGTERM, lambda *_: None)\n"
                 "time.sleep(30)\n"
                 f"open({str(survived_path)!r}, 'w').write('x')\n"
@@ -1365,9 +1388,10 @@ class SecurityContractTests(unittest.TestCase):
                 pid: int, expected_parent: ProcessGeneration | None = None
             ) -> ProcessIdentity | None:
                 if observed_adopts["leader_failures"] == 0:
-                    # Deterministic escape window: the daemon exists and
-                    # has published its pid before registration fails.
-                    _wait_for_file(daemon_pid_path)
+                    if not _wait_for_file(daemon_pid_path, 30.0):
+                        raise AssertionError(
+                            "daemon did not publish its pid before registration"
+                        )
                     observed_adopts["leader_failures"] += 1
                     return None
                 identity = real_adopt(pid, expected_parent)
@@ -1591,6 +1615,7 @@ class SecurityContractTests(unittest.TestCase):
         left.close()
         right.close()
 
+    @_in_fresh_fork
     def test_term_resistant_descendant_killed_within_bound(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-stubborn-") as raw:
             workspace = Path(raw)
@@ -1671,6 +1696,7 @@ class SecurityContractTests(unittest.TestCase):
             time.sleep(0.02)
         raise AssertionError(f"{pid} did not become a zombie")
 
+    @_in_fresh_fork
     def test_zombie_parent_forfeits_ownership_of_reparented_member(self) -> None:
         with _ChildSubreaperScope():
             parent, grandchild = self._spawn_grandchild_under_transient_parent()
@@ -1690,6 +1716,7 @@ class SecurityContractTests(unittest.TestCase):
             finally:
                 os.waitpid(parent, 0)
 
+    @_in_fresh_fork
     def test_drain_settles_member_under_unreaped_zombie_parent(self) -> None:
         with _ChildSubreaperScope():
             parent, grandchild = self._spawn_grandchild_under_transient_parent()
@@ -1780,6 +1807,7 @@ class SecurityContractTests(unittest.TestCase):
     def test_process_start_time_refuses_missing_process(self) -> None:
         self.assertIsNone(_process_start_time(0))
 
+    @_in_fresh_fork
     def test_subreaper_scope_refuses_entry_with_live_child(self) -> None:
         sleeper = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"]
@@ -1794,6 +1822,7 @@ class SecurityContractTests(unittest.TestCase):
             sleeper.kill()
             sleeper.wait(timeout=5.0)
 
+    @_in_fresh_fork
     def test_subreaper_scope_installs_and_restores(self) -> None:
         scope = _ChildSubreaperScope()
         with scope:
@@ -1921,6 +1950,7 @@ class SecurityContractTests(unittest.TestCase):
             self.assertIsNone(arm._process)
             self.assertIsNone(arm._root_identity)
 
+    @_in_fresh_fork
     def test_late_exception_close_uses_fresh_cleanup_deadline(self) -> None:
         """close() cleans TERM-resistant trees even after the arm deadline."""
         with tempfile.TemporaryDirectory(prefix="p2p-late-close-") as raw:
@@ -1967,6 +1997,7 @@ class SecurityContractTests(unittest.TestCase):
             self.assertIs(arm._state, p2p_loopback.ArmState.CLOSED)
             arm.close()  # a settled arm tolerates a repeated close safely
 
+    @_in_fresh_fork
     def test_subreaper_scope_rejects_concurrent_entry(self) -> None:
         """Overlapping ownership scopes fail closed and serialize afterwards."""
         with (
@@ -1979,16 +2010,38 @@ class SecurityContractTests(unittest.TestCase):
         with _ChildSubreaperScope():
             pass
 
-    def test_subreaper_scope_rejects_multithreaded_host(self) -> None:
-        """Scope entry refuses a host process that already runs other threads."""
+    def _prove_multithreaded_host_refusal(self) -> None:
+        child = os.fork()
+        if child == 0:
+            self._refuse_multithreaded_entry_and_exit()
+        self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 0)
+
+    def _refuse_multithreaded_entry_and_exit(self) -> None:
+        code = 0
         thread = threading.Thread(target=time.sleep, args=(0.5,))
         thread.start()
         try:
             with self.assertRaisesRegex(ContractError, "single-threaded host"):
                 _ChildSubreaperScope().__enter__()
+        except AssertionError:
+            code = 1
         finally:
             thread.join()
+        os._exit(code)
 
+    def test_subreaper_scope_rejects_multithreaded_host(self) -> None:
+        """Scope entry refuses a host process that already runs other threads."""
+        self._prove_multithreaded_host_refusal()
+
+    @_in_fresh_fork
+    def test_scope_entry_after_host_thread_fixture_teardown(self) -> None:
+        self._prove_multithreaded_host_refusal()
+        tasks = [name for name in os.listdir("/proc/self/task") if name.isdigit()]
+        self.assertEqual(tasks, [str(os.getpid())])
+        with _ChildSubreaperScope():
+            pass
+
+    @_in_fresh_fork
     def test_post_entry_host_child_is_immune_to_drain(self) -> None:
         """A host child spawned after scope entry is never adopted or signaled."""
         with tempfile.TemporaryDirectory(prefix="p2p-immune-") as raw:
