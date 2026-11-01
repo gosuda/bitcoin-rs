@@ -346,17 +346,6 @@ pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
 }
 
 pub(super) fn delete_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
-    delete_rows_internal(batch, rows);
-}
-
-pub(super) fn delete_rows_with_headers(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
-    delete_rows_internal(batch, rows);
-    for row in &rows.header_rows {
-        batch.delete(ColumnFamily::BlockHeaders, row);
-    }
-}
-
-fn delete_rows_internal(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
         (ColumnFamily::Spending, &rows.spending_rows),
@@ -375,6 +364,13 @@ fn delete_rows_internal(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
         batch.delete(ColumnFamily::UtxoMeta, &super::filters::key(hash));
     }
     invert_live_ops(batch, &rows.live_ops);
+}
+
+pub(super) fn delete_rows_with_headers(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
+    delete_rows(batch, rows);
+    for row in &rows.header_rows {
+        batch.delete(ColumnFamily::BlockHeaders, row);
+    }
 }
 
 #[cfg(test)]
