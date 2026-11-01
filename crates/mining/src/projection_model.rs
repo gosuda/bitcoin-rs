@@ -62,11 +62,12 @@ pub(crate) const fn step(state: &State, action: Action) -> Option<State> {
             })
         }
         Action::Finish => {
-            if state.done || state.pending_shares != 0 || state.active_gen != state.tip_gen {
+            if state.done || state.active_gen != state.tip_gen {
                 return None;
             }
             Some(State {
                 done: true,
+                pending_shares: 0,
                 ..*state
             })
         }
@@ -78,7 +79,7 @@ pub(crate) const fn step(state: &State, action: Action) -> Option<State> {
 pub(crate) const fn safety(state: &State) -> bool {
     state.active_gen <= state.tip_gen
         && state.pending_shares <= SHARE_CAP
-        && (!state.done || state.pending_shares == 0)
+        && (!state.done || (state.pending_shares == 0 && state.active_gen == state.tip_gen))
 }
 
 #[cfg(test)]
@@ -198,14 +199,25 @@ mod tests {
         }
 
         fn preconditions(state: &State, transition: &Action) -> bool {
-            step(state, *transition).is_some()
+            match transition {
+                Action::Advance => !state.done && state.active_gen < state.tip_gen,
+                Action::Accept => {
+                    !state.done
+                        && state.active_gen == state.tip_gen
+                        && state.pending_shares < SHARE_CAP
+                }
+                Action::Drain => state.pending_shares > 0,
+                Action::Finish => !state.done && state.active_gen == state.tip_gen,
+                Action::Stutter => true,
+            }
         }
 
-        fn apply(mut state: State, transition: &Action) -> State {
-            if let Some(next) = step(&state, *transition) {
-                state = next;
-            }
-            state
+        #[expect(
+            clippy::expect_used,
+            reason = "preconditions admit every applied transition"
+        )]
+        fn apply(state: State, transition: &Action) -> State {
+            step(&state, *transition).expect("preconditions admit every applied transition")
         }
     }
 
@@ -243,6 +255,7 @@ mod tests {
                 }
                 Action::Finish => {
                     sut.tip_gen = ref_state.tip_gen;
+                    sut.control.pending_shares.store(0, Ordering::Release);
                 }
                 Action::Stutter => {}
             }
@@ -336,5 +349,29 @@ mod tests {
         state = step(&state, Action::Accept).expect("a caught-up template accepts a share");
         state = step(&state, Action::Accept).expect("the second share fits the cap");
         assert_eq!(step(&state, Action::Accept), None);
+    }
+
+    // POOL-05
+    #[expect(
+        clippy::expect_used,
+        reason = "the test asserts the retirement step is admissible"
+    )]
+    #[test]
+    fn finish_retires_the_active_job_with_pending_shares() {
+        let mut state = State::init(1);
+        state = step(&state, Action::Advance).expect("the tip admits an advance");
+        state = step(&state, Action::Accept).expect("a caught-up template accepts a share");
+        state = step(&state, Action::Accept).expect("the second share fits the cap");
+        let retired = step(&state, Action::Finish).expect("Applied retires with pending shares");
+        assert!(retired.done, "the terminal step marks the machine done");
+        assert_eq!(
+            retired.pending_shares, 0,
+            "retirement zeroes pending shares"
+        );
+        assert_eq!(
+            retired.active_gen, retired.tip_gen,
+            "retirement leaves the tip active"
+        );
+        assert!(safety(&retired), "the retired state satisfies safety");
     }
 }
