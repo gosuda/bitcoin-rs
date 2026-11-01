@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
@@ -48,22 +49,6 @@ fn source() -> PeerToken {
         ))),
         connection_id: 7,
     }
-}
-
-fn p2sh_true_script() -> Vec<u8> {
-    [
-        vec![0xa9, 0x14],
-        vec![
-            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
-            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
-        ],
-        vec![0x87],
-    ]
-    .concat()
-}
-
-fn true_redeem_script_sig() -> Vec<u8> {
-    bitcoin_rs_script::push_data(&[0x51])
 }
 
 fn standard_spend(outpoint: OutPoint, marker: u8) -> Tx {

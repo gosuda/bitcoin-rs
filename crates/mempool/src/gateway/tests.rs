@@ -6,6 +6,7 @@ use super::{
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
 use crate::orphan::RejectScope;
 use crate::standardness::PackageTxContext;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{Mempool, MempoolEntry, MempoolLimits};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -332,22 +333,6 @@ fn standard_tx(label: u8) -> Tx {
             script_pubkey: script.into(),
         }],
     }
-}
-
-fn p2sh_true_script() -> Vec<u8> {
-    [
-        vec![bitcoin_rs_script::opcode::OP_HASH160, 0x14],
-        vec![
-            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
-            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
-        ],
-        vec![bitcoin_rs_script::opcode::OP_EQUAL],
-    ]
-    .concat()
-}
-
-fn true_redeem_script_sig() -> Vec<u8> {
-    bitcoin_rs_script::push_data(&[bitcoin_rs_script::opcode::OP_PUSHNUM_1])
 }
 
 fn p2pkh_prevout_script() -> Vec<u8> {

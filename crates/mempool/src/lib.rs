@@ -25,6 +25,8 @@ pub mod standardness;
 mod submit_package;
 #[cfg(test)]
 pub(crate) mod test_error;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 mod truc;
 
 pub use admission::{

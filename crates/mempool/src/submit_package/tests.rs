@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_fixtures::{p2sh_true_script, true_redeem_script_sig};
 use crate::{ChainAdmissionSnapshot, Mempool, MempoolLimits, MempoolObserver, MutationEnvelope};
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_consensus::ValidationEngine;
@@ -67,22 +68,6 @@ fn output(value: u64) -> TxOut {
         value: Amount::from_sat(value),
         script_pubkey: Script::from_bytes([vec![0, 32], hash.to_byte_array().to_vec()].concat()),
     }
-}
-
-fn p2sh_true_script() -> Vec<u8> {
-    [
-        vec![bitcoin_rs_script::opcode::OP_HASH160, 0x14],
-        vec![
-            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
-            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
-        ],
-        vec![bitcoin_rs_script::opcode::OP_EQUAL],
-    ]
-    .concat()
-}
-
-fn true_redeem_script_sig() -> Vec<u8> {
-    bitcoin_rs_script::push_data(&[bitcoin_rs_script::opcode::OP_PUSHNUM_1])
 }
 
 fn spend_coins(inputs: &[OutPoint], outputs: &[u64]) -> Tx {

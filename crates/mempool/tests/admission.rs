@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use super::TestError;
+use super::{p2sh_true_script, true_redeem_script_sig};
 use alloc::sync::Arc;
 use bitcoin_rs_consensus::ValidationEngine;
 use std::sync::mpsc;
@@ -43,17 +44,6 @@ const P2PKH_SCRIPT: &[u8] = &[
     opcode::OP_EQUALVERIFY,
     opcode::OP_CHECKSIG,
 ];
-
-fn p2sh_true_script() -> Vec<u8> {
-    p2sh_script_pubkey(&[
-        0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7, 0x7e,
-        0xba, 0x30, 0xcd, 0x5a, 0x4b,
-    ])
-}
-
-fn true_redeem_script_sig() -> Vec<u8> {
-    bitcoin_rs_script::push_data(&[opcode::OP_PUSHNUM_1])
-}
 
 fn p2sh_script_pubkey(hash: &[u8; 20]) -> Vec<u8> {
     let mut out = Vec::with_capacity(23);

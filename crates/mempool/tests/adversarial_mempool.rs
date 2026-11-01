@@ -17,6 +17,7 @@ use bitcoin_rs_primitives::{
 };
 
 use super::TestError;
+use super::{p2sh_true_script, true_redeem_script_sig};
 
 struct EmptyChain;
 
@@ -42,23 +43,6 @@ impl AdmissionChain for FundedChain {
             confirmed: true,
         })
     }
-}
-
-fn p2sh_true_script() -> Vec<u8> {
-    let hash = [
-        0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7, 0x7e,
-        0xba, 0x30, 0xcd, 0x5a, 0x4b,
-    ];
-    let mut out = Vec::with_capacity(23);
-    out.push(0xa9);
-    out.push(0x14);
-    out.extend_from_slice(&hash);
-    out.push(0x87);
-    out
-}
-
-fn true_redeem_script_sig() -> Vec<u8> {
-    bitcoin_rs_script::push_data(&[0x51])
 }
 
 fn outpoint(label: u8, vout: u32) -> OutPoint {
