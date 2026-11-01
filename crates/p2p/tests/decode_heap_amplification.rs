@@ -15,6 +15,8 @@ static ALLOCATION_COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATION_LIVE: AtomicUsize = AtomicUsize::new(0);
 static ALLOCATION_PEAK: AtomicUsize = AtomicUsize::new(0);
 
+static MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn grow(bytes: usize) {
     let live = ALLOCATION_LIVE.fetch_add(bytes, Ordering::SeqCst) + bytes;
     ALLOCATION_PEAK.fetch_max(live, Ordering::SeqCst);
@@ -68,12 +70,12 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     [second[0], second[1], second[2], second[3]]
 }
 
-fn blocktxn_frame(payload: &[u8]) -> Vec<u8> {
+fn frame(command: &[u8], payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::new();
     frame.extend_from_slice(&Magic::REGTEST.to_bytes());
-    let mut command = [0u8; 12];
-    command[..8].copy_from_slice(b"blocktxn");
-    frame.extend_from_slice(&command);
+    let mut command_bytes = [0u8; 12];
+    command_bytes[..command.len()].copy_from_slice(command);
+    frame.extend_from_slice(&command_bytes);
     let len = u32::try_from(payload.len()).expect("payload fits u32");
     frame.extend_from_slice(&len.to_le_bytes());
     frame.extend_from_slice(&checksum(payload));
@@ -99,10 +101,13 @@ fn one_witness_input_blocktxn_payload() -> Vec<u8> {
 
 #[test]
 fn blocktxn_decode_allocation_stays_within_the_reservation() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("measurement lock must not be poisoned");
     let invalid_payload = one_witness_input_blocktxn_payload();
     let invalid_reservation =
         bitcoin_rs_primitives::layout::decode_reservation(invalid_payload.len());
-    let invalid_frame = blocktxn_frame(&invalid_payload);
+    let invalid_frame = frame(b"blocktxn", &invalid_payload);
 
     ALLOCATION_LIVE.store(0, Ordering::SeqCst);
     ALLOCATION_PEAK.store(0, Ordering::SeqCst);
@@ -137,7 +142,7 @@ fn blocktxn_decode_allocation_stays_within_the_reservation() {
     payload.extend_from_slice(&transaction);
 
     let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
-    let frame = blocktxn_frame(&payload);
+    let frame = frame(b"blocktxn", &payload);
 
     ALLOCATION_LIVE.store(0, Ordering::SeqCst);
     ALLOCATION_PEAK.store(0, Ordering::SeqCst);
@@ -152,5 +157,44 @@ fn blocktxn_decode_allocation_stays_within_the_reservation() {
         peak <= reservation,
         "transient decode allocation {peak} exceeded the {reservation}-byte reservation for a {}-byte payload",
         payload.len()
+    );
+}
+
+#[test]
+fn cmpctblock_prefilled_transaction_decode_allocation_stays_within_the_reservation() {
+    let _measurement = MEASUREMENT_LOCK
+        .lock()
+        .expect("measurement lock must not be poisoned");
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&[0x00; 80]);
+    payload.extend_from_slice(&[0x00; 8]);
+    payload.extend_from_slice(&[0x00, 0x01, 0x00]);
+    payload.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01]);
+    payload.extend_from_slice(&[0x00; 32]);
+    payload.extend_from_slice(&[0xFF; 4]);
+    payload.extend_from_slice(&[0x00]);
+    payload.extend_from_slice(&[0xFF; 4]);
+    payload.extend_from_slice(&[0x01]);
+    payload.extend_from_slice(&[0x00; 8]);
+    payload.extend_from_slice(&[0x00]);
+    payload.extend_from_slice(&[0xFE, 0x00, 0x09, 0x3D, 0x00]);
+
+    let reservation = bitcoin_rs_primitives::layout::decode_reservation(payload.len());
+    let frame = frame(b"cmpctblock", &payload);
+
+    ALLOCATION_LIVE.store(0, Ordering::SeqCst);
+    ALLOCATION_PEAK.store(0, Ordering::SeqCst);
+    ALLOCATION_COUNTING.store(true, Ordering::SeqCst);
+    let outcome = read_message(&mut Cursor::new(frame), Magic::REGTEST);
+    ALLOCATION_COUNTING.store(false, Ordering::SeqCst);
+    let peak = ALLOCATION_PEAK.load(Ordering::SeqCst);
+    assert!(
+        peak <= reservation,
+        "transient decode allocation {peak} exceeded the {reservation}-byte reservation for a {}-byte cmpctblock payload",
+        payload.len()
+    );
+    assert!(
+        matches!(outcome, Err(PeerError::NativeDecode(_))),
+        "4,000,000 declared witness items cannot exist in the remaining bytes: {outcome:?}"
     );
 }
