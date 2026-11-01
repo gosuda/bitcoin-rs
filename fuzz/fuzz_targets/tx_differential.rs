@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
             let rust_bytes = bitcoin::consensus::serialize(&rust_tx);
             assert_eq!(our_bytes, rust_bytes, "re-encoded bytes mismatch");
         }
-        (Ok(our_tx), Err(_)) if our_tx.inputs.is_empty() => {}
+        (Ok(our_tx), Err(_)) if our_tx.inputs.is_empty() && zero_flag_dummy(data) => {}
         (Err(DecodeError::SuperfluousWitness), Ok(_)) => {}
         (Ok(_), Err(err)) => {
             panic!(
@@ -40,3 +40,7 @@ fuzz_target!(|data: &[u8]| {
         (Err(_), Err(_)) => {}
     }
 });
+
+fn zero_flag_dummy(data: &[u8]) -> bool {
+    data.len() >= 6 && data[4] == 0 && data[5] == 0
+}

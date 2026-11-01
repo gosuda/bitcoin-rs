@@ -7,27 +7,27 @@
 "PUT "
 
 # HTTP protocols
-" HTTP/1.1\r\n"
-" HTTP/1.0\r\n"
+" HTTP/1.1\x0d\x0a"
+" HTTP/1.0\x0d\x0a"
 
 # HTTP headers
 "Host: "
 "Content-Length: "
-"Content-Type: application/json\r\n"
-"Content-Type: text/plain\r\n"
+"Content-Type: application/json\x0d\x0a"
+"Content-Type: text/plain\x0d\x0a"
 "Authorization: Basic "
-"Transfer-Encoding: chunked\r\n"
-"Connection: close\r\n"
-"Connection: keep-alive\r\n"
+"Transfer-Encoding: chunked\x0d\x0a"
+"Connection: close\x0d\x0a"
+"Connection: keep-alive\x0d\x0a"
 "Upgrade: "
 "Sec-WebSocket-Key: "
 
 # Delimiters and chunked framing
-"\r\n\r\n"
-"\r\n"
-"\n\n"
-"\n"
-"0\r\n\r\n"
+"\x0d\x0a\x0d\x0a"
+"\x0d\x0a"
+"\x0a\x0a"
+"\x0a"
+"0\x0d\x0a\x0d\x0a"
 
 # Common endpoints
 "/"

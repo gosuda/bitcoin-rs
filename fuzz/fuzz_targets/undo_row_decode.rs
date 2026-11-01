@@ -14,13 +14,14 @@ fuzz_target!(|data: &[u8]| {
     let selector = data[0] % 4;
     let payload = &data[1..];
 
-    let hash = if payload.len() >= 32 {
-        let mut h = [0_u8; 32];
-        h.copy_from_slice(&payload[..32]);
-        Hash256::from_le_bytes(&h)
-    } else {
-        Hash256::default()
-    };
+    let hash = payload
+        .get(1..33)
+        .or_else(|| payload.get(..32))
+        .map_or_else(Hash256::default, |bytes| {
+            let mut h = [0_u8; 32];
+            h.copy_from_slice(bytes);
+            Hash256::from_le_bytes(&h)
+        });
 
     match selector {
         0 => {
@@ -32,7 +33,9 @@ fuzz_target!(|data: &[u8]| {
             }
         }
         1 => {
-            if let Ok(record) = decode_record(payload) {
+            let mut frame = payload.to_vec();
+            repair_journal_crc(&mut frame);
+            if let Ok(record) = decode_record(&frame) {
                 if let Ok(encoded) = encode_record(&record) {
                     let roundtripped =
                         decode_record(&encoded).expect("encoded journal record must decode");
@@ -64,3 +67,37 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn crc32c(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0x82f6_3b78 & mask);
+        }
+    }
+    !crc
+}
+
+fn repair_journal_crc(frame: &mut [u8]) {
+    const HEADER: usize = 9;
+    const TRAILER: usize = 4;
+    if frame.len() < HEADER + TRAILER || frame[..4] != *b"JRNL" || frame[4] != 1 {
+        return;
+    }
+    let Ok(len_bytes) = <[u8; 4]>::try_from(&frame[5..HEADER]) else {
+        return;
+    };
+    let Some(declared) = usize::try_from(u32::from_le_bytes(len_bytes)).ok() else {
+        return;
+    };
+    let Some(end) = HEADER.checked_add(declared) else {
+        return;
+    };
+    if end.checked_add(TRAILER) != Some(frame.len()) {
+        return;
+    }
+    let crc = crc32c(&frame[HEADER..end]);
+    frame[end..end + TRAILER].copy_from_slice(&crc.to_le_bytes());
+}

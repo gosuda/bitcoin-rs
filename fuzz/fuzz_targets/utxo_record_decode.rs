@@ -13,13 +13,14 @@ fuzz_target!(|data: &[u8]| {
     let selector = data[0] % 2;
     let payload = &data[1..];
 
-    let hash = if payload.len() >= 32 {
-        let mut h = [0_u8; 32];
-        h.copy_from_slice(&payload[..32]);
-        Hash256::from_le_bytes(&h)
-    } else {
-        Hash256::default()
-    };
+    let hash = payload
+        .get(1..33)
+        .or_else(|| payload.get(..32))
+        .map_or_else(Hash256::default, |bytes| {
+            let mut h = [0_u8; 32];
+            h.copy_from_slice(bytes);
+            Hash256::from_le_bytes(&h)
+        });
 
     match selector {
         0 => {
