@@ -1317,6 +1317,43 @@ fn json_rpc_batch_excludes_notifications() {
     assert!(rows[1].get("error").is_some());
 }
 
+// API-02
+#[test]
+fn batch_drops_v2_notifications_with_refused_envelopes() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let response = handle_json(
+        &handler,
+        br#"[{"jsonrpc":"2.0","c":"2.0","meod":"getblockcount","params":[]}]"#,
+    );
+
+    assert!(
+        response.body.is_none(),
+        "Core drops a batch member without an id: {:?}",
+        response.body
+    );
+    assert_eq!(response.status, 204);
+
+    let response = handle_json(
+        &handler,
+        br#"[{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]},{"jsonrpc":"2.0","c":"2.0","meod":"getblockcount","params":[]}]"#,
+    );
+    let body = response.body.expect("the identified member replies");
+    let rows = body.as_array().expect("batch response array");
+
+    assert_eq!(rows.len(), 1, "the notification member must be dropped");
+    assert!(rows[0].get("result").is_some());
+
+    let response = handle_json(
+        &handler,
+        br#"[{"jsonrpc":"2.0","id":null,"method":"getblockcount","params":7}]"#,
+    );
+
+    assert!(
+        response.body.is_some(),
+        "an explicit null id is not a notification"
+    );
+}
+
 fn read_whole_request(
     reader: &mut BufReader<RequestDeadlineStream>,
     _head_timeout: Duration,

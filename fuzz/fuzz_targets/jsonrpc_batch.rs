@@ -5,16 +5,32 @@ use std::sync::Arc;
 use libfuzzer_sys::fuzz_target;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
+fn v2_notification(request: &Value) -> bool {
+    request.is_object()
+        && request.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0")
+        && request.get("id").is_none()
+}
+
+fn envelope_is_valid(request: &Value) -> bool {
+    let Some(method) = request.get("method") else {
+        return false;
+    };
+    if method.as_str().is_none() {
+        return false;
+    }
+    match request.get("params") {
+        None => true,
+        Some(params) => params.is_null() || params.is_array() || params.is_object(),
+    }
+}
+
 fn verify_batch_response(requests: &[Value], body: Option<&Value>) {
     if requests.len() > 1_000 || requests.is_empty() {
         return;
     }
     let non_notifications: Vec<_> = requests
         .iter()
-        .filter(|req| {
-            let is_v2 = req.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0");
-            !is_v2 || req.get("id").is_some()
-        })
+        .filter(|request| !v2_notification(request))
         .collect();
 
     if non_notifications.is_empty() {
@@ -46,17 +62,22 @@ fn verify_batch_response(requests: &[Value], body: Option<&Value>) {
     }
 }
 
-fn verify_single_response(req_obj: &sonic_rs::Object, body: Option<&Value>) {
-    let is_v2 = req_obj.get(&"jsonrpc").and_then(|v| v.as_str()) == Some("2.0");
-    if is_v2 && req_obj.get(&"id").is_none() {
-        assert!(body.is_none(), "notification must produce no response body");
-        return;
+fn verify_single_response(request: &Value, body: Option<&Value>) {
+    if v2_notification(request) {
+        if envelope_is_valid(request) {
+            assert!(body.is_none(), "notification must produce no response body");
+            return;
+        }
+        assert!(
+            body.is_some(),
+            "refused notification envelope must be reported"
+        );
     }
     let Some(resp) = body else {
         return;
     };
     let null_val = Value::new_null();
-    let req_id = req_obj.get(&"id").unwrap_or(&null_val);
+    let req_id = request.get("id").unwrap_or(&null_val);
     let resp_id = resp.get("id").unwrap_or(&null_val);
     assert_eq!(
         req_id, resp_id,
@@ -109,8 +130,8 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(parsed) = sonic_rs::from_str::<Value>(json_str) {
         if let Some(requests) = parsed.as_array() {
             verify_batch_response(requests, response.body.as_ref());
-        } else if let Some(req_obj) = parsed.as_object() {
-            verify_single_response(req_obj, response.body.as_ref());
+        } else if parsed.is_object() {
+            verify_single_response(&parsed, response.body.as_ref());
         }
     }
 

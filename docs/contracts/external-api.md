@@ -49,6 +49,8 @@ wallet interoperability remain unverified.
 - A batch with replies answers 200 with per-member errors.
 - An empty batch answers 200 `[]`.
 - An all-notification batch answers 204 with no body.
+- A batch drops a v2 notification member with a refused envelope, matching Core's `IsNotification` gate.
+- The same object sent alone reports its refusal.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): `-32700`, `-32600`..=`-32603`, plus Core `-1`, `-3`, `-5`, `-8`, `-9`, `-10`, `-22`, `-25`, and `-26`.
 - `createrawtransaction` consumes only `inputs`, `outputs`, `locktime`, and `replaceable`.
 - The version stays 2, and `replaceable` defaults to false.

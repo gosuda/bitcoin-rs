@@ -1011,6 +1011,11 @@ pub fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
 
 const MAX_BATCH_ELEMENTS: usize = 1_000;
 
+fn v2_notification(request: &Value) -> bool {
+    request.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+        && request.get("id").is_none()
+}
+
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
     if let Some(requests) = request.as_array() {
         if requests.len() > MAX_BATCH_ELEMENTS {
@@ -1030,11 +1035,21 @@ fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {
         let mut responses = Vec::with_capacity(requests.len());
         let mut worker_held = false;
         for request in requests {
+            let notification = v2_notification(request);
             let response = handle_single_json(handler, request);
-            worker_held |=
+            let blocked =
                 crate::registry::blocking_request(request) && !response.pre_reservation_refusal();
-            if let CallResponse::Reply { body, .. } = response {
-                responses.push(body);
+            match response {
+                CallResponse::Reply {
+                    body,
+                    envelope_error,
+                    ..
+                } if !(envelope_error && notification) => {
+                    worker_held |= blocked;
+                    responses.push(body);
+                }
+                CallResponse::Reply { .. } => {}
+                CallResponse::Notification { .. } => worker_held |= blocked,
             }
         }
         if responses.is_empty() {
@@ -1119,7 +1134,7 @@ fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
     };
     let result = handler.dispatch(method, params);
     let pre_reservation_refusal = matches!(&result, Err(RpcError::ScanInProgress(_)));
-    if version == JsonRpcVersion::V2 && request.get("id").is_none() {
+    if v2_notification(request) {
         return CallResponse::Notification {
             pre_reservation_refusal,
         };
