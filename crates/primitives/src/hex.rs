@@ -78,32 +78,151 @@ mod tests {
     use super::{HexError, hex_decode, hex_decode_array, is_lowercase_hex};
     use proptest::prelude::*;
 
-    proptest! {
-        #[test]
-        fn decoding_inverts_encoding_and_matches_rust_bitcoin(
-            bytes in proptest::collection::vec(any::<u8>(), 0..64)
-        ) {
-            let text = hex_encode(&bytes);
-            prop_assert!(is_lowercase_hex(&text));
-            prop_assert_eq!(hex_decode(&text), Ok(bytes.clone()));
-            prop_assert_eq!(hex_decode(&text.to_uppercase()), Ok(bytes.clone()));
-            let oracle = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(&text).ok();
-            prop_assert_eq!(oracle, Some(bytes));
+    fn proptest_config(default_cases: u32) -> ProptestConfig {
+        let cases = std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|val| val.parse().ok())
+            .unwrap_or(default_cases);
+        ProptestConfig {
+            cases,
+            ..ProptestConfig::default()
         }
     }
 
-    #[test]
-    fn refusals_name_their_cause_and_offset() {
-        assert_eq!(hex_decode("abc"), Err(HexError::OddLength));
-        assert_eq!(hex_decode("0g"), Err(HexError::InvalidDigit { offset: 1 }));
-        assert_eq!(
-            hex_decode_array::<2>("00"),
-            Err(HexError::WrongLength {
-                expected: 4,
-                got: 2
-            })
-        );
-        assert_eq!(hex_decode_array::<2>("00ff"), Ok([0x00, 0xff]));
-        assert!(!is_lowercase_hex("00FF"));
+    fn boundary_byte_strategy() -> impl Strategy<Value = u8> {
+        prop_oneof![
+            3 => any::<u8>(),
+            1 => prop::sample::select(vec![0x00, 0x01, 0x0f, 0x10, 0x7f, 0x80, 0xfe, 0xff]),
+        ]
+    }
+
+    fn boundary_bytes_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            1 => prop::sample::select(vec![
+                vec![],
+                vec![0x00],
+                vec![0xff],
+                vec![0x00; 32],
+                vec![0xff; 32],
+                (0..32u8).collect(),
+            ]),
+            3 => prop::collection::vec(boundary_byte_strategy(), 0..=512),
+        ]
+    }
+
+    fn invalid_hex_byte_strategy() -> impl Strategy<Value = u8> {
+        prop_oneof![
+            prop::sample::select(vec![
+                b'g', b'h', b'z', b'G', b'Z', b':', b'@', b'/', b' ', b'\n', b'\0', 0x80, 0xff,
+            ]),
+            (b'g'..=b'z'),
+            (b'G'..=b'Z'),
+            (0x20u8..=0x2f),
+            (0x3au8..=0x40),
+            (0x5bu8..=0x60),
+            (0x7bu8..=0x7e),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config(1024))]
+
+        #[test]
+        fn hex_encoding_and_decoding_roundtrip_with_oracle_differential(
+            bytes in boundary_bytes_strategy(),
+            case_mask in prop::collection::vec(any::<bool>(), 0..=1024),
+        ) {
+            let lower = hex_encode(&bytes);
+            prop_assert_eq!(lower.len(), bytes.len().saturating_mul(2));
+            prop_assert!(is_lowercase_hex(&lower));
+
+            let upper = lower.to_uppercase();
+            let has_hex_alpha = lower.bytes().any(|b| (b'a'..=b'f').contains(&b));
+            if has_hex_alpha {
+                prop_assert!(!is_lowercase_hex(&upper));
+            }
+
+            let mixed: String = lower
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| {
+                    if case_mask.get(i).copied().unwrap_or(false) {
+                        ch.to_ascii_uppercase()
+                    } else {
+                        ch
+                    }
+                })
+                .collect();
+
+            prop_assert_eq!(hex_decode(&lower), Ok(bytes.clone()));
+            prop_assert_eq!(hex_decode(&upper), Ok(bytes.clone()));
+            prop_assert_eq!(hex_decode(&mixed), Ok(bytes.clone()));
+
+            let lower_oracle = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(&lower).ok();
+            prop_assert_eq!(lower_oracle, Some(bytes.clone()));
+            let upper_oracle = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(&upper).ok();
+            prop_assert_eq!(upper_oracle, Some(bytes.clone()));
+            let mixed_oracle = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(&mixed).ok();
+            prop_assert_eq!(mixed_oracle, Some(bytes.clone()));
+
+            if bytes.len() == 32 {
+                let mut expected_arr = [0u8; 32];
+                expected_arr.copy_from_slice(&bytes);
+                prop_assert_eq!(hex_decode_array::<32>(&lower), Ok(expected_arr));
+                prop_assert_eq!(hex_decode_array::<32>(&upper), Ok(expected_arr));
+                prop_assert_eq!(hex_decode_array::<32>(&mixed), Ok(expected_arr));
+            } else {
+                let expected_err = HexError::WrongLength {
+                    expected: 64,
+                    got: bytes.len().saturating_mul(2),
+                };
+                prop_assert_eq!(hex_decode_array::<32>(&lower), Err(expected_err));
+            }
+        }
+
+        #[test]
+        fn hex_odd_length_refusals(
+            bytes in boundary_bytes_strategy(),
+        ) {
+            let mut odd_hex = hex_encode(&bytes);
+            odd_hex.push('a');
+            prop_assert_eq!(hex_decode(&odd_hex), Err(HexError::OddLength));
+            prop_assert_eq!(
+                hex_decode_array::<32>(&odd_hex),
+                Err(HexError::WrongLength {
+                    expected: 64,
+                    got: odd_hex.len(),
+                })
+            );
+        }
+
+        #[test]
+        fn hex_invalid_digit_refusals_with_exact_offset(
+            bytes in prop::collection::vec(any::<u8>(), 1..=128),
+            offset_ratio in 0u32..=1000u32,
+            bad_byte in invalid_hex_byte_strategy(),
+        ) {
+            let valid_hex = hex_encode(&bytes);
+            let hex_len = valid_hex.len();
+            let max_idx = hex_len.saturating_sub(1);
+            let target_offset = (max_idx * usize::try_from(offset_ratio).unwrap_or(0)) / 1000;
+            let mut corrupted_bytes = valid_hex.into_bytes();
+            corrupted_bytes[target_offset] = bad_byte;
+            let corrupted = String::from_utf8_lossy(&corrupted_bytes).into_owned();
+            let Some(expected_offset) = corrupted
+                .bytes()
+                .position(|b| super::hex_nibble(b).is_none())
+            else {
+                prop_assert!(false, "bad_byte cannot be valid hex");
+                return Ok(());
+            };
+
+            prop_assert_eq!(
+                hex_decode(&corrupted),
+                Err(HexError::InvalidDigit {
+                    offset: expected_offset,
+                })
+            );
+        }
     }
 }
