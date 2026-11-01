@@ -9,7 +9,9 @@ use bitcoin::secp256k1::SecretKey;
 use bitcoin::secp256k1::ellswift::ElligatorSwift;
 use bitcoin::secp256k1::rand::rngs::StdRng;
 use bitcoin::secp256k1::rand::{RngCore as _, SeedableRng as _};
+use hkdf::Hkdf;
 use proptest::prelude::*;
+use sha2::Sha256;
 
 use super::{
     ELLSWIFT_LEN, Established, Handshake, MAX_GARBAGE_LEN, State, Step, V1_PREFIX_LEN, encode_key,
@@ -757,6 +759,150 @@ fn connect_custom(
     match (done_initiator, done_responder) {
         (Some(i), Some(r)) => Ok((i, r)),
         _ => Err(TestError::HandshakeIncomplete),
+    }
+}
+
+/// Official BIP324 packet test vectors (mainnet magic), rows 1 and 999 of
+/// `packet_encoding_test_vectors.csv`, as embedded in Bitcoin Core
+/// `src/test/bip324_tests.cpp`. The expected values come from the vectors, so
+/// the oracle stays independent of the production derivation.
+#[test]
+fn bip324_session_id_matches_official_packet_test_vectors() {
+    const MAINNET_MAGIC_BYTES: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+
+    struct PacketVector {
+        privkey: [u8; 32],
+        ellswift_ours: [u8; 64],
+        ellswift_theirs: [u8; 64],
+        initiating: bool,
+        session_id: [u8; 32],
+        send_garbage_terminator: [u8; GARBAGE_TERMINATOR_LEN],
+        recv_garbage_terminator: [u8; GARBAGE_TERMINATOR_LEN],
+    }
+
+    struct PacketVectorFixture {
+        privkey: &'static str,
+        ellswift_ours: &'static str,
+        ellswift_theirs: &'static str,
+        initiating: bool,
+        session_id: &'static str,
+        send_garbage_terminator: &'static str,
+        recv_garbage_terminator: &'static str,
+    }
+
+    fn fixture_bytes(text: &str) -> Vec<u8> {
+        (0..text.len() / 2)
+            .map(|index| {
+                u8::from_str_radix(&text[2 * index..2 * index + 2], 16)
+                    .expect("fixture hex decodes")
+            })
+            .collect()
+    }
+
+    fn fixture_array<const LEN: usize>(text: &str) -> [u8; LEN] {
+        let bytes = fixture_bytes(text);
+        let array = <[u8; LEN]>::try_from(bytes.as_slice()).expect("fixture hex length");
+        array
+    }
+
+    fn decode_fixture(text: &str) -> String {
+        text.chars().filter(|ch| *ch != '_').collect()
+    }
+
+    let fixtures = [
+        PacketVectorFixture {
+            privkey: "61062ea5071d800bbfd59e2e8b53d47d194b095ae5a4df04936b49772ef0d4d7",
+            ellswift_ours: "ec0adff257bbfe500c188c80b4fdd640f6b45a482bbc15fc7cef5931deff0aa1_\
+                            86f6eb9bba7b85dc4dcc28b28722de1e3d9108b985e2967045668f66098e475b",
+            ellswift_theirs: "a4a94dfce69b4a2a0a099313d10f9f7e7d649d60501c9e1d274c300e0d89aafa_\
+                              ffffffffffffffffffffffffffffffffffffffffffffffffffffffff8faf88d5",
+            initiating: true,
+            session_id: "ce72dffb015da62b0d0f5474cab8bc72605225b0cee3f62312ec680ec5f41ba5",
+            send_garbage_terminator: "faef555dfcdb936425d84aba524758f3",
+            recv_garbage_terminator: "02cb8ff24307a6e27de3b4e7ea3fa65b",
+        },
+        PacketVectorFixture {
+            privkey: "6f312890ec83bbb26798abaadd574684a53e74ccef7953b790fcc29409080246",
+            ellswift_ours: "a8785af31c029efc82fa9fc677d7118031358d7c6a25b5779a9b900e5ccd94aa_\
+                            c97eb36a3c5dbcdb2ca5843cc4c2fe0aaa46d10eb3d233a81c3dde476da00eef",
+            ellswift_theirs: "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f_\
+                              0000000000000000000000000000000000000000000000000000000000000000",
+            initiating: false,
+            session_id: "b0490e26111cb2d55bbff2ace00f7f644f64006539abb4e7513f05107bb10608",
+            send_garbage_terminator: "44737108aec5f8b6c1c277b31bbce9c1",
+            recv_garbage_terminator: "ca29b3a35237f8212bd13ed187a1da2e",
+        },
+    ];
+
+    for (index, fixture) in fixtures.iter().enumerate() {
+        let expected = PacketVector {
+            privkey: fixture_array(&decode_fixture(fixture.privkey)),
+            ellswift_ours: fixture_array(&decode_fixture(fixture.ellswift_ours)),
+            ellswift_theirs: fixture_array(&decode_fixture(fixture.ellswift_theirs)),
+            initiating: fixture.initiating,
+            session_id: fixture_array(&decode_fixture(fixture.session_id)),
+            send_garbage_terminator: fixture_array(&decode_fixture(
+                fixture.send_garbage_terminator,
+            )),
+            recv_garbage_terminator: fixture_array(&decode_fixture(
+                fixture.recv_garbage_terminator,
+            )),
+        };
+        let secret_key = SecretKey::from_slice(&expected.privkey).expect("vector key is valid");
+        let role = if expected.initiating {
+            Role::Initiator
+        } else {
+            Role::Responder
+        };
+        let shared = shared_secret(
+            secret_key,
+            ElligatorSwift::from_array(expected.ellswift_ours),
+            ElligatorSwift::from_array(expected.ellswift_theirs),
+            role,
+        );
+
+        let mut salt = Vec::with_capacity(28);
+        salt.extend_from_slice(b"bitcoin_v2_shared_secret");
+        salt.extend_from_slice(&MAINNET_MAGIC_BYTES);
+        let hkdf = Hkdf::<Sha256>::new(Some(&salt), &shared);
+        let mut session_id = [0u8; 32];
+        hkdf.expand(b"session_id", &mut session_id)
+            .expect("32-byte expand");
+        let mut terminators = [0u8; 2 * GARBAGE_TERMINATOR_LEN];
+        hkdf.expand(b"garbage_terminators", &mut terminators)
+            .expect("32-byte expand");
+        let (send, recv) = if expected.initiating {
+            let (send, recv) = terminators.split_at(GARBAGE_TERMINATOR_LEN);
+            (send, recv)
+        } else {
+            let (recv, send) = terminators.split_at(GARBAGE_TERMINATOR_LEN);
+            (send, recv)
+        };
+
+        assert_eq!(
+            session_id, expected.session_id,
+            "independent BIP324 key schedule must reproduce the official session id (vector {index})"
+        );
+        assert_eq!(
+            send, expected.send_garbage_terminator,
+            "independent key schedule must reproduce the send garbage terminator (vector {index})"
+        );
+        assert_eq!(
+            recv, expected.recv_garbage_terminator,
+            "independent key schedule must reproduce the receive garbage terminator (vector {index})"
+        );
+
+        let material = KeyMaterial::derive(&shared, Magic::from_bytes(MAINNET_MAGIC_BYTES))
+            .expect("production derivation succeeds");
+        assert_eq!(
+            material.session_id, expected.session_id,
+            "production derivation must match the official session id (vector {index})"
+        );
+        let session = Session::new(&material, role);
+        assert_eq!(
+            session.session_id, expected.session_id,
+            "established session id must match the official session id (vector {index})"
+        );
     }
 }
 
