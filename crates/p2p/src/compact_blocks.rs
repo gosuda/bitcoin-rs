@@ -8,13 +8,14 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
 use bitcoin_rs_primitives::{Block, BlockHash, Header, Tx, Txid, Wtxid};
 
+use crate::wire::MAX_BLOCK_TX_COUNT;
+
 pub use crate::peer::COMPACT_BLOCK_VERSION;
 
 const MAX_PENDING_RECONSTRUCTIONS: usize = 4;
 const MAX_PENDING_RETAINED_BYTES: usize = 8 * 1_024 * 1_024;
 const PENDING_DEADLINE: Duration = Duration::from_mins(1);
 const MAX_REQUESTED_MISSING: usize = 128;
-const MAX_BLOCK_TX_COUNT: usize = 100_000;
 const MAX_RECENT_COMPACT_BLOCKS: usize = crate::download_window::PEER_INFLIGHT_BUDGET;
 
 pub trait CompactBlockHints: Send + Sync {
