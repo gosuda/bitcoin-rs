@@ -2,11 +2,14 @@
 """Run the pinned formal evidence lane, independently of Cargo tests.
 
 Requires Python 3.11+, the pinned Apalache install, and its Java runtime.
-Every module in the proof inventory is checked at K = 128 first. Resource
-exhaustion halves K until the module completes or K reaches 1, and the
-largest attempt and its return code are recorded.
+Every module in the proof inventory runs one safety lane and one temporal
+lane. A lane starts at K = 128 or the row's K floor, whichever is larger.
+Resource exhaustion halves K down to the floor and never below it. A pass
+below the floor is return code 16, not a pass. The record holds the last
+attempted K and its return codes.
 Exit codes: 11 tool identity, 12 parse/type error, 13 counterexample,
-14 unavailable/timeout/incomplete run, 15 model identity mismatch.
+14 unavailable/timeout/incomplete run, 15 model identity mismatch,
+16 pass below the K floor.
 """
 
 from __future__ import annotations
