@@ -52,15 +52,17 @@ fn shutdown_reader_unblocks_select_on_request_shutdown() {
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     );
     let reader = chainstate.shutdown_reader();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
     let (tx, rx) = crossbeam_channel::bounded(1);
     let thread = std::thread::spawn(move || {
+        let _ = ready_tx.send(());
         crossbeam_channel::select! {
             recv(reader.closed()) -> _ => {
                 let _ = tx.send(true);
             }
         }
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(ready_rx.recv_timeout(Duration::from_secs(5)).is_ok());
     chainstate.request_shutdown();
     let unblocked = rx.recv_timeout(Duration::from_secs(5));
     assert!(
@@ -77,15 +79,17 @@ fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
     );
     let reader = chainstate.closed_for_recovery_reader();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
     let (tx, rx) = crossbeam_channel::bounded(1);
     let thread = std::thread::spawn(move || {
+        let _ = ready_tx.send(());
         crossbeam_channel::select! {
             recv(reader.closed()) -> _ => {
                 let _ = tx.send(true);
             }
         }
     });
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(ready_rx.recv_timeout(Duration::from_secs(5)).is_ok());
     chainstate.fail_closed_for_recovery();
     let unblocked = rx.recv_timeout(Duration::from_secs(5));
     assert!(

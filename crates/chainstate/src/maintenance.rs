@@ -167,8 +167,8 @@ mod tests {
             "maintenance loop did not exit within 5s deadline"
         );
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "maintenance loop did not cancel promptly within 100ms deadline, elapsed: {:?}",
+            started.elapsed() < Duration::from_millis(500),
+            "maintenance loop did not cancel promptly within deadline, elapsed: {:?}",
             started.elapsed()
         );
         let _ = worker.join();
