@@ -257,12 +257,6 @@ enum DialPurpose {
     Anchor,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodePersistence {
-    Persistent,
-    OneTry,
-}
-
 impl OutboundDial {
     #[must_use]
     pub const fn auto(addr: PeerEndpoint) -> Self {
@@ -973,17 +967,17 @@ impl P2pService {
     }
 
     pub fn add_node(&self, addr: PeerEndpoint) -> Result<(), P2pControlError> {
-        self.add_node_with_persistence(addr, NodePersistence::Persistent)
+        self.add_node_with_persistence(addr, true)
     }
 
     pub fn add_node_onetry(&self, addr: PeerEndpoint) -> Result<(), P2pControlError> {
-        self.add_node_with_persistence(addr, NodePersistence::OneTry)
+        self.add_node_with_persistence(addr, false)
     }
 
     fn add_node_with_persistence(
         &self,
         addr: PeerEndpoint,
-        persistence: NodePersistence,
+        persist: bool,
     ) -> Result<(), P2pControlError> {
         if !self.overlay.config.allows(addr.address().network()) {
             return Err(P2pControlError::NetworkDisabled);
@@ -991,7 +985,6 @@ impl P2pService {
         if self.banned.is_banned(addr.address(), SystemTime::now()) {
             return Err(P2pControlError::Banned);
         }
-        let persist = matches!(persistence, NodePersistence::Persistent);
         if persist {
             let mut added = self.added_nodes.write();
             if !added.contains(&addr) {
