@@ -420,9 +420,38 @@ mod tests {
 
     // P2P-02
     prop_state_machine! {
-        #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig { cases: lease_model_cases(), ..ProptestConfig::default() })]
         #[test]
-        fn peer_leases_match_the_reference_model(sequential 1..16 => LeaseMachine);
+        fn peer_leases_match_the_reference_model(sequential 1..32 => LeaseMachine);
+    }
+
+    fn lease_model_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(256)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: lease_model_cases(), ..ProptestConfig::default() })]
+
+        #[test]
+        fn lease_model_safety_holds_for_arbitrary_command_sequences(
+            commands in prop::collection::vec(0_u8..ACTIONS, 0..64)
+        ) {
+            let mut state = State::init();
+            prop_assert!(safety(&state), "initial state satisfies safety: {state:?}");
+            for index in commands {
+                let action = action(index);
+                if let Some(next) = step(&state, action) {
+                    state = next;
+                }
+                prop_assert!(
+                    safety(&state),
+                    "inductive safety holds after action {action:?}: {state:?}"
+                );
+            }
+        }
     }
 
     #[test]
