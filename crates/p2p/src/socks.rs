@@ -231,7 +231,15 @@ pub(crate) fn socks_connect(
     target: &SocksTarget,
     timeout: Duration,
 ) -> Result<TcpStream, DialFailure> {
-    socks_connect_impl(proxy, target, false, timeout)
+    socks_connect_with(
+        proxy,
+        target,
+        SocksDial {
+            isolate: false,
+            timeout,
+            set_nodelay: &|stream| stream.set_nodelay(true),
+        },
+    )
 }
 
 pub(crate) fn socks_connect_isolated(
@@ -239,24 +247,37 @@ pub(crate) fn socks_connect_isolated(
     target: &SocksTarget,
     timeout: Duration,
 ) -> Result<TcpStream, DialFailure> {
-    socks_connect_impl(proxy, target, true, timeout)
+    socks_connect_with(
+        proxy,
+        target,
+        SocksDial {
+            isolate: true,
+            timeout,
+            set_nodelay: &|stream| stream.set_nodelay(true),
+        },
+    )
 }
 
-fn socks_connect_impl(
-    proxy: SocketAddr,
-    target: &SocksTarget,
+struct SocksDial<'a> {
     isolate: bool,
     timeout: Duration,
+    set_nodelay: &'a dyn Fn(&TcpStream) -> io::Result<()>,
+}
+
+fn socks_connect_with(
+    proxy: SocketAddr,
+    target: &SocksTarget,
+    dial: SocksDial<'_>,
 ) -> Result<TcpStream, DialFailure> {
     let deadline = Instant::now()
-        .checked_add(timeout)
+        .checked_add(dial.timeout)
         .ok_or_else(|| DialFailure::Transport(invalid("socks exchange timeout overflow")))?;
     let connect_timeout = remaining_timeout(deadline).map_err(DialFailure::Transport)?;
     let mut stream =
         TcpStream::connect_timeout(&proxy, connect_timeout).map_err(DialFailure::Transport)?;
-    stream.set_nodelay(true).map_err(DialFailure::Transport)?;
+    let _ = (dial.set_nodelay)(&stream);
 
-    if isolate {
+    if dial.isolate {
         authenticate_isolated(&mut stream, deadline)?;
     } else {
         authenticate_no_auth(&mut stream, deadline)?;

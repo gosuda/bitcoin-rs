@@ -169,6 +169,29 @@ fn ip_dial_uses_literal_address_without_auth() -> TestResult {
 }
 
 #[test]
+fn a_failed_nodelay_does_not_fail_the_dial() -> TestResult {
+    let (proxy, rx) = fake_socks_no_auth(0x00)?;
+    let target: SocketAddr = "203.0.113.7:8333".parse()?;
+    let stream = socks_connect_with(
+        proxy,
+        &SocksTarget::Ip(target),
+        SocksDial {
+            isolate: false,
+            timeout: Duration::from_secs(5),
+            set_nodelay: &|_| Err(io::Error::other("test-injected nodelay failure")),
+        },
+    )?;
+    drop(stream);
+    let request = rx.recv()?;
+    assert_eq!(
+        request,
+        vec![0x05, 0x01, 0x00, 0x01, 203, 0, 113, 7, 0x20, 0x8d],
+        "the SOCKS exchange must complete when only the optional socket option fails"
+    );
+    Ok(())
+}
+
+#[test]
 fn dead_proxy_is_a_transport_error() -> TestResult {
     let target: SocketAddr = "203.0.113.7:8333".parse()?;
     let Err(error) = socks_connect(
