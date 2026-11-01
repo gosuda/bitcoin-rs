@@ -55,10 +55,10 @@ On mainnet, template mode requires at least one live peer and a finished initial
 
 The pool combines Stratum V1 and optional Stratum V2 mining listeners with PPLNS accounting and an external payout signer. It is disabled by default and does not enable itself from the build feature. The binary needs `pool`, and an SV2 listener also needs `pool-sv2`.
 
-The head binary used for this book was built without the pool feature, so pool startup could not be exercised here. Its refusal is:
+The head binary used for this book was built without the pool feature, so pool startup could not be exercised here. Its refusal is (with `$DATA` as the node data directory and `$POOL_DATA` as the pool data directory):
 
 ```
-$ /tmp/bitcoin-rs-book-head --network regtest --data-dir /tmp/bu-pd --pool --pool-datadir /tmp/bu-pp --pool-v1-bind 127.0.0.1:3333 --pool-share-difficulty 1 --pool-window-work 1 --pool-reward-script 76a914751e76e8199196d454941c45d1b3a323f1433bd688ac --mining-payout-address mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r
+$ ./target/release/bitcoin-rs --network regtest --data-dir $DATA --pool --pool-datadir $POOL_DATA --pool-v1-bind 127.0.0.1:3333 --pool-share-difficulty 1 --pool-window-work 1 --pool-reward-script 76a914751e76e8199196d454941c45d1b3a323f1433bd688ac --mining-payout-address mrCDrCybB6J1vRfbwM5hemdJz73FwDBC8r
 bitcoin-rs: --pool requires the pool build feature
 ```
 

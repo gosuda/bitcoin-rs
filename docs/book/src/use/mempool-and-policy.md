@@ -99,7 +99,7 @@ $ curl -s --user book:bookpass --data-binary "{\"jsonrpc\":\"2.0\",\"id\":9,\"me
 }
 ```
 
-Rejected preview rows omit fee and size. Accepted rows carry the modified effective feerate and wtxid. Unfinished package rows carry only txid, wtxid, and an optional `package-error`.
+Rejected preview rows omit fee and size. Accepted rows carry the modified effective feerate and wtxid. Unfinished package rows carry only txid, wtxid, and an optional `package-error`. A transaction above the standard weight parses normally and previews as one rejected row with `reject-reason` and `reject-details` both `tx-size`; the request itself answers 200 (`testmempoolaccept_reports_core_tx_size_on_the_oversize_row`).
 
 The operator-facing differences are mapped in [docs/policies/mempool-policy.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/mempool-policy.md). Admission, publication order, and preview purity are owned by the mempool contracts starting at [POL-02](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/mempool-policy.md). Mutation publication order is owned by [docs/contracts/mempool-mutations.md](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/mempool-mutations.md).
 

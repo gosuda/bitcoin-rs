@@ -16,10 +16,10 @@ A non-loopback `--rpc-bind` requires explicit basic credentials. A generated coo
 
 Bitcoin Core's salted `rpcauth=` line is not implemented. The `bitcoin.conf` mapping accepts `rpcuser`, `rpcpassword`, and `rpccookiefile` only.
 
-Read the cookie and pass it to curl:
+Read the cookie and pass it to curl. `$DATA` stands for the data directory:
 
 ```
-$ datadir=/tmp/worktree_BookUse/.bookuse-cookie/data
+$ datadir=$DATA
 $ curl -s --user "$(cat "$datadir/.cookie")" --data-binary '{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}' -H 'content-type: application/json' http://127.0.0.1:45875/
 {"id":1,"jsonrpc":"2.0","result":0}
 ```
