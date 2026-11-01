@@ -156,8 +156,6 @@ proofs_stage() {
   local -a kani_crates=()
   if [[ -n "${PROOFS_CRATES:-}" ]]; then
     read -r -a kani_crates <<< "${PROOFS_CRATES}"
-  elif [[ -n "${PROOFS_KANI_CRATES:-}" ]]; then
-    read -r -a kani_crates <<< "${PROOFS_KANI_CRATES}"
   else
     while IFS= read -r crate; do
       [[ -n "$crate" ]] && kani_crates+=("$crate")
@@ -211,6 +209,36 @@ proofs_stage() {
       echo "--- End log: ${log} ---" >&2
       stage_failed=$((stage_failed + 1))
     fi
+  }
+
+  reap() {
+    local -n pool="$1"
+    local allow_fallback="$2"
+    local fin=""
+    local process
+    wait -n -p fin "${pool[@]}" || true
+    if [[ -z "$fin" ]]; then
+      for process in "${pool[@]}"; do
+        if ! kill -0 "$process" 2>/dev/null; then
+          fin="$process"
+          break
+        fi
+      done
+      if [[ -z "$fin" && "$allow_fallback" == "1" && ${#pool[@]} -gt 0 ]]; then
+        fin="${pool[0]}"
+      fi
+    fi
+    report_job "$fin"
+    local -a survivors=()
+    for process in "${pool[@]}"; do
+      [[ "$process" == "$fin" ]] || survivors+=("$process")
+    done
+    pool=("${survivors[@]}")
+    survivors=()
+    for process in "${pending_pids[@]}"; do
+      [[ "$process" == "$fin" ]] || survivors+=("$process")
+    done
+    pending_pids=("${survivors[@]}")
   }
 
   local lean_log
@@ -299,62 +327,12 @@ proofs_stage() {
     job_starts[$kani_pid]=$kani_start
 
     if (( ${#running_kani[@]} >= kani_jobs )); then
-      local fin=""
-      wait -n -p fin "${running_kani[@]}" || true
-      if [[ -z "$fin" ]]; then
-        local p
-        for p in "${running_kani[@]}"; do
-          if ! kill -0 "$p" 2>/dev/null; then
-            fin="$p"
-            break
-          fi
-        done
-      fi
-      report_job "$fin"
-
-      local -a next_running=()
-      local p
-      for p in "${running_kani[@]}"; do
-        if [[ "$p" != "$fin" ]]; then
-          next_running+=("$p")
-        fi
-      done
-      running_kani=("${next_running[@]}")
-
-      local -a next_pending=()
-      for p in "${pending_pids[@]}"; do
-        if [[ "$p" != "$fin" ]]; then
-          next_pending+=("$p")
-        fi
-      done
-      pending_pids=("${next_pending[@]}")
+      reap running_kani 0
     fi
   done
 
   while (( ${#pending_pids[@]} > 0 )); do
-    local fin=""
-    wait -n -p fin "${pending_pids[@]}" || true
-    if [[ -z "$fin" ]]; then
-      local p
-      for p in "${pending_pids[@]}"; do
-        if ! kill -0 "$p" 2>/dev/null; then
-          fin="$p"
-          break
-        fi
-      done
-      if [[ -z "$fin" && ${#pending_pids[@]} -gt 0 ]]; then
-        fin="${pending_pids[0]}"
-      fi
-    fi
-    report_job "$fin"
-
-    local -a next_pending=()
-    for p in "${pending_pids[@]}"; do
-      if [[ "$p" != "$fin" ]]; then
-        next_pending+=("$p")
-      fi
-    done
-    pending_pids=("${next_pending[@]}")
+    reap pending_pids 1
   done
 
   if (( stage_failed > 0 )); then
