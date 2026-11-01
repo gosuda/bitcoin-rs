@@ -5,12 +5,12 @@ pub(crate) mod msg_type;
 mod packet;
 mod reader;
 
-pub(crate) use handshake::{Established, Handshake, Step};
-pub(crate) use packet::SendCipher;
-pub(crate) use reader::{PacketReader, is_poll_timeout};
+pub use handshake::{Established, Handshake, Step};
+pub use packet::{Opened, PacketError, RecvCipher, SendCipher};
+pub use reader::{PacketReader, is_poll_timeout};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TransportError {
+pub enum TransportError {
     #[error("BIP324 garbage terminator not found within the garbage limit")]
     TerminatorNotFound,
     #[error("peer sent a v1 version header for another network")]

@@ -87,10 +87,7 @@ fn random_credentials() -> ([u8; 16], [u8; 16]) {
     (user, password)
 }
 
-fn authenticate_isolated(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
-    write_all_deadline(stream, &[0x05, 0x01, 0x02], deadline)?;
-    let mut selection = [0u8; 2];
-    read_exact_deadline(stream, &mut selection, deadline)?;
+pub fn parse_isolated_greeting(selection: [u8; 2]) -> Result<u8, DialFailure> {
     if selection[0] != 0x05 {
         return Err(DialFailure::Transport(invalid(
             "socks greeting reply has wrong version",
@@ -100,46 +97,60 @@ fn authenticate_isolated(stream: &mut TcpStream, deadline: Instant) -> Result<()
         0x00 => Err(DialFailure::Transport(invalid(
             "socks proxy selected no-authentication for an isolation-required dial",
         ))),
-        0x02 => {
-            let (user, password) = random_credentials();
-            let mut auth = [0u8; AUTH_LEN];
-            auth[0] = 0x01;
-            auth[1] = CREDENTIAL_LEN;
-            auth[2..18].copy_from_slice(&user);
-            auth[18] = CREDENTIAL_LEN;
-            auth[19..35].copy_from_slice(&password);
-            write_all_deadline(stream, &auth, deadline)?;
-            let mut reply = [0u8; 2];
-            read_exact_deadline(stream, &mut reply, deadline)?;
-            if reply != [0x01, 0x00] {
-                return Err(DialFailure::Transport(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "socks username/password authentication failed",
-                )));
-            }
-            Ok(())
-        }
+        0x02 => Ok(selection[1]),
         _ => Err(DialFailure::Transport(invalid(
             "socks proxy selected an unsupported authentication method",
         ))),
     }
 }
 
-fn authenticate_no_auth(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
-    write_all_deadline(stream, &[0x05, 0x01, 0x00], deadline)?;
-    let mut selection = [0u8; 2];
-    read_exact_deadline(stream, &mut selection, deadline)?;
+pub fn parse_no_auth_greeting(selection: [u8; 2]) -> Result<u8, DialFailure> {
+    if selection[0] != 0x05 {
+        return Err(DialFailure::Transport(invalid(
+            "socks greeting reply has wrong version",
+        )));
+    }
     if selection != [0x05, 0x00] {
         return Err(DialFailure::Transport(invalid(
             "socks proxy refused no-authentication",
         )));
     }
+    Ok(selection[1])
+}
+
+pub fn parse_auth_reply(reply: [u8; 2]) -> Result<(), DialFailure> {
+    if reply != [0x01, 0x00] {
+        return Err(DialFailure::Transport(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "socks username/password authentication failed",
+        )));
+    }
     Ok(())
 }
 
-fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
+pub fn parse_connect_reply<R: Read>(reader: &mut R) -> Result<(), DialFailure> {
     let mut head = [0u8; 4];
-    read_exact_deadline(stream, &mut head, deadline)?;
+    reader
+        .read_exact(&mut head)
+        .map_err(DialFailure::Transport)?;
+    let bound_len = validate_connect_head(head)?;
+    let bound_len = if let Some(len) = bound_len {
+        len
+    } else {
+        let mut len = [0u8; 1];
+        reader
+            .read_exact(&mut len)
+            .map_err(DialFailure::Transport)?;
+        usize::from(len[0])
+    };
+    let mut bound = vec![0u8; bound_len + 2];
+    reader
+        .read_exact(&mut bound)
+        .map_err(DialFailure::Transport)?;
+    Ok(())
+}
+
+fn validate_connect_head(head: [u8; 4]) -> Result<Option<usize>, DialFailure> {
     if head[0] != 0x05 {
         return Err(DialFailure::Transport(invalid(
             "socks connect reply has wrong version",
@@ -160,19 +171,52 @@ fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), D
             _ => DialFailure::Transport(error),
         });
     }
-    let bound_len = match head[3] {
-        0x01 => 4,
-        0x04 => 16,
-        0x03 => {
-            let mut len = [0u8; 1];
-            read_exact_deadline(stream, &mut len, deadline)?;
-            usize::from(len[0])
-        }
-        _ => {
-            return Err(DialFailure::Transport(invalid(
-                "socks connect reply has unknown address type",
-            )));
-        }
+    match head[3] {
+        0x01 => Ok(Some(4)),
+        0x04 => Ok(Some(16)),
+        0x03 => Ok(None),
+        _ => Err(DialFailure::Transport(invalid(
+            "socks connect reply has unknown address type",
+        ))),
+    }
+}
+
+fn authenticate_isolated(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
+    write_all_deadline(stream, &[0x05, 0x01, 0x02], deadline)?;
+    let mut selection = [0u8; 2];
+    read_exact_deadline(stream, &mut selection, deadline)?;
+    parse_isolated_greeting(selection)?;
+    let (user, password) = random_credentials();
+    let mut auth = [0u8; AUTH_LEN];
+    auth[0] = 0x01;
+    auth[1] = CREDENTIAL_LEN;
+    auth[2..18].copy_from_slice(&user);
+    auth[18] = CREDENTIAL_LEN;
+    auth[19..35].copy_from_slice(&password);
+    write_all_deadline(stream, &auth, deadline)?;
+    let mut reply = [0u8; 2];
+    read_exact_deadline(stream, &mut reply, deadline)?;
+    parse_auth_reply(reply)?;
+    Ok(())
+}
+
+fn authenticate_no_auth(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
+    write_all_deadline(stream, &[0x05, 0x01, 0x00], deadline)?;
+    let mut selection = [0u8; 2];
+    read_exact_deadline(stream, &mut selection, deadline)?;
+    parse_no_auth_greeting(selection)?;
+    Ok(())
+}
+
+fn read_connect_reply(stream: &mut TcpStream, deadline: Instant) -> Result<(), DialFailure> {
+    let mut head = [0u8; 4];
+    read_exact_deadline(stream, &mut head, deadline)?;
+    let bound_len = if let Some(len) = validate_connect_head(head)? {
+        len
+    } else {
+        let mut len = [0u8; 1];
+        read_exact_deadline(stream, &mut len, deadline)?;
+        usize::from(len[0])
     };
     let mut bound = vec![0u8; bound_len + 2];
     read_exact_deadline(stream, &mut bound, deadline)?;

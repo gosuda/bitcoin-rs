@@ -20,7 +20,7 @@ const V1_PREFIX_LEN: usize = 16;
 const V1_VERSION_COMMAND: &[u8; 12] = b"version\0\0\0\0\0";
 
 #[derive(Debug)]
-pub(crate) enum Step {
+pub enum Step {
     Send,
     V1([u8; V1_PREFIX_LEN]),
     Yield,
@@ -28,14 +28,14 @@ pub(crate) enum Step {
 }
 
 #[derive(Debug)]
-pub(crate) struct Established {
-    pub(crate) send: SendCipher,
-    pub(crate) recv: PacketReader,
-    pub(crate) session_id: [u8; 32],
+pub struct Established {
+    pub send: SendCipher,
+    pub recv: PacketReader,
+    pub session_id: [u8; 32],
 }
 
 #[derive(Debug)]
-pub(crate) struct Handshake {
+pub struct Handshake {
     role: Role,
     magic: Magic,
     secret_key: SecretKey,
@@ -72,7 +72,7 @@ enum State {
 }
 
 impl Handshake {
-    pub(crate) fn initiator<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
+    pub fn initiator<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
         let mut handshake = Self::new(
             Role::Initiator,
             magic,
@@ -86,7 +86,7 @@ impl Handshake {
         handshake
     }
 
-    pub(crate) fn responder<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
+    pub fn responder<G: Rng + ?Sized>(magic: Magic, rng: &mut G) -> Self {
         Self::new(
             Role::Responder,
             magic,
@@ -116,15 +116,15 @@ impl Handshake {
         }
     }
 
-    pub(crate) fn take_outbound(&mut self) -> Vec<u8> {
+    pub fn take_outbound(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.outbound)
     }
 
-    pub(crate) const fn received_any(&self) -> bool {
+    pub const fn received_any(&self) -> bool {
         self.received_any
     }
 
-    pub(crate) fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
+    pub fn advance<R: Read>(&mut self, reader: &mut R) -> Result<Step, TransportError> {
         loop {
             if !self.outbound.is_empty() {
                 return Ok(Step::Send);

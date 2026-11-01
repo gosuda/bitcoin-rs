@@ -20,6 +20,7 @@ bitcoin-rs-primitives = { path = "../crates/primitives" }
 bitcoin-rs-consensus = { path = "../crates/consensus", default-features = false }
 bitcoin-rs-mempool = { path = "../crates/mempool", default-features = false }
 bitcoin-rs-utxo = { path = "../crates/utxo" }
+tempfile = "3"
 
 [[bin]]
 name = "p2p_message"
@@ -40,3 +41,23 @@ path = "fuzz_targets/script_eval.rs"
 [[bin]]
 name = "utxo_snapshot"
 path = "fuzz_targets/utxo_snapshot.rs"
+
+[[bin]]
+name = "p2p_message_structured"
+path = "fuzz_targets/p2p_message_structured.rs"
+
+[[bin]]
+name = "bip324_transport"
+path = "fuzz_targets/bip324_transport.rs"
+
+[[bin]]
+name = "addrman_load"
+path = "fuzz_targets/addrman_load.rs"
+
+[[bin]]
+name = "compact_block_reconstruct"
+path = "fuzz_targets/compact_block_reconstruct.rs"
+
+[[bin]]
+name = "socks_sam_reply"
+path = "fuzz_targets/socks_sam_reply.rs"

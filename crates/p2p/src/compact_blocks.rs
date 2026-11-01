@@ -193,11 +193,17 @@ impl Reconstruction {
             .retain(|(_, received)| now.saturating_duration_since(*received) < PENDING_DEADLINE);
     }
 
-    fn retained_bytes(&self) -> usize {
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
         self.pending
             .values()
             .map(|entry| entry.retained_bytes)
             .sum()
+    }
+
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 }
 

@@ -61,7 +61,7 @@ fn length_stream(key: [u8; 32], epoch: u64) -> ChaCha20 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("BIP324 packet failed authentication")]
-pub(crate) struct AuthFailed;
+pub struct AuthFailed;
 
 pub(crate) struct FsChaCha20Poly1305 {
     key: [u8; 32],

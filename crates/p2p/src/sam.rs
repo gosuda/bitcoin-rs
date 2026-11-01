@@ -77,7 +77,7 @@ fn session_id_for(private_destination: &str) -> String {
 }
 
 #[must_use]
-pub(crate) fn i2p_base64_decode(text: &str) -> Option<Vec<u8>> {
+pub fn i2p_base64_decode(text: &str) -> Option<Vec<u8>> {
     if text.is_empty() {
         return None;
     }
@@ -263,7 +263,7 @@ impl SamConn {
     }
 }
 
-fn check_hello(reply: &str) -> io::Result<()> {
+pub fn check_hello(reply: &str) -> io::Result<()> {
     let fields = parse_fields(reply, "HELLO REPLY")?;
     if field(&fields, "RESULT") != Some("OK") || field(&fields, "VERSION") != Some("3.3") {
         return Err(io::Error::new(
@@ -274,7 +274,7 @@ fn check_hello(reply: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn parse_fields(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
+pub fn parse_fields(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
     let rest = if reply == prefix {
         ""
     } else if let Some(stripped) = reply.strip_prefix(prefix) {
@@ -374,7 +374,7 @@ fn sanitize_sam_result(result: &str) -> &'static str {
     }
 }
 
-fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
+pub fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
     let fields = parse_fields(reply, prefix)?;
     if field(&fields, "RESULT") != Some("OK") {
         let raw = field(&fields, "RESULT").unwrap_or("");
@@ -388,7 +388,7 @@ fn require_ok(reply: &str, prefix: &str) -> io::Result<Vec<(String, String)>> {
 }
 
 #[must_use]
-fn destination_identity_len(bytes: &[u8]) -> Option<usize> {
+pub fn destination_identity_len(bytes: &[u8]) -> Option<usize> {
     const BASE: usize = 384;
     if bytes.len() < BASE + 3 {
         return None;

@@ -9,7 +9,7 @@ const MAX_CONTENTS_LEN: usize = (1 << 24) - 1;
 const PACKET_OVERHEAD: usize = LENGTH_FIELD_LEN + HEADER_LEN + TAG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PacketError {
+pub enum PacketError {
     #[error("BIP324 packet contents of {0} bytes exceed the length field")]
     ContentsTooLarge(usize),
     #[error("BIP324 sealed body of {0} bytes is shorter than its header and tag")]
@@ -19,20 +19,20 @@ pub(crate) enum PacketError {
 }
 
 #[derive(Debug)]
-pub(crate) struct SendCipher {
+pub struct SendCipher {
     length: FsChaCha20,
     packet: FsChaCha20Poly1305,
 }
 
 impl SendCipher {
-    pub(crate) fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
+    pub fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
         Self {
             length: FsChaCha20::new(length_key),
             packet: FsChaCha20Poly1305::new(packet_key),
         }
     }
 
-    pub(crate) fn seal(
+    pub fn seal(
         &mut self,
         contents: &[u8],
         aad: &[u8],
@@ -59,35 +59,31 @@ impl SendCipher {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Opened<'a> {
-    pub(crate) ignore: bool,
-    pub(crate) contents: &'a [u8],
+pub struct Opened<'a> {
+    pub ignore: bool,
+    pub contents: &'a [u8],
 }
 
 #[derive(Debug)]
-pub(crate) struct RecvCipher {
+pub struct RecvCipher {
     length: FsChaCha20,
     packet: FsChaCha20Poly1305,
 }
 
 impl RecvCipher {
-    pub(crate) fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
+    pub fn new(length_key: [u8; 32], packet_key: [u8; 32]) -> Self {
         Self {
             length: FsChaCha20::new(length_key),
             packet: FsChaCha20Poly1305::new(packet_key),
         }
     }
 
-    pub(crate) fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
+    pub fn decrypt_length(&mut self, mut field: [u8; LENGTH_FIELD_LEN]) -> usize {
         self.length.crypt(&mut field);
         usize::from(field[0]) | (usize::from(field[1]) << 8) | (usize::from(field[2]) << 16)
     }
 
-    pub(crate) fn open<'a>(
-        &mut self,
-        aad: &[u8],
-        body: &'a mut [u8],
-    ) -> Result<Opened<'a>, PacketError> {
+    pub fn open<'a>(&mut self, aad: &[u8], body: &'a mut [u8]) -> Result<Opened<'a>, PacketError> {
         let sealed_len = body
             .len()
             .checked_sub(TAG_LEN)

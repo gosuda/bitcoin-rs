@@ -228,7 +228,7 @@ struct GossipRow {
     services: u64,
 }
 
-pub(crate) struct AddressBook {
+pub struct AddressBook {
     state: Mutex<Manager>,
     publication: Mutex<()>,
     addrv2_gossip: [std::sync::atomic::AtomicBool; 2],
@@ -857,7 +857,7 @@ fn routable(addr: PeerEndpoint, allow_local: bool) -> bool {
 }
 
 impl AddressBook {
-    pub(crate) fn open(
+    pub fn open(
         path: Option<PathBuf>,
         magic: [u8; 4],
         allow_local: bool,
@@ -996,8 +996,17 @@ impl AddressBook {
             }
         }
     }
-    pub(crate) fn len(&self) -> usize {
+    #[must_use]
+    pub fn len(&self) -> usize {
         self.state.lock().stored.records.len()
+    }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        self.state.lock().writable
     }
     pub(crate) fn learn_dns(&self, seed: &str, addresses: &[PeerEndpoint], now: u64) {
         let source = Source::dns(seed);
