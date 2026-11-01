@@ -50,6 +50,8 @@ pub mod evidence;
 
 #[path = "../../../tools/benchmark-support/measured_samples.rs"]
 mod measured_samples;
+#[path = "../../../tools/benchmark-support/disk_backed_tmpdir.rs"]
+mod disk_backed_tmpdir;
 
 use bitcoin_rs_mempool::{LocalOrigin, MutationResult};
 use bitcoin_rs_mining::{
@@ -4317,37 +4319,17 @@ fn window_toolchain_identity() -> sonic_rs::Value {
 }
 
 fn window_host_identity() -> sonic_rs::Value {
-    let tmpdir = std::env::temp_dir()
-        .canonicalize()
-        .unwrap_or_else(|error| panic!("resolve the temporary directory: {error}"));
-    let mounts = read_proc_text("/proc/self/mounts");
-    let (device, mount_point, fstype) = mounts
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_ascii_whitespace();
-            let device = fields.next()?;
-            let mount_point = fields.next()?;
-            let fstype = fields.next()?;
-            tmpdir
-                .starts_with(mount_point)
-                .then_some((device, mount_point, fstype))
-        })
-        .max_by_key(|(_, mount_point, _)| mount_point.len())
-        .unwrap_or_else(|| panic!("no mount holds {}", tmpdir.display()));
-    assert!(
-        !matches!(fstype, "tmpfs" | "ramfs"),
-        "{} is on {fstype}: set TMPDIR to a disk-backed directory so group flushes are durable",
-        tmpdir.display()
-    );
+    let storage = disk_backed_tmpdir::require_disk_backed_temp_dir()
+        .unwrap_or_else(|error| panic!("{error}"));
     json!({
         "kernel": read_proc_text("/proc/sys/kernel/osrelease").trim(),
         "cpus_allowed_list": proc_field("/proc/self/status", "Cpus_allowed_list:"),
         "mem_total_kib": proc_kib("/proc/meminfo", "MemTotal:"),
         "storage": {
-            "tmpdir": tmpdir.display().to_string(),
-            "mount_point": mount_point,
-            "fstype": fstype,
-            "device": device,
+            "tmpdir": storage.temp_dir.display().to_string(),
+            "mount_point": storage.mount_point,
+            "fstype": storage.fstype,
+            "device": storage.device,
         },
     })
 }
