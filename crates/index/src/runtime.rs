@@ -312,6 +312,8 @@ const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
 
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Debug)]
 pub struct Generation {
     id: u64,
