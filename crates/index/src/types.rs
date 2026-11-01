@@ -375,7 +375,12 @@ impl ScriptHistoryOccurrence {
                 let txid = chunk[32..64].try_into().ok()?;
                 let position = TxPosition::read_from_bytes(&chunk[64..70]).ok()?;
                 let flags = chunk[70];
-                (flags != 0 && flags & !(Self::FUNDING | Self::SPENDING) == 0).then_some(Self {
+                let is_valid_flag = flags != 0 && (flags & !(Self::FUNDING | Self::SPENDING) == 0);
+                let is_valid_pos = position.byte_len() > 0
+                    && position.end().is_some_and(|end| {
+                        usize::try_from(end).is_ok_and(|e| e <= MAX_POSITION_END_BYTES)
+                    });
+                (is_valid_flag && is_valid_pos).then_some(Self {
                     scripthash,
                     txid,
                     position,
@@ -449,5 +454,40 @@ mod tests {
         let third = super::TxPosition::new(256, 30);
         assert!(first < second);
         assert!(second < third);
+    }
+
+    #[test]
+    fn occurrence_decode_rejects_corrupted_and_truncated_values() {
+        use super::{MAX_POSITION_END_BYTES, ScriptHistoryOccurrence, TxPosition};
+        use zerocopy::IntoBytes;
+        let mut bytes = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        bytes[70] = ScriptHistoryOccurrence::FUNDING;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&bytes), None);
+
+        let mut overflowing = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        let pos = TxPosition::new(u32::try_from(MAX_POSITION_END_BYTES).unwrap_or(0), 1);
+        overflowing[64..70].copy_from_slice(pos.as_bytes());
+        overflowing[70] = ScriptHistoryOccurrence::FUNDING;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&overflowing), None);
+
+        let truncated = vec![0u8; ScriptHistoryOccurrence::SIZE - 1];
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&truncated), None);
+
+        let trailing = vec![0u8; ScriptHistoryOccurrence::SIZE + 1];
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&trailing), None);
+
+        let mut zero_flags = vec![0u8; ScriptHistoryOccurrence::SIZE];
+        let valid_pos = TxPosition::new(10, 100);
+        zero_flags[64..70].copy_from_slice(valid_pos.as_bytes());
+        zero_flags[70] = 0;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&zero_flags), None);
+
+        let mut bad_flags = zero_flags.clone();
+        bad_flags[70] = 0b100;
+        assert_eq!(ScriptHistoryOccurrence::decode_all(&bad_flags), None);
+
+        let mut valid = zero_flags;
+        valid[70] = ScriptHistoryOccurrence::FUNDING | ScriptHistoryOccurrence::SPENDING;
+        assert!(ScriptHistoryOccurrence::decode_all(&valid).is_some());
     }
 }
