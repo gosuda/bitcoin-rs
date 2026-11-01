@@ -71,6 +71,14 @@ pub struct BlockLog {
     cumulative_tx_count: Vec<u64>,
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "usize stays within u64 on every supported target"
+)]
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("usize fits in u64")
+}
+
 impl BlockLog {
     #[must_use]
     pub const fn new() -> Self {
@@ -81,31 +89,26 @@ impl BlockLog {
         }
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "usize block body size and tx count fit in u64"
-    )]
     pub fn push(&mut self, record: BlockRecord) {
         self.total_body_size = self
             .total_body_size
-            .saturating_add(u64::try_from(record.body_size).expect("body_size fits in u64"));
+            .saturating_add(usize_to_u64(record.body_size));
         let running = self
             .cumulative_tx_count
             .last()
             .copied()
             .unwrap_or(0)
-            .saturating_add(u64::try_from(record.tx_count).expect("tx_count fits in u64"));
+            .saturating_add(usize_to_u64(record.tx_count));
         self.cumulative_tx_count.push(running);
         self.records.push(record);
     }
 
-    #[expect(clippy::expect_used, reason = "usize block body size fits in u64")]
     pub fn pop(&mut self) -> Option<BlockRecord> {
         let record = self.records.pop()?;
         let _ = self.cumulative_tx_count.pop();
         self.total_body_size = self
             .total_body_size
-            .saturating_sub(u64::try_from(record.body_size).expect("body_size fits in u64"));
+            .saturating_sub(usize_to_u64(record.body_size));
         Some(record)
     }
 
@@ -121,19 +124,17 @@ impl BlockLog {
     }
 
     #[must_use]
-    #[expect(clippy::expect_used, reason = "usize block body size fits in u64")]
     pub fn size_on_disk(&self) -> u64 {
         debug_assert_eq!(
             self.total_body_size,
             self.records.iter().fold(0_u64, |total, record| total
-                .saturating_add(u64::try_from(record.body_size).expect("body_size fits in u64"))),
+                .saturating_add(usize_to_u64(record.body_size))),
             "running body-size total drifted from the records it summarizes"
         );
         self.total_body_size
     }
 
     #[must_use]
-    #[expect(clippy::expect_used, reason = "usize tx count fits in u64")]
     pub fn tx_count_before(&self, count: usize) -> u64 {
         debug_assert_eq!(
             self.records.len(),
@@ -149,9 +150,8 @@ impl BlockLog {
             prefix,
             self.records[..count]
                 .iter()
-                .fold(0_u64, |total, record| total.saturating_add(
-                    u64::try_from(record.tx_count).expect("tx_count fits in u64")
-                )),
+                .fold(0_u64, |total, record| total
+                    .saturating_add(usize_to_u64(record.tx_count))),
             "tx-count prefix sums drifted from the records they summarize"
         );
         prefix
