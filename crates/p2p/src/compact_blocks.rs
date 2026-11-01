@@ -77,7 +77,13 @@ impl Reconstruction {
             self.recent.remove(0);
         }
         self.recent.push((hash, now));
-        let total = compact.short_ids.len() + compact.prefilled_txs.len();
+        let Some(total) = compact
+            .short_ids
+            .len()
+            .checked_add(compact.prefilled_txs.len())
+        else {
+            return Outcome::Fallback(hash);
+        };
         if total > MAX_BLOCK_TX_COUNT {
             return Outcome::Fallback(hash);
         }
@@ -85,12 +91,15 @@ impl Reconstruction {
         let Some(mut filled) = place_prefills(compact, total) else {
             return Outcome::Fallback(hash);
         };
-        let mut retained_bytes = 6 * compact.short_ids.len()
-            + filled
-                .iter()
-                .flatten()
-                .map(retained_tx_bytes)
-                .sum::<usize>();
+        let mut retained_bytes = 6_usize
+            .saturating_mul(compact.short_ids.len())
+            .saturating_add(
+                filled
+                    .iter()
+                    .flatten()
+                    .map(retained_tx_bytes)
+                    .sum::<usize>(),
+            );
 
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
             || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
@@ -113,7 +122,7 @@ impl Reconstruction {
         }
 
         if self.pending.len() >= MAX_PENDING_RECONSTRUCTIONS
-            || self.retained_bytes() + retained_bytes > MAX_PENDING_RETAINED_BYTES
+            || self.retained_bytes().saturating_add(retained_bytes) > MAX_PENDING_RETAINED_BYTES
         {
             return Outcome::Fallback(hash);
         }
@@ -266,7 +275,7 @@ fn fill_from_hints(
         let Some(body) = body else {
             continue;
         };
-        *retained_bytes += retained_tx_bytes(&body);
+        *retained_bytes = retained_bytes.saturating_add(retained_tx_bytes(&body));
         filled[slot] = Some(body);
     }
     Ok(())

@@ -834,6 +834,89 @@ fn failed_blocktxn_completion_releases_retained_byte_budget() {
     );
 }
 
+#[test]
+fn reconstruction_falls_back_on_oversized_block_tx_count_and_budget_overflow() {
+    let mut reconstruction = Reconstruction::new();
+    let hints = SetHints { txs: vec![] };
+    let (first_block, first_cmpct) =
+        sample_cmpct(vec![test_tx(1), test_tx(2)], COMPACT_BLOCK_VERSION, 0x11);
+    let outcome =
+        reconstruction.receive_cmpctblock(&first_cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+    assert!(matches!(outcome, Outcome::RequestMissing(_)));
+    drop(first_block);
+
+    let (_second_block, mut second_cmpct) =
+        sample_cmpct(vec![test_tx(3), test_tx(4)], COMPACT_BLOCK_VERSION, 0x22);
+    second_cmpct.compact_block.short_ids =
+        vec![bitcoin::bip152::ShortId::from([1u8; 6]); MAX_BLOCK_TX_COUNT + 1];
+    let outcome =
+        reconstruction.receive_cmpctblock(&second_cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+    assert!(
+        matches!(outcome, Outcome::Fallback(_)),
+        "oversized block tx count must fall back, got {outcome:?}"
+    );
+}
+
+#[test]
+fn blocktxn_wrong_counts_and_failures_release_retained_budget() {
+    for failure_case in 0..4 {
+        let mut prefill = test_tx(1);
+        prefill.outputs[0].script_pubkey = vec![1; 100_000].into();
+        let (_block, cmpct) = sample_cmpct(
+            vec![prefill, test_tx(2)],
+            COMPACT_BLOCK_VERSION,
+            0x30 + failure_case,
+        );
+        let hints = SetHints { txs: vec![] };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected request missing, got {outcome:?}");
+        };
+        assert!(reconstruction.retained_bytes() > 0);
+
+        let txn = match failure_case {
+            0 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![],
+                },
+            },
+            1 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&test_tx(2)), registry_tx(&test_tx(3))],
+                },
+            },
+            2 => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&test_tx(99))],
+                },
+            },
+            _ => BlockTxn {
+                transactions: BlockTransactions {
+                    block_hash: request.txs_request.block_hash,
+                    transactions: vec![registry_tx(&sixty_four_byte_tx(2))],
+                },
+            },
+        };
+
+        let outcome = reconstruction.receive_blocktxn(&txn, now());
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "case {failure_case} must fall back, got {outcome:?}"
+        );
+        assert_eq!(
+            reconstruction.retained_bytes(),
+            0,
+            "case {failure_case} must release retained bytes"
+        );
+    }
+}
+
 struct MissingCoins;
 impl bitcoin_rs_mempool::AdmissionChain for MissingCoins {
     fn snapshot(&self, _: &Tx) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
