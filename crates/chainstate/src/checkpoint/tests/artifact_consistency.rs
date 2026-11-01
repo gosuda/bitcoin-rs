@@ -36,7 +36,7 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> TestResult {
         mutate_authenticated_manifest(dir.path(), |manifest| {
             manifest.applied_tip.chain_tx_count = 2;
         })?;
-        let Err(_) = load_checkpoint(dir.path(), config()) else {
+        let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
             return Err(TestError::UnexpectedSuccess(
                 "inconsistent authenticated transaction counts were restored",
             ));
@@ -114,7 +114,7 @@ fn authenticated_header_semantics_require_resync() -> TestResult {
         bytes[headers::HEADER_PREFIX_LEN + 80 + 4] ^= 1;
     })?;
 
-    let Err(_) = load_checkpoint(dir.path(), config()) else {
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
         return Err(TestError::UnexpectedSuccess(
             "corrupt header checkpoint unexpectedly loaded",
         ));
@@ -191,7 +191,7 @@ fn authenticated_utxo_value_mutation_requires_resync() -> TestResult {
         bytes[FIRST_VALUE_OFFSET] ^= 1;
     })?;
 
-    let Err(_) = load_checkpoint(dir.path(), config()) else {
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
         return Err(TestError::UnexpectedSuccess(
             "corrupt UTXO checkpoint unexpectedly loaded",
         ));
@@ -270,7 +270,7 @@ fn publish_swap_between_commit_and_open_yields_integrity() -> TestResult {
     let current: CurrentV1 = sonic_rs::from_slice(&fs::read(root.join(CURRENT_FILE))?)?;
     let artifact_path = root.join(&current.directory).join(UTXO_FILE);
     assert_eq!(fs::metadata(&artifact_path)?.len(), witness.byte_len());
-    let Err(_) = load_checkpoint(dir.path(), config()) else {
+    let Err(CheckpointLoadError::Corrupt(_)) = load_checkpoint(dir.path(), config()) else {
         return Err(TestError::UnexpectedSuccess(
             "swapped checkpoint bytes unexpectedly loaded",
         ));
