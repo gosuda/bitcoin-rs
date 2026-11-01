@@ -98,11 +98,11 @@ impl FsChaCha20Poly1305 {
         tag: &[u8; TAG_LEN],
     ) -> Result<(), AuthFailed> {
         let nonce = nonce(self.packets, self.epoch);
-        self.aead()
-            .decrypt_inout_detached(&nonce.into(), aad, buffer.into(), &(*tag).into())
-            .map_err(|_| AuthFailed)?;
+        let opened =
+            self.aead()
+                .decrypt_inout_detached(&nonce.into(), aad, buffer.into(), &(*tag).into());
         self.advance();
-        Ok(())
+        opened.map_err(|_| AuthFailed)
     }
 
     fn aead(&self) -> ChaCha20Poly1305 {
@@ -192,18 +192,50 @@ mod tests {
     }
 
     #[test]
-    fn auth_failure_does_not_advance_nonce_or_trigger_rekey() -> Result<(), TestError> {
+    fn failed_decrypts_advance_the_counter_and_trigger_rekey() -> Result<(), TestError> {
         let mut sender = FsChaCha20Poly1305::new([9; 32]);
         let mut receiver = FsChaCha20Poly1305::new([9; 32]);
-        let bad_tag = [0u8; 16];
-        let mut bad_buffer = [0u8; 32];
-        for _ in 0..REKEY_INTERVAL {
+        let junk_tag = [0u8; 16];
+
+        let plain0 = *b"packet made for counter zero   ";
+        let mut stale = plain0;
+        let stale_tag = FsChaCha20Poly1305::new([9; 32]).encrypt(b"aad", &mut stale)?;
+
+        let mut junk = [0u8; 32];
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut junk, &junk_tag),
+            Err(AuthFailed)
+        );
+        let mut discard = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut stale, &stale_tag),
+            Err(AuthFailed),
+            "the receiver advanced past the consumed counter"
+        );
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+
+        for _ in 2..REKEY_INTERVAL {
+            let mut scratch = [0u8; 1];
+            let _ = sender.encrypt(b"aad", &mut scratch)?;
+            let mut corrupted = [0u8; 1];
             assert_eq!(
-                receiver.decrypt(b"aad", &mut bad_buffer, &bad_tag),
+                receiver.decrypt(b"aad", &mut corrupted, &junk_tag),
                 Err(AuthFailed)
             );
         }
-        let plain = *b"valid packet 0 after bad packets";
+
+        let mut old_epoch = plain0;
+        let old_epoch_tag = FsChaCha20Poly1305::new([9; 32]).encrypt(b"aad", &mut old_epoch)?;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut old_epoch, &old_epoch_tag),
+            Err(AuthFailed),
+            "the receiver rekeyed after REKEY_INTERVAL consumed counters"
+        );
+
+        let mut scratch = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut scratch)?;
+        let plain = *b"packet from the mirrored sender ";
         let mut buffer = plain;
         let tag = sender.encrypt(b"aad", &mut buffer)?;
         receiver.decrypt(b"aad", &mut buffer, &tag)?;
@@ -233,8 +265,20 @@ mod tests {
         );
 
         let mut recv_buf1 = buf1;
-        receiver.decrypt(b"aad", &mut recv_buf1, &tag1)?;
-        assert_eq!(recv_buf1, plain1);
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut recv_buf1, &tag1),
+            Err(AuthFailed),
+            "the replay consumed the counter of the next sender packet"
+        );
+        let mut discard = [0u8; 1];
+        let _ = sender.encrypt(b"aad", &mut discard)?;
+
+        let plain2 = *b"message 2 payload";
+        let mut buf2 = plain2;
+        let tag2 = sender.encrypt(b"aad", &mut buf2)?;
+        let mut recv_buf2 = buf2;
+        receiver.decrypt(b"aad", &mut recv_buf2, &tag2)?;
+        assert_eq!(recv_buf2, plain2);
         Ok(())
     }
 }
