@@ -465,7 +465,14 @@ fn strict_v4_coin_hash_ignores_output_order() -> TestResult {
         let mut bytes = v4_header(txid(192_001), 1920, 1);
         bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 2));
         for vout in vouts {
-            append_snapshot_output(&mut bytes, vout, 1_000 + u64::from(vout), 1920, false, &[0x51]);
+            append_snapshot_output(
+                &mut bytes,
+                vout,
+                1_000 + u64::from(vout),
+                1920,
+                false,
+                &[0x51],
+            );
         }
         bytes.extend_from_slice(&[0_u8; 384]);
         bytes
@@ -473,14 +480,8 @@ fn strict_v4_coin_hash_ignores_output_order() -> TestResult {
     let forward = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([3, 9])))?;
     let reverse = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([9, 3])))?;
     assert_eq!(
-        forward
-            .set
-            .lock_stable_view()
-            .hash_serialized_3()?,
-        reverse
-            .set
-            .lock_stable_view()
-            .hash_serialized_3()?,
+        forward.set.lock_stable_view().hash_serialized_3()?,
+        reverse.set.lock_stable_view().hash_serialized_3()?,
         "an unordered record must hash to the same coin commitment"
     );
     for vout in [3_u32, 9] {

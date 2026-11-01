@@ -123,7 +123,9 @@ fn run_expecting_exit(
 }
 
 fn rpc_address(log: &str) -> Option<SocketAddr> {
-    let line = log.lines().find(|line| line.contains("rpc listener bound"))?;
+    let line = log
+        .lines()
+        .find(|line| line.contains("rpc listener bound"))?;
     let rest = line.split_once("\"addr\":\"")?.1;
     rest.split_once('"')?.0.parse().ok()
 }
@@ -145,7 +147,10 @@ impl Node {
                 });
             }
             if let Some(status) = child.try_wait()? {
-                return Err(TestError::EarlyExit { status, log: tail(&text) });
+                return Err(TestError::EarlyExit {
+                    status,
+                    log: tail(&text),
+                });
             }
             if Instant::now() >= until {
                 let _ = child.kill();
@@ -167,7 +172,8 @@ impl Node {
         method: &str,
         credentials: Option<(&str, &str)>,
     ) -> Result<(u16, String), TestError> {
-        let body = format!("{{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"{method}\",\"params\":[]}}");
+        let body =
+            format!("{{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"{method}\",\"params\":[]}}");
         let mut stream = TcpStream::connect_timeout(&self.rpc, RPC_TIMEOUT)?;
         stream.set_read_timeout(Some(RPC_TIMEOUT))?;
         stream.set_write_timeout(Some(RPC_TIMEOUT))?;
@@ -199,12 +205,11 @@ impl Node {
 
     fn rpc_result(&self, credentials: Option<(&str, &str)>) -> Result<Value, TestError> {
         let (status, body) = self.rpc("getblockcount", credentials)?;
-        let value: Value = sonic_rs::from_slice(body.as_bytes()).map_err(|_error| {
-            TestError::RpcNotJson {
+        let value: Value =
+            sonic_rs::from_slice(body.as_bytes()).map_err(|_error| TestError::RpcNotJson {
                 status,
                 body: body.clone(),
-            }
-        })?;
+            })?;
         value
             .get("result")
             .filter(|result| result.as_u64().is_some())
@@ -235,11 +240,7 @@ impl Node {
     fn stop(mut self) -> Result<(), TestError> {
         let status = self.terminate()?;
         let log = read_log(&self.log)?;
-        assert_eq!(
-            status.code(),
-            Some(0),
-            "clean stop log:\n{log}"
-        );
+        assert_eq!(status.code(), Some(0), "clean stop log:\n{log}");
         Ok(())
     }
 }
@@ -289,7 +290,11 @@ fn bitcoin_conf_semicolon_credentials_authenticate_end_to_end() -> Result<(), Te
     )?;
 
     let result = node.rpc_result(Some(("ab;cd", "xy;z")))?;
-    assert_eq!(result.as_u64(), Some(0), "configured credentials answer the RPC");
+    assert_eq!(
+        result.as_u64(),
+        Some(0),
+        "configured credentials answer the RPC"
+    );
     let (truncated, _) = node.rpc("getblockcount", Some(("ab", "xy")))?;
     assert_eq!(
         truncated, 401,

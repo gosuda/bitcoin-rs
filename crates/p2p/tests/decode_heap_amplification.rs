@@ -100,7 +100,8 @@ fn one_witness_input_blocktxn_payload() -> Vec<u8> {
 #[test]
 fn blocktxn_decode_allocation_stays_within_the_reservation() {
     let invalid_payload = one_witness_input_blocktxn_payload();
-    let invalid_reservation = bitcoin_rs_primitives::layout::decode_reservation(invalid_payload.len());
+    let invalid_reservation =
+        bitcoin_rs_primitives::layout::decode_reservation(invalid_payload.len());
     let invalid_frame = blocktxn_frame(&invalid_payload);
 
     ALLOCATION_LIVE.store(0, Ordering::SeqCst);

@@ -1114,9 +1114,7 @@ fn replacement_fitting_after_eviction_is_not_refused_by_dead_links() {
         None,
     );
 
-    let parents: Vec<Tx> = (0..24u8)
-        .map(|index| tx(100 + index))
-        .collect();
+    let parents: Vec<Tx> = (0..24u8).map(|index| tx(100 + index)).collect();
     for parent in &parents {
         gateway
             .insert_entry(
@@ -1146,8 +1144,7 @@ fn replacement_fitting_after_eviction_is_not_refused_by_dead_links() {
 
     let mut replacement = tx(251);
     replacement.inputs = conflict_inputs;
-    let replacement_entry =
-        MempoolEntry::new(Arc::new(replacement.clone()), 100, 100_000, 1, 7, 0);
+    let replacement_entry = MempoolEntry::new(Arc::new(replacement.clone()), 100, 100_000, 1, 7, 0);
     let stale_cap = {
         let pool = gateway.read();
         let conflict_id = pool
@@ -1173,10 +1170,7 @@ fn replacement_fitting_after_eviction_is_not_refused_by_dead_links() {
         result.changes,
         vec![
             crate::mutation::change(&conflict_txid, removed(RemovalReason::Replaced)),
-            crate::mutation::change(
-                &replacement_entry.txid,
-                MutationOutcome::Accepted,
-            ),
+            crate::mutation::change(&replacement_entry.txid, MutationOutcome::Accepted,),
         ],
         "the eviction removes the conflict, then the replacement lands"
     );

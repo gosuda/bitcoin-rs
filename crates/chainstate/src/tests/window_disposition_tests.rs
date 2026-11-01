@@ -85,15 +85,15 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             Operational,
         ),
         (
-            JournalBackpressure(Box::new(JournalWriterError::Io(
-                std::io::Error::other("journal device gone"),
-            ))),
+            JournalBackpressure(Box::new(JournalWriterError::Io(std::io::Error::other(
+                "journal device gone",
+            )))),
             Fatal,
         ),
         (
-            RecoveryPublication(Box::new(CheckpointError::Storage(
-                StorageError::backend("checkpoint write lost"),
-            ))),
+            RecoveryPublication(Box::new(CheckpointError::Storage(StorageError::backend(
+                "checkpoint write lost",
+            )))),
             Fatal,
         ),
     ];

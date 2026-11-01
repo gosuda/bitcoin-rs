@@ -252,12 +252,7 @@ struct PoisonedUndoStore {
 }
 
 impl UndoStore for PoisonedUndoStore {
-    fn persist_undo(
-        &self,
-        height: u32,
-        hash: Hash256,
-        record: &[u8],
-    ) -> Result<(), StorageError> {
+    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         if height == 0 {
             return self.inner.persist_undo(height, hash, record);
         }

@@ -929,8 +929,7 @@ fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
             "cmpctblock short_ids count too large",
         ));
     }
-    let mut short_ids =
-        Vec::with_capacity(short_ids_cap.min(reader.len() / SHORT_ID_WIRE_BYTES));
+    let mut short_ids = Vec::with_capacity(short_ids_cap.min(reader.len() / SHORT_ID_WIRE_BYTES));
     for _ in 0..short_ids_count {
         short_ids.push(ShortId::consensus_decode(&mut reader)?);
     }
@@ -947,14 +946,12 @@ fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
             "cmpctblock total transactions too large",
         ));
     }
-    let mut prefilled_txs = Vec::with_capacity(
-        prefilled_cap.min(reader.len() / MIN_PREFILLED_WIRE_BYTES),
-    );
+    let mut prefilled_txs =
+        Vec::with_capacity(prefilled_cap.min(reader.len() / MIN_PREFILLED_WIRE_BYTES));
     for _ in 0..prefilled_count {
-        let idx = u16::try_from(
-            bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0,
-        )
-        .map_err(|_| PeerError::Misbehavior("cmpctblock prefilled index out of bounds"))?;
+        let idx =
+            u16::try_from(bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0)
+                .map_err(|_| PeerError::Misbehavior("cmpctblock prefilled index out of bounds"))?;
         let tx = decode_bounded_transaction(&mut reader)?;
         prefilled_txs.push(PrefilledTransaction { idx, tx });
     }

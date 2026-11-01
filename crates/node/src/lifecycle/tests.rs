@@ -35,7 +35,10 @@ fn split_rpc_listeners_start_and_join_through_node_services() -> Result<(), Test
     config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
     config.rpc.public_bind = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
     let node = start_node(config, RuntimeInputs::default(), false)?;
-    let services = node.services.as_ref().ok_or(TestError::Missing("node services"))?;
+    let services = node
+        .services
+        .as_ref()
+        .ok_or(TestError::Missing("node services"))?;
     assert_eq!(services.rpc_threads.len(), 2);
     let management_address = services
         .rpc_address(bitcoin_rs_rpc::RpcSurface::Management)

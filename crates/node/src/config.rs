@@ -496,9 +496,7 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError
             bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(text)
                 .map_err(|difficulty_error| ConfigError::PoolShareDifficulty { difficulty_error })?
         },
-        window_work: pool
-            .window_work
-            .ok_or(ConfigError::PoolWindowWorkMissing)?,
+        window_work: pool.window_work.ok_or(ConfigError::PoolWindowWorkMissing)?,
         fee_bps: pool.fee_bps.unwrap_or(0),
         reward_script,
         maturity: pool.maturity.unwrap_or(100),

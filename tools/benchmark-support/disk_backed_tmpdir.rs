@@ -24,8 +24,7 @@ pub(crate) fn require_disk_backed_temp_dir() -> Result<TempDirMount, TempDirMoun
     let temp_dir = std::env::temp_dir()
         .canonicalize()
         .map_err(TempDirMountError::Resolve)?;
-    let mounts =
-        std::fs::read_to_string("/proc/self/mounts").map_err(TempDirMountError::Mounts)?;
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(TempDirMountError::Mounts)?;
     let (device, mount_point, fstype) = mounts
         .lines()
         .filter_map(|line| {

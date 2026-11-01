@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use bitcoin_rs_chain::{BlockTree, NodeStatus, regtest_fixture};
 use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Network};
+use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_storage::undo::InMemoryUndoStore;
 use bitcoin_rs_storage::{
-    DisconnectMarker, InMemoryDurableHeadStore, MandatoryRetention, RetentionRegistry, StorageError,
-    UndoStore,
+    DisconnectMarker, InMemoryDurableHeadStore, MandatoryRetention, RetentionRegistry,
+    StorageError, UndoStore,
 };
-use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::{bounded, unbounded};
 
@@ -20,12 +20,7 @@ struct PoisonedUndoStore {
 }
 
 impl UndoStore for PoisonedUndoStore {
-    fn persist_undo(
-        &self,
-        height: u32,
-        hash: Hash256,
-        record: &[u8],
-    ) -> Result<(), StorageError> {
+    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         if height == 0 {
             return self.inner.persist_undo(height, hash, record);
         }

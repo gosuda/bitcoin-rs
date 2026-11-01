@@ -44,10 +44,10 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::push_int;
 pub mod evidence;
 
-#[path = "../../../tools/benchmark-support/measured_samples.rs"]
-mod measured_samples;
 #[path = "../../../tools/benchmark-support/disk_backed_tmpdir.rs"]
 mod disk_backed_tmpdir;
+#[path = "../../../tools/benchmark-support/measured_samples.rs"]
+mod measured_samples;
 
 use bitcoin_rs_mempool::{LocalOrigin, MutationResult};
 use bitcoin_rs_mining::{

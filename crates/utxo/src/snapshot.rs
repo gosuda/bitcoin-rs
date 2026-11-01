@@ -1128,13 +1128,10 @@ mod walk_tests {
         let checks = Cell::new(0_usize);
 
         let result = set.with_stable_view(|view| {
-            view.for_each_coin_cancellable(
-                |_| observed.set(observed.get() + 1),
-                &|| {
-                    checks.set(checks.get() + 1);
-                    true
-                },
-            )
+            view.for_each_coin_cancellable(|_| observed.set(observed.get() + 1), &|| {
+                checks.set(checks.get() + 1);
+                true
+            })
         });
 
         assert!(matches!(result, Err(UtxoError::Cancelled)));

@@ -78,11 +78,12 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         );
         object.insert(
             "is_apply_halted",
-            json!(ctx
-                .chain
-                .chain_control
-                .as_ref()
-                .is_some_and(|control| control.is_apply_halted())),
+            json!(
+                ctx.chain
+                    .chain_control
+                    .as_ref()
+                    .is_some_and(|control| control.is_apply_halted())
+            ),
         );
     }
     Ok(response)

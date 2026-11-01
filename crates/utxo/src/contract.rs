@@ -588,7 +588,10 @@ fn validate_undo_for_block(
         }
         restored.insert(add.outpoint);
     }
-    if !external_inputs.iter().all(|outpoint| restored.contains(outpoint)) {
+    if !external_inputs
+        .iter()
+        .all(|outpoint| restored.contains(outpoint))
+    {
         return Err(UndoCodecError::BlockMismatch {
             reason: "an external input has no restored coin",
         });

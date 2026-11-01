@@ -214,8 +214,8 @@ impl Mempool {
                     .surviving_neighbor_sides(id, &excluded)
                     .ok_or(RbfError::InconsistentGraph)?;
                 let entry = self.entry(id).ok_or(RbfError::InconsistentGraph)?;
-                projected.memory = entry_memory_usage(&entry.tx)
-                    .saturating_add(link_memory_usage(edges, 1));
+                projected.memory =
+                    entry_memory_usage(&entry.tx).saturating_add(link_memory_usage(edges, 1));
             }
             after.nodes.push(projected);
         }

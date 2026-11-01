@@ -123,8 +123,7 @@ impl FuzzChain {
     fn attach_stores(&mut self) {
         self.chain.durable_head = Arc::clone(&self.durable) as Arc<dyn DurableHeadStore>;
         self.chain.undo_store = Arc::clone(&self.undo) as Arc<dyn UndoStore>;
-        self.chain.block_body_store =
-            Some(Arc::clone(&self.bodies) as Arc<dyn BlockBodyStore>);
+        self.chain.block_body_store = Some(Arc::clone(&self.bodies) as Arc<dyn BlockBodyStore>);
     }
 
     pub fn apply(&self, block: &Block) -> Result<(), FuzzError> {
@@ -150,10 +149,7 @@ impl FuzzChain {
 
     #[must_use]
     pub fn applied_tip(&self) -> Option<TipSnapshot> {
-        self.chain
-            .applied_tip_snapshot()
-            .as_deref()
-            .cloned()
+        self.chain.applied_tip_snapshot().as_deref().cloned()
     }
 
     pub fn durable_head(&self) -> Result<Option<(u32, Hash256)>, FuzzError> {

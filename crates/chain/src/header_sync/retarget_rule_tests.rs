@@ -74,11 +74,7 @@ fn pow_limit_work() -> ChainWork {
     core_set_compact(TESTNET_POW_LIMIT_BITS).0
 }
 
-fn core_calculate_next_work_required(
-    last_time: u32,
-    base_bits: u32,
-    first_time: u32,
-) -> u32 {
+fn core_calculate_next_work_required(last_time: u32, base_bits: u32, first_time: u32) -> u32 {
     let mut actual = i64::from(last_time) - i64::from(first_time);
     let timespan = i64::from(TARGET_TIMESPAN);
     if actual < timespan / 4 {
@@ -120,7 +116,13 @@ fn tree_shape(tree: &BlockTree) -> Vec<(Hash256, u32, NodeStatus, Option<NodeId>
     (0..len)
         .map(|index| {
             let node = tree.node(NodeId::new(index)).expect("node exists");
-            (node.hash, node.height, node.status, node.parent, node.chainwork)
+            (
+                node.hash,
+                node.height,
+                node.status,
+                node.parent,
+                node.chainwork,
+            )
         })
         .collect()
 }
@@ -148,7 +150,9 @@ fn side_chain_retarget_anchors_shared_height_zero_block() -> Result<(), TestErro
     let mut tree = BlockTree::new();
     let side_tip = side_chain_retip(&mut tree)?;
     assert_eq!(tree.node(side_tip)?.height, RETARGET_INTERVAL);
-    let retarget_parent = tree.parent_id(side_tip)?.ok_or(TestError::from("no parent"))?;
+    let retarget_parent = tree
+        .parent_id(side_tip)?
+        .ok_or(TestError::from("no parent"))?;
     let parent_time = tree.node(retarget_parent)?.header.time;
     let parent_bits = tree.node(retarget_parent)?.header.bits.to_consensus();
     let got = next_work_required(&tree, retarget_parent, 0, network)?.to_consensus();
@@ -165,10 +169,23 @@ fn bip94_retarget_scales_anchor_block_bits() -> Result<(), TestError> {
     let network = Network::Testnet4;
     let mut tree = BlockTree::new();
     let first_time = 1_600_000_000_u32;
-    let tip = build_retarget_chain(&mut tree, 0x1b04_04cb, TESTNET_POW_LIMIT_BITS, first_time, 1)?;
+    let tip = build_retarget_chain(
+        &mut tree,
+        0x1b04_04cb,
+        TESTNET_POW_LIMIT_BITS,
+        first_time,
+        1,
+    )?;
     let got = next_work_required(&tree, tip, 0, network)?.to_consensus();
-    let want = core_calculate_next_work_required(first_time + RETARGET_INTERVAL - 1, 0x1b04_04cb, first_time);
-    assert_eq!(got, want, "BIP94 scales the anchor block's bits, not the last block's");
+    let want = core_calculate_next_work_required(
+        first_time + RETARGET_INTERVAL - 1,
+        0x1b04_04cb,
+        first_time,
+    );
+    assert_eq!(
+        got, want,
+        "BIP94 scales the anchor block's bits, not the last block's"
+    );
     Ok(())
 }
 
@@ -180,7 +197,11 @@ fn testnet_min_difficulty_boundary_is_strict_and_walks_back() -> Result<(), Test
     let mut times = vec![1_600_000_000_u32];
     for height in 1..8_u32 {
         let index = usize::try_from(height - 1).expect("index fits usize");
-        let bits = if height == 5 { 0x1b04_04cb } else { TESTNET_POW_LIMIT_BITS };
+        let bits = if height == 5 {
+            0x1b04_04cb
+        } else {
+            TESTNET_POW_LIMIT_BITS
+        };
         let header = chain_header(&mut prev, times[index] + 700, bits, height);
         times.push(header.time);
         tree.insert_header(header, NodeStatus::HeaderValid)?;
@@ -204,24 +225,54 @@ fn refused_header_leaves_tree_unchanged() -> Result<(), TestError> {
     let genesis = network.genesis_block();
     let mut tree = BlockTree::new();
     let base_time = genesis.header.time;
-    accept_headers(&mut tree, &[genesis.header], network, base_time, HeaderValidationMode::LiveAdmission)?;
+    accept_headers(
+        &mut tree,
+        &[genesis.header],
+        network,
+        base_time,
+        HeaderValidationMode::LiveAdmission,
+    )?;
     let good = super::fixture::mine_regtest(genesis.block_hash(), 1, base_time + 600, 4);
-    accept_headers(&mut tree, &[good], network, base_time + 600, HeaderValidationMode::LiveAdmission)?;
+    accept_headers(
+        &mut tree,
+        &[good],
+        network,
+        base_time + 600,
+        HeaderValidationMode::LiveAdmission,
+    )?;
     let good_hash = good.compute_hash();
-    let good_id = tree.lookup(Hash256::from(good_hash)).ok_or(TestError::from("tip"))?;
+    let good_id = tree
+        .lookup(Hash256::from(good_hash))
+        .ok_or(TestError::from("tip"))?;
     let child = super::fixture::mine_regtest(good_hash, 2, base_time + 1300, 4);
-    accept_headers(&mut tree, &[child], network, base_time + 1300, HeaderValidationMode::LiveAdmission)?;
+    accept_headers(
+        &mut tree,
+        &[child],
+        network,
+        base_time + 1300,
+        HeaderValidationMode::LiveAdmission,
+    )?;
     tree.invalidate_subtree(good_id)?;
     assert_eq!(tree.node(good_id)?.status, NodeStatus::Invalid);
     let before = tree_shape(&tree);
     let now = base_time + 1_000_000;
 
-    let duplicate = accept_headers(&mut tree, &[good], network, base_time + 600, HeaderValidationMode::LiveAdmission);
-    assert!(matches!(duplicate, Err(ChainError::KnownInvalidHeader { .. })));
+    let duplicate = accept_headers(
+        &mut tree,
+        &[good],
+        network,
+        base_time + 600,
+        HeaderValidationMode::LiveAdmission,
+    );
+    assert!(matches!(
+        duplicate,
+        Err(ChainError::KnownInvalidHeader { .. })
+    ));
     assert_eq!(tree_shape(&tree), before);
 
     let out_of_order_parent = super::fixture::mine_regtest(good_hash, 5, base_time + 1900, 4);
-    let out_of_order_child = super::fixture::mine_regtest(out_of_order_parent.compute_hash(), 6, base_time + 2500, 4);
+    let out_of_order_child =
+        super::fixture::mine_regtest(out_of_order_parent.compute_hash(), 6, base_time + 2500, 4);
     let res = accept_headers(
         &mut tree,
         &[out_of_order_child, out_of_order_parent],
@@ -234,7 +285,13 @@ fn refused_header_leaves_tree_unchanged() -> Result<(), TestError> {
 
     let orphan = super::fixture::mine_regtest(BlockHash::default(), 2, base_time + 700, 4);
     assert!(matches!(
-        accept_headers(&mut tree, &[orphan], network, now, HeaderValidationMode::LiveAdmission),
+        accept_headers(
+            &mut tree,
+            &[orphan],
+            network,
+            now,
+            HeaderValidationMode::LiveAdmission
+        ),
         Err(ChainError::MissingParent { .. })
     ));
     assert_eq!(tree_shape(&tree), before);
@@ -248,21 +305,39 @@ fn refused_header_leaves_tree_unchanged() -> Result<(), TestError> {
 
     let early = super::fixture::mine_regtest(genesis.block_hash(), 1, base_time, 4);
     assert!(matches!(
-        accept_headers(&mut tree, &[early], network, now, HeaderValidationMode::LiveAdmission),
+        accept_headers(
+            &mut tree,
+            &[early],
+            network,
+            now,
+            HeaderValidationMode::LiveAdmission
+        ),
         Err(ChainError::TimestampTooEarly { .. })
     ));
     assert_eq!(tree_shape(&tree), before);
 
     let mismatched_bits = header_with(genesis.block_hash(), base_time + 2600, 0x0100_0000, 12);
     assert!(matches!(
-        accept_headers(&mut tree, &[mismatched_bits], network, now, HeaderValidationMode::LiveAdmission),
+        accept_headers(
+            &mut tree,
+            &[mismatched_bits],
+            network,
+            now,
+            HeaderValidationMode::LiveAdmission
+        ),
         Err(_)
     ));
     assert_eq!(tree_shape(&tree), before);
 
     let far_future = super::fixture::mine_regtest(genesis.block_hash(), 1, now + 7201, 4);
     assert!(matches!(
-        accept_headers(&mut tree, &[far_future], network, now, HeaderValidationMode::LiveAdmission),
+        accept_headers(
+            &mut tree,
+            &[far_future],
+            network,
+            now,
+            HeaderValidationMode::LiveAdmission
+        ),
         Err(ChainError::TimestampTooFarAhead { .. })
     ));
     assert_eq!(tree_shape(&tree), before);

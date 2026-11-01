@@ -9,9 +9,7 @@ use bitcoin_rs_primitives::{
     TxOut, Witness,
 };
 use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget};
-use bitcoin_rs_storage::{
-    InMemoryUndoStore, MandatoryRetention, RetentionRegistry, UndoStore,
-};
+use bitcoin_rs_storage::{InMemoryUndoStore, MandatoryRetention, RetentionRegistry, UndoStore};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::{
     BlockChanges, UndoCodecError, UndoLoadError, UtxoAdd, commit_block_changes,
@@ -68,7 +66,9 @@ fn chain_to(height: u32) -> TestResult<Fixture> {
     chain.retention = MandatoryRetention::new(Arc::clone(&retention));
     chain.history = HistoryAccess::new(
         Arc::clone(&retention),
-        RetentionBudget::from_blocks(bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN),
+        RetentionBudget::from_blocks(
+            bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+        ),
     );
     seed_genesis(&chain)?;
     let genesis = Network::Regtest.genesis_block();
@@ -97,8 +97,7 @@ fn coinbase_outpoint(block: &Block) -> OutPoint {
 }
 
 fn undo_record(undo: &InMemoryUndoStore, height: u32, block: &Block) -> TestResult<Vec<u8>> {
-    undo
-        .load_undo(height, Hash256::from(block.block_hash()))?
+    undo.load_undo(height, Hash256::from(block.block_hash()))?
         .ok_or(TestError::Missing("persisted undo record"))
 }
 
@@ -113,9 +112,7 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         100,
         vec![coinbase(100), spend_tx.clone()],
     )?;
-    let outcome = refused
-        .chain
-        .apply_block(&BlockPayload::from_local(block));
+    let outcome = refused.chain.apply_block(&BlockPayload::from_local(block));
     assert!(
         matches!(
             outcome,
@@ -129,7 +126,11 @@ fn coinbase_maturity_refuses_depth_99_and_accepts_depth_100() -> TestResult {
         "depth 99 coinbase spend must be refused, got {outcome:?}"
     );
     assert!(
-        refused.chain.utxo.get(&OutPoint::new(spend_tx.txid(), 0)).is_none(),
+        refused
+            .chain
+            .utxo
+            .get(&OutPoint::new(spend_tx.txid(), 0))
+            .is_none(),
         "a refused coinbase spend must not enter the UTXO set"
     );
     assert_eq!(
@@ -250,7 +251,10 @@ fn disconnect_refuses_missing_or_truncated_undo_and_keeps_state() -> TestResult 
             panic!("truncated={truncated}: unavailable undo must refuse, got {outcome:?}");
         };
         let expected = if truncated {
-            matches!(*error, ApplyError::UndoLoad(UndoLoadError::Unreadable { .. }))
+            matches!(
+                *error,
+                ApplyError::UndoLoad(UndoLoadError::Unreadable { .. })
+            )
         } else {
             matches!(*error, ApplyError::UndoLoad(UndoLoadError::Missing { .. }))
         };
@@ -316,9 +320,7 @@ fn a_block_with_a_duplicate_live_txid_is_refused_at_any_height() -> TestResult {
         3,
         vec![coinbase(3), spend_tx],
     )?;
-    let outcome = fixture
-        .chain
-        .apply_block(&BlockPayload::from_local(block));
+    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(block));
     assert!(
         matches!(
             outcome,
@@ -371,11 +373,7 @@ fn a_reorg_below_the_retained_undo_window_refuses_before_mutation() -> TestResul
         .chain
         .applied_tip_snapshot()
         .ok_or(TestError::Missing("applied tip"))?;
-    let before_utxo = fixture
-        .chain
-        .utxo
-        .lock_stable_view()
-        .hash_serialized_3()?;
+    let before_utxo = fixture.chain.utxo.lock_stable_view().hash_serialized_3()?;
     let error = crate::reorg::switch_to_branch(
         &fixture.chain,
         target,
@@ -431,9 +429,7 @@ fn block_output_sums_at_the_money_boundary() -> TestResult {
         3,
         vec![coinbase(3), spend(funding, max_money + 1)],
     )?;
-    let outcome = fixture
-        .chain
-        .apply_block(&BlockPayload::from_local(above));
+    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(above));
     assert!(
         matches!(
             outcome,
@@ -449,9 +445,7 @@ fn block_output_sums_at_the_money_boundary() -> TestResult {
         3,
         vec![coinbase(3), spend(funding, max_money)],
     )?;
-    let outcome = fixture
-        .chain
-        .apply_block(&BlockPayload::from_local(exact));
+    let outcome = fixture.chain.apply_block(&BlockPayload::from_local(exact));
     assert!(
         matches!(
             outcome,

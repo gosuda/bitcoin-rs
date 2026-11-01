@@ -333,8 +333,10 @@ pub(crate) struct NodeServices {
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
-    shutdown_forwarder:
-        Option<(std::thread::JoinHandle<()>, Arc<bitcoin_rs_chain::LatchWriter>)>,
+    shutdown_forwarder: Option<(
+        std::thread::JoinHandle<()>,
+        Arc<bitcoin_rs_chain::LatchWriter>,
+    )>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
     rpc_addresses: Vec<(RpcSurface, std::net::SocketAddr)>,

@@ -1,4 +1,7 @@
-#![expect(clippy::expect_used, reason = "fixture setup and frame reads must fail loudly")]
+#![expect(
+    clippy::expect_used,
+    reason = "fixture setup and frame reads must fail loudly"
+)]
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -67,8 +70,8 @@ fn a_silent_outbound_peer_gets_the_keepalive_ping_and_is_expired() {
 
 fn read_ping(client: &TcpStream, magic: Magic) -> Message {
     loop {
-        let (message, _raw) = crate::wire::read_message(&mut &*client, magic)
-            .expect("client reads session frames");
+        let (message, _raw) =
+            crate::wire::read_message(&mut &*client, magic).expect("client reads session frames");
         if matches!(message, Message::Ping(_)) {
             return message;
         }

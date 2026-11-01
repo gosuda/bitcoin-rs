@@ -1012,8 +1012,7 @@ pub fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
 const MAX_BATCH_ELEMENTS: usize = 1_000;
 
 fn v2_notification(request: &Value) -> bool {
-    request.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
-        && request.get("id").is_none()
+    request.get("jsonrpc").and_then(Value::as_str) == Some("2.0") && request.get("id").is_none()
 }
 
 fn handle_decoded_json(handler: &Handler, request: &Value) -> JsonResponse {

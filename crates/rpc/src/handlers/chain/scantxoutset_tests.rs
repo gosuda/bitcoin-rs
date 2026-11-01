@@ -251,7 +251,6 @@ fn scantxoutset_refuses_malformed_requests() {
             ]),
             "Supported scan descriptors",
         ),
-
     ];
 
     for (name, params, message) in cases {
@@ -276,7 +275,10 @@ fn scantxoutset_refuses_malformed_requests() {
 
     let error = scantxoutset(
         &ctx,
-        &json!(["start", ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]]),
+        &json!([
+            "start",
+            ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]
+        ]),
     )
     .expect_err("another network's address must be refused");
     assert_eq!(error.to_string(), "Address is not valid");
