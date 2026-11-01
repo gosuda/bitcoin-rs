@@ -1107,7 +1107,6 @@ impl DownloadWindow {
         )
     }
 
-    #[expect(clippy::too_many_arguments)]
     pub(crate) fn next_peer_request_allowing_retry(
         &mut self,
         stager: &mut BlockStager,
