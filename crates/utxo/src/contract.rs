@@ -548,6 +548,110 @@ pub fn load_block_undo(
     undo_codec::decode(&record, hash).map_err(|source| UndoLoadError::Unreadable { hash, source })
 }
 
+pub fn load_block_undo_for_block(
+    store: &dyn UndoStore,
+    height: u32,
+    hash: Hash256,
+    block: &Block,
+    max_script_size: usize,
+) -> Result<UndoBatch, UndoLoadError> {
+    let undo = load_block_undo(store, height, hash)?;
+    validate_undo_for_block(block, height, &undo, max_script_size)
+        .map_err(|source| UndoLoadError::Unreadable { hash, source })?;
+    Ok(undo)
+}
+
+fn validate_undo_for_block(
+    block: &Block,
+    height: u32,
+    undo: &UndoBatch,
+    max_script_size: usize,
+) -> Result<(), UndoCodecError> {
+    if height == 0 {
+        return Ok(());
+    }
+    let (created, mut expected_removes) = block_outputs(block, max_script_size)?;
+    let (external_inputs, same_block_inputs) = block_inputs(block);
+    expected_removes.retain(|outpoint| !same_block_inputs.contains(outpoint));
+
+    let mut restored: HashSet<OutPoint> = HashSet::with_capacity(undo.restores().len());
+    for add in undo.restores() {
+        if add.height >= height {
+            return Err(UndoCodecError::BlockMismatch {
+                reason: "restored coin height is not historical",
+            });
+        }
+        if !external_inputs.contains(&add.outpoint) && !created.contains(&add.outpoint) {
+            return Err(UndoCodecError::BlockMismatch {
+                reason: "restored outpoint is not an input or output of the block",
+            });
+        }
+        restored.insert(add.outpoint);
+    }
+    if !external_inputs.iter().all(|outpoint| restored.contains(outpoint)) {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "an external input has no restored coin",
+        });
+    }
+    expected_removes.retain(|outpoint| !restored.contains(outpoint));
+    let removed: HashSet<OutPoint> = undo.removes().iter().copied().collect();
+    if removed != expected_removes {
+        return Err(UndoCodecError::BlockMismatch {
+            reason: "removed outpoints differ from the block's retained outputs",
+        });
+    }
+    Ok(())
+}
+
+fn block_outputs(
+    block: &Block,
+    max_script_size: usize,
+) -> Result<(HashSet<OutPoint>, HashSet<OutPoint>), UndoCodecError> {
+    let mut created = HashSet::new();
+    let mut retained = HashSet::new();
+    for tx in &block.txs {
+        let txid = tx.txid();
+        for (index, txout) in tx.outputs.iter().enumerate() {
+            let vout = u32::try_from(index).map_err(|_| UndoCodecError::BlockMismatch {
+                reason: "block output index exceeds the vout range",
+            })?;
+            let outpoint = OutPoint::new(txid, vout);
+            created.insert(outpoint);
+            let unstorable = txout.script_pubkey.first() == Some(&0x6a)
+                || txout.script_pubkey.len() > max_script_size;
+            if !unstorable {
+                retained.insert(outpoint);
+            }
+        }
+    }
+    Ok((created, retained))
+}
+
+fn block_inputs(block: &Block) -> (HashSet<OutPoint>, HashSet<OutPoint>) {
+    let mut prior_txids: HashSet<Txid> = HashSet::with_capacity(block.txs.len());
+    let mut external = HashSet::new();
+    let mut same_block = HashSet::new();
+    for tx in &block.txs {
+        if tx.is_coinbase() {
+            prior_txids.insert(tx.txid());
+            continue;
+        }
+        for input in &tx.inputs {
+            let outpoint = input.previous_output;
+            match prior_txids.contains(&outpoint.txid) {
+                true => {
+                    same_block.insert(outpoint);
+                }
+                false => {
+                    external.insert(outpoint);
+                }
+            }
+        }
+        prior_txids.insert(tx.txid());
+    }
+    (external, same_block)
+}
+
 pub fn rollback_block(
     store: &dyn UndoStore,
     utxo: &UtxoSet,

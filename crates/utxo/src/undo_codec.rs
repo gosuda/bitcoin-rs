@@ -57,6 +57,8 @@ pub enum UndoCodecError {
     InvalidCoinbase { found: u8 },
     #[error("undo record repeats outpoint {txid}:{vout}")]
     DuplicateOutpoint { txid: Hash256, vout: u32 },
+    #[error("undo record does not match its block: {reason}")]
+    BlockMismatch { reason: &'static str },
 }
 
 #[must_use]
