@@ -62,14 +62,20 @@ fuzz_target!(|data: &[u8]| {
                         )
                     })
                     .collect();
-                if let Ok(re_encoded) = UtxoRecord::from_owned_outputs(record.txid(), &owned) {
-                    assert_eq!(record.output_count(), re_encoded.output_count());
-                    for (out1, out2) in record.outputs().zip(re_encoded.outputs()) {
-                        assert_eq!(out1.vout, out2.vout);
-                        assert_eq!(out1.value, out2.value);
-                        assert_eq!(out1.script_pubkey, out2.script_pubkey);
-                        assert_eq!(out1.coinbase, out2.coinbase);
-                        assert_eq!(out1.height, out2.height);
+                let re_encoded = UtxoRecord::from_owned_outputs(record.txid(), &owned);
+                match re_encoded {
+                    Ok(re_encoded) => {
+                        assert_eq!(record.output_count(), re_encoded.output_count());
+                        for (out1, out2) in record.outputs().zip(re_encoded.outputs()) {
+                            assert_eq!(out1.vout, out2.vout);
+                            assert_eq!(out1.value, out2.value);
+                            assert_eq!(out1.script_pubkey, out2.script_pubkey);
+                            assert_eq!(out1.coinbase, out2.coinbase);
+                            assert_eq!(out1.height, out2.height);
+                        }
+                    }
+                    Err(err) => {
+                        panic!("owned-outputs rebuild of decoded record failed: {err:?}");
                     }
                 }
             }
