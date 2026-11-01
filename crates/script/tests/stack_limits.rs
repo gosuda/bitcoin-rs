@@ -144,7 +144,7 @@ fn check(
         match result {
             Ok(()) => assert!(expected.is_ok(), "{spend:?}: kernel accepted"),
             Err(ConsensusError::Script { .. }) => {
-                assert!(expected.is_err(), "{spend:?}: kernel rejected")
+                assert!(expected.is_err(), "{spend:?}: kernel rejected");
             }
             Err(error) => return Err(error.into()),
         }

@@ -1228,7 +1228,7 @@ fn is_policy_only_script_test(row: &ScriptTestRow) -> bool {
         Interpreter.execute_with_prevouts(
             &row.script_pubkey,
             &row.script_sig,
-            &row.witness,
+            &Witness::from_stack(row.witness.clone()),
             mand_flags,
             &prevouts,
             &spend,
