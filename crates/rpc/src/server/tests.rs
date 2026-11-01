@@ -114,7 +114,7 @@ fn keep_alive_wait_is_not_bounded_by_the_head_budget() -> io::Result<()> {
 }
 
 #[test]
-fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
+fn an_exhausted_blocking_budget_still_serves_the_transaction_decode() {
     let handler = Handler::new(Arc::new(Context::new()));
     handler.configure_blocking_admission(2);
     let held = match handler.reserve_blocking_request() {
@@ -124,26 +124,21 @@ fn decoderawtransaction_reserves_the_blocking_budget_before_decode() {
     let mut valid_tx_hex = String::from("0200000001");
     valid_tx_hex.push_str(&"00".repeat(32));
     valid_tx_hex.push_str("ffffffff00ffffffff010100000000000000015100000000");
-    let refused = handler.dispatch(
-        "decoderawtransaction",
-        &sonic_rs::json!([valid_tx_hex.as_str()]),
+
+    let response = handle_json(
+        &handler,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":["{valid_tx_hex}"]}}"#
+        )
+        .as_bytes(),
     );
+
+    assert_eq!(response.status, 200, "the decode is ordinary work");
     assert!(
-        matches!(
-            &refused,
-            Err(RpcError::Misc(message)) if message == "RPC blocking request limit reached"
-        ),
-        "an exhausted budget must refuse before decode: {refused:?}"
+        !response.close,
+        "an ordinary decode must keep the connection alive"
     );
     drop(held);
-    let served = handler.dispatch(
-        "decoderawtransaction",
-        &sonic_rs::json!([valid_tx_hex.as_str()]),
-    );
-    assert!(
-        served.is_ok(),
-        "a free budget must serve the decode: {served:?}"
-    );
 }
 
 /// A `scantxoutset start` refused because another scan holds the

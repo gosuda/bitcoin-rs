@@ -29,6 +29,8 @@ pub(crate) enum Execution {
     #[default]
     Immediate,
     Blocking,
+    /// Dispatched with the request latch without a blocking-quota slot.
+    Interruptible,
     Scan,
     LongPoll,
 }
@@ -37,7 +39,7 @@ impl Execution {
     pub(crate) fn is_blocking(self, params: &Value) -> bool {
         use sonic_rs::JsonValueTrait as _;
         match self {
-            Self::Immediate => false,
+            Self::Immediate | Self::Interruptible => false,
             Self::Blocking => true,
             Self::Scan => {
                 params
@@ -95,6 +97,9 @@ macro_rules! declare_rows {
     (@execution) => { Execution::Immediate };
     (@execution $execution:ident) => { Execution::$execution };
     (@handler $handler:expr, Blocking) => {
+        match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
+    };
+    (@handler $handler:expr, Interruptible) => {
         match $handler { Some(handler) => Some(Dispatch::Cancellable(handler)), None => None }
     };
     (@handler $handler:expr, Scan) => {
@@ -193,11 +198,11 @@ declare_rows! {
     "scantxoutset", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Fixed addr/raw and public pkh/wpkh/sh(wpkh)/key-only tr descriptors, including wildcard/multipath expansion. Ranges are inclusive, defaulting to [0,1000] per wildcard path; fixed descriptors validate and ignore ranges. At most 1024 aggregate script expansions before deduplication; private keys, secret-dependent derivation and other forms remain unsupported. Cancellable traversal holds chain-transition exclusion; ancestry and response projection use the retained tip after release. Input, traversal, result and 60-second limits apply (docs/contracts/external-api.md, API-35).", "0.4.0", Some(chain::scantxoutset), Scan, ["action", "scanobjects"];
     "getrawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::getrawtransaction);
     "gettxout", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout), ["txid", "n", "include_mempool"];
-    "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof), Blocking;
+    "gettxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof), Interruptible;
     "verifytxoutproof", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::verifytxoutproof);
     "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::sendrawtransaction), ["hexstring", "maxfeerate", "maxburnamount"];
     "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Scoped package submission is exposed separately by submitpackage.", "0.4.0", Some(tx::testmempoolaccept), ["rawtxs", "maxfeerate"];
-    "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction), Blocking, ["hexstring"];
+    "decoderawtransaction", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction), Interruptible, ["hexstring"];
     "compressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction encoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::compressrawtransaction), Blocking, ["hexstring", "compress_outpoints"];
     "decompressrawtransaction", SurfaceKind::Rpc, Status::Extension, "", "", "Optional BIP337 compressed-transaction decoding; disabled unless the node starts with --compressed-transactions, which answers -32603 (crates/rpc/src/compressed_tx.rs).", "0.14.0", Some(tx::decompressrawtransaction), Blocking, ["hexstring"];
     "createrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Accepts inputs, outputs, locktime and replaceable only. Version is fixed at 2 and replaceable defaults to false. Named version is rejected with -8; a fifth positional or args-prefix entry is rejected with -32602 after named binding. See docs/contracts/external-api.md#api-02-json-rpc-mechanics-and-the-wallet-free-surface.", "0.4.0", Some(tx::createrawtransaction), ["inputs", "outputs", "locktime", "replaceable"];
@@ -419,6 +424,36 @@ mod tests {
             assert!(
                 blocking_request(&json!({"method": method, "params": params})),
                 "{method} must be classified as a blocking request"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_inspection_keeps_the_latch_without_blocking_admission() {
+        for method in ["decoderawtransaction", "gettxoutproof"] {
+            assert!(
+                !blocking_request(&json!({"method": method, "params": []})),
+                "{method} must take no blocking slot and close no keep-alive"
+            );
+            let row = REGISTRY
+                .iter()
+                .find(|row| row.entry.name == method)
+                .unwrap_or_else(|| panic!("{method} is registered"));
+            assert!(
+                matches!(row.handler, Some(Dispatch::Cancellable(_))),
+                "{method} must keep latch dispatch"
+            );
+        }
+        for method in [
+            "verifychain",
+            "dumptxoutset",
+            "gettxoutsetinfo",
+            "compressrawtransaction",
+            "decompressrawtransaction",
+        ] {
+            assert!(
+                blocking_request(&json!({"method": method, "params": []})),
+                "{method} must stay blocking-classified"
             );
         }
     }

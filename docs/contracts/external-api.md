@@ -338,7 +338,8 @@ wallet interoperability remain unverified.
 - A second call is refused with `-8` (`a UTXO-wide scan is already running`), and a running `scantxoutset` also refuses it with `-8`.
 - The walk holds the UTXO stable-view read guard for its whole duration, so block commits wait for it.
 - The single reservation and blocking quota bound that wait to one caller per dispatcher.
-- The request latch interrupts it with `-1`.
+- The request latch and the reservation's abort flag interrupt it with `-1`, checked every 256 coins in each walk.
+- `scantxoutset status` reports progress 0 during that walk because only a `scantxoutset` start advances progress, and `scantxoutset abort` stops it.
 - Request bodies, batch size, response assembly, scan rows, in-flight work, and long-poll clients are bounded.
 - A public explorer read cannot consume the CPU or memory quota needed to validate new blocks.
 
@@ -744,7 +745,8 @@ wallet interoperability remain unverified.
 - Each binding owns its dispatcher latch and quota.
 - Rebinding the same `Context` creates a fresh dispatcher while old requests keep the old latch.
 - Registry execution metadata classifies the three waits, `scantxoutset` `start`, and template `getblocktemplate` with a string `longpollid` as `Blocking`.
-- The rows for `verifychain`, `dumptxoutset`, `gettxoutsetinfo`, `gettxoutproof`, and materializing transaction decodes `decoderawtransaction`, `compressrawtransaction`, `decompressrawtransaction` carry the same class.
+- The rows for `verifychain`, `dumptxoutset`, `gettxoutsetinfo`, `compressrawtransaction`, and `decompressrawtransaction` carry the same class.
+- `gettxoutproof` and `decoderawtransaction` take the request latch but stay ordinary: one block body or one hex-capped decode takes no blocking slot and closes no keep-alive.
 - Every `Handler::dispatch` of a classified call (direct, batch, notification) acquires its dispatcher bounded blocking quota.
 - A bound listener permits one fewer classified call than one source may hold.
 - The formula is `max_connections - max_connections/4 - 1` (95 of 128; zero with one worker).
