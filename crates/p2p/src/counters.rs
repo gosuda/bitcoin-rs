@@ -6,243 +6,139 @@ use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// One per-message accounting bucket, named by its wire command.
+/// Declares [`MessageAccount`]: one row per accounted wire command, plus the
+/// [`MessageAccount::Other`] bucket appended last.
 ///
-/// The buckets up to and including [`MessageAccount::SendTxrcncl`] are Bitcoin
-/// Core v31.1's known message commands (`ALL_NET_MESSAGE_TYPES`,
-/// `src/protocol.h`): a received frame under any other command folds into
-/// [`MessageAccount::Other`], exactly as `CNode::ReceiveMsgBytes` pre-seeds
-/// only those commands plus the `*other*` bucket so a remote peer cannot grow
-/// the map. The buckets after it are commands this node itself can put on the
-/// wire that Core v31.1's known list does not carry: sent accounting
-/// attributes them by their own name (as Core's `CNode::AccountForSentBytes`
-/// inserts the raw command), receives still fold into `*other*`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MessageAccount {
-    Version,
-    Verack,
-    Addr,
-    AddrV2,
-    SendAddrV2,
-    Inv,
-    GetData,
-    MerkleBlock,
-    GetBlocks,
-    GetHeaders,
-    Tx,
-    Headers,
-    Block,
-    GetAddr,
-    MemPool,
-    Ping,
-    Pong,
-    NotFound,
-    FilterLoad,
-    FilterAdd,
-    FilterClear,
-    SendHeaders,
-    FeeFilter,
-    SendCmpct,
-    CmpctBlock,
-    GetBlockTxn,
-    BlockTxn,
-    GetCFilters,
-    CFilter,
-    GetCFHeaders,
-    CFHeaders,
-    GetCFCheckpt,
-    CFCheckpt,
-    WtxidRelay,
-    SendTxrcncl,
-    Feature,
-    Alert,
-    Reject,
-    SendPackages,
-    AncPkgInfo,
-    GetPkgTxns,
-    PkgTxns,
-    StaleTip,
-    Other,
+/// Each row is `classification Variant = "command"`, where the
+/// classification drives both directions of accounting:
+///
+/// - `both` — this node receives and sends the command, so frames count
+///   under the command's own name in either direction;
+/// - `send_only` — this node only ever puts the command on the wire; a sent
+///   frame still counts under its own name, while a received frame under it
+///   folds into `Other`, the bucket every unknown command lands in.
+///
+/// The enum variants, the declaration-order bucket array, the command
+/// lookup, the reporting names, and the receive-side fold are all derived
+/// from the one table, so the mapping is declared exactly once.
+macro_rules! message_accounts {
+    (@count $classification:ident) => {
+        1
+    };
+    (@receive_bucket both $variant:ident) => {
+        Self::$variant
+    };
+    (@receive_bucket send_only $variant:ident) => {
+        Self::Other
+    };
+    (
+        $( $classification:ident $variant:ident = $command:literal ),* $(,)?
+    ) => {
+        /// One per-message accounting bucket, named by its wire command.
+        ///
+        /// The bucket set is fixed by the [`message_accounts`] table: a
+        /// command a remote peer sends that no row carries folds into
+        /// [`MessageAccount::Other`] and can never grow the map, which is
+        /// why the per-peer counters stay fixed-size and bounded (the same
+        /// reason `CNode::ReceiveMsgBytes` pre-seeds only a fixed command
+        /// map, Core v31.1 `src/net.cpp`).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum MessageAccount {
+            $( $variant, )*
+            Other,
+        }
+
+        impl MessageAccount {
+            /// Every bucket in declaration order; indexing into the
+            /// per-message counter arrays uses the position here.
+            const ALL: [Self; Self::COUNT] = [ $( Self::$variant, )* Self::Other ];
+
+            const COUNT: usize = 0 $( + message_accounts!(@count $classification) )* + 1;
+
+            /// The bucket a frame under `command` lands in, or `None` when
+            /// no bucket carries that command name.
+            fn from_command(command: &str) -> Option<Self> {
+                match command {
+                    $( $command => Some(Self::$variant), )*
+                    _ => None,
+                }
+            }
+
+            /// The receive-side bucket for `command`: `both` rows count
+            /// under their own name, `send_only` rows and unknown commands
+            /// fold into `*other*`.
+            fn receive(command: &str) -> Self {
+                match command {
+                    $( $command => message_accounts!(@receive_bucket $classification $variant), )*
+                    _ => Self::Other,
+                }
+            }
+
+            /// The send-side bucket for `command`: our own outgoing commands
+            /// are attributed by name, as Core's send accounting does.
+            fn send(command: &str) -> Self {
+                Self::from_command(command).unwrap_or(Self::Other)
+            }
+
+            /// The wire command this bucket reports as in the per-message
+            /// maps.
+            const fn name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $command, )*
+                    Self::Other => "*other*",
+                }
+            }
+        }
+    };
+}
+
+message_accounts! {
+    both Version = "version",
+    both Verack = "verack",
+    both Addr = "addr",
+    both AddrV2 = "addrv2",
+    both SendAddrV2 = "sendaddrv2",
+    both Inv = "inv",
+    both GetData = "getdata",
+    both MerkleBlock = "merkleblock",
+    both GetBlocks = "getblocks",
+    both GetHeaders = "getheaders",
+    both Tx = "tx",
+    both Headers = "headers",
+    both Block = "block",
+    both GetAddr = "getaddr",
+    both MemPool = "mempool",
+    both Ping = "ping",
+    both Pong = "pong",
+    both NotFound = "notfound",
+    both FilterLoad = "filterload",
+    both FilterAdd = "filteradd",
+    both FilterClear = "filterclear",
+    both SendHeaders = "sendheaders",
+    both FeeFilter = "feefilter",
+    both SendCmpct = "sendcmpct",
+    both CmpctBlock = "cmpctblock",
+    both GetBlockTxn = "getblocktxn",
+    both BlockTxn = "blocktxn",
+    both GetCFilters = "getcfilters",
+    both CFilter = "cfilter",
+    both GetCFHeaders = "getcfheaders",
+    both CFHeaders = "cfheaders",
+    both GetCFCheckpt = "getcfcheckpt",
+    both CFCheckpt = "cfcheckpt",
+    both WtxidRelay = "wtxidrelay",
+    both SendTxrcncl = "sendtxrcncl",
+    both Feature = "feature",
+    send_only Alert = "alert",
+    send_only Reject = "reject",
+    send_only SendPackages = "sendpackages",
+    send_only AncPkgInfo = "ancpkginfo",
+    send_only GetPkgTxns = "getpkgtxns",
+    send_only PkgTxns = "pkgtxns",
+    send_only StaleTip = "staletip",
 }
 
 impl MessageAccount {
-    /// Every bucket in declaration order; indexing into the per-message
-    /// counter arrays uses the position here.
-    const ALL: [Self; Self::COUNT] = [
-        Self::Version,
-        Self::Verack,
-        Self::Addr,
-        Self::AddrV2,
-        Self::SendAddrV2,
-        Self::Inv,
-        Self::GetData,
-        Self::MerkleBlock,
-        Self::GetBlocks,
-        Self::GetHeaders,
-        Self::Tx,
-        Self::Headers,
-        Self::Block,
-        Self::GetAddr,
-        Self::MemPool,
-        Self::Ping,
-        Self::Pong,
-        Self::NotFound,
-        Self::FilterLoad,
-        Self::FilterAdd,
-        Self::FilterClear,
-        Self::SendHeaders,
-        Self::FeeFilter,
-        Self::SendCmpct,
-        Self::CmpctBlock,
-        Self::GetBlockTxn,
-        Self::BlockTxn,
-        Self::GetCFilters,
-        Self::CFilter,
-        Self::GetCFHeaders,
-        Self::CFHeaders,
-        Self::GetCFCheckpt,
-        Self::CFCheckpt,
-        Self::WtxidRelay,
-        Self::SendTxrcncl,
-        Self::Feature,
-        Self::Alert,
-        Self::Reject,
-        Self::SendPackages,
-        Self::AncPkgInfo,
-        Self::GetPkgTxns,
-        Self::PkgTxns,
-        Self::StaleTip,
-        Self::Other,
-    ];
-
-    const COUNT: usize = 44;
-
-    /// The bucket a frame under `command` lands in, or `None` when no bucket
-    /// carries that command name.
-    fn from_command(command: &str) -> Option<Self> {
-        match command {
-            "version" => Some(Self::Version),
-            "verack" => Some(Self::Verack),
-            "addr" => Some(Self::Addr),
-            "addrv2" => Some(Self::AddrV2),
-            "sendaddrv2" => Some(Self::SendAddrV2),
-            "inv" => Some(Self::Inv),
-            "getdata" => Some(Self::GetData),
-            "merkleblock" => Some(Self::MerkleBlock),
-            "getblocks" => Some(Self::GetBlocks),
-            "getheaders" => Some(Self::GetHeaders),
-            "tx" => Some(Self::Tx),
-            "headers" => Some(Self::Headers),
-            "block" => Some(Self::Block),
-            "getaddr" => Some(Self::GetAddr),
-            "mempool" => Some(Self::MemPool),
-            "ping" => Some(Self::Ping),
-            "pong" => Some(Self::Pong),
-            "notfound" => Some(Self::NotFound),
-            "filterload" => Some(Self::FilterLoad),
-            "filteradd" => Some(Self::FilterAdd),
-            "filterclear" => Some(Self::FilterClear),
-            "sendheaders" => Some(Self::SendHeaders),
-            "feefilter" => Some(Self::FeeFilter),
-            "sendcmpct" => Some(Self::SendCmpct),
-            "cmpctblock" => Some(Self::CmpctBlock),
-            "getblocktxn" => Some(Self::GetBlockTxn),
-            "blocktxn" => Some(Self::BlockTxn),
-            "getcfilters" => Some(Self::GetCFilters),
-            "cfilter" => Some(Self::CFilter),
-            "getcfheaders" => Some(Self::GetCFHeaders),
-            "cfheaders" => Some(Self::CFHeaders),
-            "getcfcheckpt" => Some(Self::GetCFCheckpt),
-            "cfcheckpt" => Some(Self::CFCheckpt),
-            "wtxidrelay" => Some(Self::WtxidRelay),
-            "sendtxrcncl" => Some(Self::SendTxrcncl),
-            "feature" => Some(Self::Feature),
-            "alert" => Some(Self::Alert),
-            "reject" => Some(Self::Reject),
-            "sendpackages" => Some(Self::SendPackages),
-            "ancpkginfo" => Some(Self::AncPkgInfo),
-            "getpkgtxns" => Some(Self::GetPkgTxns),
-            "pkgtxns" => Some(Self::PkgTxns),
-            "staletip" => Some(Self::StaleTip),
-            _ => None,
-        }
-    }
-
-    /// The receive-side bucket for `command`: Core's known commands count
-    /// under their own name, everything else (unknown commands and this
-    /// node's post-v31 extensions alike) folds into `*other*`.
-    fn receive(command: &str) -> Self {
-        match Self::from_command(command) {
-            Some(
-                Self::Feature
-                | Self::Alert
-                | Self::Reject
-                | Self::SendPackages
-                | Self::AncPkgInfo
-                | Self::GetPkgTxns
-                | Self::PkgTxns
-                | Self::StaleTip,
-            ) => Self::Other,
-            account => account.unwrap_or(Self::Other),
-        }
-    }
-
-    /// The send-side bucket for `command`: our own outgoing commands are
-    /// attributed by name, as Core's send accounting does.
-    fn send(command: &str) -> Self {
-        Self::from_command(command).unwrap_or(Self::Other)
-    }
-
-    /// The wire command this bucket reports as in the per-message maps.
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Version => "version",
-            Self::Verack => "verack",
-            Self::Addr => "addr",
-            Self::AddrV2 => "addrv2",
-            Self::SendAddrV2 => "sendaddrv2",
-            Self::Inv => "inv",
-            Self::GetData => "getdata",
-            Self::MerkleBlock => "merkleblock",
-            Self::GetBlocks => "getblocks",
-            Self::GetHeaders => "getheaders",
-            Self::Tx => "tx",
-            Self::Headers => "headers",
-            Self::Block => "block",
-            Self::GetAddr => "getaddr",
-            Self::MemPool => "mempool",
-            Self::Ping => "ping",
-            Self::Pong => "pong",
-            Self::NotFound => "notfound",
-            Self::FilterLoad => "filterload",
-            Self::FilterAdd => "filteradd",
-            Self::FilterClear => "filterclear",
-            Self::SendHeaders => "sendheaders",
-            Self::FeeFilter => "feefilter",
-            Self::SendCmpct => "sendcmpct",
-            Self::CmpctBlock => "cmpctblock",
-            Self::GetBlockTxn => "getblocktxn",
-            Self::BlockTxn => "blocktxn",
-            Self::GetCFilters => "getcfilters",
-            Self::CFilter => "cfilter",
-            Self::GetCFHeaders => "getcfheaders",
-            Self::CFHeaders => "cfheaders",
-            Self::GetCFCheckpt => "getcfcheckpt",
-            Self::CFCheckpt => "cfcheckpt",
-            Self::WtxidRelay => "wtxidrelay",
-            Self::SendTxrcncl => "sendtxrcncl",
-            Self::Feature => "feature",
-            Self::Alert => "alert",
-            Self::Reject => "reject",
-            Self::SendPackages => "sendpackages",
-            Self::AncPkgInfo => "ancpkginfo",
-            Self::GetPkgTxns => "getpkgtxns",
-            Self::PkgTxns => "pkgtxns",
-            Self::StaleTip => "staletip",
-            Self::Other => "*other*",
-        }
-    }
-
     #[expect(
         clippy::as_conversions,
         reason = "the enum is field-less with implicit sequential discriminants, so the cast is the bucket's array position"
@@ -327,7 +223,7 @@ impl PeerCounters {
     }
 
     /// Charges one fully framed incoming message to its command's bucket:
-    /// Core v31.1's known commands under their own name, anything else under
+    /// commands this node receives under their own name, anything else under
     /// `*other*`.
     ///
     /// The connection layer's receive accounting entry point, called after
