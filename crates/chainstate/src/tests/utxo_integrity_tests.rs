@@ -63,7 +63,8 @@ fn chain_to(height: u32) -> TestResult<Fixture> {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let undo = Arc::new(InMemoryUndoStore::default());
     let retention = Arc::new(RetentionRegistry::new());
-    chain.undo_store = Arc::clone(&undo) as Arc<dyn bitcoin_rs_storage::UndoStore>;
+    let undo_store: Arc<dyn bitcoin_rs_storage::UndoStore> = undo.clone();
+    chain.undo_store = undo_store;
     chain.retention = MandatoryRetention::new(Arc::clone(&retention));
     chain.history = HistoryAccess::new(
         Arc::clone(&retention),
@@ -248,9 +249,11 @@ fn disconnect_refuses_missing_or_truncated_undo_and_keeps_state() -> TestResult 
         let Err(DisconnectError::Refused(error)) = outcome else {
             panic!("truncated={truncated}: unavailable undo must refuse, got {outcome:?}");
         };
-        let expected = truncated
-            .then(|| matches!(*error, ApplyError::UndoLoad(UndoLoadError::Unreadable { .. })))
-            .unwrap_or_else(|| matches!(*error, ApplyError::UndoLoad(UndoLoadError::Missing { .. })));
+        let expected = if truncated {
+            matches!(*error, ApplyError::UndoLoad(UndoLoadError::Unreadable { .. }))
+        } else {
+            matches!(*error, ApplyError::UndoLoad(UndoLoadError::Missing { .. }))
+        };
         assert!(
             expected,
             "truncated={truncated}: unexpected refusal {error:?}"
