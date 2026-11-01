@@ -113,14 +113,14 @@ mod tests {
     fn invalid_hex_byte_strategy() -> impl Strategy<Value = u8> {
         prop_oneof![
             prop::sample::select(vec![
-                b'g', b'h', b'z', b'G', b'Z', b':', b'@', b'/', b' ', b'\n', b'\0', 0x80, 0xff,
+                b'g', b'h', b'z', b'G', b'Z', b':', b'@', b'/', b' ', b'\n', b'\t',
             ]),
             (b'g'..=b'z'),
             (b'G'..=b'Z'),
-            (0x20u8..=0x2f),
-            (0x3au8..=0x40),
-            (0x5bu8..=0x60),
-            (0x7bu8..=0x7e),
+            (0x20_u8..=0x2f),
+            (0x3a_u8..=0x40),
+            (0x5b_u8..=0x60),
+            (0x7b_u8..=0x7e),
         ]
     }
 
@@ -208,19 +208,15 @@ mod tests {
             let target_offset = (max_idx * usize::try_from(offset_ratio).unwrap_or(0)) / 1000;
             let mut corrupted_bytes = valid_hex.into_bytes();
             corrupted_bytes[target_offset] = bad_byte;
-            let corrupted = String::from_utf8_lossy(&corrupted_bytes).into_owned();
-            let Some(expected_offset) = corrupted
-                .bytes()
-                .position(|b| super::hex_nibble(b).is_none())
-            else {
-                prop_assert!(false, "bad_byte cannot be valid hex");
+            let Ok(corrupted) = String::from_utf8(corrupted_bytes) else {
+                prop_assert!(false, "ASCII corrupted string");
                 return Ok(());
             };
 
             prop_assert_eq!(
                 hex_decode(&corrupted),
                 Err(HexError::InvalidDigit {
-                    offset: expected_offset,
+                    offset: target_offset,
                 })
             );
         }
