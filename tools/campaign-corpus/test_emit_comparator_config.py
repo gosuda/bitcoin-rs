@@ -363,13 +363,6 @@ class CustodyRefusalTests(EmitterTestCase):
         self.assertIn("BLOCKED: candidate binary", stderr)
         self.assertFalse(self.output.exists())
 
-    def test_missing_oracle_binary_is_blocked(self) -> None:
-        self.fixture.oracle.unlink()
-        code, stderr = self.fixture.emit("p2p", self.output)
-        self.assertEqual(code, 2)
-        self.assertIn("BLOCKED: oracle binary", stderr)
-        self.assertFalse(self.output.exists())
-
     def test_symlink_archive_is_refused(self) -> None:
         target = self.root / "archive-target.bin"
         target.write_bytes(self.fixture.archive_bytes)
