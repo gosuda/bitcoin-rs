@@ -26,17 +26,32 @@ fn validate_block(data: &[u8]) {
     let Ok(block) = bitcoin_rs_primitives::deserialize::<Block>(&encoded) else {
         return;
     };
+    let consensus = bitcoin_rs_primitives::consensus_bytes(&block);
     assert_eq!(
-        bitcoin_rs_primitives::consensus_bytes(&block),
+        consensus,
         encoded,
         "native decode must re-encode to the rust-bitcoin serialization"
     );
+    let re_decoded = bitcoin_rs_primitives::deserialize::<Block>(&consensus)
+        .expect("native re-decode must succeed on consensus_bytes");
+    assert_eq!(re_decoded, block, "round-trip block equality");
+    let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+    assert_eq!(re_consensus, consensus, "canonical block bytes idempotent");
+
     assert!(
         encoded.len() + block.retained_heap_bytes()
             <= bitcoin_rs_primitives::layout::decode_reservation(encoded.len()),
         "decoded block exceeds its decode reservation"
     );
-    let _ = verify_block_rules(&block);
+
+    let r1 = verify_block_rules(&block);
+    let r2 = verify_block_rules(&block);
+    assert_eq!(
+        format!("{r1:?}"),
+        format!("{r2:?}"),
+        "verify_block_rules determinism"
+    );
+
     let view = AnyCoinView {
         coin: TxOut {
             value: Amount::from_sat(50_000_000),
@@ -44,7 +59,13 @@ fn validate_block(data: &[u8]) {
         },
     };
     for tx in &block.txs {
-        let _ = verify_transaction_non_script(tx, &view, 1, 0, VerifyFlags::MANDATORY);
+        let t1 = verify_transaction_non_script(tx, &view, 1, 0, VerifyFlags::MANDATORY);
+        let t2 = verify_transaction_non_script(tx, &view, 1, 0, VerifyFlags::MANDATORY);
+        assert_eq!(
+            format!("{t1:?}"),
+            format!("{t2:?}"),
+            "verify_transaction_non_script determinism"
+        );
     }
 }
 

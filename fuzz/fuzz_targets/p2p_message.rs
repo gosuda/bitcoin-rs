@@ -35,19 +35,85 @@ fuzz_target!(|data: &[u8]| {
     framed.extend_from_slice(digest.as_byte_array().get(..4).unwrap_or(&[0; 4]));
     framed.extend_from_slice(payload);
 
-    let mut cursor = Cursor::new(framed.as_slice());
-    if let Ok((message, _raw)) = bitcoin_rs_p2p::wire::read_message(&mut cursor, magic) {
-        let decoded = match &message {
-            bitcoin_rs_p2p::Message::Block(payload) => {
-                payload.block().retained_heap_bytes()
+    let r1 = bitcoin_rs_p2p::wire::read_message(&mut Cursor::new(framed.as_slice()), magic);
+    let r2 = bitcoin_rs_p2p::wire::read_message(&mut Cursor::new(framed.as_slice()), magic);
+    match (&r1, &r2) {
+        (Ok((m1, raw1)), Ok((m2, raw2))) => {
+            assert_eq!(m1, m2, "p2p determinism mismatch for {command}");
+            assert_eq!(raw1, raw2, "p2p raw determinism mismatch for {command}");
+        }
+        (Err(e1), Err(e2)) => {
+            assert_eq!(
+                format!("{e1:?}"),
+                format!("{e2:?}"),
+                "p2p error determinism mismatch for {command}"
+            );
+        }
+        _ => panic!("p2p read_message non-deterministic outcome for {command}"),
+    }
+
+    if let Ok((message, _raw)) = r1 {
+        match &message {
+            bitcoin_rs_p2p::Message::Block(payload_block) => {
+                let decoded = payload_block.block().retained_heap_bytes();
+                assert!(
+                    payload.len() + decoded
+                        <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+                    "{command} decoded beyond its decode reservation"
+                );
             }
-            bitcoin_rs_p2p::Message::Tx(tx) => tx.retained_heap_bytes(),
-            _ => return,
-        };
-        assert!(
-            payload.len() + decoded
-                <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
-            "{command} decoded beyond its decode reservation"
+            bitcoin_rs_p2p::Message::Tx(tx) => {
+                let decoded = tx.retained_heap_bytes();
+                assert!(
+                    payload.len() + decoded
+                        <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()),
+                    "{command} decoded beyond its decode reservation"
+                );
+            }
+            bitcoin_rs_p2p::Message::Headers(headers) => {
+                let heap = headers.capacity() * core::mem::size_of::<bitcoin_rs_primitives::Header>();
+                assert!(
+                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    "{command} headers heap beyond reservation"
+                );
+            }
+            bitcoin_rs_p2p::Message::Addr(addrs) => {
+                let heap = addrs.capacity() * 32;
+                assert!(
+                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    "{command} addr heap beyond reservation"
+                );
+            }
+            bitcoin_rs_p2p::Message::Inv(inv)
+            | bitcoin_rs_p2p::Message::GetData(inv)
+            | bitcoin_rs_p2p::Message::NotFound(inv) => {
+                let heap = inv.capacity() * 36;
+                assert!(
+                    heap <= bitcoin_rs_primitives::layout::decode_reservation(payload.len()) + 1024,
+                    "{command} inv heap beyond reservation"
+                );
+            }
+            _ => {}
+        }
+
+        let mut reencoded = Vec::new();
+        let written = bitcoin_rs_p2p::wire::write_message(&mut reencoded, magic, &message)
+            .expect("p2p write_message must succeed on decoded message");
+        assert_eq!(written, reencoded.len());
+        let (re_decoded, _) =
+            bitcoin_rs_p2p::wire::read_message(&mut Cursor::new(&reencoded), magic)
+                .expect("p2p re-decode must succeed on re-encoded message");
+        assert_eq!(
+            re_decoded, message,
+            "p2p round-trip message equality failed for {command}"
+        );
+        let mut reencoded2 = Vec::new();
+        let written2 = bitcoin_rs_p2p::wire::write_message(&mut reencoded2, magic, &re_decoded)
+            .expect("p2p idempotent re-encode must succeed");
+        assert_eq!(written2, written);
+        assert_eq!(
+            reencoded, reencoded2,
+            "p2p canonical re-encode must be idempotent for {command}"
         );
     }
 });

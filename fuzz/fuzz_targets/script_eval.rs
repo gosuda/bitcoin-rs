@@ -57,6 +57,12 @@ fuzz_target!(|data: &[u8]| {
         else {
             return;
         };
+        let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+        let re_decoded = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(&consensus)
+            .expect("script_eval tx round-trip decode");
+        assert_eq!(re_decoded, tx, "script_eval tx round-trip equality");
+        let re_consensus = bitcoin_rs_primitives::consensus_bytes(&re_decoded);
+        assert_eq!(re_consensus, consensus, "canonical tx bytes idempotent");
         let Some(index) = take_u16(&mut rest) else {
             return;
         };
@@ -84,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
             });
         }
         let input = &tx.inputs[index];
-        let _ = Interpreter::default().execute_with_prevouts(
+        let r1 = Interpreter::default().execute_with_prevouts(
             prevouts[index].script_pubkey.as_slice(),
             input.script_sig.as_slice(),
             &input.witness,
@@ -92,6 +98,20 @@ fuzz_target!(|data: &[u8]| {
             &prevouts,
             &tx,
             index,
+        );
+        let r2 = Interpreter::default().execute_with_prevouts(
+            prevouts[index].script_pubkey.as_slice(),
+            input.script_sig.as_slice(),
+            &input.witness,
+            flags,
+            &prevouts,
+            &tx,
+            index,
+        );
+        assert_eq!(
+            format!("{r1:?}"),
+            format!("{r2:?}"),
+            "Interpreter::execute_with_prevouts determinism in TX_CONTEXT"
         );
         return;
     }
@@ -176,9 +196,13 @@ fuzz_target!(|data: &[u8]| {
         }],
         lock_time: LockTime::ZERO,
     };
+    let consensus = bitcoin_rs_primitives::consensus_bytes(&tx);
+    let re_decoded = bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Tx>(&consensus)
+        .expect("synthetic tx deserialize");
+    assert_eq!(re_decoded, tx, "synthetic tx round-trip equality");
 
     let interpreter = Interpreter::default();
-    let _ = interpreter.execute_with_prevouts(
+    let r1 = interpreter.execute_with_prevouts(
         &script_pubkey,
         &script_sig,
         &bitcoin_rs_primitives::Witness::from_stack(witness.clone()),
@@ -186,5 +210,19 @@ fuzz_target!(|data: &[u8]| {
         std::slice::from_ref(&prevout),
         &tx,
         0,
+    );
+    let r2 = interpreter.execute_with_prevouts(
+        &script_pubkey,
+        &script_sig,
+        &bitcoin_rs_primitives::Witness::from_stack(witness),
+        flags,
+        std::slice::from_ref(&prevout),
+        &tx,
+        0,
+    );
+    assert_eq!(
+        format!("{r1:?}"),
+        format!("{r2:?}"),
+        "Interpreter::execute_with_prevouts determinism"
     );
 });
