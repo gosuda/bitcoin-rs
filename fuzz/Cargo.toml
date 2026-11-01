@@ -24,6 +24,8 @@ tempfile = "3"
 bitcoin-rs-index = { path = "../crates/index" }
 bitcoin-rs-rpc = { path = "../crates/rpc", default-features = false, features = ["test-seam"] }
 bitcoin-rs-storage = { path = "../crates/storage", default-features = false }
+bitcoin-rs-chain = { path = "../crates/chain", features = ["test-seam"] }
+bitcoin-rs-chainstate = { path = "../crates/chainstate", features = ["fuzzing"] }
 sonic-rs = "0.5"
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
 [[bin]]
@@ -105,3 +107,15 @@ path = "fuzz_targets/tx_differential.rs"
 [[bin]]
 name = "script_differential"
 path = "fuzz_targets/script_differential.rs"
+
+[[bin]]
+name = "header_sync_sequence"
+path = "fuzz_targets/header_sync_sequence.rs"
+
+[[bin]]
+name = "chainstate_reorg_model"
+path = "fuzz_targets/chainstate_reorg_model.rs"
+
+[[bin]]
+name = "block_decode_roundtrip"
+path = "fuzz_targets/block_decode_roundtrip.rs"

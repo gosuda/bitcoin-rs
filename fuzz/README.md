@@ -38,6 +38,9 @@ cargo +nightly fuzz run p2p_message
 | `jsonrpc_batch`             | JSON-RPC 2.0 batch parsing, method routing, and parameter validation    |
 | `esplora_route`             | Esplora and REST path routing, endpoint query decoding                  |
 | `rpc_hex_params`            | Hex parameters, address parsing, and output descriptor evaluation       |
+| `block_decode_roundtrip`    | Structured block generation, byte mutation, canonical re-encoding       |
+| `header_sync_sequence`      | Header batches, alternative-branch reorgs, and tip selection by work    |
+| `chainstate_reorg_model`    | Connect, disconnect, flush, and reopen against an in-memory model       |
 
 The snapshot target also embeds the [independent Core regtest-200 fixture](../crates/utxo/tests/fixtures/core-v2/README.md). The fixture keeps its 51-byte pinned header. It yields at most 256 input triples as little-endian body-offset/XOR-byte mutations. Empty and no-op inputs exercise the complete positive fixture and reach coin decoding with no foreign-format seed. The fixture is compiled in. That arm needs no companion-corpus import.
 

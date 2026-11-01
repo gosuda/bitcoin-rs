@@ -48,11 +48,11 @@ get_target_weight() {
     case "${target}" in
         script_eval|script_differential)
             printf '%s\n' 4 ;;
-        block_validate|tx_validate|tx_differential)
+        block_validate|tx_validate|tx_differential|chainstate_reorg_model)
             printf '%s\n' 3 ;;
         p2p_message|p2p_message_structured|bip324_transport|compact_block_reconstruct)
             printf '%s\n' 2 ;;
-        utxo_snapshot|undo_row_decode|index_row_decode|utxo_record_decode|mempool_dat_load)
+        block_decode_roundtrip|header_sync_sequence|utxo_snapshot|undo_row_decode|index_row_decode|utxo_record_decode|mempool_dat_load)
             printf '%s\n' 2 ;;
         addrman_load|socks_sam_reply|rpc_http_request|jsonrpc_batch|esplora_route|rpc_hex_params)
             printf '%s\n' 1 ;;
