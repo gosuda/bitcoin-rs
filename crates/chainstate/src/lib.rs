@@ -33,6 +33,9 @@ mod connect;
 mod disconnect;
 mod durable;
 mod prepare;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 mod tip_wait;
 mod window;
 pub use prepare::bytes_are_block;
