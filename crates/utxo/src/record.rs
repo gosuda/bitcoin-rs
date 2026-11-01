@@ -111,7 +111,7 @@ fn pack_height(height: u32, coinbase: bool) -> u64 {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OneUtxoOut<'a> {
+pub struct OneUtxoOut<'a> {
     pub vout: u32,
     pub value: u64,
     pub script_pubkey: &'a [u8],
@@ -120,7 +120,7 @@ pub(crate) struct OneUtxoOut<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UtxoRecord {
+pub struct UtxoRecord {
     buf: Box<[u8]>,
 }
 
@@ -131,7 +131,7 @@ struct RecordHeader {
     inline_len: usize,
 }
 
-pub(crate) struct UtxoOutputIter<'a> {
+pub struct UtxoOutputIter<'a> {
     bytes: &'a [u8],
     layout: V5Layout,
     index: usize,
@@ -166,19 +166,17 @@ impl<'a> Iterator for UtxoOutputIter<'a> {
 impl ExactSizeIterator for UtxoOutputIter<'_> {}
 
 impl UtxoRecord {
-    pub(crate) fn from_encoded(buf: Box<[u8]>) -> Result<Self, UtxoError> {
+    pub fn from_encoded(buf: Box<[u8]>) -> Result<Self, UtxoError> {
         validate_encoded(&buf)?;
         Ok(Self { buf })
     }
 
-    fn bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
         &self.buf
     }
 
-    pub(crate) fn from_owned_outputs(
-        txid: Hash256,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<Self, UtxoError> {
+    pub fn from_owned_outputs(txid: Hash256, outputs: &[OwnedUtxoOut]) -> Result<Self, UtxoError> {
         let buf = encode_record(
             txid,
             outputs.len().min(INLINE_CAPACITY),
@@ -193,21 +191,21 @@ impl UtxoRecord {
         UtxoKey::from_prefix(prefix)
     }
 
-    pub(crate) fn txid(&self) -> Hash256 {
+    pub fn txid(&self) -> Hash256 {
         let mut txid = [0_u8; TXID_LEN];
         txid.copy_from_slice(&self.bytes()[..TXID_LEN]);
         Hash256::from_le_bytes(&txid)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.output_count() == 0
     }
 
-    pub(crate) fn output_count(&self) -> usize {
+    pub fn output_count(&self) -> usize {
         self.header().output_count
     }
 
-    pub(crate) fn outputs(&self) -> UtxoOutputIter<'_> {
+    pub fn outputs(&self) -> UtxoOutputIter<'_> {
         let bytes = self.bytes();
         let layout = match self.layout() {
             Ok(layout) => layout,
@@ -221,7 +219,7 @@ impl UtxoRecord {
         }
     }
 
-    pub(crate) fn find_output(&self, vout: u32) -> Option<OneUtxoOut<'_>> {
+    pub fn find_output(&self, vout: u32) -> Option<OneUtxoOut<'_>> {
         let bytes = self.bytes();
         let layout = self.layout().ok()?;
         let index = (0..layout.count)
@@ -233,7 +231,7 @@ impl UtxoRecord {
         }
     }
 
-    pub(crate) fn max_vout(&self) -> Option<u32> {
+    pub fn max_vout(&self) -> Option<u32> {
         let bytes = self.bytes();
         let layout = self.layout().ok()?;
         (0..layout.count)
@@ -786,8 +784,25 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     let mut max_vout = 0_u64;
     let mut max_len = 0_u64;
     let mut cursor = layout.payloads;
+    let mut seen = if layout.count > 16 {
+        Some(hashbrown::HashSet::with_capacity(layout.count.min(1024)))
+    } else {
+        None
+    };
     for index in 0..layout.count {
-        max_vout = max_vout.max(u64::from(layout.vout_at(bytes, index)?));
+        let vout = layout.vout_at(bytes, index)?;
+        if let Some(set) = seen.as_mut() {
+            if !set.insert(vout) {
+                return Err(UtxoError::CorruptRecord);
+            }
+        } else {
+            for prior in 0..index {
+                if layout.vout_at(bytes, prior)? == vout {
+                    return Err(UtxoError::CorruptRecord);
+                }
+            }
+        }
+        max_vout = max_vout.max(u64::from(vout));
         let len = layout.payload_len_at(bytes, index)?;
         max_len = max_len.max(u64::try_from(len).unwrap_or(u64::MAX));
         let (_, next) = decode_output_at(bytes, &layout, index, cursor)?;
@@ -893,16 +908,17 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedUtxoOut {
-    pub(crate) vout: u32,
-    pub(crate) value: u64,
-    pub(crate) script_pubkey: Vec<u8>,
-    pub(crate) coinbase: bool,
-    pub(crate) height: u32,
+pub struct OwnedUtxoOut {
+    pub vout: u32,
+    pub value: u64,
+    pub script_pubkey: Vec<u8>,
+    pub coinbase: bool,
+    pub height: u32,
 }
 
 impl OwnedUtxoOut {
-    pub(crate) const fn new(
+    #[must_use]
+    pub const fn new(
         vout: u32,
         value: u64,
         script_pubkey: Vec<u8>,

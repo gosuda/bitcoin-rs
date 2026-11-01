@@ -148,6 +148,21 @@ fn a_corrupt_encoded_record_is_refused() -> Result<(), UtxoError> {
 }
 
 #[test]
+fn record_rejects_duplicate_vouts() -> Result<(), UtxoError> {
+    let record = UtxoRecord::from_owned_outputs(
+        Hash256::default(),
+        &[output(0, &[0x51], 1), output(1, &[0x52], 2)],
+    )?;
+    let mut bytes = record.bytes().to_vec();
+    bytes[V5_BODY_OFFSET + 1] = bytes[V5_BODY_OFFSET];
+    assert!(matches!(
+        UtxoRecord::from_encoded(bytes.into_boxed_slice()),
+        Err(UtxoError::CorruptRecord)
+    ));
+    Ok(())
+}
+
+#[test]
 fn an_absurd_compressed_amount_is_rejected_rather_than_overflowing() {
     let mut payload = vec![0xFE_u8];
     payload.extend_from_slice(&[0xFF; 8]);
