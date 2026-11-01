@@ -175,7 +175,7 @@ fn sendrawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
     let oversize = "00".repeat(limit + 1);
     let too_large =
         super::sendrawtransaction(&ctx, &json!([oversize])).expect_err("oversize hex must fail");
-    assert_eq!(too_large.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(too_large.code(), RpcError::CORE_DESERIALIZATION_ERROR);
 }
 
 #[test]
@@ -190,12 +190,131 @@ fn decoderawtransaction_rejects_odd_length_and_invalid_and_oversize_hex() {
         .expect_err("invalid hex must fail");
     assert_eq!(invalid.code(), RpcError::CORE_DESERIALIZATION_ERROR);
 
-    let limit = usize::try_from(super::MAX_INSPECT_HEX_CHARS / 2).unwrap_or(0);
-    let oversize = "00".repeat(limit + 1);
+    let oversize = "00".repeat(1_000_001);
     let too_large = super::decoderawtransaction(&ctx, &json!([oversize]), &latch)
         .expect_err("oversize hex must fail");
-    assert_eq!(too_large.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(too_large.code(), RpcError::CORE_DESERIALIZATION_ERROR);
 }
+// API-10
+#[test]
+fn sendrawtransaction_answers_core_tx_size_for_hex_beyond_the_broadcast_bound() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        29_424_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(29_424)).to_lower_hex_string();
+    let error = ctx
+        .chain
+        .with_stable_chainstate(|| super::sendrawtransaction(&ctx, &json!([raw.clone()])))
+        .expect_err("an oversize transaction must answer Core tx-size");
+
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_VERIFY_REJECTED,
+        "Core answers -26 for an oversize transaction: {error}"
+    );
+    assert_eq!(error.to_string(), "tx-size");
+}
+
+// API-10
+#[test]
+fn sendrawtransaction_maps_the_gateway_weight_reject_to_core_tx_size() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        2_954_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(2_954)).to_lower_hex_string();
+    let error = ctx
+        .chain
+        .with_stable_chainstate(|| super::sendrawtransaction(&ctx, &json!([raw.clone()])))
+        .expect_err("a transaction above the standard weight must answer Core tx-size");
+
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_VERIFY_REJECTED,
+        "Core answers -26 for an oversize transaction: {error}"
+    );
+    assert_eq!(error.to_string(), "tx-size");
+}
+
+// API-10
+#[test]
+fn testmempoolaccept_reports_core_tx_size_on_the_oversize_row() {
+    let ctx = Context::new();
+    fund_coin(
+        &ctx,
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+        2_954_000,
+    );
+    let ctx = Arc::new(ctx);
+    let raw = consensus_bytes(&many_output_tx(2_954)).to_lower_hex_string();
+    let rows = ctx
+        .chain
+        .with_stable_chainstate(|| super::testmempoolaccept(&ctx, &json!([[raw.clone()]])))
+        .unwrap_or_else(|err| panic!("one oversize row must not fail the request: {err}"));
+    let rows = rows.as_array().unwrap_or_else(|| panic!("rows: {rows:?}"));
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["allowed"].as_bool(), Some(false), "row: {row}");
+    assert_eq!(row["reject-reason"].as_str(), Some("tx-size"), "row: {row}");
+    assert_eq!(
+        row["reject-details"].as_str(),
+        Some("tx-size"),
+        "row: {row}"
+    );
+}
+
+// API-10
+#[test]
+fn testmempoolaccept_survives_one_oversize_row_with_package_too_large() {
+    let ctx = Context::new();
+    let outpoint = retry_fund_utxo(&ctx, 1, 10_000);
+    let small = retry_tx(outpoint, 9_000);
+    let oversize_raw = consensus_bytes(&many_output_tx(29_424)).to_lower_hex_string();
+    let small_raw = consensus_bytes(&small).to_lower_hex_string();
+    let ctx = Arc::new(ctx);
+    let rows = ctx
+        .chain
+        .with_stable_chainstate(|| {
+            super::testmempoolaccept(&ctx, &json!([[oversize_raw, small_raw]]))
+        })
+        .unwrap_or_else(|err| panic!("one oversize row must not fail the request: {err}"));
+    let rows = rows.as_array().unwrap_or_else(|| panic!("rows: {rows:?}"));
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row["package-error"].as_str(),
+            Some("package-too-large"),
+            "row: {row}"
+        );
+        assert!(
+            row["allowed"].is_null(),
+            "unfinished rows carry no allowed key: {row}"
+        );
+    }
+}
+
+// API-02
+#[test]
+fn decoderawtransaction_decodes_oversize_hex_like_core() {
+    let ctx = Arc::new(Context::new());
+    let latch = bitcoin_rs_chain::LatchWriter::new().reader();
+    let raw = consensus_bytes(&many_output_tx(117_700)).to_lower_hex_string();
+    let value = super::decoderawtransaction(&ctx, &json!([raw]), &latch)
+        .unwrap_or_else(|err| panic!("Core decodes any hex that fits the request: {err}"));
+    assert_eq!(
+        value["vout"].as_array().map(|items| items.len()),
+        Some(117_700),
+        "the decoded transaction renders every output"
+    );
+}
+
 #[test]
 fn testmempoolaccept_binds_named_parameters_and_rejects_excess() {
     let ctx = Arc::new(Context::new());
@@ -786,6 +905,52 @@ fn gettxoutproof_without_blockhash_refuses_before_reading_any_block_body() {
         0,
         "the refusal must not read any block body"
     );
+}
+
+fn many_output_tx(output_count: usize) -> Tx {
+    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[0x11_u8; 20]);
+    script.push(0x88);
+    script.push(0xac);
+    let script = Script::from_bytes(script);
+    let outputs = (0..output_count)
+        .map(|_index| TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone(),
+        })
+        .collect::<Vec<_>>();
+    Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs,
+    }
+}
+
+fn fund_coin(ctx: &Context, outpoint: OutPoint, value_sat: u64) {
+    use bitcoin_rs_primitives::{Amount, Script};
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        outpoint,
+        TxOut {
+            value: Amount::from_sat(value_sat),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        },
+        false,
+        0,
+    ));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo.fixture_set(),
+        &changes,
+        &Hash256::default(),
+    )
+    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 }
 
 fn distinct_block(marker: u8) -> Block {

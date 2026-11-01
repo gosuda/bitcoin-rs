@@ -377,7 +377,11 @@ wallet interoperability remain unverified.
 - The gateway owns fee verification and authoritative mutation.
 - Preview runs the identical pipeline and mutates nothing (no membership, estimator, relay, admission sequence, or victims; `POL-06`).
 - `testmempoolaccept` returns preview rows in the frozen Core 31.1 shape with frozen reject-reason strings.
+- RPC broadcast and preview raw-transaction hex (`sendrawtransaction`, `submitpackage`, `testmempoolaccept`) has no pre-decode size cap; decode stays bounded by the 16 MiB request body.
+- Esplora `POST /tx` keeps its own broadcast hex bound and answers 400 beyond it.
+- A transaction above `MAX_STANDARD_TX_WEIGHT` reaches the gateway: `sendrawtransaction` answers Core `-26` (`tx-size`), preview marks its row `tx-size`, and packages above `MAX_PACKAGE_WEIGHT` report Core `package-too-large` rows.
 - Broadcast rejections map to the Esplora dialect: a rejected transaction is a 400 with the reason, not a retryable 503.
+
 ### `API-11`: BIP22/BIP23 template extras
 
 - Owner: `template_from_candidate` in `crates/mining/src/coordinator.rs` via `MiningService::get_block_template`.
@@ -574,6 +578,7 @@ wallet interoperability remain unverified.
 - A txid missing from the mempool returns `-5` (`Transaction {str} not in mempool.`, caller's string).
 - Anything else is Core `DecodeHexTx`.
 - Invalid hex or an incomplete transaction returns `-22` (`Transaction decode failed for {str}. Make sure the tx has at least one input.`).
+- Raw-transaction hex has no size gate at parse; Core `DecodeHexTx` decodes any hex and the block build owns validation.
 
 ### `API-28`: `getprioritisedtransactions` `modified_fee` is satoshis
 
@@ -746,7 +751,7 @@ wallet interoperability remain unverified.
 - Rebinding the same `Context` creates a fresh dispatcher while old requests keep the old latch.
 - Registry execution metadata classifies the three waits, `scantxoutset` `start`, and template `getblocktemplate` with a string `longpollid` as `Blocking`.
 - The rows for `verifychain`, `dumptxoutset`, `gettxoutsetinfo`, `compressrawtransaction`, and `decompressrawtransaction` carry the same class.
-- `gettxoutproof` and `decoderawtransaction` take the request latch but stay ordinary: one block body or one hex-capped decode takes no blocking slot and closes no keep-alive.
+- `gettxoutproof` and `decoderawtransaction` take the request latch but stay ordinary: one block body or one body-bounded decode takes no blocking slot and closes no keep-alive.
 - Every `Handler::dispatch` of a classified call (direct, batch, notification) acquires its dispatcher bounded blocking quota.
 - A bound listener permits one fewer classified call than one source may hold.
 - The formula is `max_connections - max_connections/4 - 1` (95 of 128; zero with one worker).

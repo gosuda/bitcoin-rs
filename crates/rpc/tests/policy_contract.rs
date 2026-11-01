@@ -530,9 +530,9 @@ fn sendrawtransaction_rejects_oversized_and_nonstandard_txs()
             .err()
             .ok_or("expected oversized rejection")?,
     );
-    assert!(
-        message.contains("transaction weight exceeds maximum standard weight"),
-        "unexpected message: {message}"
+    assert_eq!(
+        message, "tx-size",
+        "Core answers tx-size for an oversize transaction"
     );
 
     let weird = Tx {

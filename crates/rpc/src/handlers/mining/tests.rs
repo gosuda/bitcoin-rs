@@ -1169,6 +1169,57 @@ fn generateblock_without_submit_includes_hex() {
     assert!(!request.submit);
 }
 
+fn oversize_raw_tx() -> Tx {
+    let mut script = vec![0x76, 0xa9, 0x14];
+    script.extend_from_slice(&[0x11_u8; 20]);
+    script.push(0x88);
+    script.push(0xac);
+    let script = Script::from_bytes(script);
+    let outputs = (0..117_700_usize)
+        .map(|_index| TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.clone(),
+        })
+        .collect::<Vec<_>>();
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        outputs,
+        lock_time: LockTime::ZERO,
+    }
+}
+
+// API-27
+#[test]
+fn generateblock_parses_oversize_raw_transactions() {
+    let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
+    let ctx = ctx_with_control(control.clone());
+    let raw = consensus_bytes(&oversize_raw_tx()).to_lower_hex_string();
+    let result = generateblock(&ctx, &json!([REGTEST_ADDRESS, [raw], false]))
+        .unwrap_or_else(|err| panic!("Core generateblock has no size gate at parse: {err}"));
+    assert!(
+        result
+            .get("hash")
+            .and_then(JsonValueTrait::as_str)
+            .is_some()
+    );
+    let request = control
+        .last_generate
+        .lock()
+        .clone()
+        .unwrap_or_else(|| panic!("generateblock must call generate"));
+    let GenerateSelection::Ordered(items) = request.selection else {
+        panic!("expected ordered selection, got {:?}", request.selection);
+    };
+    assert_eq!(items.len(), 1, "the raw transaction reaches the template");
+    assert!(!request.submit);
+}
+
 #[test]
 fn generateblock_requires_transactions_array() {
     let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());

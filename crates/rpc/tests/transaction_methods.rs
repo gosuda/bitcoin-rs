@@ -513,12 +513,8 @@ fn createrawtransaction_rejects_duplicate_input() {
     assert_eq!(err.code(), RpcError::INVALID_PARAMS);
 }
 
-const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
-const CONSENSUS_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the consensus size limit";
-
 #[test]
-fn broadcast_methods_refuse_hex_beyond_the_standard_size_limit_before_decode()
--> Result<(), TestError> {
+fn broadcast_methods_report_unparseable_oversize_hex_like_core() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let oversized = "00".repeat(400_001);
@@ -532,17 +528,18 @@ fn broadcast_methods_refuse_hex_beyond_the_standard_size_limit_before_decode()
             .err()
             .ok_or("oversized broadcast hex must be refused")?;
         assert!(
-            matches!(&error, RpcError::InvalidParameter(message) if message == BROADCAST_HEX_LIMIT_ERROR),
+            matches!(&error, RpcError::Deserialization(message)
+                if message.starts_with("TX decode failed")),
             "{method} refused with the wrong boundary: {error:?}"
         );
+        assert_eq!(error.code(), -22, "Core answers -22 for unparseable hex");
     }
     assert!(ctx.mempool.gateway.read().is_empty());
     Ok(())
 }
 
 #[test]
-fn decoderawtransaction_refuses_hex_beyond_the_consensus_size_limit_before_decode()
--> Result<(), TestError> {
+fn decoderawtransaction_reports_unparseable_oversize_hex_like_core() -> Result<(), TestError> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let oversized = "00".repeat(4_000_001);
@@ -551,9 +548,10 @@ fn decoderawtransaction_refuses_hex_beyond_the_consensus_size_limit_before_decod
         .err()
         .ok_or("oversized inspection hex must be refused")?;
     assert!(
-        matches!(&error, RpcError::InvalidParameter(message) if message == CONSENSUS_HEX_LIMIT_ERROR),
+        matches!(&error, RpcError::Deserialization(message) if message == "TX decode failed"),
         "inspection refused with the wrong boundary: {error:?}"
     );
+    assert_eq!(error.code(), -22, "Core answers -22 for unparseable hex");
     Ok(())
 }
 

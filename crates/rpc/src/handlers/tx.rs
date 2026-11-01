@@ -477,7 +477,7 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             "maxburnamount is out of range".to_owned(),
         ));
     }
-    let tx = decode_broadcast_tx(
+    let tx = decode_tx(
         raw,
         "TX decode failed. Make sure the tx has at least one input.".to_owned(),
     )?;
@@ -542,7 +542,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 "raw transaction must be a string".to_owned(),
             ));
         };
-        txs.push(decode_broadcast_tx(
+        txs.push(decode_tx(
             raw,
             format!("TX decode failed: {raw} Make sure the tx has at least one input."),
         )?);
@@ -580,7 +580,11 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
             vsize: allowed.then(|| i64::from(fact.vsize)),
             fees,
             reject_reason: fact.reject_reason.map(reject_reason_to_frozen_string),
-            reject_details: None,
+            reject_details: fact
+                .reject_reason
+                .as_ref()
+                .filter(|reason| is_oversize_reject(reason))
+                .map(|_| CORE_TX_SIZE_REJECT.to_owned()),
         }));
     }
     typed_to_sonic_omitting_nulls(&rows)
@@ -597,7 +601,7 @@ pub(crate) fn decoderawtransaction(
             "transaction decode request cancelled; retry".to_owned(),
         ));
     }
-    let tx = decode_inspection_tx(raw, "TX decode failed".to_owned())?;
+    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
     let mut value = crate::tx_render::transaction_json(&tx, ctx.chain.chain_network, None);
     if let Some(object) = value.as_object_mut() {
         object.remove(&"hex");
@@ -622,7 +626,7 @@ pub(crate) fn compressrawtransaction(
         ));
     }
     let compress_outpoints = optional_bool(params, 1, true)?;
-    let tx = decode_inspection_tx(raw, "TX decode failed".to_owned())?;
+    let tx = decode_tx(raw, "TX decode failed".to_owned())?;
     ctx.chain.with_stable_chainstate(|| {
         let mut resolver = crate::context::RpcPrevoutResolver::new(ctx, cancellation.clone())?;
         let (compressed, warnings) = crate::compressed_tx::compress_transaction(
@@ -805,9 +809,7 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
 }
 
 const MAX_BROADCAST_HEX_CHARS: u64 = 2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
-const MAX_INSPECT_HEX_CHARS: u64 = 2 * bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
 const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
-const CONSENSUS_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the consensus size limit";
 
 fn check_hex_len(raw: &str, limit: u64, error: &'static str) -> Result<(), &'static str> {
     if u64::try_from(raw.len()).unwrap_or(u64::MAX) > limit {
@@ -818,20 +820,6 @@ fn check_hex_len(raw: &str, limit: u64, error: &'static str) -> Result<(), &'sta
 
 pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
     check_hex_len(raw, MAX_BROADCAST_HEX_CHARS, BROADCAST_HEX_LIMIT_ERROR)
-}
-
-pub(crate) fn check_consensus_hex_len(raw: &str) -> Result<(), &'static str> {
-    check_hex_len(raw, MAX_INSPECT_HEX_CHARS, CONSENSUS_HEX_LIMIT_ERROR)
-}
-
-fn decode_broadcast_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
-    check_broadcast_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
-    decode_tx(raw, message)
-}
-
-fn decode_inspection_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
-    check_consensus_hex_len(raw).map_err(|error| RpcError::InvalidParameter(error.to_owned()))?;
-    decode_tx(raw, message)
 }
 
 fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
@@ -1020,11 +1008,25 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
     sats_from_btc(value, "Invalid amount")
 }
 
+const CORE_TX_SIZE_REJECT: &str = "tx-size";
+
+fn is_oversize_reject(reason: &AcceptanceRejectReason) -> bool {
+    matches!(
+        reason,
+        AcceptanceRejectReason::NonStandard(
+            bitcoin_rs_mempool::standardness::StandardnessError::Weight
+        )
+    )
+}
+
 pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
         AcceptanceRejectReason::MissingInputs => {
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
+        }
+        ref oversize if is_oversize_reject(oversize) => {
+            RpcError::TxRejected(CORE_TX_SIZE_REJECT.to_owned())
         }
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
     }
@@ -1044,6 +1046,7 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
             bitcoin_rs_mempool::PolicyError::ClusterCountLimit
             | bitcoin_rs_mempool::PolicyError::ClusterSizeLimit,
         ) => "too-large-cluster".to_owned(),
+        ref oversize if is_oversize_reject(oversize) => CORE_TX_SIZE_REJECT.to_owned(),
         other => other.to_string(),
     }
 }
