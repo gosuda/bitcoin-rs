@@ -871,7 +871,49 @@ fn gettxoutproof_with_blockhash_reports_pruned_body_for_a_header_only_block() {
 
 // API-02
 #[test]
-fn gettxoutproof_without_blockhash_refuses_before_reading_any_block_body() {
+fn gettxoutproof_without_blockhash_answers_from_the_utxo_set() {
+    let genesis = fixture_genesis();
+    let Some(coinbase) = genesis.txs.first() else {
+        panic!("genesis has no transactions");
+    };
+    let txid = coinbase.txid();
+    let mut ctx = Context::new();
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        OutPoint::new(txid, 0),
+        coinbase.outputs[0].clone(),
+        false,
+        0,
+    ));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo.fixture_set(),
+        &changes,
+        &Hash256::default(),
+    )
+    .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    install_blocks(&mut ctx, std::slice::from_ref(&genesis));
+    let ctx = Arc::new(ctx);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let value = handler
+        .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
+        .unwrap_or_else(|err| panic!("gettxoutproof failed: {err}"));
+    let Some(proof_hex) = value.as_str() else {
+        panic!("expected proof hex, got {value:?}");
+    };
+    let extracted = handler
+        .dispatch("verifytxoutproof", &json!([proof_hex]))
+        .unwrap_or_else(|err| panic!("verifytxoutproof failed: {err}"));
+    let Some(arr) = extracted.as_array() else {
+        panic!("expected array, got {extracted:?}");
+    };
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0].as_str(), Some(txid.to_string()).as_deref());
+}
+
+// API-02
+#[test]
+fn gettxoutproof_without_blockhash_answers_core_message_when_the_transaction_is_unknown() {
     let genesis = fixture_genesis();
     let Some(coinbase) = genesis.txs.first() else {
         panic!("genesis has no transactions");
@@ -889,21 +931,22 @@ fn gettxoutproof_without_blockhash_refuses_before_reading_any_block_body() {
 
     let error = handler
         .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
-        .expect_err("a missing transaction index must refuse the proof");
+        .expect_err("a transaction with no coin and no index must answer Core's miss");
 
     assert_eq!(
         error.code(),
-        RpcError::CORE_INVALID_PARAMETER,
-        "Core answers RPC_INVALID_PARAMETER for a missing txindex: {error}"
+        RpcError::CORE_NOT_FOUND,
+        "Core answers -5 for a transaction it cannot place: {error}"
     );
     assert_eq!(
         error.to_string(),
-        "The transaction index must be enabled to get a proof"
+        "Transaction not yet in block",
+        "Core's miss text for a transaction outside the UTXO set and index"
     );
     assert_eq!(
         source.calls.load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "the refusal must not read any block body"
+        "the miss must not read any block body"
     );
 }
 
@@ -1124,6 +1167,7 @@ fn gettxoutproof_index_path_does_not_read_unrelated_block_bodies() {
     );
 }
 
+// API-02
 #[test]
 fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
     let blocks = [distinct_block(1), distinct_block(2)];
@@ -1141,10 +1185,11 @@ fn gettxoutproof_keeps_its_error_when_no_block_holds_every_txid() {
 
     assert!(
         matches!(
-            result,
-            Err(RpcError::NotFound("no block contains all requested txids"))
+            &result,
+            Err(RpcError::InvalidAddressOrKey(reason))
+                if reason == "Not all transactions found in specified or retrieved block"
         ),
-        "txids spread across blocks must keep the pre-index error: {result:?}"
+        "a resolved block missing txids must answer Core's not-all error: {result:?}"
     );
 }
 
@@ -1185,16 +1230,24 @@ fn gettxoutproof_index_path_answers_for_several_txids_in_one_block() {
     assert_eq!(verified_txids, expected_txids);
 }
 
+// API-02
 #[test]
-fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
+fn gettxoutproof_asks_the_index_about_the_first_txid_only() {
     let block = block_with_two_txs(12);
-    let wanted = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-    let Some(only_one) = wanted.last().copied() else {
+    let mut wanted: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+    wanted.sort_unstable();
+    let Some(first) = wanted.first().copied() else {
         panic!("block has no transactions");
     };
 
     let mut ctx = Context::new();
-    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
+    ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |txid: &Txid| {
+        if *txid == first {
+            Ok(Some(1))
+        } else {
+            panic!("the index must not be asked about later txids: {txid}")
+        }
+    })));
     let indexed = BlockRecord::from_block(1, &block);
     ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
         height: indexed.height,
@@ -1212,7 +1265,7 @@ fn gettxoutproof_probes_every_txid_before_giving_up_on_the_index() {
 
     assert!(
         result.as_ref().is_ok_and(|value| value.as_str().is_some()),
-        "one unresolvable probe must not abandon the index path: {result:?}"
+        "one index answer for the first txid must resolve the whole proof: {result:?}"
     );
 }
 

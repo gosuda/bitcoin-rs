@@ -97,8 +97,10 @@ wallet interoperability remain unverified.
 - Bare P2PK/multisig keeps Core syntactic key handling.
 - This is an input and work limit, not a response-size limit.
 - Pinned matrix: `overhaul_process_harness::script_decode_cases` (classes, encodings, wrappers, checksums, params, networks, shared projections).
-- `gettxoutproof` without `blockhash` requires an enabled txindex whose capability is ready.
-- Without an enabled txindex, it answers Core `-8` (`The transaction index must be enabled to get a proof`) and reads no block body.
+- `gettxoutproof` without `blockhash` finds the block from the UTXO set: it probes the requested txids in ascending txid order for an unspent output (`MAX_OUTPUTS_PER_BLOCK` vouts per txid) and answers from that block.
+- With no unspent coin, it consults the txindex about the first txid only.
+- With neither source, it answers Core `-5` (`Transaction not yet in block`) and reads no block body.
+- A resolved block that does not hold every txid answers Core `-5` (`Not all transactions found in specified or retrieved block`).
 - With `blockhash`, it reads only that block.
 - Both forms hold one blocking-quota slot (`API-34`) and poll the request latch.
 - The registry declares `Blocking`.

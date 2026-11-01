@@ -319,15 +319,64 @@ pub(crate) fn gettxoutproof(
         return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
 
-    if !txindex_usable(ctx) {
-        return Err(RpcError::InvalidParameter(
-            "The transaction index must be enabled to get a proof".to_owned(),
-        ));
+    let mut ordered: Vec<Txid> = wanted.iter().copied().collect();
+    ordered.sort_unstable();
+    if let Some(record) = ctx
+        .chain
+        .with_stable_chainstate(|| block_from_utxo(ctx, &ordered))
+    {
+        return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
-    if let Some(proof) = proof_via_index(ctx, &wanted, cancellation)? {
-        return Ok(proof);
+    if txindex_usable(ctx)
+        && let Some(record) = block_via_index(ctx, ordered.first(), cancellation)?
+    {
+        return proof_from_single_record(ctx, &record, &wanted, cancellation);
     }
-    Err(RpcError::NotFound("no block contains all requested txids"))
+    Err(RpcError::InvalidAddressOrKey(
+        "Transaction not yet in block".to_owned(),
+    ))
+}
+
+const MAX_OUTPUTS_PER_BLOCK: u32 = 111_111;
+
+fn block_from_utxo(ctx: &Arc<Context>, ordered: &[Txid]) -> Option<BlockRecord> {
+    for txid in ordered {
+        for vout in 0..MAX_OUTPUTS_PER_BLOCK {
+            let Some(coin) = ctx.chain.utxo.get_entry(&OutPoint::new(*txid, vout)) else {
+                continue;
+            };
+            return ctx.chain.block_by_height(coin.height);
+        }
+    }
+    None
+}
+
+fn block_via_index(
+    ctx: &Arc<Context>,
+    txid: Option<&Txid>,
+    cancellation: &bitcoin_rs_chain::LatchReader,
+) -> Result<Option<BlockRecord>, RpcError> {
+    let Some(txid) = txid else {
+        return Ok(None);
+    };
+    if cancellation.is_triggered() {
+        return Err(proof_interrupted());
+    }
+    let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
+        return Ok(None);
+    };
+    match derived_index.transaction_height(txid) {
+        Ok(Some(height)) => Ok(ctx.chain.block_by_height(height)),
+        Ok(None) => Ok(None),
+        Err(error) => {
+            tracing::warn!(
+                txid = %txid,
+                %error,
+                "txindex lookup failed; gettxoutproof cannot answer"
+            );
+            Err(error.into())
+        }
+    }
 }
 
 fn txindex_usable(ctx: &Context) -> bool {
@@ -347,40 +396,6 @@ fn proof_interrupted() -> RpcError {
     RpcError::Misc("gettxoutproof interrupted".to_owned())
 }
 
-fn proof_via_index(
-    ctx: &Arc<Context>,
-    wanted: &hashbrown::HashSet<Txid>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
-) -> Result<Option<Value>, RpcError> {
-    let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
-        return Ok(None);
-    };
-    for probe in wanted {
-        if cancellation.is_triggered() {
-            return Err(proof_interrupted());
-        }
-        let height = match derived_index.transaction_height(probe) {
-            Ok(Some(height)) => height,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(
-                    txid = %probe,
-                    %error,
-                    "txindex lookup failed; gettxoutproof cannot answer"
-                );
-                return Err(error.into());
-            }
-        };
-        let Some(record) = ctx.chain.block_by_height(height) else {
-            continue;
-        };
-        if let Some(proof) = proof_from_record(ctx, &record, wanted, cancellation)? {
-            return Ok(Some(proof));
-        }
-    }
-    Ok(None)
-}
-
 fn proof_from_single_record(
     ctx: &Arc<Context>,
     record: &bitcoin_rs_index::block_log::BlockRecord,
@@ -393,23 +408,9 @@ fn proof_from_single_record(
     let Some(bytes) = ctx.chain.block_body_bytes(record) else {
         return Err(RpcError::NotFound("block data pruned"));
     };
-    proof_from_body(&bytes, wanted)
-        .ok_or(RpcError::NotFound("no block contains all requested txids"))
-}
-
-fn proof_from_record(
-    ctx: &Arc<Context>,
-    record: &bitcoin_rs_index::block_log::BlockRecord,
-    wanted: &hashbrown::HashSet<Txid>,
-    cancellation: &bitcoin_rs_chain::LatchReader,
-) -> Result<Option<Value>, RpcError> {
-    if cancellation.is_triggered() {
-        return Err(proof_interrupted());
-    }
-    let Some(bytes) = ctx.chain.block_body_bytes(record) else {
-        return Err(RpcError::NotFound("block data pruned"));
-    };
-    Ok(proof_from_body(&bytes, wanted))
+    proof_from_body(&bytes, wanted).ok_or(RpcError::InvalidAddressOrKey(
+        "Not all transactions found in specified or retrieved block".to_owned(),
+    ))
 }
 
 fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
