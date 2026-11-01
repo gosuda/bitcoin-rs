@@ -1,6 +1,6 @@
 # Window pipeline and group commit attribution
 
-This document defines the measurement protocol, the evidence schema, and the promotion gates for windowed block apply (ENG-91, #1607). It also governs the durable group commit. Product-domain measured seconds never live here (`HPA-08`, `HPA-12`). This page records diagnostic run summaries for one window-apply mechanism (`HPA-09`). It also records the keep-or-revert decision. Status: `measured_rejected`. The candidate arm ran, failed the gate, and was reverted. Its regression tests stayed. Shared cell rules are in [README.md](README.md). The attribution method is in [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md).
+This document defines the measurement protocol, the evidence schema, and the promotion gates for windowed block apply (#1607). It also governs the durable group commit. Product-domain measured seconds never live here (`HPA-08`, `HPA-12`). This page records diagnostic run summaries for one window-apply mechanism (`HPA-09`). It also records the keep-or-revert decision. Status: `measured_rejected`. The candidate arm ran, failed the gate, and was reverted. Its regression tests stayed. Shared cell rules are in [README.md](README.md). The attribution method is in [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md).
 
 | Item | State |
 |---|---|

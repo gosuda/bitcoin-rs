@@ -1,6 +1,6 @@
 # P2P loopback lanes
 
-This document owns the loopback P2P lanes of the target node (gate G7). The lanes cover deterministic multi-peer handshake, headers, block download and serving, transaction ingress and egress, discovery, and fee-filter relay. They also cover compact-block reconstruction with full-block fallback, and optional v2 transport and compact filters when enabled. No lane contacts public nodes.
+This document owns the loopback P2P lanes of the target node (P2P gate). The lanes cover deterministic multi-peer handshake, headers, block download and serving, transaction ingress and egress, discovery, and fee-filter relay. They also cover compact-block reconstruction with full-block fallback, and optional v2 transport and compact filters when enabled. No lane contacts public nodes.
 Comparator `tools/benchmark-campaign/p2p_loopback.py` (contract `p2p-loopback-config-v1`, result `p2p-loopback-result-v2`); description below is prior contract text, and no completed campaign is claimed.
 
 ## Cells it owns

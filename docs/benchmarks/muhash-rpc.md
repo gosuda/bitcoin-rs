@@ -1,6 +1,6 @@
 # MuHash RPC comparator cell
 
-This document owns the MuHash API cell. The cell is the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs, compared with the same JSON-RPC call in Bitcoin Core `v31.1`. The custody controller `tools/benchmark-campaign/muhash_rpc.py` drives the comparison. The controller is a comparator, not a benchmark result. A ratio exists only after every custody gate passes. In the target node the query uses an `AppliedView` tip check and a stable UTXO view. It is bounded and cancellable. Its result is a product cell under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md) and a manifest row of the T31 Core RPC contract.
+This document owns the MuHash API cell. The cell is the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs, compared with the same JSON-RPC call in Bitcoin Core `v31.1`. The custody controller `tools/benchmark-campaign/muhash_rpc.py` drives the comparison. The controller is a comparator, not a benchmark result. A ratio exists only after every custody gate passes. In the target node the query uses an `AppliedView` tip check and a stable UTXO view. It is bounded and cancellable. Its result is a product cell under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md) and a manifest row of the MuHash Core RPC contract.
 
 ## Cell it owns
 
