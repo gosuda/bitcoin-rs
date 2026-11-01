@@ -330,7 +330,7 @@ impl DerivedIndexQueryEngine {
             .map(|row| row.row.height())
             .filter(|height| prefix.covers(*height))
             .collect();
-        heights.sort_unstable_by(|left, right| right.cmp(left));
+        heights.sort_unstable();
         heights.dedup();
         if heights.is_empty() {
             return Self::scoped_absence(prefix, "transaction index");
@@ -836,7 +836,7 @@ mod tests {
 
     // IDX-02
     #[test]
-    fn history_cursor_resolves_the_newest_occurrence() {
+    fn history_cursor_resolves_the_oldest_covered_occurrence() {
         let script = ScriptHash::from_byte_array([4; 32]);
         let duplicate = occurrence(script, 9, 77);
         let snapshot = HistorySnapshot::new(
@@ -851,7 +851,59 @@ mod tests {
             &Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
         )
         .unwrap_or_else(|error| panic!("cursor resolution failed: {error}"));
-        assert_eq!(cursor, Some((20, 77)), "the newest occurrence wins");
+        assert_eq!(
+            cursor,
+            Some((5, 66)),
+            "the cursor excludes every earlier occurrence of the same transaction"
+        );
+    }
+
+    // IDX-02
+    #[test]
+    fn duplicate_txid_cursor_never_repeats_a_page() {
+        let script = ScriptHash::from_byte_array([5; 32]);
+        let duplicate = occurrence(script, 9, 100);
+        let snapshot = HistorySnapshot::new(
+            script,
+            vec![
+                (20, vec![duplicate, occurrence(script, 7, 50)]),
+                (5, vec![occurrence(script, 9, 90)]),
+            ],
+        );
+        let budget = &mut QueryBudget::new();
+        let mut seen: Vec<ScriptHistoryRecord> = Vec::new();
+        let mut cursor = None;
+        for _ in 0..8 {
+            let page = DerivedIndexQueryEngine::confirmed_history_page_for(
+                &snapshot,
+                &prefix(),
+                budget,
+                script,
+                cursor,
+                1,
+            )
+            .unwrap_or_else(|error| panic!("cursor page failed: {error}"));
+            assert!(page.cursor_found);
+            if page.records.is_empty() {
+                break;
+            }
+            for record in page.records {
+                assert!(
+                    !seen.contains(&record),
+                    "a page repeated {record:?} after the cursor"
+                );
+                seen.push(record);
+            }
+            cursor = seen.last().map(|record| record.txid);
+        }
+        assert_eq!(
+            seen.first(),
+            Some(&ScriptHistoryRecord {
+                txid: Txid(bitcoin_rs_primitives::Hash256::from_le_bytes(&[9; 32])),
+                height: 20,
+            }),
+            "the first page starts at the newest occurrence"
+        );
     }
 
     // IDX-02
