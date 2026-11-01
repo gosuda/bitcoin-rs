@@ -111,15 +111,14 @@ pub fn scan_blocks<R: BufRead>(mut reader: R) -> Result<ScanReport, ScanError> {
         let block = ParsedBlock::parse_exact(&raw)
             .map_err(|source| ScanError::Decode { line, source })?
             .materialize();
-        if let Some(expected) = previous {
-            let found = block.header.prev_blockhash;
-            if found != expected {
-                return Err(ScanError::BrokenChain {
-                    line,
-                    expected,
-                    found,
-                });
-            }
+        let found = block.header.prev_blockhash;
+        let expected = previous.unwrap_or_default();
+        if found != expected {
+            return Err(ScanError::BrokenChain {
+                line,
+                expected,
+                found,
+            });
         }
         previous = Some(block.block_hash());
         if height > 0 {

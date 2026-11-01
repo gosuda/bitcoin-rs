@@ -108,6 +108,17 @@ fn chain_file_round_trip_preserves_blocks_undo_and_final_set() {
 }
 
 #[test]
+fn a_declared_block_count_above_the_file_is_refused_without_reserving_it() {
+    let text = "swiftsync-chain 1\nseed 00\nblocks 18446744073709551615\n";
+    let error = Chain::parse(text).expect_err("a count without blocks must be refused");
+    assert!(
+        matches!(error, Error::ChainFormat { line: 3, .. }),
+        "oracle is the chain file grammar: the declared count must equal the carried \
+         blocks; got {error}"
+    );
+}
+
+#[test]
 fn fold_of_created_minus_spent_equals_the_reconstruction_muhash() {
     let chain = chain::build(ChainSpec::pinned()).expect("pinned chain builds");
     let hints = hints_for(&chain);

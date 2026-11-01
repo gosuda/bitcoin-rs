@@ -349,6 +349,21 @@ fn refuses_a_reordered_block_file_naming_the_line() {
 }
 
 #[test]
+fn refuses_a_file_that_starts_after_genesis() {
+    let Chain { lines, .. } = fixture_chain();
+    let error = scan_lines(&lines[1..]).expect_err("a file without the genesis block must fail");
+    assert!(
+        matches!(
+            error,
+            ScanError::BrokenChain { line: 1, expected, .. }
+                if expected == bitcoin_rs_primitives::BlockHash::default()
+        ),
+        "oracle is header linkage: file line 1 must hold the genesis block, whose \
+         prev_blockhash is all zeros; got {error}"
+    );
+}
+
+#[test]
 fn p2pk_shape_requires_key_prefix_and_checksig() {
     assert!(
         p2pk_pubkey(&p2pk(KEY_WRONG_PREFIX).to_bytes()).is_none(),

@@ -540,11 +540,35 @@ class FreezePins(unittest.TestCase):
         self.assertEqual(cmodern.state["oracle"], "core_gettxoutsetinfo_muhash_at_stop")
 
     def test_validation_posture_and_oracle(self) -> None:
+        self.assertEqual(self.freeze.assume_valid_height, 0)
+        self.assertEqual(self.freeze.network, "mainnet")
+        self.assertEqual(self.freeze.genesis_hash, GENESIS_HASH)
+        self.assertEqual(self.freeze.network_magic, MAGIC)
+        self.assertEqual(self.freeze.core_oracle["implementation"], "Bitcoin Core 31.1")
         self.assertEqual(
             corpus.core_oracle_params(self.freeze, "C150"), ["muhash", 150_000, True]
         )
         self.assertEqual(
             corpus.core_oracle_params(self.freeze, "Cmodern"), ["muhash", 709_635, True]
+        )
+
+    def test_eleven_named_special_contexts(self) -> None:
+        self.assertEqual(len(self.freeze.census_specials), 11)
+        self.assertEqual(
+            set(self.freeze.census_specials),
+            {
+                "p2sh_redeem_spends",
+                "native_witness_v0_spends",
+                "p2sh_wrapped_witness_v0_spends",
+                "bare_multisig_checks",
+                "p2sh_multisig_checks",
+                "native_witness_v0_multisig_checks",
+                "p2sh_wrapped_witness_v0_multisig_checks",
+                "taproot_key_path_spends",
+                "tapscript_spends",
+                "tapscript_schnorr_checks",
+                "tapscript_checksigadd_checks",
+            },
         )
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ pub const BLOCK_INTERVAL: u32 = 600;
 pub const SUBSIDY_HALVING_INTERVAL: u32 = 150;
 pub const INITIAL_SUBSIDY: u64 = 50 * 100_000_000;
 pub const MAX_BLOCK_TRANSACTIONS: u32 = 4;
+pub const PREALLOCATED_ENTRIES: usize = 1024;
 
 pub fn subsidy(height: u32) -> u64 {
     INITIAL_SUBSIDY >> (height / SUBSIDY_HALVING_INTERVAL).min(63)
@@ -538,7 +539,7 @@ impl Chain {
             });
         };
         let count = parse_field::<usize>(count_line, "blocks", index.saturating_add(1))?;
-        let mut blocks: Vec<ChainBlock> = Vec::with_capacity(count);
+        let mut blocks: Vec<ChainBlock> = Vec::with_capacity(count.min(PREALLOCATED_ENTRIES));
         while let Some((index, line)) = lines.next() {
             let line_number = index.saturating_add(1);
             let fields: Vec<&str> = line.split(' ').collect();
@@ -572,7 +573,7 @@ impl Chain {
                 });
             }
             let undo_count = parse_str::<usize>(undo_fields[2], undo_line_number)?;
-            let mut undo = Vec::with_capacity(undo_count);
+            let mut undo = Vec::with_capacity(undo_count.min(PREALLOCATED_ENTRIES));
             for _ in 0..undo_count {
                 let Some((entry_index, entry_line)) = lines.next() else {
                     return Err(Error::ChainFormat {

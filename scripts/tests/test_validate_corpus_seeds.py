@@ -101,6 +101,7 @@ class ValidateCorpusSeedsTest(unittest.TestCase):
     def test_empty_corpus_fails(self):
         proc = run_validator(str(self.corpus), "t")
         self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refusing empty corpus", proc.stderr)
 
     def test_budget_flags_reject_flood(self):
         self.add_seed(b"one")

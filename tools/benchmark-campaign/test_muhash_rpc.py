@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -33,7 +34,7 @@ BESTBLOCK = "ab" * 32
 MUHASH = "cd" * 32
 OTHER_MUHASH = "ef" * 32
 HEIGHT = 840_000
-CREDENTIAL_SECRET = "bench-pass-7f3a"
+CREDENTIAL_SECRET = secrets.token_hex(16)
 REQUEST_BODY = module._request_body()
 
 
@@ -2430,6 +2431,15 @@ class CampaignControllerTests(unittest.TestCase):
                 )
             finally:
                 module.os.memfd_create = real_memfd  # type: ignore[method-assign]
+            self.assertEqual(
+                calls,
+                [
+                    module._MFD_ALLOW_SEALING | module._MFD_EXEC,
+                    module._MFD_ALLOW_SEALING,
+                    module._MFD_ALLOW_SEALING | module._MFD_NOEXEC_SEAL,
+                    module._MFD_ALLOW_SEALING,
+                ],
+            )
             ran = subprocess.run(
                 [f"/proc/self/fd/{binary_fd}"],
                 capture_output=True,

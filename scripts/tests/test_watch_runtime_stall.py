@@ -207,6 +207,7 @@ class RuntimeStallTests(unittest.TestCase):
         # entries exist; an unbounded enumeration would pull all 300.
         self.assertEqual(len(pulls), 257)
         waits = next(self.root.glob("stall-*/kernel-waits.txt")).read_text()
+        self.assertIn("Thread snapshot truncated at 256 threads.\n", waits)
         self.assertEqual(waits.count("/comm: unavailable"), 256)
 
     def test_identity_change_after_attach_forces_an_incomplete_result(self) -> None:
@@ -266,9 +267,10 @@ class RuntimeStallTests(unittest.TestCase):
         with patch.object(watchdog, "process",
                           side_effect=[identity, replacement]), \
              patch.object(watchdog.subprocess, "run", return_value=probe) as run:
-            with self.assertRaises(ProcessLookupError):
+            with self.assertRaises(ProcessLookupError) as raised:
                 watchdog.preflight_attach(identity, "/not-a-debugger")
         run.assert_called_once()
+        self.assertIn("PID was reused", str(raised.exception))
 
     def test_preflight_scopes_denial_diagnosis_to_ptrace_output(self) -> None:
         identity = watchdog.Process(99, "100")
