@@ -255,11 +255,43 @@ mod tests {
 
     mod roundtrip {
         use bitcoin::consensus::serialize;
-        use proptest::collection::vec;
         use proptest::prelude::*;
 
         use crate::consensus_bytes;
         use crate::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
+
+        fn proptest_config(default_cases: u32) -> ProptestConfig {
+            let cases = std::env::var("PROPTEST_CASES")
+                .ok()
+                .and_then(|val| val.parse().ok())
+                .unwrap_or(default_cases);
+            ProptestConfig {
+                cases,
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn boundary_item_strategy() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![
+                1 => Just(Vec::new()),
+                1 => Just(vec![0x00]),
+                1 => Just(vec![0x51]),
+                1 => Just(vec![0xff; 32]),
+                1 => Just(vec![0x42; 520]),
+                3 => proptest::collection::vec(any::<u8>(), 0..=80),
+                1 => proptest::collection::vec(any::<u8>(), 81..=520),
+            ]
+        }
+
+        fn boundary_stack_strategy() -> impl Strategy<Value = Vec<Vec<u8>>> {
+            prop_oneof![
+                1 => Just(Vec::new()),
+                1 => Just(vec![Vec::new()]),
+                1 => Just(vec![Vec::new(), Vec::new()]),
+                1 => Just(vec![vec![0x01], Vec::new(), vec![0x02]]),
+                3 => proptest::collection::vec(boundary_item_strategy(), 0..=32),
+            ]
+        }
 
         fn bitcoin_tx_with(stack: &[Vec<u8>]) -> bitcoin::Transaction {
             bitcoin::Transaction {
@@ -282,16 +314,37 @@ mod tests {
         }
 
         proptest! {
+            #![proptest_config(proptest_config(1024))]
+
             #[test]
             fn stacks_round_trip_and_encode_like_rust_bitcoin(
-                stack in vec(vec(any::<u8>(), 0..300), 0..64)
+                stack in boundary_stack_strategy(),
             ) {
                 let witness = Witness::from_stack(stack.clone());
+                let mut pushed = Witness::new();
+                for item in &stack {
+                    pushed.push(item);
+                }
+                prop_assert_eq!(&witness, &pushed);
                 prop_assert_eq!(witness.len(), stack.len());
+                prop_assert_eq!(witness.is_empty(), stack.is_empty());
+
                 let items: Vec<&[u8]> = witness.iter().collect();
                 let expected: Vec<&[u8]> = stack.iter().map(Vec::as_slice).collect();
-                prop_assert_eq!(items, expected);
-                prop_assert_eq!(witness.iter().rev().count(), stack.len());
+                prop_assert_eq!(&items, &expected);
+
+                let rev_items: Vec<&[u8]> = witness.iter().rev().collect();
+                let mut rev_expected = expected.clone();
+                rev_expected.reverse();
+                prop_assert_eq!(&rev_items, &rev_expected);
+
+                for (idx, item) in stack.iter().enumerate() {
+                    prop_assert_eq!(witness.get(idx), Some(item.as_slice()));
+                    prop_assert_eq!(&witness[idx], item.as_slice());
+                }
+                prop_assert_eq!(witness.get(stack.len()), None);
+                prop_assert_eq!(witness.first(), stack.first().map(Vec::as_slice));
+                prop_assert_eq!(witness.last(), stack.last().map(Vec::as_slice));
 
                 let tx = Tx {
                     version: 2,
@@ -309,6 +362,33 @@ mod tests {
                 };
                 let oracle = serialize(&bitcoin_tx_with(&stack));
                 prop_assert_eq!(consensus_bytes(&tx), oracle);
+
+                let mut cleared = pushed;
+                cleared.clear();
+                prop_assert!(cleared.is_empty());
+                prop_assert_eq!(cleared.len(), 0);
+            }
+
+            #[test]
+            fn script_buffer_and_slice_invariants(
+                raw in prop_oneof![
+                    1 => Just(Vec::new()),
+                    1 => Just(vec![0x51]),
+                    1 => Just(vec![0x00; 20]),
+                    1 => Just(vec![0x6a, 0x14]),
+                    2 => proptest::collection::vec(any::<u8>(), 0..=520),
+                ],
+            ) {
+                let script = Script::from_bytes(raw.clone());
+                prop_assert_eq!(script.as_bytes(), raw.as_slice());
+                prop_assert_eq!(script.len(), raw.len());
+                prop_assert_eq!(script.is_empty(), raw.is_empty());
+                prop_assert_eq!(&script, &raw);
+
+                let oracle = bitcoin::ScriptBuf::from_bytes(raw);
+                prop_assert_eq!(script.as_bytes(), oracle.as_bytes());
+                prop_assert_eq!(script.len(), oracle.len());
+                prop_assert_eq!(script.is_empty(), oracle.is_empty());
             }
         }
     }
