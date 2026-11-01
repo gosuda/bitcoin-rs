@@ -275,6 +275,11 @@ run_single_campaign() {
     run_target_coverage "${target}" "after" "${target_corpus}"
 
     if (( cmin_status == 0 )); then
+        if ! "${REPO_ROOT}/scripts/validate-corpus-seeds.sh" \
+            "${target_corpus}" "${target}"; then
+            printf '%s\n' "refusing to publish corpus for ${target}" >&2
+            return 1
+        fi
         rsync -a --delete "${target_corpus}/" "${OUTPUT_DIR}/corpus/${target}/"
     fi
 
