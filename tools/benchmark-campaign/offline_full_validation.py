@@ -37,12 +37,14 @@ from evidence import (
     JsonObject,
     _array,
     _is_object,
-    _publish_result,
+    _object,
     _text,
     _uint,
     _validate_json_depth,
     canonical_bytes,
     canonical_sha256,
+    copy_pinned,
+    publish_result,
     summarize,
 )
 from p2p_loopback import _ChildSubreaperScope, _direct_children_pids
@@ -408,18 +410,6 @@ class ArmObservation:
     durability_ok: bool
     state_ok: bool
     error: str | None
-
-
-def _object(value: object, field: str, keys: frozenset[str]) -> JsonObject:
-    if not _is_object(value):
-        raise ContractError(f"{field} must be a JSON object")
-    actual = frozenset(value)
-    if actual != keys:
-        raise ContractError(
-            f"{field} has wrong keys; missing_count={len(keys - actual)}, "
-            f"unknown_count={len(actual - keys)}"
-        )
-    return value
 
 
 def _boolean(value: object, field: str) -> bool:
@@ -1140,93 +1130,34 @@ def _expand_command(
 
 def _verified_copy(program: Program, arm_dir: Path) -> Path:
     descriptor = _open_regular(program.binary, f"{program.role} binary")
-    digest = hashlib.sha256()
-    target = arm_dir / "node-under-test"
     try:
         info = os.fstat(descriptor)
-        if info.st_size > MAX_BINARY_BYTES:
-            raise ContractError(f"{program.role}.binary exceeds MAX_BINARY_BYTES")
-        target_fd = os.open(
-            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o500
-        )
-        try:
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                written = 0
-                while written < len(chunk):
-                    written += os.write(target_fd, chunk[written:])
-            os.fsync(target_fd)
-        finally:
-            os.close(target_fd)
-    except OSError as error:
-        raise ContractError(f"cannot copy {program.role} binary: {error}") from error
     finally:
         os.close(descriptor)
-    if digest.hexdigest() != program.binary_sha256:
-        target.unlink(missing_ok=True)
-        raise ContractError(f"{program.role} copied binary digest mismatch")
-    target.chmod(0o500)
-    return target
+    if info.st_size > MAX_BINARY_BYTES:
+        raise ContractError(f"{program.role}.binary exceeds MAX_BINARY_BYTES")
+    return copy_pinned(
+        program.binary, arm_dir / "node-under-test", program.binary_sha256
+    )
 
 
-def _verify_copy_digest(binary_path: Path, expected: str) -> None:
-    descriptor = _open_regular(binary_path, "arm binary")
-    owned = False
-    try:
-        with os.fdopen(descriptor, "rb") as stream:
-            owned = True
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    except OSError as error:
-        raise ContractError(f"cannot verify arm binary bytes: {error}") from error
-    finally:
-        if not owned:
-            os.close(descriptor)
+def _require_copy_digest(binary_path: Path, expected: str) -> None:
+    _, digest = _hash_regular(binary_path, "arm binary")
     if digest != expected:
         raise ContractError("arm binary changed after its verified copy")
 
 
-def _copy_readonly(
-    source: Path,
-    dest: Path,
-    expected_sha256: str,
-    expected_size: int,
-    field: str,
-) -> FileIdentity:
-    descriptor = _open_regular(source, field)
-    digest = hashlib.sha256()
-    copied = 0
+def _pin_file(ref: FileRef, dest: Path, field: str) -> FileIdentity:
+    copy_pinned(ref.path, dest, ref.sha256, 0o400)
     try:
-        dest_fd = os.open(
-            dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400
-        )
-        try:
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                copied += len(chunk)
-                digest.update(chunk)
-                written = 0
-                while written < len(chunk):
-                    written += os.write(dest_fd, chunk[written:])
-            os.fsync(dest_fd)
-            info = os.fstat(dest_fd)
-        finally:
-            os.close(dest_fd)
-    except OSError as error:
+        info, digest = _hash_regular(dest, field)
+    except ContractError:
         dest.unlink(missing_ok=True)
-        raise ContractError(f"cannot pin {field}: {error}") from error
-    finally:
-        os.close(descriptor)
-    observed = digest.hexdigest()
-    if copied != expected_size or observed != expected_sha256:
+        raise
+    if info.st_size != ref.size:
         dest.unlink(missing_ok=True)
         raise ContractError(f"{field} changed before the campaign pin")
-    dest.chmod(0o400)
-    return _identity_from_stat(info, observed)
+    return _identity_from_stat(info, digest)
 
 
 def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
@@ -1234,31 +1165,15 @@ def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
     custody.mkdir()
     archive_path = custody / "archive"
     manifest_path = custody / "manifest"
-    archive_identity = _copy_readonly(
-        config.archive.path,
-        archive_path,
-        config.archive.sha256,
-        config.archive.size,
-        "archive",
-    )
-    manifest_identity = _copy_readonly(
-        config.manifest.path,
-        manifest_path,
-        config.manifest.sha256,
-        config.manifest.size,
-        "manifest",
-    )
+    archive_identity = _pin_file(config.archive, archive_path, "archive")
+    manifest_identity = _pin_file(config.manifest, manifest_path, "manifest")
     index_ref: FileRef | None = None
     index_identity: FileIdentity | None = None
     pinned_sources: list[PinnedIndexedSource] = []
     if config.indexed is not None:
         custody_index = custody / "index"
-        index_identity = _copy_readonly(
-            config.indexed.index.path,
-            custody_index,
-            config.indexed.index.sha256,
-            config.indexed.index.size,
-            "indexed index",
+        index_identity = _pin_file(
+            config.indexed.index, custody_index, "indexed index"
         )
         index_ref = FileRef(
             custody_index,
@@ -1274,12 +1189,8 @@ def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
         for name, digest, size in declared:
             original = config.indexed.source_dir / name
             dest = sources_dir / name
-            identity = _copy_readonly(
-                original,
-                dest,
-                digest,
-                size,
-                f"indexed source {name}",
+            identity = _pin_file(
+                FileRef(original, digest, size), dest, f"indexed source {name}"
             )
             pinned_sources.append(
                 PinnedIndexedSource(name, FileRef(dest, digest, size), identity)
@@ -1515,7 +1426,7 @@ def _run_arm(
     data_dir.mkdir()
     binary_path = _verified_copy(program, arm_dir)
     _assert_pins(pinned)
-    _verify_copy_digest(binary_path, program.binary_sha256)
+    _require_copy_digest(binary_path, program.binary_sha256)
     state_path = arm_dir / "state.json"
     argv = _expand_command(
         program.command,
@@ -1541,7 +1452,7 @@ def _run_arm(
             raise ContractError(f"{program.role} has no reopen command")
         reopen_path = arm_dir / "reopen-state.json"
         _assert_pins(pinned)
-        _verify_copy_digest(binary_path, program.binary_sha256)
+        _require_copy_digest(binary_path, program.binary_sha256)
         reopen_argv = _expand_command(
             program.reopen_command,
             binary_path=binary_path,
@@ -1726,7 +1637,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         prefix="offline-full-validation-", dir=output.parent
     ) as temporary:
         result = run_campaign(config, Path(temporary) / "arms")
-        _publish_result(result, output)
+        publish_result(result, output)
     return 0
 
 

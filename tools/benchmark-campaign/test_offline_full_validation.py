@@ -46,6 +46,12 @@ HASH64 = "ab" * 32
 OUTPUT_NAME = Path("out") / "result.json"
 
 
+def _output(root: Path) -> Path:
+    output = root / OUTPUT_NAME
+    output.parent.mkdir(mode=0o700, exist_ok=True)
+    return output
+
+
 def _is_object(value: object) -> TypeIs[JsonObject]:
     return isinstance(value, dict) and all(isinstance(key, str) for key in value)
 
@@ -572,7 +578,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-campaign-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -607,7 +613,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-reopen-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_workspace(root, reopen=True)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -630,7 +636,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(liar)
         config["candidate"]["binary_sha256"] = _sha256_file(liar)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -649,7 +655,7 @@ class CampaignTests(unittest.TestCase):
         config["core"]["binary"] = str(failing)
         config["core"]["binary_sha256"] = _sha256_file(failing)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -658,8 +664,7 @@ class CampaignTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-exists-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, _ = _build_workspace(root)
-        output = root / OUTPUT_NAME
-        output.parent.mkdir(parents=True)
+        output = _output(root)
         output.write_text("keep\n", encoding="utf-8")
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
@@ -695,7 +700,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(daemon)
         config["candidate"]["binary_sha256"] = _sha256_file(daemon)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -718,7 +723,7 @@ class CampaignTests(unittest.TestCase):
         config["candidate"]["binary"] = str(mutator)
         config["candidate"]["binary_sha256"] = _sha256_file(mutator)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
@@ -741,7 +746,7 @@ class IndexedParityHarnessTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp(prefix="offline-indexed-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, expected = _build_dual_workspace(root)
-        output = root / OUTPUT_NAME
+        output = _output(root)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -868,7 +873,7 @@ class IndexedParityHarnessTests(unittest.TestCase):
         config["candidate"]["binary"] = str(mutator)
         config["candidate"]["binary_sha256"] = _sha256_file(mutator)
         config_path.write_bytes(canonical_bytes(config) + b"\n")
-        output = root / OUTPUT_NAME
+        output = _output(root)
         with self.assertRaises(ContractError):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
