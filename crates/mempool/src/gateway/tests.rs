@@ -1962,7 +1962,9 @@ fn begin_chain_change_serializes_with_inflight_admission() {
 
     let gateway_b = Arc::clone(&gateway);
     let (b_done_tx, b_done_rx) = mpsc::channel();
+    let (b_ready_tx, b_ready_rx) = mpsc::channel();
     let b_handle = std::thread::spawn(move || {
+        b_ready_tx.send(()).expect("thread B ready");
         let guard = gateway_b
             .begin_chain_change()
             .expect("begin after lock release");
@@ -1971,7 +1973,9 @@ fn begin_chain_change_serializes_with_inflight_admission() {
             .expect("test waiting for begin result");
     });
 
-    std::thread::sleep(core::time::Duration::from_millis(100));
+    b_ready_rx
+        .recv_timeout(core::time::Duration::from_secs(10))
+        .expect("thread B started");
     assert_eq!(
         gateway.stable_generation(),
         Some(0),
