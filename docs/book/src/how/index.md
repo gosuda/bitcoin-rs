@@ -71,10 +71,10 @@ The portable bundle is a one-shot import or export of `TxLookup` only. `--index-
 
 ## Worked trace
 
-A regtest node started with `--txindex true --scriptindex=full` logs index store recovery before workers start:
+A regtest node started with `--txindex true --scriptindex=full` logs index store recovery before workers start. `$DATA` is the data directory passed to `--data-dir`:
 
 ```text
-$ bitcoin-rs --network regtest --data-dir /tmp/book_embedhow_idx \
+$ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
     --txindex true --scriptindex=full
 {"timestamp":"2026-11-01T17:01:17.243411Z","level":"INFO","fields":{"message":"index store recovery in progress","capability":"txindex","namespace":"txindex","backend":"fjall","elapsed_secs":0},"target":"bitcoin_rs_index::runtime::startup"}

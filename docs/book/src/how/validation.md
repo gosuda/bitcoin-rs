@@ -53,10 +53,10 @@ Selection is a runtime setting, spelled identically at each layer:
 | TOML | `validation_engine = "kernel"` | `validation_mode = "full"` |
 | Layers | defaults, then `--config`, then `--bitcoin-conf`, then environment, then CLI | same |
 
-A kernel-free binary refuses the setting at startup, before chain state opens:
+A kernel-free binary refuses the setting at startup, before chain state opens. `$DATA` is a data directory:
 
 ```text
-$ bitcoin-rs --network regtest --data-dir /tmp/book_embedhow_kernel \
+$ bitcoin-rs --network regtest --data-dir $DATA \
     --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --validation-engine kernel
 bitcoin-rs: validation engine `kernel` is not supported by this build: bitcoinkernel support is not compiled in (enable the `kernel` feature)
 ```

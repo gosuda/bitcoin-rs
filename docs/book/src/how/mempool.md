@@ -83,12 +83,12 @@ History persists to `fee-estimator-history.dat` on every teardown, including sta
 
 ## Worked trace
 
-A clean regtest start and stop shows the persistence side of the pool. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged fields removed.
+A clean regtest start and stop shows the persistence side of the pool. `$DATA` is the data directory passed to `--data-dir`. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged fields removed.
 
 ```text
 INFO bitcoin_rs_node::state::open no mempool snapshot; starting with an empty pool status=missing
 INFO bitcoin_rs_mempool::snapshot prepared mempool snapshot transactions=0 bytes=84 elapsed_ms=0
-INFO bitcoin_rs_mempool::fee_history saved fee-estimator history path=/tmp/book_embedhow_daemon2/fee-estimator-history.dat bytes=57965
+INFO bitcoin_rs_mempool::fee_history saved fee-estimator history path=$DATA/fee-estimator-history.dat bytes=57965
 ```
 
 The snapshot line appears only for a clean shutdown with no prior teardown error. An empty pool still writes an 84-byte snapshot.

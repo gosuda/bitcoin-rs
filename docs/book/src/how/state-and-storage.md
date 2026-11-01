@@ -101,11 +101,11 @@ Pruning is rejected together with `txindex`, `blockfilterindex`, or a script ind
 
 ## Worked trace
 
-A regtest start and one mined block produce these storage and commit lines. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged diagnostic fields removed.
+A regtest start and one mined block produce these storage and commit lines. `$DATA` is the data directory passed to `--data-dir`. The binary emits one JSON object per line; fields are shown as `key=value` with the timestamp and unchanged diagnostic fields removed.
 
 ```text
 INFO bitcoin_rs_chainstate::recovery chainstate restore selected restore_source=cold reason=no_complete_checkpoint
-INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend=fjall chainstate_dir=/tmp/book_embedhow_daemon2/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
+INFO bitcoin_rs_node::state::open opened storage backend with effective cache capacities backend=fjall chainstate_dir=$DATA/chainstate chainstate_cache_bytes=471859200 txindex_cache_bytes=0 total_cache_bytes=471859200
 DEBUG bitcoin_rs_chainstate::connect apply_block: tail begin height=1 outcome.hash=5c3d99d734b492661bac6a4e3f5c8d78ad097ad42c0fa6e9814ca6692b4e5b24
 DEBUG bitcoin_rs_chainstate::connect apply_block: publish profile height=1 durable_sync_us=4 durable_commit_us=67
 INFO bitcoin_rs_node::lifecycle published clean chainstate checkpoint generation=1
