@@ -35,31 +35,6 @@ pub enum FuzzError {
     MissingHeader { hash: Hash256 },
 }
 
-#[derive(Default)]
-struct FuzzBodies {
-    bodies: RwLock<HashMap<(u32, Hash256), Vec<u8>>>,
-}
-
-impl BlockBodyStore for FuzzBodies {
-    fn persist_block_body(
-        &self,
-        height: u32,
-        hash: Hash256,
-        body: &[u8],
-    ) -> Result<(), StorageError> {
-        self.bodies.write().insert((height, hash), body.to_vec());
-        Ok(())
-    }
-
-    fn load_block_body(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.bodies.read().get(&(height, hash)).cloned())
-    }
-
-    fn sync(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-}
-
 #[doc(hidden)]
 pub struct FuzzCheckpoint {
     tip: TipSnapshot,
@@ -84,7 +59,7 @@ pub struct FuzzChain {
     utxo: Arc<UtxoSet>,
     durable: Arc<InMemoryDurableHeadStore>,
     undo: Arc<InMemoryUndoStore>,
-    bodies: Arc<FuzzBodies>,
+    bodies: Arc<crate::test_support::MemoryBodies>,
     headers: RwLock<HashMap<Hash256, Header>>,
     network: Network,
 }
@@ -106,7 +81,7 @@ impl FuzzChain {
             utxo,
             durable: Arc::new(InMemoryDurableHeadStore::new()),
             undo: Arc::new(InMemoryUndoStore::default()),
-            bodies: Arc::new(FuzzBodies::default()),
+            bodies: Arc::new(crate::test_support::MemoryBodies::default()),
             headers: RwLock::new(HashMap::new()),
             network,
         };

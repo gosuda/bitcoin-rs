@@ -263,7 +263,7 @@ fn signet_solution_is_checked_on_commit_not_proposal() -> TestResult {
 }
 
 use super::*;
-use crate::test_fixtures::MemoryBodies;
+use crate::test_support::MemoryBodies;
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_storage::block_body::BlockBodyStore;

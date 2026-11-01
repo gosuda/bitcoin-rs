@@ -1530,6 +1530,9 @@ impl UtxoView for BlockLocalUtxoView<'_> {
 #[cfg(any(test, verification))]
 pub(crate) mod admission_model;
 
+#[cfg(any(test, feature = "test-seam"))]
+pub(crate) mod test_support;
+
 #[cfg(test)]
 mod test_fixtures;
 

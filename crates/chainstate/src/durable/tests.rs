@@ -11,7 +11,8 @@ use parking_lot::Mutex;
 use proptest::prelude::*;
 use std::sync::Arc;
 
-use crate::test_fixtures::{MemoryBodies, TestError, TestResult, handles, seed_genesis};
+use crate::test_fixtures::{TestError, TestResult, handles, seed_genesis};
+use crate::test_support::MemoryBodies;
 use crate::{ApplyError, Chainstate};
 
 mod revalidation;

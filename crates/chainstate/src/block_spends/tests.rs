@@ -18,7 +18,8 @@ use parking_lot::Mutex;
 
 use crate::{
     AssumeUtxoDiskStatus, Chainstate,
-    test_fixtures::{MemoryBodies, TestError, TestResult, handles},
+    test_fixtures::{TestError, TestResult, handles},
+    test_support::MemoryBodies,
 };
 
 #[derive(Default)]

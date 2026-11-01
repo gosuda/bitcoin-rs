@@ -476,7 +476,7 @@ fn a_window_with_an_invalid_middle_block_commits_only_the_valid_prefix() -> Test
 #[test]
 fn a_window_prepared_against_a_replaced_tip_discards_the_stale_branch() -> TestResult {
     let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
-    chain.block_body_store = Some(Arc::new(crate::test_fixtures::MemoryBodies::default()));
+    chain.block_body_store = Some(Arc::new(crate::test_support::MemoryBodies::default()));
     seed_genesis(&chain)?;
     commit_genesis_head(&chain)?;
     let genesis = Network::Regtest.genesis_block();
