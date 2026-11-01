@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use bitcoin_rs_mempool::{Mempool, SnapshotEntry};
 use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
-use bitcoin_rs_primitives::{Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
+use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Sequence, Tx, Txid};
 use common::{
     Forged, PAYOUT, insert_forged, selected_fees, serialized_size, total_sigop_cost, tx,
     zero_fee_pool,
@@ -275,7 +275,7 @@ fn spec() -> impl Strategy<Value = Spec> {
             3 => 5_000_u64..60_000,
             1 => Just(0_u64),
             1 => Just(1_u64),
-            1 => Just(u64::MAX / 8),
+            1 => Just(Amount::MAX_MONEY.to_sat()),
         ],
         prop::sample::select(vec![
             400_u64, 800, 2_000, 8_000, 401, 1_997, 2_001, 1024, 4096, 65_536, 101_008,
