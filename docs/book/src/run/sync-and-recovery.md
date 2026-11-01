@@ -1,6 +1,6 @@
 # Sync, recovery, and pruning
 
-On restart the node restores the newest clean checkpoint it holds, replays the committed gap to the durable head, and continues. After an abrupt kill it does the same replay without a new checkpoint.
+On restart the node restores the newest clean checkpoint it holds, replays the committed gap to the durable head, and continues. After an abrupt kill it does the same replay without a new checkpoint. Transcripts below write `$DATA` for the data directory and `$STATE` for the offline-import certification directory.
 
 ## Two kinds of progress
 
@@ -59,13 +59,13 @@ Prune with the transaction, script, or compact-filter index off. The startup che
 The binary can apply a Core-framed archive without peers, for evidence lanes. All three flags are required together:
 
 ```sh
-$ ./target/release/bitcoin-rs --corpus archive.bin --manifest manifest.json --state /tmp/btcrs-book/state
+$ ./target/release/bitcoin-rs --corpus archive.bin --manifest manifest.json --state $STATE
 ```
 
 Passing only some of them is an error:
 
 ```sh
-$ ./target/release/bitcoin-rs --corpus archive.bin --network regtest --data-dir /tmp/btcrs-book/offline
+$ ./target/release/bitcoin-rs --corpus archive.bin --network regtest --data-dir $DATA
 bitcoin-rs: --corpus, --manifest, and --state must be given together
 ```
 

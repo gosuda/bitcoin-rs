@@ -1,11 +1,11 @@
 # Storage and memory
 
-Three storage engines are selectable. `fjall` is the default, `redb` is compiled into the default binary, and `rocksdb` is a non-default feature.
+Three storage engines are selectable. `fjall` is the default, `redb` is compiled into the default binary, and `rocksdb` is a non-default feature. Transcripts below write `$DATA` for the data directory you pass to `--data-dir`.
 
 ## Choose a backend
 
 ```sh
-$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/redb \
+$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --storage-backend redb
 ```
@@ -15,14 +15,14 @@ It starts and names `"backend":"redb"` in the storage line.
 The accepted values are `fjall`, `redb`, and `rocksdb`. An unknown name is rejected before startup:
 
 ```sh
-$ ./target/release/bitcoin-rs --storage-backend bogus --network regtest --data-dir /tmp/btcrs-book/x
+$ ./target/release/bitcoin-rs --storage-backend bogus --network regtest --data-dir $DATA
 error: invalid value 'bogus' for '--storage-backend <STORAGE_BACKEND>': unsupported storage backend bogus
 ```
 
 A known name that this build does not include fails config validation:
 
 ```sh
-$ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data-dir /tmp/btcrs-book/x
+$ ./target/release/bitcoin-rs --storage-backend rocksdb --network regtest --data-dir $DATA
 bitcoin-rs: unsupported storage backend rocksdb
 ```
 
@@ -31,7 +31,7 @@ bitcoin-rs: unsupported storage backend rocksdb
 The backend appears in the startup line:
 
 ```
-{"timestamp":"...","level":"INFO","fields":{"message":"opened storage backend with effective cache capacities","backend":"fjall","chainstate_dir":"/tmp/btcrs-book/regtest/chainstate","chainstate_cache_bytes":471859200,"txindex_cache_bytes":0,"total_cache_bytes":471859200},"target":"bitcoin_rs_node::state::open"}
+{"timestamp":"...","level":"INFO","fields":{"message":"opened storage backend with effective cache capacities","backend":"fjall","chainstate_dir":"$DATA/chainstate","chainstate_cache_bytes":471859200,"txindex_cache_bytes":0,"total_cache_bytes":471859200},"target":"bitcoin_rs_node::state::open"}
 ```
 
 ## dbcache
@@ -39,7 +39,7 @@ The backend appears in the startup line:
 `--dbcache-mb` sets the storage-engine cache budget in MiB. The default is 450 MiB. The value is clamped between 16 MiB and 1 TiB.
 
 ```sh
-$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/cache-16 \
+$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --dbcache-mb 1 2>&1 | grep -o 'chainstate_cache_bytes":[0-9]*,"txindex_cache_bytes":[0-9]*,"total_cache_bytes":[0-9]*'
 chainstate_cache_bytes":16777216,"txindex_cache_bytes":0,"total_cache_bytes":16777216
@@ -48,7 +48,7 @@ chainstate_cache_bytes":16777216,"txindex_cache_bytes":0,"total_cache_bytes":167
 With the transaction index enabled, the budget splits 80 percent to chainstate and 20 percent to the index cache:
 
 ```sh
-$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/cache-txindex \
+$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --dbcache-mb 500 --txindex=true 2>&1 | grep -o 'chainstate_cache_bytes":[0-9]*,"txindex_cache_bytes":[0-9]*,"total_cache_bytes":[0-9]*'
 chainstate_cache_bytes":419430400,"txindex_cache_bytes":104857600,"total_cache_bytes":524288000
@@ -57,7 +57,7 @@ chainstate_cache_bytes":419430400,"txindex_cache_bytes":104857600,"total_cache_b
 A value above the ceiling clamps to 1 TiB:
 
 ```sh
-$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/cache-1tib \
+$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --dbcache-mb 2000000 2>&1 | grep -o '"total_cache_bytes":[0-9]*'
 "total_cache_bytes":1099511627776
@@ -72,7 +72,7 @@ dbcache is a storage cache budget, not a process memory cap. Block staging has i
 Pruning is not compatible with the transaction, script, or compact-filter indexes:
 
 ```sh
-$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/prune-index \
+$ timeout 5 ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --prune-target-mb 600 --txindex=true
 bitcoin-rs: transaction, script and compact-filter indexing are not compatible with -prune

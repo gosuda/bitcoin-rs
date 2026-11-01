@@ -1,6 +1,6 @@
 # Shutdown and upgrades
 
-Stop the node with `SIGTERM` or `SIGINT`. A clean stop publishes a checkpoint, saves fee-estimator history, writes a mempool snapshot, and exits with status 0.
+Stop the node with `SIGTERM` or `SIGINT`. A clean stop drains open RPC connections, publishes a checkpoint, saves fee-estimator history, writes a mempool snapshot, and exits with status 0. `$DATA` below stands for the data directory you pass to `--data-dir`.
 
 ## What a signal does
 
@@ -8,16 +8,17 @@ The signal thread listens for `SIGTERM` and `SIGINT` and triggers the node's shu
 
 1. drains the derived index workers,
 2. requests chainstate and P2P shutdown,
-3. joins the event loop, RPC listeners, and workers,
-4. publishes a clean chainstate checkpoint if the shutdown was clean,
-5. saves fee-estimator history,
-6. writes the mempool snapshot with a 10-second budget.
+3. stops each RPC listener. Every listener first wakes readers blocked on idle connections, then waits up to 5 seconds for open connection threads to finish. Connections that outlive the deadline are reported with `rpc connections exceeded the drain deadline`, and the listener thread then joins.
+4. joins the event loop and remaining workers,
+5. publishes a clean chainstate checkpoint if the shutdown was clean,
+6. saves fee-estimator history,
+7. writes the mempool snapshot with a 10-second budget.
 
 The clean path ends with:
 
 ```
 {"message":"published clean chainstate checkpoint","generation":1}
-{"message":"saved fee-estimator history","path":"/tmp/btcrs-book/regtest/fee-estimator-history.dat","bytes":57965}
+{"message":"saved fee-estimator history","path":"$DATA/fee-estimator-history.dat","bytes":57965}
 {"message":"prepared mempool snapshot","transactions":0,"bytes":84,"elapsed_ms":"0"}
 {"message":"bitcoin-rs node exited cleanly"}
 ```
@@ -31,9 +32,9 @@ The signal handling source is [`crates/node/src/signal.rs`](https://github.com/g
 The node takes an exclusive lock on the data directory before opening storage. A second process on the same directory exits immediately:
 
 ```sh
-$ ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/regtest \
+$ ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false
-bitcoin-rs: Cannot obtain a lock on directory /tmp/btcrs-book/regtest. bitcoin-rs is probably already running.
+bitcoin-rs: Cannot obtain a lock on directory $DATA. bitcoin-rs is probably already running.
 ```
 
 The exit status is 1. The lock is a POSIX record lock on `.lock` plus an in-process registry keyed by the directory's device and inode, so two paths to the same directory collide as well. The lock lives as long as the last handle that can still write the directory.
@@ -51,7 +52,7 @@ The mempool consequences are narrower than "everything is lost". Locally submitt
 Stop the node cleanly, keep a copy of the data directory, and read the format marker before you swap binaries.
 
 ```sh
-$ cat /tmp/btcrs-book/regtest/CURRENT_SCHEMA
+$ cat $DATA/CURRENT_SCHEMA
 2
 ```
 

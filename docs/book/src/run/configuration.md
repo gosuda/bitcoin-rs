@@ -22,11 +22,11 @@ storage_backend = "fjall"
 dbcache_mb = 100
 ```
 
-Run with the file, then add each layer in turn. The snippet filters the boot line to the field under test.
+Run with the file, then add each layer in turn. `$DATA` stands for the data directory you pass to `--data-dir`. The snippet filters the boot line to the field under test.
 
 ```sh
 $ timeout 5 ./target/release/bitcoin-rs --config layer.toml \
-  --data-dir /tmp/btcrs-book/prec-toml \
+  --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 2>&1 | grep -o 'dbcache_mb: [0-9]*'
 dbcache_mb: 100
 ```
@@ -35,7 +35,7 @@ An environment variable wins over the TOML file:
 
 ```sh
 $ BITCOIN_RS_DBCACHE_MB=200 timeout 5 ./target/release/bitcoin-rs --config layer.toml \
-  --data-dir /tmp/btcrs-book/prec-env \
+  --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 2>&1 | grep -o 'dbcache_mb: [0-9]*'
 dbcache_mb: 200
 ```
@@ -44,7 +44,7 @@ A CLI flag wins over both:
 
 ```sh
 $ BITCOIN_RS_DBCACHE_MB=200 timeout 5 ./target/release/bitcoin-rs --config layer.toml \
-  --data-dir /tmp/btcrs-book/prec-cli --dbcache-mb 300 \
+  --data-dir $DATA --dbcache-mb 300 \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 2>&1 | grep -o 'dbcache_mb: [0-9]*'
 dbcache_mb: 300
 ```
@@ -53,7 +53,7 @@ The Core-style file sits between TOML and the environment. A `bitcoin.conf` cont
 
 ```sh
 $ timeout 5 ./target/release/bitcoin-rs --config layer.toml --bitcoin-conf bitcoin.conf \
-  --data-dir /tmp/btcrs-book/prec-conf \
+  --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 2>&1 | grep -o 'dbcache_mb: [0-9]*'
 dbcache_mb: 400
 ```
@@ -101,7 +101,7 @@ Read the resolved dump instead of guessing:
 
 ```sh
 $ timeout 5 ./target/release/bitcoin-rs --config layer.toml --network signet \
-  --data-dir /tmp/btcrs-book/prec-signet \
+  --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 2>&1 | grep -o 'NodeConfig { network: [A-Za-z0-9]*'
 NodeConfig { network: Signet
 ```

@@ -1,6 +1,6 @@
 # Networks and the data directory
 
-The node writes all persistent state under one data directory. Select the network with `--network`; the directory defaults to `.bitcoin-rs` in the current working directory.
+The node writes all persistent state under one data directory. Select the network with `--network`; the directory defaults to `.bitcoin-rs` in the current working directory. Transcripts and layouts below write `$DATA` for that directory.
 
 ## Networks and default ports
 
@@ -21,7 +21,7 @@ The data directory is not partitioned by network. Two networks pointed at the sa
 A fresh regtest node on an empty directory produces this layout at height zero:
 
 ```text
-/tmp/btcrs-book/regtest
+$DATA
 ├── .cookie
 ├── .lock
 ├── .process-epoch.lock
@@ -79,7 +79,7 @@ Stop the node first. Then:
 To start from nothing, stop the node and move the directory:
 
 ```sh
-$ mv /tmp/btcrs-book/regtest /tmp/btcrs-book/regtest.old
+$ mv $DATA $DATA.old
 ```
 
 Start with the same `--data-dir` path. An empty directory is created and initialized at the current schema. Keep the old directory until you no longer need its history; the node never deletes operator data on its own.

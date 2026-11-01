@@ -1,11 +1,11 @@
 # First start
 
-Start a regtest node with an explicit data directory and loopback listeners, then drive it over RPC. Regtest needs no peers and mines locally.
+Start a regtest node with an explicit data directory and loopback listeners, then drive it over RPC. Regtest needs no peers and mines locally. `$DATA` below stands for the data directory you pass to `--data-dir`.
 
 ```sh
 $ ./target/release/bitcoin-rs \
   --network regtest \
-  --data-dir /tmp/btcrs-book/regtest \
+  --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 \
   --rpc-bind 127.0.0.1:0 \
   --dns-seeds-enabled=false
@@ -27,7 +27,7 @@ The P2P line repeats the configured listen address, so with `:0` it does not tel
 The node generates `.cookie` in the data directory with mode `0600`. RPC requests authenticate with its contents.
 
 ```sh
-$ cat /tmp/btcrs-book/regtest/.cookie
+$ cat $DATA/.cookie
 __cookie__:d2e4ffab2ef6846eb7aab8b682365cc4bb54785aaaedcf80b9aa264094cd60e1
 ```
 
@@ -36,7 +36,7 @@ The value is fresh on each start. Read it after the node is listening, not befor
 ## Query the chain
 
 ```sh
-$ curl -s --user "$(cat /tmp/btcrs-book/regtest/.cookie)" \
+$ curl -s --user "$(cat $DATA/.cookie)" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"1.0","id":"1","method":"getblockchaininfo","params":[]}' \
   http://127.0.0.1:41701/
@@ -68,7 +68,7 @@ Trimmed to the fields that matter at height zero:
 `generatetoaddress` is the documented solo-mining generate path. It solves a fresh candidate, submits it through the chainstate owner, and returns the block hash.
 
 ```sh
-$ curl -s --user "$(cat /tmp/btcrs-book/regtest/.cookie)" \
+$ curl -s --user "$(cat $DATA/.cookie)" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"1.0","id":"1","method":"generatetoaddress","params":[1,"mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"]}' \
   http://127.0.0.1:41701/
@@ -107,7 +107,7 @@ A clean shutdown publishes a chainstate checkpoint, saves fee-estimator history,
 
 ```
 {"timestamp":"...","level":"INFO","fields":{"message":"published clean chainstate checkpoint","generation":1},"target":"bitcoin_rs_node::lifecycle"}
-{"timestamp":"...","level":"INFO","fields":{"message":"saved fee-estimator history","path":"/tmp/btcrs-book/regtest/fee-estimator-history.dat","bytes":57965},"target":"bitcoin_rs_mempool::fee_history"}
+{"timestamp":"...","level":"INFO","fields":{"message":"saved fee-estimator history","path":"$DATA/fee-estimator-history.dat","bytes":57965},"target":"bitcoin_rs_mempool::fee_history"}
 {"timestamp":"...","level":"INFO","fields":{"message":"prepared mempool snapshot","transactions":0,"bytes":84,"elapsed_ms":"0"},"target":"bitcoin_rs_mempool::snapshot"}
 {"timestamp":"...","level":"INFO","fields":{"message":"bitcoin-rs node exited cleanly"},"target":"bitcoin_rs_node::lifecycle"}
 ```

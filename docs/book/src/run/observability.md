@@ -1,6 +1,6 @@
 # Logs, metrics, and stalls
 
-Logs are JSON lines on stderr. Metrics are a separate opt-in HTTP listener. The stall watchdog is a script outside the node that reads the log.
+Logs are JSON lines on stderr. Metrics are a separate opt-in HTTP listener. The stall watchdog is a script outside the node that reads the log. Commands below write `$DATA` for the data directory you pass to `--data-dir`.
 
 ## Log format
 
@@ -23,7 +23,7 @@ Logs go to stderr, not stdout. Redirecting only stdout leaves you with an empty 
 The metrics listener is off by default. Turn it on with `--metrics-bind`:
 
 ```sh
-$ ./target/release/bitcoin-rs --network regtest --data-dir /tmp/btcrs-book/regtest \
+$ ./target/release/bitcoin-rs --network regtest --data-dir $DATA \
   --p2p-listen 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --dns-seeds-enabled=false \
   --metrics-bind 127.0.0.1:19100
 ```
