@@ -176,7 +176,7 @@ impl SyncChain for NodeSyncChain {
                 HeaderAdmission::Rejected(error)
             }
             Err(bitcoin_rs_chainstate::HeaderAdmissionError::Refused(error)) => {
-                HeaderAdmission::Refused(Box::new(error))
+                HeaderAdmission::Refused(bitcoin_rs_chain::HeaderRefusal::from_cause(&error))
             }
         }
     }

@@ -213,7 +213,7 @@ impl BlockSync {
                 );
             }
             HeaderAdmission::Refused(error) => {
-                self.request_ancestry_after_refusal(source, error.as_ref());
+                self.request_ancestry_after_refusal(source, &error);
             }
         }
     }
@@ -318,7 +318,7 @@ impl BlockSync {
     fn request_ancestry_after_refusal(
         &self,
         source: Option<PeerSource>,
-        error: &(dyn core::error::Error + Send + Sync),
+        error: &bitcoin_rs_chain::HeaderRefusal,
     ) {
         let now = Instant::now();
         let mut last = self.refused_rerequest_at.lock();
@@ -980,7 +980,7 @@ impl BlockSync {
                 if let Some(mut state) = dropped {
                     state.finalize();
                 }
-                self.request_ancestry_after_refusal(Some(source), error.as_ref());
+                self.request_ancestry_after_refusal(Some(source), &error);
                 return None;
             }
             return Some(admission);

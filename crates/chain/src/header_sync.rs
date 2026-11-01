@@ -26,7 +26,22 @@ pub enum HeaderAdmission {
         demoted_tip: Option<Hash256>,
     },
     Rejected(ChainError),
-    Refused(Box<dyn core::error::Error + Send + Sync>),
+    Refused(HeaderRefusal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{cause}")]
+pub struct HeaderRefusal {
+    cause: String,
+}
+
+impl HeaderRefusal {
+    #[must_use]
+    pub fn from_cause(cause: &dyn core::fmt::Display) -> Self {
+        Self {
+            cause: cause.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

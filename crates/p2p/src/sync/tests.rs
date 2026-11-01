@@ -13,7 +13,8 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash;
 use bitcoin_rs_chain::{
-    BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
+    BlockTree, ChainWork, HeaderRefusal, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    regtest_fixture,
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash, BlockPayload, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
@@ -72,9 +73,7 @@ impl SyncChain for RefusingChain {
     }
 
     fn admit_headers(&self, _headers: &[Header]) -> HeaderAdmission {
-        HeaderAdmission::Refused(Box::new(std::io::Error::other(
-            "scripted admission refusal",
-        )))
+        HeaderAdmission::Refused(HeaderRefusal::from_cause(&"scripted admission refusal"))
     }
 
     fn minimum_chain_work(&self) -> ChainWork {
