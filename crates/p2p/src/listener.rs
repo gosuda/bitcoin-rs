@@ -2618,15 +2618,16 @@ fn write_ready_burst(
         for (queued, frame) in burst.iter().zip(&frames) {
             crate::net_trace::outbound_message(net_trace, queued.message(), frame.payload());
         }
-        let written = crate::wire::write_frames(writer, &frames);
-        if written.is_ok() {
-            // Charge each frame's wire size to its command once the burst
-            // left the socket; a failed write tears the connection down, so
-            // its partial traffic never becomes a visible peer row.
-            for (queued, frame) in burst.iter().zip(&frames) {
-                counters.record_msg_sent(queued.message().command().as_ref(), frame.wire_len());
-            }
-        }
+        // Each frame is charged to its command once the writer accepts its
+        // final byte, Core's flush semantics. A write error still tears the
+        // connection down, but the frames the socket already accepted in
+        // full keep their charges, so the per-message buckets track the
+        // socket counter's accepted bytes; a frame the error cut short is
+        // never charged.
+        let written = crate::wire::write_frames(writer, &frames, &mut |index: usize| {
+            let command = burst[index].message().command();
+            counters.record_msg_sent(command.as_ref(), frames[index].wire_len());
+        });
         drop(burst);
         match written {
             Ok(()) => pending = leftover,

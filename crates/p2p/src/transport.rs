@@ -74,6 +74,10 @@ impl Negotiated {
 impl RecvTransport {
     /// Reads at most one message: `Ok(None)` when the v2 transport carried a decoy
     /// packet or a message of an empty or undefined type, which BIP324 peers drop.
+    /// An empty or undefined type still spent the packet's bytes on the wire, so
+    /// `observe` sees it (folded into the `*other*` bucket, like a v1 frame under
+    /// an unknown command) before the drop; a decoy packet carries no message and
+    /// keeps no per-message charge.
     ///
     /// A v1 frame always carries a message and is never `None`. `observe`
     /// receives the command, its payload, and the frame's exact wire size:
@@ -92,6 +96,7 @@ impl RecvTransport {
                     return Ok(None);
                 };
                 let Some((command, payload)) = msg_type::decode(&contents) else {
+                    observe("", &[], crate::bip324::PACKET_OVERHEAD + contents.len())?;
                     return Ok(None);
                 };
                 observe(
@@ -163,5 +168,79 @@ pub(crate) fn establish<S: Read + Write>(
             Err(error) if is_poll_timeout(&error) => {}
             Err(error) => return Err(transport_error(error)),
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used)]
+mod tests {
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    use bitcoin::p2p::Magic;
+
+    use super::RecvTransport;
+    use crate::bip324::{PACKET_OVERHEAD, PacketReader, RecvCipher, SendCipher};
+    use crate::counters::PeerCounters;
+
+    fn v2_receiver() -> RecvTransport {
+        RecvTransport::V2(Box::new(PacketReader::new(
+            RecvCipher::new([1; 32], [2; 32]),
+            Vec::new(),
+        )))
+    }
+
+    #[test]
+    fn a_v2_frame_of_undefined_type_charges_other_then_drops() {
+        let mut cipher = SendCipher::new([1; 32], [2; 32]);
+        let mut transport = v2_receiver();
+        // Short id 29 is assigned to no command, so this packet carries a
+        // message of undefined type.
+        let contents = [29_u8, 0xde, 0xad];
+        let packet = cipher.seal(&contents, &[], false).expect("seal");
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut observed = Vec::new();
+        let message = transport
+            .read_message(
+                &mut Cursor::new(packet),
+                Magic::BITCOIN,
+                |command, payload, len| {
+                    counters.record_msg_recv(command, len);
+                    observed.push((command.to_owned(), payload.to_vec(), len));
+                    Ok(())
+                },
+            )
+            .expect("an undefined type drops the message, never errors");
+
+        assert!(message.is_none(), "an undefined-type message drops");
+        assert_eq!(
+            observed,
+            vec![(String::new(), Vec::new(), PACKET_OVERHEAD + contents.len())],
+            "the dropped frame is observed with an empty command and its wire size"
+        );
+        assert_eq!(
+            counters.recv_per_message(),
+            vec![(
+                "*other*",
+                u64::try_from(PACKET_OVERHEAD + contents.len()).expect("fits u64")
+            )],
+            "the undefined-type frame's wire bytes land in the *other* bucket"
+        );
+    }
+
+    #[test]
+    fn a_v2_decoy_packet_charges_nothing() {
+        let mut cipher = SendCipher::new([1; 32], [2; 32]);
+        let mut transport = v2_receiver();
+        let decoy = cipher.seal(&[], &[], true).expect("seal decoy");
+
+        let message = transport
+            .read_message(&mut Cursor::new(decoy), Magic::BITCOIN, |_, _, _| {
+                panic!("a decoy packet carries no message to account");
+            })
+            .expect("a decoy drops, never errors");
+
+        assert!(message.is_none());
     }
 }
