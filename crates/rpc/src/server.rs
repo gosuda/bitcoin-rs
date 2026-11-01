@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "test-seam"), allow(unreachable_pub))]
+
 use alloc::sync::Arc;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
@@ -786,6 +788,7 @@ pub fn read_http_request(
     }
 }
 
+#[cfg_attr(not(feature = "test-seam"), allow(dead_code))]
 pub fn parse_http_request(reader: impl Read) -> Result<Option<HttpRequest>, RequestReadError> {
     let mut reader = BufReader::new(reader);
     read_http_request(&mut reader)
