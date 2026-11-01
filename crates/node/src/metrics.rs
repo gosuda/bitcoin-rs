@@ -118,10 +118,6 @@ impl EvidenceIdentity {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep metric descriptions together in the process-wide registry"
-)]
 fn describe_node_metrics() {
     metrics::describe_gauge!(
         "rpc.esplora.expensive.active",

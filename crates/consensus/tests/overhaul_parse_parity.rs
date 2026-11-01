@@ -54,10 +54,6 @@ const fn compact_size_len(value: u64) -> u32 {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one contract across two fixtures: ids, weight, positions, merkle"
-)]
 fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
     for height in [LEGACY_HEIGHT, SEGWIT_HEIGHT] {
         let bytes = fixture_bytes(height);

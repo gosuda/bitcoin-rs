@@ -365,7 +365,6 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
 /// resolved prevout.
 ///
 /// Genesis returns empty mutations.
-#[expect(clippy::too_many_arguments)]
 pub fn build_block_changes<'a>(
     block: &'a Block,
     height: u32,

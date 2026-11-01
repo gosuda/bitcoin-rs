@@ -1385,7 +1385,6 @@ fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
     use bitcoin_rs_primitives::Script;
     use std::sync::Arc;

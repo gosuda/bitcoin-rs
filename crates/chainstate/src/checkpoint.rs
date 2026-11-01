@@ -535,10 +535,6 @@ pub(crate) fn write_checkpoint_from_dir(
     )
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Keep checkpoint artifact ordering and manifest construction together"
-)]
 pub(crate) fn write_checkpoint_from_dir_at(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,

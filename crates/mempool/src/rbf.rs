@@ -234,10 +234,6 @@ impl PreparedPoolChange {
 }
 
 impl ReplacementInputs {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep RBF comparison and post-expiry capacity verification tied to one captured stamp"
-    )]
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, Refusal> {
         let expiry_time = match self.enforcement {
             LimitEnforcement::ExpireBeforeTrim(now) => Some(now),
@@ -392,10 +388,6 @@ impl Mempool {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "capture pre-expiry replacement and post-expiry capacity facts under one pool guard"
-    )]
     pub(crate) fn capture_admission(
         &self,
         entry: MempoolEntry,

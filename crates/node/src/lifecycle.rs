@@ -602,7 +602,6 @@ impl Drop for StartupGuard {
     }
 }
 
-#[expect(clippy::too_many_lines)]
 pub(crate) fn start_node(
     config: NodeConfig,
     runtime: RuntimeInputs,

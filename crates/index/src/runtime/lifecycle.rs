@@ -22,7 +22,6 @@ use std::thread;
 
 impl DerivedIndexWorker {
     /// backend open returns. `reporter` receives the index-ahead rollback
-    #[expect(clippy::too_many_arguments)]
     pub fn spawn_with_open(
         runtime: Arc<DerivedIndexRuntime>,
         spec: DerivedIndexOpenSpec,

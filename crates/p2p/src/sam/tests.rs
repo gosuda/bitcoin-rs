@@ -389,7 +389,6 @@ impl Peer {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn handle_fake_sam_stream(
     stream: TcpStream,
     peer: Peer,

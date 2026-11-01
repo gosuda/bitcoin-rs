@@ -243,10 +243,6 @@ impl OverlayTransport {
         })
     }
 
-    #[expect(
-        clippy::case_sensitive_file_extension_comparisons,
-        reason = "These normalized DNS suffixes identify protocols, not filesystem extensions"
-    )]
     pub(crate) fn resolve(
         &self,
         text: &str,

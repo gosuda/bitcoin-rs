@@ -91,7 +91,6 @@ impl NodeState {
         Self::open_inner(config, mempool_observer, wrap)
     }
 
-    #[expect(clippy::too_many_lines)]
     fn open_inner<W>(
         config: NodeConfig,
         mempool_observer: Option<&Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,

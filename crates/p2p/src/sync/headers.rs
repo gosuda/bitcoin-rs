@@ -74,7 +74,6 @@ impl BlockSync {
         });
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;

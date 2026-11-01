@@ -255,10 +255,6 @@ impl ChainQuery for ActiveChainQuery {
             .is_some_and(|index| index.filter_index_info().is_ok_and(|info| info.synced))
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep BIP157 bounds, bounded catch-up and streaming in one serving owner"
-    )]
     fn serve_compact_filters(
         &self,
         pending: &FilterRequest,

@@ -33,10 +33,6 @@ impl crate::context::DerivedIndexQuery for LoadTxIndex {
 
 #[test]
 #[ignore = "bounded load probe; run explicitly with --ignored --nocapture"]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep bounded load setup and measurement together"
-)]
 fn large_script_projection_load() {
     let limit = std::env::var("ESPLORA_LOAD_LIMIT")
         .expect("set candidate limit")

@@ -80,10 +80,7 @@ impl BlockPayload {
         Self { block, bytes }
     }
 
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "Owning raw releases the ignored submitblock suffix after copying the consumed prefix"
-    )]
+    // Own raw so the ignored submitblock suffix is released after copying the prefix.
     pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
         let mut reader: &[u8] = &raw;
         let block = Block::consensus_decode(&mut reader)?;

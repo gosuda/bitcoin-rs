@@ -372,7 +372,6 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
     }
 }
 
-#[expect(clippy::too_many_lines)]
 fn prove_window<'a, 'h>(
     handles: &'h Chainstate,
     payloads: &[&'a BlockPayload],

@@ -93,10 +93,6 @@ fn start(binary: Kind) -> ProcessNode {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one common-chain fixture owns parameter parity, corruption injection and state preservation"
-)]
 fn verifychain_reads_the_requested_window_and_preserves_state() {
     use std::io::{Seek as _, SeekFrom};
 
@@ -582,10 +578,6 @@ fn replacement_signaling_matches_pinned_core() {
     });
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the ordered replacement and rejection observations together"
-)]
 fn replacement_signaling_case(signals: bool) {
     use bitcoin::Sequence;
     use bitcoin::consensus::encode::serialize_hex;
@@ -720,10 +712,6 @@ fn replacement_signaling_case(signals: bool) {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the ordered public-process scenario and its observations together"
-)]
 fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
     let (mut core, mut node) = std::thread::scope(|scope| {
         let core = scope.spawn(|| start(Kind::Core));

@@ -694,7 +694,6 @@ fn expected_chain_live(
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "Paused seed lifecycle proof")]
 fn seed_paused_write_permits_apply_and_retires_generation() {
     let fixture = SeedFixture::new(4);
     fixture.persist_branch_a_undo();
@@ -826,7 +825,6 @@ fn seed_paused_write_permits_apply_and_retires_generation() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "Artifact integrity matrix proof")]
 fn seed_tamper_variants_yield_integrity_without_watermark() {
     let (set, _coins) = seed_coin_set(200);
     let tip_hash = synthetic_txid(77);

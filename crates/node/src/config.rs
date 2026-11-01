@@ -400,10 +400,6 @@ impl NodeConfig {
         Self::materialize(&UserConfig::default(), NetworkSelection::from(network))
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One fold of every resolved field keeps precedence auditable in one place"
-    )]
     fn materialize(settings: &UserConfig, selection: NetworkSelection) -> Self {
         let profile = NetworkProfile::for_selection(selection);
         let mut chainstate_journal = ChainstateJournalConfig::default();

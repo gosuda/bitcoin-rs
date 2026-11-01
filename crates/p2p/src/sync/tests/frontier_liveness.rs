@@ -34,7 +34,6 @@ fn answer_requests(
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     let (tree, mut blocks) = mined_chain(6, 0)?;
     let mut prev = blocks[5].block_hash();

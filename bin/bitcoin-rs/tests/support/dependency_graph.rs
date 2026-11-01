@@ -452,7 +452,6 @@ impl WorkspaceGraph {
         let mut color: BTreeMap<&str, u8> = BTreeMap::new();
         let mut stack: Vec<String> = Vec::new();
 
-        #[expect(clippy::items_after_statements)]
         fn visit<'a>(
             graph: &'a WorkspaceGraph,
             color: &mut BTreeMap<&'a str, u8>,

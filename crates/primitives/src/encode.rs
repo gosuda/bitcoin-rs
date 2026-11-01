@@ -401,10 +401,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the `?`-chained body reads clearest as a Result-returning test even though the harness ignores it"
-    )]
     fn trailing_bytes_are_rejected_by_deserialize() -> Result<()> {
         use crate::{OutPoint, Tx, TxIn, Txid};
 

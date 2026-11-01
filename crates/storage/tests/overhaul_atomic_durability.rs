@@ -629,10 +629,7 @@ impl KvStore for OneFamilyStore {
             .cloned())
     }
 
-    #[expect(
-        clippy::needless_collect,
-        reason = "the collect drops the lock guard before the owned iterator returns"
-    )]
+    // Materialize rows so the returned owned iterator cannot retain the lock guard.
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -724,10 +721,6 @@ impl KvSnapshot for OneFamilySnapshot {
         Ok(scan_one_family_from(&self.rows, cf, prefix, start, limit))
     }
 
-    #[expect(
-        clippy::needless_collect,
-        reason = "the returned box owns its rows; materializing keeps the two impls uniform"
-    )]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
