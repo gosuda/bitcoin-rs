@@ -84,6 +84,7 @@ Source owners in the table use repository-relative paths.
 - Found blocks MUST submit through node mining control before the accounting record finalizes.
 - The outcome MUST NOT substitute for active-chain evidence.
 - After `Applied`, the active job MUST retire synchronously.
+- The owner MUST NOT delay retirement until the pending-share count reaches zero.
 - The node MUST run `invalidate_active` before ledger, outbox, or acknowledgement processing.
 - Work on a retired job is stale.
 - A byte-identical replay keeps duplicate identity (SV1 21 vs 22; SV2 `stale-share` vs `duplicate-share`).

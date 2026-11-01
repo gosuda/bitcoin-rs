@@ -54,9 +54,9 @@ Drain ==
 Finish ==
   /\ ~done
   /\ activeGen = TipGen
-  /\ pendingShares = 0
   /\ done' = TRUE
-  /\ UNCHANGED << activeGen, pendingShares >>
+  /\ pendingShares' = 0
+  /\ UNCHANGED << activeGen >>
 
 Stutter ==
   /\ UNCHANGED vars
@@ -79,7 +79,7 @@ Safety ==
 
 EnAdvance == ~done /\ activeGen < TipGen
 EnDrain == pendingShares > 0
-EnFinish == ~done /\ activeGen = TipGen /\ pendingShares = 0
+EnFinish == ~done /\ activeGen = TipGen
 
 FairAdvance == ((<>[] EnAdvance) => ([]<> <<Advance>>_vars))
 FairDrain == ((<>[] EnDrain) => ([]<> <<Drain>>_vars))
