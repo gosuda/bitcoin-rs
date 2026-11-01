@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from evidence import (
     ContractError,
     _parse_start_time,
-    _publish_result,
     canonical_bytes,
     copy_pinned,
     hash_regular_file,
@@ -204,7 +203,7 @@ class PublishResultTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as temporary,
             self.assertRaises(ContractError),
         ):
-            _publish_result({"result": nested}, Path(temporary) / "out.json")
+            publish_result({"result": nested}, Path(temporary) / "out.json")
 
 
 if __name__ == "__main__":

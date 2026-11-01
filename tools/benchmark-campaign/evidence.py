@@ -525,6 +525,3 @@ def publish_result(result: JsonObject, output: Path) -> None:
         raise ContractError("publication requires Linux O_TMPFILE support")
     _validate_json_depth(result, "result")
     _publish_payload(canonical_bytes(result) + b"\n", output)
-
-
-_publish_result = publish_result
