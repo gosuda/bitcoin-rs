@@ -576,7 +576,10 @@ fn message_account_names_round_trip_through_from_command() {
 
 #[test]
 fn receive_buckets_cover_core_v31_known_commands() {
-    // Core v31.1 src/protocol.h ALL_NET_MESSAGE_TYPES, verbatim.
+    // Core v31.1 src/protocol.h ALL_NET_MESSAGE_TYPES, verbatim. Pinned as
+    // compatibility evidence: the table's `both` rows are these commands
+    // plus `feature`, so a Core peer's frames keep their own receive
+    // buckets.
     let core_known = [
         "version",
         "verack",
@@ -624,15 +627,17 @@ fn receive_buckets_cover_core_v31_known_commands() {
 }
 
 #[test]
-fn unknown_and_post_v31_receives_fold_into_other() {
-    for command in [
-        "frobnicate",
-        "",
-        "feature",
-        "sendpackages",
-        "staletip",
-        "alert",
-    ] {
+fn feature_counts_by_name_in_both_directions() {
+    // BIP434 negotiation is a command this node receives, so a received
+    // feature frame keeps its own bucket instead of folding into *other*.
+    assert_eq!(MessageAccount::receive("feature"), MessageAccount::Feature);
+    assert_eq!(MessageAccount::receive("feature").name(), "feature");
+    assert_eq!(MessageAccount::send("feature"), MessageAccount::Feature);
+}
+
+#[test]
+fn unknown_and_send_only_receives_fold_into_other() {
+    for command in ["frobnicate", "", "sendpackages", "staletip", "alert"] {
         assert_eq!(
             MessageAccount::receive(command),
             MessageAccount::Other,
