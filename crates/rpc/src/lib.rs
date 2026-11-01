@@ -28,9 +28,7 @@ pub use handlers::Handler;
 pub use server::{RpcServer, RpcSurface};
 
 #[cfg(feature = "test-seam")]
-pub use server::{
-    HttpRequest, JsonResponse, RequestReadError, handle_json, parse_http_request, read_http_request,
-};
+pub use server::{handle_json, read_http_request};
 
 #[cfg(test)]
 pub(crate) mod test_error;

@@ -918,12 +918,6 @@ pub fn read_http_request(
     }
 }
 
-#[cfg_attr(not(feature = "test-seam"), allow(dead_code))]
-pub fn parse_http_request(reader: impl Read) -> Result<Option<HttpRequest>, RequestReadError> {
-    let mut reader = BufReader::new(reader);
-    read_http_request(&mut reader)
-}
-
 const BODY_READ_CHUNK: usize = 8 * 1_024;
 
 fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) -> io::Result<()> {
