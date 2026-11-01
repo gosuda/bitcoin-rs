@@ -740,7 +740,6 @@ mod tests {
             corrupt_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..128)
         ) {
             let ip_addr = IpAddr::V6(std::net::Ipv6Addr::from(ip));
-            let default_groups = NetGroups::default();
 
             if let Some(asn) = interpret(CORE_ASMAP, ip_addr) {
                 if asn != 0 && routable(ip_addr) {
@@ -757,8 +756,12 @@ mod tests {
             if valid(&corrupt_bytes) {
                 proptest::prop_assert!(interpret(&corrupt_bytes, ip_addr).is_some());
             } else {
-                proptest::prop_assert_eq!(default_groups.identity(), None);
-                proptest::prop_assert_eq!(default_groups.group(ip_addr), prefix_group(ip_addr));
+                let directory = tempfile::tempdir().expect("tempdir");
+                let path = directory.path().join("asmap.dat");
+                std::fs::write(&path, &corrupt_bytes).expect("write corrupt map");
+                let loaded = NetGroups::load(Some(&path));
+                proptest::prop_assert_eq!(loaded.identity(), None);
+                proptest::prop_assert_eq!(loaded.group(ip_addr), prefix_group(ip_addr));
             }
         }
     }
