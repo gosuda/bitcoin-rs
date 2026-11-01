@@ -161,11 +161,11 @@ max_lag_seconds = 30
 
 ## A complete regtest file
 
-This file starts a regtest node with the same settings as the examples:
+This file starts a regtest node with the same settings as the examples. `$DATA` stands for the data directory you pass to `--data-dir` or the `data_dir` key:
 
 ```toml
 network = "regtest"
-data_dir = "/tmp/worktree_BookUse/.bookuse-node/data"
+data_dir = "$DATA"
 rpc_bind = "127.0.0.1:45869"
 p2p_listen = ["127.0.0.1:48471"]
 dns_seeds_enabled = false

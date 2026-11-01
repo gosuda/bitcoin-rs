@@ -38,7 +38,7 @@ cargo run --locked -p contract-index -- --check
 
 The check verifies that both generated files are current, that every tag resolves, and that Markdown links in the checked documents resolve. A stale file prints the path and the regeneration command. `./scripts/ci-pr.sh contracts` runs the same check as a CI profile.
 
-The index at this commit records 204 clauses, 157 with proof artifacts, and 47 gap clauses. The numbers come from the tree, not from a target. Quote them with the index link, or not at all.
+The [evidence index](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md) at this commit records 204 clauses, 157 with proof artifacts, and 47 gap clauses. The numbers come from the tree, not from a target. Quote them with the index link, or not at all.
 
 ## Gaps stay gaps
 

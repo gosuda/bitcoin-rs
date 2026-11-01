@@ -119,7 +119,7 @@ That test reads the evidence document produced by `scripts/run-p2p-core-interop.
 cargo run --locked -p contract-index -- --check
 ```
 
-The check exits 0 in this checkout. The generated index records 204 clauses, 157 with tagged proof artifacts, and 47 gap clauses. `./scripts/ci-pr.sh contracts` runs the same check and also verifies the contract list in `docs/contracts/README.md`.
+The check exits 0 in this checkout. The generated [evidence index](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/evidence-index.md) records 204 clauses, 157 with tagged proof artifacts, and 47 gap clauses. `./scripts/ci-pr.sh contracts` runs the same check and also verifies the contract list in `docs/contracts/README.md`.
 
 A gap clause has no tagged artifact. It is not a waiver and not a pass. Closing one means adding the artifact and its tag, then regenerating the index in the same change-set. The count moves only when the tree moves.
 

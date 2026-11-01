@@ -1,6 +1,6 @@
 # Benchmarks
 
-No benchmark number in this book is a result. At this commit every product performance cell is unmeasured, and every cmodern cell is blocked on a missing corpus. The benchmark pages own the evidence rules.
+No benchmark number in this book is a result. At this commit every product performance cell is unmeasured, and every Cmodern cell is blocked on a missing corpus. The benchmark pages own the evidence rules.
 
 ## Three evidence tiers
 
@@ -41,7 +41,7 @@ A fixture ratio near 1.0 is a plumbing check, not a product result. Both arms ca
 
 `Observed once, not evidence` marks a number kept for context. It has no six-identity sample, supports no acceptance verdict, and supports no promotion.
 
-The product ledger has 36 cells, one per domain, corpus, native architecture, and backend. At this commit all 36 cells have `residual = "unmeasured"`, `custody = "none"`, and `noise_floor = "unobserved"`. Every cmodern cell is `BLOCKED` on the missing archive and manifest. C150 custody is staged, but no Core-versus-bitcoin-rs campaign has run against it. The live IBD arm still has no stop-at-height flag.
+The product ledger has 36 cells, one per domain, corpus, native architecture, and backend. At this commit all 36 cells have `residual = "unmeasured"`, `custody = "none"`, and `noise_floor = "unobserved"`. Every Cmodern cell is `BLOCKED` on the missing archive and manifest. C150 custody is staged, but no Core-versus-bitcoin-rs campaign has run against it. The live IBD arm still has no stop-at-height flag.
 
 The historical C150 ratio in the offline comparator page is not carried forward. A new ratio exists only after a gated result file against a frozen corpus.
 
