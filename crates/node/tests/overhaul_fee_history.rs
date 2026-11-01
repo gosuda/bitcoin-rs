@@ -66,7 +66,7 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
             script_pubkey: p2sh_true_output(),
         },
         false,
-        100,
+        0,
     ));
     bitcoin_rs_utxo::contract::commit_block_changes(
         &state.chainstate().utxo_handle(),
