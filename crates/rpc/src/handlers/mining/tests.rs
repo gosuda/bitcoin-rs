@@ -149,6 +149,7 @@ fn getblocktemplate_rejects_mainnet_without_peers() {
         .expect_err("mainnet without peers must fail");
     assert!(matches!(error, RpcError::ClientNotConnected(_)));
     assert_eq!(error.code(), RpcError::CORE_CLIENT_NOT_CONNECTED);
+    assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
 }
 
 // API-12
@@ -278,6 +279,10 @@ fn getblocktemplate_requires_signet_rule_on_signet() {
         .expect_err("missing signet support must fail");
     assert!(matches!(missing_signet, RpcError::InvalidParameter(_)));
     assert_eq!(missing_signet.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(
+        missing_signet.to_string(),
+        r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#
+    );
     let missing_both = getblocktemplate(&ctx, &json!([{}]))
         .expect_err("missing both rules on signet must quote signet first");
     assert_eq!(missing_both.code(), RpcError::CORE_INVALID_PARAMETER);
@@ -301,6 +306,10 @@ fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
         .expect_err("template-listed signet still requires client support");
     assert!(matches!(error, RpcError::InvalidParameter(_)));
     assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+    assert_eq!(
+        error.to_string(),
+        "Support for 'signet' rule requires explicit client support"
+    );
     assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
 }
 
@@ -318,6 +327,10 @@ fn getblocktemplate_rejects_missing_segwit_rule() {
         let error = getblocktemplate(&ctx, &params).expect_err("missing segwit support must fail");
         assert!(matches!(error, RpcError::InvalidParameter(_)));
         assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(
+            error.to_string(),
+            r#"getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})"#
+        );
     }
     assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
 }

@@ -15,7 +15,7 @@ use crate::rest::Response;
 use crate::rest::{bad_request, json_ok, service_unavailable};
 use sonic_rs::json as sonic_json;
 
-const TRANSACTION_BATCH_SIZE: usize = 25;
+pub(super) const TRANSACTION_BATCH_SIZE: usize = 25;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();

@@ -379,8 +379,8 @@ fn serve_accept_loop_cancels_promptly_on_idle_socket() -> io::Result<()> {
 
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_millis(10),
-        "idle accept shutdown took {elapsed:?}, expected under 10ms"
+        elapsed < Duration::from_millis(250),
+        "idle accept shutdown took {elapsed:?}; one 20 ms readiness poll plus scheduling must bound it"
     );
     exit_result?;
     handle.join().expect("join server thread");

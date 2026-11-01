@@ -2426,6 +2426,11 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         )
         .expect("external parent");
     assert_eq!(values[0].fee, 25);
+    assert_eq!(
+        checks.load(Ordering::Relaxed),
+        0,
+        "an index-resolved parent needs no readiness read"
+    );
     let values = Projection::new(&ctx)
         .transaction_values(
             [(&child, None), (&child, None)],
@@ -2436,6 +2441,11 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         .expect("in-block parent");
     assert_eq!(values[0].fee, 25);
     assert_eq!(values[1].fee, 25);
+    assert_eq!(
+        checks.load(Ordering::Relaxed),
+        1,
+        "a block-supplied spent parent confirms readiness once"
+    );
     ctx.indexes.esplora_tx_index = Some(Arc::new(ReadinessIndex {
         parent: parent.clone(),
         checks: Arc::clone(&checks),
@@ -2450,6 +2460,11 @@ fn block_parent_reuse_checks_readiness_only_when_needed() {
         )
         .expect_err("index behind tip");
     assert_eq!(error.status, 503);
+    assert_eq!(
+        checks.load(Ordering::Relaxed),
+        2,
+        "the behind-tip path confirms readiness once more"
+    );
 }
 
 #[test]
@@ -2499,6 +2514,11 @@ fn backend_mempool_get_bounds_prevouts_without_limiting_rows() {
         assert_eq!(response.status, 200);
         let rows: Vec<Value> = sonic_rs::from_slice(&response.body).expect("rows");
         assert_eq!(rows.len(), count);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            count.div_ceil(super::backend::TRANSACTION_BATCH_SIZE),
+            "one index read per distinct prevout txid in each batch for {path} with {count} rows"
+        );
         for (row, tx) in rows.iter().zip(txs.iter().skip(start)) {
             assert_eq!(row["txid"], tx.txid().to_string());
             assert_eq!(row["fee"], 50);

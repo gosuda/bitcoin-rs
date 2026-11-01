@@ -190,16 +190,17 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
     let corruption = block_spends_error(BlockSpendsError::Corrupt("fixture"));
     assert_eq!(corruption.code(), -32603);
     assert_eq!(
-        block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
-            below: 10
-        }))
-        .code(),
-        -1
+        corruption.to_string(),
+        "Undo data expected but can't be read. This could be due to disk corruption or a conflict with a pruning event."
     );
-    assert_eq!(
-        block_spends_error(BlockSpendsError::History(HistoryUnavailable::Missing)).code(),
-        -1
-    );
+    let pruned = block_spends_error(BlockSpendsError::History(HistoryUnavailable::Pruned {
+        below: 10,
+    }));
+    assert_eq!(pruned.code(), -1);
+    assert_eq!(pruned.to_string(), "Block not available (pruned data)");
+    let missing = block_spends_error(BlockSpendsError::History(HistoryUnavailable::Missing));
+    assert_eq!(missing.code(), -1);
+    assert_eq!(missing.to_string(), "Block not found on disk");
     assert_eq!(block_spends_error(BlockSpendsError::Retry).code(), -1);
     assert_eq!(
         block_spends_error(BlockSpendsError::BodyRead(
