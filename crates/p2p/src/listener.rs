@@ -22,8 +22,6 @@ const HANDSHAKE_READ_POLL: Duration = Duration::from_secs(1);
 
 const BUDGET_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-const MESSAGE_LOOP_POLL: Duration = Duration::from_secs(1);
-
 fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_nonblocking(false)?;
@@ -101,8 +99,6 @@ pub struct ConnectionShared {
     pub(crate) shared_outbound: Arc<crate::connection::SharedOutboundBudget>,
     block_memory: Arc<crate::inbound::block_memory::BlockMemory>,
     pub dial_routes: crate::DialRoutes,
-    #[cfg(test)]
-    pub(crate) test_keepalive_intervals: std::sync::OnceLock<(Duration, Duration)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,8 +165,6 @@ impl ConnectionShared {
             shared_outbound: Arc::new(crate::connection::SharedOutboundBudget::new()),
             block_memory: Arc::default(),
             dial_routes: crate::DialRoutes::default(),
-            #[cfg(test)]
-            test_keepalive_intervals: std::sync::OnceLock::new(),
         }
     }
 
@@ -1453,7 +1447,7 @@ fn run_connected_session(
         "p2p handshake complete; entering message loop",
     );
 
-    let loop_result = match peer.stream.set_read_timeout(Some(MESSAGE_LOOP_POLL)) {
+    let loop_result = match peer.stream.set_read_timeout(None) {
         Ok(()) => run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref()),
         Err(error) => Err(crate::wire::PeerError::Io(error)),
     };
@@ -1559,8 +1553,6 @@ enum KeepaliveAction {
 }
 
 struct Keepalive {
-    ping_interval: Duration,
-    timeout_interval: Duration,
     last_recv: Instant,
     last_send: Instant,
     last_ping: Option<Instant>,
@@ -1574,13 +1566,7 @@ fn past_stall(last: Instant, since: Instant, now: Instant) -> Instant {
 
 impl Keepalive {
     fn starting(now: Instant) -> Self {
-        Self::with_intervals(now, PING_INTERVAL, TIMEOUT_INTERVAL)
-    }
-
-    fn with_intervals(now: Instant, ping_interval: Duration, timeout_interval: Duration) -> Self {
         Self {
-            ping_interval,
-            timeout_interval,
             last_recv: now,
             last_send: now,
             last_ping: None,
@@ -1646,17 +1632,17 @@ impl Keepalive {
     fn decide(&self, now: Instant, receive_silence_expires: bool) -> KeepaliveAction {
         let last_recv = self.excluding_stall(self.last_recv, now);
         let last_send = self.excluding_stall(self.last_send, now);
-        let receive_expired = receive_silence_expires
-            && now.saturating_duration_since(last_recv) > self.timeout_interval;
-        let send_expired = now.saturating_duration_since(last_send) > self.timeout_interval;
+        let receive_expired =
+            receive_silence_expires && now.saturating_duration_since(last_recv) > TIMEOUT_INTERVAL;
+        let send_expired = now.saturating_duration_since(last_send) > TIMEOUT_INTERVAL;
         if receive_expired || send_expired {
             return KeepaliveAction::Expired;
         }
-        let idle = now.saturating_duration_since(last_recv) >= self.ping_interval
-            || now.saturating_duration_since(last_send) >= self.ping_interval;
+        let idle = now.saturating_duration_since(last_recv) >= PING_INTERVAL
+            || now.saturating_duration_since(last_send) >= PING_INTERVAL;
         let probe_owed = self
             .last_ping
-            .is_none_or(|last| now.saturating_duration_since(last) >= self.ping_interval);
+            .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
         if probe_owed && idle {
             KeepaliveAction::Ping
         } else {
@@ -1957,11 +1943,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
 
     let mut keepalive = Keepalive::starting(Instant::now());
-    #[cfg(test)]
-    if let Some((ping_interval, timeout_interval)) = shared.test_keepalive_intervals.get() {
-        keepalive.ping_interval = *ping_interval;
-        keepalive.timeout_interval = *timeout_interval;
-    }
     let budget = lease.budget_handle();
     let mut parked_since: Option<Instant> = None;
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
@@ -4003,9 +3984,6 @@ mod discouragement_tests;
 
 #[cfg(test)]
 mod dial_cleanup_tests;
-
-#[cfg(test)]
-mod keepalive_loop_tests;
 
 #[cfg(test)]
 mod v2_transport_tests;
