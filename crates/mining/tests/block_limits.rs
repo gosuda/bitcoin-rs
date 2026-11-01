@@ -260,3 +260,157 @@ fn context(segwit_active: bool) -> CandidateContext {
         ..common::context()
     }
 }
+
+#[test]
+fn exact_sigops_limits_cover_n_minus_one_n_and_n_plus_one() -> TestResult {
+    for segwit_active in [false, true] {
+        let mut pool = zero_fee_pool();
+        let witness = if segwit_active {
+            vec![vec![0x11; 32]].into()
+        } else {
+            Witness::new()
+        };
+        let tx = make_tx(1, None, &witness);
+        let txid = tx.txid();
+        let vsize = u32::try_from(tx.vsize())?;
+        let sigop_cost = 400_u32;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx),
+            vsize,
+            10_000,
+            0,
+            0,
+            sigop_cost,
+        ))?;
+
+        let snapshot = pool.mining_snapshot();
+        let mut ctx = context(segwit_active);
+        let baseline = assemble_candidate(&ctx, &pool, &[0x51])?;
+        assert_eq!(baseline.transactions.len(), 1);
+        assert_eq!(baseline.transactions[0].txid, txid);
+
+        let exact_sigops = u64::from(sigop_cost);
+        ctx.max_sigops = exact_sigops;
+        let at_n = assemble_candidate(&ctx, &pool, &[0x51])?;
+        assert_eq!(at_n.transactions.len(), 1);
+        let at_n_ordered = assemble_ordered_candidate(&ctx, &snapshot, &[0x51])?;
+        assert_eq!(at_n_ordered.transactions.len(), 1);
+
+        ctx.max_sigops = exact_sigops + 1;
+        let at_n_plus_one = assemble_candidate(&ctx, &pool, &[0x51])?;
+        assert_eq!(at_n_plus_one.transactions.len(), 1);
+        let at_n_plus_one_ordered = assemble_ordered_candidate(&ctx, &snapshot, &[0x51])?;
+        assert_eq!(at_n_plus_one_ordered.transactions.len(), 1);
+
+        ctx.max_sigops = exact_sigops.saturating_sub(1);
+        let at_n_minus_one = assemble_candidate(&ctx, &pool, &[0x51])?;
+        assert_eq!(at_n_minus_one.transactions.len(), 0);
+        assert!(matches!(
+            assemble_ordered_candidate(&ctx, &snapshot, &[0x51]),
+            Err(MiningError::CapacityExhausted { field: "sigops" })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_template_builds_valid_envelope_and_merkle_root() -> TestResult {
+    for segwit_active in [false, true] {
+        let pool = zero_fee_pool();
+        let ctx = context(segwit_active);
+        let candidate = assemble_candidate(&ctx, &pool, &[0x51])?;
+
+        assert!(candidate.transactions.is_empty());
+        let subsidy = bitcoin_rs_consensus::block_subsidy(
+            candidate.height,
+            Network::Regtest.subsidy_halving_interval(),
+        );
+        assert_eq!(candidate.coinbase_value, subsidy);
+
+        let block = candidate.into_unsolved_block()?;
+        assert_eq!(block.txs.len(), 1);
+        assert_eq!(
+            block.header.prev_blockhash,
+            candidate.previous_block_hash.into()
+        );
+        assert_eq!(
+            block.header.merkle_root,
+            Hash256::from(candidate.coinbase.txid())
+        );
+
+        if segwit_active {
+            assert!(candidate.witness_commitment.is_some());
+            assert_eq!(candidate.coinbase.outputs.len(), 2);
+            assert_eq!(candidate.coinbase.inputs[0].witness.len(), 1);
+            assert_eq!(
+                candidate.coinbase.inputs[0].witness.first(),
+                Some(&[0_u8; 32][..])
+            );
+        } else {
+            assert!(candidate.witness_commitment.is_none());
+            assert_eq!(candidate.coinbase.outputs.len(), 1);
+            assert!(candidate.coinbase.inputs[0].witness.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn non_final_locktime_mempool_tx_is_excluded_from_template() -> TestResult {
+    let mut pool = zero_fee_pool();
+    let mut tx = make_tx(1, None, &Witness::new());
+    tx.lock_time = LockTime::from_consensus(500_000_100);
+    tx.inputs[0].sequence = Sequence::from_consensus(0);
+    let txid = tx.txid();
+    let vsize = u32::try_from(tx.vsize())?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 5_000, 0, 0, 0))?;
+
+    let mut ctx = context(false);
+    ctx.height = 100;
+    ctx.locktime_cutoff = 500_000_100;
+    let excluded = assemble_candidate(&ctx, &pool, &[0x51])?;
+    assert!(excluded.transactions.is_empty());
+
+    ctx.locktime_cutoff = 500_000_101;
+    let included = assemble_candidate(&ctx, &pool, &[0x51])?;
+    assert_eq!(included.transactions.len(), 1);
+    assert_eq!(included.transactions[0].txid, txid);
+    Ok(())
+}
+
+#[test]
+fn coinbase_budget_admission_boundaries() -> TestResult {
+    use bitcoin_rs_mining::CoinbaseBudget;
+
+    let pool = zero_fee_pool();
+    let ctx = context(true);
+    let candidate = assemble_candidate(&ctx, &pool, &[0x51])?;
+
+    assert!(
+        candidate
+            .admits(CoinbaseBudget {
+                additional_size: 10,
+                additional_sigops: 10
+            })
+            .is_ok()
+    );
+    assert!(matches!(
+        candidate.admits(CoinbaseBudget {
+            additional_size: u32::MAX,
+            additional_sigops: 0
+        }),
+        Err(MiningError::CapacityExhausted { field: "weight" }
+            | MiningError::CandidateScalarOverflow { .. })
+    ));
+    let mut limited_ctx = ctx;
+    limited_ctx.max_sigops = 50_000;
+    let limited = assemble_candidate(&limited_ctx, &pool, &[0x51])?;
+    assert!(matches!(
+        limited.admits(CoinbaseBudget {
+            additional_size: 0,
+            additional_sigops: u16::MAX
+        }),
+        Err(MiningError::CapacityExhausted { field: "sigops" })
+    ));
+    Ok(())
+}
