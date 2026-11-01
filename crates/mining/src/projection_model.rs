@@ -270,7 +270,6 @@ mod tests {
         }
     }
 
-    // POOL-05
     fn projection_model_cases() -> u32 {
         std::env::var("PROPTEST_CASES")
             .ok()
@@ -278,6 +277,7 @@ mod tests {
             .unwrap_or(256)
     }
 
+    // POOL-05
     prop_state_machine! {
         #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
         #[test]
@@ -297,6 +297,7 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
 
+        // POOL-05
         #[test]
         fn projection_model_safety_holds_for_arbitrary_command_sequences(
             commands in prop::collection::vec(any::<u8>(), 0..48)
