@@ -22,11 +22,11 @@ Both lanes run under full validation (`--assume-valid-height 0`), strict-Rust cr
 | Restart at intermediate committed ancestor | recovered tip and coins equal; fence reopened only after reconciliation | `planned_not_executed` |
 | Stage histograms (`node.apply_block.*`) | inclusive per-stage histograms reported beside the wall, never summed | `planned_not_executed` |
 
-The targets are contracts, not measurements. No applicable cell may regress against the T02 baseline: cost, latency, RSS and bytes must not increase, and throughput must not decrease. Any optimization is promoted only by the acceptance rule below.
+The targets are contracts, not measurements. No applicable cell may regress against the recorded baseline: cost, latency, RSS and bytes must not increase, and throughput must not decrease. Any optimization is promoted only by the acceptance rule below.
 
 ## Required identities per sample
 
-The six identities of [`README.md`](README.md), enforced by the T02 collector.
+The six identities of [`README.md`](README.md), enforced by the evidence collector.
 
 ## Acceptance rule
 
