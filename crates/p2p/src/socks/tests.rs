@@ -345,3 +345,108 @@ fn partial_byte_trickle_does_not_extend_deadline() -> TestResult {
     assert!(!error.counts_as_peer_failure());
     Ok(())
 }
+
+#[test]
+fn empty_domain_name_is_rejected() -> TestResult {
+    let (proxy, _rx) = fake_socks_no_auth(0x00)?;
+    let Err(error) = socks_connect(
+        proxy,
+        &SocksTarget::Domain(String::new(), 8333),
+        Duration::from_secs(5),
+    ) else {
+        return Err(TestError::Missing("empty domain must fail"));
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[test]
+fn oversize_domain_name_is_rejected() -> TestResult {
+    let (proxy, _rx) = fake_socks_no_auth(0x00)?;
+    let over_domain = "a".repeat(256);
+    let Err(error) = socks_connect(
+        proxy,
+        &SocksTarget::Domain(over_domain, 8333),
+        Duration::from_secs(5),
+    ) else {
+        return Err(TestError::Missing("oversize domain must fail"));
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+}
+
+#[test]
+fn truncated_socks_handshakes_fail_with_unexpected_eof() -> TestResult {
+    for stage in 0..4 {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let proxy = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut greeting = [0u8; 3];
+            let _ = stream.read_exact(&mut greeting);
+            if stage == 0 {
+                return Ok(());
+            }
+            let _ = stream.write_all(&[0x05, 0x00]);
+            let mut head = [0u8; 4];
+            let _ = stream.read_exact(&mut head);
+            let mut rest = [0u8; 6];
+            let _ = stream.read_exact(&mut rest);
+            if stage == 1 {
+                return Ok(());
+            }
+            if stage == 2 {
+                let _ = stream.write_all(&[0x05, 0x00]);
+                return Ok(());
+            }
+            let _ = stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127]);
+            Ok(())
+        });
+
+        let target: SocketAddr = "127.0.0.1:8333".parse()?;
+        let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(2))
+        else {
+            return Err(TestError::Missing("truncated handshake must fail"));
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof,
+            "stage {stage} must fail with unexpected eof"
+        );
+        let _server_res = server
+            .join()
+            .map_err(|_| TestError::Missing("server panicked"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_connect_replies_fail() -> TestResult {
+    for (atyp, rsv, ver) in [(0x02, 0x00, 0x05), (0x01, 0x01, 0x05), (0x01, 0x00, 0x04)] {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let proxy = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut greeting = [0u8; 3];
+            let _ = stream.read_exact(&mut greeting);
+            let _ = stream.write_all(&[0x05, 0x00]);
+            let mut head = [0u8; 4];
+            let _ = stream.read_exact(&mut head);
+            let mut rest = [0u8; 6];
+            let _ = stream.read_exact(&mut rest);
+            let _ = stream.write_all(&[ver, 0x00, rsv, atyp, 127, 0, 0, 1, 0x20, 0x8d]);
+            Ok(())
+        });
+
+        let target: SocketAddr = "127.0.0.1:8333".parse()?;
+        let Err(error) = socks_connect(proxy, &SocksTarget::Ip(target), Duration::from_secs(2))
+        else {
+            return Err(TestError::Missing("malformed connect reply must fail"));
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let _server_res = server
+            .join()
+            .map_err(|_| TestError::Missing("server panicked"))?;
+    }
+    Ok(())
+}

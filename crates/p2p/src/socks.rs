@@ -229,6 +229,11 @@ fn socks_connect_impl(
         },
         SocksTarget::Domain(host, _) => {
             let bytes = host.as_bytes();
+            if bytes.is_empty() {
+                return Err(DialFailure::Transport(invalid(
+                    "socks domain name cannot be empty",
+                )));
+            }
             let len = u8::try_from(bytes.len()).map_err(|_| {
                 DialFailure::Transport(invalid("socks domain name exceeds 255 bytes"))
             })?;
