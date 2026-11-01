@@ -8,6 +8,8 @@ mod packet;
 mod reader;
 
 pub(crate) use handshake::{Established, Handshake, Step};
+#[cfg(test)]
+pub(crate) use packet::RecvCipher;
 pub(crate) use packet::{PACKET_OVERHEAD, SendCipher};
 pub(crate) use reader::{PacketReader, is_poll_timeout};
 

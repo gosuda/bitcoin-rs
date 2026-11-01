@@ -315,10 +315,15 @@ impl PeerError {
     }
 }
 
+/// `progress` runs after each accepted chunk with the cumulative byte count
+/// the writer accepted so far, including the chunk that completes the write;
+/// it never runs for a chunk of zero bytes (that is a `WriteZero` error).
 fn write_all_vectored<W: Write + ?Sized>(
     writer: &mut W,
     mut slices: &mut [IoSlice<'_>],
+    mut progress: impl FnMut(usize),
 ) -> Result<(), PeerError> {
+    let mut accepted = 0;
     while !slices.is_empty() {
         match writer.write_vectored(slices) {
             Ok(0) => {
@@ -327,7 +332,11 @@ fn write_all_vectored<W: Write + ?Sized>(
                     "failed to write whole message",
                 )));
             }
-            Ok(written) => IoSlice::advance_slices(&mut slices, written),
+            Ok(written) => {
+                IoSlice::advance_slices(&mut slices, written);
+                accepted += written;
+                progress(accepted);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(PeerError::Io(error)),
         }
@@ -415,20 +424,38 @@ pub(crate) fn write_frame<W: Write + ?Sized>(
 ) -> Result<usize, PeerError> {
     let mut slices = Vec::with_capacity(2);
     frame.push_slices(&mut slices);
-    write_all_vectored(writer, &mut slices)?;
+    write_all_vectored(writer, &mut slices, |_| {})?;
     Ok(frame.wire_len())
 }
 
+/// Writes every frame, reporting each one to `fully_written`, in order, once
+/// the writer has accepted that frame's final byte (Core's flush semantics:
+/// a message's sent bytes count only once the socket took the whole frame).
+///
+/// Partial acceptance is ordinary backpressure — the loop retries the
+/// remainder — so every frame is reported on success. An error leaves
+/// exactly the frames reported so far charged, which tracks the socket-level
+/// counter: it, too, counted only the accepted prefix.
 pub(crate) fn write_frames<W: Write + ?Sized>(
     writer: &mut W,
     frames: &[FramedMessage],
+    mut fully_written: impl FnMut(usize),
 ) -> Result<(), PeerError> {
     let mut slices = Vec::with_capacity(frames.len().saturating_mul(2));
+    let mut frame_ends = Vec::with_capacity(frames.len());
+    let mut end = 0;
     for frame in frames {
         frame.push_slices(&mut slices);
+        end += frame.wire_len();
+        frame_ends.push(end);
     }
-    write_all_vectored(writer, &mut slices)?;
-    Ok(())
+    let mut reported = 0;
+    write_all_vectored(writer, &mut slices, |accepted| {
+        while reported < frame_ends.len() && frame_ends[reported] <= accepted {
+            fully_written(reported);
+            reported += 1;
+        }
+    })
 }
 
 pub fn write_message<W: Write + ?Sized>(
