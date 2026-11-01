@@ -255,7 +255,9 @@ impl NodeState {
                 config.validation.mode,
                 head.as_ref(),
                 durable_head.as_ref(),
-                config.storage.prune_target_mb > 0,
+                storage
+                    .stored_prune_height()
+                    .is_some_and(|height| height > 0),
             )?;
             prepare_initial_chainstate(
                 &config.data_dir,

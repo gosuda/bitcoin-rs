@@ -23,6 +23,7 @@ pub(super) struct NodeStorage {
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    prune_height: Option<u32>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
 
@@ -50,6 +51,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
             bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?,
         ));
+        let prune_height = bitcoin_rs_storage::pruning::load_pruneheight(&*store)?;
         let block_files = Arc::new(
             match committed {
                 Some(extent) => {
@@ -71,6 +73,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
                 Arc::clone(&block_files),
             )),
             retention,
+            prune_height,
             deferred,
         };
         Ok((storage, block_files))
@@ -109,6 +112,10 @@ impl NodeStorage {
 
     pub(super) const fn kind(&self) -> &'static str {
         self.backend.as_str()
+    }
+
+    pub(super) const fn stored_prune_height(&self) -> Option<u32> {
+        self.prune_height
     }
 
     pub(super) fn block_body_store(

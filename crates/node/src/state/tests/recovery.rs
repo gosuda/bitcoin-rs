@@ -1012,3 +1012,25 @@ fn restart_without_periodic_publication_restores_tip_and_commit_id() -> Result<(
     assert_eq!(landed.height, head.height);
     Ok(())
 }
+
+// RCV-02
+#[test]
+fn stored_prune_height_comes_from_the_datadir_not_the_config() -> Result<(), TestError> {
+    let (_dir, state, config) = applied_regtest_chain(620, 320)?;
+    let service = state
+        .prune_service()
+        .ok_or(TestError::Missing("prune service with prune_target_mb > 0"))?;
+    service.prune_to_height(30).map_err(TestError::from)?;
+    drop(service);
+    drop(state);
+
+    let mut reopen = config;
+    reopen.storage.prune_target_mb = 0;
+    let state = NodeState::open(reopen, None)?;
+    assert_eq!(
+        state.storage.stored_prune_height(),
+        Some(30),
+        "a datadir pruned before keeps its prune height after the config drops it"
+    );
+    Ok(())
+}
