@@ -416,3 +416,79 @@ fn rejects_snapshot_with_record_count_exceeding_budget() {
         Err(UtxoError::SnapshotRecordCountTooLarge { count: 300_000_000 })
     ));
 }
+
+fn valid_two_output_snapshot(record_txid: Hash256, height: u32) -> Vec<u8> {
+    let mut bytes = v4_header(txid(190_001), height, 1);
+    bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 2));
+    append_snapshot_output(&mut bytes, 0, 1_000, height, false, &[0x51]);
+    append_snapshot_output(&mut bytes, 1, 2_000, height, true, &[0x51, 0x52]);
+    bytes.extend_from_slice(&[0_u8; 384]);
+    bytes
+}
+
+#[test]
+fn strict_v4_refuses_every_truncation_length() -> TestResult {
+    let bytes = valid_two_output_snapshot(txid(190_000), 1900);
+    read_snapshot_strict_v4(&mut Cursor::new(&bytes))?;
+    for cut in 0..bytes.len() {
+        assert!(
+            read_snapshot_strict_v4(&mut Cursor::new(&bytes[..cut])).is_err(),
+            "truncation at {cut} decoded"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn strict_v4_refuses_a_duplicated_record() {
+    let record_txid = txid(191_000);
+    let mut bytes = v4_header(txid(191_001), 1910, 2);
+    for vout in [0_u32, 1] {
+        bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 1));
+        append_snapshot_output(&mut bytes, vout, 1_000, 1910, false, &[0x51]);
+    }
+    bytes.extend_from_slice(&[0_u8; 384]);
+    let result = read_snapshot_strict_v4(&mut Cursor::new(bytes));
+    assert!(matches!(
+        result,
+        Err(UtxoError::SnapshotRecordCountMismatch {
+            declared: 2,
+            actual: 1
+        })
+    ));
+}
+
+#[test]
+fn strict_v4_coin_hash_ignores_output_order() -> TestResult {
+    fn ordered_snapshot(vouts: [u32; 2]) -> Vec<u8> {
+        let record_txid = txid(192_000);
+        let mut bytes = v4_header(txid(192_001), 1920, 1);
+        bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 2));
+        for vout in vouts {
+            append_snapshot_output(&mut bytes, vout, 1_000 + u64::from(vout), 1920, false, &[0x51]);
+        }
+        bytes.extend_from_slice(&[0_u8; 384]);
+        bytes
+    }
+    let forward = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([3, 9])))?;
+    let reverse = read_snapshot_strict_v4(&mut Cursor::new(ordered_snapshot([9, 3])))?;
+    assert_eq!(
+        forward
+            .set
+            .lock_stable_view()
+            .hash_serialized_3()?,
+        reverse
+            .set
+            .lock_stable_view()
+            .hash_serialized_3()?,
+        "an unordered record must hash to the same coin commitment"
+    );
+    for vout in [3_u32, 9] {
+        let outpoint = OutPoint::new(txid(192_000).into(), vout);
+        assert!(
+            reverse.set.get_entry(&outpoint).is_some(),
+            "unordered record lost vout {vout}"
+        );
+    }
+    Ok(())
+}
