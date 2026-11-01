@@ -1319,13 +1319,10 @@ fn json_rpc_batch_excludes_notifications() {
 
 fn read_whole_request(
     reader: &mut BufReader<RequestDeadlineStream>,
-    head_timeout: Duration,
-    body_timeout: Duration,
+    _head_timeout: Duration,
+    _body_timeout: Duration,
 ) -> Result<Option<HttpRequest>, RequestReadError> {
-    match read_request_head(reader, head_timeout)? {
-        Some(head) => read_request_body(reader, body_timeout, head).map(Some),
-        None => Ok(None),
-    }
+    read_http_request(reader)
 }
 
 struct Exchange {
@@ -1433,7 +1430,7 @@ fn unauthorized_request_with_buffered_body_returns_without_the_drain_hold() -> i
     request.extend_from_slice(b"X");
     client.write_all(&request)?;
     let mut reader = BufReader::new(RequestDeadlineStream::new(server, Duration::from_secs(30)));
-    let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+    let head = match read_request_head(&mut reader) {
         Ok(Some(head)) => head,
         Ok(None) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head")),
         Err(RequestReadError::Io(error)) => return Err(error),
@@ -1474,7 +1471,7 @@ fn serve_unauthorized(request: &[u8], take: usize) -> io::Result<(String, Vec<u8
         let (stream, _) = listener.accept()?;
         let mut reader =
             BufReader::new(RequestDeadlineStream::new(stream, Duration::from_secs(30)));
-        let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+        let head = match read_request_head(&mut reader) {
             Ok(Some(head)) => head,
             Ok(None) => {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "missing head"));
@@ -2163,4 +2160,15 @@ fn auth_constant_time_eq_verifies_byte_mismatch_and_length_mismatch() {
     assert!(!constant_time_eq(b"password12", b"password123"));
     assert!(!constant_time_eq(b"", b"p"));
     assert!(constant_time_eq(b"", b""));
+}
+
+#[test]
+fn json_depth_limit_exceeded_returns_parse_error_without_stack_overflow() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let mut deep = Vec::with_capacity(20_000);
+    deep.extend(std::iter::repeat_n(b'[', 10_000));
+    deep.extend(std::iter::repeat_n(b']', 10_000));
+    let response = handle_json(&handler, &deep);
+    assert_eq!(response.status, 500);
+    assert!(response.body.is_some());
 }

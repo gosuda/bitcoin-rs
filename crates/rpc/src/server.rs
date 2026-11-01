@@ -381,7 +381,11 @@ fn serve_connection(
     let mut reader = BufReader::new(RequestDeadlineStream::new(stream, idle_timeout));
     loop {
         reader.get_mut().reset_deadline(idle_timeout);
-        let head = match read_request_head(&mut reader, REQUEST_HEAD_TIMEOUT) {
+        if reader.fill_buf()?.is_empty() {
+            return Ok(());
+        }
+        reader.get_mut().reset_deadline(REQUEST_HEAD_TIMEOUT);
+        let head = match read_request_head(&mut reader) {
             Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
             Err(error) => {
@@ -407,7 +411,8 @@ fn serve_connection(
         if authenticate_json_rpc_head(auth, &mut reader, &head)? {
             return Ok(());
         }
-        let request = match read_request_body(&mut reader, REQUEST_BODY_TIMEOUT, head) {
+        reader.get_mut().reset_deadline(REQUEST_BODY_TIMEOUT);
+        let request = match read_request_body(&mut reader, head) {
             Ok(request) => request,
             Err(error) => {
                 return handle_read_error(
@@ -575,11 +580,12 @@ fn dispatch_http_request(
     Ok(false)
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    keep_alive: bool,
-    body: Vec<u8>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub keep_alive: bool,
+    pub body: Vec<u8>,
 }
 
 const fn is_token_char(byte: u8) -> bool {
@@ -617,7 +623,7 @@ fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(St
 }
 
 fn read_headers(
-    reader: &mut BufReader<RequestDeadlineStream>,
+    reader: &mut impl BufRead,
     mut header_bytes: usize,
 ) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
     let mut content_length = None;
@@ -677,33 +683,28 @@ fn read_headers(
     }
 }
 
-enum RequestReadError {
-    Io(io::Error),
+#[derive(Debug, thiserror::Error)]
+pub enum RequestReadError {
+    #[error("i/o error reading request: {0}")]
+    Io(#[from] io::Error),
+    #[error("rest getutxos body exceeds limit")]
     RestBodyTooLarge,
 }
 
-impl From<io::Error> for RequestReadError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
+pub(crate) struct RequestHead {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) keep_alive: bool,
+    pub(crate) content_length: usize,
 }
 
-struct RequestHead {
-    method: String,
-    path: String,
-    authorization: Option<String>,
-    keep_alive: bool,
-    content_length: usize,
-}
-
-fn read_request_head(
-    reader: &mut BufReader<RequestDeadlineStream>,
-    head_timeout: Duration,
+pub(crate) fn read_request_head(
+    reader: &mut impl BufRead,
 ) -> Result<Option<RequestHead>, RequestReadError> {
     if reader.fill_buf()?.is_empty() {
         return Ok(None);
     }
-    reader.get_mut().reset_deadline(head_timeout);
     let (request_line, bytes) = read_head_line(reader, MAX_HEADER_BYTES)?;
     if bytes == 0 {
         return Ok(None);
@@ -761,12 +762,10 @@ fn read_request_head(
     }))
 }
 
-fn read_request_body(
-    reader: &mut BufReader<RequestDeadlineStream>,
-    body_timeout: Duration,
+pub(crate) fn read_request_body(
+    reader: &mut impl Read,
     head: RequestHead,
 ) -> Result<HttpRequest, RequestReadError> {
-    reader.get_mut().reset_deadline(body_timeout);
     let mut body = Vec::new();
     read_body(reader, head.content_length, &mut body)?;
     Ok(HttpRequest {
@@ -775,6 +774,20 @@ fn read_request_body(
         keep_alive: head.keep_alive,
         body,
     })
+}
+
+pub fn read_http_request(
+    reader: &mut impl BufRead,
+) -> Result<Option<HttpRequest>, RequestReadError> {
+    match read_request_head(reader)? {
+        Some(head) => read_request_body(reader, head).map(Some),
+        None => Ok(None),
+    }
+}
+
+pub fn parse_http_request(reader: impl Read) -> Result<Option<HttpRequest>, RequestReadError> {
+    let mut reader = BufReader::new(reader);
+    read_http_request(&mut reader)
 }
 
 const BODY_READ_CHUNK: usize = 8 * 1_024;
@@ -802,11 +815,12 @@ fn read_body(reader: &mut impl Read, content_length: usize, body: &mut Vec<u8>) 
     Ok(())
 }
 
-struct JsonResponse {
-    close: bool,
-    status: u16,
-    reason: &'static str,
-    body: Option<Value>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonResponse {
+    pub close: bool,
+    pub status: u16,
+    pub reason: &'static str,
+    pub body: Option<Value>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -935,14 +949,51 @@ impl CallResponse {
     }
 }
 
-fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
-    let body = match core::str::from_utf8(body) {
+const MAX_JSON_DEPTH: usize = 128;
+
+fn check_json_depth(body: &[u8]) -> Result<(), RpcError> {
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in body {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => {
+                    depth = depth.saturating_add(1);
+                    if depth > MAX_JSON_DEPTH {
+                        return Err(RpcError::TopLevelParse("JSON nesting depth limit exceeded"));
+                    }
+                }
+                b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
+    let body_str = match core::str::from_utf8(body) {
         Ok(body) => body,
         Err(error) => {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());
         }
     };
-    let request = match sonic_rs::from_str::<Value>(body) {
+    if let Err(error) = check_json_depth(body) {
+        return legacy_error_response(&error, &Value::new_null());
+    }
+    let request = match sonic_rs::from_str::<Value>(body_str) {
         Ok(request) => request,
         Err(error) => {
             return legacy_error_response(&RpcError::from(error), &Value::new_null());

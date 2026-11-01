@@ -25,7 +25,10 @@ pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;
 pub use handlers::Handler;
-pub use server::{RpcServer, RpcSurface};
+pub use server::{
+    HttpRequest, JsonResponse, RequestReadError, RpcServer, RpcSurface, handle_json,
+    parse_http_request, read_http_request,
+};
 
 #[cfg(test)]
 pub(crate) mod test_error;
