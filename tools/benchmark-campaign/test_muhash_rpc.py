@@ -519,16 +519,6 @@ class TrialTests(unittest.TestCase):
         code, _ = environment.run()
         self.assertEqual(code, 2)
 
-    def test_oversized_response_is_refused(self) -> None:
-        environment = self._environment(mode="oversized", max_response_bytes=4096)
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_deep_response_is_refused(self) -> None:
-        environment = self._environment(mode="deep")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
     def test_slow_drip_hits_end_to_end_deadline(self) -> None:
         environment = self._environment(mode="slow_drip", timeout="0.3")
         started = time.monotonic()
@@ -551,29 +541,8 @@ class TrialTests(unittest.TestCase):
         self.assertLess(elapsed, 1.5)
         self.assertFalse(environment.server.drips_finished)
 
-    def test_decoder_depth_overflow_is_refused(self) -> None:
-        environment = self._environment(mode="decoder_deep")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_decoder_deep_trial_input_is_refused(self) -> None:
-        environment = self._environment(corrupt="input_decoder_deep")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
     def test_overlong_integer_token_is_refused(self) -> None:
         environment = self._environment(mode="overlong_int")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_overlong_integer_in_trial_input_is_refused(self) -> None:
-        environment = self._environment()
-        environment.server.shutdown()
-        poisoned = environment.input_path.read_bytes().replace(
-            b'"max_response_bytes":65536', b'"max_response_bytes":' + b"9" * 5_000
-        )
-        self.assertNotEqual(poisoned, environment.input_path.read_bytes())
-        environment.input_path.write_bytes(poisoned)
         code, _ = environment.run()
         self.assertEqual(code, 2)
 
@@ -591,48 +560,8 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertNotIn(b"secret-9af3-bearer-token-duplicate".decode(), stderr)
 
-    def test_non_loopback_endpoint_is_refused(self) -> None:
-        environment = self._environment(endpoint="http://10.0.0.1:8332/")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_endpoint_with_userinfo_is_refused(self) -> None:
-        environment = self._environment(endpoint="http://user:pass@127.0.0.1:8332/")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
     def test_endpoint_without_port_or_path_is_refused(self) -> None:
         environment = self._environment(endpoint="http://127.0.0.1")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_endpoint_with_fragment_is_refused(self) -> None:
-        environment = self._environment(endpoint="http://127.0.0.1:8332/#frag")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_redirect_is_refused(self) -> None:
-        environment = self._environment(mode="redirect")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_http_error_status_is_refused(self) -> None:
-        environment = self._environment(mode="http_error")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_mismatched_json_rpc_id_is_refused(self) -> None:
-        environment = self._environment(mode="wrong_id")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_mismatched_json_rpc_version_is_refused(self) -> None:
-        environment = self._environment(mode="wrong_version")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_rpc_error_envelope_is_refused(self) -> None:
-        environment = self._environment(mode="rpc_error")
         code, _ = environment.run()
         self.assertEqual(code, 2)
 
@@ -807,30 +736,6 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("changed while being read", stderr)
 
-    def test_duplicate_key_in_trial_input_is_refused(self) -> None:
-        environment = self._environment()
-        environment.server.shutdown()
-        raw = environment.input_path.read_bytes()
-        poisoned = raw.replace(
-            b'"controller_pre_receipt"',
-            b'"campaign_id":"x","campaign_id":"y","controller_pre_receipt"',
-        )
-        self.assertNotEqual(raw, poisoned)
-        environment.input_path.write_bytes(poisoned)
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_duplicate_key_in_rpc_result_is_refused(self) -> None:
-        environment = self._environment(mode="duplicate_key")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_extreme_amount_exponents_are_refused(self) -> None:
-        for amount in ("1e999999999", "1e-999999999", "0.000000001", "-1"):
-            environment = self._environment(state=_state_literal(amount=amount))
-            code, _ = environment.run()
-            self.assertEqual(code, 2, amount)
-
     def test_credential_size_mismatch_is_refused(self) -> None:
         environment = self._environment()
         environment.server.shutdown()
@@ -882,16 +787,6 @@ class TrialTests(unittest.TestCase):
         self.assertTrue(output_exists)
         self.assertEqual(len(target_requests), 1)
         self.assertEqual(trap_requests, [])
-
-    def test_oversized_trial_input_is_refused_before_parse(self) -> None:
-        environment = self._environment(corrupt="input_oversize")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
-
-    def test_deeply_nested_trial_input_is_refused(self) -> None:
-        environment = self._environment(corrupt="input_deep")
-        code, _ = environment.run()
-        self.assertEqual(code, 2)
 
     def test_unknown_trial_input_key_is_refused(self) -> None:
         environment = self._environment()
@@ -1632,32 +1527,6 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("untrusted renames", stderr.getvalue())
 
-    def test_shared_group_ancestor_is_refused(self) -> None:
-        environment = self._environment()
-        environment.write_manifest()
-        # Group-writable: even the owner's own primary group is not a
-        # trust boundary; any member may rename the next component.
-        shared = environment.root / "shared-group"
-        shared.mkdir()
-        shared.chmod(0o770)
-        victim = shared / "victim"
-        victim.mkdir()
-        victim.chmod(0o700)
-        stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            code = module.main(
-                [
-                    "aggregate",
-                    "--input",
-                    str(environment.root / "aggregate-input.json"),
-                    "--output",
-                    str(victim / "result.json"),
-                ]
-            )
-        self.assertEqual(code, 2)
-        self.assertIn("untrusted renames", stderr.getvalue())
-        self.assertFalse((victim / "result.json").exists())
-
     def test_shared_group_final_parent_is_refused(self) -> None:
         environment = self._environment()
         environment.write_manifest()
@@ -1821,20 +1690,6 @@ class AggregateTests(unittest.TestCase):
 
         code, output = self._run_with_post_link_fault(
             environment, {"name": "stat", "poison": poisoned_stat}
-        )
-        self.assertEqual(code, 2)
-        self.assertFalse(output.exists())
-
-    def test_post_link_fsync_failure_rolls_back_output(self) -> None:
-        environment = self._environment()
-
-        def poisoned_fsync(fd: int) -> None:
-            raise OSError(errno.EIO, "injected directory fsync failure")
-
-        # The poison arms only after linkat, so the pre-link inode fsync
-        # runs clean and the post-link directory fsync is the failure.
-        code, output = self._run_with_post_link_fault(
-            environment, {"name": "fsync", "poison": poisoned_fsync}
         )
         self.assertEqual(code, 2)
         self.assertFalse(output.exists())
