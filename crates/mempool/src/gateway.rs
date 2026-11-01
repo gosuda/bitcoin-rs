@@ -15,6 +15,8 @@ use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::mpsc;
 
 struct PrevoutMap<'a> {
     index: HashMap<OutPoint, &'a TxOut>,
@@ -545,6 +547,20 @@ struct PublishState {
     draining: bool,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct BeginChainProbes {
+    entered: Option<mpsc::Sender<()>>,
+    lock_held: Option<BeginLockHold>,
+}
+
+#[cfg(test)]
+struct BeginLockHold {
+    signal: mpsc::Sender<bool>,
+    resume: mpsc::Receiver<()>,
+    released_probe: Box<dyn Fn() -> bool + Send>,
+}
+
 pub struct MempoolGateway {
     pub(crate) pool: Arc<RwLock<Mempool>>,
     pub(crate) lifecycle: Mutex<crate::orphan::AdmissionLifecycle>,
@@ -555,6 +571,8 @@ pub struct MempoolGateway {
     chain_generation: AtomicU64,
     engine: ValidationEngine,
     script_cache: Option<Arc<ScriptExecutionCache>>,
+    #[cfg(test)]
+    begin_probes: Mutex<BeginChainProbes>,
 }
 
 impl core::fmt::Debug for MempoolGateway {
@@ -592,6 +610,8 @@ impl MempoolGateway {
             chain_generation: AtomicU64::new(0),
             engine,
             script_cache,
+            #[cfg(test)]
+            begin_probes: Mutex::new(BeginChainProbes::default()),
         }
     }
 
@@ -649,7 +669,11 @@ impl MempoolGateway {
     }
 
     pub fn begin_chain_change(self: &Arc<Self>) -> Result<ChainChangeGuard, ChainChangeError> {
+        #[cfg(test)]
+        self.notify_begin_entry();
         let pool_guard = self.pool.write();
+        #[cfg(test)]
+        self.hold_at_begin_lock();
         let current = self.chain_generation.load(Ordering::Relaxed);
         if !current.is_multiple_of(2) {
             return Err(ChainChangeError::AlreadyActive);
@@ -663,6 +687,42 @@ impl MempoolGateway {
             odd,
             even,
         })
+    }
+
+    #[cfg(test)]
+    fn notify_begin_entry(&self) {
+        if let Some(entered) = self.begin_probes.lock().entered.as_ref() {
+            let _ = entered.send(());
+        }
+    }
+
+    #[cfg(test)]
+    fn hold_at_begin_lock(&self) {
+        let Some(hold) = self.begin_probes.lock().lock_held.take() else {
+            return;
+        };
+        let released = (hold.released_probe)();
+        if hold.signal.send(released).is_err() {
+            return;
+        }
+        let _ = hold.resume.recv();
+    }
+
+    #[cfg(test)]
+    pub fn install_begin_chain_change_probes(
+        &self,
+        entered: mpsc::Sender<()>,
+        lock_held: mpsc::Sender<bool>,
+        resume: mpsc::Receiver<()>,
+        released_probe: Box<dyn Fn() -> bool + Send>,
+    ) {
+        let mut probes = self.begin_probes.lock();
+        probes.entered = Some(entered);
+        probes.lock_held = Some(BeginLockHold {
+            signal: lock_held,
+            resume,
+            released_probe,
+        });
     }
 
     #[cfg(any(test, feature = "test-seam"))]

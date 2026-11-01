@@ -2000,34 +2000,42 @@ fn chain_generation_overflow_fails_closed() {
     );
 }
 
+// MPL-04
 #[test]
 fn begin_chain_change_serializes_with_inflight_admission() {
     let gateway = gateway_with(None);
 
     let (held_tx, held_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
-    let gateway_a = Arc::clone(&gateway);
     let admission_released = Arc::new(AtomicBool::new(false));
     let released_probe = Arc::clone(&admission_released);
+    let gateway_a = Arc::clone(&gateway);
     let a_handle = std::thread::spawn(move || {
         let guard = gateway_a.pool().write();
         held_tx.send(()).expect("test waiting for lock acquisition");
-        release_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("test alive to release");
+        release_rx.recv().expect("test alive to release");
         released_probe.store(true, Ordering::SeqCst);
         drop(guard);
     });
 
     held_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
+        .recv()
         .expect("thread A acquired the pool write lock");
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (lock_held_tx, lock_held_rx) = mpsc::channel::<bool>();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let held_when_probed = Arc::clone(&admission_released);
+    gateway.install_begin_chain_change_probes(
+        entered_tx,
+        lock_held_tx,
+        resume_rx,
+        Box::new(move || held_when_probed.load(Ordering::SeqCst)),
+    );
 
     let gateway_b = Arc::clone(&gateway);
     let (b_done_tx, b_done_rx) = mpsc::channel();
-    let (b_ready_tx, b_ready_rx) = mpsc::channel();
     let b_handle = std::thread::spawn(move || {
-        b_ready_tx.send(()).expect("thread B ready");
         let guard = gateway_b
             .begin_chain_change()
             .expect("begin after lock release");
@@ -2036,59 +2044,40 @@ fn begin_chain_change_serializes_with_inflight_admission() {
             .expect("test waiting for begin result");
     });
 
-    b_ready_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
-        .expect("thread B started");
-
+    entered_rx
+        .recv()
+        .expect("thread B entered begin_chain_change");
     assert!(
         gateway.pool().is_locked_exclusive(),
-        "the admission still holds the pool write lock that parks begin_chain_change"
+        "the admission holds the pool write lock that parks begin_chain_change"
     );
     assert!(
         b_done_rx.try_recv().is_err(),
         "begin_chain_change must not complete while the admission holds the write lock"
-    );
-    let generation_shifted = Arc::new(AtomicBool::new(false));
-    let shifted_probe = Arc::clone(&generation_shifted);
-    let stop_probe = Arc::clone(&admission_released);
-    let gateway_probe = Arc::clone(&gateway);
-    let sampler = std::thread::spawn(move || {
-        while !stop_probe.load(Ordering::SeqCst) {
-            if gateway_probe.stable_generation() != Some(0) {
-                shifted_probe.store(true, Ordering::SeqCst);
-                break;
-            }
-            std::thread::yield_now();
-        }
-    });
-
-    for _ in 0..200_000 {
-        std::thread::yield_now();
-    }
-    assert!(
-        gateway.pool().is_locked_exclusive(),
-        "the admission still holds the pool write lock after the scheduling spin"
-    );
-    assert!(
-        b_done_rx.try_recv().is_err(),
-        "begin_chain_change had scheduling chances and must still be parked"
     );
     assert_eq!(
         gateway.stable_generation(),
         Some(0),
         "begin must not store odd while an admission holds the write lock"
     );
+    assert!(
+        lock_held_rx.try_recv().is_err(),
+        "begin_chain_change must still be parked on the pool write lock held by the admission"
+    );
 
     release_tx.send(()).expect("thread A alive");
     a_handle.join().expect("thread A completed");
-    sampler.join().expect("generation sampler completed");
-    assert!(
-        !generation_shifted.load(Ordering::SeqCst),
-        "begin_chain_change stored an odd generation while an admission held the write lock"
-    );
 
+    let lock_held_after_release = lock_held_rx
+        .recv()
+        .expect("begin_chain_change reached the pool write lock");
+    resume_tx.send(()).expect("resume begin_chain_change");
+    assert!(
+        lock_held_after_release,
+        "begin_chain_change must pass the pool write lock only after the admission released it"
+    );
     let guard = b_done_rx
-        .recv_timeout(core::time::Duration::from_secs(10))
+        .recv()
         .expect("begin_chain_change returned after lock release");
     assert_eq!(guard.odd_generation(), 1);
     assert_eq!(guard.reserved_even(), 2);
