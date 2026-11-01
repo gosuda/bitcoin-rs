@@ -118,7 +118,7 @@ inductive scan.UtxoScanError where
 | Aborted : scan.UtxoScanError
 
 /-- [bitcoin_rs_utxo::set::UtxoError]
-    Source: 'crates/utxo/src/set.rs', lines 20:0-51:1
+    Source: 'crates/utxo/src/set.rs', lines 20:0-53:1
     Visibility: public -/
 @[discriminant isize]
 inductive set.UtxoError where
@@ -137,6 +137,7 @@ inductive set.UtxoError where
 | SnapshotShardMismatch : Std.U8 → Std.U8 → set.UtxoError
 | SnapshotTxidPrefixMismatch : set.UtxoError
 | AmountOutOfRange : Std.U64 → set.UtxoError
+| Cancelled : set.UtxoError
 
 /-- [bitcoin_rs_utxo::compress::compress_amount]: loop body 0:
     Source: 'crates/utxo/src/compress.rs', lines 78:4-81:5 -/
