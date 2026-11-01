@@ -238,7 +238,7 @@ pub enum OfflineImportError {
     ArchiveSizeMismatch,
     #[error("archive digest does not match the manifest")]
     ArchiveDigestMismatch,
-    #[error("cannot read provenance {path}")]
+    #[error("cannot read provenance {path}: {source}")]
     ProvenanceRead {
         path: PathBuf,
         #[source]
@@ -246,7 +246,7 @@ pub enum OfflineImportError {
     },
     #[error("provenance {path} exceeds its bound")]
     ProvenanceExceedsBound { path: PathBuf },
-    #[error("provenance {path} is not valid JSON")]
+    #[error("provenance {path} is not valid JSON: {source}")]
     ProvenanceJson {
         path: PathBuf,
         #[source]
@@ -792,7 +792,7 @@ fn require_full_validation_provenance(
         }),
         Err(error) => Err(OfflineImportError::ProvenanceUnreadable {
             tip_height: tip.height,
-            detail: format!("{error:#}"),
+            detail: error.to_string(),
         }),
     }
 }
