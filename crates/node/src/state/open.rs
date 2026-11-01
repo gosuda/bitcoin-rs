@@ -702,6 +702,7 @@ impl NodeState {
             seed_offer,
         ));
         verify_startup_window(&chainstate, &config.data_dir)?;
+        let shutdown = Arc::new(chainstate.shutdown_reader().child());
         Ok(Self {
             config,
             #[cfg(test)]
@@ -724,7 +725,7 @@ impl NodeState {
             recovery_reporter,
             snapshots,
             block_announce_rx: Mutex::new(Some(block_announce_rx)),
-            shutdown: Arc::new(bitcoin_rs_chain::LatchWriter::new()),
+            shutdown,
         })
     }
 }

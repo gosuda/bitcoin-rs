@@ -329,7 +329,8 @@ pub(crate) struct NodeServices {
     #[cfg(feature = "pool")]
     pool: Option<crate::pool::PoolService>,
     event_loop: Option<std::thread::JoinHandle<()>>,
-    shutdown_forwarder: Option<std::thread::JoinHandle<()>>,
+    shutdown_forwarder:
+        Option<(std::thread::JoinHandle<()>, Arc<bitcoin_rs_chain::LatchWriter>)>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
@@ -484,6 +485,15 @@ impl NodeServices {
                 set_first_error(first_error, RunError::MaintenanceWorkerPanicked);
             }
         }
+        if let Some((handle, stop)) = self.shutdown_forwarder.take() {
+            stop.trigger();
+            if matches!(handle.join(), Ok(())) {
+                tracing::info!("shutdown forwarder exited cleanly");
+            } else {
+                tracing::error!("shutdown forwarder panicked");
+                set_first_error(first_error, RunError::ShutdownForwarderPanicked);
+            }
+        }
         if let Some(mut handler) = self.signal_handler.take() {
             if let Err(error) = handler.close_and_join() {
                 tracing::error!(%error, "signal forwarding thread did not shut down cleanly");
@@ -635,15 +645,21 @@ pub(crate) fn start_node(
     let injected_shutdown_forwarder = if let Some(rx) = injected_shutdown {
         let state_shutdown = state.shutdown_writer();
         let chainstate_for_signal = state.chainstate();
-        Some(
+        let forwarder_stop = Arc::new(state.shutdown_reader().child());
+        let forwarder_stop_reader = forwarder_stop.reader();
+        Some((
             std::thread::Builder::new()
                 .name("bitcoin-rs-shutdown-forwarder".into())
                 .spawn(move || {
-                    let _ = rx.recv();
+                    crossbeam_channel::select! {
+                        recv(rx) -> _ => {}
+                        recv(forwarder_stop_reader.closed()) -> _ => {}
+                    }
                     state_shutdown.trigger();
                     chainstate_for_signal.request_shutdown();
                 })?,
-        )
+            forwarder_stop,
+        ))
     } else {
         if install_signals {
             let chainstate_for_signal = state.chainstate();

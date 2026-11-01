@@ -9,6 +9,7 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - `StartupGuard::finish` transfers the owned `Node` only after every service started.
   - Both paths MUST stop through `NodeServices::teardown` with `TeardownMode` (`StartupAbort` vs `CleanShutdown`).
   - Teardown requests shutdown and wakes the event loop.
+  - The node shutdown latch is a child of the chainstate latch, so a chainstate recovery closure stops the node instead of only its P2P, index, and mining users.
   - Teardown joins the event loop and all configured RPC/HTTP listeners.
   - Teardown stops metrics.
   - Teardown joins P2P core, ingress, and relay workers.
@@ -62,9 +63,11 @@ The typed in-process surface provides `Node::start`, gateway broadcast, and cons
   - It fires on every applied-tip connect/disconnect to the attached coordinator.
   - Before attach it is a no-op.
 - **EMB-09: Shutdown wake cannot block teardown.**
-  - The bounded wake channel already holds the required notification.
-  - Teardown sends nonblocking and continues joins whether accepted, full, or receiverless.
+  - An injected shutdown receiver is served by one named forwarder thread.
+  - The forwarder waits on that receiver and on the node shutdown latch, so the latch ends it too.
   - Teardown raises the authoritative shutdown flag first.
+  - Teardown then triggers the forwarder latch and joins the forwarder.
+  - No store handle outlives shutdown, even while the caller keeps its sender open.
   - Owner: `lifecycle.rs::NodeServices::teardown`.
 
 ## Startup failure and cancellation

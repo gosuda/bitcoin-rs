@@ -66,6 +66,8 @@ pub enum RunError {
     ReadinessSamplerPanicked,
     #[error("signal forwarding thread panicked")]
     SignalForwardingPanicked,
+    #[error("shutdown forwarder thread panicked")]
+    ShutdownForwarderPanicked,
     #[error("event loop thread panicked")]
     EventLoopPanicked,
     #[error("rpc listener thread panicked")]

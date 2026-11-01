@@ -636,21 +636,54 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> Result<(), 
 // EMB-09
 #[test]
 fn a_queued_shutdown_wake_does_not_block_teardown() -> Result<(), TestError> {
-    let latch = bitcoin_rs_chain::LatchWriter::new();
-    let reader = latch.reader();
-    let forwarder = std::thread::spawn(move || {
-        let _ = reader.closed().recv();
-    });
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let mut services = NodeServices::default();
-        services.shutdown_forwarder = Some(forwarder);
-        let result = services.teardown(None, TeardownMode::StartupAbort);
-        let _ = done_tx.send(result);
-    });
-    let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));
-    worker.join().map_err(|_| TestError::ThreadPanicked)?;
-    result.map_err(|_| TestError::Timeout("teardown blocked on queued wake"))??;
+    let temp = tempfile::tempdir()?;
+    let config = isolated_config(&temp.path().join("node-forwarder"));
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+    let node = start_node(
+        config.clone(),
+        RuntimeInputs::default().with_shutdown(shutdown_rx),
+        false,
+    )?;
+
+    node.shutdown_blocking()?;
+
+    let reopened = NodeState::open(config, None)?;
+    drop(reopened);
+    drop(shutdown_tx);
+    Ok(())
+}
+
+// EMB-01
+#[test]
+fn recovery_closure_stops_the_node_run_loop() -> Result<(), TestError> {
+    let temp = tempfile::tempdir()?;
+    let config = isolated_config(&temp.path().join("node-recovery-exit"));
+    let node = start_node(config, RuntimeInputs::default(), false)?;
+
+    node.state.chainstate().fail_closed_for_recovery();
+
+    let deadline = std::time::Instant::now() + WITNESS_BOUND;
+    loop {
+        let exited = node
+            .services
+            .as_ref()
+            .and_then(|services| services.event_loop.as_ref())
+            .is_some_and(|handle| handle.is_finished());
+        if exited {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the event loop kept running after a chainstate recovery closure"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        node.state.shutdown_reader().is_triggered(),
+        "a recovery closure must raise the node shutdown latch"
+    );
+
+    node.shutdown_blocking()?;
     Ok(())
 }
 const WITNESS_BOUND: Duration = Duration::from_secs(10);

@@ -774,8 +774,8 @@ impl Chainstate {
     }
 
     pub fn request_shutdown(&self) {
-        let _gate = self.tip_notification.gate.lock();
         self.shutdown.trigger();
+        let _gate = self.tip_notification.gate.lock();
         self.tip_notification.changed.notify_all();
     }
 
