@@ -32,11 +32,24 @@
 # How it works
 
 - [Architecture](how/architecture.md)
+- [Startup](how/startup.md)
 - [Validation](how/validation.md)
+- [Block connect and reorg](how/block-connect-and-reorg.md)
+- [Header sync and block download](how/header-sync-and-block-download.md)
 - [Chain state and storage](how/state-and-storage.md)
+- [Durability and the journal](how/durability-and-journal.md)
+- [Checkpoints and recovery](how/checkpoints-and-recovery.md)
+- [Snapshots and assumeutxo](how/snapshots-and-assumeutxo.md)
+- [Pruning](how/pruning.md)
 - [Peer-to-peer networking](how/p2p.md)
+- [BIP324 and peer management](how/bip324-and-peer-management.md)
 - [Mempool](how/mempool.md)
+- [Mempool admission](how/mempool-admission.md)
 - [Indexes](how/index.md)
+- [Index state, reconciliation, and bundles](how/index-bundles-and-reconciliation.md)
+- [Native pool ledger](how/pool-ledger.md)
+- [RPC server](how/rpc-server.md)
+- [Node runtime](how/node-runtime.md)
 
 # Trust and evidence
 
