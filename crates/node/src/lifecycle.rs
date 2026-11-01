@@ -333,6 +333,7 @@ pub(crate) struct NodeServices {
         Option<(std::thread::JoinHandle<()>, Arc<bitcoin_rs_chain::LatchWriter>)>,
     metrics: Option<crate::metrics::MetricsServer>,
     rpc_threads: Vec<std::thread::JoinHandle<std::io::Result<()>>>,
+    rpc_addresses: Vec<(RpcSurface, std::net::SocketAddr)>,
     maintenance_worker: Option<std::thread::JoinHandle<()>>,
     tx_ingress: Option<std::thread::JoinHandle<()>>,
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
@@ -341,8 +342,15 @@ pub(crate) struct NodeServices {
     signal_handler: Option<crate::signal::ShutdownHandler>,
     teardown_started: bool,
 }
-
 impl NodeServices {
+    #[cfg(test)]
+    pub(crate) fn rpc_address(&self, surface: RpcSurface) -> Option<std::net::SocketAddr> {
+        self.rpc_addresses
+            .iter()
+            .find(|(bound, _)| *bound == surface)
+            .map(|(_, address)| *address)
+    }
+
     pub(crate) fn teardown(
         &mut self,
         state: Option<&mut NodeState>,
@@ -848,6 +856,7 @@ fn start_rpc_listeners(
 ) -> Result<(), RunError> {
     for (rpc_server, surface) in listeners {
         let rpc_local_addr = rpc_server.local_addr()?;
+        services.rpc_addresses.push((surface, rpc_local_addr));
         tracing::info!(addr = %rpc_local_addr, ?surface, "rpc listener bound");
         let rpc_shutdown = state.shutdown_reader();
         let worker = std::thread::Builder::new()
