@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
@@ -10,6 +8,8 @@ use bitcoin_rs_storage::{
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::Mutex;
+use proptest::prelude::*;
+use std::sync::Arc;
 
 use crate::test_fixtures::{MemoryBodies, TestError, TestResult, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
@@ -612,4 +612,145 @@ fn committed_gap_append_gap_does_not_enter_retention_relief() -> TestResult {
     );
     assert_eq!(std::fs::read(path.join("head.json"))?, journal_head_before);
     Ok(())
+}
+
+struct CrashWindowHeadStore {
+    inner: Arc<dyn DurableHeadStore>,
+    fail_on_commit: Mutex<bool>,
+}
+
+impl DurableHeadStore for CrashWindowHeadStore {
+    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
+        self.inner.load()
+    }
+
+    fn commit(
+        &self,
+        expected: Option<&DurableHead>,
+        next: &DurableHead,
+        records: &CommitRecords<'_>,
+    ) -> Result<(), StorageError> {
+        if *self.fail_on_commit.lock() {
+            return Err(StorageError::Backend(
+                "simulated crash during head commit".to_owned(),
+            ));
+        }
+        self.inner.commit(expected, next, records)
+    }
+
+    fn load_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_attestation(head)
+    }
+
+    fn attest(
+        &self,
+        head: &DurableHead,
+        level: bitcoin_rs_storage::ScriptAttestation,
+    ) -> Result<(), StorageError> {
+        self.inner.attest(head, level)
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+        ..ProptestConfig::default()
+    })]
+    #[test]
+    fn stateful_crash_window_leaves_state_exactly_before_or_after(
+        fail_mode in 0_u8..=2,
+        cold_boot in any::<bool>(),
+    ) {
+        let store: Arc<dyn DurableHeadStore> = Arc::new(InMemoryDurableHeadStore::new());
+        let bodies: Arc<dyn BlockBodyStore> = Arc::new(MemoryBodies::default());
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = Hash256::from(genesis.block_hash());
+        bodies
+            .persist_block_body(0, genesis_hash, &consensus_bytes(&genesis))
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+
+        let genesis_head = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
+            commit_id: 1,
+            height: 0,
+            tip: genesis_hash,
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        };
+        store
+            .commit(None, &genesis_head, &CommitRecords::default())
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+
+        let child1 = mined_child(BlockHash(genesis_hash), 1)
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        let child1_hash = Hash256::from(child1.block_hash());
+        bodies
+            .persist_block_body(1, child1_hash, &consensus_bytes(&child1))
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+
+        let crash_store = Arc::new(CrashWindowHeadStore {
+            inner: Arc::clone(&store),
+            fail_on_commit: Mutex::new(fail_mode == 0),
+        });
+
+        let mut chain = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let genesis_tip = seed_genesis(&chain).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        chain.durable_head = crash_store;
+        chain.block_body_store = Some(Arc::clone(&bodies));
+
+        let payload = bitcoin_rs_primitives::BlockPayload::from_local(child1);
+        let apply_result = chain.apply_block(&payload);
+
+        let prior_head = genesis_head;
+
+        if fail_mode == 0 {
+            prop_assert!(apply_result.is_err(), "write index failure must return error");
+        } else {
+            prop_assert!(apply_result.is_ok(), "clean write must succeed");
+        }
+
+        let mut reopened = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+        let _ = seed_genesis(&reopened).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+        reopened.durable_head = store;
+        reopened.block_body_store = Some(bodies);
+        if cold_boot {
+            reopened.applied_tip.store(None);
+            reopened.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+        } else if fail_mode == 1 {
+            reopened.applied_tip.store(Some(Arc::new(genesis_tip)));
+        } else {
+            reopened.applied_tip.store(chain.applied_tip.load_full());
+        }
+        super::reconcile_at_boot(&reopened).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+
+        let recovered_tip = reopened
+            .applied_tip_snapshot()
+            .ok_or_else(|| TestCaseError::fail("recovered tip must exist"))?;
+        let recovered_head = reopened
+            .durable_head
+            .load()
+            .map_err(|e| TestCaseError::fail(format!("{e:?}")))?
+            .ok_or_else(|| TestCaseError::fail("recovered head must exist"))?;
+
+        prop_assert_eq!(recovered_tip.height, recovered_head.height);
+        prop_assert_eq!(recovered_tip.hash, recovered_head.tip);
+
+        let is_state_before = recovered_head == prior_head
+            && recovered_tip.height == 0
+            && recovered_tip.hash == genesis_hash;
+        let is_state_after = recovered_head.height == 1
+            && recovered_head.tip == child1_hash
+            && recovered_tip.height == 1
+            && recovered_tip.hash == child1_hash;
+
+        prop_assert!(
+            is_state_before || is_state_after,
+            "state after crash-window reopen must be exactly before or exactly after, got height {}",
+            recovered_head.height
+        );
+    }
 }
