@@ -428,11 +428,17 @@ impl ModelDriver {
             self.height,
             0,
         );
-        if self.pool.insert_entry(entry).is_ok() {
-            self.naive.insert(tx, vsize, fee, self.current_time);
+        if self.naive.contains_txid(&tx.txid()) {
+            return;
+        }
+        match self.pool.insert_entry(entry) {
+            Ok(_) => self.naive.insert(tx, vsize, fee, self.current_time),
+            Err(error) => panic!(
+                "model predicts acceptance for a fresh insertion that spends only unspent outpoints, but the pool refused: {error:?}"
+            ),
         }
     }
-    fn apply_replace(&mut self, nonce: u32, victim_pick: usize, fee_bump: u64) {
+    fn apply_replace(&mut self, nonce: u32, victim_pick: usize, fee_bump: u64, shortfall: bool) {
         let pooled = self.pool.iter_txids();
         if pooled.is_empty() {
             return;
@@ -462,20 +468,37 @@ impl ModelDriver {
             .saturating_mul(200)
             .checked_div(victims_vsize.max(1))
             .unwrap_or(0);
-        let fee = victims_fee
-            .max(rate_fee)
-            .saturating_add(10_000)
-            .saturating_add(fee_bump);
-        let expected = self.naive.evaluate_bip125_replacement(&candidate, fee, 200);
-        let Some(victims) = expected else {
-            return;
+        let fee = if shortfall {
+            victims_fee / 2
+        } else {
+            victims_fee
+                .max(rate_fee)
+                .saturating_add(10_000)
+                .saturating_add(fee_bump)
         };
+        if self.naive.contains_txid(&candidate.txid()) {
+            return;
+        }
+        let expected = self.naive.evaluate_bip125_replacement(&candidate, fee, 200);
         let repl = ReplacementCandidate::new(Arc::clone(&candidate), 200, fee, 0);
         let outcome = self
             .pool
             .replace_transaction(&repl, self.current_time, self.height);
-        let Ok(outcome) = outcome else {
+        let Some(victims) = expected else {
+            assert!(
+                outcome.is_err(),
+                "model predicts a BIP125 rejection, but the pool accepted the replacement"
+            );
             return;
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(crate::rbf::RbfError::InsufficientFeerateDiagram) => return,
+            Err(error) => {
+                panic!(
+                    "model predicts a BIP125-valid replacement, but the pool refused: {error:?}"
+                );
+            }
         };
         let mut pool_removed = HashSet::new();
         for change in outcome.changes {
@@ -622,11 +645,15 @@ impl ModelDriver {
                     self.height,
                     0,
                 );
-                if self.pool.insert_entry(entry).is_ok() {
-                    self.naive.insert(tx, 200, 10_000, self.current_time);
-                    readded = readded.saturating_add(1);
-                    continue;
+                match self.pool.insert_entry(entry) {
+                    Ok(_) => {}
+                    Err(error) => panic!(
+                        "model predicts acceptance for the reorg re-add, but the pool refused: {error:?}"
+                    ),
                 }
+                self.naive.insert(tx, 200, 10_000, self.current_time);
+                readded = readded.saturating_add(1);
+                continue;
             }
             remaining.push(tx);
         }
@@ -653,6 +680,7 @@ enum ModelOp {
         nonce: u32,
         victim_pick: usize,
         fee_bump: u64,
+        shortfall: bool,
         time_offset: u64,
     },
     RemoveForBlock {
@@ -693,14 +721,21 @@ fn arb_model_op() -> impl Strategy<Value = ModelOp> {
                 time_offset,
             }
         }),
-        1 => (any::<u32>(), 0_usize..16, 0_u64..50_000, 0_u64..100).prop_map(
-            |(nonce, victim_pick, fee_bump, time_offset)| ModelOp::Replace {
+        1 => (
+            any::<u32>(),
+            0_usize..16,
+            0_u64..50_000,
+            any::<bool>(),
+            0_u64..100,
+        ).prop_map(|(nonce, victim_pick, fee_bump, shortfall, time_offset)| {
+            ModelOp::Replace {
                 nonce,
                 victim_pick,
                 fee_bump,
+                shortfall,
                 time_offset,
             }
-        ),
+        }),
         1 => (
             prop::collection::vec(0_usize..16, 1..4),
             prop::option::of(0_usize..16),
@@ -753,10 +788,11 @@ proptest! {
                     nonce,
                     victim_pick,
                     fee_bump,
+                    shortfall,
                     time_offset,
                 } => {
                     driver.current_time = driver.current_time.saturating_add(time_offset);
-                    driver.apply_replace(nonce, victim_pick, fee_bump);
+                    driver.apply_replace(nonce, victim_pick, fee_bump, shortfall);
                 }
                 ModelOp::RemoveForBlock {
                     block_picks,
