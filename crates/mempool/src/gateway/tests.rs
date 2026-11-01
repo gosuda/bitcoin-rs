@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::{Mutex, RwLock};
 use std::sync::mpsc;
 
@@ -1948,12 +1948,16 @@ fn begin_chain_change_serializes_with_inflight_admission() {
     let (held_tx, held_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let gateway_a = Arc::clone(&gateway);
+    let admission_released = Arc::new(AtomicBool::new(false));
+    let released_probe = Arc::clone(&admission_released);
     let a_handle = std::thread::spawn(move || {
-        let _guard = gateway_a.pool().write();
+        let guard = gateway_a.pool().write();
         held_tx.send(()).expect("test waiting for lock acquisition");
         release_rx
             .recv_timeout(core::time::Duration::from_secs(10))
             .expect("test alive to release");
+        released_probe.store(true, Ordering::SeqCst);
+        drop(guard);
     });
 
     held_rx
@@ -1976,6 +1980,40 @@ fn begin_chain_change_serializes_with_inflight_admission() {
     b_ready_rx
         .recv_timeout(core::time::Duration::from_secs(10))
         .expect("thread B started");
+
+    assert!(
+        gateway.pool().is_locked_exclusive(),
+        "the admission still holds the pool write lock that parks begin_chain_change"
+    );
+    assert!(
+        b_done_rx.try_recv().is_err(),
+        "begin_chain_change must not complete while the admission holds the write lock"
+    );
+    let generation_shifted = Arc::new(AtomicBool::new(false));
+    let shifted_probe = Arc::clone(&generation_shifted);
+    let stop_probe = Arc::clone(&admission_released);
+    let gateway_probe = Arc::clone(&gateway);
+    let sampler = std::thread::spawn(move || {
+        while !stop_probe.load(Ordering::SeqCst) {
+            if gateway_probe.stable_generation() != Some(0) {
+                shifted_probe.store(true, Ordering::SeqCst);
+                break;
+            }
+            std::thread::yield_now();
+        }
+    });
+
+    for _ in 0..200_000 {
+        std::thread::yield_now();
+    }
+    assert!(
+        gateway.pool().is_locked_exclusive(),
+        "the admission still holds the pool write lock after the scheduling spin"
+    );
+    assert!(
+        b_done_rx.try_recv().is_err(),
+        "begin_chain_change had scheduling chances and must still be parked"
+    );
     assert_eq!(
         gateway.stable_generation(),
         Some(0),
@@ -1984,6 +2022,11 @@ fn begin_chain_change_serializes_with_inflight_admission() {
 
     release_tx.send(()).expect("thread A alive");
     a_handle.join().expect("thread A completed");
+    sampler.join().expect("generation sampler completed");
+    assert!(
+        !generation_shifted.load(Ordering::SeqCst),
+        "begin_chain_change stored an odd generation while an admission held the write lock"
+    );
 
     let guard = b_done_rx
         .recv_timeout(core::time::Duration::from_secs(10))
