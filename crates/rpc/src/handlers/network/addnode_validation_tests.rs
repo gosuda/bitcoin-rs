@@ -1,7 +1,7 @@
 use super::*;
 use alloc::sync::Arc;
-use sonic_rs::JsonValueTrait;
 use sonic_rs::json;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 #[test]
 fn addnode_rejects_bad_address() {

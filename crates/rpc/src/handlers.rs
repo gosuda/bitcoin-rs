@@ -255,9 +255,10 @@ fn label_of(name: &str) -> &str {
 }
 
 pub(crate) fn optional_bool(params: &Value, index: usize, default: bool) -> Result<bool, RpcError> {
-    let Some(array) = params.as_array() else {
+    if params.is_null() {
         return Ok(default);
-    };
+    }
+    let array = params_array(params)?;
     let Some(value) = array.get(index) else {
         return Ok(default);
     };
@@ -303,9 +304,8 @@ pub(crate) fn required_i64(
     index: usize,
     name: &'static str,
 ) -> Result<i64, RpcError> {
-    let value = params
-        .as_array()
-        .and_then(|arr| arr.get(index))
+    let value = params_array(params)?
+        .get(index)
         .ok_or(RpcError::InvalidParams(name))?;
     if !value.is_number() {
         return Err(wrong_type(index + 1, label_of(name), value, "number"));

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
 use bitcoin_rs_primitives::{USER_AGENT, unix_time_secs};
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+use sonic_rs::{JsonValueTrait, Value};
 
 use crate::context::Context;
 use crate::convert::{i64_saturated, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
@@ -71,9 +71,10 @@ fn ban_until_relative(now: SystemTime, bantime: u64) -> Result<SystemTime, RpcEr
 }
 
 fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
-    let Some(array) = params.as_array() else {
+    if params.is_null() {
         return Ok(default);
-    };
+    }
+    let array = params_array(params)?;
     let Some(value) = array.get(index) else {
         return Ok(default);
     };

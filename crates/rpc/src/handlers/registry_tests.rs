@@ -117,6 +117,26 @@ fn optional_boolean_type_error_names_the_type() {
     let error = optional_bool(&params, 1, true).expect_err("type error");
     assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
 }
+#[test]
+#[expect(clippy::expect_used)]
+fn rejects_non_array_params_for_optional_bool() {
+    let bad_params = json!("not an array");
+    let error = optional_bool(&bad_params, 0, true).expect_err("must reject non-array");
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+
+    let object_params = json!({"flag": true});
+    let error = optional_bool(&object_params, 0, true).expect_err("must reject non-array");
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+}
+
+#[test]
+#[expect(clippy::expect_used)]
+fn rejects_non_array_params_for_required_i64() {
+    let bad_params = json!("not an array");
+    let error = super::required_i64(&bad_params, 0, "height is required")
+        .expect_err("must reject non-array");
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+}
 
 #[test]
 #[expect(clippy::expect_used)]
