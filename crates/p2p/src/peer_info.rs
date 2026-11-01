@@ -27,7 +27,6 @@ impl PeerRole {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
     pub endpoint: Option<PeerEndpoint>,
     pub network: NetworkLabel,

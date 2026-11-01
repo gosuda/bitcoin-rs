@@ -2130,7 +2130,6 @@ fn adaptive_floor_still_convicts_true_staller_after_limit_cycle() {
     assert!(!window.peer_in_staller_cooldown(PeerSource::for_test_endpoint(healthy_addr()), end));
 }
 
-#[expect(clippy::too_many_lines)]
 fn limit_cycle_window_state() -> (
     DownloadWindow,
     BlockStager,

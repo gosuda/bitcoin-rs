@@ -690,7 +690,6 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
 }
 
 #[cfg(not(any(unix, windows)))]
-#[expect(clippy::unnecessary_wraps)]
 fn sync_blocks_dir(_blocks_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }

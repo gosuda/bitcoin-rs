@@ -647,15 +647,12 @@ impl MempoolGateway {
     }
 
     #[cfg(any(test, feature = "test-seam"))]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the consuming mutation API retains the entry across bounded optimistic attempts"
-    )]
     pub fn insert_entry(
         &self,
         origin: AdmissionOrigin,
         entry: MempoolEntry,
     ) -> Result<MutationResult, MempoolError> {
+        // Keep ownership of entry across bounded optimistic retries.
         for _ in 0..crate::admission::MAX_ADMISSION_RETRIES {
             let inputs = self
                 .pool
@@ -740,7 +737,6 @@ impl MempoolGateway {
         Err(RbfError::StalePlan)
     }
 
-    #[expect(clippy::needless_pass_by_value)]
     #[cfg(any(test, feature = "test-seam"))]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
         self.admit_transaction_claimed(&request, None, crate::admission::AdmissionFence::Stable)
@@ -861,10 +857,6 @@ impl MempoolGateway {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep policy precedence and the captured preparation stamp in one owner"
-    )]
     pub(crate) fn prepare_admission(
         pool: &Mempool,
         request: &AdmissionRequest,

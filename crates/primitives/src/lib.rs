@@ -69,7 +69,6 @@ mod float_conversion_tests {
     use super::{i64_to_f64, u64_to_f64};
 
     #[test]
-    #[allow(clippy::suboptimal_flops)]
     fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
         for value in [
             0_u64,

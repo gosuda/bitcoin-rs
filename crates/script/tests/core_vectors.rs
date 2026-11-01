@@ -591,10 +591,6 @@ struct ScriptTestRow {
     comment: String,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "test vector parser; splitting would obscure the row format"
-)]
 fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> {
     let path = reference_path("script_tests.json");
     let text =
@@ -812,7 +808,6 @@ struct TxVectorRow {
 }
 
 #[expect(
-    clippy::too_many_lines,
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,

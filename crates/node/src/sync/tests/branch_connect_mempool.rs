@@ -99,7 +99,6 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
 -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::hashes::{Hash as _, hash160};

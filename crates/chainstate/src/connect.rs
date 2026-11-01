@@ -45,7 +45,6 @@ pub(super) fn apply_committed_block_admitted<'b>(
     }
 }
 
-#[expect(clippy::too_many_lines)]
 pub(super) fn apply_block_admitted<'b>(
     handles: &Chainstate,
     payload: &'b BlockPayload,

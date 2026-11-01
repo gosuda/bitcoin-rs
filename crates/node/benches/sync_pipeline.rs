@@ -19,18 +19,6 @@
     clippy::cast_precision_loss,
     reason = "benchmark: precision loss is intentional for perf measurement"
 )]
-#![expect(
-    clippy::items_after_statements,
-    reason = "benchmark: helper structs defined near use site for readability"
-)]
-#![expect(
-    clippy::suboptimal_flops,
-    reason = "benchmark: explicit mul-add is clearer than fma here"
-)]
-#![expect(
-    clippy::semicolon_if_nothing_returned,
-    reason = "benchmark: closure returns elapsed time, semicolon would break it"
-)]
 
 use std::hint::black_box;
 use std::io::Write as _;

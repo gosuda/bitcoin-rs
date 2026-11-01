@@ -108,7 +108,6 @@ impl Worker {
         }
     }
 
-    #[expect(clippy::too_many_lines, reason = "Seed outcomes share one owner")]
     fn seed_from_bundle(&self) -> Result<SeedFlow, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
             return Ok(SeedFlow::Return(ReconcileAction::Stalled));

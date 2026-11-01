@@ -174,10 +174,6 @@ pub(crate) fn tapscript_op_success(script: &[u8], flags: VerifyFlags) -> Result<
     Ok(false)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep byte and opcode cursors in the same interpreter loop"
-)]
 pub(crate) fn eval_script(
     stack: &mut Stack,
     script: &[u8],
@@ -342,13 +338,6 @@ pub const fn is_op_success(op: u8) -> bool {
         || (op >= 187 && op <= 254)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per opcode mirrors Core's EvalScript switch; splitting \
-              families into helpers would fragment the shared op-count and \
-              codeseparator state"
-)]
-#[expect(clippy::too_many_arguments)]
 fn dispatch(
     op: u8,
     f_exec: bool,
@@ -877,10 +866,6 @@ pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
     (out, removed)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors Core's EvalChecksig parameter list over shared state"
-)]
 fn eval_checksig(
     sig: &[u8],
     pubkey: &[u8],
@@ -950,14 +935,6 @@ fn eval_checksig(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors Core's CHECKMULTISIG parameter list over shared state"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "multisig check mirrors Core's CheckMultisig linear flow"
-)]
 fn check_multisig(
     stack: &mut Stack,
     require_minimal: bool,

@@ -459,10 +459,6 @@ fn low_work_headers_do_not_reach_block_tree() -> TestResult {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "verify queued receipt across both sync passes"
-)]
 fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);
@@ -702,7 +698,6 @@ fn owned_header_requests_suppress_competing_frontier_and_chain_sync_requests() -
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn expired_header_syncs_drop_delayed_pages_before_recovery() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);

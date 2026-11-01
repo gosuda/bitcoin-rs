@@ -830,10 +830,6 @@ fn taproot_nonempty_scriptsig_falls_back_to_uncompressed_envelope() {
 }
 
 #[test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one table of output shapes exercised in a single round trip"
-)]
 fn roundtrip_p2sh_multisig_and_output_shapes() {
     let signer = Signer::new(15);
     let prevout = TxOut {
@@ -1312,10 +1308,6 @@ impl PrevoutResolver for BodyResolver {
 /// Absent bodies are BLOCKED, not a pass.
 #[test]
 #[ignore = "requires BITCOIN_RS_BIP337_MAINNET_BODIES with mainnet block bodies"]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one derivation walk over every fixture field and vector"
-)]
 fn mainnet_bodies_truth() {
     let Ok(dir) = std::env::var("BITCOIN_RS_BIP337_MAINNET_BODIES") else {
         panic!(
@@ -1461,7 +1453,6 @@ fn compact_of(der_plus_hashtype: &[u8]) -> [u8; 64] {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn shared_sighash_cache_recovers_every_input() {
     let signer_a = Signer::new(31);
     let signer_b = Signer::new(32);
@@ -1581,7 +1572,6 @@ fn shared_sighash_cache_recovers_every_input() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn production_resolver_clones_only_the_requested_output() {
     use std::sync::Arc;
 

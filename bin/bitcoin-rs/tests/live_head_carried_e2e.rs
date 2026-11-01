@@ -128,7 +128,6 @@ fn announced_live_head_applies_and_continues() -> Result<(), Error> {
     Ok(())
 }
 
-#[expect(clippy::too_many_lines)]
 #[test]
 fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;

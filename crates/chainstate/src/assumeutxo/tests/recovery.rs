@@ -121,10 +121,6 @@ fn snapshot_lower_height_work_commit_survives_durable_record_reopen() -> TestRes
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One datadir must survive the complete activation, convergence, reorg and restart sequence"
-)]
 fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
@@ -261,10 +257,6 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Exercise orphan publication, retirement and suffix replay in one datadir"
-)]
 fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;

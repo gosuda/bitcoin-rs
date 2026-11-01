@@ -232,7 +232,6 @@ fn a_failed_window_restores_the_script_cache_entries_it_took()
     Ok(())
 }
 #[test]
-#[expect(clippy::too_many_lines)]
 fn a_window_refused_after_proof_restores_only_uncommitted_takes()
 -> Result<(), Box<dyn std::error::Error>> {
     let network = Network::Regtest;

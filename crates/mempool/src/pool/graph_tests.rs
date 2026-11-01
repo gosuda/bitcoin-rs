@@ -564,7 +564,6 @@ fn try_insert_tracked(
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn random_mutations_leave_graph_semantics_exact() {
     for seed in [0x5EED_u64, 0xC0_FFEE, 0xB1_05] {
         let mut pool = fuzzer_pool();

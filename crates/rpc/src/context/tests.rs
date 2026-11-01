@@ -249,7 +249,6 @@ fn record_at_height_does_not_trust_the_index_on_a_sparse_log() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn from_handles_shares_chain_handles_with_caller() {
     use alloc::sync::Arc;
 
@@ -759,7 +758,6 @@ fn height_lookups_follow_applied_tip_when_header_fork_leads()
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn ibd_latch_judges_the_contexts_own_tree() {
     use alloc::sync::Arc;
 

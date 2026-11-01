@@ -40,12 +40,7 @@ pub struct Node {
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
-#[allow(
-    unknown_lints,
-    clippy::unused_async,
-    clippy::unused_async_trait_impl,
-    reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-)]
+// Synchronous embedding work is deferred until the returned future is polled.
 impl Node {
     pub async fn start(
         config: crate::NodeConfig,
@@ -339,10 +334,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one live-node scenario proves single and package submissions share ordered gateway publication, including refusal and the direct-insertion control"
-    )]
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());

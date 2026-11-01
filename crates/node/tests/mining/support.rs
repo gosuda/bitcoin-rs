@@ -453,7 +453,6 @@ pub(crate) fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -
     Ok(block)
 }
 
-#[expect(clippy::unnecessary_wraps)]
 pub(crate) fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
     let utxo = state.chainstate().utxo_reader();
     let applied_tip = state.chainstate().applied_tip_reader();

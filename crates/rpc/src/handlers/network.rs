@@ -459,10 +459,6 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
     Ok(Value::new_null())
 }
 
-#[expect(
-    clippy::case_sensitive_file_extension_comparisons,
-    reason = "The lowercased I2P DNS suffix selects a transport, not a filesystem extension"
-)]
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;

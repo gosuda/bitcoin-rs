@@ -16,7 +16,6 @@ fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> 
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
     let mut mempool = zero_fee_pool();
     let parent = tx(1, 50_000, None);

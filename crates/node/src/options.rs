@@ -163,12 +163,10 @@ fn parse_noban_list(value: &str) -> Result<Vec<bitcoin_rs_p2p::IpSubnet>> {
         .collect()
 }
 
-#[expect(clippy::unnecessary_wraps)]
 fn parse_text(value: &str) -> std::result::Result<String, Infallible> {
     Ok(value.to_owned())
 }
 
-#[expect(clippy::unnecessary_wraps)]
 fn parse_path(value: &str) -> std::result::Result<PathBuf, Infallible> {
     Ok(PathBuf::from(value))
 }

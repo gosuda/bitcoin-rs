@@ -309,10 +309,6 @@ fn sam_invalid_id_revokes_stream_epoch_and_reconnects_while_control_responds() {
     sam_session_recovery(true);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One fixture follows control setup, loss, epoch revocation, reconnect, and shutdown"
-)]
 fn sam_session_recovery(invalid_id: bool) {
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};

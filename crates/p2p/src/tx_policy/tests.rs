@@ -233,10 +233,6 @@ fn obsolete_connection_cannot_release_a_replacement() {
     );
 }
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Single end-to-end retirement scenario drives request, arrival, and resend phases"
-)]
 fn known_state_and_external_arrival_retire_requests_before_another_send() {
     use std::sync::{
         Arc,

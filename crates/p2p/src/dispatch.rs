@@ -227,7 +227,6 @@ pub fn dispatch_inbound<S>(
     Ok(responses.into_inner())
 }
 
-#[expect(clippy::too_many_arguments, reason = "independent protocol sinks")]
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,

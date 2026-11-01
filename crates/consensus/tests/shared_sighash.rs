@@ -166,10 +166,6 @@ fn parallel_shared_digests_match_reference_for_each_input_context() {
     });
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one mixed independently signed transaction fixture"
-)]
 fn signed_fixture() -> (Tx, Vec<TxOut>) {
     let (mut tx, mut prevouts) = fixture(42, 42);
     tx.lock_time = LockTime::ZERO;

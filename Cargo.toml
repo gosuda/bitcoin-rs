@@ -259,8 +259,27 @@ correctness                = { level = "deny", priority = -1 }
 suspicious                 = { level = "warn", priority = -1 }
 complexity                 = { level = "warn", priority = -1 }
 perf                       = { level = "warn", priority = -1 }
-pedantic                   = { level = "warn", priority = -1 }
-nursery                    = { level = "warn", priority = -1 }
+# Optional groups are selected below instead of becoming blanket CI gates.
+pedantic                   = { level = "allow", priority = -1 }
+nursery                    = { level = "allow", priority = -1 }
+# Select safety, numerical-loss and guard-lifetime checks from the optional groups.
+unchecked_time_subtraction = "warn"
+cast_ptr_alignment        = "warn"
+ptr_as_ptr                = "warn"
+checked_conversions       = "warn"
+non_send_fields_in_send_ty = "warn"
+debug_assert_with_mut_call = "warn"
+read_zero_byte_vec        = "warn"
+transmute_undefined_repr  = "warn"
+fallible_impl_from        = "warn"
+cast_possible_truncation   = "warn"
+cast_possible_wrap         = "warn"
+cast_sign_loss             = "warn"
+cast_precision_loss        = "warn"
+float_cmp                  = "warn"
+invalid_upcast_comparisons = "warn"
+large_stack_arrays         = "warn"
+significant_drop_in_scrutinee = "warn"
 undocumented_unsafe_blocks = "deny"
 as_conversions             = "deny"
 cast_lossless              = "deny"
@@ -270,26 +289,10 @@ dbg_macro                  = "deny"
 todo                       = "deny"
 unimplemented              = "deny"
 mod_module_files           = "deny"
-# Pedantic noise overrides — drop these patterns from the warn band.
-module_name_repetitions    = "allow"
-similar_names              = "allow"
-must_use_candidate         = "allow"
-missing_errors_doc         = "allow"
-missing_panics_doc         = "allow"
-struct_field_names         = "allow"
-# Nursery items that fire on perfectly fine code.
-option_if_let_else          = "allow"
-significant_drop_tightening = "allow"
-redundant_pub_crate         = "allow"
-# Clippy 1.92 added pedantic lints that fire on patterns previously clippy-clean.
-# These are style preferences, not correctness gates; allow at the workspace level.
-manual_let_else            = "allow"
-format_push_string         = "allow"
-missing_const_for_fn       = "allow"
-collapsible_if             = "allow"
-needless_continue          = "allow"
-iter_without_into_iter     = "allow"
-into_iter_without_iter     = "allow"
+too_many_lines             = "allow"
+too_many_arguments         = "allow"
+# Preserve the existing default-style preference.
+collapsible_if = "allow"
 
 # ============================================================================
 # Profiles

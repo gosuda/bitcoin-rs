@@ -121,10 +121,6 @@ impl Mempool {
             .map(|ids| ids.len())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep before/after projections tied to the same captured component membership"
-    )]
     pub(crate) fn projected_graphs(
         &self,
         candidates: &[MempoolEntry],

@@ -293,7 +293,6 @@ impl BlockSync {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
     pub(super) fn buffer_received_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,

@@ -254,10 +254,6 @@ pub(crate) fn batch_requests(
 }
 
 impl MempoolGateway {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "keep batch capture, verification and retry fencing in one auditable owner"
-    )]
     pub fn preview_transactions(
         &self,
         txs: &[Tx],

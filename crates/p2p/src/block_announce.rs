@@ -741,8 +741,6 @@ pub fn spawn_block_announce_worker(
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::expect_used,
-    clippy::explicit_iter_loop,
-    clippy::unreadable_literal,
     clippy::unwrap_used
 )]
 mod tests;

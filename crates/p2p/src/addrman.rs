@@ -557,10 +557,6 @@ impl Manager {
             }
         }
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One learn pass owns admission, bucket placement, and eviction in table order"
-    )]
     fn learn(
         &mut self,
         addr: PeerEndpoint,
