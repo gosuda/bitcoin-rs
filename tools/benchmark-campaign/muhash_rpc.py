@@ -10,7 +10,6 @@ verdict publisher.
 
 import argparse
 import base64
-import ctypes
 import errno
 import fcntl
 import hashlib
@@ -28,7 +27,24 @@ import urllib.parse
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TypedDict, TypeIs
+from typing import TypedDict
+
+from evidence import (
+    ContractError,
+    JsonObject,
+    _array,
+    _is_object,
+    _object,
+    _text,
+    _uint,
+    _validate_json_depth,
+    canonical_bytes,
+    canonical_sha256,
+    copy_pinned,
+    nearest_rank,
+    process_start_time,
+    publish_result,
+)
 
 TRIAL_INPUT_SCHEMA = "muhash-rpc-trial-input-v2"
 AGGREGATE_INPUT_SCHEMA = "muhash-rpc-aggregate-input-v2"
@@ -78,15 +94,10 @@ MAX_RECEIPT_BYTES = 65_536
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_JSON_DEPTH = 32
 _HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
-type JsonObject = dict[str, object]
 
 
 class ComparatorError(Exception):
     """Base class for comparator refusals."""
-
-
-class ContractError(ComparatorError, ValueError):
-    """Input or evidence violates the comparator contract."""
 
 
 class RpcTransportError(ComparatorError):
@@ -123,55 +134,11 @@ class UtxoState:
     muhash: str
 
 
-def _is_object(value: object) -> TypeIs[JsonObject]:
-    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
-
-
-def _is_array(value: object) -> TypeIs[list[object]]:
-    return isinstance(value, list)
-
-
-def _object(value: object, field: str, keys: frozenset[str]) -> JsonObject:
-    if not _is_object(value):
-        raise ContractError(f"{field} must be a JSON object")
-    actual = frozenset(value)
-    if actual != keys:
-        # Diagnostics carry counts only: attacker-controlled member names
-        # must never reach stderr.
-        raise ContractError(
-            f"{field} has wrong keys; missing_count={len(keys - actual)}, "
-            f"unknown_count={len(actual - keys)}"
-        )
-    return value
-
-
-def _array(value: object, field: str, length: int | None = None) -> list[object]:
-    if not _is_array(value):
-        raise ContractError(f"{field} must be an array")
-    if length is not None and len(value) != length:
-        raise ContractError(f"{field} must contain exactly {length} items")
-    return value
-
-
-def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ContractError(f"{field} must be a nonempty string")
-    return value
-
-
 def _choice(value: object, field: str, choices: frozenset[str]) -> str:
     text = _text(value, field)
     if text not in choices:
         raise ContractError(f"{field} must be one of {sorted(choices)}")
     return text
-
-
-def _uint(value: object, field: str, *, positive: bool = False) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ContractError(f"{field} must be a nonnegative integer")
-    if positive and value == 0:
-        raise ContractError(f"{field} must be positive")
-    return value
 
 
 def _decimal(value: object, field: str, *, positive: bool = False) -> Decimal:
@@ -217,57 +184,6 @@ def _path(value: object, field: str) -> Path:
     return path
 
 
-def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    text = format(value, "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
-
-
-def canonical_json_bytes(value: object) -> bytes:
-    """Encode deterministic JSON with Decimal values as normalized numbers."""
-
-    def encode(item: object) -> str:
-        if item is None:
-            return "null"
-        if item is True:
-            return "true"
-        if item is False:
-            return "false"
-        if isinstance(item, int):
-            return str(item)
-        if isinstance(item, Decimal):
-            if not item.is_finite():
-                raise ContractError("canonical JSON cannot encode a non-finite Decimal")
-            return _decimal_text(item)
-        if isinstance(item, str):
-            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-        if isinstance(item, (list, tuple)):
-            return "[" + ",".join(encode(child) for child in item) + "]"
-        if _is_object(item):
-            fields = (f"{encode(key)}:{encode(item[key])}" for key in sorted(item))
-            return "{" + ",".join(fields) + "}"
-        raise ContractError(f"unsupported canonical JSON value: {type(item).__name__}")
-
-    return encode(value).encode("utf-8")
-
-
-def canonical_sha256(value: object) -> str:
-    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
-
-
-def _check_depth(value: object) -> None:
-    stack: list[tuple[object, int]] = [(value, 1)]
-    while stack:
-        item, depth = stack.pop()
-        if depth > MAX_JSON_DEPTH:
-            raise ContractError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
-        if _is_object(item):
-            stack.extend((child, depth + 1) for child in item.values())
-        elif _is_array(item):
-            stack.extend((child, depth + 1) for child in item)
-
-
 def _unique_object(pairs: list[tuple[str, object]]) -> JsonObject:
     result: JsonObject = {}
     for key, value in pairs:
@@ -298,7 +214,7 @@ def _parse_json(raw: bytes, field: str) -> object:
         if isinstance(error, ContractError):
             raise
         raise ContractError(f"{field} JSON could not be decoded") from error
-    _check_depth(value)
+    _validate_json_depth(value, field)
     return value
 
 
@@ -747,8 +663,6 @@ def _parse_post(value: object, field: str = "post_receipt") -> JsonObject:
 
 MAX_HEADER_BYTES = 16_384
 
-_AT_EMPTY_PATH = 0x1000
-
 
 def _remaining(deadline_ns: int) -> float:
     remaining = (deadline_ns - time.perf_counter_ns()) / 1_000_000_000
@@ -1014,7 +928,7 @@ def _load_credentials(reference: FileRef) -> tuple[str, str]:
 
 
 def _request_body() -> bytes:
-    return canonical_json_bytes(
+    return canonical_bytes(
         {"jsonrpc": "2.0", "id": 1, "method": RPC_METHOD, "params": list(RPC_PARAMS)}
     )
 
@@ -1168,22 +1082,13 @@ def trial_order(pair_index: int) -> tuple[str, str]:
     return ("core", "bitcoin-rs") if pair_index % 2 == 0 else ("bitcoin-rs", "core")
 
 
-def nearest_rank(samples: list[int], percentile: int) -> int:
-    if not samples:
-        raise ContractError("cannot summarize an empty sample set")
-    if percentile <= 0 or percentile > 100:
-        raise ContractError("percentile must be in 1..100")
-    ordered = sorted(samples)
-    return ordered[(percentile * len(ordered) + 99) // 100 - 1]
-
-
 def _stats(samples: list[int]) -> Statistics:
     if len(samples) != PAIR_COUNT:
         raise ContractError(f"each arm must have exactly {PAIR_COUNT} samples")
     return {
-        "p50_ns": nearest_rank(samples, 50),
-        "p95_ns": nearest_rank(samples, 95),
-        "p99_ns": nearest_rank(samples, 99),
+        "p50_ns": nearest_rank(samples, 0.50),
+        "p95_ns": nearest_rank(samples, 0.95),
+        "p99_ns": nearest_rank(samples, 0.99),
         "max_ns": max(samples),
     }
 
@@ -1814,7 +1719,7 @@ def _require_peer_owned(
     deadline_ns: int,
 ) -> None:
     while True:
-        if _read_starttime(pid) != starttime:
+        if process_start_time(pid) != starttime:
             raise ContractError("arm process identity changed")
         try:
             client_port = int(connection.getsockname()[1])
@@ -1851,20 +1756,6 @@ def _wait_owned_endpoint(
             time.sleep(0.01)
 
 
-def _read_starttime(pid: int) -> int:
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError as error:
-        raise ContractError("cannot read arm /proc/pid/stat") from error
-    fields = text.rpartition(")")[2].split()
-    if len(fields) < 20:
-        raise ContractError("arm /proc/pid/stat is truncated")
-    try:
-        return int(fields[19])
-    except ValueError as error:
-        raise ContractError("arm /proc/pid/stat is unparsable") from error
-
-
 def _read_proc_faults(pid: int) -> JsonObject:
     try:
         text = Path(f"/proc/{pid}/stat").read_text()
@@ -1898,87 +1789,6 @@ def _read_proc_io(pid: int) -> JsonObject:
     if set(values) != required:
         raise ContractError("arm /proc/pid/io is missing counters")
     return {key: values[key] for key in sorted(required)}
-
-
-def _copy_pinned_file(
-    source: Path,
-    expected: str,
-    destination: Path,
-    *,
-    cap: int,
-    mode: int,
-    field: str,
-) -> Path:
-    """Copy pinned bytes onto a new workspace path.
-
-    The commit point is ``fsync`` of the destination fd, then ``chmod``.
-    The parent directory is not fsynced: this is a campaign workspace
-    artifact, not a published result. ``O_EXCL`` refuses a destination
-    that already exists. Hash mismatch and any I/O failure after create
-    unlink the destination and raise ``ContractError``; those failures
-    are not retried here. ``run_campaign`` owns the workspace and does
-    not retry a failed copy. Spawn re-hashes the copy into a sealed memfd
-    before exec.
-    """
-    created = False
-    try:
-        descriptor = os.open(
-            source,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
-        )
-    except OSError as error:
-        raise ContractError(f"cannot open {field}") from error
-    digest = hashlib.sha256()
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ContractError(f"{field} must be a regular file")
-        if info.st_size > cap:
-            raise ContractError(f"{field} exceeds the size cap")
-        target_fd = os.open(
-            destination,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-            mode,
-        )
-        created = True
-        try:
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                written = 0
-                while written < len(chunk):
-                    written += os.write(target_fd, chunk[written:])
-            os.fsync(target_fd)
-        finally:
-            os.close(target_fd)
-    except OSError as error:
-        if created:
-            destination.unlink(missing_ok=True)
-        raise ContractError(f"cannot copy {field}") from error
-    finally:
-        os.close(descriptor)
-    if digest.hexdigest() != expected:
-        destination.unlink(missing_ok=True)
-        raise ContractError(f"{field} SHA-256 does not match its pin")
-    try:
-        destination.chmod(mode)
-    except OSError as error:
-        destination.unlink(missing_ok=True)
-        raise ContractError(f"cannot copy {field}") from error
-    return destination
-
-
-def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
-    return _copy_pinned_file(
-        source,
-        expected,
-        destination,
-        cap=MAX_BINARY_BYTES,
-        mode=0o500,
-        field="arm binary",
-    )
 
 
 def _open_verified_snapshot(
@@ -2123,7 +1933,7 @@ class _ArmProcess:
         _wait_owned_endpoint(
             self._process, self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS
         )
-        self._starttime = _read_starttime(self._pid)
+        self._starttime = process_start_time(self._pid)
         self._warmed = False
 
     def require_endpoint(self) -> None:
@@ -2163,7 +1973,7 @@ class _ArmProcess:
     def identity(self) -> tuple[int, int]:
         if self._pid is None or self._starttime is None:
             raise ContractError(f"{self.spec.kind} process has no attested identity")
-        if _read_starttime(self._pid) != self._starttime:
+        if process_start_time(self._pid) != self._starttime:
             raise ContractError(f"{self.spec.kind} process identity changed")
         return self._pid, self._starttime
 
@@ -2251,31 +2061,27 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
     _verify_file(config.candidate.config, "candidate config")
 
     workspace.mkdir(parents=True, exist_ok=True)
-    core_bin = _verify_binary_copy(
+    core_bin = copy_pinned(
         config.core.binary,
-        config.core.binary_sha256,
         workspace / "core-node",
+        config.core.binary_sha256,
     )
-    candidate_bin = _verify_binary_copy(
+    candidate_bin = copy_pinned(
         config.candidate.binary,
-        config.candidate.binary_sha256,
         workspace / "candidate-node",
+        config.candidate.binary_sha256,
     )
-    core_config = _copy_pinned_file(
+    core_config = copy_pinned(
         config.core.config.path,
-        config.core.config.sha256,
         workspace / "core-config",
-        cap=MAX_RECEIPT_BYTES,
-        mode=0o400,
-        field="core config",
+        config.core.config.sha256,
+        0o400,
     )
-    candidate_config = _copy_pinned_file(
+    candidate_config = copy_pinned(
         config.candidate.config.path,
-        config.candidate.config.sha256,
         workspace / "candidate-config",
-        cap=MAX_RECEIPT_BYTES,
-        mode=0o400,
-        field="candidate config",
+        config.candidate.config.sha256,
+        0o400,
     )
     expected_height = _uint(config.expected["height"], "campaign expected.height")
     expected_hash = _hash(config.expected["bestblock"], "campaign expected.bestblock")
@@ -2446,188 +2252,8 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
     return aggregate(manifest_ref.path)
 
 
-def _link_tmpfile(fd: int, dir_fd: int, name: str) -> None:
-    # linkat with AT_EMPTY_PATH publishes the anonymous O_TMPFILE inode
-    # itself. A pathname-based link would re-resolve a replaceable name
-    # and let an attacker swap the bytes between write and link.
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.linkat.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-    ]
-    if libc.linkat(fd, b"", dir_fd, name.encode(), _AT_EMPTY_PATH) != 0:
-        code = ctypes.get_errno()
-        if code == errno.EEXIST:
-            raise ContractError("output path already exists")
-        raise ContractError("publication could not link the result inode")
-
-
-def _open_trusted_dir(path: Path) -> int:
-    # Namespace trust is established component by component: every
-    # component is opened with O_NOFOLLOW from the previously opened
-    # directory fd, so a rename/rebind anywhere on the chain cannot swap
-    # an ancestor after it has been approved. Any group- or other-write
-    # bit makes a component untrusted, regardless of who owns it: a shared
-    # group is not a trust boundary. The single exception is sticky
-    # root-owned semantics, and then only when the component beneath it is
-    # owned by the effective user and not writable by group or other.
-    raw_parts = path.absolute().parts
-    resolved: list[str] = [raw_parts[0]]
-    for part in raw_parts[1:]:
-        if part == "..":
-            if len(resolved) > 1:
-                resolved.pop()
-        elif part != ".":
-            resolved.append(part)
-    absolute = Path(*resolved)
-    if not absolute.is_absolute() or absolute.parent == absolute:
-        raise ContractError("output parent must name a directory")
-    walk_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | os.O_NONBLOCK
-    )
-    euid = os.geteuid()
-
-    def untrusted_writable(info: os.stat_result) -> bool:
-        # Group-write and other-write both let someone who is not the
-        # owner rename the next component. Ownership of the directory
-        # does not make its group trustworthy.
-        return bool(stat.S_IMODE(info.st_mode) & 0o022)
-
-    current = os.open("/", walk_flags)
-    try:
-        for component in absolute.parts[1:]:
-            parent_info = os.fstat(current)
-            try:
-                child = os.open(component, walk_flags, dir_fd=current)
-            except OSError as error:
-                raise ContractError(
-                    "output parent must be an existing directory"
-                ) from error
-            child_info = os.fstat(child)
-            if untrusted_writable(parent_info):
-                sticky_root = (
-                    parent_info.st_uid == 0
-                    and stat.S_IMODE(parent_info.st_mode) & stat.S_ISVTX
-                )
-                child_safe = child_info.st_uid == euid and not untrusted_writable(
-                    child_info
-                )
-                if not sticky_root or not child_safe:
-                    raise ContractError(
-                        "output ancestor must not allow untrusted renames"
-                    )
-            os.close(current)
-            current = child
-        final_info = os.fstat(current)
-        if final_info.st_uid != euid or untrusted_writable(final_info):
-            raise ContractError(
-                "output parent must be owned by the current user and "
-                "not writable by untrusted users"
-            )
-        return current
-    except BaseException:
-        os.close(current)
-        raise
-
-
-def _unlink_published(dir_fd: int, name: str, published: os.stat_result) -> None:
-    # Roll back only the inode this process linked: the held directory fd
-    # is addressed with no symlink following, and the visible inode must
-    # still be the linked one. A rename, a replacement, or a hostile
-    # symlink at the name is left exactly as found.
-    try:
-        visible = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-    except OSError:
-        # The name is gone or unreachable, so there is nothing
-        # comparator-owned left to remove.
-        return
-    if (visible.st_dev, visible.st_ino) != (published.st_dev, published.st_ino):
-        # The name no longer identifies the linked inode: never remove a
-        # substituted artifact.
-        return
-    try:
-        os.unlink(name, dir_fd=dir_fd)
-    except OSError:
-        # Rollback could not complete; the primary failure is still
-        # reported and the surviving artifact stays visible rather than
-        # being half-removed behind a masked error.
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError:
-        # Durability of the rollback itself is best effort and must not
-        # mask the primary publication failure.
-        return
-
-
-def _publish_result(path: Path, payload: bytes) -> None:
-    # The result is written to an anonymous O_TMPFILE inode in a held,
-    # trusted output directory and linked into place with linkat
-    # AT_EMPTY_PATH. No substitutable temporary name ever exists, the fd
-    # stays open until after the link, and the parent namespace identity
-    # is re-established immediately before the link so a rename/rebind of
-    # the requested pathname cannot yield a success the caller cannot see.
-    if path.name == str(path) or path.parent == path:
-        raise ContractError("output path must name a file inside a directory")
-    dir_fd = _open_trusted_dir(path.parent)
-    try:
-        tmpfile_flags = (
-            os.O_WRONLY | getattr(os, "O_TMPFILE", 0) | getattr(os, "O_CLOEXEC", 0)
-        )
-        if not tmpfile_flags & getattr(os, "O_TMPFILE", 0):
-            raise ContractError("publication requires O_TMPFILE support")
-        try:
-            temp_fd = os.open(".", tmpfile_flags, 0o600, dir_fd=dir_fd)
-        except OSError as error:
-            raise ContractError(
-                "publication requires O_TMPFILE support on the output filesystem"
-            ) from error
-        try:
-            written = os.write(temp_fd, payload)
-            if written != len(payload):
-                raise OSError(f"short result write: {written} of {len(payload)} bytes")
-            os.fsync(temp_fd)
-            # Re-establish the requested parent's namespace identity: the
-            # held dirfd must still be the directory the caller named.
-            verify_fd = _open_trusted_dir(path.parent)
-            try:
-                held = os.fstat(dir_fd)
-                current = os.fstat(verify_fd)
-                if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
-                    raise ContractError("output parent changed during publication")
-            finally:
-                os.close(verify_fd)
-            _link_tmpfile(temp_fd, dir_fd, path.name)
-            published = os.fstat(temp_fd)
-            try:
-                final = os.stat(path.name, dir_fd=dir_fd)
-                if (final.st_dev, final.st_ino) != (
-                    published.st_dev,
-                    published.st_ino,
-                ):
-                    raise ContractError("published inode does not match the result fd")
-                os.fsync(dir_fd)
-            except BaseException:
-                # Any failure after the link leaves a receipt-shaped name
-                # behind unless it is rolled back; remove only the linked
-                # inode and re-raise the primary failure.
-                _unlink_published(dir_fd, path.name, published)
-                raise
-        finally:
-            os.close(temp_fd)
-    finally:
-        os.close(dir_fd)
-
-
 def _write_record(path: Path, record: JsonObject) -> None:
-    _publish_result(path, canonical_json_bytes(record) + b"\n")
+    publish_result(record, path)
 
 
 def _die(message: str) -> int:
@@ -2655,7 +2281,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             record = run_campaign(args.input, args.workspace)
         _write_record(args.output, record)
-    except ComparatorError as error:
+    except (ComparatorError, ContractError) as error:
         return _die(str(error))
     except OSError as error:
         return _die(f"I/O failure ({error.errno})")

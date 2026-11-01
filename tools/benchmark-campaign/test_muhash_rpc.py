@@ -23,6 +23,8 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import evidence
+
 MODULE_PATH = Path(__file__).with_name("muhash_rpc.py")
 MODULE_NAME = "muhash_rpc_under_test"
 SPEC = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
@@ -39,7 +41,7 @@ REQUEST_BODY = module._request_body()
 
 
 def _raw_response(state: dict[str, object]) -> bytes:
-    return module.canonical_json_bytes(
+    return module.canonical_bytes(
         {"jsonrpc": "2.0", "id": 1, "error": None, "result": state}
     )
 
@@ -338,7 +340,7 @@ class _TrialEnv:
         self.thread = self.server.start()
         self.endpoint = endpoint or self.server.endpoint
         self.owner_pid = os.getpid()
-        self.owner_starttime = module._read_starttime(self.owner_pid)
+        self.owner_starttime = evidence.process_start_time(self.owner_pid)
         corpus = _write_file(self.root, "corpus.bin", b"frozen-corpus")
         executable = _write_file(self.root, "bitcoind", b"core-binary")
         config = _write_file(self.root, "bitcoin.conf", b"conf-bytes")
@@ -394,7 +396,7 @@ class _TrialEnv:
             },
             "operator_trust_boundary": module.OPERATOR_TRUST_BOUNDARY,
         }
-        pre_bytes = module.canonical_json_bytes(pre)
+        pre_bytes = module.canonical_bytes(pre)
         self.pre_ref = _write_file(self.root, "pre.json", pre_bytes)
         self.expected = {"height": expected_height, "bestblock": expected_bestblock}
         self.trial_input: dict[str, object] = {
@@ -413,7 +415,7 @@ class _TrialEnv:
             "expected": self.expected,
             "controller_pre_receipt": self.pre_ref,
         }
-        input_bytes = module.canonical_json_bytes(self.trial_input)
+        input_bytes = module.canonical_bytes(self.trial_input)
         self.input_path = self.root / "trial-input.json"
         self.input_path.write_bytes(input_bytes)
         if corrupt == "input_oversize":
@@ -672,14 +674,14 @@ class TrialTests(unittest.TestCase):
             corpus_file["path"] = str(fifo)
             corpus["file"] = corpus_file
             poisoned["corpus"] = corpus
-            environment.input_path.write_bytes(module.canonical_json_bytes(poisoned))
+            environment.input_path.write_bytes(module.canonical_bytes(poisoned))
         else:
             poisoned = dict(environment.trial_input)
             credential = dict(poisoned["credential_file"])
             assert isinstance(credential, dict)
             credential["path"] = str(fifo)
             poisoned["credential_file"] = credential
-            environment.input_path.write_bytes(module.canonical_json_bytes(poisoned))
+            environment.input_path.write_bytes(module.canonical_bytes(poisoned))
         result: dict[str, object] = {"done": False}
 
         def runner() -> None:
@@ -763,7 +765,7 @@ class TrialTests(unittest.TestCase):
         poisoned = dict(environment.trial_input)
         poisoned["secret-7f-token-unknown"] = 1
         poisoned["x-control"] = "\x1b[31mred"
-        environment.input_path.write_bytes(module.canonical_json_bytes(poisoned))
+        environment.input_path.write_bytes(module.canonical_bytes(poisoned))
         code, _, stderr = environment.run_capture()
         self.assertEqual(code, 2)
         self.assertNotIn("secret-7f-token-unknown", stderr)
@@ -837,7 +839,7 @@ class TrialTests(unittest.TestCase):
         assert isinstance(credential, dict)
         credential["bytes"] = int(credential["bytes"]) + 1
         poisoned["credential_file"] = credential
-        environment.input_path.write_bytes(module.canonical_json_bytes(poisoned))
+        environment.input_path.write_bytes(module.canonical_bytes(poisoned))
         code, _ = environment.run()
         self.assertEqual(code, 2)
 
@@ -896,7 +898,7 @@ class TrialTests(unittest.TestCase):
         environment.server.shutdown()
         poisoned = dict(environment.trial_input)
         poisoned["rpc_method"] = "getbestblockhash"
-        environment.input_path.write_bytes(module.canonical_json_bytes(poisoned))
+        environment.input_path.write_bytes(module.canonical_bytes(poisoned))
         code, _ = environment.run()
         self.assertEqual(code, 2)
 
@@ -1010,7 +1012,7 @@ class _AggregateEnv:
             },
             "operator_trust_boundary": module.OPERATOR_TRUST_BOUNDARY,
         }
-        pre_bytes = module.canonical_json_bytes(pre)
+        pre_bytes = module.canonical_bytes(pre)
         pre_ref = _write_file(self.root, f"pre-{index}.json", pre_bytes)
         trial_manifest: dict[str, object] = {
             **coordinates,
@@ -1028,7 +1030,7 @@ class _AggregateEnv:
             "expected": {"height": HEIGHT, "bestblock": BESTBLOCK},
             "controller_pre_receipt": pre_ref,
         }
-        trial_bytes = module.canonical_json_bytes(trial_manifest)
+        trial_bytes = module.canonical_bytes(trial_manifest)
         trial_ref = _write_file(self.root, f"trial-{index}.json", trial_bytes)
         raw = _raw_response(_state_map())
         duration = (index + 1) * 100 if kind == "core" else (index + 1) * 100 + 1
@@ -1054,7 +1056,7 @@ class _AggregateEnv:
         observation["self_sha256"] = module.canonical_sha256(observation)
         self.next_start += duration + 1
         obs_ref = _write_file(
-            self.root, f"obs-{index}.json", module.canonical_json_bytes(observation)
+            self.root, f"obs-{index}.json", module.canonical_bytes(observation)
         )
         execution: dict[str, object] | None = None
         if (
@@ -1087,7 +1089,7 @@ class _AggregateEnv:
             "eviction_execution": execution,
         }
         post_ref = _write_file(
-            self.root, f"post-{index}.json", module.canonical_json_bytes(post)
+            self.root, f"post-{index}.json", module.canonical_bytes(post)
         )
         return {
             "trial_input": trial_ref,
@@ -1120,7 +1122,7 @@ class _AggregateEnv:
 
     def write_manifest(self, manifest: dict[str, object] | None = None) -> Path:
         path = self.root / "aggregate-input.json"
-        path.write_bytes(module.canonical_json_bytes(manifest or self.manifest()))
+        path.write_bytes(module.canonical_bytes(manifest or self.manifest()))
         return path
 
     def run(
@@ -1148,7 +1150,7 @@ class _AggregateEnv:
         new_ref = _write_file(
             self.root,
             f"{slot}-rewritten-{index}.json",
-            module.canonical_json_bytes(value),
+            module.canonical_bytes(value),
         )
         reference[slot] = new_ref
 
@@ -1168,13 +1170,13 @@ class _AggregateEnv:
         assert callable(mutation)
         mutation(pre, post)
         pre_ref = _write_file(
-            self.root, f"pre-rewritten-{index}.json", module.canonical_json_bytes(pre)
+            self.root, f"pre-rewritten-{index}.json", module.canonical_bytes(pre)
         )
         trial["controller_pre_receipt"] = pre_ref
         trial_ref = _write_file(
             self.root,
             f"trial-rewritten-{index}.json",
-            module.canonical_json_bytes(trial),
+            module.canonical_bytes(trial),
         )
         observation = self._read_evidence(index, "observation")
         observation["input_sha256"] = module.canonical_sha256(trial)
@@ -1184,12 +1186,12 @@ class _AggregateEnv:
         obs_ref = _write_file(
             self.root,
             f"obs-rewritten-{index}.json",
-            module.canonical_json_bytes(observation),
+            module.canonical_bytes(observation),
         )
         post["pre_receipt_sha256"] = pre_ref["sha256"]
         post["observation_sha256"] = observation["self_sha256"]
         post_ref = _write_file(
-            self.root, f"post-rewritten-{index}.json", module.canonical_json_bytes(post)
+            self.root, f"post-rewritten-{index}.json", module.canonical_bytes(post)
         )
         self.triples[index] = {
             "trial_input": trial_ref,
@@ -1211,11 +1213,11 @@ class _AggregateEnv:
         obs_ref = _write_file(
             self.root,
             f"obs-rewritten-{index}.json",
-            module.canonical_json_bytes(observation),
+            module.canonical_bytes(observation),
         )
         post["observation_sha256"] = observation["self_sha256"]
         post_ref = _write_file(
-            self.root, f"post-rewritten-{index}.json", module.canonical_json_bytes(post)
+            self.root, f"post-rewritten-{index}.json", module.canonical_bytes(post)
         )
         self.triples[index]["observation"] = obs_ref
         self.triples[index]["post_receipt"] = post_ref
@@ -1227,7 +1229,7 @@ class _AggregateEnv:
         trial_ref = _write_file(
             self.root,
             f"trial-tampered-{index}.json",
-            module.canonical_json_bytes(trial),
+            module.canonical_bytes(trial),
         )
         self.triples[index]["trial_input"] = trial_ref
 
@@ -1711,7 +1713,7 @@ class AggregateTests(unittest.TestCase):
         environment = self._environment()
         environment.write_manifest()
         output = environment.root / "rebound.json"
-        original_open_trusted = module._open_trusted_dir
+        original_open_trusted = evidence._open_trusted_dir
         calls = {"count": 0}
 
         def rebinding_open_trusted(candidate: Path) -> int:
@@ -1726,7 +1728,7 @@ class AggregateTests(unittest.TestCase):
                     environment.root = moved
             return original_open_trusted(candidate)
 
-        module._open_trusted_dir = rebinding_open_trusted  # type: ignore[assignment]
+        evidence._open_trusted_dir = rebinding_open_trusted  # type: ignore[assignment]
         try:
             code = module.main(
                 [
@@ -1738,7 +1740,7 @@ class AggregateTests(unittest.TestCase):
                 ]
             )
         finally:
-            module._open_trusted_dir = original_open_trusted  # type: ignore[assignment]
+            evidence._open_trusted_dir = original_open_trusted  # type: ignore[assignment]
         self.assertEqual(code, 2)
         self.assertFalse(output.exists())
 
@@ -1782,14 +1784,14 @@ class AggregateTests(unittest.TestCase):
         # The fault arms only after linkat succeeds, so the test exercises
         # post-link rollback, not pre-link refusal.
         output = environment.root / "rollback.json"
-        original_link = module._link_tmpfile
+        original_link = evidence._link_tmpfile
         original_function = getattr(module.os, fault["name"])
 
         def linking(fd: int, dir_fd: int, name: str) -> None:
             original_link(fd, dir_fd, name)
             setattr(module.os, fault["name"], fault["poison"])  # type: ignore[arg-type]
 
-        module._link_tmpfile = linking  # type: ignore[arg-type]
+        evidence._link_tmpfile = linking  # type: ignore[arg-type]
         try:
             code = module.main(
                 [
@@ -1801,7 +1803,7 @@ class AggregateTests(unittest.TestCase):
                 ]
             )
         finally:
-            module._link_tmpfile = original_link  # type: ignore[arg-type]
+            evidence._link_tmpfile = original_link  # type: ignore[arg-type]
             setattr(module.os, fault["name"], original_function)  # type: ignore[arg-type]
         return code, output
 
@@ -1840,7 +1842,7 @@ class AggregateTests(unittest.TestCase):
     def test_substituted_output_is_never_removed(self) -> None:
         environment = self._environment()
         output = environment.root / "substituted.json"
-        original_link = module._link_tmpfile
+        original_link = evidence._link_tmpfile
 
         def linking(fd: int, dir_fd: int, name: str) -> None:
             original_link(fd, dir_fd, name)
@@ -1849,7 +1851,7 @@ class AggregateTests(unittest.TestCase):
             output.unlink()
             output.write_bytes(b'{"forged": true}')
 
-        module._link_tmpfile = linking  # type: ignore[arg-type]
+        evidence._link_tmpfile = linking  # type: ignore[arg-type]
         try:
             code = module.main(
                 [
@@ -1861,7 +1863,7 @@ class AggregateTests(unittest.TestCase):
                 ]
             )
         finally:
-            module._link_tmpfile = original_link  # type: ignore[arg-type]
+            evidence._link_tmpfile = original_link  # type: ignore[arg-type]
         self.assertEqual(code, 2)
         self.assertEqual(output.read_bytes(), b'{"forged": true}')
 
@@ -1885,17 +1887,17 @@ class PureHelperTests(unittest.TestCase):
 
     def test_nearest_rank_is_exact_not_interpolated(self) -> None:
         samples = [70, 10, 60, 20, 50, 30, 40]
-        self.assertEqual(module.nearest_rank(samples, 50), 40)
-        self.assertEqual(module.nearest_rank(samples, 95), 70)
-        self.assertEqual(module.nearest_rank(samples, 99), 70)
+        self.assertEqual(module.nearest_rank(samples, 0.50), 40)
+        self.assertEqual(module.nearest_rank(samples, 0.95), 70)
+        self.assertEqual(module.nearest_rank(samples, 0.99), 70)
 
     def test_nearest_rank_rejects_empty_and_bad_percentiles(self) -> None:
         with self.assertRaises(module.ContractError):
-            module.nearest_rank([], 50)
+            module.nearest_rank([], 0.50)
         with self.assertRaises(module.ContractError):
-            module.nearest_rank([1], 0)
+            module.nearest_rank([1], 0.0)
         with self.assertRaises(module.ContractError):
-            module.nearest_rank([1], 101)
+            module.nearest_rank([1], 1.01)
 
     def test_stats_require_exactly_seven_samples(self) -> None:
         with self.assertRaises(module.ContractError):
@@ -2016,7 +2018,7 @@ class CampaignControllerTests(unittest.TestCase):
         _sweep_base()
 
     def _state_bytes(self, muhash: str = MUHASH) -> bytes:
-        return module.canonical_json_bytes(
+        return module.canonical_bytes(
             {
                 "height": HEIGHT,
                 "bestblock": BESTBLOCK,
@@ -2122,7 +2124,7 @@ class CampaignControllerTests(unittest.TestCase):
             "eviction_procedure": eviction,
         }
         config_path = root / "campaign.json"
-        config_path.write_bytes(module.canonical_json_bytes(config))
+        config_path.write_bytes(module.canonical_bytes(config))
         return root, config_path, root / "result.json"
 
     def _run(
@@ -2306,7 +2308,7 @@ class CampaignControllerTests(unittest.TestCase):
                     HEIGHT,
                     BESTBLOCK,
                     child.pid,
-                    module._read_starttime(child.pid),
+                    evidence.process_start_time(child.pid),
                 )
             self.assertRegex(str(raised.exception), r"not owned|never owned")
             self.assertEqual(spy.requests, [])
@@ -2324,13 +2326,11 @@ class CampaignControllerTests(unittest.TestCase):
         source.write_bytes(b"pinned-config")
         digest = _sha256(b"pinned-config")
         destination = root / "workspace-config"
-        module._copy_pinned_file(
+        evidence.copy_pinned(
             source,
-            digest,
             destination,
-            cap=module.MAX_RECEIPT_BYTES,
-            mode=0o400,
-            field="arm config",
+            digest,
+            0o400,
         )
         source.write_bytes(b"replaced-config")
         descriptor = module._open_verified_snapshot(
