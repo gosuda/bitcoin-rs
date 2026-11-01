@@ -148,7 +148,8 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_loop_cancels_promptly_on_latch_trigger() -> crate::test_fixtures::TestResult {
+    fn maintenance_loop_cancels_within_500ms_on_latch_trigger() -> crate::test_fixtures::TestResult
+    {
         let dir = tempfile::tempdir()?;
         let publisher = test_publisher(dir.path())?;
         let writer = LatchWriter::new();
