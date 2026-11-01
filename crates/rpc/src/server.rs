@@ -1,15 +1,14 @@
 #![cfg_attr(not(feature = "test-seam"), allow(unreachable_pub))]
 
 use alloc::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 use tracing::{debug, error, warn};
 
@@ -125,7 +124,33 @@ impl RpcServer {
         self,
         shutdown: &bitcoin_rs_chain::LatchReader,
         surface: RpcSurface,
+        accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+    ) -> io::Result<()> {
+        self.serve_accept_loop_with_connections(
+            shutdown,
+            surface,
+            accept,
+            Arc::new(ConnectionTracker::default()),
+        )
+    }
+
+    #[cfg(test)]
+    fn serve_accept_loop_observed(
+        self,
+        shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
+        accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+        connections: Arc<ConnectionTracker>,
+    ) -> io::Result<()> {
+        self.serve_accept_loop_with_connections(shutdown, surface, accept, connections)
+    }
+
+    fn serve_accept_loop_with_connections(
+        self,
+        shutdown: &bitcoin_rs_chain::LatchReader,
+        surface: RpcSurface,
         mut accept: impl FnMut(&mio::net::TcpListener) -> io::Result<(mio::net::TcpStream, SocketAddr)>,
+        connections: Arc<ConnectionTracker>,
     ) -> io::Result<()> {
         let _stop = RpcStop(Arc::clone(&self.handler));
         let handler_clone = Arc::clone(&self.handler);
@@ -146,17 +171,14 @@ impl RpcServer {
         let _cancel_guard = shutdown.on_cancel(move || {
             let _ = waker_cancel.wake();
         });
-        let connections = Arc::new(ConnectionTracker::default());
         let connection_waker = Arc::clone(&connections);
         let _connection_guard = shutdown.on_cancel(move || {
             connection_waker.wake_readers();
         });
-        let (exited_tx, exited_rx) = mpsc::channel();
         let mut events = mio::Events::with_capacity(2);
         let context = AcceptContext {
             active: Arc::new(Mutex::new(ActiveConnections::default())),
             connections: Arc::clone(&connections),
-            exited: exited_tx.clone(),
             shutdown: shutdown.clone(),
             surface,
         };
@@ -198,7 +220,7 @@ impl RpcServer {
             }
         }
         connections.wake_readers();
-        drain_connections(&connections, &exited_rx);
+        drain_connections(&connections);
         outcome
     }
 
@@ -208,6 +230,7 @@ impl RpcServer {
         stream: TcpStream,
         peer: IpAddr,
     ) -> io::Result<()> {
+        context.connections.reap_finished();
         let surface = context.surface;
         let mut stream = match prepare_http_socket(stream) {
             Ok(stream) => stream,
@@ -241,16 +264,11 @@ impl RpcServer {
             context.connections.wake_readers();
         }
         let tracker = Arc::clone(&context.connections);
-        let exited = context.exited.clone();
         let spawned = thread::Builder::new()
             .name("rpc-connection".to_owned())
             .stack_size(RPC_CONNECTION_STACK_BYTES)
             .spawn(move || {
-                let _slot = ConnectionSlot {
-                    tracker,
-                    id,
-                    exited,
-                };
+                let _slot = ConnectionSlot { tracker, id };
                 let _permit = permit;
                 if let Err(error) =
                     serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout, surface)
@@ -351,15 +369,21 @@ impl Drop for ConnectionPermit {
 struct AcceptContext {
     active: Arc<Mutex<ActiveConnections>>,
     connections: Arc<ConnectionTracker>,
-    exited: mpsc::Sender<()>,
     shutdown: bitcoin_rs_chain::LatchReader,
     surface: RpcSurface,
+}
+
+#[derive(Default)]
+struct LiveConnections {
+    ids: HashSet<u64>,
 }
 
 #[derive(Default)]
 struct ConnectionTracker {
     streams: Mutex<HashMap<u64, TcpStream>>,
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    live: Mutex<LiveConnections>,
+    drained: Condvar,
     next_id: AtomicU64,
 }
 
@@ -370,14 +394,39 @@ impl ConnectionTracker {
 
     fn admit(&self, id: u64, stream: TcpStream) {
         self.streams.lock().insert(id, stream);
+        self.live.lock().ids.insert(id);
     }
 
     fn release(&self, id: u64) {
         self.streams.lock().remove(&id);
+        let mut live = self.live.lock();
+        if live.ids.remove(&id) && live.ids.is_empty() {
+            self.drained.notify_all();
+        }
     }
 
     fn record_thread(&self, handle: thread::JoinHandle<()>) {
         self.threads.lock().push(handle);
+    }
+
+    fn reap_finished(&self) {
+        let mut finished = Vec::new();
+        {
+            let mut threads = self.threads.lock();
+            let mut index = 0;
+            while index < threads.len() {
+                if threads[index].is_finished() {
+                    finished.push(threads.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        for handle in finished {
+            if handle.join().is_err() {
+                error!("rpc connection panicked");
+            }
+        }
     }
 
     fn wake_readers(&self) {
@@ -386,44 +435,65 @@ impl ConnectionTracker {
         }
     }
 
+    fn wait_for_drain(&self, deadline: Instant) -> bool {
+        let mut live = self.live.lock();
+        while !live.ids.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if self.drained.wait_for(&mut live, remaining).timed_out() && !live.ids.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn live_count(&self) -> usize {
+        self.live.lock().ids.len()
+    }
+
     fn take_threads(&self) -> Vec<thread::JoinHandle<()>> {
         std::mem::take(&mut *self.threads.lock())
+    }
+}
+
+#[cfg(test)]
+impl ConnectionTracker {
+    fn retained_threads(&self) -> usize {
+        self.threads.lock().len()
+    }
+
+    fn retained_threads_settled(&self) -> bool {
+        self.threads
+            .lock()
+            .iter()
+            .all(|handle| handle.is_finished())
     }
 }
 
 struct ConnectionSlot {
     tracker: Arc<ConnectionTracker>,
     id: u64,
-    exited: mpsc::Sender<()>,
 }
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
         self.tracker.release(self.id);
-        let _ = self.exited.send(());
     }
 }
 
-fn drain_connections(connections: &ConnectionTracker, exited: &mpsc::Receiver<()>) {
-    let handles = connections.take_threads();
+fn drain_connections(connections: &ConnectionTracker) {
     let deadline = Instant::now() + CONNECTION_DRAIN_DEADLINE;
-    let mut drained = 0;
-    while drained < handles.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || exited.recv_timeout(remaining).is_err() {
-            break;
-        }
-        drained += 1;
-    }
-    let all_drained = drained == handles.len();
+    let all_drained = connections.wait_for_drain(deadline);
     if !all_drained {
         warn!(
-            drained,
-            pending = handles.len() - drained,
+            pending = connections.live_count(),
             "rpc connections exceeded the drain deadline"
         );
     }
-    for handle in handles {
+    connections.reap_finished();
+    for handle in connections.take_threads() {
         if (all_drained || handle.is_finished()) && handle.join().is_err() {
             error!("rpc connection panicked");
         }

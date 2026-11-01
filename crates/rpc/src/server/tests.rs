@@ -1622,6 +1622,59 @@ fn accept_test_server() -> io::Result<RpcServer> {
 }
 
 #[test]
+fn closed_connections_leave_no_retained_tracker_entries() -> io::Result<()> {
+    const CONNECTIONS: usize = 1_000;
+    const MAX_CONNECTIONS: usize = 4;
+    let server = accept_test_server()?;
+    let addr = server.local_addr()?;
+    let shutdown = LatchWriter::new();
+    let reader = shutdown.reader();
+    let connections = Arc::new(ConnectionTracker::default());
+    let observed = Arc::clone(&connections);
+    let handle = thread::spawn(move || {
+        server.serve_accept_loop_observed(
+            &reader,
+            RpcSurface::Shared,
+            mio::net::TcpListener::accept,
+            observed,
+        )
+    });
+
+    let exchanges = (|| -> io::Result<()> {
+        let request = json_rpc_head(None, 0);
+        for _ in 0..CONNECTIONS {
+            let mut client = TcpStream::connect(addr)?;
+            client.set_read_timeout(Some(Duration::from_secs(5)))?;
+            client.write_all(&request)?;
+            let mut response = String::new();
+            client.read_to_string(&mut response)?;
+            assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+        }
+        Ok(())
+    })();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    if exchanges.is_ok() {
+        while !connections.retained_threads_settled() {
+            assert!(
+                Instant::now() < deadline,
+                "connection threads did not finish within the settle deadline"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let retained = connections.retained_threads();
+    shutdown.trigger();
+    handle.join().expect("accept thread")?;
+    exchanges?;
+    assert!(
+        retained <= MAX_CONNECTIONS,
+        "the tracker retained {retained} entries after {CONNECTIONS} short connections closed"
+    );
+    Ok(())
+}
+
+#[test]
 fn idle_accept_is_prompt_across_arrival_phases() -> io::Result<()> {
     let server = accept_test_server()?;
     let addr = server.local_addr()?;
