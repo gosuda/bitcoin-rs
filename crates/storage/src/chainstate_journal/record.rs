@@ -340,21 +340,11 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record};
+    use super::{
+        Coin, JournalRecord, JournalRecordError, MAGIC, Mutation, decode_record, encode_record,
+    };
     use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
     use proptest::prelude::*;
-
-    fn coin(seed: u8, height: u32, coinbase: bool) -> Coin {
-        Coin {
-            outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), u32::from(seed)),
-            txout: TxOut {
-                value: Amount::from_sat(u64::from(seed) * 1_000),
-                script_pubkey: Script::from_bytes(vec![0x51, seed]),
-            },
-            height,
-            coinbase,
-        }
-    }
 
     fn header_bytes(hash: [u8; 32]) -> [u8; 80] {
         let mut header = [0_u8; 80];
@@ -363,100 +353,57 @@ mod tests {
         header
     }
 
-    fn sample() -> JournalRecord {
-        JournalRecord {
-            height: 42,
-            block_hash: [9; 32],
-            prev_hash: [8; 32],
-            block_tx_count: 70_000,
-            coin_stats_height_delta: -1,
-            raw_header: header_bytes([9; 32]),
-            mutations: vec![
-                Mutation::Create {
-                    coin: coin(1, 42, true),
-                },
-                Mutation::Spend {
-                    coin: coin(2, 11, false),
-                },
-                Mutation::Overwrite {
-                    old_coin: coin(3, 7, false),
-                    new_coin: coin(4, 42, false),
-                },
-            ],
-        }
+    fn arb_height() -> impl Strategy<Value = u32> {
+        prop_oneof![
+            Just(0),
+            Just(1),
+            Just(2),
+            Just(100_000),
+            Just(u32::MAX - 1),
+            Just(u32::MAX),
+            any::<u32>(),
+        ]
     }
 
-    #[test]
-    fn round_trips_genesis_and_all_mutation_kinds() -> std::io::Result<()> {
-        let genesis = JournalRecord {
-            height: 0,
-            block_hash: [0; 32],
-            prev_hash: [0; 32],
-            block_tx_count: 1,
-            coin_stats_height_delta: 0,
-            raw_header: header_bytes([0; 32]),
-            mutations: Vec::new(),
-        };
-        for record in [genesis, sample()] {
-            assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
-        }
-        Ok(())
+    fn arb_amount() -> impl Strategy<Value = Amount> {
+        prop_oneof![
+            Just(Amount::from_sat(0)),
+            Just(Amount::from_sat(1)),
+            Just(Amount::from_sat(21_000_000 * 100_000_000)),
+            Just(Amount::from_sat(u64::MAX)),
+            any::<u64>().prop_map(Amount::from_sat),
+        ]
     }
 
-    #[test]
-    fn every_single_byte_corruption_is_rejected() -> std::io::Result<()> {
-        let bytes = encode_record(&sample())?;
-        for index in 0..bytes.len() {
-            let mut corrupted = bytes.clone();
-            corrupted[index] ^= 1;
-            assert!(
-                decode_record(&corrupted).is_err(),
-                "byte {index} was accepted"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn every_truncated_prefix_is_rejected() -> std::io::Result<()> {
-        let bytes = encode_record(&sample())?;
-        for length in 0..bytes.len() {
-            assert!(
-                decode_record(&bytes[..length]).is_err(),
-                "prefix {length} was accepted"
-            );
-        }
-        assert!(decode_record(&bytes).is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn bad_magic_and_version_are_rejected() -> std::io::Result<()> {
-        let bytes = encode_record(&sample())?;
-        let mut bad_magic = bytes.clone();
-        bad_magic[0] ^= 1;
-        assert_eq!(decode_record(&bad_magic), Err(JournalRecordError::BadMagic));
-        let mut bad_version = bytes;
-        bad_version[4] = 2;
-        assert!(matches!(
-            decode_record(&bad_version),
-            Err(JournalRecordError::BadVersion { .. })
-        ));
-        Ok(())
+    fn arb_script() -> impl Strategy<Value = Script> {
+        prop_oneof![
+            Just(Script::from_bytes(Vec::new())),
+            Just(Script::from_bytes(vec![0x51])),
+            Just(Script::from_bytes(vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef])),
+            (0..64_usize, any::<u8>()).prop_map(|(len, b)| Script::from_bytes(vec![b; len])),
+        ]
     }
 
     fn arb_coin() -> impl Strategy<Value = Coin> {
-        (any::<u8>(), any::<u32>(), any::<bool>(), 0..12_usize).prop_map(
-            |(seed, height, coinbase, script_len)| Coin {
-                outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), u32::from(seed)),
-                txout: TxOut {
-                    value: Amount::from_sat(u64::from(seed)),
-                    script_pubkey: Script::from_bytes(vec![seed; script_len]),
-                },
-                height,
-                coinbase,
-            },
+        (
+            any::<[u8; 32]>(),
+            prop_oneof![Just(0), Just(1), Just(u32::MAX), any::<u32>()],
+            arb_amount(),
+            arb_script(),
+            arb_height(),
+            any::<bool>(),
         )
+            .prop_map(
+                |(txid_bytes, vout, value, script_pubkey, height, coinbase)| Coin {
+                    outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&txid_bytes)), vout),
+                    txout: TxOut {
+                        value,
+                        script_pubkey,
+                    },
+                    height,
+                    coinbase,
+                },
+            )
     }
 
     fn arb_mutation() -> impl Strategy<Value = Mutation> {
@@ -468,19 +415,137 @@ mod tests {
         ]
     }
 
+    fn arb_record() -> impl Strategy<Value = JournalRecord> {
+        (
+            arb_height(),
+            prop_oneof![Just([0_u8; 32]), Just([0xff_u8; 32]), any::<[u8; 32]>()],
+            prop_oneof![Just([0_u8; 32]), Just([0xff_u8; 32]), any::<[u8; 32]>()],
+            prop_oneof![
+                Just(0_u64),
+                Just(1),
+                Just(2),
+                Just(u64::MAX - 1),
+                Just(u64::MAX),
+                any::<u64>()
+            ],
+            prop_oneof![
+                Just(0_i64),
+                Just(1),
+                Just(-1),
+                Just(i64::MIN),
+                Just(i64::MAX),
+                any::<i64>()
+            ],
+            prop::collection::vec(arb_mutation(), 0..16),
+        )
+            .prop_map(
+                |(
+                    height,
+                    block_hash,
+                    prev_hash,
+                    block_tx_count,
+                    coin_stats_height_delta,
+                    mutations,
+                )| {
+                    let raw_header = header_bytes(block_hash);
+                    JournalRecord {
+                        height,
+                        block_hash,
+                        prev_hash,
+                        block_tx_count,
+                        coin_stats_height_delta,
+                        raw_header,
+                        mutations,
+                    }
+                },
+            )
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
+            ..ProptestConfig::default()
+        })]
         #[test]
-        fn arbitrary_mutation_lists_round_trip(
-            height in any::<u32>(),
-            block_hash in any::<[u8; 32]>(),
-            prev_hash in any::<[u8; 32]>(),
-            block_tx_count in any::<u64>(),
-            coin_stats_height_delta in any::<i64>(),
-            mutations in prop::collection::vec(arb_mutation(), 0..16),
+        fn record_round_trips_identically_and_corruptions_are_rejected(
+            record in arb_record(),
+            flip_pos_seed in any::<usize>(),
+            flip_mask in 1_u8..=255,
+            trunc_seed in any::<usize>(),
+            trailing in prop::collection::vec(any::<u8>(), 1..=16),
+            swap_pos_seed in any::<usize>(),
         ) {
-            let raw_header = header_bytes(block_hash);
-            let record = JournalRecord { height, block_hash, prev_hash, block_tx_count, coin_stats_height_delta, raw_header, mutations };
-            prop_assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
+            let bytes = encode_record(&record)?;
+
+            let decoded = decode_record(&bytes).map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+            prop_assert_eq!(&decoded, &record, "round trip must produce identical record");
+
+            let flip_idx = flip_pos_seed % bytes.len();
+            let mut flipped = bytes.clone();
+            flipped[flip_idx] ^= flip_mask;
+            if flipped[flip_idx] != bytes[flip_idx] {
+                let flip_res = decode_record(&flipped);
+                match flip_idx.cmp(&MAGIC.len()) {
+                    std::cmp::Ordering::Less => {
+                        prop_assert_eq!(
+                            flip_res,
+                            Err(JournalRecordError::BadMagic),
+                            "magic corruption at byte {} must return BadMagic",
+                            flip_idx
+                        );
+                    }
+                    std::cmp::Ordering::Equal => {
+                        prop_assert!(
+                            matches!(flip_res, Err(JournalRecordError::BadVersion { .. })),
+                            "version corruption must return BadVersion"
+                        );
+                    }
+                    std::cmp::Ordering::Greater => {
+                        if let Ok(wrong) = flip_res {
+                            prop_assert_eq!(
+                                &wrong,
+                                &record,
+                                "corrupted record at byte {} must not decode to a different value",
+                                flip_idx
+                            );
+                        }
+                    }
+                }
+            }
+
+            let trunc_len = trunc_seed % bytes.len();
+            let trunc_res = decode_record(&bytes[..trunc_len]);
+            prop_assert!(
+                trunc_res.is_err(),
+                "truncated record of length {trunc_len} (full {}) must be rejected",
+                bytes.len()
+            );
+
+            let mut extended = bytes.clone();
+            extended.extend_from_slice(&trailing);
+            let ext_res = decode_record(&extended);
+            prop_assert_eq!(
+                ext_res,
+                Err(JournalRecordError::MalformedPayload),
+                "record with trailing bytes must return MalformedPayload"
+            );
+
+            if bytes.len() > 1 {
+                let swap_idx = swap_pos_seed % (bytes.len() - 1);
+                if bytes[swap_idx] != bytes[swap_idx + 1] {
+                    let mut swapped = bytes;
+                    swapped.swap(swap_idx, swap_idx + 1);
+                    let swap_res = decode_record(&swapped);
+                    if let Ok(wrong) = swap_res {
+                        prop_assert_eq!(
+                            &wrong,
+                            &record,
+                            "swapped bytes at {} must not decode to a different value",
+                            swap_idx
+                        );
+                    }
+                }
+            }
         }
     }
 }
