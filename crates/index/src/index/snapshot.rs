@@ -118,7 +118,11 @@ impl StoreTxIndexSnapshot<'_> {
         let scan =
             self.snapshot
                 .scan_prefix_from_bounded(ColumnFamily::Funding, prefix, start, limit)?;
-        decode_history_scan(scan)
+        let mut decoded = decode_scan(scan)?;
+        for row in &mut decoded.rows {
+            row.row.height = crate::types::ascending_history_height(row.row.height);
+        }
+        Ok(decoded)
     }
 }
 
@@ -127,21 +131,6 @@ fn decode_scan(scan: bitcoin_rs_storage::PrefixScan) -> Result<TxIndexScan, Inde
     let mut rows = Vec::with_capacity(scan.rows.len());
     for (key, value) in scan.rows {
         let row = decode_row(&key)?;
-        rows.push(TxIndexScanRow { row, value });
-    }
-    Ok(TxIndexScan {
-        rows,
-        encoded_bytes,
-        complete: scan.complete,
-    })
-}
-
-fn decode_history_scan(scan: bitcoin_rs_storage::PrefixScan) -> Result<TxIndexScan, IndexError> {
-    let encoded_bytes = encoded_bytes(&scan);
-    let mut rows = Vec::with_capacity(scan.rows.len());
-    for (key, value) in scan.rows {
-        let mut row = decode_row(&key)?;
-        row.height = crate::types::encode_height(crate::types::decode_history_height(row.height));
         rows.push(TxIndexScanRow { row, value });
     }
     Ok(TxIndexScan {

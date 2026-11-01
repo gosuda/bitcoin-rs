@@ -38,6 +38,11 @@ pub(crate) const fn decode_history_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     !u32::from_be_bytes(bytes)
 }
 
+#[must_use]
+pub(crate) const fn ascending_history_height(bytes: [u8; HEIGHT_SIZE]) -> [u8; HEIGHT_SIZE] {
+    encode_height(decode_history_height(bytes))
+}
+
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
 #[derive(

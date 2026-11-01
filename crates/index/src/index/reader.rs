@@ -48,8 +48,7 @@ impl<S: KvStore> Indexer<S> {
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
         let mut rows = collect_prefix_rows(iter)?;
         for row in &mut rows {
-            row.height =
-                crate::types::encode_height(crate::types::decode_history_height(row.height));
+            row.height = crate::types::ascending_history_height(row.height);
         }
         Ok(rows)
     }
