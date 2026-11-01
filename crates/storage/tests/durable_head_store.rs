@@ -344,20 +344,24 @@ fn rejects_reopen_with_corrupt_or_truncated_durable_head() -> Result<(), Storage
 #[test]
 fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reopen()
 -> Result<(), StorageError> {
-    for fail_index in 0..=5 {
+    let cf = bitcoin_rs_storage::ColumnFamily::TxConfirmed;
+    for fail_index in 0..=5_u8 {
         let temp = tempfile::tempdir()?;
-        let cf = bitcoin_rs_storage::ColumnFamily::TxConfirmed;
         {
             let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
-            let mut batch = backend.new_batch();
+            let mut full_batch = backend.new_batch();
             for i in 0..5_u8 {
-                batch.put(cf, &[i], &[i, i]);
+                full_batch.put(cf, &[i], &[i, i]);
             }
             if fail_index < 5 {
-                backend.arm_persist_fault(PersistFault::PartialApply);
-                let _ = backend.write_durable(batch);
+                let mut partial = backend.new_batch();
+                for i in 0..fail_index {
+                    partial.put(cf, &[i], &[i, i]);
+                }
+                backend.arm_persist_fault(PersistFault::FailApply);
+                let _ = backend.write_durable(partial);
             } else {
-                backend.write_durable(batch)?;
+                backend.write_durable(full_batch)?;
             }
         }
         let reopened = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
@@ -371,6 +375,11 @@ fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reo
             present == 0 || present == 5,
             "fail_index {fail_index} left partially written state: {present} of 5 keys present"
         );
+        if fail_index < 5 {
+            assert_eq!(present, 0);
+        } else {
+            assert_eq!(present, 5);
+        }
     }
     Ok(())
 }
