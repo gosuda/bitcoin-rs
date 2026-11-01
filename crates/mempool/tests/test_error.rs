@@ -1,5 +1,6 @@
-use bitcoin_rs_mempool::{AdmitError, MempoolError, PrioritiseError, RbfError, SubmitError};
-
+use bitcoin_rs_mempool::{
+    AdmitError, ChainChangeError, MempoolError, PrioritiseError, RbfError, SubmitError,
+};
 #[derive(Debug, thiserror::Error)]
 pub enum TestError {
     #[error("mempool error: {0}")]
@@ -12,6 +13,8 @@ pub enum TestError {
     Admit(#[from] AdmitError),
     #[error("submit error: {0}")]
     Submit(#[from] SubmitError),
+    #[error("chain change error: {0}")]
+    ChainChange(#[from] ChainChangeError),
     #[error("try-from-int error: {0}")]
     TryFromInt(#[from] core::num::TryFromIntError),
     #[error("consensus decode error: {0}")]

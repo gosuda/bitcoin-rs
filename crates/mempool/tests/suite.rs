@@ -1,4 +1,5 @@
 mod admission;
+mod adversarial_mempool;
 mod graph_limits;
 mod policy_contract;
 mod rbf_bip125;
