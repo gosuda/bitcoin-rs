@@ -654,6 +654,7 @@ impl DurableHeadStore for CrashWindowHeadStore {
     }
 }
 
+// RCV-03
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
@@ -747,10 +748,18 @@ proptest! {
             && recovered_tip.height == 1
             && recovered_tip.hash == child1_hash;
 
-        prop_assert!(
-            is_state_before || is_state_after,
-            "state after crash-window reopen must be exactly before or exactly after, got height {}",
-            recovered_head.height
-        );
+        if fail_mode == 0 {
+            prop_assert!(
+                is_state_before,
+                "fail mode 0 refuses the head commit, so reopen must land exactly before, got height {}",
+                recovered_head.height
+            );
+        } else {
+            prop_assert!(
+                is_state_after,
+                "fail modes 1 and 2 acknowledge the head commit, so reopen must land exactly after, got height {}",
+                recovered_head.height
+            );
+        }
     }
 }
