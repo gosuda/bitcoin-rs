@@ -82,8 +82,8 @@ fuzz_target!(|data: &[u8]| {
                 Ok(None) => {
                     assert!(ignore);
                 }
-                Err(_) => {
-                    break;
+                Err(error) => {
+                    panic!("honest sealed packet failed to open before any tag failure: {error:?}");
                 }
             }
         } else {
