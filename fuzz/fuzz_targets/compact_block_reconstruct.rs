@@ -86,10 +86,6 @@ fn sixty_four_byte_tx() -> bitcoin::Transaction {
     }
 }
 
-fn txid_bytes(txid: bitcoin::Txid) -> [u8; 32] {
-    txid.to_byte_array()
-}
-
 fn assert_block_matches(block: &bitcoin_rs_primitives::Block, expected: &bitcoin::Block) {
     assert_eq!(
         block.header.compute_hash().as_bytes(),
@@ -99,7 +95,7 @@ fn assert_block_matches(block: &bitcoin_rs_primitives::Block, expected: &bitcoin
     let expected_txids: Vec<[u8; 32]> = expected
         .txdata
         .iter()
-        .map(|tx| txid_bytes(tx.compute_txid()))
+        .map(|tx| tx.compute_txid().to_byte_array())
         .collect();
     assert_eq!(txids, expected_txids);
 }

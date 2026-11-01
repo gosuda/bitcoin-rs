@@ -25,6 +25,17 @@ use bitcoin_rs_primitives::{BlockPayload, CompactTarget, Header, Network};
 use libfuzzer_sys::arbitrary::{self, Unstructured};
 use libfuzzer_sys::{fuzz_mutator, fuzz_target, fuzzer_mutate};
 
+fn synthetic_header() -> bitcoin::block::Header {
+    bitcoin::block::Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash: BlockHash::all_zeros(),
+        merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+        time: 1_234_567,
+        bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
+        nonce: 0,
+    }
+}
+
 fn arbitrary_message(u: &mut Unstructured<'_>) -> arbitrary::Result<Message> {
     let selector = u.arbitrary::<u8>()? % 22;
     let genesis = Network::Regtest.genesis_block();
@@ -140,14 +151,7 @@ fn arbitrary_message(u: &mut Unstructured<'_>) -> arbitrary::Result<Message> {
         }
         7 => {
             let nonce = u.arbitrary::<u64>()?;
-            let b_header = bitcoin::block::Header {
-                version: bitcoin::block::Version::ONE,
-                prev_blockhash: zero_hash,
-                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
-                time: 1_234_567,
-                bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
-                nonce: 0,
-            };
+            let b_header = synthetic_header();
             let dummy_txid = Txid::all_zeros();
             let short_id = ShortId::with_siphash_keys(&dummy_txid, (0, 0));
             Ok(Message::CmpctBlock(CmpctBlock {
@@ -183,14 +187,7 @@ fn arbitrary_message(u: &mut Unstructured<'_>) -> arbitrary::Result<Message> {
             Ok(Message::FeeFilter(rate))
         }
         12 => {
-            let b_header = bitcoin::block::Header {
-                version: bitcoin::block::Version::ONE,
-                prev_blockhash: zero_hash,
-                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
-                time: 1_234_567,
-                bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
-                nonce: 0,
-            };
+            let b_header = synthetic_header();
             let txid = Txid::all_zeros();
             let pmt = bitcoin::merkle_tree::PartialMerkleTree::from_txids(&[txid], &[true]);
             Ok(Message::MerkleBlock(MerkleBlock {

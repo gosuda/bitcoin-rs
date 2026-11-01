@@ -234,7 +234,6 @@ fuzz_target!(|data: &[u8]| {
         reads += 1;
         if reads > 64 {
             break;
-
         }
     }
 

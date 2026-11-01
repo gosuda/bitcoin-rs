@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
 
     fn take<'a>(rest: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
         let chunk = rest.get(..len)?;
-        *rest = &rest[len.min(rest.len())..];
+        *rest = &rest[len..];
         Some(chunk)
     }
     fn take_u16(rest: &mut &[u8]) -> Option<usize> {

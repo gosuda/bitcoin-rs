@@ -146,15 +146,27 @@ fn build_spending_tx(script_pubkey: &[u8], script_sig: &[u8], witness: Witness) 
     (tx, prevouts)
 }
 
+#[derive(Clone, Copy)]
 enum Commitment {
     Matched,
     Mismatched,
 }
 
+fn committed_program(digest: &[u8], body: &[u8], commitment: Commitment) -> Vec<u8> {
+    match commitment {
+        Commitment::Matched => digest.to_vec(),
+        Commitment::Mismatched => flip_byte(digest, body),
+    }
+}
+
 fn build_case(data: &[u8]) -> (Vec<u8>, Vec<u8>, Witness, VerifyFlags, Option<Commitment>) {
     let shape = data[0] % 7;
     let body = &data[1..];
-    let mismatch = body.first().is_some_and(|byte| byte % 2 == 1);
+    let commitment = if body.first().is_some_and(|byte| byte % 2 == 1) {
+        Commitment::Mismatched
+    } else {
+        Commitment::Matched
+    };
 
     match shape {
         0 => {
@@ -173,16 +185,11 @@ fn build_case(data: &[u8]) -> (Vec<u8>, Vec<u8>, Witness, VerifyFlags, Option<Co
             let mut script_sig = Vec::new();
             push(&mut script_sig, &sig);
             push(&mut script_sig, &pubkey);
-            let commitment = if mismatch {
-                Commitment::Mismatched
-            } else {
-                Commitment::Matched
-            };
-            let program = if mismatch {
-                flip_byte(hash160::Hash::hash(&pubkey).as_byte_array(), body)
-            } else {
-                hash160::Hash::hash(&pubkey).as_byte_array().to_vec()
-            };
+            let program = committed_program(
+                hash160::Hash::hash(&pubkey).as_byte_array(),
+                body,
+                commitment,
+            );
             let mut script_pubkey = vec![0x76, 0xa9, 0x14];
             script_pubkey.extend_from_slice(&program);
             script_pubkey.extend_from_slice(&[0x88, 0xac]);
@@ -198,19 +205,14 @@ fn build_case(data: &[u8]) -> (Vec<u8>, Vec<u8>, Witness, VerifyFlags, Option<Co
             let (redeem, _) = build_script_pair(body);
             let mut script_sig = Vec::new();
             push(&mut script_sig, &redeem);
-            let program = if mismatch {
-                flip_byte(hash160::Hash::hash(&redeem).as_byte_array(), body)
-            } else {
-                hash160::Hash::hash(&redeem).as_byte_array().to_vec()
-            };
+            let program = committed_program(
+                hash160::Hash::hash(&redeem).as_byte_array(),
+                body,
+                commitment,
+            );
             let mut script_pubkey = vec![0xa9, 0x14];
             script_pubkey.extend_from_slice(&program);
             script_pubkey.push(0x87);
-            let commitment = if mismatch {
-                Commitment::Mismatched
-            } else {
-                Commitment::Matched
-            };
             (
                 script_pubkey,
                 script_sig,
@@ -223,17 +225,12 @@ fn build_case(data: &[u8]) -> (Vec<u8>, Vec<u8>, Witness, VerifyFlags, Option<Co
             let pubkey = cycled(body, 33, 0x02);
             let sig = cycled(body, 71, 0x30);
             let witness = Witness::from_stack(vec![sig, pubkey.clone()]);
-            let program = if mismatch {
-                flip_byte(hash160::Hash::hash(&pubkey).as_byte_array(), body)
-            } else {
-                hash160::Hash::hash(&pubkey).as_byte_array().to_vec()
-            };
+            let program = committed_program(
+                hash160::Hash::hash(&pubkey).as_byte_array(),
+                body,
+                commitment,
+            );
             let script_pubkey = witness_program(0x00, &program);
-            let commitment = if mismatch {
-                Commitment::Mismatched
-            } else {
-                Commitment::Matched
-            };
             (
                 script_pubkey,
                 Vec::new(),
@@ -248,17 +245,12 @@ fn build_case(data: &[u8]) -> (Vec<u8>, Vec<u8>, Witness, VerifyFlags, Option<Co
             let (wscript, _) = build_script_pair(body);
             let item = cycled(body, 32, 0x01);
             let witness = Witness::from_stack(vec![item, wscript.clone()]);
-            let program = if mismatch {
-                flip_byte(sha256::Hash::hash(&wscript).as_byte_array(), body)
-            } else {
-                sha256::Hash::hash(&wscript).as_byte_array().to_vec()
-            };
+            let program = committed_program(
+                sha256::Hash::hash(&wscript).as_byte_array(),
+                body,
+                commitment,
+            );
             let script_pubkey = witness_program(0x00, &program);
-            let commitment = if mismatch {
-                Commitment::Mismatched
-            } else {
-                Commitment::Matched
-            };
             (
                 script_pubkey,
                 Vec::new(),

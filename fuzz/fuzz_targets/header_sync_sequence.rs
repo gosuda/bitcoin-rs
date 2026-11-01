@@ -194,20 +194,20 @@ fn verify(tree: &BlockTree, tracked: &[Tracked]) {
     }
 }
 
-fn mined_header(tree: &BlockTree, parent: &Tracked, delta: u32, nonce: u32) -> Header {
-    let parent_node = tree.node(parent.id).expect("parent node");
-    let mut header = Header {
+fn child_header(parent_hash: Hash256, parent_time: u32, delta: u32, nonce: u32) -> Header {
+    Header {
         version: 4,
-        prev_blockhash: BlockHash(parent.hash),
+        prev_blockhash: BlockHash(parent_hash),
         merkle_root: Hash256::default(),
-        time: parent_node
-            .header
-            .time
-            .saturating_add(1)
-            .saturating_add(delta % 600),
+        time: parent_time.saturating_add(1).saturating_add(delta),
         bits: CompactTarget::from_consensus(REGTEST_BITS),
         nonce,
-    };
+    }
+}
+
+fn mined_header(tree: &BlockTree, parent: &Tracked, delta: u32, nonce: u32) -> Header {
+    let parent_node = tree.node(parent.id).expect("parent node");
+    let mut header = child_header(parent.hash, parent_node.header.time, delta % 600, nonce);
     mine(&mut header);
     header
 }
@@ -283,18 +283,13 @@ fn batch_op(
     let mut parent_header = tree.node(tracked[slot].id).expect("parent node").header;
     let mut headers = Vec::with_capacity(count);
     for index in 0..count {
-        let mut header = Header {
-            version: 4,
-            prev_blockhash: BlockHash(Hash256::from(parent_header.compute_hash())),
-            merkle_root: Hash256::default(),
-            time: parent_header
-                .time
-                .saturating_add(1)
-                .saturating_add(delta),
-            bits: CompactTarget::from_consensus(REGTEST_BITS),
-            nonce: u32::from_be_bytes([chunk[76], chunk[77], chunk[78], chunk[79]])
+        let mut header = child_header(
+            Hash256::from(parent_header.compute_hash()),
+            parent_header.time,
+            delta,
+            u32::from_be_bytes([chunk[76], chunk[77], chunk[78], chunk[79]])
                 .wrapping_add(u32::try_from(index).expect("count fits")),
-        };
+        );
         if index == corrupt {
             if corrupt_mode == 0 {
                 header.time = genesis_time().saturating_sub(1_000);
@@ -357,18 +352,13 @@ fn reorg_op(
     let mut parent_header = tree.node(tracked[pick].id).expect("parent node").header;
     let mut headers = Vec::with_capacity(steps);
     for index in 0..steps {
-        let mut header = Header {
-            version: 4,
-            prev_blockhash: BlockHash(Hash256::from(parent_header.compute_hash())),
-            merkle_root: Hash256::default(),
-            time: parent_header
-                .time
-                .saturating_add(1)
-                .saturating_add(delta),
-            bits: CompactTarget::from_consensus(REGTEST_BITS),
-            nonce: u32::from_be_bytes([chunk[76], chunk[77], chunk[78], chunk[79]])
+        let mut header = child_header(
+            Hash256::from(parent_header.compute_hash()),
+            parent_header.time,
+            delta,
+            u32::from_be_bytes([chunk[76], chunk[77], chunk[78], chunk[79]])
                 .wrapping_add(u32::try_from(index).expect("steps fit")),
-        };
+        );
         mine(&mut header);
         parent_header = header;
         headers.push(header);
