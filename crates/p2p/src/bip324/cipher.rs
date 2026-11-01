@@ -98,11 +98,11 @@ impl FsChaCha20Poly1305 {
         tag: &[u8; TAG_LEN],
     ) -> Result<(), AuthFailed> {
         let nonce = nonce(self.packets, self.epoch);
-        let opened =
-            self.aead()
-                .decrypt_inout_detached(&nonce.into(), aad, buffer.into(), &(*tag).into());
+        self.aead()
+            .decrypt_inout_detached(&nonce.into(), aad, buffer.into(), &(*tag).into())
+            .map_err(|_| AuthFailed)?;
         self.advance();
-        opened.map_err(|_| AuthFailed)
+        Ok(())
     }
 
     fn aead(&self) -> ChaCha20Poly1305 {
@@ -188,6 +188,53 @@ mod tests {
             }
             assert_eq!(receiver.decrypt(&aad, &mut buffer, &tag), Err(AuthFailed));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn auth_failure_does_not_advance_nonce_or_trigger_rekey() -> Result<(), TestError> {
+        let mut sender = FsChaCha20Poly1305::new([9; 32]);
+        let mut receiver = FsChaCha20Poly1305::new([9; 32]);
+        let bad_tag = [0u8; 16];
+        let mut bad_buffer = [0u8; 32];
+        for _ in 0..REKEY_INTERVAL {
+            assert_eq!(
+                receiver.decrypt(b"aad", &mut bad_buffer, &bad_tag),
+                Err(AuthFailed)
+            );
+        }
+        let plain = *b"valid packet 0 after bad packets";
+        let mut buffer = plain;
+        let tag = sender.encrypt(b"aad", &mut buffer)?;
+        receiver.decrypt(b"aad", &mut buffer, &tag)?;
+        assert_eq!(buffer, plain);
+        Ok(())
+    }
+
+    #[test]
+    fn packet_replay_is_rejected() -> Result<(), TestError> {
+        let mut sender = FsChaCha20Poly1305::new([7; 32]);
+        let mut receiver = FsChaCha20Poly1305::new([7; 32]);
+        let plain0 = *b"message 0 payload";
+        let mut buf0 = plain0;
+        let tag0 = sender.encrypt(b"aad", &mut buf0)?;
+        let plain1 = *b"message 1 payload";
+        let mut buf1 = plain1;
+        let tag1 = sender.encrypt(b"aad", &mut buf1)?;
+
+        let mut recv_buf0 = buf0;
+        receiver.decrypt(b"aad", &mut recv_buf0, &tag0)?;
+        assert_eq!(recv_buf0, plain0);
+
+        let mut replayed = buf0;
+        assert_eq!(
+            receiver.decrypt(b"aad", &mut replayed, &tag0),
+            Err(AuthFailed)
+        );
+
+        let mut recv_buf1 = buf1;
+        receiver.decrypt(b"aad", &mut recv_buf1, &tag1)?;
+        assert_eq!(recv_buf1, plain1);
         Ok(())
     }
 }
