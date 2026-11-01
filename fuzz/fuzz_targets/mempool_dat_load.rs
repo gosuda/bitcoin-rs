@@ -7,6 +7,7 @@ use bitcoin_rs_primitives::Network;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_FUZZ_SNAPSHOT_BYTES: u64 = 1024 * 1024;
+const NON_GATING_DEADLINE: Duration = Duration::from_secs(3600);
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() {
@@ -21,13 +22,13 @@ fuzz_target!(|data: &[u8]| {
     };
     let payload = &data[1..];
 
-    let deadline = Instant::now() + Duration::from_millis(100);
+    let deadline = Instant::now() + NON_GATING_DEADLINE;
 
     if let Ok(snapshot) = Snapshot::decode(payload, network, MAX_FUZZ_SNAPSHOT_BYTES, deadline) {
         let _ = snapshot.order();
-        let encode_deadline = Instant::now() + Duration::from_millis(100);
+        let encode_deadline = Instant::now() + NON_GATING_DEADLINE;
         if let Ok(encoded) = snapshot.encode(network, MAX_FUZZ_SNAPSHOT_BYTES, encode_deadline) {
-            let decode_deadline = Instant::now() + Duration::from_millis(100);
+            let decode_deadline = Instant::now() + NON_GATING_DEADLINE;
             let roundtripped =
                 Snapshot::decode(&encoded, network, MAX_FUZZ_SNAPSHOT_BYTES, decode_deadline);
             match roundtripped {
