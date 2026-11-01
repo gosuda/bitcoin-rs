@@ -98,3 +98,28 @@ fn closed_for_recovery_reader_unblocks_select_on_fail_closed() {
     );
     let _ = thread.join();
 }
+
+// ARCH-09
+#[test]
+fn shutdown_hooks_run_without_the_tip_gate() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let chainstate = Arc::new(crate::test_fixtures::handles(
+        bitcoin_rs_primitives::Network::Regtest,
+        Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+    ));
+    let gate_free = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&gate_free);
+    let owner = Arc::clone(&chainstate);
+    let _hook = chainstate.shutdown_reader().on_cancel(move || {
+        observed.store(
+            owner.tip_notification.gate.try_lock().is_some(),
+            Ordering::SeqCst,
+        );
+    });
+    chainstate.request_shutdown();
+    assert!(
+        gate_free.load(Ordering::SeqCst),
+        "cancellation hooks must run without the tip gate held"
+    );
+}
