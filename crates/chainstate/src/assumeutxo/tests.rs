@@ -1371,3 +1371,25 @@ fn activation_offer_only_on_full_success() -> TestResult {
     assert!(initial.script_live_seed.is_some());
     Ok(())
 }
+
+// RCV-01, RCV-04
+#[test]
+fn rejects_assumeutxo_snapshot_with_truncated_headers() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    drop(manager);
+    let path = dir
+        .path()
+        .join("assumeutxo")
+        .join(fixture.pinned.block_hash.to_string());
+    std::fs::write(path.join("headers.dat"), [0_u8; 10])?;
+    let result =
+        crate::assumeutxo_snapshot::load_verified(dir.path(), Network::Regtest, &fixture.pinned);
+    assert!(matches!(
+        result,
+        Err(crate::assumeutxo_snapshot::SnapshotArchiveError::HeaderArchiveLength)
+    ));
+    Ok(())
+}

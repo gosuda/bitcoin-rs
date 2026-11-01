@@ -286,3 +286,91 @@ fn attest_raises_only_the_current_head() -> Result<(), StorageError> {
     );
     Ok(())
 }
+
+// RCV-01, RCV-04
+#[test]
+fn rejects_reopen_with_corrupt_or_truncated_durable_head() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let (backend, store) = open_store(temp.path())?;
+    let valid = head(1, 1);
+    store.commit(None, &valid, &CommitRecords::default())?;
+    let encoded = valid.encode();
+    let cf = bitcoin_rs_storage::ColumnFamily::UtxoMeta;
+    let key = bitcoin_rs_storage::durable_head::DURABLE_HEAD_KEY;
+
+    let mut truncated = backend.new_batch();
+    truncated.put(cf, key, &encoded[..10]);
+    backend.write_durable(truncated)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_magic = encoded;
+    bad_magic[0] = b'X';
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_magic);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_version = encoded;
+    bad_version[4] = 99;
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_version);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    let mut bad_crc = encoded;
+    let last = bad_crc.len() - 1;
+    bad_crc[last] ^= 0xff;
+    let mut batch = backend.new_batch();
+    batch.put(cf, key, &bad_crc);
+    backend.write_durable(batch)?;
+    assert!(matches!(
+        store.load(),
+        Err(StorageError::IncompatibleData(_))
+    ));
+
+    Ok(())
+}
+
+// RCV-03, RCV-04
+#[test]
+fn crash_windows_failing_backend_writer_at_each_write_index_preserves_atomic_reopen()
+-> Result<(), StorageError> {
+    for fail_index in 0..=5 {
+        let temp = tempfile::tempdir()?;
+        let cf = bitcoin_rs_storage::ColumnFamily::TxConfirmed;
+        {
+            let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+            let mut batch = backend.new_batch();
+            for i in 0..5_u8 {
+                batch.put(cf, &[i], &[i, i]);
+            }
+            if fail_index < 5 {
+                backend.arm_persist_fault(PersistFault::PartialApply);
+                let _ = backend.write_durable(batch);
+            } else {
+                backend.write_durable(batch)?;
+            }
+        }
+        let reopened = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+        let mut present = 0_usize;
+        for i in 0..5_u8 {
+            if reopened.get(cf, &[i])?.is_some() {
+                present += 1;
+            }
+        }
+        assert!(
+            present == 0 || present == 5,
+            "fail_index {fail_index} left partially written state: {present} of 5 keys present"
+        );
+    }
+    Ok(())
+}

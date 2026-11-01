@@ -294,3 +294,51 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> TestResult {
     );
     Ok(())
 }
+
+// RCV-02
+#[test]
+fn use_after_close_refuses_operations() {
+    let utxo = Arc::new(UtxoSet::new());
+    let handles = handles(Network::Regtest, utxo);
+    assert!(!handles.is_closed_for_recovery());
+    handles.fail_closed_for_recovery();
+    assert!(handles.is_closed_for_recovery());
+
+    assert!(matches!(
+        handles.begin_transition(),
+        Err(ApplyError::Shutdown)
+    ));
+    let genesis = Network::Regtest.genesis_block();
+    let outcome = handles.apply_block(&BlockPayload::from_local(genesis));
+    assert!(matches!(outcome, Err(ApplyError::Shutdown)));
+}
+
+// RCV-09, RCV-11
+#[test]
+fn current_schema_version_mismatch_and_corruption_refuses_open() -> TestResult {
+    use bitcoin_rs_storage::checkpoint::{
+        CURRENT_SCHEMA_FILE, ensure_current_schema, open_data_dir,
+    };
+    let temp = tempfile::tempdir()?;
+    let dir = open_data_dir(temp.path())?;
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"1\n")?;
+    let result = ensure_current_schema(&dir);
+    assert!(matches!(
+        &result,
+        Err(err) if err.to_string().contains("CURRENT_SCHEMA is not the current datadir schema epoch")
+    ));
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"0\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"3\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"corrupt\n")?;
+    assert!(ensure_current_schema(&dir).is_err());
+
+    std::fs::write(temp.path().join(CURRENT_SCHEMA_FILE), b"2\n")?;
+    assert!(ensure_current_schema(&dir).is_ok());
+    Ok(())
+}

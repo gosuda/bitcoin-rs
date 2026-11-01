@@ -1,5 +1,6 @@
 mod coin_stats_roundtrip;
 mod commit_roundtrip;
+mod key_prefix_collisions;
 mod muhash_unit;
 mod snapshot_roundtrip;
 mod snapshot_v4_golden;
