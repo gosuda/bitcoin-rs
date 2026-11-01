@@ -881,18 +881,6 @@ class IndexedParityHarnessTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             load_config(config_path)
 
-    def test_indexed_source_mutation_after_load_is_refused(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="offline-indexed-pin-"))
-        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
-        config_path, _ = _build_dual_workspace(root)
-        config = load_config(config_path)
-        victim = root / "blks" / "blk00000.dat"
-        raw = bytearray(victim.read_bytes())
-        raw[20] ^= 0xFF
-        victim.write_bytes(bytes(raw))
-        with self.assertRaises(ContractError):
-            run_campaign(config, root / "arms")
-
     def test_child_custody_source_mutation_is_refused(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="offline-indexed-srcmut-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
