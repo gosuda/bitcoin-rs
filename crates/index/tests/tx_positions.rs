@@ -189,33 +189,73 @@ fn txid_positions_address_their_own_transaction() {
     }
 }
 
-#[test]
-fn a_partial_position_decodes_to_none() {
-    let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
-    for truncated in 1..value.len() {
-        if truncated % TX_POSITION_SIZE == 0 {
-            continue;
-        }
-        assert!(
-            TxPositionValue::decode(&value[..truncated]).is_none(),
-            "a {truncated}-byte value must not decode"
-        );
-    }
+fn arb_u24() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        Just(0),
+        Just(1),
+        Just(2),
+        Just(U24_MAX - 1),
+        Just(U24_MAX),
+        0..=U24_MAX,
+    ]
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
+        ..ProptestConfig::default()
+    })]
     #[test]
     fn position_values_round_trip(
-        raw in proptest::collection::vec((0..=U24_MAX, 0..=U24_MAX), 1..32),
+        raw in proptest::collection::vec((arb_u24(), arb_u24()), 1..=32),
+        extra_len in 1_usize..TX_POSITION_SIZE,
+        extra_bytes in proptest::collection::vec(any::<u8>(), TX_POSITION_SIZE..=TX_POSITION_SIZE * 2),
+        flip_pos in any::<usize>(),
+        flip_mask in 1_u8..=255,
     ) {
         let positions = raw
             .iter()
             .map(|(offset, len)| TxPosition::new(*offset, *len))
             .collect::<Vec<_>>();
         let encoded = TxPositionValue::encode(&positions);
-        let decoded = TxPositionValue::decode(&encoded).expect("decodes");
-        prop_assert_eq!(decoded, positions.as_slice());
+        let decoded = TxPositionValue::decode(&encoded);
+        prop_assert_eq!(decoded, Some(positions.as_slice()));
+
+        prop_assert_eq!(TxPositionValue::decode(&[]), None);
+
+        for truncated in 1..encoded.len() {
+            if truncated % TX_POSITION_SIZE != 0 {
+                prop_assert_eq!(
+                    TxPositionValue::decode(&encoded[..truncated]),
+                    None,
+                    "truncated length {} must fail to decode",
+                    truncated
+                );
+            }
+        }
+
+        let mut extended = encoded.clone();
+        extended.extend_from_slice(&extra_bytes[..extra_len]);
+        prop_assert_eq!(
+            TxPositionValue::decode(&extended),
+            None,
+            "extended length {} must fail to decode",
+            extended.len()
+        );
+
+        let flip_idx = flip_pos % encoded.len();
+        let mut flipped = encoded.clone();
+        flipped[flip_idx] ^= flip_mask;
+        if flipped[flip_idx] != encoded[flip_idx] {
+            let res = TxPositionValue::decode(&flipped);
+            if let Some(other) = res {
+                prop_assert_ne!(
+                    other,
+                    positions.as_slice(),
+                    "mutated position bytes must not decode to identical positions"
+                );
+                prop_assert_eq!(other.len(), positions.len());
+            }
+        }
     }
-
-
 }
