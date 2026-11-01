@@ -218,7 +218,10 @@ mod tests {
 
     // IDX-06
     prop_state_machine! {
-        #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256),
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn index_projection_matches_the_reference_model(sequential 1..12 => ProjectionMachine);
     }
