@@ -592,3 +592,53 @@ fn full_start_over_a_pruned_datadir_names_the_way_out() -> TestResult {
     assert!(!requires_full_revalidation(checkpoint_dir.path()));
     Ok(())
 }
+
+// RCV-02
+#[test]
+fn full_start_over_a_validating_assumeutxo_head_names_the_way_out() -> TestResult {
+    let (chain, _block, _funding, checkpoint_dir) = commit_chain_with_checkpoint(OP_PUSHNUM_1)?;
+    let head = chain
+        .durable_head
+        .load()?
+        .ok_or(TestError::Missing("missing durable head"))?;
+    let validating = bitcoin_rs_storage::DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating {
+            base_height: head.height,
+            base_hash: head.tip,
+            expected_hash_serialized: bitcoin_rs_primitives::Hash256::from_le_bytes(&[0x52; 32]),
+            chain_tx_count: head.chain_tx_count,
+            historical_height: 0,
+            historical_hash: Network::Regtest.genesis_block_hash(),
+            pending: None,
+            checkpoint: None,
+        },
+        ..head
+    };
+    let error = require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::Full,
+        Some(&validating),
+        chain.durable_head.as_ref(),
+        false,
+    )
+    .err()
+    .ok_or(TestError::UnexpectedSuccess(
+        "a validating assumeutxo datadir cannot rebuild with full validation",
+    ))?;
+    assert!(
+        matches!(
+            error,
+            crate::recovery::RecoveryError::AssumeUtxoValidatingNeedsFullValidation
+        ),
+        "{error}"
+    );
+    assert!(!requires_full_revalidation(checkpoint_dir.path()));
+    require_full_script_attestation(
+        checkpoint_dir.path(),
+        ValidationMode::AssumeValid,
+        Some(&validating),
+        chain.durable_head.as_ref(),
+        false,
+    )?;
+    Ok(())
+}

@@ -81,6 +81,10 @@ pub enum RecoveryError {
         "full validation requires an unpruned datadir; restart with --validation-mode assume-valid or resync"
     )]
     PrunedDatadirNeedsFullValidation,
+    #[error(
+        "full validation cannot revalidate an assumeutxo datadir that is still validating its historical suffix; restart with --validation-mode assume-valid or resync"
+    )]
+    AssumeUtxoValidatingNeedsFullValidation,
 }
 
 pub fn requires_full_revalidation(data_dir: &Path) -> bool {
@@ -97,14 +101,32 @@ pub fn require_full_script_attestation(
     store: &dyn bitcoin_rs_storage::DurableHeadStore,
     pruned: bool,
 ) -> Result<(), RecoveryError> {
-    let (crate::ValidationMode::Full, Some(head)) = (mode, head) else {
+    let Some(head) = head else {
         return Ok(());
     };
+    if mode != crate::ValidationMode::Full {
+        if let Ok(attested) = store.load_attestation(head)
+            && attested < ScriptAttestation::Full
+        {
+            tracing::warn!(
+                attested = ?attested,
+                height = head.height,
+                "the stored assume-valid chain is not fully script-validated; blocks the fast path skipped stay unverified"
+            );
+        }
+        return Ok(());
+    }
     let attested = store
         .load_attestation(head)
         .map_err(|source| RecoveryError::AttestationRead { source })?;
     if attested >= ScriptAttestation::Full {
         return Ok(());
+    }
+    if matches!(
+        head.assumeutxo,
+        bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Validating { .. }
+    ) {
+        return Err(RecoveryError::AssumeUtxoValidatingNeedsFullValidation);
     }
     if pruned {
         return Err(RecoveryError::PrunedDatadirNeedsFullValidation);
