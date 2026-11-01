@@ -5,9 +5,9 @@ use crate::support::{TestError, common::MemoryStore};
 use bitcoin_rs_index::types::ScriptHistoryOccurrence;
 use bitcoin_rs_index::{
     IndexCapabilities, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer, ScriptHash,
-    SpentCoinScripts,
+    ScriptHashRow, SpendingPrefixRow, SpentCoinScripts,
 };
-use bitcoin_rs_primitives::{Hash256, encode};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit};
 
 const BLOCKS: u32 = 12;
@@ -379,6 +379,45 @@ fn failed_fenced_write_publishes_no_watermark_and_no_rows() -> Result<(), TestEr
         store.count(ColumnFamily::Funding),
         committed_rows,
         "no row of the failed batch is visible"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrupt_or_truncated_funding_row_key_fails_loudly() -> Result<(), TestError> {
+    let chain = build_chain();
+    let store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    commit_chain(&mut writer, &chain)?;
+    let script = ScriptHash::from_script_bytes(&script_for(0));
+    let prefix = ScriptHashRow::scan_prefix(script);
+    let mut truncated_key = Vec::from(prefix);
+    truncated_key.extend_from_slice(&[0x01, 0x02, 0x03]);
+    assert_eq!(truncated_key.len(), 11);
+    store.put(ColumnFamily::Funding, &truncated_key, &[0x42])?;
+    let indexer = Indexer::new(Arc::clone(&store));
+    let result = indexer.iter_funding_rows(script);
+    assert!(
+        matches!(result, Err(IndexError::InvalidPrefixRowLength { len: 11 })),
+        "corrupt prefix row key must fail loudly, got: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrupt_or_truncated_spending_row_key_fails_loudly() -> Result<(), TestError> {
+    let store = Arc::new(MemoryStore::default());
+    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x55; 32])), 0);
+    let prefix = SpendingPrefixRow::row(&outpoint, 0).prefix;
+    let mut truncated_key = Vec::from(prefix);
+    truncated_key.extend_from_slice(&[0x01, 0x02]);
+    assert_eq!(truncated_key.len(), 10);
+    store.put(ColumnFamily::Spending, &truncated_key, &[0x42])?;
+    let indexer = Indexer::new(Arc::clone(&store));
+    let result = indexer.iter_spending_rows(&outpoint);
+    assert!(
+        matches!(result, Err(IndexError::InvalidPrefixRowLength { len: 10 })),
+        "corrupt spending row key must fail loudly, got: {result:?}"
     );
     Ok(())
 }

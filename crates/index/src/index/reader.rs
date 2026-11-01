@@ -96,12 +96,13 @@ fn collect_prefix_rows(
     let mut rows = Vec::new();
     for entry in iter {
         let (key, _value) = entry?;
-        if key.len() == crate::HASH_PREFIX_ROW_SIZE {
-            rows.push(
-                zerocopy::FromBytes::read_from_bytes(&key[..])
-                    .map_err(|_| IndexError::InvalidHeaderLength { len: key.len() })?,
-            );
+        if key.len() != crate::HASH_PREFIX_ROW_SIZE {
+            return Err(IndexError::InvalidPrefixRowLength { len: key.len() });
         }
+        rows.push(
+            zerocopy::FromBytes::read_from_bytes(&key[..])
+                .map_err(|_| IndexError::InvalidPrefixRowLength { len: key.len() })?,
+        );
     }
     Ok(rows)
 }
