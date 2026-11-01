@@ -629,7 +629,6 @@ impl KvStore for OneFamilyStore {
             .cloned())
     }
 
-    // Materialize rows so the returned owned iterator cannot retain the lock guard.
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,

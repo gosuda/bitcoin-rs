@@ -82,7 +82,8 @@ impl BlockPayload {
         }
     }
 
-    // Own raw so the ignored submitblock suffix is released after copying the prefix.
+    /// The returned payload owns only the decoded prefix. The ignored suffix is not
+    /// retained.
     pub fn from_prefix(raw: Bytes) -> Result<(Self, usize), DecodeError> {
         let mut reader: &[u8] = &raw;
         let block = Block::consensus_decode(&mut reader)?;
