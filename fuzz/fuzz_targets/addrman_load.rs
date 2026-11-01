@@ -33,11 +33,15 @@ fn sealed(payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn write_book(path: &std::path::Path, payload: &[u8]) {
+fn write_bytes(path: &std::path::Path, bytes: &[u8]) {
     if let Ok(mut file) = File::create(path) {
-        let _ = file.write_all(&sealed(payload));
+        let _ = file.write_all(bytes);
         let _ = file.sync_all();
     }
+}
+
+fn write_book(path: &std::path::Path, payload: &[u8]) {
+    write_bytes(path, &sealed(payload));
 }
 
 fn candidate(record: &Record) -> String {
@@ -123,7 +127,7 @@ fuzz_target!(|data: &[u8]| {
     let base = dir.path().join("peers.dat");
     let scoped = dir.path().join("peers-01020304.dat");
     let mut u = Unstructured::new(data);
-    let mode = u.arbitrary::<u8>().unwrap_or_default() % 4;
+    let mode = u.arbitrary::<u8>().unwrap_or_default() % 5;
 
     match mode {
         0 => {
@@ -167,7 +171,7 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
-        _ => {
+        3 => {
             let version = 1 + u32::from(u.arbitrary::<u8>().unwrap_or_default() % 9);
             let payload = format!("{{\"version\":{version},\"magic\":[1,2,3,4]}}").into_bytes();
             write_book(&base, &payload);
@@ -183,6 +187,22 @@ fuzz_target!(|data: &[u8]| {
                 book.is_writable(),
                 "a matching legacy book keeps discovery writable"
             );
+        }
+        _ => {
+            let payload = data.get(1..).unwrap_or_default();
+            write_bytes(&scoped, payload);
+            let book = AddressBook::open(Some(base), MAGIC, false, None);
+            assert!(
+                !book.is_writable(),
+                "an address book with a bad checksum must disable writes"
+            );
+            assert!(book.is_empty(), "a corrupt address book must load no records");
+            if let Ok(after) = fs::read(&scoped) {
+                assert_eq!(
+                    after, payload,
+                    "loading must not rewrite a corrupt address book"
+                );
+            }
         }
     }
 
