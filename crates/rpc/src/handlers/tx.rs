@@ -812,15 +812,11 @@ fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
 const MAX_BROADCAST_HEX_CHARS: u64 = 2 * bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_WEIGHT;
 const BROADCAST_HEX_LIMIT_ERROR: &str = "transaction hex exceeds the broadcast size limit";
 
-fn check_hex_len(raw: &str, limit: u64, error: &'static str) -> Result<(), &'static str> {
-    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > limit {
-        return Err(error);
+pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_BROADCAST_HEX_CHARS {
+        return Err(BROADCAST_HEX_LIMIT_ERROR);
     }
     Ok(())
-}
-
-pub(crate) fn check_broadcast_hex_len(raw: &str) -> Result<(), &'static str> {
-    check_hex_len(raw, MAX_BROADCAST_HEX_CHARS, BROADCAST_HEX_LIMIT_ERROR)
 }
 
 fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {

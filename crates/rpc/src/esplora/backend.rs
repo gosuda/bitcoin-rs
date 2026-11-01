@@ -31,8 +31,16 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> 
 pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
     let ctx = handler.context();
     match path {
-        "/internal/txs" => Some(internal_transactions(ctx.as_ref(), body)),
-        "/internal/mempool/txs" => Some(internal_mempool_transactions(ctx.as_ref(), body)),
+        "/internal/txs" => Some(internal_transactions_scoped(
+            ctx.as_ref(),
+            body,
+            TransactionScope::All,
+        )),
+        "/internal/mempool/txs" => Some(internal_transactions_scoped(
+            ctx.as_ref(),
+            body,
+            TransactionScope::MempoolOnly,
+        )),
         "/internal/txs/outspends/by-txid" => Some(internal_outspends_by_txid(ctx.as_ref(), body)),
         "/internal/txs/outspends/by-outpoint" => {
             Some(internal_outspends_by_outpoint(ctx.as_ref(), body))
@@ -136,14 +144,6 @@ fn select_mempool_page<'a>(
 enum TransactionScope {
     All,
     MempoolOnly,
-}
-
-fn internal_transactions(ctx: &Context, body: &[u8]) -> Response {
-    internal_transactions_scoped(ctx, body, TransactionScope::All)
-}
-
-fn internal_mempool_transactions(ctx: &Context, body: &[u8]) -> Response {
-    internal_transactions_scoped(ctx, body, TransactionScope::MempoolOnly)
 }
 
 fn internal_transactions_scoped(ctx: &Context, body: &[u8], scope: TransactionScope) -> Response {

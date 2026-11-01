@@ -2373,12 +2373,11 @@ fn block_witness_binding_observes_activation() {
         (bitcoin_rs_primitives::Network::Regtest, false),
     ] {
         ctx.chain.chain_network = network;
-        assert_eq!(
-            Projection::new(&ctx)
-                .required_block(&record.hash.to_string())
-                .is_ok(),
-            expected
-        );
+        let projection = Projection::new(&ctx);
+        let loaded = projection
+            .required_block_record(&record.hash.to_string())
+            .and_then(|record| projection.block_from_record(record));
+        assert_eq!(loaded.is_ok(), expected);
     }
 }
 
