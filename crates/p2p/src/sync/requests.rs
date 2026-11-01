@@ -239,24 +239,6 @@ impl BlockSync {
         );
     }
 
-    fn build_compact_inventory(request: &crate::download_window::PeerRequest) -> Vec<Inventory> {
-        let mut inventory = Vec::with_capacity(request.len());
-        for (_, hash) in request.entries() {
-            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-            inventory.push(Inventory::CompactBlock(block_hash));
-        }
-        inventory
-    }
-
-    fn build_witness_inventory(request: &crate::download_window::PeerRequest) -> Vec<Inventory> {
-        let mut inventory = Vec::with_capacity(request.len());
-        for (_, hash) in request.entries() {
-            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-            inventory.push(Inventory::WitnessBlock(block_hash));
-        }
-        inventory
-    }
-
     fn compact_fetch_eligible(
         &self,
         request: &crate::download_window::PeerRequest,
@@ -377,11 +359,17 @@ impl BlockSync {
         now: Instant,
     ) -> GetdataRequestOutcome {
         let compact_fetch = self.compact_fetch_eligible(request, frontier);
-        let inventory = if compact_fetch {
-            Self::build_compact_inventory(request)
-        } else {
-            Self::build_witness_inventory(request)
-        };
+        let inventory: Vec<Inventory> = request
+            .entries()
+            .map(|(_, hash)| {
+                let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+                if compact_fetch {
+                    Inventory::CompactBlock(block_hash)
+                } else {
+                    Inventory::WitnessBlock(block_hash)
+                }
+            })
+            .collect();
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
