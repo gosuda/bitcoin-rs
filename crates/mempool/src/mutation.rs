@@ -44,6 +44,7 @@ pub enum MutationOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MutationChange {
+    /// Transaction id in native consensus byte order.
     pub txid: Hash256,
     pub outcome: MutationOutcome,
 }
@@ -136,6 +137,9 @@ impl From<LocalOrigin> for AdmissionOrigin {
 pub struct MutationEnvelope {
     pub origin: AdmissionOrigin,
     pub result: MutationResult,
+    /// Accepted transaction bodies as `(index into `result.changes`, body)`
+    /// pairs in change order. The list is empty when no observer asked for
+    /// bodies.
     pub accepted_transactions: Vec<(usize, alloc::sync::Arc<bitcoin_rs_primitives::Tx>)>,
 }
 
