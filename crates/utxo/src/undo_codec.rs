@@ -1,8 +1,3 @@
-//! Versioned on-disk encoding for [`UndoBatch`].
-//!
-//! The first byte is a format version, so a record written by an older binary
-//! is rejected rather than misread.
-
 use std::collections::HashSet;
 
 use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};

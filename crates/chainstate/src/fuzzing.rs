@@ -1,5 +1,3 @@
-//! In-memory chainstate surface for the `chainstate_reorg_model` fuzz target.
-
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -177,8 +175,6 @@ impl FuzzChain {
         Ok(FuzzCheckpoint { tip, coins })
     }
 
-    /// The in-memory durable head is the checkpoint that retires a completed
-    /// disconnect rollback, so reopening does not need a file checkpoint.
     pub fn reopen(&self, checkpoint: &FuzzCheckpoint) -> Result<Self, FuzzError> {
         let Some((head_height, head_hash)) = self.durable_head()? else {
             return Err(FuzzError::MissingDurableHead);

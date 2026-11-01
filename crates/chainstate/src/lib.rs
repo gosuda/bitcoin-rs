@@ -330,8 +330,6 @@ impl AssumeValidGate {
 pub(crate) enum BlockProvenance {
     Network,
     LocalReplay,
-    /// Rebuilding without an accepted checkpoint cannot inherit script trust
-    /// from durable commits that may have used `AssumeValid`.
     ColdReplay,
 }
 

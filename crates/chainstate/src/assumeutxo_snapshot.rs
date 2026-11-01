@@ -25,7 +25,6 @@ const DIRECTORY: &str = "assumeutxo";
 
 static NEXT_ARCHIVE: AtomicU64 = AtomicU64::new(0);
 
-/// Failures while writing, reclaiming, or verifying the immutable snapshot archive.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotArchiveError {
     #[error(transparent)]

@@ -142,9 +142,6 @@ pub enum JournalWriterError {
 }
 
 impl JournalWriterError {
-    /// True when the error is the designed flow-control state that compaction
-    /// relieves in-process; every other variant is an engine or invariant
-    /// failure that no in-process retry can clear.
     #[must_use]
     pub fn is_backpressure(&self) -> bool {
         matches!(self, Self::RetentionLimit { .. })

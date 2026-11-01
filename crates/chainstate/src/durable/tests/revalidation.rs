@@ -1,5 +1,3 @@
-//! Cold recovery must not inherit script trust from `AssumeValid` commits (#1730).
-
 use std::path::Path;
 use std::sync::Arc;
 
