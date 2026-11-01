@@ -2,6 +2,7 @@ use bip157::{Builder, ChainState, Event, HashCheckpoint, Network, ScriptBuf};
 use sonic_rs::json;
 use std::{
     net::{IpAddr, Ipv4Addr},
+    process::ExitCode,
     time::Duration,
 };
 
@@ -62,7 +63,17 @@ impl From<bip157::error::FetchBlockError> for InteropError {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), InteropError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), InteropError> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 3 {
         return Err(InteropError::Usage);
