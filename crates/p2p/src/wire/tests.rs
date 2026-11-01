@@ -573,3 +573,64 @@ fn empty_command_in_v1_header_is_rejected() {
     let result = read_message(&mut cursor, Magic::REGTEST);
     assert!(matches!(result, Err(PeerError::InvalidCommand(_))));
 }
+
+#[test]
+fn non_canonical_boolean_in_version_is_rejected() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..7].copy_from_slice(b"version");
+    frame.extend_from_slice(&cmd);
+
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&70017u32.to_le_bytes());
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.extend_from_slice(&0i64.to_le_bytes());
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&[0u8; 26]);
+    payload.extend_from_slice(&0u64.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&0i32.to_le_bytes());
+    payload.push(246);
+
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let result = read_message(&mut cursor, Magic::REGTEST);
+    assert!(
+        result.is_err(),
+        "non-canonical boolean in version must be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn non_canonical_boolean_in_sendcmpct_is_rejected() -> Result<(), PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::REGTEST.to_bytes());
+    let mut cmd = [0u8; 12];
+    cmd[..9].copy_from_slice(b"sendcmpct");
+    frame.extend_from_slice(&cmd);
+
+    let mut payload = Vec::new();
+    payload.push(2);
+    payload.extend_from_slice(&2u64.to_le_bytes());
+
+    let len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&super::checksum(&payload));
+    frame.extend_from_slice(&payload);
+
+    let mut cursor = Cursor::new(frame);
+    let result = read_message(&mut cursor, Magic::REGTEST);
+    assert!(
+        result.is_err(),
+        "non-canonical boolean in sendcmpct must be rejected"
+    );
+    Ok(())
+}
