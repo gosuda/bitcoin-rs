@@ -197,3 +197,74 @@ fn testnet_min_difficulty_boundary_is_strict_and_walks_back() -> Result<(), Test
     assert_eq!(early, 0x1b04_04cb);
     Ok(())
 }
+
+#[test]
+fn refused_header_leaves_tree_unchanged() -> Result<(), TestError> {
+    let network = Network::Regtest;
+    let genesis = network.genesis_block();
+    let mut tree = BlockTree::new();
+    let base_time = genesis.header.time;
+    accept_headers(&mut tree, &[genesis.header], network, base_time, HeaderValidationMode::LiveAdmission)?;
+    let good = super::fixture::mine_regtest(genesis.block_hash(), 1, base_time + 600, 4);
+    accept_headers(&mut tree, &[good], network, base_time + 600, HeaderValidationMode::LiveAdmission)?;
+    let good_hash = good.compute_hash();
+    let good_id = tree.lookup(Hash256::from(good_hash)).ok_or(TestError::from("tip"))?;
+    let child = super::fixture::mine_regtest(good_hash, 2, base_time + 1300, 4);
+    accept_headers(&mut tree, &[child], network, base_time + 1300, HeaderValidationMode::LiveAdmission)?;
+    tree.invalidate_subtree(good_id)?;
+    assert_eq!(tree.node(good_id)?.status, NodeStatus::Invalid);
+    let before = tree_shape(&tree);
+    let now = base_time + 1_000_000;
+
+    let duplicate = accept_headers(&mut tree, &[good], network, base_time + 600, HeaderValidationMode::LiveAdmission);
+    assert!(matches!(duplicate, Err(ChainError::KnownInvalidHeader { .. })));
+    assert_eq!(tree_shape(&tree), before);
+
+    let out_of_order_parent = super::fixture::mine_regtest(good_hash, 5, base_time + 1900, 4);
+    let out_of_order_child = super::fixture::mine_regtest(out_of_order_parent.compute_hash(), 6, base_time + 2500, 4);
+    let res = accept_headers(
+        &mut tree,
+        &[out_of_order_child, out_of_order_parent],
+        network,
+        now,
+        HeaderValidationMode::LiveAdmission,
+    );
+    assert!(matches!(res, Err(ChainError::MissingParent { .. })));
+    assert_eq!(tree_shape(&tree), before);
+
+    let orphan = super::fixture::mine_regtest(BlockHash::default(), 2, base_time + 700, 4);
+    assert!(matches!(
+        accept_headers(&mut tree, &[orphan], network, now, HeaderValidationMode::LiveAdmission),
+        Err(ChainError::MissingParent { .. })
+    ));
+    assert_eq!(tree_shape(&tree), before);
+
+    let invalid_parent_child = super::fixture::mine_regtest(good_hash, 5, base_time + 2600, 4);
+    assert!(matches!(
+        accept_headers(&mut tree, &[invalid_parent_child], network, now, HeaderValidationMode::LiveAdmission),
+        Err(ChainError::InvalidParent { parent } ) if parent == good_id
+    ));
+    assert_eq!(tree_shape(&tree), before);
+
+    let early = super::fixture::mine_regtest(genesis.block_hash(), 1, base_time, 4);
+    assert!(matches!(
+        accept_headers(&mut tree, &[early], network, now, HeaderValidationMode::LiveAdmission),
+        Err(ChainError::TimestampTooEarly { .. })
+    ));
+    assert_eq!(tree_shape(&tree), before);
+
+    let mismatched_bits = header_with(genesis.block_hash(), base_time + 2600, 0x0100_0000, 12);
+    assert!(matches!(
+        accept_headers(&mut tree, &[mismatched_bits], network, now, HeaderValidationMode::LiveAdmission),
+        Err(_)
+    ));
+    assert_eq!(tree_shape(&tree), before);
+
+    let far_future = super::fixture::mine_regtest(genesis.block_hash(), 1, now + 7201, 4);
+    assert!(matches!(
+        accept_headers(&mut tree, &[far_future], network, now, HeaderValidationMode::LiveAdmission),
+        Err(ChainError::TimestampTooFarAhead { .. })
+    ));
+    assert_eq!(tree_shape(&tree), before);
+    Ok(())
+}
