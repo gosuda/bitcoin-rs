@@ -75,9 +75,9 @@ A version label alone is never custody: a reference MUST carry source and binary
 ### `REF-06`: Formal tool identity
 
 - This clause defines the evidence tool pin only (no checker run claimed).
-- `name = "apalache-mc"` at `version = "0.62.2"`.
-- `archive_sha256 7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2`.
-- `jar_sha256 079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8`.
+- `name = "apalache-mc"` at `version = "0.62.4"`.
+- `archive_sha256 3b6b7ebf24e778535bf47e0cb3f0799c9ab9048df41119c7d3091c6ca1760bc1`.
+- `jar_sha256 e5223915507b65cc5f1638bd037ede60f8a4fc1644aff46355779f9b05df9262`.
 - Observed Java runtime `26.0.2.1`.
 
 ### `REF-07`: Pinned mainnet stop and custody rule
