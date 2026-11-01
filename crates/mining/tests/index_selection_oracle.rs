@@ -261,17 +261,42 @@ struct Spec {
     delta: i64,
 }
 
+fn oracle_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(256)
+}
+
 fn spec() -> impl Strategy<Value = Spec> {
     (
         prop::option::of(0_usize..24),
-        prop_oneof![3 => 5_000_u64..60_000, 1 => Just(0_u64)],
-        prop::sample::select(vec![400_u64, 800, 2_000, 8_000, 401, 1_997, 2_001]),
+        prop_oneof![
+            3 => 5_000_u64..60_000,
+            1 => Just(0_u64),
+            1 => Just(1_u64),
+            1 => Just(u64::MAX / 8),
+        ],
+        prop::sample::select(vec![
+            400_u64, 800, 2_000, 8_000, 401, 1_997, 2_001, 1024, 4096, 65_536, 101_008,
+        ]),
         any::<bool>(),
-        prop::sample::select(vec![100_u32, 200, 1_000]),
+        prop::sample::select(vec![100_u32, 200, 1_000, 101]),
         0_u32..40,
         0_u8..6,
         0_u8..4,
-        prop::sample::select(vec![0_i64, 0, 0, -4_000, -2_000, 3_000, 90_000, -65_000]),
+        prop::sample::select(vec![
+            0_i64,
+            0,
+            0,
+            -4_000,
+            -2_000,
+            3_000,
+            90_000,
+            -65_000,
+            i64::MIN,
+            i64::MAX,
+        ]),
     )
         .prop_map(
             |(parent, fee, weight, exact_vsize, size, sigops, locktime, lock_kind, delta)| Spec {
@@ -345,6 +370,7 @@ fn build_pool(specs: &[Spec]) -> Mempool {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig { cases: oracle_cases(), ..ProptestConfig::default() })]
     #[test]
     fn indexed_selection_matches_the_independent_oracle(
         specs in prop::collection::vec(spec(), 1..24),
