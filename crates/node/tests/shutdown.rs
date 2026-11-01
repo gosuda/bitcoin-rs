@@ -124,10 +124,20 @@ fn subscribe_and_use_after_shutdown_are_refused() -> Result<(), TestError> {
     shutdown_tx
         .send(())
         .map_err(|_| TestError::message("failed to send first shutdown signal"))?;
-    shutdown_tx
-        .send(())
-        .map_err(|_| TestError::message("failed to send second shutdown signal"))?;
-    thread::sleep(Duration::from_millis(50));
+    match shutdown_tx.try_send(()) {
+        Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
+        Err(crossbeam_channel::TrySendError::Full(_)) => {
+            panic!("the shutdown channel has room for a repeated signal")
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while node.subscribe_chain().is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shutdown must become observable"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
 
     let sub_after = node.subscribe_chain();
     assert!(
