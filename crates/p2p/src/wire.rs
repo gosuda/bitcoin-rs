@@ -2,6 +2,10 @@ use std::io::{IoSlice, Read, Write};
 
 use bytes;
 
+use bitcoin::Transaction;
+use bitcoin::bip152::{
+    BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds, PrefilledTransaction, ShortId,
+};
 use bitcoin::consensus::encode::{self, Decodable};
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::address::AddrV2Message;
@@ -31,6 +35,8 @@ pub(crate) const MAX_WRITE_BURST: usize = 8;
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 pub const MAX_LOCATOR_HASHES: usize = 101;
+
+pub const MAX_BLOCK_TX_COUNT: usize = 100_000;
 
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
 
@@ -255,12 +261,16 @@ pub enum PeerError {
     BannedDestination(bitcoin_rs_primitives::PeerAddress),
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportFailure),
+    #[error("self-connection detected")]
+    SelfConnection,
 }
 
 impl PeerError {
     pub(crate) fn inbound(error: Self) -> Self {
         match error {
-            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } => error,
+            Self::Io(_) | Self::Transport(_) | Self::WrongNetwork { .. } | Self::SelfConnection => {
+                error
+            }
             _ => Self::Incoming(Box::new(error)),
         }
     }
@@ -661,9 +671,9 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
         "getcfcheckpt" => Message::GetCFCheckpt(encode::deserialize::<GetCFCheckpt>(payload)?),
         "cfcheckpt" => Message::CFCheckpt(encode::deserialize::<CFCheckpt>(payload)?),
         "sendcmpct" => Message::SendCmpct(encode::deserialize::<SendCmpct>(payload)?),
-        "cmpctblock" => Message::CmpctBlock(encode::deserialize::<CmpctBlock>(payload)?),
-        "getblocktxn" => Message::GetBlockTxn(encode::deserialize::<GetBlockTxn>(payload)?),
-        "blocktxn" => Message::BlockTxn(encode::deserialize::<BlockTxn>(payload)?),
+        "cmpctblock" => Message::CmpctBlock(decode_cmpctblock(payload)?),
+        "getblocktxn" => Message::GetBlockTxn(decode_getblocktxn(payload)?),
+        "blocktxn" => Message::BlockTxn(decode_blocktxn(payload)?),
         "reject" => Message::Reject(encode::deserialize::<Reject>(payload)?),
         "alert" => Message::Alert(encode::deserialize::<Vec<u8>>(payload)?),
         "feefilter" => Message::FeeFilter(encode::deserialize::<i64>(payload)?),
@@ -859,9 +869,123 @@ pub(crate) fn read_command(raw: &[u8]) -> Result<String, PeerError> {
             String::from_utf8_lossy(raw).into_owned(),
         ));
     }
-    std::str::from_utf8(&raw[..end])
+    let command_bytes = &raw[..end];
+    if !command_bytes.iter().all(u8::is_ascii_graphic) {
+        return Err(PeerError::InvalidCommand(
+            String::from_utf8_lossy(raw).into_owned(),
+        ));
+    }
+    std::str::from_utf8(command_bytes)
         .map(str::to_owned)
         .map_err(|_| PeerError::InvalidCommand(String::from_utf8_lossy(raw).into_owned()))
+}
+
+fn decode_cmpctblock(payload: &[u8]) -> Result<CmpctBlock, PeerError> {
+    let mut reader = payload;
+    let header = bitcoin::block::Header::consensus_decode(&mut reader)?;
+    let nonce = u64::consensus_decode(&mut reader)?;
+    let short_ids_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let short_ids_cap =
+        usize::try_from(short_ids_count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if short_ids_cap > MAX_BLOCK_TX_COUNT {
+        return Err(PeerError::Misbehavior(
+            "cmpctblock short_ids count too large",
+        ));
+    }
+    let mut short_ids = Vec::with_capacity(short_ids_cap);
+    for _ in 0..short_ids_count {
+        short_ids.push(ShortId::consensus_decode(&mut reader)?);
+    }
+    let prefilled_count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let prefilled_cap =
+        usize::try_from(prefilled_count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if prefilled_cap > MAX_BLOCK_TX_COUNT {
+        return Err(PeerError::Misbehavior(
+            "cmpctblock prefilled_txs count too large",
+        ));
+    }
+    if short_ids_cap.saturating_add(prefilled_cap) > MAX_BLOCK_TX_COUNT {
+        return Err(PeerError::Misbehavior(
+            "cmpctblock total transactions too large",
+        ));
+    }
+    let mut prefilled_txs = Vec::with_capacity(prefilled_cap);
+    for _ in 0..prefilled_count {
+        prefilled_txs.push(PrefilledTransaction::consensus_decode(&mut reader)?);
+    }
+    if !reader.is_empty() {
+        return Err(PeerError::Misbehavior(
+            "trailing bytes after cmpctblock payload",
+        ));
+    }
+    Ok(CmpctBlock {
+        compact_block: HeaderAndShortIds {
+            header,
+            nonce,
+            short_ids,
+            prefilled_txs,
+        },
+    })
+}
+
+fn decode_blocktxn(payload: &[u8]) -> Result<BlockTxn, PeerError> {
+    let mut reader = payload;
+    let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if capacity > MAX_BLOCK_TX_COUNT {
+        return Err(PeerError::Misbehavior("blocktxn count too large"));
+    }
+    let mut transactions = Vec::with_capacity(capacity);
+    for _ in 0..count {
+        transactions.push(Transaction::consensus_decode(&mut reader)?);
+    }
+    if !reader.is_empty() {
+        return Err(PeerError::Misbehavior(
+            "trailing bytes after blocktxn payload",
+        ));
+    }
+    Ok(BlockTxn {
+        transactions: BlockTransactions {
+            block_hash,
+            transactions,
+        },
+    })
+}
+
+fn decode_getblocktxn(payload: &[u8]) -> Result<GetBlockTxn, PeerError> {
+    let mut reader = payload;
+    let block_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if capacity > MAX_BLOCK_TX_COUNT {
+        return Err(PeerError::Misbehavior(
+            "getblocktxn indexes count too large",
+        ));
+    }
+    let mut indexes = Vec::with_capacity(capacity);
+    let mut last_index: u64 = 0;
+    for _ in 0..count {
+        let differential = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+        last_index = last_index
+            .checked_add(differential)
+            .ok_or_else(|| PeerError::Misbehavior("getblocktxn index overflow"))?;
+        indexes.push(last_index);
+        last_index = last_index
+            .checked_add(1)
+            .ok_or_else(|| PeerError::Misbehavior("getblocktxn index overflow"))?;
+    }
+    if !reader.is_empty() {
+        return Err(PeerError::Misbehavior(
+            "trailing bytes after getblocktxn payload",
+        ));
+    }
+    Ok(GetBlockTxn {
+        txs_request: BlockTransactionsRequest {
+            block_hash,
+            indexes,
+        },
+    })
 }
 
 fn command_string(command: &str) -> Result<CommandString, PeerError> {

@@ -21,7 +21,8 @@ use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::wire::{
-    MAX_ADDR_MESSAGE_COUNT, MAX_LOCATOR_HASHES, Message, PeerError, read_message, write_message,
+    MAX_ADDR_MESSAGE_COUNT, MAX_BLOCK_TX_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, Message,
+    PeerError, read_message, write_message,
 };
 use sha2::{Digest, Sha256};
 
@@ -356,4 +357,264 @@ fn compact_block_transaction() -> Transaction {
             script_pubkey: ScriptBuf::new(),
         }],
     }
+}
+
+#[test]
+fn command_padding_rejects_non_ascii_control_and_dirty_padding() {
+    let cases = [
+        (
+            &b"ping\0\0\0\0\0\0\0\x01"[..],
+            "dirty padding after nul terminator",
+        ),
+        (&b"ping\n\0\0\0\0\0\0\0"[..], "control character in command"),
+        (&b"ping\x80\0\0\0\0\0\0\0"[..], "non-ascii byte in command"),
+        (&b"\0\0\0\0\0\0\0\0\0\0\0\0"[..], "empty command"),
+        (&b"pi ng\0\0\0\0\0\0\0"[..], "space in command"),
+    ];
+
+    for (cmd, desc) in cases {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&Magic::BITCOIN.to_bytes());
+        frame.extend_from_slice(cmd);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&checksum(&[]));
+
+        let res = read_message(&mut Cursor::new(frame), Magic::BITCOIN);
+        assert!(
+            matches!(res, Err(PeerError::InvalidCommand(_))),
+            "{desc} must fail with InvalidCommand, got {res:?}"
+        );
+    }
+}
+
+#[test]
+fn compact_block_messages_reject_counts_exceeding_allocation_cap() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    99u64
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let count_over = u64::try_from(MAX_BLOCK_TX_COUNT + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    VarInt(count_over)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "cmpctblock short_ids count too large"
+        ))
+    ));
+
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    99u64
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let count_over = u64::try_from(MAX_BLOCK_TX_COUNT + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    VarInt(count_over)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "cmpctblock prefilled_txs count too large"
+        ))
+    ));
+
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    99u64
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(1)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    ShortId::default()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let count_at_cap =
+        u64::try_from(MAX_BLOCK_TX_COUNT).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    VarInt(count_at_cap)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "cmpctblock total transactions too large"
+        ))
+    ));
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let count_over = u64::try_from(MAX_BLOCK_TX_COUNT + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    VarInt(count_over)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"blocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior("blocktxn count too large"))
+    ));
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let count_over = u64::try_from(MAX_BLOCK_TX_COUNT + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    VarInt(count_over)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    let frame = message_frame(b"getblocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "getblocktxn indexes count too large"
+        ))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn compact_block_messages_reject_trailing_bytes() -> Result<(), PeerError> {
+    let mut payload = Vec::new();
+    compact_block_header()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    0u64.consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"cmpctblock", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "trailing bytes after cmpctblock payload"
+        ))
+    ));
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"blocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "trailing bytes after blocktxn payload"
+        ))
+    ));
+
+    let mut payload = Vec::new();
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    VarInt(0)
+        .consensus_encode(&mut payload)
+        .map_err(|e| PeerError::Io(std::io::Error::other(e.to_string())))?;
+    payload.push(0x42);
+    let frame = message_frame(b"getblocktxn", &payload)?;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::Misbehavior(
+            "trailing bytes after getblocktxn payload"
+        ))
+    ));
+
+    Ok(())
+}
+
+#[test]
+fn framing_attacks_magic_checksum_and_length_boundaries() -> Result<(), PeerError> {
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[0] ^= 0xff;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::WrongNetwork { .. })
+    ));
+
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[20] ^= 1;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::BadChecksum)
+    ));
+
+    let mut frame = message_frame(b"ping", &[1; 8])?;
+    frame[24] ^= 1;
+    assert!(matches!(
+        read_message(&mut Cursor::new(frame), Magic::BITCOIN),
+        Err(PeerError::BadChecksum)
+    ));
+
+    let mut header_n_minus_1 = Vec::new();
+    header_n_minus_1.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n_minus_1.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n_minus_1 = u32::try_from(MAX_MESSAGE_PAYLOAD - 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n_minus_1.extend_from_slice(&len_n_minus_1.to_le_bytes());
+    header_n_minus_1.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n_minus_1), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    let mut header_n = Vec::new();
+    header_n.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n =
+        u32::try_from(MAX_MESSAGE_PAYLOAD).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n.extend_from_slice(&len_n.to_le_bytes());
+    header_n.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    let mut header_n_plus_1 = Vec::new();
+    header_n_plus_1.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    header_n_plus_1.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+    let len_n_plus_1 = u32::try_from(MAX_MESSAGE_PAYLOAD + 1)
+        .map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    header_n_plus_1.extend_from_slice(&len_n_plus_1.to_le_bytes());
+    header_n_plus_1.extend_from_slice(&[0u8; 4]);
+    assert!(matches!(
+        read_message(&mut Cursor::new(header_n_plus_1), Magic::BITCOIN),
+        Err(PeerError::PayloadTooLarge(len)) if len == MAX_MESSAGE_PAYLOAD + 1
+    ));
+
+    let partial_header = vec![0u8; 12];
+    assert!(matches!(
+        read_message(&mut Cursor::new(partial_header), Magic::BITCOIN),
+        Err(PeerError::Io(_))
+    ));
+
+    Ok(())
 }
