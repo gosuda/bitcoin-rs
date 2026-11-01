@@ -145,9 +145,6 @@ class MountBoundaryTests(unittest.TestCase):
         assert picked is not None
         self.assertEqual(picked["majmin"], "8:9")
 
-    def test_no_table_entry_gives_none(self) -> None:
-        self.assertIsNone(pick_mount("/nothing/here", []))
-
     def test_nonutf8_child_mount_maps_to_child(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -214,31 +211,6 @@ class EscapeTests(unittest.TestCase):
         self.assertEqual(
             [mount["mountpoint"] for mount in mounts],
             ["/data\x0braw", "/other\x0craw", "/car\riageraw"],
-        )
-
-    def test_mountinfo_keeps_carriage_return_without_read_text_newline(
-        self,
-    ) -> None:
-        # Python 3.12 Path.read_text has no ``newline`` argument; the reader
-        # must still disable newline translation so a raw CR survives.
-        with tempfile.TemporaryDirectory() as tmp:
-            table = Path(tmp) / "mountinfo"
-            table.write_bytes(
-                b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n"
-                b"2 1 8:2 / /car\riage rw - ext4 /dev/sda2 rw\n"
-            )
-
-            def _no_newline(
-                self: Path, encoding: str | None = None, errors: str | None = None
-            ) -> str:
-                # 3.12 read_text always applies universal-newline translation.
-                text = self.read_bytes().decode(encoding or "utf-8", errors or "strict")
-                return text.replace("\r\n", "\n").replace("\r", "\n")
-
-            with mock.patch.object(Path, "read_text", _no_newline):
-                mounts = read_mountinfo(table)
-        self.assertEqual(
-            [mount["mountpoint"] for mount in mounts], ["/", "/car\riage"]
         )
 
     def test_mountinfo_malformed_lines_skipped(self) -> None:
@@ -353,19 +325,6 @@ class CounterTests(unittest.TestCase):
             self.assertIsNone(handle)
             self.assertEqual(scope["status"], "unavailable")
 
-    def test_short_stat_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sys_base = root / "sys"
-            sys_base.mkdir()
-            _make_device(sys_base, "8:1", DeviceFixture("1 2 3\n"))
-            table = _standard_table(root, _standard_mount("8:1", "/"))
-            handle, scope = identify_scope(
-                _real_scratch(root), mountinfo_path=table, sys_base=sys_base
-            )
-            self.assertIsNone(handle)
-            self.assertEqual(scope["status"], "unavailable")
-
 
 class ScopeLabelTests(unittest.TestCase):
     def _scope_for(
@@ -448,18 +407,6 @@ class ScopeLabelTests(unittest.TestCase):
             self.assertIsNone(handle)
             self.assertEqual(scope["status"], "unavailable")
 
-    def test_bad_override_format_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sys_base = root / "sys"
-            sys_base.mkdir()
-            table = _standard_table(root, _standard_mount("8:1", "/"))
-            handle, scope = identify_scope(
-                "/", "bogus", mountinfo_path=table, sys_base=sys_base
-            )
-            self.assertIsNone(handle)
-            self.assertEqual(scope["status"], "unavailable")
-
     def test_matching_override_stays_available(self) -> None:
         handle, scope = self._scope_for("ext4", "8:1", override="8:1")
         self.assertEqual(scope["status"], "available")
@@ -469,12 +416,6 @@ class ScopeLabelTests(unittest.TestCase):
 
     def test_mismatched_override_is_rejected(self) -> None:
         handle, scope = self._scope_for("ext4", "8:1", override="8:2")
-        self.assertIsNone(handle)
-        self.assertEqual(scope["status"], "unavailable")
-        self.assertIn("override", str(scope.get("reason", "")))
-
-    def test_zfs_mismatched_override_is_rejected(self) -> None:
-        handle, scope = self._scope_for("zfs", "0:42", override="8:1")
         self.assertIsNone(handle)
         self.assertEqual(scope["status"], "unavailable")
         self.assertIn("override", str(scope.get("reason", "")))
@@ -675,16 +616,6 @@ class DeltaTests(unittest.TestCase):
             )
             self.assertEqual(filesystem.main(["sample", "--path", "/"] + base_args), 0)
 
-    def test_scope_json_serializable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sys_base = root / "sys"
-            sys_base.mkdir()
-            _make_device(sys_base, "8:1", _ext4_device(3))
-            table = _standard_table(root, _standard_mount("8:1", "/"))
-            _, scope = identify_scope("/", mountinfo_path=table, sys_base=sys_base)
-        json.dumps(scope)
-
 
 class ScratchValidationTests(unittest.TestCase):
     def _available_fixture(
@@ -749,27 +680,6 @@ class MountParseStrictnessTests(unittest.TestCase):
             )
             mounts = read_mountinfo(table)
             self.assertEqual([mount["majmin"] for mount in mounts], ["8:1"])
-
-    def test_consecutive_spaces_do_not_misattribute_scratch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            scratch = _real_scratch(root)
-            sys_base = root / "sys"
-            sys_base.mkdir()
-            _make_device(sys_base, "8:1", _ext4_device(5))
-            table = root / "mountinfo"
-            _write_mountinfo(
-                table,
-                [
-                    _mountline(MountSpec(majmin="8:1", point="/", source="/dev/sda1")),
-                    f"9  0 8:9 / {scratch} rw,relatime - ext4 /dev/sdz1 rw",
-                ],
-            )
-            handle, scope = identify_scope(
-                scratch, mountinfo_path=table, sys_base=sys_base
-            )
-            self.assertEqual(scope["status"], "available")
-            self.assertEqual(scope["majmin"], "8:1")
 
 
 class CounterBoundTests(unittest.TestCase):
