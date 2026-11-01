@@ -159,3 +159,15 @@ fn side_chain_retarget_anchors_shared_height_zero_block() -> Result<(), TestErro
     );
     Ok(())
 }
+
+#[test]
+fn bip94_retarget_scales_anchor_block_bits() -> Result<(), TestError> {
+    let network = Network::Testnet4;
+    let mut tree = BlockTree::new();
+    let first_time = 1_600_000_000_u32;
+    let tip = build_retarget_chain(&mut tree, 0x1b04_04cb, TESTNET_POW_LIMIT_BITS, first_time, 1)?;
+    let got = next_work_required(&tree, tip, 0, network)?.to_consensus();
+    let want = core_calculate_next_work_required(first_time + RETARGET_INTERVAL - 1, 0x1b04_04cb, first_time);
+    assert_eq!(got, want, "BIP94 scales the anchor block's bits, not the last block's");
+    Ok(())
+}
