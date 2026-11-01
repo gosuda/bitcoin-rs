@@ -206,5 +206,23 @@ class PublishResultTests(unittest.TestCase):
             publish_result({"result": nested}, Path(temporary) / "out.json")
 
 
+class ResultModeTests(unittest.TestCase):
+    def _published_mode(self, mask: int) -> int:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "out.json"
+            previous = os.umask(mask)
+            try:
+                publish_result({"schema": "test-v1"}, output)
+                return stat.S_IMODE(os.stat(output).st_mode)
+            finally:
+                os.umask(previous)
+
+    def test_result_mode_is_pinned_against_a_restrictive_umask(self) -> None:
+        self.assertEqual(self._published_mode(0o277), 0o600)
+
+    def test_result_mode_is_pinned_against_a_standard_umask(self) -> None:
+        self.assertEqual(self._published_mode(0o027), 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -441,7 +441,7 @@ def _create_result_tmpfile(directory: int) -> int:
     if not tmpfile:
         raise ContractError("publication requires O_TMPFILE support")
     try:
-        return os.open(
+        descriptor = os.open(
             ".",
             os.O_WRONLY | tmpfile | getattr(os, "O_CLOEXEC", 0),
             0o600,
@@ -451,6 +451,12 @@ def _create_result_tmpfile(directory: int) -> int:
         raise ContractError(
             "publication requires O_TMPFILE support on the output filesystem"
         ) from error
+    try:
+        os.fchmod(descriptor, 0o600)
+    except OSError as error:
+        os.close(descriptor)
+        raise ContractError("cannot pin the result mode") from error
+    return descriptor
 
 
 def _write_result(descriptor: int, payload: bytes) -> None:
