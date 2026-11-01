@@ -731,6 +731,32 @@ def _muhash_document(
     return document, (side, frozen)
 
 
+def _unlink_linked(parent: Path, name: str, published: os.stat_result) -> None:
+    try:
+        directory = os.open(
+            parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
+    except OSError:
+        return
+    try:
+        try:
+            visible = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except OSError:
+            return
+        if (visible.st_dev, visible.st_ino) != (published.st_dev, published.st_ino):
+            return
+        try:
+            os.unlink(name, dir_fd=directory)
+        except OSError:
+            return
+        try:
+            os.fsync(directory)
+        except OSError:
+            return
+    finally:
+        os.close(directory)
+
+
 def _publish(
     output: Path, document: JsonObject, side: tuple[Path, JsonObject] | None
 ) -> None:
@@ -739,9 +765,19 @@ def _publish(
     if side is not None and side[0].exists():
         raise ContractError(f"output already exists: {side[0]}")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    published: os.stat_result | None = None
     if side is not None:
         publish_result(side[1], side[0])
-    publish_result(document, output)
+        try:
+            published = os.stat(side[0], follow_symlinks=False)
+        except OSError:
+            published = None
+    try:
+        publish_result(document, output)
+    except BaseException:
+        if side is not None and published is not None:
+            _unlink_linked(side[0].parent, side[0].name, published)
+        raise
 
 
 def _run(args: argparse.Namespace) -> None:

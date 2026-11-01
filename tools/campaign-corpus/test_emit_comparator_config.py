@@ -19,6 +19,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from decimal import Decimal
 from pathlib import Path
 
@@ -413,6 +414,55 @@ class CustodyRefusalTests(EmitterTestCase):
         self.assertIn("output already exists", stderr)
         self.assertEqual(self.output.read_bytes(), b"sentinel")
         self.assertFalse(side.exists())
+
+
+class PublicationFailureTests(EmitterTestCase):
+    def _fault_injecting_fsync(self, on_third):
+        side = self.output.with_suffix(".frozen-state.json")
+        real_fsync = os.fsync
+        calls: list[int] = []
+
+        def failing_fsync(descriptor: int) -> None:
+            calls.append(descriptor)
+            if len(calls) == 3:
+                on_third(side)
+                raise OSError("injected config publish failure")
+            real_fsync(descriptor)
+
+        return side, calls, failing_fsync
+
+    def test_config_publish_failure_removes_the_linked_sidecar(self) -> None:
+        def keep_sidecar(side: Path) -> None:
+            pass
+
+        side, calls, failing_fsync = self._fault_injecting_fsync(keep_sidecar)
+        with mock.patch("os.fsync", failing_fsync):
+            code, stderr = self.fixture.emit("muhash", self.output)
+        self.assertEqual(code, 2, stderr)
+        self.assertIn("cannot write the result payload", stderr)
+        self.assertFalse(side.exists())
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(calls), 4)
+
+        code, stderr = self.fixture.emit("muhash", self.output)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertTrue(side.is_file())
+        self.assertTrue(self.output.is_file())
+
+    def test_config_publish_failure_keeps_a_replaced_sidecar(self) -> None:
+        def replace_sidecar(side: Path) -> None:
+            side.unlink()
+            side.write_bytes(b"foreign\n")
+
+        side, calls, failing_fsync = self._fault_injecting_fsync(replace_sidecar)
+        with mock.patch("os.fsync", failing_fsync):
+            code, stderr = self.fixture.emit("muhash", self.output)
+        self.assertEqual(code, 2, stderr)
+        self.assertIn("cannot write the result payload", stderr)
+        self.assertEqual(side.read_bytes(), b"foreign\n")
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(calls), 3)
+
 
 
 if __name__ == "__main__":
