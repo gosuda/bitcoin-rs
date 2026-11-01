@@ -175,6 +175,8 @@ pub(crate) enum TestError {
     #[error(transparent)]
     Disconnect(#[from] crate::DisconnectError),
     #[error(transparent)]
+    Fuzz(#[from] crate::fuzzing::FuzzError),
+    #[error(transparent)]
     AssumeUtxo(#[from] crate::assumeutxo::AssumeUtxoError),
     #[error(transparent)]
     Checkpoint(#[from] crate::CheckpointError),

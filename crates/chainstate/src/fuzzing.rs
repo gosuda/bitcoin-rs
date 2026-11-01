@@ -6,9 +6,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::{Block, BlockPayload, Hash256, Header, Network};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_storage::{
-    DurableHeadStore, InMemoryDurableHeadStore, InMemoryUndoStore, StorageError, UndoStore,
-};
+use bitcoin_rs_storage::{InMemoryDurableHeadStore, InMemoryUndoStore, StorageError, UndoStore};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, commit_block_changes};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
@@ -121,9 +119,9 @@ impl FuzzChain {
     }
 
     fn attach_stores(&mut self) {
-        self.chain.durable_head = Arc::clone(&self.durable) as Arc<dyn DurableHeadStore>;
-        self.chain.undo_store = Arc::clone(&self.undo) as Arc<dyn UndoStore>;
-        self.chain.block_body_store = Some(Arc::clone(&self.bodies) as Arc<dyn BlockBodyStore>);
+        self.chain.durable_head = self.durable.clone();
+        self.chain.undo_store = self.undo.clone();
+        self.chain.block_body_store = Some(self.bodies.clone());
     }
 
     pub fn apply(&self, block: &Block) -> Result<(), FuzzError> {
@@ -237,9 +235,9 @@ impl FuzzChain {
             Arc::new(CoinStatsListener::new(CoinStats::default())),
             Arc::new(ChainEventPublisher::detached(0)),
         );
-        chain.durable_head = Arc::clone(&self.durable) as Arc<dyn DurableHeadStore>;
-        chain.undo_store = Arc::clone(&self.undo) as Arc<dyn UndoStore>;
-        chain.block_body_store = Some(Arc::clone(&self.bodies) as Arc<dyn BlockBodyStore>);
+        chain.durable_head = self.durable.clone();
+        chain.undo_store = self.undo.clone();
+        chain.block_body_store = Some(self.bodies.clone());
         recover_disconnect_marker(&chain)?;
         let reopened = Self {
             chain,
@@ -290,40 +288,38 @@ mod tests {
     use bitcoin_rs_primitives::{Hash256, Network};
 
     use super::FuzzChain;
+    use crate::test_fixtures::TestResult;
 
     #[test]
-    fn reopen_keeps_the_certified_tx_count_for_the_next_block() {
-        let chain = FuzzChain::new(Network::Regtest).expect("open");
+    fn reopen_keeps_the_certified_tx_count_for_the_next_block() -> TestResult {
+        let chain = FuzzChain::new(Network::Regtest)?;
         let genesis = Network::Regtest.genesis_block();
-        let first = mined_regtest_child_at(genesis.block_hash(), 1).expect("mine");
-        chain.apply(&first).expect("apply");
-        let checkpoint = chain.flush().expect("flush");
-        let reopened = chain.reopen(&checkpoint).expect("reopen");
-        let second = mined_regtest_child_at(first.block_hash(), 2).expect("mine");
-        reopened.apply(&second).expect("apply");
-        let tip = reopened.applied_tip().expect("tip");
+        let first = mined_regtest_child_at(genesis.block_hash(), 1)?;
+        chain.apply(&first)?;
+        let checkpoint = chain.flush()?;
+        let reopened = chain.reopen(&checkpoint)?;
+        let second = mined_regtest_child_at(first.block_hash(), 2)?;
+        reopened.apply(&second)?;
+        let tip = reopened.applied_tip().ok_or("missing tip")?;
         assert_eq!(tip.chain_tx_count, ChainTxCount::established(3));
+        Ok(())
     }
 
     #[test]
-    fn reopen_maps_the_checkpoint_tip_onto_the_rebuilt_tree() {
-        let chain = FuzzChain::new(Network::Regtest).expect("open");
+    fn reopen_maps_the_checkpoint_tip_onto_the_rebuilt_tree() -> TestResult {
+        let chain = FuzzChain::new(Network::Regtest)?;
         let genesis = Network::Regtest.genesis_block();
-        let first =
-            mined_regtest_child_at_time(genesis.block_hash(), genesis_time() + 1, 1).expect("mine");
-        chain.apply(&first).expect("apply");
-        chain.disconnect(&first).expect("disconnect");
-        let alternative =
-            mined_regtest_child_at_time(genesis.block_hash(), genesis_time() + 2, 1).expect("mine");
-        chain.apply(&alternative).expect("apply");
-        let checkpoint = chain.flush().expect("flush");
-        let reopened = chain.reopen(&checkpoint).expect("reopen");
-        let tip = reopened.applied_tip().expect("tip");
+        let first = mined_regtest_child_at_time(genesis.block_hash(), genesis_time() + 1, 1)?;
+        chain.apply(&first)?;
+        chain.disconnect(&first)?;
+        let alternative = mined_regtest_child_at_time(genesis.block_hash(), genesis_time() + 2, 1)?;
+        chain.apply(&alternative)?;
+        let checkpoint = chain.flush()?;
+        let reopened = chain.reopen(&checkpoint)?;
+        let tip = reopened.applied_tip().ok_or("missing tip")?;
         assert_eq!(tip.hash, Hash256::from(alternative.block_hash()));
         let tree = reopened.chain.block_tree_handle();
-        assert_eq!(
-            tree.read().node(tip.tip_id).expect("tip node").hash,
-            tip.hash
-        );
+        assert_eq!(tree.read().node(tip.tip_id)?.hash, tip.hash);
+        Ok(())
     }
 }

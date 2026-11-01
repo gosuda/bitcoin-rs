@@ -32,7 +32,7 @@ mod block_spends;
 mod connect;
 mod disconnect;
 mod durable;
-#[cfg(feature = "fuzzing")]
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 pub mod fuzzing;
 mod prepare;

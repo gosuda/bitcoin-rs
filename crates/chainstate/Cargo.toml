@@ -23,8 +23,6 @@ default = []
 # production-build guarantee is in-workspace, where only dev-dependencies
 # select it and the g17 gate fails if it leaks into a shipped target.
 test-seam = ["bitcoin-rs-storage/test-seam"]
-# In-memory chainstate surface for `fuzz/fuzz_targets/chainstate_reorg_model.rs`.
-fuzzing = ["test-seam"]
 kernel = ["bitcoin-rs-consensus/kernel"]
 rocksdb = [
     "bitcoin-rs-storage/rocksdb",
