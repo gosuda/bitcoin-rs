@@ -73,9 +73,18 @@ impl<'a> UtxoScanPermit<'a> {
         })
     }
 
+    #[must_use]
+    pub fn aborted(&self) -> bool {
+        self.set
+            .scan
+            .0
+            .lock()
+            .as_ref()
+            .is_some_and(|progress| progress.abort)
+    }
+
     pub fn cancelled(&self, stopping: impl FnOnce() -> bool) -> Result<bool, UtxoScanError> {
-        let abort = self.set.scan.0.lock().as_ref().is_some_and(|p| p.abort);
-        if abort || stopping() {
+        if self.aborted() || stopping() {
             return Ok(true);
         }
         if self.started.elapsed() >= MAX_DURATION {
@@ -407,6 +416,20 @@ mod tests {
         assert!(!complete);
         assert_eq!(scan.txouts, 512);
         assert_eq!(scan.unspents.len(), 512);
+    }
+
+    #[test]
+    fn a_reserved_walk_observes_the_scan_abort_flag() {
+        let reader = UtxoReader::new(coins(4));
+        let permit = reader
+            .reserve_scan()
+            .unwrap_or_else(|error| panic!("reserve: {error}"));
+        assert!(!permit.aborted());
+        assert!(reader.abort_scan());
+        assert!(
+            permit.aborted(),
+            "a walk owner must see the abort that status and abort report"
+        );
     }
 
     #[test]

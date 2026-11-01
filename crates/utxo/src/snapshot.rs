@@ -18,6 +18,7 @@ const SNAPSHOT_WRITE_VERSION: u32 = 4;
 const MUHASH_TRAILER_LEN: usize = 384;
 const SEED_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_RECORDS: u64 = 250_000_000;
+pub(crate) const WALK_CANCELLATION_INTERVAL: usize = 256;
 const MAX_SNAPSHOT_COINS_PER_TXID: u32 = 1_000_000;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -450,26 +451,39 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
 }
 
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
-    hash_serialized_3_stable_inner(view, None)
+    hash_serialized_3_stable_inner(view, None, &|| false)
 }
 
 pub(crate) fn hash_serialized_3_stable_at_height(
     view: &UtxoSetView<'_>,
     snapshot_height: u32,
 ) -> Result<Hash256, UtxoError> {
-    hash_serialized_3_stable_inner(view, Some(snapshot_height))
+    hash_serialized_3_stable_inner(view, Some(snapshot_height), &|| false)
+}
+
+pub(crate) fn hash_serialized_3_stable_cancellable(
+    view: &UtxoSetView<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, None, cancelled)
 }
 
 fn hash_serialized_3_stable_inner(
     view: &UtxoSetView<'_>,
     snapshot_height: Option<u32>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Hash256, UtxoError> {
     let mut engine = SerializedUtxoHasher::new();
+    let mut visited = 0usize;
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
             let mut entries = Vec::with_capacity(table.output_count());
             for record in &table.table {
                 for output in record.outputs() {
+                    visited += 1;
+                    if visited.is_multiple_of(WALK_CANCELLATION_INTERVAL) && cancelled() {
+                        return Err(UtxoError::Cancelled);
+                    }
                     entries.push(HashSerializedEntry {
                         txid_le: record.txid().to_le_bytes(),
                         output,
@@ -537,15 +551,31 @@ impl SerializedUtxoHasher {
 }
 
 impl UtxoSetView<'_> {
-    pub(crate) fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
+    pub(crate) fn for_each_coin<F>(&self, f: F) -> Result<(), UtxoError>
     where
         F: FnMut(SnapshotCoin<'_>),
     {
+        self.for_each_coin_cancellable(f, &|| false)
+    }
+
+    pub(crate) fn for_each_coin_cancellable<F>(
+        &self,
+        mut f: F,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), UtxoError>
+    where
+        F: FnMut(SnapshotCoin<'_>),
+    {
+        let mut visited = 0usize;
         for shard_idx in 0_u8..=u8::MAX {
             self.shard(usize::from(shard_idx)).with_table(|table| {
                 for record in &table.table {
                     let txid = record.txid();
                     for output in record.outputs() {
+                        visited += 1;
+                        if visited.is_multiple_of(WALK_CANCELLATION_INTERVAL) && cancelled() {
+                            return Err(UtxoError::Cancelled);
+                        }
                         f(SnapshotCoin {
                             txid,
                             vout: output.vout,
@@ -1057,5 +1087,62 @@ mod seed_no_token_tests {
             })
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::WALK_CANCELLATION_INTERVAL;
+    use crate::{
+        UtxoError, UtxoSet,
+        contract::{BlockChanges, UtxoAdd, commit_block_changes},
+    };
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+    use std::cell::Cell;
+
+    fn set_with_coins(count: usize) -> UtxoSet {
+        let set = UtxoSet::new();
+        let mut changes = BlockChanges::default();
+        for index in 0..count {
+            let mut bytes = [0_u8; 32];
+            bytes[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+            changes.add(UtxoAdd::new(
+                OutPoint::new(Hash256::from_le_bytes(&bytes).into(), 0),
+                TxOut {
+                    value: Amount::from_sat(7),
+                    script_pubkey: vec![0x51].into(),
+                },
+                false,
+                0,
+            ));
+        }
+        commit_block_changes(&set, &changes, &Hash256::default())
+            .unwrap_or_else(|error| panic!("fixture coins: {error}"));
+        set
+    }
+
+    #[test]
+    fn a_coin_walk_checks_cancellation_every_documented_interval() {
+        let set = set_with_coins(2 * WALK_CANCELLATION_INTERVAL);
+        let observed = Cell::new(0_usize);
+        let checks = Cell::new(0_usize);
+
+        let result = set.with_stable_view(|view| {
+            view.for_each_coin_cancellable(
+                |_| observed.set(observed.get() + 1),
+                &|| {
+                    checks.set(checks.get() + 1);
+                    true
+                },
+            )
+        });
+
+        assert!(matches!(result, Err(UtxoError::Cancelled)));
+        assert_eq!(
+            observed.get(),
+            WALK_CANCELLATION_INTERVAL - 1,
+            "the first check must run after the documented interval"
+        );
+        assert_eq!(checks.get(), 1, "one walk asks once before stopping");
     }
 }

@@ -1025,12 +1025,13 @@ fn compute_txoutset_hash(
     stable: &bitcoin_rs_utxo::UtxoSetView<'_>,
     stats: &bitcoin_rs_utxo::stats::CoinStats,
     hash_type: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<(&'static str, String)>, RpcError> {
     match hash_type {
         "hash_serialized_3" => {
             let hash = stable
-                .hash_serialized_3()
-                .map_err(|err| RpcError::Internal(err.to_string()))?;
+                .hash_serialized_3_cancellable(cancelled)
+                .map_err(txoutset_walk_error)?;
             Ok(Some(("hash_serialized_3", hash.to_string_be())))
         }
         "muhash" => Ok(Some((
@@ -1044,20 +1045,34 @@ fn compute_txoutset_hash(
     }
 }
 
+fn txoutset_walk_error(error: bitcoin_rs_utxo::UtxoError) -> RpcError {
+    match error {
+        bitcoin_rs_utxo::UtxoError::Cancelled => {
+            RpcError::Misc("gettxoutsetinfo interrupted".to_owned())
+        }
+        error => RpcError::Internal(error.to_string()),
+    }
+}
+
 fn scan_txoutset_view(
     ctx: &Context,
     view: &AppliedView,
     hash_type: &str,
-    cancellation: &bitcoin_rs_chain::LatchReader,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<TxOutSetScan, RpcError> {
-    if cancellation.is_triggered() {
+    if cancelled() {
         return Err(RpcError::Misc("gettxoutsetinfo interrupted".to_owned()));
     }
     let want_muhash = hash_type == "muhash";
     ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
-            .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = compute_txoutset_hash(stable, &stats, hash_type)?;
+        let stats = bitcoin_rs_utxo::stats::scan_coin_stats_cancellable(
+            stable,
+            view.height(),
+            want_muhash,
+            cancelled,
+        )
+        .map_err(txoutset_walk_error)?;
+        let set_hash = compute_txoutset_hash(stable, &stats, hash_type, cancelled)?;
         let disk_size = u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
         Ok(TxOutSetScan {
             stats,
@@ -1072,18 +1087,20 @@ fn scan_txoutset_view(
 fn execute_txoutset_scan(
     ctx: &Context,
     hash_type: &str,
+    permit: &bitcoin_rs_utxo::scan::UtxoScanPermit<'_>,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<(AppliedView, TxOutSetScan), RpcError> {
+    let cancelled = || permit.aborted() || cancellation.is_triggered();
     for _ in 0..4 {
         let view = ctx.chain.applied_view();
-        let scanned = scan_txoutset_view(ctx, &view, hash_type, cancellation)?;
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, &cancelled)?;
         if ctx.chain.applied_view().tip() == view.tip() {
             return Ok((view, scanned));
         }
     }
     ctx.chain.with_stable_chainstate(|| {
         let view = ctx.chain.applied_view();
-        let scanned = scan_txoutset_view(ctx, &view, hash_type, cancellation)?;
+        let scanned = scan_txoutset_view(ctx, &view, hash_type, &cancelled)?;
         Ok((view, scanned))
     })
 }
@@ -1123,13 +1140,13 @@ pub(crate) fn gettxoutsetinfo(
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
     let hash_type = parse_txoutsetinfo_params(params)?;
-    let _scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
+    let scan_permit = ctx.chain.utxo.reserve_scan().map_err(|error| match error {
         bitcoin_rs_utxo::scan::UtxoScanError::InProgress => {
             RpcError::InvalidParameter("a UTXO-wide scan is already running".to_owned())
         }
         error => RpcError::Internal(error.to_string()),
     })?;
-    let (view, scan) = execute_txoutset_scan(ctx, hash_type, cancellation)?;
+    let (view, scan) = execute_txoutset_scan(ctx, hash_type, &scan_permit, cancellation)?;
     format_txoutsetinfo_response(ctx, &view, scan)
 }
 

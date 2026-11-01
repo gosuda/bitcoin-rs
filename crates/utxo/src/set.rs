@@ -48,6 +48,8 @@ pub enum UtxoError {
     SnapshotTxidPrefixMismatch,
     #[error("output value {value} exceeds the maximum money supply")]
     AmountOutOfRange { value: u64 },
+    #[error("UTXO walk cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]
@@ -147,6 +149,13 @@ impl UtxoSetView<'_> {
 
     pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
         crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
+    }
+
+    pub fn hash_serialized_3_cancellable(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Hash256, UtxoError> {
+        crate::snapshot::hash_serialized_3_stable_cancellable(self, cancelled)
     }
 
     pub fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {

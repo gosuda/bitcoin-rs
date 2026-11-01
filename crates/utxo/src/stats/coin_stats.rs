@@ -170,13 +170,28 @@ pub fn scan_coin_stats(
     height: u32,
     want_muhash: bool,
 ) -> Result<CoinStats, crate::UtxoError> {
-    let mut accumulator = if want_muhash {
+    let mut accumulator = new_accumulator(height, want_muhash);
+    view.for_each_coin(|coin| accumulator.observe_coin(coin))?;
+    Ok(accumulator.into_stats())
+}
+
+pub fn scan_coin_stats_cancellable(
+    view: &crate::UtxoSetView<'_>,
+    height: u32,
+    want_muhash: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CoinStats, crate::UtxoError> {
+    let mut accumulator = new_accumulator(height, want_muhash);
+    view.for_each_coin_cancellable(|coin| accumulator.observe_coin(coin), cancelled)?;
+    Ok(accumulator.into_stats())
+}
+
+fn new_accumulator(height: u32, want_muhash: bool) -> CoinStatsAccumulator {
+    if want_muhash {
         CoinStatsAccumulator::with_muhash(height)
     } else {
         CoinStatsAccumulator::without_muhash(height)
-    };
-    view.for_each_coin(|coin| accumulator.observe_coin(coin))?;
-    Ok(accumulator.into_stats())
+    }
 }
 
 #[derive(Debug)]

@@ -211,6 +211,14 @@ fn undo_read_failures_preserve_core_integrity_and_availability_codes() {
 }
 
 #[test]
+fn a_cancelled_utxo_walk_reports_interruption() {
+    let error = txoutset_walk_error(bitcoin_rs_utxo::UtxoError::Cancelled);
+
+    assert_eq!(error.code(), -1);
+    assert_eq!(error.to_string(), "gettxoutsetinfo interrupted");
+}
+
+#[test]
 fn unknown_hashes_are_not_found_on_every_block_response_form() {
     let ctx = Arc::new(Context::new());
     let hash = Hash256::from_le_bytes(&[0xab_u8; 32]).to_string_be();
