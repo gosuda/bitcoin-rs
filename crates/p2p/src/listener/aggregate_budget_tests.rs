@@ -435,9 +435,11 @@ fn answered_once_after_the_aggregate_drains(request: &Message, expected: Message
 
     drop(hold);
     served.open_gate();
-    // The message loop's first-pass keepalive probe was refused alongside the
-    // deferred reply while the aggregate was full; with room again it drains
-    // first (top-of-pass), then the deferred reply follows.
+    // The message loop's first-pass keepalive probe met the same full
+    // aggregate as the deferred reply: whether it was refused or queued
+    // under the remaining room depends on the request's reply bound (the
+    // relaxed pending check above accepts either). With room again it
+    // drains first (top-of-pass), then the deferred reply follows.
     assert!(
         matches!(
             read_messages(&mut served.client, 1)?.as_slice(),
