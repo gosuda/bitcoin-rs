@@ -61,6 +61,8 @@ pub enum ConfigError {
     PoolConnectionLimits,
     #[error("pool connection limits exceed platform bounds")]
     PoolConnectionLimitsBounds,
+    #[error("--pool-window-work is required")]
+    PoolWindowWorkMissing,
     #[error("--pool-window-work must be positive")]
     PoolWindowWork,
     #[error("--pool-fee-bps must be at most 10000")]
@@ -494,7 +496,9 @@ fn resolve_pool(settings: &UserConfig) -> Result<Option<PoolConfig>, ConfigError
             bitcoin_rs_mining::pool::ShareTarget::from_pool_difficulty_decimal(text)
                 .map_err(|difficulty_error| ConfigError::PoolShareDifficulty { difficulty_error })?
         },
-        window_work: pool.window_work.ok_or(ConfigError::PoolWindowWork)?,
+        window_work: pool
+            .window_work
+            .ok_or(ConfigError::PoolWindowWorkMissing)?,
         fee_bps: pool.fee_bps.unwrap_or(0),
         reward_script,
         maturity: pool.maturity.unwrap_or(100),

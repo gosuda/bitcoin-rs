@@ -75,6 +75,24 @@ fn pool_requires_explicit_policy_and_listener() {
 
 #[cfg(feature = "pool")]
 #[test]
+fn an_absent_window_work_is_not_reported_as_non_positive() {
+    let mut layer = pool_layer();
+    layer.pool.window_work = None;
+    match super::resolve(&[&layer]) {
+        Err(ConfigError::PoolWindowWorkMissing) => {}
+        other => panic!("an absent window work is a required value, not a zero: {other:?}"),
+    }
+
+    let mut layer = pool_layer();
+    layer.pool.window_work = Some(0);
+    match super::resolve(&[&layer]) {
+        Err(ConfigError::PoolWindowWork) => {}
+        other => panic!("zero window work keeps the positive-value refusal: {other:?}"),
+    }
+}
+
+#[cfg(feature = "pool")]
+#[test]
 fn pool_composed_connection_defaults_are_pinned() {
     let config = resolved(&[&pool_layer()]);
     let pool = config
