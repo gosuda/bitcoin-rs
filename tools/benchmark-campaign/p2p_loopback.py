@@ -26,16 +26,19 @@ from typing import NoReturn, Self
 
 from evidence import (
     ContractError,
-    _is_object,
+    JsonObject,
     _array,
+    _is_object,
+    _object,
     _text,
     _uint,
+    _validate_json_depth,
     canonical_bytes,
     canonical_sha256,
-    _validate_json_depth,
+    copy_pinned,
+    process_start_time,
+    publish_result,
     summarize,
-    _publish_result,
-    JsonObject,
 )
 
 CONFIG_SCHEMA = "p2p-loopback-config-v1"
@@ -159,18 +162,6 @@ class ArmObservation:
     protocol_ok: bool
     state_ok: bool
     error: str | None
-
-
-def _object(value: object, field: str, keys: frozenset[str]) -> JsonObject:
-    if not _is_object(value):
-        raise ContractError(f"{field} must be a JSON object")
-    actual = frozenset(value)
-    if actual != keys:
-        raise ContractError(
-            f"{field} has wrong keys; missing={sorted(keys - actual)}, "
-            f"unknown={sorted(actual - keys)}"
-        )
-    return value
 
 
 def _positive(value: object, field: str, maximum: int = (1 << 63) - 1) -> int:
@@ -765,75 +756,6 @@ def _state(path: Path, field: str) -> JsonObject:
     return value
 
 
-def _verified_copy(program: Program, arm_dir: Path) -> Path:
-    """Copy the binary from one no-follow fd and verify the copy digest."""
-    try:
-        descriptor = os.open(
-            program.binary,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-        )
-    except OSError as error:
-        raise ContractError(f"cannot open {program.role} binary: {error}") from error
-    digest = hashlib.sha256()
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ContractError(f"{program.role}.binary is not a regular file")
-        if info.st_size > MAX_BINARY_BYTES:
-            raise ContractError(f"{program.role}.binary exceeds MAX_BINARY_BYTES")
-        target = arm_dir / "node-under-test"
-        target_fd = os.open(
-            target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-            0o500,
-        )
-        try:
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                written = 0
-                while written < len(chunk):
-                    written += os.write(target_fd, chunk[written:])
-            os.fsync(target_fd)
-        finally:
-            os.close(target_fd)
-    except OSError as error:
-        raise ContractError(f"cannot copy {program.role} binary: {error}") from error
-    finally:
-        os.close(descriptor)
-    if digest.hexdigest() != program.binary_sha256:
-        target.unlink(missing_ok=True)
-        raise ContractError(f"{program.role} copied binary digest mismatch")
-    target.chmod(0o500)
-    return target
-
-
-def _verify_copy_digest(binary_path: Path, expected: str) -> None:
-    """Re-open, fstat, and hash the exact copy bytes immediately pre-spawn."""
-    try:
-        descriptor = os.open(binary_path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as error:
-        raise ContractError(
-            f"cannot open arm binary for spawn verification: {error}"
-        ) from error
-    owned = False
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ContractError("arm binary is not a regular file")
-        with os.fdopen(descriptor, "rb") as stream:
-            owned = True
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    except OSError as error:
-        raise ContractError(f"cannot verify arm binary bytes: {error}") from error
-    finally:
-        if not owned:
-            os.close(descriptor)
-    if digest != expected:
-        raise ContractError("arm binary changed after its verified copy")
-
-
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _SUBREAPER_SCOPE_LOCK = threading.Lock()
@@ -973,25 +895,27 @@ def _direct_children_pids() -> list[int]:
     return sorted(set(_read_proc_children(os.getpid())))
 
 
-def _process_state_and_start_time(pid: int) -> tuple[str, int] | None:
-    """Read /proc state and start-time ticks; None once the process is gone."""
+def _process_start_time(pid: int) -> int | None:
+    """Read /proc start-time ticks; None once the process is gone."""
+    try:
+        return process_start_time(pid)
+    except ContractError:
+        return None
+
+
+def _process_state_and_parent(pid: int) -> tuple[str, int] | None:
+    """Read state and parent from one /proc stat snapshot."""
     try:
         stat_text = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
-        return None  # the process is gone; identity cannot verify
+        return None
     fields = stat_text.rpartition(")")[2].split()
-    if len(fields) < 20:
-        return None  # unexpected /proc layout; refuse to guess
+    if len(fields) < 2:
+        return None
     try:
-        return fields[0], int(fields[19])
+        return fields[0], int(fields[1])
     except ValueError:
-        return None  # unparsable start time; refuse to guess
-
-
-def _process_start_time(pid: int) -> int | None:
-    """Read /proc start-time ticks; None once the process is gone."""
-    observed = _process_state_and_start_time(pid)
-    return None if observed is None else observed[1]
+        return None
 
 
 _DEAD_PROCESS_STATES = frozenset("ZX")
@@ -1004,10 +928,15 @@ def _owning_start_time(pid: int) -> int | None:
     an unreaped zombie owns nothing even though its /proc entry still
     verifies; treat it as gone for parent-edge validation.
     """
-    observed = _process_state_and_start_time(pid)
-    if observed is None or observed[0] in _DEAD_PROCESS_STATES:
+    start_time = _process_start_time(pid)
+    observed = _process_state_and_parent(pid)
+    if (
+        start_time is None
+        or observed is None
+        or observed[0] in _DEAD_PROCESS_STATES
+    ):
         return None
-    return observed[1]
+    return start_time
 
 
 @dataclass(frozen=True)
@@ -1017,18 +946,16 @@ class ProcessGeneration:
 
 
 def _process_parent_and_generation(pid: int) -> tuple[int, ProcessGeneration] | None:
-    """Read parent and generation atomically from one /proc stat snapshot."""
-    try:
-        stat_text = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+    """Read parent and generation for one stable /proc generation."""
+    before = _process_start_time(pid)
+    if before is None:
         return None
-    fields = stat_text.rpartition(")")[2].split()
-    if len(fields) < 20:
+    observed = _process_state_and_parent(pid)
+    if observed is None:
         return None
-    try:
-        return int(fields[1]), ProcessGeneration(pid, int(fields[19]))
-    except ValueError:
+    if _process_start_time(pid) != before:
         return None
+    return observed[1], ProcessGeneration(pid, before)
 
 
 def _self_generation() -> ProcessGeneration:
@@ -1765,7 +1692,9 @@ def _run_arm(
     arm_deadline_ns = arm_start + config.peer.connect_timeout_ns + MAX_ARM_DURATION_NS
     arm_dir = root / f"{order_index:02d}-{program.role}"
     arm_dir.mkdir(parents=True)
-    binary_path = _verified_copy(program, arm_dir)
+    binary_path = copy_pinned(
+        program.binary, arm_dir / "node-under-test", program.binary_sha256
+    )
     data_dir = arm_dir / "data"
     data_dir.mkdir()
     (data_dir / "lifecycle-initial.json").write_bytes(
@@ -1773,7 +1702,6 @@ def _run_arm(
     )
     with ArmProcess(config, program.role, binary_path, arm_dir, arm_deadline_ns) as arm:
         arm.require_ready()
-        _verify_copy_digest(binary_path, program.binary_sha256)
         started = time.monotonic_ns()
         arm.launch(program.command, "primary")
         exit_code = arm.wait_clean()
@@ -1800,7 +1728,6 @@ def _run_arm(
         if config.lifecycle.mode == "restart":
             if program.restart_command is None:
                 raise ContractError(f"{program.role} has no restart command")
-            _verify_copy_digest(binary_path, program.binary_sha256)
             arm.launch(program.restart_command, "restart")
             restart_exit = arm.wait_clean()
             restart_state = _state(
@@ -2168,7 +2095,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as temporary:
         work = Path(temporary) / "arms"
         result = run_campaign(config, work)
-        _publish_result(result, output)
+        publish_result(result, output)
     return 0
 
 

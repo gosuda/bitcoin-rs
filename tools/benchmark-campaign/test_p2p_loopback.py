@@ -26,9 +26,9 @@ from evidence import (
     MAX_JSON_DEPTH,
     ContractError,
     _percentile,
-    _publish_result,
     canonical_bytes,
     canonical_sha256,
+    publish_result,
     summarize,
 )
 from p2p_loopback import (
@@ -50,7 +50,6 @@ from p2p_loopback import (
     PeerObservation,
     ProcessGeneration,
     ProcessIdentity,
-    Program,
     _accept_magic_peer,
     _argv_digest,
     _candidate_magic,
@@ -66,8 +65,6 @@ from p2p_loopback import (
     _send_paced,
     _sleep_until,
     _state,
-    _verified_copy,
-    _verify_copy_digest,
     load_config,
     main,
     parse_config,
@@ -1033,10 +1030,35 @@ class MagicGateTests(unittest.TestCase):
 class CampaignTests(unittest.TestCase):
     def _run_main(self, workspace: Path, config_path: Path) -> bytes:
         output = workspace / OUTPUT_NAME
+        output.parent.mkdir(mode=0o700, exist_ok=True)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
         return output.read_bytes()
+
+    def test_arm_binary_is_pinned_copy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p2p-pinned-copy-") as raw:
+            workspace = Path(raw)
+            fixture = CampaignFixture(workspace)
+            config = fixture.load()
+            root = workspace / "arms"
+            result = run_campaign(config, root)
+            programs = {"core": config.core, "candidate": config.candidate}
+            for order_index, arm_value in enumerate(_arms_list(result["arms"])):
+                arm = _object(arm_value)
+                role = str(arm["role"])
+                program = programs[role]
+                copy = Path(str(arm["binary_path"]))
+                self.assertEqual(
+                    copy, root / f"{order_index:02d}-{role}" / "node-under-test"
+                )
+                self.assertNotEqual(copy, program.binary)
+                self.assertEqual(_sha256_file(copy), program.binary_sha256)
+                self.assertEqual(copy.read_bytes(), program.binary.read_bytes())
+                self.assertEqual(
+                    stat.S_IMODE(copy.stat().st_mode),
+                    stat.S_IRUSR | stat.S_IXUSR,
+                )
 
     def test_seven_alternating_pairs_emit_custody_json(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-loopback-fresh-") as raw:
@@ -1185,83 +1207,17 @@ class SecurityContractTests(unittest.TestCase):
         self.assertEqual(digest, _argv_digest(list(argv)))
         self.assertNotIn(b"8333", canonical_bytes(_public_argv(argv)))
 
-    def _copy_program(self, source: Path, digest: str | None = None) -> Program:
-        return Program(
-            role="core",
-            binary=source,
-            binary_sha256=digest if digest is not None else _sha256_file(source),
-            command=("{binary}",),
-            restart_command=None,
-        )
-
-    def test_verified_copy_binds_digest_and_mode(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-ok-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-ok\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            self.assertEqual(copy, arm_dir / "node-under-test")
-            self.assertEqual(copy.read_bytes(), source.read_bytes())
-            self.assertEqual(_sha256_file(copy), _sha256_file(source))
-            self.assertEqual(
-                stat.S_IMODE(copy.stat().st_mode), stat.S_IRUSR | stat.S_IXUSR
-            )
-
-    def test_verified_copy_refuses_digest_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-bad-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-bad\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            with self.assertRaisesRegex(ContractError, "digest mismatch"):
-                _verified_copy(self._copy_program(source, digest=HASH64), arm_dir)
-            self.assertFalse((arm_dir / "node-under-test").exists())
-
-    def test_verified_copy_refuses_non_regular_file(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-copy-dir-") as raw:
-            workspace = Path(raw)
-            source = workspace / "node-dir"
-            source.mkdir()
-            with self.assertRaisesRegex(ContractError, "not a regular file"):
-                _verified_copy(self._copy_program(source, digest=HASH64), workspace)
-
-    def test_copy_reverified_before_spawn_binds_bytes(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-reverify-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            _verify_copy_digest(copy, _sha256_file(source))
-            copy.chmod(stat.S_IRUSR | stat.S_IWUSR)
-            copy.write_bytes(b"#!-tampered\n")
-            copy.chmod(stat.S_IRUSR | stat.S_IXUSR)
-            with self.assertRaisesRegex(
-                ContractError, "changed after its verified copy"
-            ):
-                _verify_copy_digest(copy, _sha256_file(source))
-
-    def test_spawn_verification_refuses_symlinked_copy(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-symlink-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            link = workspace / "node-under-test"
-            os.symlink(source, link)
-            with self.assertRaisesRegex(ContractError, "spawn verification"):
-                _verify_copy_digest(link, _sha256_file(source))
-
     def test_publication_never_clobbers_existing_output(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-publish-") as raw:
             workspace = Path(raw)
             output = workspace / "out" / "result.json"
-            output.parent.mkdir()
-            _publish_result({"run": 1}, output)
+            output.parent.mkdir(mode=0o700)
+            publish_result({"run": 1}, output)
             published = output.read_bytes()
             scratch = output.parent / f".p2p-loopback-result.{os.getpid()}.tmp"
             self.assertFalse(scratch.exists())
             with self.assertRaisesRegex(ContractError, "output already exists"):
-                _publish_result({"run": 2}, output)
+                publish_result({"run": 2}, output)
             self.assertEqual(output.read_bytes(), published)
 
     def test_result_omits_raw_command_and_secrets(self) -> None:
@@ -1272,11 +1228,7 @@ class SecurityContractTests(unittest.TestCase):
                 extra_command_args=["--rpcpassword", "supersecret-token"],
             )
             output = workspace / OUTPUT_NAME
-            self.assertEqual(
-                main(["--config", str(fixture.config_path), "--output", str(output)]),
-                0,
-            )
-            payload = output.read_bytes()
+            payload = self._run_main(workspace, fixture.config_path)
             for leak in (
                 b"supersecret-token",
                 b"--rpcpassword",
@@ -1470,11 +1422,8 @@ class SecurityContractTests(unittest.TestCase):
                 _hash_file(fifo)
             link = workspace / "node-link"
             link.symlink_to(source)
-            program = self._copy_program(link, digest=_sha256_file(source))
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
             with self.assertRaisesRegex(ContractError, "cannot open"):
-                _verified_copy(program, arm_dir)
+                _hash_file(link)
 
     def test_error_output_omits_secrets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-secret-fail-") as raw:
@@ -1536,7 +1485,7 @@ class SecurityContractTests(unittest.TestCase):
             _argv_digest(secreted_config.core.command),
         )
 
-    def test_restart_binds_the_verified_copy(self) -> None:
+    def test_restart_binds_the_pinned_copy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-restart-copy-") as raw:
             workspace = Path(raw)
             fixture = CampaignFixture(workspace, mode="restart")
@@ -1553,6 +1502,7 @@ class SecurityContractTests(unittest.TestCase):
 
     def _run_main(self, workspace: Path, config_path: Path) -> bytes:
         output = workspace / OUTPUT_NAME
+        output.parent.mkdir(mode=0o700, exist_ok=True)
         self.assertEqual(
             main(["--config", str(config_path), "--output", str(output)]), 0
         )
@@ -1781,32 +1731,6 @@ class SecurityContractTests(unittest.TestCase):
                 self.assertFalse(Path(f"/proc/{grandchild}").exists())
             finally:
                 os.waitpid(parent, 0)
-
-    def test_digest_failure_after_worker_start_closes_promptly(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="p2p-digest-worker-") as raw:
-            workspace = Path(raw)
-            source = _write_executable(workspace / "node.py", "#!-v1\n")
-            arm_dir = workspace / "00-core"
-            arm_dir.mkdir()
-            copy = _verified_copy(self._copy_program(source), arm_dir)
-            arm = ArmProcess(
-                _stub_config(),
-                "core",
-                copy,
-                arm_dir,
-                time.monotonic_ns() + MAX_ARM_DURATION_NS,
-            )
-            with arm:
-                arm.require_ready()
-                copy.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                copy.write_bytes(b"#!-tampered\n")
-                copy.chmod(stat.S_IRUSR | stat.S_IXUSR)
-                with self.assertRaisesRegex(
-                    ContractError, "changed after its verified copy"
-                ):
-                    _verify_copy_digest(copy, _sha256_file(source))
-            self.assertFalse(arm.worker_alive())
-            self.assertEqual(arm._listener.fileno(), -1)
 
     def test_enoexec_after_worker_start_closes_promptly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p2p-enoexec-") as raw:
