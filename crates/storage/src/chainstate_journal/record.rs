@@ -353,6 +353,100 @@ mod tests {
         header
     }
 
+    fn coin(seed: u8, height: u32, coinbase: bool) -> Coin {
+        Coin {
+            outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), u32::from(seed)),
+            txout: TxOut {
+                value: Amount::from_sat(u64::from(seed) * 1_000),
+                script_pubkey: Script::from_bytes(vec![0x51, seed]),
+            },
+            height,
+            coinbase,
+        }
+    }
+
+    fn sample() -> JournalRecord {
+        JournalRecord {
+            height: 42,
+            block_hash: [9; 32],
+            prev_hash: [8; 32],
+            block_tx_count: 70_000,
+            coin_stats_height_delta: -1,
+            raw_header: header_bytes([9; 32]),
+            mutations: vec![
+                Mutation::Create {
+                    coin: coin(1, 42, true),
+                },
+                Mutation::Spend {
+                    coin: coin(2, 11, false),
+                },
+                Mutation::Overwrite {
+                    old_coin: coin(3, 7, false),
+                    new_coin: coin(4, 42, false),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn round_trips_genesis_and_all_mutation_kinds() -> std::io::Result<()> {
+        let genesis = JournalRecord {
+            height: 0,
+            block_hash: [0; 32],
+            prev_hash: [0; 32],
+            block_tx_count: 1,
+            coin_stats_height_delta: 0,
+            raw_header: header_bytes([0; 32]),
+            mutations: Vec::new(),
+        };
+        for record in [genesis, sample()] {
+            assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_single_byte_corruption_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
+        for index in 0..bytes.len() {
+            let mut corrupted = bytes.clone();
+            corrupted[index] ^= 1;
+            assert!(
+                decode_record(&corrupted).is_err(),
+                "byte {index} was accepted"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_truncated_prefix_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
+        for length in 0..bytes.len() {
+            assert!(
+                decode_record(&bytes[..length]).is_err(),
+                "prefix {length} was accepted"
+            );
+        }
+        assert!(decode_record(&bytes).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn bad_magic_and_version_are_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] ^= 1;
+        assert_eq!(decode_record(&bad_magic), Err(JournalRecordError::BadMagic));
+        let mut bad_version = bytes;
+        bad_version[4] = 2;
+        assert!(matches!(
+            decode_record(&bad_version),
+            Err(JournalRecordError::BadVersion { .. })
+        ));
+        Ok(())
+    }
+
     fn arb_height() -> impl Strategy<Value = u32> {
         prop_oneof![
             Just(0),
