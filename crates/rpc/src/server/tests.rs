@@ -1855,3 +1855,312 @@ fn rejects_request_target_with_nul_byte() -> io::Result<()> {
     assert!(seen.eof);
     Ok(())
 }
+
+#[test]
+fn batch_size_n_minus_one_is_served() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let at_limit_minus_one = (0..MAX_BATCH_ELEMENTS - 1)
+        .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"getblockcount","params":[]}))
+        .collect::<Vec<_>>();
+    let accepted = handle_decoded_json(&handler, &Value::from(at_limit_minus_one));
+    assert_eq!(accepted.status, 200);
+    assert_eq!(
+        accepted
+            .body
+            .expect("batch replies")
+            .as_array()
+            .map(sonic_rs::Array::len),
+        Some(MAX_BATCH_ELEMENTS - 1)
+    );
+}
+
+#[test]
+fn answers_duplicate_ids_in_batch_independently() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let batch = json!([
+        {"jsonrpc":"2.0","id":"duplicate-id","method":"getblockcount","params":[]},
+        {"jsonrpc":"2.0","id":"duplicate-id","method":"getblockcount","params":[]}
+    ]);
+    let response = handle_decoded_json(&handler, &batch);
+    assert_eq!(response.status, 200);
+    let items = response
+        .body
+        .expect("body")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0].get("id").and_then(|v| v.as_str()),
+        Some("duplicate-id")
+    );
+    assert_eq!(
+        items[1].get("id").and_then(|v| v.as_str()),
+        Some("duplicate-id")
+    );
+}
+
+#[test]
+fn rejects_non_object_members_in_batch_as_invalid_request() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let batch = json!([1, "not-an-object", true, Value::new_null()]);
+    let response = handle_decoded_json(&handler, &batch);
+    assert_eq!(response.status, 200);
+    let items = response
+        .body
+        .expect("body")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(items.len(), 4);
+    for item in &items {
+        assert_eq!(
+            item.get("error").and_then(|e| e.get("code")),
+            Some(&json!(RpcError::INVALID_REQUEST))
+        );
+        assert!(
+            item.get("id")
+                .is_some_and(sonic_rs::JsonValueTrait::is_null)
+        );
+    }
+}
+
+#[test]
+fn dispatches_params_as_object_and_array_and_rejects_primitive() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let mut valid_tx_hex = String::from("0200000001");
+    valid_tx_hex.push_str(&"00".repeat(32));
+    valid_tx_hex.push_str("ffffffff00ffffffff010100000000000000015100000000");
+
+    let array_params = json!({"jsonrpc":"2.0","id":1,"method":"decoderawtransaction","params":[valid_tx_hex.as_str()]});
+    let resp_arr = handle_decoded_json(&handler, &array_params);
+    assert_eq!(resp_arr.status, 200);
+    assert!(resp_arr.body.as_ref().expect("body").get("error").is_none());
+
+    let object_params = json!({"jsonrpc":"2.0","id":2,"method":"decoderawtransaction","params":{"hexstring":valid_tx_hex.as_str()}});
+    let resp_obj = handle_decoded_json(&handler, &object_params);
+    assert_eq!(resp_obj.status, 200);
+    assert!(resp_obj.body.as_ref().expect("body").get("error").is_none());
+    assert_eq!(
+        resp_arr.body.expect("array body").get("result"),
+        resp_obj.body.expect("obj body").get("result")
+    );
+
+    let primitive_params = json!({"jsonrpc":"2.0","id":3,"method":"getblockcount","params":123});
+    let resp = handle_decoded_json(&handler, &primitive_params);
+    assert_eq!(resp.status, 400);
+    assert_eq!(
+        resp.body
+            .expect("body")
+            .get("error")
+            .and_then(|e| e.get("code")),
+        Some(&json!(RpcError::INVALID_REQUEST))
+    );
+}
+
+#[test]
+fn preserves_huge_numbers_in_request_id() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let max_u64_id = "18446744073709551615";
+    let body =
+        format!(r#"{{"jsonrpc":"2.0","id":{max_u64_id},"method":"getblockcount","params":[]}}"#);
+    let response = handle_json(&handler, body.as_bytes());
+    assert_eq!(response.status, 200);
+    let body_str = sonic_rs::to_string(&response.body.expect("body")).expect("json");
+    assert!(
+        body_str.contains(max_u64_id),
+        "must preserve exact huge integer in id: {body_str}"
+    );
+}
+
+#[test]
+fn rejects_invalid_utf8_in_json_rpc_body() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let invalid_utf8 = b"\xff\xfe\xfd";
+    let response = handle_json(&handler, invalid_utf8);
+    assert_eq!(response.status, 500);
+    assert_eq!(
+        response
+            .body
+            .expect("body")
+            .get("error")
+            .and_then(|e| e.get("code")),
+        Some(&json!(-32_700))
+    );
+}
+
+#[test]
+fn rejects_raw_nul_bytes_in_json_rpc_body() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let raw_nul = b"{\"jsonrpc\":\"2.0\",\"method\":\"test\0\",\"id\":1}";
+    let response = handle_json(&handler, raw_nul);
+    assert_eq!(response.status, 500);
+    assert_eq!(
+        response
+            .body
+            .expect("body")
+            .get("error")
+            .and_then(|e| e.get("code")),
+        Some(&json!(-32_700))
+    );
+}
+
+#[test]
+fn handles_deeply_nested_json_without_panic() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let mut nested_objects = Vec::new();
+    for _ in 0..300 {
+        nested_objects.extend_from_slice(b"{\"a\":");
+    }
+    nested_objects.extend_from_slice(b"1");
+    nested_objects.extend(std::iter::repeat_n(b'}', 300));
+    let response = handle_json(&handler, &nested_objects);
+    assert_eq!(response.status, 400);
+    assert_eq!(
+        response
+            .body
+            .expect("body")
+            .get("error")
+            .and_then(|e| e.get("code")),
+        Some(&json!(RpcError::INVALID_REQUEST))
+    );
+
+    let mut nested_arrays = Vec::new();
+    nested_arrays.extend(std::iter::repeat_n(b'[', 300));
+    nested_arrays.extend(std::iter::repeat_n(b']', 300));
+    let response = handle_json(&handler, &nested_arrays);
+    assert_eq!(response.status, 200);
+    let items = response
+        .body
+        .expect("body")
+        .as_array()
+        .expect("array")
+        .clone();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].get("error").and_then(|e| e.get("code")),
+        Some(&json!(RpcError::INVALID_REQUEST))
+    );
+}
+
+#[test]
+fn serves_pipelined_requests_on_keep_alive_connection() -> io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let server = thread::spawn(move || -> io::Result<()> {
+        let (stream, _) = listener.accept()?;
+        serve_connection(
+            stream,
+            &Auth::basic("alice", "secret"),
+            &Handler::new(Arc::new(Context::new())),
+            false,
+            Duration::from_secs(5),
+            RpcSurface::Shared,
+        )
+    });
+
+    let body1 = r#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
+    let body2 = r#"{"jsonrpc":"2.0","id":2,"method":"getblockcount","params":[]}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body1}\
+         POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body2}",
+        body1.len(),
+        body2.len()
+    )
+    .into_bytes();
+
+    let mut client = TcpStream::connect(address)?;
+    client.write_all(&request)?;
+    let mut response = String::new();
+    client.read_to_string(&mut response)?;
+    server.join().expect("server")?;
+
+    let count = response.split("HTTP/1.1 200 OK").count();
+    assert_eq!(
+        count, 3,
+        "expected exactly 2 responses in pipelined exchange: {response}"
+    );
+    assert!(response.contains("\"id\":1"));
+    assert!(response.contains("\"id\":2"));
+    Ok(())
+}
+
+#[test]
+fn ignores_pipelined_request_after_connection_close() -> io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let server = thread::spawn(move || -> io::Result<()> {
+        let (stream, _) = listener.accept()?;
+        serve_connection(
+            stream,
+            &Auth::basic("alice", "secret"),
+            &Handler::new(Arc::new(Context::new())),
+            false,
+            Duration::from_secs(5),
+            RpcSurface::Shared,
+        )
+    });
+
+    let body1 = r#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
+    let body2 = r#"{"jsonrpc":"2.0","id":2,"method":"getblockcount","params":[]}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body1}\
+         POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body2}",
+        body1.len(),
+        body2.len()
+    )
+    .into_bytes();
+
+    let mut client = TcpStream::connect(address)?;
+    client.write_all(&request)?;
+    let mut response = String::new();
+    client.read_to_string(&mut response)?;
+    server.join().expect("server")?;
+
+    let count = response.split("HTTP/1.1 200 OK").count();
+    assert_eq!(
+        count, 2,
+        "expected exactly 1 response since first closed connection: {response}"
+    );
+    assert!(response.contains("\"id\":1"));
+    assert!(!response.contains("\"id\":2"));
+    Ok(())
+}
+
+#[test]
+fn recovers_from_missing_cookie_file() {
+    let result = crate::auth::Auth::cookie("/tmp/nonexistent_cookie_file_for_btcrs_test");
+    assert!(result.is_err());
+}
+
+#[test]
+fn rejects_cookie_file_without_colon() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let cookie_path = dir.path().join(".cookie");
+    std::fs::write(&cookie_path, b"user_without_password")?;
+    let result = crate::auth::Auth::cookie(&cookie_path);
+    assert!(matches!(result, Err(crate::auth::AuthError::InvalidCookie)));
+    Ok(())
+}
+
+#[test]
+fn accepts_cookie_file_with_empty_password() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let cookie_path = dir.path().join(".cookie");
+    std::fs::write(&cookie_path, b"alice:\n")?;
+    let auth = crate::auth::Auth::cookie(&cookie_path).expect("valid cookie with empty password");
+    assert!(auth.validate_header(Some("Basic YWxpY2U6")));
+    assert!(!auth.validate_header(Some("Basic YWxpY2U6c2VjcmV0")));
+    Ok(())
+}
+
+#[test]
+fn auth_constant_time_eq_verifies_byte_mismatch_and_length_mismatch() {
+    use crate::auth::constant_time_eq;
+    assert!(constant_time_eq(b"password123", b"password123"));
+    assert!(!constant_time_eq(b"password123", b"password124"));
+    assert!(!constant_time_eq(b"password123", b"password12"));
+    assert!(!constant_time_eq(b"password12", b"password123"));
+    assert!(!constant_time_eq(b"", b"p"));
+    assert!(constant_time_eq(b"", b""));
+}
