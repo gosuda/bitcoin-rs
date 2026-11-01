@@ -423,3 +423,64 @@ fn oversized_body_retires_awaiting_claim_but_not_ordinary_requests() {
         .expect("owner claim survives a stranger oversized body");
     table.package_response_rejected(admitted.into_token(), &inventory);
 }
+
+#[test]
+fn package_limits_n_minus_one_n_plus_one_and_duplicate_tokens() {
+    let txs_24: Vec<Tx> = (0..24).map(|i| sample_tx(1, i, 1_000)).collect();
+    let payload_24 = make_payload(&txs_24);
+    let plan_24 = plan_package_charge(&payload_24).expect("24 txs must succeed");
+    assert_eq!(plan_24.count, 24);
+
+    let txs_25: Vec<Tx> = (0..25).map(|i| sample_tx(1, i, 1_000)).collect();
+    let payload_25 = make_payload(&txs_25);
+    let plan_25 = plan_package_charge(&payload_25).expect("25 txs must succeed");
+    assert_eq!(plan_25.count, 25);
+
+    let txs_26: Vec<Tx> = (0..26).map(|i| sample_tx(1, i, 1_000)).collect();
+    let payload_26 = make_payload(&txs_26);
+    assert_eq!(
+        plan_package_charge(&payload_26),
+        Err(PackageRefusal::OverCount)
+    );
+
+    let capacity = PackageCapacity::new(10_000);
+    let peer = source(42);
+    let (frame, decoded) = capacity.charge(peer, 100, 100).expect("first charge");
+    assert_eq!(capacity.held(), 1);
+    assert_eq!(
+        capacity.charge(peer, 100, 100).err(),
+        Some(PackageRefusal::PeerHeld)
+    );
+    drop(decoded);
+    assert_eq!(capacity.held(), 0);
+    drop(frame);
+    assert_eq!(capacity.reserved(), 0);
+}
+
+#[test]
+fn package_expiry_and_disconnect_interleaving() {
+    let table = PeerTable::new();
+    let capacity = PackageCapacity::new(10_000_000);
+    let inventory = CountingInventory::default();
+    let (owner, _rx) = registered_source(&table, 8333);
+
+    let parent = sample_tx(1, 1, 50_000);
+    let child = sample_tx(1, 2, 40_000);
+    let subject = child.wtxid();
+
+    assert!(table.request_package_info(owner, subject, &[]));
+    assert!(table.request_package_transactions(owner, subject, vec![parent.wtxid(), subject]));
+
+    table.transaction_peer_disconnected(owner, &inventory);
+
+    assert_eq!(
+        table
+            .admit_package(&capacity, &inventory, owner, make_payload(&[parent, child]))
+            .err(),
+        Some(PackageRefusal::Unsolicited)
+    );
+
+    let teardown = table.clear_package_claims(&capacity);
+    assert_eq!(teardown.held, 0);
+    assert_eq!(teardown.bytes_reserved, 0);
+}
