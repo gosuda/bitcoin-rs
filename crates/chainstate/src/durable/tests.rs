@@ -549,6 +549,82 @@ fn committed_gap_replay_failure_fails_closed() -> TestResult {
     Ok(())
 }
 
+struct AttestFailHeadStore {
+    inner: Arc<dyn DurableHeadStore>,
+}
+
+impl DurableHeadStore for AttestFailHeadStore {
+    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
+        self.inner.load()
+    }
+
+    fn commit(
+        &self,
+        expected: Option<&DurableHead>,
+        next: &DurableHead,
+        records: &CommitRecords<'_>,
+    ) -> Result<(), StorageError> {
+        self.inner.commit(expected, next, records)
+    }
+
+    fn load_attestation(
+        &self,
+        head: &DurableHead,
+    ) -> Result<bitcoin_rs_storage::ScriptAttestation, StorageError> {
+        self.inner.load_attestation(head)
+    }
+
+    fn attest(
+        &self,
+        _head: &DurableHead,
+        _level: bitcoin_rs_storage::ScriptAttestation,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Backend(
+            "simulated attestation failure".to_owned(),
+        ))
+    }
+}
+
+// RCV-02
+#[test]
+fn cold_replay_attestation_failure_fails_closed() -> TestResult {
+    let (mut handles, child) = restored_chainstate()?;
+    handles.applied_tip.store(None);
+    handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let genesis = Network::Regtest.genesis_block();
+    let bodies = Arc::new(MemoryBodies::default());
+    bodies.persist_block_body(
+        0,
+        Hash256::from(genesis.block_hash()),
+        &consensus_bytes(&genesis),
+    )?;
+    bodies.persist_block_body(
+        1,
+        Hash256::from(child.block_hash()),
+        &consensus_bytes(&child),
+    )?;
+    install_head(&mut handles, &child, bodies)?;
+    let inner = Arc::clone(&handles.durable_head);
+    handles.durable_head = Arc::new(AttestFailHeadStore { inner });
+
+    let Err(error) = super::reconcile_at_boot(&handles) else {
+        panic!("a failed Full attestation must fail the rebuild");
+    };
+    assert!(
+        matches!(error, ApplyError::DurableHeadCommit(_)),
+        "the attestation failure surfaces unchanged, got: {error:?}"
+    );
+    assert!(
+        handles.shutdown_reader().is_triggered(),
+        "a failed Full attestation must fail closed"
+    );
+    assert!(
+        matches!(handles.begin_transition(), Err(ApplyError::Shutdown)),
+        "admission must stay closed after a failed attestation"
+    );
+    Ok(())
+}
+
 /// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
 /// a progress checkpoint or a retry. The original writer error stays intact.
 // RCV-02, JW-ORDER-1
