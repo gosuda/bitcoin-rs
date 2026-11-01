@@ -280,26 +280,33 @@ fuzz_mutator!(|data: &mut [u8], size: usize, max_size: usize, seed: u32| {
 fuzz_target!(|data: &[u8]| {
     let magic = Magic::REGTEST;
     let mut cursor = Cursor::new(data);
-    let Ok((message, raw_payload)) = read_message(&mut cursor, magic) else {
-        return;
-    };
-
-    let decoded_retained = match &message {
-        Message::Block(payload) => payload.block().retained_heap_bytes(),
-        Message::Tx(tx) => tx.retained_heap_bytes(),
-        _ => 0,
-    };
-    let reservation = decode_reservation(raw_payload.len());
-    assert!(
-        raw_payload.len().saturating_add(decoded_retained) <= reservation,
-        "payload decode exceeded reservation bound"
-    );
-
-    if let Ok(re_encoded) = encode_payload(&message) {
-        assert_eq!(
-            re_encoded.as_slice(),
-            raw_payload.as_ref(),
-            "message re-encode must match decoded payload"
+    for _ in 0..32 {
+        let before = cursor.position();
+        let Ok((message, raw_payload)) = read_message(&mut cursor, magic) else {
+            return;
+        };
+        assert!(
+            cursor.position() > before,
+            "a decoded frame must advance the reader"
         );
+
+        let decoded_retained = match &message {
+            Message::Block(payload) => payload.block().retained_heap_bytes(),
+            Message::Tx(tx) => tx.retained_heap_bytes(),
+            _ => 0,
+        };
+        let reservation = decode_reservation(raw_payload.len());
+        assert!(
+            raw_payload.len().saturating_add(decoded_retained) <= reservation,
+            "payload decode exceeded reservation bound"
+        );
+
+        if let Ok(re_encoded) = encode_payload(&message) {
+            assert_eq!(
+                re_encoded.as_slice(),
+                raw_payload.as_ref(),
+                "message re-encode must match decoded payload"
+            );
+        }
     }
 });
