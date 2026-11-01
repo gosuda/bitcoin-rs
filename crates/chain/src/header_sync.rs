@@ -523,3 +523,6 @@ mod contextual_header_tests;
 
 #[cfg(test)]
 mod compact_overflow_tests;
+
+#[cfg(test)]
+mod retarget_rule_tests;
