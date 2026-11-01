@@ -1,3 +1,5 @@
+#![expect(clippy::expect_used)]
+
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
@@ -10,10 +12,10 @@ use bitcoin::secp256k1::rand::{RngCore as _, SeedableRng as _};
 use proptest::prelude::*;
 
 use super::{
-    ELLSWIFT_LEN, Established, Handshake, MAX_GARBAGE_LEN, Step, V1_PREFIX_LEN, encode_key,
+    ELLSWIFT_LEN, Established, Handshake, MAX_GARBAGE_LEN, State, Step, V1_PREFIX_LEN, encode_key,
 };
 use crate::bip324::TransportError;
-use crate::bip324::keys::{KeyMaterial, Role, Session, shared_secret};
+use crate::bip324::keys::{GARBAGE_TERMINATOR_LEN, KeyMaterial, Role, Session, shared_secret};
 use crate::bip324::packet::PacketError;
 use crate::bip324::reader::{MAX_RECV_CONTENTS_LEN, is_poll_timeout};
 use crate::transport::establish;
@@ -671,14 +673,253 @@ fn a_stream_cut_anywhere_never_establishes() -> TestResult {
     Ok(())
 }
 
+fn bip324_proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1024)
+}
+
+struct CustomParty {
+    sk: SecretKey,
+    aux: [u8; 32],
+    garbage: Vec<u8>,
+}
+
+fn connect_custom(
+    initiator: CustomParty,
+    responder: CustomParty,
+    max_read: usize,
+) -> Result<(Established, Established), TestError> {
+    let initiator_ellswift = encode_key(initiator.sk, initiator.aux);
+    let responder_ellswift = encode_key(responder.sk, responder.aux);
+    let mut initiator = Handshake {
+        role: Role::Initiator,
+        magic: MAGIC,
+        secret_key: initiator.sk,
+        ellswift: initiator_ellswift,
+        garbage: initiator.garbage,
+        outbound: Vec::new(),
+        received_any: false,
+        state: State::ReadKey {
+            key: [0; ELLSWIFT_LEN],
+            filled: 0,
+        },
+    };
+    initiator.queue_key();
+    let mut responder = Handshake {
+        role: Role::Responder,
+        magic: MAGIC,
+        secret_key: responder.sk,
+        ellswift: responder_ellswift,
+        garbage: responder.garbage,
+        outbound: Vec::new(),
+        received_any: false,
+        state: State::DetectV1 {
+            prefix: [0; V1_PREFIX_LEN],
+            filled: 0,
+        },
+    };
+    let mut to_initiator = Inbox {
+        max_read,
+        ..Inbox::default()
+    };
+    let mut to_responder = Inbox {
+        max_read,
+        ..Inbox::default()
+    };
+    let (mut done_initiator, mut done_responder) = (None, None);
+    for _ in 0..1_000_000 {
+        if done_initiator.is_none() {
+            match initiator.advance(&mut to_initiator) {
+                Ok(Step::Send) => to_responder.bytes.extend(initiator.take_outbound()),
+                Ok(Step::Yield) => {}
+                Ok(Step::Established(established)) => done_initiator = Some(*established),
+                Ok(Step::V1(_)) => return Err(TestError::UnexpectedV1),
+                Err(error) if is_poll_timeout(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if done_responder.is_none() {
+            match responder.advance(&mut to_responder) {
+                Ok(Step::Send) => to_initiator.bytes.extend(responder.take_outbound()),
+                Ok(Step::Yield) => {}
+                Ok(Step::Established(established)) => done_responder = Some(*established),
+                Ok(Step::V1(_)) => return Err(TestError::UnexpectedV1),
+                Err(error) if is_poll_timeout(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if done_initiator.is_some() && done_responder.is_some() {
+            break;
+        }
+    }
+    match (done_initiator, done_responder) {
+        (Some(i), Some(r)) => Ok((i, r)),
+        _ => Err(TestError::HandshakeIncomplete),
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig { cases: bip324_proptest_cases(), ..ProptestConfig::default() })]
 
     #[test]
-    fn hostile_bytes_never_establish(bytes in prop::collection::vec(any::<u8>(), 0..6_000)) {
-        let mut rng = StdRng::seed_from_u64(15);
-        let mut responder = Handshake::responder(MAGIC, &mut rng);
-        let result = finish(&mut responder, &mut Inbox::default(), &bytes);
-        prop_assert!(!matches!(result, Ok(Step::Established(_))), "{result:?}");
+    fn bip324_in_memory_handshake_establishes_and_agrees_with_spec_oracle(
+        init_seed in any::<u64>(),
+        resp_seed in any::<u64>(),
+        init_garbage_len in prop_oneof![
+            Just(0usize), Just(1), Just(15), Just(16), Just(64), Just(4094), Just(4095), 0..=4095usize
+        ],
+        resp_garbage_len in prop_oneof![
+            Just(0usize), Just(1), Just(15), Just(16), Just(64), Just(4094), Just(4095), 0..=4095usize
+        ],
+        max_read in prop_oneof![
+            Just(0usize), Just(1), Just(2), Just(7), Just(16), Just(64), Just(256)
+        ],
+        payload in prop::collection::vec(any::<u8>(), 0..256),
+    ) {
+        let mut init_rng = StdRng::seed_from_u64(init_seed);
+        let init_sk = SecretKey::new(&mut init_rng);
+        let mut init_aux = [0u8; 32];
+        init_rng.fill_bytes(&mut init_aux);
+        let mut init_garbage = vec![0u8; init_garbage_len];
+        init_rng.fill_bytes(&mut init_garbage);
+
+        let mut resp_rng = StdRng::seed_from_u64(resp_seed);
+        let resp_sk = SecretKey::new(&mut resp_rng);
+        let mut resp_aux = [0u8; 32];
+        resp_rng.fill_bytes(&mut resp_aux);
+        let mut resp_garbage = vec![0u8; resp_garbage_len];
+        resp_rng.fill_bytes(&mut resp_garbage);
+
+        let init_ellswift = encode_key(init_sk, init_aux);
+        let resp_ellswift = encode_key(resp_sk, resp_aux);
+
+        let secret = shared_secret(init_sk, init_ellswift, resp_ellswift, Role::Initiator);
+        let material = KeyMaterial::derive(&secret, MAGIC).expect("valid key material derivation");
+        let expected_session = Session::new(&material, Role::Initiator);
+        let (mut init_est, mut resp_est) = connect_custom(
+            CustomParty {
+                sk: init_sk,
+                aux: init_aux,
+                garbage: init_garbage,
+            },
+            CustomParty {
+                sk: resp_sk,
+                aux: resp_aux,
+                garbage: resp_garbage,
+            },
+            max_read,
+        ).expect("handshake must establish");
+
+        prop_assert_eq!(init_est.session_id, resp_est.session_id, "initiator and responder session IDs must match");
+        prop_assert_eq!(init_est.session_id, expected_session.session_id, "session ID must match BIP324 specification oracle");
+
+        let mut pipe = Inbox { max_read, ..Inbox::default() };
+        let sealed = init_est.send.seal(&payload, &[], false).expect("initiator seals packet");
+        pipe.bytes.extend(sealed);
+        let decrypted = resp_est.recv.read_contents(&mut pipe).expect("responder reads packet");
+        prop_assert_eq!(decrypted.as_deref(), Some(payload.as_slice()), "decrypted payload must match sent payload");
+
+        let mut reverse_pipe = Inbox { max_read, ..Inbox::default() };
+        let reply_sealed = resp_est.send.seal(&payload, &[], false).expect("responder seals packet");
+        reverse_pipe.bytes.extend(reply_sealed);
+        let reply_decrypted = init_est.recv.read_contents(&mut reverse_pipe).expect("initiator reads packet");
+        prop_assert_eq!(reply_decrypted.as_deref(), Some(payload.as_slice()), "reverse decrypted payload must match sent payload");
+    }
+
+    #[test]
+    fn bip324_handshake_rejects_corrupted_and_boundary_violating_inputs(
+        seed in any::<u64>(),
+        mode in 0..5u8,
+        garbage_len in prop_oneof![Just(0usize), Just(1), Just(64), Just(4095)],
+        mutate_byte_idx in 0..64usize,
+        raw_bytes in prop::collection::vec(any::<u8>(), 0..6_000),
+    ) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        match mode {
+            0 => {
+                let mut responder = Handshake::responder(MAGIC, &mut rng);
+                let result = finish(&mut responder, &mut Inbox::default(), &raw_bytes);
+                prop_assert!(!matches!(result, Ok(Step::Established(_))), "hostile bytes must never establish: {result:?}");
+            }
+            1 => {
+                let initiator = ScriptedInitiator::new(&mut rng, garbage_len);
+                let mut responder = Handshake::responder(MAGIC, &mut rng);
+                let mut inbox = Inbox::default();
+                let mut session = initiator.open(&mut responder, &mut inbox).expect("initiator opens");
+                let mut tail = session.send_garbage_terminator.to_vec();
+                tail.extend(session.send.seal(&[], &initiator.garbage, false).expect("seal version"));
+                let idx = mutate_byte_idx % GARBAGE_TERMINATOR_LEN;
+                tail[idx] ^= 0x55;
+                tail.extend(vec![0u8; MAX_GARBAGE_LEN]);
+                let result = finish(&mut responder, &mut inbox, &tail);
+                prop_assert!(
+                    matches!(result, Err(TransportError::TerminatorNotFound)),
+                    "mutated terminator must fail terminator scan: {result:?}"
+                );
+            }
+            2 => {
+                let initiator = ScriptedInitiator::new(&mut rng, garbage_len);
+                let mut responder = Handshake::responder(MAGIC, &mut rng);
+                let mut inbox = Inbox::default();
+                let mut session = initiator.open(&mut responder, &mut inbox).expect("initiator opens");
+                let mut tail = session.send_garbage_terminator.to_vec();
+                let mut version_packet = session.send.seal(&[], &initiator.garbage, false).expect("seal version");
+                let idx = mutate_byte_idx % version_packet.len();
+                version_packet[idx] ^= 0xaa;
+                tail.extend(version_packet);
+                let result = finish(&mut responder, &mut inbox, &tail);
+                prop_assert!(
+                    !matches!(result, Ok(Step::Established(_))),
+                    "mutated version packet must fail authentication and not establish: {result:?}"
+                );
+            }
+            3 => {
+                let mut prefix = [0u8; 16];
+                let magic_bytes = if mutate_byte_idx % 2 == 0 {
+                    MAGIC.to_bytes()
+                } else {
+                    [0xde, 0xad, 0xbe, 0xef]
+                };
+                prefix[..4].copy_from_slice(&magic_bytes);
+                prefix[4..].copy_from_slice(b"version\0\0\0\0\0");
+                let mut responder = Handshake::responder(MAGIC, &mut rng);
+                let result = finish(&mut responder, &mut Inbox::default(), &prefix);
+                if magic_bytes == MAGIC.to_bytes() {
+                    prop_assert!(matches!(result, Ok(Step::V1(_))), "matching magic version prefix must detect V1 fallback");
+                } else {
+                    prop_assert!(matches!(result, Err(TransportError::WrongNetworkV1)), "wrong magic version prefix must reject WrongNetworkV1");
+                }
+            }
+            _ => {
+                let extra = 1 + (mutate_byte_idx % 100);
+                let initiator = ScriptedInitiator::new(&mut rng, MAX_GARBAGE_LEN + extra);
+                let mut responder = Handshake::responder(MAGIC, &mut rng);
+                let mut inbox = Inbox::default();
+                match initiator.open(&mut responder, &mut inbox) {
+                    Ok(mut session) => {
+                        let mut tail = session.send_garbage_terminator.to_vec();
+                        tail.extend(session.send.seal(&[], &initiator.garbage, false).expect("seal version"));
+                        let result = finish(&mut responder, &mut inbox, &tail);
+                        prop_assert!(
+                            matches!(result, Err(TransportError::TerminatorNotFound)),
+                            "garbage beyond limit in finish must fail with TerminatorNotFound: {result:?}"
+                        );
+                    }
+                    Err(TestError::UnexpectedStep(err)) => {
+                        prop_assert!(
+                            err.contains("TerminatorNotFound"),
+                            "garbage beyond limit in open must fail with TerminatorNotFound: {err}"
+                        );
+                    }
+                    Err(other) => {
+                        return Err(proptest::test_runner::TestCaseError::fail(format!(
+                            "unexpected error for oversized garbage: {other:?}"
+                        )));
+                    }
+                }
+            }
+        }
     }
 }
