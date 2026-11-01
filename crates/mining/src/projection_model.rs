@@ -271,10 +271,49 @@ mod tests {
     }
 
     // POOL-05
+    fn projection_model_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(256)
+    }
+
     prop_state_machine! {
-        #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
         #[test]
-        fn mining_projection_matches_the_reference_model(sequential 1..12 => MiningMachine);
+        fn mining_projection_matches_the_reference_model(sequential 1..24 => MiningMachine);
+    }
+
+    fn projection_action(index: u8) -> Action {
+        match index {
+            0 => Action::Advance,
+            1 => Action::Accept,
+            2 => Action::Drain,
+            3 => Action::Finish,
+            _ => Action::Stutter,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: projection_model_cases(), ..ProptestConfig::default() })]
+
+        #[test]
+        fn projection_model_safety_holds_for_arbitrary_command_sequences(
+            commands in prop::collection::vec(any::<u8>(), 0..48)
+        ) {
+            let mut state = State::init(4);
+            prop_assert!(safety(&state), "initial state satisfies safety: {state:?}");
+            for raw in commands {
+                let action = projection_action(raw % 5);
+                if let Some(next) = step(&state, action) {
+                    state = next;
+                }
+                prop_assert!(
+                    safety(&state),
+                    "inductive safety holds after action {action:?}: {state:?}"
+                );
+            }
+        }
     }
 
     #[test]
