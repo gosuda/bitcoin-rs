@@ -692,7 +692,7 @@ pub(crate) fn decode_payload(command: &str, payload: &bytes::Bytes) -> Result<Me
             Ok(announcement) => Message::StaleTip(announcement),
             Err(error) if error.is_policy_limit() => Message::Unknown {
                 command: command_string(crate::staletip::STALETIP_COMMAND)?,
-                payload: Vec::new(),
+                payload: payload.to_vec(),
             },
             Err(error) => return Err(error.into()),
         },

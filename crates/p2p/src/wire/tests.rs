@@ -527,9 +527,13 @@ fn staletip_roundtrips_and_over_limit_is_ignored_not_punished() -> Result<(), Pe
     )?;
     assert!(
         matches!(&ignored, super::Message::Unknown { command, payload }
-                if command.as_ref() == "staletip" && payload.is_empty()),
+                if command.as_ref() == "staletip" && payload.as_slice() == over.as_slice()),
         "{ignored:?}"
     );
+    let mut rewritten = Vec::new();
+    write_message(&mut rewritten, Magic::REGTEST, &ignored)?;
+    let (re_decoded, _) = read_message(&mut Cursor::new(rewritten), Magic::REGTEST)?;
+    assert_eq!(re_decoded, ignored);
 
     let result = read_message(
         &mut Cursor::new(frame_of(b"staletip", &[0u8; 31])?),
