@@ -316,9 +316,146 @@ fn non_serving_peers_are_never_probe_picks() {
     }
 }
 
+fn naive_plan(frontier: &SyncFrontier) -> super::super::frontier::FrontierPlan {
+    let mut plan = super::super::frontier::FrontierPlan::default();
+    let peers_exist = !frontier.usable_peers.is_empty();
+    let body_state = match frontier.body_state {
+        Some(BodyState::InFlight(owner))
+            if !frontier
+                .usable_peers
+                .iter()
+                .any(|peer| peer.source == owner) =>
+        {
+            Some(BodyState::Unowned)
+        }
+        state => state,
+    };
+    let body_unowned =
+        matches!(body_state, Some(BodyState::Unowned)) && !frontier.chain.apply_halted;
+
+    plan.header_action = if frontier.header_request_live {
+        HeaderAction::AwaitPending
+    } else if !peers_exist {
+        HeaderAction::Idle
+    } else if body_unowned {
+        if frontier.usable_peers.is_empty() {
+            HeaderAction::Extend
+        } else {
+            HeaderAction::Probe(frontier.usable_peers[0].source)
+        }
+    } else {
+        HeaderAction::Extend
+    };
+
+    let Some(required) = frontier.chain.next_required else {
+        plan.no_progress = Some(if frontier.chain.apply_halted {
+            NoProgressReason::ApplyHalted
+        } else if frontier.chain.applied_tip.is_none() || frontier.chain.chain_tip.is_none() {
+            NoProgressReason::ChainViewUnavailable
+        } else if frontier.chain.applied_tip.as_ref() == frontier.chain.chain_tip.as_ref() {
+            NoProgressReason::AtTip
+        } else {
+            NoProgressReason::FrontierUnresolvable
+        });
+        return plan;
+    };
+
+    if frontier.chain.apply_halted {
+        plan.no_progress = Some(NoProgressReason::ApplyHalted);
+        return plan;
+    }
+
+    if !peers_exist {
+        plan.no_progress = Some(NoProgressReason::NoUsablePeers);
+        return plan;
+    }
+
+    plan.schedule_bodies = true;
+    if matches!(body_state, Some(BodyState::Unowned)) {
+        let has_capable = frontier.usable_peers.iter().any(|peer| {
+            let claimed = u32::try_from(peer.info.best_known_height).ok();
+            let resolved = peer.active_height;
+            let capable = match (claimed, resolved) {
+                (Some(c), Some(r)) => Some(c.max(r)),
+                (Some(c), None) => Some(c),
+                (None, r) => r,
+            };
+            capable.is_some_and(|h| h >= required.height)
+        });
+        if !has_capable {
+            plan.no_progress = Some(NoProgressReason::NoCapablePeer);
+        }
+    }
+    plan
+}
+
+fn frontier_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1024)
+}
+
+fn frontier_peak_schedule_universal_invariant(
+    chain: ChainFrontier,
+    body_state: Option<BodyState>,
+    usable_peers: Vec<UsablePeer>,
+    header_request_live: bool,
+) {
+    let frontier = SyncFrontier {
+        header_request_live,
+        chain,
+        body_state,
+        header_request: None,
+        usable_peers,
+    };
+    let plan = frontier.plan();
+    if frontier.chain.next_required.is_some() {
+        assert!(
+            plan.schedule_bodies || plan.no_progress.is_some(),
+            "required body must schedule recovery or name the reason: {plan:?}"
+        );
+    }
+    if let Some(BodyState::InFlight(owner)) = frontier.body_state
+        && !frontier.chain.apply_halted
+        && frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.source == owner)
+    {
+        assert!(plan.schedule_bodies, "live owner is progress: {plan:?}");
+        assert_eq!(plan.no_progress, None);
+    }
+    if let Some(BodyState::InFlight(owner)) = frontier.body_state
+        && !frontier.usable_peers.is_empty()
+        && !frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.source == owner)
+        && !frontier.chain.apply_halted
+        && !frontier
+            .usable_peers
+            .iter()
+            .any(|peer| peer.capability().is_some())
+    {
+        assert_eq!(plan.no_progress, Some(NoProgressReason::NoCapablePeer));
+    }
+    if plan.no_progress == Some(NoProgressReason::NoUsablePeers) {
+        assert!(frontier.usable_peers.is_empty());
+    }
+    if frontier.usable_peers.is_empty()
+        && frontier.chain.next_required.is_some()
+        && !frontier.chain.apply_halted
+    {
+        assert_eq!(plan.no_progress, Some(NoProgressReason::NoUsablePeers));
+    }
+}
+
 proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: frontier_cases(), ..proptest::prelude::ProptestConfig::default() })]
+
     #[test]
-    fn plan_never_leaves_a_required_body_unaccounted(
+    fn frontier_plan_matches_naive_reference(
         applied_ahead in proptest::bool::ANY,
         next_required in proptest::option::of(0_u32..16),
         apply_halted in proptest::bool::ANY,
@@ -343,7 +480,7 @@ proptest::proptest! {
                 let mut peer = usable(
                     u16::try_from(9100 + idx).unwrap_or(9100),
                     *height,
-                    None,
+                    Some(u32::try_from(*height).unwrap_or(0)),
                 );
                 if *evidenced {
                     peer.demonstrated_tips = vec![hash(0x77)];
@@ -392,50 +529,81 @@ proptest::proptest! {
             header_request_live: header_request.is_some(),
             usable_peers,
         };
-        let plan = frontier.plan();
-        if frontier.chain.next_required.is_some() {
-            proptest::prop_assert!(
-                plan.schedule_bodies || plan.no_progress.is_some(),
-                "required body must schedule recovery or name the reason: \
-                 {plan:?}"
-            );
-        }
-        if let Some(BodyState::InFlight(owner)) = frontier.body_state
-            && !frontier.chain.apply_halted
-            && frontier
-                .usable_peers
-                .iter()
-                .any(|peer| peer.source == owner)
-        {
-            proptest::prop_assert!(plan.schedule_bodies, "live owner is progress: {plan:?}");
-            proptest::prop_assert_eq!(plan.no_progress, None);
-        }
-        if let Some(BodyState::InFlight(owner)) = frontier.body_state
-            && !frontier.usable_peers.is_empty()
-            && !frontier.usable_peers.iter().any(|peer| peer.source == owner)
-            && !frontier.chain.apply_halted
-            && !frontier
-                .usable_peers
-                .iter()
-                .any(|peer| peer.capability().is_some())
-        {
-            proptest::prop_assert_eq!(
-                plan.no_progress,
-                Some(NoProgressReason::NoCapablePeer)
-            );
-        }
-        if plan.no_progress == Some(NoProgressReason::NoUsablePeers) {
-            proptest::prop_assert!(frontier.usable_peers.is_empty());
-        }
-        if frontier.usable_peers.is_empty()
-            && frontier.chain.next_required.is_some()
-            && !frontier.chain.apply_halted
-        {
-            proptest::prop_assert_eq!(
-                plan.no_progress,
-                Some(NoProgressReason::NoUsablePeers)
-            );
-        }
+        let expected = naive_plan(&frontier);
+        let actual = frontier.plan();
+        proptest::prop_assert_eq!(actual.schedule_bodies, expected.schedule_bodies);
+        proptest::prop_assert_eq!(actual.no_progress, expected.no_progress);
+        proptest::prop_assert!(
+            std::mem::discriminant(&actual.header_action)
+                == std::mem::discriminant(&expected.header_action),
+            "header action class matches naive reference: actual {:?} expected {:?}",
+            actual.header_action,
+            expected.header_action
+        );
+    }
+
+    #[test]
+    fn frontier_peak_schedule_universal_invariant_prop(
+        applied_ahead in proptest::bool::ANY,
+        next_required in proptest::option::of(0_u32..16),
+        apply_halted in proptest::bool::ANY,
+        body_case in 0_u8..3,
+        in_flight_live in proptest::bool::ANY,
+        peers in proptest::collection::vec(
+            (0_i32..32, proptest::bool::ANY),
+            0..5usize,
+        ),
+        pending_live in proptest::bool::ANY,
+    ) {
+        let applied = snap(1, 8, 0x01);
+        let chain_tip = if applied_ahead {
+            Arc::clone(&applied)
+        } else {
+            snap(2, 12, 0x02)
+        };
+        let usable_peers = peers
+            .iter()
+            .enumerate()
+            .map(|(idx, (height, evidenced))| {
+                let mut peer = usable(
+                    u16::try_from(9100 + idx).unwrap_or(9100),
+                    *height,
+                    Some(u32::try_from(*height).unwrap_or(0)),
+                );
+                if *evidenced {
+                    peer.demonstrated_tips = vec![hash(0x77)];
+                }
+                peer
+            })
+            .collect::<Vec<_>>();
+        let body_state = next_required.map(|_height| match body_case {
+            0 => BodyState::Unowned,
+            1 => BodyState::Staged,
+            _ => {
+                if in_flight_live {
+                    usable_peers.first().map_or(BodyState::Unowned, |peer| {
+                        BodyState::InFlight(peer.source)
+                    })
+                } else {
+                    BodyState::InFlight(PeerSource::for_test(addr_of(9999)))
+                }
+            }
+        });
+        let chain = ChainFrontier {
+            applied_tip: Some(applied),
+            chain_tip: Some(chain_tip),
+            next_required: next_required.map(|height| RequiredBody {
+                height,
+                hash: hash(0x03),
+            }),
+            apply_halted,
+        };
+        frontier_peak_schedule_universal_invariant(
+            chain,
+            body_state,
+            usable_peers,
+            pending_live,
+        );
     }
 }
 
