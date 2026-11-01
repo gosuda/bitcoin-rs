@@ -515,3 +515,56 @@ fn graph_work_stays_local_on_worst_case_shapes() {
     );
     assert_graph_exact(&pool);
 }
+
+#[test]
+fn a_surviving_node_is_measured_from_the_links_the_exclusion_keeps() {
+    let mut pool = fuzzer_pool();
+    let root = insert_ok(&mut pool, 1, &[], 100);
+    let first = insert_ok(&mut pool, 2, &[OutPoint::new(root, 0)], 100);
+    let second = insert_ok(&mut pool, 3, &[OutPoint::new(root, 0)], 100);
+    let root_id = pool.entry_id_by_txid(&root).expect("pooled");
+    let first_id = pool.entry_id_by_txid(&first).expect("pooled");
+    let second_id = pool.entry_id_by_txid(&second).expect("pooled");
+    assert_eq!(pool.entry_memory(root_id).expect("pooled"), {
+        let sides = pool.links(root_id).expect("pooled").children.len();
+        entry_memory_usage(&pool.entry(root_id).expect("pooled").tx)
+            .saturating_add(link_memory_usage(sides, 1))
+    });
+
+    let (before, after) = pool
+        .projected_graphs(&[], &[first_id, second_id], ProjectionScope::AllEntries)
+        .expect("projection");
+    let root_before = before
+        .nodes
+        .iter()
+        .find(|node| node.id == Some(root_id))
+        .expect("the root is projected");
+    let root_after = after
+        .nodes
+        .iter()
+        .find(|node| node.id == Some(root_id))
+        .expect("the root survives");
+    assert_eq!(
+        root_after.memory,
+        entry_memory_usage(&pool.entry(root_id).expect("pooled").tx),
+        "a root whose children all leave keeps no link memory"
+    );
+    assert!(
+        root_after.memory < root_before.memory,
+        "the projection must stop charging the evicted links"
+    );
+
+    let mut changes = Vec::new();
+    pool.remove_entries_with_reasons(
+        &[
+            (first_id, RemovalReason::PolicyEviction),
+            (second_id, RemovalReason::PolicyEviction),
+        ],
+        &mut changes,
+    );
+    assert_eq!(
+        root_after.memory,
+        pool.entry_memory(root_id).expect("pooled"),
+        "the projection must equal the accounting after the removals"
+    );
+}
