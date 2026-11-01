@@ -226,3 +226,129 @@ fn invalid_configured_map_preserves_current_and_pre_release_files_until_repaired
         assert_indexes(&restored.state.lock());
     }
 }
+
+#[test]
+fn rejects_truncated_and_corrupt_files_and_invalid_entry_bounds() {
+    let dir = tempfile::tempdir().expect("directory");
+    let base = dir.path().join("peers.dat");
+    let path = network_path(&base, [1; 4]);
+
+    let mut cases: Vec<Vec<u8>> = Vec::new();
+    cases.push(Vec::new());
+    cases.push(vec![0x42]);
+    cases.push(vec![0x55; 31]);
+    let empty_payload_checksum = Sha256::digest([])[..].to_vec();
+    cases.push(empty_payload_checksum);
+    let mut one_byte_payload = vec![0x7b];
+    one_byte_payload.extend_from_slice(&Sha256::digest([0x7b]));
+    cases.push(one_byte_payload);
+    let valid_book = book();
+    let a1 = addr(1);
+    let a2 = addr(2);
+    valid_book.learn_dns("seed", &[a1, a2], EPOCH);
+    valid_book.succeeded(a1, 9, EPOCH + 1);
+    valid_book.succeeded(a2, 9, EPOCH + 1);
+    let valid_json = sonic_rs::to_value(&valid_book.state.lock().stored).expect("valid schema");
+
+    let mut duplicate_records = valid_json.clone();
+    let record0 = duplicate_records["records"][0].clone();
+    duplicate_records["records"]
+        .as_array_mut()
+        .expect("arr")
+        .push(record0);
+    cases.push(fixture_bytes(&duplicate_records));
+
+    let mut duplicate_buckets = valid_json.clone();
+    duplicate_buckets["records"][0]["tried"] = false.into();
+    duplicate_buckets["records"][0]["new_buckets"] = sonic_rs::json!([1, 1]);
+    cases.push(fixture_bytes(&duplicate_buckets));
+
+    let mut over_new_refs = valid_json.clone();
+    over_new_refs["records"][0]["tried"] = false.into();
+    over_new_refs["records"][0]["new_buckets"] = sonic_rs::json!([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    cases.push(fixture_bytes(&over_new_refs));
+
+    let mut duplicate_anchors = valid_json.clone();
+    duplicate_anchors["anchors"] = sonic_rs::json!([
+        {"addr": a1.to_string(), "confirmed_at": EPOCH + 1},
+        {"addr": a1.to_string(), "confirmed_at": EPOCH + 2}
+    ]);
+    cases.push(fixture_bytes(&duplicate_anchors));
+
+    let a3 = addr(3);
+    let mut over_anchors = valid_json;
+    over_anchors["anchors"] = sonic_rs::json!([
+        {"addr": a1.to_string(), "confirmed_at": EPOCH + 1},
+        {"addr": a2.to_string(), "confirmed_at": EPOCH + 2},
+        {"addr": a3.to_string(), "confirmed_at": EPOCH + 3}
+    ]);
+    cases.push(fixture_bytes(&over_anchors));
+
+    for (index, bytes) in cases.iter().enumerate() {
+        fs::write(&path, bytes).expect("write case");
+        let book = AddressBook::open(Some(base.clone()), [1; 4], false, None);
+        assert!(
+            !book.state.lock().writable,
+            "case {index} must fail closed and be non-writable"
+        );
+        assert_eq!(book.len(), 0, "case {index} must import zero records");
+        book.save();
+        assert_eq!(
+            &fs::read(&path).expect("source intact"),
+            bytes,
+            "case {index} must preserve source file intact"
+        );
+    }
+}
+
+#[test]
+fn anchor_handling_bounds_expiration_and_recovery() {
+    let book = book();
+    let a1 = addr(1);
+    let a2 = addr(2);
+    let a3 = addr(3);
+    let unconfirmed = addr(4);
+
+    book.learn_dns("seed", &[a1, a2, a3, unconfirmed], EPOCH);
+    book.succeeded(a1, 9, EPOCH);
+    book.succeeded(a2, 9, EPOCH);
+    book.succeeded(a3, 9, EPOCH);
+
+    book.remember_anchors(&[unconfirmed], EPOCH);
+    assert_eq!(book.state.lock().stored.anchors.len(), 0);
+
+    book.remember_anchors(&[a1, a2, a3], EPOCH);
+    assert_eq!(book.state.lock().stored.anchors.len(), MAX_ANCHORS);
+
+    book.remember_anchors(&[], EPOCH);
+    assert_eq!(book.state.lock().stored.anchors.len(), 0);
+
+    book.remember_anchors(&[a1, a2], EPOCH);
+    let way_future = EPOCH + 8 * 24 * 3600;
+    let expired_anchors = book.take_restart_anchors(way_future);
+    assert_eq!(
+        expired_anchors.len(),
+        0,
+        "expired anchors must not be taken"
+    );
+
+    book.remember_anchors(&[a1], EPOCH + 1000);
+    let skewed_anchors = book.take_restart_anchors(EPOCH);
+    assert_eq!(
+        skewed_anchors.len(),
+        0,
+        "future-skewed anchors must not be taken"
+    );
+
+    book.remember_anchors(&[a1, a2], EPOCH);
+    let taken = book.take_restart_anchors(EPOCH + 1);
+    assert_eq!(taken.len(), 2);
+    assert_eq!(book.state.lock().stored.anchors.len(), 0);
+
+    book.return_restart_anchor(a1, EPOCH + 2);
+    assert_eq!(book.state.lock().stored.anchors.len(), 1);
+    assert_eq!(book.state.lock().stored.anchors[0].endpoint, a1);
+
+    book.return_restart_anchors(EPOCH + 3);
+    assert_eq!(book.state.lock().stored.anchors.len(), 2);
+}
