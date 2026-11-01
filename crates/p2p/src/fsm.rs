@@ -36,12 +36,6 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
             peer.compact_blocks.record_remote_preference(send_cmpct);
             Ok(())
         }
-        Message::FeeFilter(rate) => {
-            if *rate < 0 {
-                return Err(PeerError::Misbehavior("negative feefilter rate"));
-            }
-            require_ready(peer.state)
-        }
         Message::Addr(_)
         | Message::Inv(_)
         | Message::GetData(_)
@@ -54,6 +48,7 @@ pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerE
         | Message::BlockPayload(_)
         | Message::Headers(_)
         | Message::GetAddr
+        | Message::FeeFilter(_)
         | Message::Ping(_)
         | Message::Pong(_)
         | Message::MerkleBlock(_)

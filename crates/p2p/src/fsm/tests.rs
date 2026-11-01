@@ -429,22 +429,19 @@ fn negotiation_messages_before_version_are_rejected() {
 }
 
 #[test]
-fn negative_feefilter_is_rejected() -> Result<(), PeerError> {
+fn negative_feefilter_is_ignored() -> Result<(), PeerError> {
     let mut peer = fresh_peer();
     step(&mut peer, &Message::Version(version_message()))?;
     step(&mut peer, &Message::Verack)?;
     assert_eq!(peer.state, PeerState::Ready);
 
-    assert!(matches!(
-        step(&mut peer, &Message::FeeFilter(-1)),
-        Err(PeerError::Misbehavior("negative feefilter rate"))
-    ));
-    assert!(matches!(
-        step(&mut peer, &Message::FeeFilter(i64::MIN)),
-        Err(PeerError::Misbehavior("negative feefilter rate"))
-    ));
-    assert!(step(&mut peer, &Message::FeeFilter(0)).is_ok());
-    assert!(step(&mut peer, &Message::FeeFilter(1_000)).is_ok());
+    step(&mut peer, &Message::FeeFilter(-1))?;
+    assert_eq!(peer.state, PeerState::Ready);
+    step(&mut peer, &Message::FeeFilter(i64::MIN))?;
+    assert_eq!(peer.state, PeerState::Ready);
+    step(&mut peer, &Message::FeeFilter(0))?;
+    step(&mut peer, &Message::FeeFilter(1_000))?;
+    assert_eq!(peer.state, PeerState::Ready);
     Ok(())
 }
 
