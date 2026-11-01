@@ -273,7 +273,8 @@ if verification runs. Consumers must not require every field on a single event.
 - Review enforcement: a new `metrics::` call site must cite an OBS clause in
   the PR. A series not in the ledger and not an operator signal is a
   review-failing diagnostic leak into the metrics API.
-- The historical stage-timer tables in
-  [`benchmarks/end-to-end-sync.md`](benchmarks/end-to-end-sync.md) record
-  measurements taken under the old names on retired artifacts. They are
-  evidence, not a promise that those series still exist.
+- The historical stage-timer tables were removed from
+  [`benchmarks/end-to-end-sync.md`](benchmarks/end-to-end-sync.md#history)
+  and are in Git history at commit `bda50acd4`. They use old metric names on
+  retired artifacts. They are evidence, not a promise that those series still
+  exist.
