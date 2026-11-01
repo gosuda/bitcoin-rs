@@ -659,15 +659,40 @@ fn tail_does_not_rescue_prefix_from_non_final_chunk() -> Result<(), TestError> {
     Ok(())
 }
 
+fn policy_pareto_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1024)
+}
+
 proptest! {
+    #![proptest_config(ProptestConfig { cases: policy_pareto_cases(), ..ProptestConfig::default() })]
+
     #[test]
     fn independent_selection_is_deterministic(
-        fees in prop::collection::vec(1_000_u64..50_000, 1..30),
+        fees in prop::collection::vec(
+            prop_oneof![
+                6 => 1_000_u64..50_000,
+                1 => Just(0_u64),
+                1 => Just(2_u64.pow(50)),
+                1 => Just(1_u64),
+            ],
+            1..30,
+        ),
+        weights in prop::collection::vec(
+            prop_oneof![
+                6 => Just(400_u64),
+                1 => prop_oneof![Just(512_u64), Just(1_000), Just(4_000), Just(16_000), Just(40_000), Just(64_000)],
+            ],
+            1..30,
+        ),
     ) {
+        let count = fees.len().min(weights.len());
         let mut pool = zero_fee_pool();
-        for (index, fee) in fees.iter().enumerate() {
+        for index in 0..count {
             let label = u8::try_from(index).expect("proptest vec is bounded");
-            insert_forged(&mut pool, tx(label, 1_000, None), Forged::new(*fee, 400, 100))
+            insert_forged(&mut pool, tx(label, 1_000, None), consistent(fees[index], weights[index]))
                 .expect("pool admits fixture");
         }
         let left = assemble_candidate(&context(), &pool, PAYOUT).expect("left assembly");
@@ -691,7 +716,12 @@ proptest! {
     #[test]
     fn tail_pass_never_loses_fees_and_preserves_invariants(
         inputs in prop::collection::vec(
-            (0_u64..20_000, 400_u64..2_000, 0_usize..8, -5_000_i64..5_000),
+            (
+                prop_oneof![0_u64..20_000, Just(0_u64), Just(2_u64.pow(50))],
+                prop_oneof![400_u64..2_000, Just(400_u64), Just(10_000_u64)],
+                0_usize..32,
+                prop_oneof![-5_000_i64..5_000, Just(i64::MIN), Just(i64::MAX), Just(0)],
+            ),
             1..12,
         ),
     ) {
