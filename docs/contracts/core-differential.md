@@ -101,7 +101,7 @@ libbitcoinkernel oracle tests prove consensus-script parity. This page owns live
 
 ### `CORE-07`: Core functional suite lane
 
-- **Owner**: `tools/core-functional/` — `fetch-core-tests.sh`, `run.sh` +
+- **Owner**: `tools/core-functional/` with `fetch-core-tests.sh`, `run.sh` +
   `tools/core-functional/bin/runner.py`, `bin/bitcoind-wrapper`, `shim/sitecustomize.py`;
   `tools/core-functional/README.md` owns the measured-results record.
 - `fetch-core-tests.sh` extracts the v31.1 functional suite only from a tag
