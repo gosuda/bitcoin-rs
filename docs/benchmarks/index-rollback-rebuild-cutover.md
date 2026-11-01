@@ -8,7 +8,7 @@ Cell: per-block forward ingest cost (`t_fw`) versus per-block rollback commit co
 cargo test --locked -p bitcoin-rs-index --no-default-features --features fjall --lib runtime::recovery_tests -- --nocapture
 ```
 
-Routing regression (`crates/index/src/runtime/recovery_tests.rs`, small fork fixtures; strict `>`, so `depth == cutover` rewinds; `cutover = 0` rebuilds everything, `u32::MAX` restores rewind-at-any-depth): depth at or below the cutover rewinds, above it rebuilds. Any value in `[1_000, 100_000]` routes the #208 834k-block stale branch to a rebuild while organic reorgs around 100 blocks or fewer rewind; the measured ratio picks the value. Sample identities: the six of [`README.md`](README.md) via the T02 collector. Acceptance: the promotion, regression, reporting, retention, and `BLOCKED` rules of [`README.md`](README.md). Status: end-state cells `planned_not_executed`; the measurement below is prior candidate evidence (512-block fjall fixture, harness removed in a5e9858b), not end-state proof.
+Routing regression (`crates/index/src/runtime/recovery_tests.rs`, small fork fixtures; strict `>`, so `depth == cutover` rewinds; `cutover = 0` rebuilds everything, `u32::MAX` restores rewind-at-any-depth): depth at or below the cutover rewinds, above it rebuilds. Any value in `[1_000, 100_000]` routes the #208 834k-block stale branch to a rebuild while organic reorgs around 100 blocks or fewer rewind; the measured ratio picks the value. Under the identity, acceptance and status rules of [`README.md`](README.md): end-state cells `planned_not_executed`; the measurement below is prior candidate evidence (512-block fjall fixture, harness removed in a5e9858b), not end-state proof.
 
 | Run | t_fw (ns) | t_rb (ns) | derived |
 |---|---|---:|---:|

@@ -21,18 +21,9 @@ Bitcoin Core `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, `bitcoi
 
 The query is a bounded read under the existing read fence; it cannot consume the validation CPU or memory quota. Result rendering keeps integer satoshis internally and Core's exact external units.
 
-## Required identities per sample
-
-The six identities of [`README.md`](README.md), enforced by the T02 collector.
-
-## Acceptance rule
-
-The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.md`](README.md).
-
-
 ## Status
 
-`planned_not_executed`, as defined in [`README.md`](README.md).
+`planned_not_executed` under the identity, acceptance and status rules of [`README.md`](README.md).
 
 ## Prior candidate evidence (controller contract before the rewrite)
 
