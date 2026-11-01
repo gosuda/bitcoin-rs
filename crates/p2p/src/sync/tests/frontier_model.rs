@@ -462,7 +462,7 @@ proptest::proptest! {
         body_case in 0_u8..3,
         in_flight_live in proptest::bool::ANY,
         peers in proptest::collection::vec(
-            (0_i32..32, proptest::bool::ANY),
+            (0_i32..32, proptest::bool::ANY, proptest::bool::ANY),
             0..5usize,
         ),
         pending_live in proptest::bool::ANY,
@@ -476,11 +476,11 @@ proptest::proptest! {
         let usable_peers = peers
             .iter()
             .enumerate()
-            .map(|(idx, (height, evidenced))| {
+            .map(|(idx, (height, evidenced, resolved))| {
                 let mut peer = usable(
                     u16::try_from(9100 + idx).unwrap_or(9100),
                     *height,
-                    Some(u32::try_from(*height).unwrap_or(0)),
+                    resolved.then_some(u32::try_from(*height).unwrap_or(0)),
                 );
                 if *evidenced {
                     peer.demonstrated_tips = vec![hash(0x77)];
