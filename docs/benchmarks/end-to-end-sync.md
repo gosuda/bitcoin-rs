@@ -39,18 +39,15 @@ The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.
 
 ## Historical C150 comparator ratio
 
-[`offline-full-validation.md`](offline-full-validation.md) names this ratio by
-value, so its row stays as a record. A disk-bounded campaign at commit
+A disk-bounded campaign at commit
 `de8001e83bd4e09077d4cebbbdd23d0cebade194` used the exact mainnet range
 0–150,000. Both implementations used full validation, the same stop hash, and
-CPU set 0–31.
+CPU set 0–31. The row is observed once, not evidence, and is kept for context
+only.
 
-| Workload | bitcoin-rs median | Bitcoin Core 31.1 median | Core / bitcoin-rs | Result |
+| Workload | bitcoin-rs observed | Bitcoin Core 31.1 observed | Core / bitcoin-rs | Result |
 |---|---:|---:|---:|---|
-| Full-validation local replay / chainstate reindex | 39.251s | 64.922s | 1.654× | Faster, below the 2× target |
-
-The campaign accepts the measured 1.654× production replay result rather than weakening
-validation, persistence, crash recovery, or reorg-availability semantics to claim 2×.
+| Full-validation local replay / chainstate reindex | 39.251s | 64.922s | 1.654× | Observed once, not evidence |
 
 ## History
 
