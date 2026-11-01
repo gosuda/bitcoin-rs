@@ -407,14 +407,7 @@ pub(crate) fn seed_coinbase_spend_at(height: u32, fee_sats: u64) -> Tx {
     }
 }
 
-pub(crate) fn p2sh_true_output() -> Script {
-    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    Script::from_bytes(redeem.to_p2sh().into_bytes())
-}
-
-pub(crate) fn p2sh_true_spend_script_sig() -> Script {
-    Script::from_bytes(vec![0x01, 0x51])
-}
+pub(crate) use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig};
 
 pub(crate) fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Block> {
     let coinbase = Tx {

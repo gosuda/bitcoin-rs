@@ -1,5 +1,6 @@
 #![cfg(any(feature = "fjall", feature = "redb"))]
 
+use crate::support::block_on;
 use bitcoin_rs_node::test_support::TestError;
 use bitcoin_rs_node::{Auth, Network, NodeConfig, RuntimeInputs, run};
 use crossbeam_channel::bounded;
@@ -50,18 +51,6 @@ fn test_storage_backend() -> bitcoin_rs_storage::StorageBackend {
     #[cfg(not(feature = "fjall"))]
     {
         bitcoin_rs_storage::StorageBackend::Redb
-    }
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            std::task::Poll::Ready(output) => return output,
-            std::task::Poll::Pending => std::thread::yield_now(),
-        }
     }
 }
 

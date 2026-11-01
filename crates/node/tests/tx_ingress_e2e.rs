@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
@@ -40,10 +41,6 @@ const RELAY_ABSENCE_WINDOW: Duration = Duration::from_secs(31);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(35);
 const COLLECT_SLICE: Duration = Duration::from_millis(200);
 
-fn parent_txid(marker: u8) -> Txid {
-    Txid::from(Hash256::from_le_bytes(&[marker; 32]))
-}
-
 fn tx_inv(txid: &Txid) -> Message {
     Message::Inv(vec![Inventory::Transaction(
         bitcoin::hashes::Hash::from_byte_array(*txid.as_bytes()),
@@ -59,17 +56,8 @@ fn open_node() -> Result<(NodeState, tempfile::TempDir)> {
     Ok((state, dir))
 }
 
-fn p2sh_true_output() -> Vec<u8> {
-    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    redeem.to_p2sh().into_bytes()
-}
-
-fn p2sh_true_spend_script_sig() -> Script {
-    Script::from_bytes(vec![0x01, 0x51])
-}
-
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
-    fund_utxo_script(state, parent, value, p2sh_true_output())
+    fund_utxo_script(state, parent, value, p2sh_true_output().as_bytes().to_vec())
 }
 
 fn fund_utxo_script(

@@ -6,6 +6,7 @@ use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
 
+use crate::support::{p2sh_true_output, p2sh_true_spend_script_sig, parent_txid};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
@@ -48,15 +49,6 @@ fn apply_genesis(state: &NodeState) -> Result<()> {
     Ok(())
 }
 
-fn p2sh_true_output() -> Script {
-    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    Script::from_bytes(redeem.to_p2sh().into_bytes())
-}
-
-fn p2sh_true_spend_script_sig() -> Script {
-    Script::from_bytes(vec![0x01, 0x51])
-}
-
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
     let mut changes = BlockChanges::with_capacity(1, 0);
     changes.add(UtxoAdd::new(
@@ -74,10 +66,6 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
         &Hash256::from_le_bytes(&[0xBB; 32]),
     )
     .map_err(|error| TestError::message(format!("utxo commit failed: {error}")))
-}
-
-fn parent_txid(marker: u8) -> Txid {
-    Txid::from(Hash256::from_le_bytes(&[marker; 32]))
 }
 
 fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {

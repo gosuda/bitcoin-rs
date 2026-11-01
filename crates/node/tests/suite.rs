@@ -7,5 +7,6 @@ mod overhaul_durable_head;
 mod overhaul_fee_history;
 mod shutdown;
 mod state_storage;
+mod support;
 mod sync_smoke;
 mod tx_ingress_e2e;

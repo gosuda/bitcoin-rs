@@ -1,8 +1,7 @@
-use std::task::{Context, Poll, Waker};
-
 use bitcoin_rs_node::test_support::TestError;
 
 type Result<T, E = TestError> = core::result::Result<T, E>;
+use crate::support::{block_on, p2sh_true_output, p2sh_true_spend_script_sig};
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::query_api::HistoricalQueryError;
@@ -11,8 +10,8 @@ use bitcoin_rs_node::ScriptIndexMode;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::push_int;
 
@@ -21,18 +20,6 @@ const SEED_BASE_TIME: u32 = 1_296_688_603;
 const SEED_BLOCK_INTERVAL: u32 = 600;
 const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
 
 // EMB-06, EMB-07
 #[test]
@@ -399,15 +386,6 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
     let (first_hash, first_bytes) =
         first_block.ok_or_else(|| TestError::message("at least one block must be seeded"))?;
     Ok((tip.hash, first_hash, first_bytes))
-}
-
-fn p2sh_true_output() -> Script {
-    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
-    Script::from_bytes(redeem.to_p2sh().into_bytes())
-}
-
-fn p2sh_true_spend_script_sig() -> Script {
-    Script::from_bytes(vec![0x01, 0x51])
 }
 
 fn seed_coinbase(height: u32) -> Tx {
