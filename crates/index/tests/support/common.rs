@@ -100,7 +100,6 @@ impl KvStore for MemoryStore {
         Ok(guard[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -179,7 +178,6 @@ impl KvSnapshot for MemorySnapshot {
         Ok(self.cfs[cf.index()].get(key).cloned())
     }
 
-    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,

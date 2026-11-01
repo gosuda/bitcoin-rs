@@ -735,10 +735,6 @@ fn outpoint(seed: u8) -> OutPoint {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one case table, not one case per test"
-)]
 fn block_script_verification_reports_the_earliest_block_ordered_error() {
     let coinbase = coinbase_transaction_with_script_sig_len(2);
 

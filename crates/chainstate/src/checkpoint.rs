@@ -805,7 +805,6 @@ fn checkpoint_manifest(input: &ManifestInputs<'_>) -> CheckpointManifestV1 {
         },
     }
 }
-
 pub(crate) fn write_checkpoint_from_dir_at(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,

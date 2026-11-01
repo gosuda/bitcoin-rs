@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::thread;
 
 impl DerivedIndexWorker {
-    #[expect(clippy::too_many_arguments)]
     pub fn spawn_with_open(
         runtime: Arc<DerivedIndexRuntime>,
         spec: DerivedIndexOpenSpec,

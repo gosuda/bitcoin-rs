@@ -1078,7 +1078,6 @@ impl DownloadWindow {
         self.next_request_height = retry_height;
     }
 
-    #[expect(clippy::too_many_arguments)]
     pub(crate) fn next_peer_request(
         &mut self,
         stager: &mut BlockStager,

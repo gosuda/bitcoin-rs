@@ -77,10 +77,6 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), TestErr
 
 // SYNC-01, SYNC-02, SYNC-05
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the rejection, unchanged consumer state and recovery in one scenario"
-)]
 fn tick_recovers_rejected_frontier_without_publishing_unapplied_blocks() -> Result<(), TestError> {
     let genesis = regtest_genesis_block()?;
     let block_one = child_coinbase_block(&genesis, 1)?;

@@ -1,5 +1,3 @@
-#![allow(clippy::inline_always)]
-
 use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
 use sha2::{Digest, Sha256};

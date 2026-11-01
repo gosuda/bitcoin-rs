@@ -207,7 +207,6 @@ fn assert_taproot_digests_match(
         }
     }
 }
-
 fn signed_fixture() -> (Tx, Vec<TxOut>) {
     let (mut tx, mut prevouts) = fixture(42, 42);
     tx.lock_time = LockTime::ZERO;

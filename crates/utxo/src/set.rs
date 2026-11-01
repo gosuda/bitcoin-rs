@@ -269,7 +269,6 @@ impl UtxoSet {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
         self.with_stable_view(|view| view.len())
     }
 
@@ -280,7 +279,6 @@ impl UtxoSet {
 
     #[must_use]
     pub fn record_count(&self) -> usize {
-        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
         self.with_stable_view(|view| view.record_count())
     }
 

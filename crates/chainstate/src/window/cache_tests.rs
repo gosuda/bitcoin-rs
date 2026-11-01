@@ -222,7 +222,6 @@ fn a_failed_window_restores_the_script_cache_entries_it_took() -> TestResult {
     Ok(())
 }
 #[test]
-#[expect(clippy::too_many_lines)]
 fn a_window_refused_after_proof_restores_only_uncommitted_takes() -> TestResult {
     let network = Network::Regtest;
     let mut handles: Chainstate = handles(network, Arc::new(UtxoSet::new()));

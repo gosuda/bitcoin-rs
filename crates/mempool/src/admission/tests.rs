@@ -1426,10 +1426,6 @@ fn witness_spend() -> (Arc<Tx>, Coins) {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep the independent BIP141 oracle and offered-output boundary vectors together"
-)]
 fn package_prevouts_preserve_sigops_without_mutating_the_pool()
 -> Result<(), crate::test_error::TestError> {
     use bitcoin_rs_primitives::consensus_bytes;

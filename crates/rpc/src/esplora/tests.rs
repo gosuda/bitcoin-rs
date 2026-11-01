@@ -486,7 +486,6 @@ fn fee_estimate_conversion_preserves_the_exact_relay_floor() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn bitcoin_esplora_surface_matches_documented_routes_and_content_types() -> Result<(), TestError> {
     let (handler, transaction, block, address) = contract_fixture()?;
     let txid = transaction.txid().to_string();
@@ -613,7 +612,6 @@ fn bitcoin_esplora_surface_matches_documented_routes_and_content_types() -> Resu
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn bitcoin_esplora_representations_match_the_documented_schemas() -> Result<(), TestError> {
     fn keys(value: &Value) -> std::collections::BTreeSet<&str> {
         value
@@ -917,7 +915,6 @@ fn composed_response_retries_when_the_applied_tip_identity_changes() {
 }
 
 #[test]
-#[expect(clippy::too_many_lines)]
 fn block_status_and_block_list_never_straddle_two_applied_branches() -> Result<(), TestError> {
     use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::Header;
@@ -1503,7 +1500,6 @@ fn history_hydrates_only_the_requested_chain_page() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
     let target = vec![0x51];
     let script_hash = ScriptHash::new(&target);
@@ -1624,7 +1620,6 @@ fn chain_history_does_not_enumerate_script_live_or_poll_mempool() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn chain_history_pagination_traversal_multi_page_and_pruned_blocks() {
     let target = vec![0x51];
     let script_hash = ScriptHash::new(&target);
@@ -2051,10 +2046,6 @@ fn transaction_projection_uses_internal_lookup_for_prevout_and_fee() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "first, later, mixed and missing pages share one history fixture"
-)]
 fn history_resolves_shared_parents_once_per_page() {
     let parent = paying_transaction(&[OutPoint::null()], &vec![(125, vec![0x52]); 62]);
     let transactions = (0_u32..30)

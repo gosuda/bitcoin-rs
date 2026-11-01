@@ -123,7 +123,6 @@ impl ConnectionShared {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         peer_table: Arc<crate::PeerTable>,
@@ -603,7 +602,6 @@ pub fn bind_listener(addr: std::net::SocketAddr) -> Result<TcpListener, Listener
     Ok(listener)
 }
 
-#[expect(clippy::needless_pass_by_value)]
 pub fn serve(
     listener: TcpListener,
     shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
@@ -906,10 +904,6 @@ enum Dialed {
     V1Retry,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One connection owner keeps admission, TCP health, lease publication, and handshake teardown ordered"
-)]
 fn dial(
     addr: PeerEndpoint,
     shared: &ConnectionShared,
@@ -1230,10 +1224,6 @@ fn negotiate_inbound(
     crate::transport::establish(stream, &mut handshake, shared.magic, lease, deadline)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One handshake owner keeps transport, version, and session publication ordered"
-)]
 fn run_handshake(
     stream: TcpStream,
     peer_addr: impl Into<crate::PeerRemote>,
@@ -1929,7 +1919,6 @@ fn retry_deferred_request<S>(
     }
 }
 
-#[expect(clippy::too_many_lines)]
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: impl Into<crate::PeerRemote>,

@@ -834,10 +834,6 @@ fn decode_inspection_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     decode_tx(raw, message)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one amount parser keeps sign, exponent, mantissa, and scale checks in a single auditable sequence"
-)]
 fn sats_from_btc(value: &Value, message: &'static str) -> Result<u64, RpcError> {
     let text = if let Some(text) = value.as_str() {
         text.to_owned()

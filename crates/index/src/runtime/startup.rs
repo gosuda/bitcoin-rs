@@ -49,7 +49,6 @@ where
     }
 }
 
-#[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(super) fn run_worker_with_open(
     runtime: &Arc<DerivedIndexRuntime>,
     spec: DerivedIndexOpenSpec,
@@ -189,7 +188,6 @@ impl WorkerSetup<'_> {
         self.shutdown.is_triggered() || self.generation.is_revoked() || self.runtime.should_stop()
     }
 }
-
 pub(super) fn open_and_run(
     setup: &WorkerSetup<'_>,
     body_store: Option<Arc<dyn BlockBodyStore>>,

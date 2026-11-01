@@ -34,7 +34,6 @@ mod serde_opt_hash256 {
     use bitcoin_rs_primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    #[expect(clippy::ref_option)]
     pub(super) fn serialize<S>(hash: &Option<Hash256>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

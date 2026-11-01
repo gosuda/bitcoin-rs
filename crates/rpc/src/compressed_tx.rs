@@ -765,10 +765,6 @@ struct Plan {
     sequence: u32,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one sequential encoding pass over the transaction fields"
-)]
 pub(crate) fn compress_transaction(
     tx: &Tx,
     resolver: &mut dyn PrevoutResolver,
@@ -1230,10 +1226,6 @@ pub(crate) struct DecompressPlan {
     inputs: Vec<InputParts>,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one sequential decoding pass over the transaction fields"
-)]
 pub(crate) fn decompress_prepare(
     bytes: &[u8],
     resolver: &mut dyn PrevoutResolver,

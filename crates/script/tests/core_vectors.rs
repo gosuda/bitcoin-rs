@@ -591,10 +591,6 @@ struct ScriptTestRow {
     comment: String,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "test vector parser; splitting would obscure the row format"
-)]
 fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> {
     let path = reference_path("script_tests.json");
     let text =
@@ -808,10 +804,6 @@ struct TxVectorRow {
     row_index: usize,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "test vector parser mirrors Core's linear test loader structure"
-)]
 fn load_tx_vectors(
     name: &str,
     expected_accept: bool,

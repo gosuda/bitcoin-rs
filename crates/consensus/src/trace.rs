@@ -1,5 +1,4 @@
 #![allow(
-    clippy::items_after_statements,
     clippy::as_conversions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss

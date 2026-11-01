@@ -667,7 +667,6 @@ impl Manager {
             Some(index)
         }
     }
-
     fn learn(
         &mut self,
         addr: PeerEndpoint,
