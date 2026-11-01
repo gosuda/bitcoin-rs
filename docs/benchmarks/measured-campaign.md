@@ -155,16 +155,39 @@ The `block_to_template corpus:` line and the `mrp-verify: node_identity ` line m
 
 ### How the six benchmark sample identities map to registration and records
 
-[`README.md`](README.md#required-identities-per-sample) is binding and requires six identities per sample: Artifact, Configuration, Corpus, Durability, Toolchain, and Hardware. In a measured campaign, individual Criterion `sample.json` files and `MRP_COUNTED_SAMPLE` stdout lines carry only timing arrays (`iters`/`times` or `unit_ns`/`unit_count`/`total_ns`) and row identifiers. The table below distinguishes the subset of fields validated directly by `measured_runner.py` and `measured_analyze.py` from the additional operator-retained configuration, durability, toolchain, and hardware metadata required by [`README.md`](README.md#required-identities-per-sample). Successful registration validation alone does not certify complete performance-acceptance evidence, and implied source state or timing splits never waive or substitute for the policy-required identities:
+[`README.md`](README.md#required-identities-per-sample) is binding and requires six identities per sample: Artifact, Configuration, Corpus, Durability, Toolchain, and Hardware. In a measured campaign, individual Criterion `sample.json` files and `MRP_COUNTED_SAMPLE` stdout lines carry only timing arrays (`iters`/`times` or `unit_ns`/`unit_count`/`total_ns`) and row identifiers. The table below shows the fields that `measured_runner.py` and `measured_analyze.py` validate directly. Capture the remaining Configuration, Durability, Toolchain, and Hardware fields with `tools/benchmark-campaign/operator_identity.py capture` after the campaign stops, and keep its `operator-identity-v1` bundle beside the campaign's `results.json`. Successful registration validation alone does not certify complete performance-acceptance evidence, and implied source state or timing splits never waive or substitute for the policy-required identities:
 
-| Identity | Fields validated by `measured_runner.py` / `measured_analyze.py` and operator-retained metadata boundary |
+| Identity | Fields validated by `measured_runner.py` / `measured_analyze.py`, and the operator identity bundle boundary |
 |---|---|
 | Artifact | Validated by tools: `source_fingerprints`, `bench_fingerprints`, `lock_fingerprints`, `scripts`, `binaries[key].sha256`, `binaries[key].receipt`, and per-case `binary_sha256_before` / `binary_sha256_after` re-hashed before and after each child invocation. |
-| Configuration | Validated by tools: pinned row `argv` in `targets[T<n>].rows`, runner-enforced `BITCOIN_RS_VALIDATION_ENGINE=native` in every child environment, and `node_identity[*].engine == "native"` on T2/T3 stdout. Although frozen source and build provenance (`source_fingerprints`, `lock_fingerprints`, `binaries[key].receipt`) fix the compiled tree, the runner and analyzer do not independently capture or validate runtime fields for resolved `NodeConfig`, feature set, or allocator; those remain additional operator-retained metadata required by [`README.md`](README.md#required-identities-per-sample). |
+| Configuration | Validated by tools: pinned row `argv` in `targets[T<n>].rows`, runner-enforced `BITCOIN_RS_VALIDATION_ENGINE=native` in every child environment, and `node_identity[*].engine == "native"` on T2/T3 stdout. Although frozen source and build provenance (`source_fingerprints`, `lock_fingerprints`, `binaries[key].receipt`) fix the compiled tree, the runner and analyzer do not independently capture or validate runtime fields for resolved `NodeConfig`, feature set, or allocator; the `operator-identity-v1` bundle captures those fields beside `results.json`. |
 | Corpus | Validated by tools: pinned `corpus` and `node_identity` objects in registration, verified against T2/T3 stdout (`node_corpus` and per-sample `identity`), plus deterministic in-bench fixture assertions verified by `--mrp-verify` / `--mrp-verify-counted`. |
-| Durability | Validated by tools: frozen source, bench, and lock digests (`source_fingerprints`, `bench_fingerprints`, `lock_fingerprints`, `binaries[key].receipt`) and presence/shape of T2's per-unit `durable_sync_us` and `durable_commit_us` arrays. Those arrays are descriptive timing splits, not durability identity fields, and source hashes alone do not record runtime backend, batch mode (`write`, `write_deferred`, `write_durable`), or flush/sync posture; those remain additional operator-retained metadata required by [`README.md`](README.md#required-identities-per-sample). |
-| Toolchain | Validated by tools: `lock_fingerprints` across all five trees, `dependency_baseline_evidence`, and the required digest fields (`source_digest`, `bench_source_sha256`, `lock_digest`, `binary_sha256`) in each `binaries[key].receipt`. Exact `rustc` version, edition, profile, and enabled feature strings in receipts or campaign records are not schema-enforced by the validator and remain operator-retained metadata required by [`README.md`](README.md#required-identities-per-sample). |
-| Hardware | Validated by tools: registration `host.cpu` and `host.cpu_model`, enforced via `taskset -c <cpu>` and verified against live `/proc/cpuinfo`, `os.sched_getaffinity(0)`, and `/sys/devices/system/cpu` (`cpufreq`) in per-case `host_before` and `host_after`, plus `perf` counters (`task-clock`, `cycles:u`, `instructions:u`) in the separate per-case `perf` field, with raw CSV text in `perf_csv`. System memory, storage device, and OS kernel identity are not validated by the runner or analyzer and remain operator-retained metadata required by [`README.md`](README.md#required-identities-per-sample). |
+| Durability | Validated by tools: frozen source, bench, and lock digests (`source_fingerprints`, `bench_fingerprints`, `lock_fingerprints`, `binaries[key].receipt`) and presence/shape of T2's per-unit `durable_sync_us` and `durable_commit_us` arrays. Those arrays are descriptive timing splits, not durability identity fields, and source hashes alone do not record runtime backend, batch mode (`write`, `write_deferred`, `write_durable`), or flush/sync posture; the `operator-identity-v1` bundle captures those fields beside `results.json`. |
+| Toolchain | Validated by tools: `lock_fingerprints` across all five trees, `dependency_baseline_evidence`, and the required digest fields (`source_digest`, `bench_source_sha256`, `lock_digest`, `binary_sha256`) in each `binaries[key].receipt`. Exact `rustc` version, edition, profile, and enabled feature strings in receipts or campaign records are not schema-enforced by the validator and are captured, with `rustc --version --verbose`, by the `operator-identity-v1` bundle beside `results.json`. |
+| Hardware | Validated by tools: registration `host.cpu` and `host.cpu_model`, enforced via `taskset -c <cpu>` and verified against live `/proc/cpuinfo`, `os.sched_getaffinity(0)`, and `/sys/devices/system/cpu` (`cpufreq`) in per-case `host_before` and `host_after`, plus `perf` counters (`task-clock`, `cycles:u`, `instructions:u`) in the separate per-case `perf` field, with raw CSV text in `perf_csv`. System memory, storage device, and OS kernel identity are not validated by the runner or analyzer and are captured by the `operator-identity-v1` bundle beside `results.json`. |
+
+Run the capture command after the campaign stops. It launches no workload. A missing or refused identity exits `2` with `BLOCKED: <identity>` on stderr and writes nothing:
+
+```sh
+python3 tools/benchmark-campaign/operator_identity.py capture \
+  --run-dir /abs/path/to/campaign_root --binary /abs/path/to/bench_binary \
+  --node-config /abs/path/to/resolved-node-config \
+  --output /abs/path/to/campaign_root/operator-identity.json \
+  --commit <source_commit> --features <features> --allocator <allocator> \
+  --validation-mode <validation_mode> --backend <backend> \
+  --batch-mode <write|write_deferred|write_durable> \
+  --flush-posture <flush_posture> --sync-posture <sync_posture>
+```
+
+`--node-config` is optional. Every other identity flag is required. The bundle records the rustc toolchain from `rustc --version --verbose`, the CPU model, the online and pinned cores, the cpufreq governor, total memory, the OS kernel, the storage scope of the run directory from `filesystem.py` (a ZFS pool stays `unavailable` with its reason), the binary SHA-256 and size, the source commit, the resolved `NodeConfig` SHA-256 when given, and the runtime posture flags. It carries a canonical SHA-256 over its own payload. Verify a bundle after any move or copy:
+
+```sh
+python3 tools/benchmark-campaign/operator_identity.py verify \
+  --bundle /abs/path/to/campaign_root/operator-identity.json \
+  --binary /abs/path/to/bench_binary
+```
+
+`verify` recomputes the bundle digest and the binary hash. Any mismatch exits `1` with `INVALID:` on stderr, and that bundle is not evidence.
 
 ### Pinned row inventory (31 rows: 17 Criterion, 12 counted, 2 node)
 
