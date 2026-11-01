@@ -25,9 +25,8 @@ pub(crate) fn getblocktweaks(ctx: &Arc<Context>, params: &Value) -> Result<Value
         .ok_or(RpcError::MethodDisabled(
             "getblocktweaks is disabled; enable --silent-payments",
         ))?;
-    let params = super::bind_named_params(params, &["block"])?;
-    super::ensure_at_most_params(&params, 1)?;
-    let params = super::params_array(&params)?;
+    super::ensure_at_most_params(params, 1)?;
+    let params = super::params_array(params)?;
     let selector = params
         .first()
         .ok_or(RpcError::InvalidParams("block height or hash is required"))?;

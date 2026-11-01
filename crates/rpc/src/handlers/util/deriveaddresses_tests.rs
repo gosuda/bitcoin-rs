@@ -262,7 +262,8 @@ fn combo_does_not_derive_from_a_testnet_wif_on_mainnet() {
 fn deriveaddresses_binds_named_parameters_and_rejects_excess() {
     let ctx = Arc::new(Context::new());
     let desc = checksummed(&format!("addr({ADDRESS})"));
-    let named = deriveaddresses(&ctx, &json!({"descriptor": desc}))
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("deriveaddresses", &json!({"descriptor": desc}))
         .unwrap_or_else(|err| panic!("named params failed: {err}"));
     assert_eq!(named, json!([ADDRESS]));
 
@@ -276,7 +277,8 @@ fn deriveaddresses_binds_named_parameters_and_rejects_excess() {
 fn getdescriptorinfo_binds_named_parameters_and_rejects_excess() {
     let ctx = Arc::new(Context::new());
     let desc = format!("addr({ADDRESS})");
-    let named = getdescriptorinfo(&ctx, &json!({"descriptor": desc}))
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("getdescriptorinfo", &json!({"descriptor": desc}))
         .unwrap_or_else(|err| panic!("named params failed: {err}"));
     assert!(named.get("descriptor").is_some());
 

@@ -325,7 +325,8 @@ fn disconnectnode_nodeid_above_u32_max_never_aliases_a_live_connection()
     let ctx = Arc::new(ctx);
 
     let wide = lease.node_id() + (u64::from(u32::MAX) + 1);
-    let refused = disconnectnode(&ctx, &json!({ "nodeid": wide }));
+    let refused = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("disconnectnode", &json!({ "nodeid": wide }));
     assert!(
         matches!(refused, Err(RpcError::NotFound(_))),
         "a wide selector is well-formed but names no connection"
@@ -529,7 +530,8 @@ fn disconnectnode_accepts_a_named_nodeid_alone_and_keeps_address_precedence()
     ));
     assert!(!lease.is_cancelled());
 
-    let named = disconnectnode(&ctx, &json!({ "nodeid": node_id }))
+    let named = crate::Handler::new(Arc::clone(&ctx))
+        .dispatch("disconnectnode", &json!({ "nodeid": node_id }))
         .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
     assert!(named.is_null());
     assert!(lease.is_cancelled());
@@ -597,12 +599,13 @@ fn disconnectnode_identity_forms_ignore_a_session_still_handshaking()
     let ctx = Arc::new(ctx);
     let address = addr.to_string();
 
+    let handler = crate::Handler::new(Arc::clone(&ctx));
     for params in [
         json!(["", node_id]),
         json!([address.as_str(), node_id]),
         json!({ "nodeid": node_id }),
     ] {
-        let refused = disconnectnode(&ctx, &params);
+        let refused = handler.dispatch("disconnectnode", &params);
         assert!(
             matches!(refused, Err(RpcError::NotFound(_))),
             "{params:?}: {refused:?}"

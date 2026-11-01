@@ -139,9 +139,13 @@ fn testmempoolaccept_binds_named_parameters_and_rejects_excess() {
         .expect_err("excess parameters must fail");
     assert!(matches!(excess, RpcError::InvalidParams(_)));
 
-    let named = super::testmempoolaccept(&ctx, &json!({"rawtxs": []}))
-        .expect_err("named params must reach rawtxs validation");
-    assert!(matches!(named, RpcError::InvalidParams(_)));
+    let handler = crate::Handler::new(Arc::clone(&ctx));
+    let named = handler.dispatch("testmempoolaccept", &json!({"rawtxs": []}));
+    let positional = handler.dispatch("testmempoolaccept", &json!([[]]));
+    assert_eq!(
+        named.expect_err("named empty rawtxs").to_string(),
+        positional.expect_err("positional empty rawtxs").to_string()
+    );
 }
 
 #[test]

@@ -461,8 +461,6 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring", "maxfeerate", "maxburnamount"])?;
-    let params = bound.as_ref();
     super::ensure_at_most_params(params, 3)?;
     let raw = required_str(params, 0, "raw transaction is required")?;
     let max_feerate = send_max_feerate(params, 1)?;
@@ -522,8 +520,6 @@ enum AcceptanceRow {
 }
 
 pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["rawtxs", "maxfeerate"])?;
-    let params = bound.as_ref();
     super::ensure_at_most_params(params, 2)?;
     let array = params_array(params)?;
     let raw_txs = array
@@ -593,8 +589,6 @@ pub(crate) fn decoderawtransaction(
     params: &Value,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["hexstring"])?;
-    let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     if cancellation.is_triggered() {
         return Err(RpcError::Misc(
@@ -619,8 +613,6 @@ pub(crate) fn compressrawtransaction(
             "compressrawtransaction is disabled; enable --compressed-transactions",
         ));
     }
-    let bound = super::bind_named_params(params, &["hexstring", "compress_outpoints"])?;
-    let params = bound.as_ref();
     let raw = required_str(params, 0, "raw transaction is required")?;
     if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
         return Err(RpcError::InvalidParameter(
@@ -660,8 +652,6 @@ pub(crate) fn decompressrawtransaction(
             "decompressrawtransaction is disabled; enable --compressed-transactions",
         ));
     }
-    let bound = super::bind_named_params(params, &["hexstring"])?;
-    let params = bound.as_ref();
     let raw = required_str(params, 0, "compressed transaction is required")?;
     if raw.len() > crate::compressed_tx::MAX_COMPRESSED_TX_BYTES * 2 {
         return Err(RpcError::InvalidParameter(
@@ -688,12 +678,10 @@ pub(crate) fn decompressrawtransaction(
     })
 }
 
-const CREATE_TRANSACTION_ARGUMENTS: &[&str] = &["inputs", "outputs", "locktime", "replaceable"];
+const CREATE_TRANSACTION_MAX_ARGUMENTS: usize = 4;
 
 pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, CREATE_TRANSACTION_ARGUMENTS)?;
-    let params = bound.as_ref();
-    super::ensure_at_most_params(params, CREATE_TRANSACTION_ARGUMENTS.len())?;
+    super::ensure_at_most_params(params, CREATE_TRANSACTION_MAX_ARGUMENTS)?;
     let array = params_array(params)?;
     let inputs = array
         .first()

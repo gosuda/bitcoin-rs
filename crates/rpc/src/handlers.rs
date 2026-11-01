@@ -86,6 +86,11 @@ impl Handler {
         else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
+        let bound = row
+            .arg_names
+            .map(|names| bind_named_params(params, names))
+            .transpose()?;
+        let params = bound.as_ref().map_or(params, |bound| bound.as_ref());
         let _blocking = row
             .execution
             .is_blocking(params)

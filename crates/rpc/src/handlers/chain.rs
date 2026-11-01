@@ -129,10 +129,9 @@ pub(crate) fn dumptxoutset(
     params: &Value,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["path", "type"])?;
-    super::ensure_at_most_params(&params, 2)?;
-    let path = required_str(&params, 0, "path is required")?;
-    let snapshot_type = match params_array(&params)?.get(1) {
+    super::ensure_at_most_params(params, 2)?;
+    let path = required_str(params, 0, "path is required")?;
+    let snapshot_type = match params_array(params)?.get(1) {
         Some(value) if !value.is_null() => value
             .as_str()
             .ok_or_else(|| super::wrong_type_plain(value, "string"))?,
@@ -482,8 +481,6 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["blockhash", "verbosity"])?;
-    let params = bound.as_ref();
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbosity = getblock_verbosity(params)?;
     let _render = if verbosity >= 2 {
@@ -1137,8 +1134,6 @@ pub(crate) fn gettxoutsetinfo(
 }
 
 pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["blockhash", "filtertype"])?;
-    let params = bound.as_ref();
     let hash =
         parse_hash(required_str(params, 0, "block hash is required")?).map_err(
             |error| match error {
@@ -1255,8 +1250,7 @@ pub(crate) fn scantxoutset(
     params: &Value,
     cancellation: &bitcoin_rs_chain::LatchReader,
 ) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["action", "scanobjects"])?;
-    let (action, objects) = scan_arguments(&params)?;
+    let (action, objects) = scan_arguments(params)?;
     match action {
         "start" => {
             let permit = ctx

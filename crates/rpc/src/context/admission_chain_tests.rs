@@ -323,11 +323,12 @@ fn sendrawtransaction_honors_maxburnamount_before_admission() {
         refused.to_string().contains("maxburnamount"),
         "unexpected refusal: {refused}"
     );
-    let refused = tx::sendrawtransaction(
-        &rpc_ctx,
-        &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
-    )
-    .expect_err("unknown prevout must still be refused");
+    let refused = crate::Handler::new(Arc::clone(&rpc_ctx))
+        .dispatch(
+            "sendrawtransaction",
+            &json!({"hexstring": raw, "maxburnamount": "0.00001"}),
+        )
+        .expect_err("unknown prevout must still be refused");
     assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
 }
 
@@ -504,7 +505,8 @@ fn sendrawtransaction_rejects_unknown_extra_params() {
         refused.to_string().contains("too many parameters"),
         "unexpected refusal: {refused}"
     );
-    let refused = tx::sendrawtransaction(&rpc_ctx, &json!({"hexstring": raw, "bogus": 1}))
+    let refused = crate::Handler::new(Arc::clone(&rpc_ctx))
+        .dispatch("sendrawtransaction", &json!({"hexstring": raw, "bogus": 1}))
         .expect_err("an unknown named parameter must be refused");
     assert!(
         refused.to_string().contains("Unknown named parameter"),

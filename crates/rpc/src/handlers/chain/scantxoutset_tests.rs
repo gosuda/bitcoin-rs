@@ -280,7 +280,9 @@ fn scantxoutset_refuses_malformed_requests() {
 #[test]
 fn scantxoutset_empty_and_named_start_match_genesis() {
     let ctx = Arc::new(Context::new());
-    let result = scantxoutset(&ctx, &json!({"action":"start", "scanobjects":[]}))
+    let handler = crate::Handler::new(Arc::clone(&ctx));
+    let result = handler
+        .dispatch("scantxoutset", &json!({"action":"start", "scanobjects":[]}))
         .unwrap_or_else(|error| panic!("empty scan: {error}"));
     assert_eq!(result["success"].as_bool(), Some(true));
     assert_eq!(

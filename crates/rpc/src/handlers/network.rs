@@ -527,10 +527,9 @@ fn control_error_to_rpc_error(error: bitcoin_rs_p2p::P2pControlError) -> RpcErro
 }
 
 pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let bound = super::bind_named_params(params, &["address", "nodeid"])?;
-    let array = params_array(&bound)?;
+    let array = params_array(params)?;
     let address = if array.first().is_some_and(|value| !value.is_null()) {
-        Some(required_str(&bound, 0, "address is required")?)
+        Some(required_str(params, 0, "address is required")?)
     } else {
         None
     };

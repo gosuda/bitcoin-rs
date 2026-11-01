@@ -258,6 +258,128 @@ fn named_binding_preserves_method_boundaries() {
     }
 }
 
+#[test]
+#[expect(clippy::expect_used)]
+fn named_parameters_match_positional_arguments_for_core_methods() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let txid = "00".repeat(32);
+    let hash = "11".repeat(32);
+    let observed = |result: Result<sonic_rs::Value, RpcError>| {
+        result.map_err(|error| (error.code(), error.to_string()))
+    };
+    for (method, named, positional) in [
+        ("getblockhash", json!({"height": 0}), json!([0])),
+        (
+            "getblockheader",
+            json!({"blockhash": hash.as_str(), "verbose": false}),
+            json!([hash.as_str(), false]),
+        ),
+        (
+            "gettxoutsetinfo",
+            json!({"hash_type": "none"}),
+            json!(["none"]),
+        ),
+        (
+            "gettxoutsetinfo",
+            json!({"hash_or_height": 0}),
+            json!([null, 0]),
+        ),
+        ("getrawmempool", json!({"verbose": true}), json!([true])),
+        (
+            "getrawmempool",
+            json!({"mempool_sequence": true}),
+            json!([null, true]),
+        ),
+        (
+            "getmempoolancestors",
+            json!({"txid": txid.as_str(), "verbose": false}),
+            json!([txid.as_str(), false]),
+        ),
+        (
+            "getmempooldescendants",
+            json!({"txid": txid.as_str(), "verbose": false}),
+            json!([txid.as_str(), false]),
+        ),
+        (
+            "generatetoaddress",
+            json!({"nblocks": 1, "address": "regtest"}),
+            json!([1, "regtest"]),
+        ),
+        (
+            "generateblock",
+            json!({"output": "regtest", "transactions": []}),
+            json!(["regtest", []]),
+        ),
+        (
+            "setban",
+            json!({"subnet": "127.0.0.1", "command": "add"}),
+            json!(["127.0.0.1", "add"]),
+        ),
+        (
+            "getnodeaddresses",
+            json!({"count": 5, "network": "ipv4"}),
+            json!([5, "ipv4"]),
+        ),
+        (
+            "gettxout",
+            json!({"txid": txid.as_str(), "n": 0}),
+            json!([txid.as_str(), 0]),
+        ),
+        ("finalizepsbt", json!({"psbt": "zz"}), json!(["zz"])),
+        (
+            "estimatesmartfee",
+            json!({"conf_target": 6, "estimate_mode": "conservative"}),
+            json!([6, "conservative"]),
+        ),
+    ] {
+        assert_eq!(
+            observed(handler.dispatch(method, &named)),
+            observed(handler.dispatch(method, &positional)),
+            "{method} named parameters must bind like positional parameters"
+        );
+    }
+    assert_eq!(
+        observed(handler.dispatch("getrawmempool", &json!({"mempool_sequence": true}))),
+        Ok(json!({"txids": [], "mempool_sequence": 0}))
+    );
+    let error = handler
+        .dispatch("gettxoutsetinfo", &json!({"hash_or_height": 0}))
+        .expect_err("named hash_or_height requires the coinstats index");
+    assert_eq!(
+        error.to_string(),
+        "Querying specific block heights requires coinstatsindex"
+    );
+    let error = handler
+        .dispatch(
+            "estimatesmartfee",
+            &json!({"conf_target": 6, "estimate_mode": "bogus"}),
+        )
+        .expect_err("named mode");
+    assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+}
+
+#[test]
+#[expect(clippy::expect_used)]
+fn named_parameter_errors_use_core_invalid_parameter_code() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let error = handler
+        .dispatch("getblockhash", &json!({"height": 0, "extra": 1}))
+        .expect_err("unknown name");
+    assert_eq!(error.code(), -8);
+    assert_eq!(error.to_string(), "Unknown named parameter extra");
+    let error = handler
+        .dispatch(
+            "getblockheader",
+            &json!({"args": ["00"], "blockhash": "00"}),
+        )
+        .expect_err("positional and named conflict");
+    assert_eq!(error.code(), -8);
+    assert_eq!(
+        error.to_string(),
+        "Parameter blockhash specified twice both as positional and named argument"
+    );
+}
+
 fn test_context() -> (Arc<Context>, Arc<bitcoin_rs_chainstate::Chainstate>) {
     let chainstate = Arc::new(bitcoin_rs_chainstate::Chainstate::new(
         bitcoin_rs_primitives::Network::Regtest,

@@ -1,5 +1,4 @@
 use alloc::sync::Arc;
-use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{LatchReader, TipWaitCondition};
@@ -8,18 +7,17 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use crate::{RpcError, context::Context};
 
-use super::{bind_named_params, wrong_type};
+use super::wrong_type;
 
 fn arguments<'a>(
     params: &'a Value,
     names: &[&str],
     required: usize,
     usage: &str,
-) -> Result<Cow<'a, Value>, RpcError> {
-    let params = bind_named_params(params, names)?;
+) -> Result<&'a Value, RpcError> {
     let array = params
         .as_array()
-        .ok_or(RpcError::InvalidParams("params must be an array or object"))?;
+        .ok_or(RpcError::InvalidParams("params must be an array"))?;
     if array.len() < required || array.len() > names.len() {
         return Err(RpcError::Misc(usage.to_owned()));
     }

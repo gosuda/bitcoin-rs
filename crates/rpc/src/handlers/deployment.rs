@@ -13,9 +13,8 @@ use crate::convert::typed_to_sonic_omitting_nulls;
 use crate::error::RpcError;
 
 pub(crate) fn getdeploymentinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let params = super::bind_named_params(params, &["blockhash"])?;
-    super::ensure_at_most_params(&params, 1)?;
-    let value = super::params_array(&params)?.first();
+    super::ensure_at_most_params(params, 1)?;
+    let value = super::params_array(params)?.first();
     let hash = match value.filter(|value| !value.is_null()) {
         None => ctx.chain.applied_view().hash(ctx.chain.chain_network),
         Some(value) => {
@@ -185,7 +184,7 @@ mod tests {
         assert!(!sonic_rs::to_string(&value)?.contains("null"));
         assert_eq!(
             value,
-            getdeploymentinfo(&context, &json!({"blockhash": typed.hash}))?
+            handler.dispatch("getdeploymentinfo", &json!({"blockhash": typed.hash}))?
         );
         assert_eq!(value, getdeploymentinfo(&context, &json!([null]))?);
         let rest = crate::rest::route(&context, "/rest/deploymentinfo.json", "", true);
