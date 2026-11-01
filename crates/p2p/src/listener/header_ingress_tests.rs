@@ -102,17 +102,9 @@ fn disconnected_header_ingress_releases_the_sender() -> TestResult {
 // P2P-07
 #[test]
 fn sustained_wire_and_body_header_ingress_stays_bounded() -> TestResult {
-    run_sustained_wire_headers_case()?;
-    run_sustained_body_headers_case()?;
+    run_sustained_ingress_case(HeaderDelivery::WireResponse)?;
+    run_sustained_ingress_case(HeaderDelivery::EmbeddedBlock)?;
     Ok(())
-}
-
-fn run_sustained_wire_headers_case() -> TestResult {
-    run_sustained_ingress_case(HeaderDelivery::WireResponse)
-}
-
-fn run_sustained_body_headers_case() -> TestResult {
-    run_sustained_ingress_case(HeaderDelivery::EmbeddedBlock)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
