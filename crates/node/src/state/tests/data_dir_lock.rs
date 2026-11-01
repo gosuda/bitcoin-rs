@@ -66,6 +66,54 @@ fn second_open_while_first_lives_refuses_and_reopen_succeeds_after_drop() -> Res
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn fork_exec_window_cannot_hold_the_directory_lock() -> Result<(), TestError> {
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path().join("node");
+    std::fs::create_dir_all(&data_dir)?;
+
+    let first = DataDirLock::acquire(&data_dir)?;
+
+    let (arrived_tx, mut arrived_rx) = UnixStream::pair()?;
+    let (mut release_tx, release_rx) = UnixStream::pair()?;
+    let spawner = std::thread::spawn(move || {
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.args(["--list"]);
+        let mut arrived = arrived_tx;
+        let mut release = release_rx;
+        // SAFETY: the closure only writes and reads one byte on inherited sockets.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                arrived.write_all(&[1])?;
+                release.read_exact(&mut [0_u8; 1])?;
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
+
+    let mut signal = [0_u8; 1];
+    arrived_rx.read_exact(&mut signal)?;
+
+    drop(first);
+    let second = DataDirLock::acquire(&data_dir);
+    release_tx.write_all(&[1])?;
+    let second = second?;
+    drop(second);
+    let mut child = spawner
+        .join()
+        .map_err(|_| TestError::ExpectationFailed("child spawner thread panicked"))??;
+    let status = child.wait()?;
+    assert!(status.success(), "listed child must exit cleanly");
+    Ok(())
+}
+
 #[test]
 fn running_node_refuses_open_until_shutdown_releases() -> Result<(), TestError> {
     let dir = tempfile::tempdir()?;
@@ -142,13 +190,15 @@ fn idle_keepalive_rpc_connection_keeps_the_directory_locked_after_shutdown() -> 
 {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
-    let mut config = lock_config(&data_dir);
-    let probe = std::net::TcpListener::bind("127.0.0.1:0")?;
-    config.rpc.bind = probe.local_addr()?;
-    drop(probe);
-
+    let config = lock_config(&data_dir);
     let node = start_node(config.clone(), crate::RuntimeInputs::default(), false)?;
-    let client = idle_keepalive_rpc_connection(config.rpc.bind)?;
+    let address = node
+        .services
+        .as_ref()
+        .ok_or(TestError::Missing("node services"))?
+        .rpc_address(bitcoin_rs_rpc::RpcSurface::Shared)
+        .ok_or(TestError::Missing("shared rpc address"))?;
+    let client = idle_keepalive_rpc_connection(address)?;
     node.shutdown_blocking()?;
 
     let Err(error) = NodeState::open(config.clone(), None) else {
