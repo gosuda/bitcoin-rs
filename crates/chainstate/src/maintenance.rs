@@ -158,7 +158,6 @@ mod tests {
             maintenance_loop(&publisher, &reader);
             let _ = join_tx.send(());
         });
-        std::thread::sleep(Duration::from_millis(50));
         let started = Instant::now();
         writer.trigger();
         let joined = join_rx.recv_timeout(Duration::from_secs(5));
