@@ -84,7 +84,7 @@ import corpus
 import muhash_rpc
 import offline_full_validation as offline
 import p2p_loopback
-from evidence import ContractError, JsonObject, _publish_result
+from evidence import ContractError, JsonObject, canonical_bytes, publish_result
 
 CONTRACT_ERRORS = (
     ContractError,
@@ -678,7 +678,7 @@ def _muhash_document(
         "total_amount": Decimal(registry.total_amount_sat) / Decimal(SATOSHI_PER_COIN),
         "muhash": registry.muhash,
     }
-    frozen_bytes = muhash_rpc.canonical_json_bytes(frozen) + b"\n"
+    frozen_bytes = canonical_bytes(frozen) + b"\n"
     side = output.with_suffix(FROZEN_STATE_SUFFIX)
     arm_config_ref = {
         "path": str(side),
@@ -740,8 +740,8 @@ def _publish(
         raise ContractError(f"output already exists: {side[0]}")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if side is not None:
-        muhash_rpc._write_record(side[0], side[1])
-    _publish_result(document, output)
+        publish_result(side[1], side[0])
+    publish_result(document, output)
 
 
 def _run(args: argparse.Namespace) -> None:

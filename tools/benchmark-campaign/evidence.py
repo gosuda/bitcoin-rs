@@ -241,17 +241,22 @@ def _copy_pinned_data(descriptor: int, target: int, digest: hashlib._Hash) -> No
         _write_all(target, chunk)
 
 
-def _hash_pinned_copy(destination: Path) -> str:
+def hash_regular_file(path: Path) -> str:
+    """SHA-256 of one regular file read without following a symlink.
+
+    The path is opened with ``O_NOFOLLOW`` and must be a regular file.
+    An open failure and any other file type raise ``ContractError``.
+    """
     try:
         descriptor = os.open(
-            destination,
+            path,
             os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         )
     except OSError as error:
-        raise ContractError(f"cannot verify pinned copy {destination}") from error
+        raise ContractError(f"cannot open {path}") from error
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ContractError(f"pinned copy {destination} is not a regular file")
+            raise ContractError(f"{path} is not a regular file")
         with os.fdopen(descriptor, "rb") as stream:
             descriptor = -1
             return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -297,7 +302,7 @@ def copy_pinned(
         destination.unlink(missing_ok=True)
         raise ContractError(f"pinned copy of {source} has the wrong SHA-256")
     try:
-        observed = _hash_pinned_copy(destination)
+        observed = hash_regular_file(destination)
     except (OSError, ContractError):
         destination.unlink(missing_ok=True)
         raise

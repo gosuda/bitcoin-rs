@@ -355,6 +355,34 @@ class CaptureBundleTests(unittest.TestCase):
             else:
                 self.fail("capture accepted a missing binary")
 
+    def test_symlinked_binary_hashes_its_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            host = HostFixture(Path(raw))
+            target = _write_bytes(host.root / "binary-target", BINARY_BYTES)
+            link = host.root / "binary-link"
+            link.symlink_to(target)
+            request = dataclasses.replace(host.base_request(), binary=link)
+            bundle = host.capture(request)
+        artifact = _mapping(bundle["artifact"])
+        self.assertEqual(
+            artifact["binary_sha256"], hashlib.sha256(BINARY_BYTES).hexdigest()
+        )
+        self.assertEqual(artifact["binary_size_bytes"], len(BINARY_BYTES))
+        self.assertEqual(artifact["binary_path"], str(target.resolve()))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every file")
+    def test_unreadable_binary_permissions_are_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            host = HostFixture(Path(raw))
+            host.binary.chmod(0o000)
+            try:
+                host.capture()
+            except operator_identity.BlockedIdentity as error:
+                self.assertEqual([name for name, _ in error.blocked], ["binary"])
+                self.assertIsNotNone(error.blocked[0][1])
+            else:
+                self.fail("capture accepted an unreadable binary")
+
     def test_unreadable_node_config_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             host = HostFixture(Path(raw))
@@ -585,7 +613,7 @@ class VerifyTests(unittest.TestCase):
         host = HostFixture(root)
         bundle = host.capture()
         path = root / "operator-identity.json"
-        evidence._publish_result(bundle, path)
+        evidence.publish_result(bundle, path)
         return path, host.binary
 
     def test_verify_accepts_matching_bundle_and_binary(self) -> None:

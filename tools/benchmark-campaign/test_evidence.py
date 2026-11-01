@@ -19,6 +19,7 @@ from evidence import (
     _publish_result,
     canonical_bytes,
     copy_pinned,
+    hash_regular_file,
     nearest_rank,
     process_start_time,
     publish_result,
@@ -135,6 +136,32 @@ class CopyPinnedTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 copy_pinned(source, destination, hashlib.sha256(payload).hexdigest())
             self.assertEqual(destination.read_bytes(), b"existing")
+
+
+class HashRegularFileTests(unittest.TestCase):
+    def test_matches_an_independent_digest(self) -> None:
+        payload = b"pinned-config"
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            source.write_bytes(payload)
+            self.assertEqual(
+                hash_regular_file(source), hashlib.sha256(payload).hexdigest()
+            )
+
+    def test_symlink_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "real"
+            real.write_bytes(b"pinned-config")
+            link = root / "link"
+            link.symlink_to(real)
+            with self.assertRaises(ContractError):
+                hash_regular_file(link)
+
+    def test_directory_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ContractError):
+                hash_regular_file(Path(temporary))
 
 
 class PublishResultTests(unittest.TestCase):

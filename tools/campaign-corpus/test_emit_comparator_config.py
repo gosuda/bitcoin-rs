@@ -412,7 +412,7 @@ class CustodyRefusalTests(EmitterTestCase):
         self.assertFalse(self.output.exists())
 
     def test_existing_output_refuses_without_writes(self) -> None:
-        self.output.parent.mkdir(parents=True)
+        os.mkdir(self.output.parent, 0o700)
         self.output.write_bytes(b"sentinel")
         side = self.output.with_suffix(".frozen-state.json")
         code, stderr = self.fixture.emit("muhash", self.output)

@@ -35,7 +35,6 @@ SHA-256 and rejects any mismatch with exit 1.
 
 import argparse
 import dataclasses
-import hashlib
 import json
 import os
 import re
@@ -101,14 +100,6 @@ class BlockedIdentity(Exception):
         super().__init__("; ".join(identity for identity, _ in blocked))
 
 
-def sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(65536):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
 def _file_digest(path: Path, identity: str) -> FileDigest:
     """SHA-256 and byte size of one existing regular file."""
     try:
@@ -117,7 +108,11 @@ def _file_digest(path: Path, identity: str) -> FileDigest:
         raise BlockedIdentity([(identity, f"cannot stat {path}: {error}")]) from error
     if not stat.S_ISREG(status.st_mode):
         raise BlockedIdentity([(identity, f"{path} is not a regular file")])
-    return sha256_file(path), status.st_size
+    try:
+        digest = evidence.hash_regular_file(path.resolve())
+    except (OSError, evidence.ContractError) as error:
+        raise BlockedIdentity([(identity, str(error))]) from error
+    return digest, status.st_size
 
 
 def _validated_required(identity: str, value: str | None) -> tuple[str | None, str | None]:
@@ -425,8 +420,8 @@ def verify_bundle(bundle_path: Path, binary: Path) -> int:
         print("INVALID: bundle carries no artifact.binary_sha256", file=sys.stderr)
         return 1
     try:
-        actual_hash = sha256_file(binary)
-    except OSError as error:
+        actual_hash = evidence.hash_regular_file(binary.resolve())
+    except (OSError, evidence.ContractError) as error:
         print(f"INVALID: cannot hash binary {binary}: {error}", file=sys.stderr)
         return 1
     if actual_hash != recorded_hash:
@@ -511,7 +506,7 @@ def _capture_command(args: argparse.Namespace) -> int:
                 print(f"BLOCKED: {identity}: {reason}", file=sys.stderr)
         return 2
     try:
-        evidence._publish_result(bundle, args.output)
+        evidence.publish_result(bundle, args.output)
     except evidence.ContractError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
